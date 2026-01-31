@@ -12,6 +12,9 @@ use tray_icon::{
     Icon, TrayIconBuilder,
 };
 
+mod api;
+mod rpc;
+
 #[cfg(test)]
 mod tests;
 
@@ -48,6 +51,11 @@ fn main() -> Result<()> {
                 eprintln!("Failed to send initial state");
                 return;
             }
+
+            // Start RPC server
+            tokio::spawn(async move {
+                rpc::run_server(19140).await;
+            });
 
             // Daemon work loop - check for shutdown signal
             while !shutdown_clone.load(Ordering::Relaxed) {

@@ -4,12 +4,26 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "jellysync-daemon"
+path = "src/main.rs"
+
+
+
 [dependencies]
 tokio.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 rusqlite.workspace = true
-keyring.workspace = true
+
 tray-icon.workspace = true
 tao.workspace = true
 image.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+axum.workspace = true
+lazy_static = "1.5"
+
+[dev-dependencies]
+mockito = "1.5"

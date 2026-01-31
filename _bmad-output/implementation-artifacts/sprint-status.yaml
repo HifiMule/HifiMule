@@ -46,8 +46,8 @@ development_status:
   1-3-detachable-tauri-ui-skeleton: done
   epic-1-retrospective: done
 
-  epic-2: backlog
-  2-1-secure-jellyfin-server-link: backlog
+  epic-2: in-progress
+  2-1-secure-jellyfin-server-link: done
   2-2-mass-storage-heartbeat-autodetection: backlog
   2-3-multi-device-profile-mapping: backlog
   epic-2-retrospective: optional
