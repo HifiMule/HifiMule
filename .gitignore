@@ -24,3 +24,7 @@ Thumbs.db
 dist/
 build/
 out/
+
+# Rust
+target/
+

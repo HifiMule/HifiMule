@@ -1,0 +1,18 @@
+[workspace]
+members = [
+    "jellysync-daemon",
+    "jellysync-ui/src-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.93.0"
+
+[workspace.dependencies]
+tokio = { version = "~1.49", features = ["full"] }
+anyhow = "~1.0"
+thiserror = "~2.0"
+rusqlite = { version = "~0.38", features = ["bundled"] }
+keyring = "~3.6"
