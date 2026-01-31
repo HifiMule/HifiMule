@@ -17,14 +17,25 @@ export default defineConfig(async () => ({
     host: host || false,
     hmr: host
       ? {
-          protocol: "ws",
-          host,
-          port: 1421,
-        }
+        protocol: "ws",
+        host,
+        port: 1421,
+      }
       : undefined,
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
     },
   },
+  envPrefix: ['VITE_', 'TAURI_ENV_*'],
+  build: {
+    target:
+      process.env.TAURI_ENV_PLATFORM == 'windows'
+        ? 'chrome105'
+        : 'safari13',
+    sourcemap: !!process.env.TAURI_ENV_DEBUG,
+  },
+  outDir: 'dist',
+  // Recommended for Tauri to ensure assets are linked correctly
+  emptyOutDir: true,
 }));

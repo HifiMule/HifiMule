@@ -1,22 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
+// JellyfinSync UI Main Entry Point
+// This story focuses on the skeleton and layout.
 
-let greetInputEl: HTMLInputElement | null;
-let greetMsgEl: HTMLElement | null;
+console.log("JellyfinSync UI Initialized");
 
-async function greet() {
-  if (greetMsgEl && greetInputEl) {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    greetMsgEl.textContent = await invoke("greet", {
-      name: greetInputEl.value,
-    });
-  }
-}
-
-window.addEventListener("DOMContentLoaded", () => {
-  greetInputEl = document.querySelector("#greet-input");
-  greetMsgEl = document.querySelector("#greet-msg");
-  document.querySelector("#greet-form")?.addEventListener("submit", (e) => {
-    e.preventDefault();
-    greet();
-  });
-});
+// Future IPC communication will be added here
+// following the localhost HTTP JSON-RPC pattern.

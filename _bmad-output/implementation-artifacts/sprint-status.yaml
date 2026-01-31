@@ -43,7 +43,7 @@ development_status:
   epic-1: in-progress
   1-1-multi-process-workspace-initialization: done
   1-2-cross-platform-system-tray-hub: done
-  1-3-detachable-tauri-ui-skeleton: backlog
+  1-3-detachable-tauri-ui-skeleton: done
   epic-1-retrospective: optional
 
   epic-2: backlog

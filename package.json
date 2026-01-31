@@ -1,4 +1,9 @@
 {
+  "scripts": {
+    "build:ui": "npm run tauri build --prefix jellysync-ui",
+    "build:daemon": "cargo build --release",
+    "build": "npm run build:ui && npm run build:daemon"
+  },
   "devDependencies": {
     "@eslint-community/eslint-utils": "^4.9.1",
     "@eslint/config-array": "^0.23.0",
