@@ -10,3 +10,6 @@ anyhow.workspace = true
 thiserror.workspace = true
 rusqlite.workspace = true
 keyring.workspace = true
+tray-icon.workspace = true
+tao.workspace = true
+image.workspace = true

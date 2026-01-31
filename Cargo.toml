@@ -16,3 +16,6 @@ anyhow = "~1.0"
 thiserror = "~2.0"
 rusqlite = { version = "~0.38", features = ["bundled"] }
 keyring = "~3.6"
+tray-icon = "~0.19"
+tao = "~0.31"
+image = { version = "~0.25", default-features = false, features = ["png"] }
