@@ -10,12 +10,6 @@ yarn-error.log*
 .env.test.local
 .env.production.local
 
-# BMAD & Tooling
-_bmad/
-.agent/
-.claude/
-.opencode/
-
 # OS
 .DS_Store
 Thumbs.db
