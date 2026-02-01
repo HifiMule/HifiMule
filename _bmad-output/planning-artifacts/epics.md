@@ -36,6 +36,7 @@ FR20: Run as a background service (headless) with minimal resource usage.
 FR21: Toggle "Launch on Startup" behavior.
 FR22: Provide tray-icon status updates for sync progress and hardware state.
 FR23: Send OS-native notifications for sync completion or errors.
+FR24: Provide visual feedback (splash screen) during application startup and connection validation.
 
 ### NonFunctional Requirements
 
@@ -91,6 +92,7 @@ FR20: Epic 1 - Headless Background Daemon
 FR21: Epic 1 - Toggle Launch on Startup
 FR22: Epic 1 - System Tray Lifecycle Hub
 FR23: Epic 5 - OS-Native Sync Notifications
+FR24: Epic 2 - Startup Splash Screen with Connection Status
 
 ## Epic List
 
@@ -181,6 +183,23 @@ So that my sync rules are applied automatically on connection.
 **Given** a known device (has `.jellysync.json` with a unique ID) is connected
 **When** the daemon reads the ID
 **Then** it automatically loads the associated Jellyfin User Profile and Sync Rules.
+
+### Story 2.4: Startup Splash Screen with Connection Status
+
+As a Convenience Seeker (Sarah),
+I want to see a splash screen while the app is starting and connecting to my server,
+So that I know the application hasn't frozen during its initialization phase.
+
+**Acceptance Criteria:**
+
+**Given** the `jellysync-ui` is launched
+**When** the application is initializing (loading daemon, checking connection)
+**Then** a native Tauri splash screen featuring the JellyfinSync logo and name is displayed.
+**And** it clearly indicates the current state via status text (e.g., "Initializing Daemon...", "Connecting to Server...").
+**When** the daemon is ready and connection is verified
+**Then** the splash screen auto-dismisses and the main window appears.
+**When** a connection timeout (10 seconds) or initialization error occurs
+**Then** the splash screen displays a clear error message with a "Retry" or "Open Settings" option.
 
 
 ## Epic 3: The Curation Hub (Basket & Library)
