@@ -48,7 +48,7 @@ development_status:
 
   epic-2: in-progress
   2-1-secure-jellyfin-server-link: done
-  2-2-mass-storage-heartbeat-autodetection: backlog
+  2-2-mass-storage-heartbeat-autodetection: done
   2-3-multi-device-profile-mapping: backlog
   2-4-startup-splash-screen-with-connection-status: backlog
   epic-2-retrospective: optional

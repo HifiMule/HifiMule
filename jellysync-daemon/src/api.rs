@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use lazy_static::lazy_static;
+
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -57,9 +57,7 @@ struct Credentials {
 
 pub struct FileCredentialManager;
 
-lazy_static! {
-    static ref CRED_FILE_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
-}
+static CRED_FILE_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 impl FileCredentialManager {
     // Allows overriding the path for testing
