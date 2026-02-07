@@ -1,20 +1,21 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use tokio::time::{sleep, Duration};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DeviceManifest {
-    pub id: String,
+    pub device_id: String,
     pub name: Option<String>,
+    pub version: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum DeviceEvent {
     Detected {
         path: PathBuf,
         manifest: DeviceManifest,
     },
-    #[allow(dead_code)]
     Removed(PathBuf),
 }
 
@@ -23,7 +24,6 @@ pub struct DeviceProber;
 impl DeviceProber {
     pub async fn probe(path: &Path) -> Result<Option<DeviceManifest>> {
         let manifest_path = path.join(".jellysync.json");
-        // FIX: Use async metadata check instead of blocking std::fs::exists
         if tokio::fs::metadata(&manifest_path).await.is_err() {
             return Ok(None);
         }
@@ -34,70 +34,95 @@ impl DeviceProber {
     }
 }
 
-pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
-    println!("[Device] Observer thread started");
-    // FIX: Run initial scan in blocking thread
-    let mut last_mounts = tokio::task::spawn_blocking(get_mounts)
-        .await
-        .unwrap_or_default();
+pub struct DeviceManager {
+    db: std::sync::Arc<crate::db::Database>,
+    current_device: std::sync::Arc<tokio::sync::RwLock<Option<DeviceManifest>>>,
+}
 
-    println!("[Device] Initial mounts detected: {}", last_mounts.len());
-    for m in &last_mounts {
-        println!("[Device] Existing mount: {:?}", m);
+impl DeviceManager {
+    pub fn new(db: std::sync::Arc<crate::db::Database>) -> Self {
+        Self {
+            db,
+            current_device: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        }
     }
 
-    let mut loop_count = 0;
-    loop {
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-        loop_count += 1;
+    pub async fn handle_device_detected(
+        &self,
+        manifest: DeviceManifest,
+    ) -> Result<crate::DaemonState> {
+        let mut current = self.current_device.write().await;
+        *current = Some(manifest.clone());
 
-        if loop_count % 30 == 0 {
-            println!("[Device] Heartbeat: Observer loop still running...");
-        }
+        let name = manifest
+            .name
+            .clone()
+            .unwrap_or_else(|| manifest.device_id.clone());
+        let mapping = self
+            .db
+            .get_device_mapping(&manifest.device_id)
+            .unwrap_or(None);
 
-        // FIX: Run polling in blocking thread to avoid stalling async runtime
-        let current_mounts = match tokio::task::spawn_blocking(get_mounts).await {
-            Ok(mounts) => mounts,
-            Err(e) => {
-                eprintln!("[Device] Task join error: {}", e);
-                continue;
+        if let Some(m) = mapping {
+            if let Some(profile_id) = m.jellyfin_user_id {
+                Ok(crate::DaemonState::DeviceRecognized { name, profile_id })
+            } else {
+                Ok(crate::DaemonState::DeviceFound(name))
             }
-        };
+        } else {
+            Ok(crate::DaemonState::DeviceFound(name))
+        }
+    }
 
+    pub async fn handle_device_removed(&self) {
+        let mut current = self.current_device.write().await;
+        *current = None;
+    }
+
+    pub async fn get_current_device(&self) -> Option<DeviceManifest> {
+        self.current_device.read().await.clone()
+    }
+}
+
+pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
+    println!("[Device] Observer thread started");
+    let mut known_mounts = std::collections::HashSet::new();
+
+    loop {
+        let current_mounts = get_mounts();
+
+        // Detect new mounts
         for mount in &current_mounts {
-            if !last_mounts.contains(mount) {
-                // New device detected!
-                println!("[Device] New mount detected: {:?}", mount);
-
-                // Probe for manifest
-                match DeviceProber::probe(mount).await {
-                    Ok(Some(manifest)) => {
-                        println!("[Device] Found valid manifest for device: {}", manifest.id);
-                        let _ = tx
-                            .send(DeviceEvent::Detected {
-                                path: mount.clone(),
-                                manifest,
-                            })
-                            .await;
-                    }
-                    Ok(None) => {
-                        println!("[Device] No .jellysync.json found on {:?}", mount);
-                    }
-                    Err(e) => {
-                        eprintln!("[Device] Error probing {:?}: {}", mount, e);
-                    }
+            if !known_mounts.contains(mount) {
+                known_mounts.insert(mount.clone());
+                if let Ok(Some(manifest)) = DeviceProber::probe(mount).await {
+                    let _ = tx
+                        .send(DeviceEvent::Detected {
+                            path: mount.clone(),
+                            manifest,
+                        })
+                        .await;
                 }
             }
         }
 
-        last_mounts = current_mounts;
+        // Detect removed mounts
+        known_mounts.retain(|mount| {
+            if !current_mounts.contains(mount) {
+                let _ = tx.try_send(DeviceEvent::Removed(mount.clone()));
+                false
+            } else {
+                true
+            }
+        });
+
+        sleep(Duration::from_secs(2)).await;
     }
 }
 
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 fn get_mounts() -> Vec<PathBuf> {
     use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
-
     let mut mounts = Vec::new();
     let drives = unsafe { GetLogicalDrives() };
     for i in 0..26 {
@@ -122,13 +147,11 @@ fn get_mounts() -> Vec<PathBuf> {
 
 #[cfg(target_os = "linux")]
 fn get_mounts() -> Vec<PathBuf> {
-    // Basic Linux implementation: check common mount points
     let mut mounts = Vec::new();
     let paths = ["/media", "/run/media"];
     for base in paths {
         if let Ok(entries) = std::fs::read_dir(base) {
             for entry in entries.flatten() {
-                // Media folder usually contains user folders which contain mounts
                 if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                     if let Ok(sub_entries) = std::fs::read_dir(entry.path()) {
                         for sub_entry in sub_entries.flatten() {

@@ -1,6 +1,6 @@
 # Story 2.3: Multi-Device Profile Mapping
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -20,19 +20,19 @@ so that my sync rules are applied automatically on connection.
 
 ## Tasks / Subtasks
 
-- [ ] **T1: Initialize SQLite Database** (AC: #2)
-  - [ ] Implement `db` module in `jellysync-daemon`.
-  - [ ] Create `devices` table: `id` (TEXT PRIMARY KEY), `name` (TEXT), `jellyfin_user_id` (TEXT), `sync_rules` (TEXT/JSON), `last_seen_at` (DATETIME).
-  - [ ] Initialize the database in `main.rs` on startup.
-- [ ] **T2: Implement Device Mapping Logic** (AC: #1, #3)
-  - [ ] Create `DeviceManager` or update `DeviceProber` to perform database lookups after manifest detection.
-  - [ ] Implement `get_device_mapping(device_id)` and `save_device_mapping(mapping)` functions.
-- [ ] **T3: Update Daemon State & RPC** (AC: #4, #5)
-  - [ ] Add `DeviceRecognized { device_id, profile_id }` to `DaemonState` or event stream.
-  - [ ] Implement JSON-RPC method `set_device_profile(device_id, profile_id, rules)` to persist mappings.
-- [ ] **T4: Integration Testing**
-  - [ ] Verify that plugging in a device with a known ID triggers the "Recognized" state.
-  - [ ] Verify that updating a profile via RPC persists to SQLite.
+- [x] **T1: Initialize SQLite Database** (AC: #2)
+  - [x] Implement `db` module in `jellysync-daemon`.
+  - [x] Create `devices` table: `id` (TEXT PRIMARY KEY), `name` (TEXT), `jellyfin_user_id` (TEXT), `sync_rules` (TEXT/JSON), `last_seen_at` (DATETIME).
+  - [x] Initialize the database in `main.rs` on startup.
+- [x] **T2: Implement Device Mapping Logic** (AC: #1, #3)
+  - [x] Create `DeviceManager` or update `DeviceProber` to perform database lookups after manifest detection.
+  - [x] Implement `get_device_mapping(device_id)` and `save_device_mapping(mapping)` functions.
+- [x] **T3: Update Daemon State & RPC** (AC: #4, #5)
+  - [x] Add `DeviceRecognized { device_id, profile_id }` to `DaemonState` or event stream.
+  - [x] Implement JSON-RPC method `set_device_profile(device_id, profile_id, rules)` to persist mappings.
+- [x] **T4: Integration Testing**
+  - [x] Verify that plugging in a device with a known ID triggers the "Recognized" state.
+  - [x] Verify that updating a profile via RPC persists to SQLite.
 
 ## Dev Notes
 
@@ -41,7 +41,7 @@ so that my sync rules are applied automatically on connection.
   - Follow the **Multi-Process Architecture**; ensure the database file is located in the platform-standard AppData directory (similar to `api.rs` credential logic).
   - Use `tokio::task::spawn_blocking` for SQLite operations to avoid blocking the async executor.
 - **Source tree components to touch:**
-  - `jellysync-daemon/src/db.rs`: [NEW] Database schema and operations.
+  - `jellysync-daemon/src/db.rs`: Database schema and operations.
   - `jellysync-daemon/src/main.rs`: Database initialization and lifecycle.
   - `jellysync-daemon/src/device/mod.rs`: Integration of lookups after probing.
   - `jellysync-daemon/src/rpc.rs`: New methods for mapping management.
@@ -64,10 +64,25 @@ so that my sync rules are applied automatically on connection.
 
 ### Agent Model Used
 
-Antigravity (BMad Create-Story Workflow)
+Antigravity (Adversarial Code Fix)
 
 ### Debug Log References
 
 ### Completion Notes List
+- Successfully implemented SQLite database integration using `rusqlite`.
+- Created shared `paths` utility for platform-standard AppData directory management.
+- Developed `DeviceManager` to centralize device state management and database lookups.
+- Implemented `get_daemon_state` JSON-RPC method to allow UI polling of daemon state.
+- Transitioned Jellyfin token storage from plaintext JSON to OS-native `keyring`.
+- Fixed fragile time-based state resets in `main.rs` event loop.
+- Added comprehensive integration tests in `src/tests.rs` verifying the full detection-to-recognition flow.
 
 ### File List
+- `jellysync-daemon/src/db.rs` [MODIFIED] (Added Serialize/Deserialize)
+- `jellysync-daemon/src/paths.rs` [MODIFIED] (Added Result error handling)
+- `jellysync-daemon/src/main.rs` [MODIFIED] (Refactored for DeviceManager)
+- `jellysync-daemon/src/rpc.rs` [MODIFIED] (Added get_daemon_state, fixed types)
+- `jellysync-daemon/src/api.rs` [MODIFIED] (Implemented keyring storage)
+- `jellysync-daemon/src/device/mod.rs` [MODIFIED] (Added DeviceManager)
+- `jellysync-daemon/Cargo.toml` [MODIFIED] (Added keyring dependency)
+- `jellysync-daemon/src/tests.rs` [MODIFIED] (Added integration test)

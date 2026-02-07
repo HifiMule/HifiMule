@@ -13,7 +13,9 @@ use tray_icon::{
 };
 
 mod api;
+mod db;
 mod device;
+mod paths;
 mod rpc;
 
 #[cfg(test)]
@@ -26,6 +28,7 @@ pub enum DaemonState {
     Syncing,
     Scanning,
     DeviceFound(String),
+    DeviceRecognized { name: String, profile_id: String },
     Error,
 }
 
@@ -49,16 +52,29 @@ fn main() -> Result<()> {
         rt.block_on(async {
             println!("JellyfinSync Daemon started");
 
+            // Initialize database
+            let db_path = match paths::get_app_data_dir() {
+                Ok(p) => p.join("jellysync.db"),
+                Err(e) => {
+                    eprintln!("Failed to get app data directory: {}", e);
+                    let _ = state_tx.send(DaemonState::Error);
+                    return;
+                }
+            };
+            let db = match db::Database::new(db_path) {
+                Ok(db) => Arc::new(db),
+                Err(e) => {
+                    eprintln!("Failed to initialize database: {}", e);
+                    let _ = state_tx.send(DaemonState::Error);
+                    return;
+                }
+            };
+
             // Initial state
             if let Err(e) = state_tx.send(DaemonState::Idle) {
                 eprintln!("Failed to send initial state: {}", e);
                 return;
             }
-
-            // Start RPC server
-            tokio::spawn(async move {
-                rpc::run_server(19140).await;
-            });
 
             // Start Device Observer
             let (device_tx, mut device_rx) = tokio::sync::mpsc::channel(10);
@@ -66,34 +82,38 @@ fn main() -> Result<()> {
                 device::run_observer(device_tx).await;
             });
 
+            // Initialize Device Manager
+            let device_manager = Arc::new(device::DeviceManager::new(Arc::clone(&db)));
+
+            // Start RPC server
+            let db_clone = Arc::clone(&db);
+            let dm_clone = Arc::clone(&device_manager);
+            tokio::spawn(async move {
+                rpc::run_server(19140, db_clone, dm_clone).await;
+            });
+
             // Handle Device Events
-            let state_tx_clone2 = state_tx.clone();
+            let state_tx_clone = state_tx.clone();
             tokio::spawn(async move {
                 while let Some(event) = device_rx.recv().await {
                     match event {
                         device::DeviceEvent::Detected { path, manifest } => {
                             println!("Device detected at {:?}: {:?}", path, manifest);
-                            let name = manifest.name.unwrap_or_else(|| manifest.id.clone());
-                            if let Err(e) =
-                                state_tx_clone2.send(DaemonState::DeviceFound(name.clone()))
-                            {
-                                eprintln!("Failed to update state to DeviceFound: {}", e);
-                            }
-
-                            // Return to idle after a few seconds
-                            let tx = state_tx_clone2.clone();
-                            tokio::spawn(async move {
-                                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                                // Only reset if we haven't found ANOTHER device (simple check)
-                                // In a real app we'd query state, but for now just blindly sending idle is okay
-                                // as long as we log errors.
-                                // Actually, let's just log the error if channel is closed.
-                                if let Err(e) = tx.send(DaemonState::Idle) {
-                                    eprintln!("Failed to reset state to Idle: {}", e);
+                            match device_manager.handle_device_detected(manifest).await {
+                                Ok(new_state) => {
+                                    let _ = state_tx_clone.send(new_state);
                                 }
-                            });
+                                Err(e) => {
+                                    eprintln!("Error handling device detection: {}", e);
+                                    let _ = state_tx_clone.send(DaemonState::Error);
+                                }
+                            }
                         }
-                        device::DeviceEvent::Removed(_) => {}
+                        device::DeviceEvent::Removed(path) => {
+                            println!("Device removed at {:?}", path);
+                            device_manager.handle_device_removed().await;
+                            let _ = state_tx_clone.send(DaemonState::Idle);
+                        }
                     }
                 }
             });
@@ -164,6 +184,13 @@ fn main() -> Result<()> {
                     }
                     DaemonState::DeviceFound(name) => {
                         let _ = tray.set_tooltip(Some(&format!("JellyfinSync: Found {}", name)));
+                        let _ = tray.set_icon(Some((*icon_syncing).clone()));
+                    }
+                    DaemonState::DeviceRecognized { name, profile_id } => {
+                        let _ = tray.set_tooltip(Some(&format!(
+                            "JellyfinSync: Recognized {} (Profile: {})",
+                            name, profile_id
+                        )));
                         let _ = tray.set_icon(Some((*icon_syncing).clone()));
                     }
                     DaemonState::Error => {

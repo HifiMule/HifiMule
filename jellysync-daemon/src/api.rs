@@ -1,10 +1,8 @@
 use anyhow::{anyhow, Result};
-
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-
 use std::sync::Mutex;
 
 pub struct JellyfinClient {
@@ -27,8 +25,8 @@ impl JellyfinClient {
 
     pub async fn test_connection(&self, url: &str, token: &str) -> Result<SystemInfo> {
         // Validate inputs
-        FileCredentialManager::validate_url(url)?;
-        FileCredentialManager::validate_token(token)?;
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -50,83 +48,30 @@ impl JellyfinClient {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-struct Credentials {
+struct Config {
     pub url: String,
-    pub token: String,
 }
 
-pub struct FileCredentialManager;
+pub struct CredentialManager;
 
-static CRED_FILE_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+static CONFIG_FILE_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+const KEYRING_SERVICE: &str = "jellyfinsync-daemon";
+const KEYRING_USER: &str = "jellyfin-token";
 
-impl FileCredentialManager {
-    // Allows overriding the path for testing
+impl CredentialManager {
     #[cfg(test)]
-    pub fn set_credentials_path(path: PathBuf) {
-        let mut p = CRED_FILE_PATH.lock().unwrap();
+    pub fn set_config_path(path: PathBuf) {
+        let mut p = CONFIG_FILE_PATH.lock().unwrap();
         *p = Some(path);
     }
 
-    fn get_credentials_path() -> PathBuf {
-        let p = CRED_FILE_PATH.lock().unwrap();
+    fn get_config_path() -> Result<PathBuf> {
+        let p = CONFIG_FILE_PATH.lock().unwrap();
         if let Some(ref path) = *p {
-            return path.clone();
+            return Ok(path.clone());
         }
 
-        // Use platform-standard directories
-        #[cfg(target_os = "windows")]
-        {
-            if let Ok(appdata) = std::env::var("APPDATA") {
-                let mut path = PathBuf::from(appdata);
-                path.push("JellyfinSync");
-                if !path.exists() {
-                    let _ = std::fs::create_dir_all(&path);
-                }
-                path.push("credentials.json");
-                return path;
-            }
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            if let Ok(home) = std::env::var("HOME") {
-                let mut path = PathBuf::from(home);
-                path.push("Library");
-                path.push("Application Support");
-                path.push("JellyfinSync");
-                if !path.exists() {
-                    let _ = std::fs::create_dir_all(&path);
-                }
-                path.push("credentials.json");
-                return path;
-            }
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            if let Ok(xdg_data) = std::env::var("XDG_DATA_HOME") {
-                let mut path = PathBuf::from(xdg_data);
-                path.push("jellyfinsync");
-                if !path.exists() {
-                    let _ = std::fs::create_dir_all(&path);
-                }
-                path.push("credentials.json");
-                return path;
-            } else if let Ok(home) = std::env::var("HOME") {
-                let mut path = PathBuf::from(home);
-                path.push(".local");
-                path.push("share");
-                path.push("jellyfinsync");
-                if !path.exists() {
-                    let _ = std::fs::create_dir_all(&path);
-                }
-                path.push("credentials.json");
-                return path;
-            }
-        }
-
-        // Fallback to current directory
-        PathBuf::from("credentials.json")
+        Ok(crate::paths::get_app_data_dir()?.join("config.json"))
     }
 
     pub(crate) fn validate_url(url: &str) -> Result<()> {
@@ -153,33 +98,39 @@ impl FileCredentialManager {
         Self::validate_url(url)?;
         Self::validate_token(token)?;
 
-        let creds = Credentials {
+        let config = Config {
             url: url.to_string(),
-            token: token.to_string(),
         };
+        let json = serde_json::to_string_pretty(&config)?;
+        let path = Self::get_config_path()?;
+        fs::write(&path, json).map_err(|e| anyhow!("Failed to write config file: {}", e))?;
 
-        let json = serde_json::to_string_pretty(&creds)?;
-        let path = Self::get_credentials_path();
-
-        fs::write(&path, json).map_err(|e| anyhow!("Failed to write credentials file: {}", e))?;
+        let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
+            .map_err(|e| anyhow!("Failed to access keyring: {}", e))?;
+        entry
+            .set_password(token)
+            .map_err(|e| anyhow!("Failed to save token to keyring: {}", e))?;
 
         Ok(())
     }
 
     pub fn get_credentials() -> Result<(String, String)> {
-        let path = Self::get_credentials_path();
-
+        let path = Self::get_config_path()?;
         if !path.exists() {
-            return Err(anyhow!("No credentials file found"));
+            return Err(anyhow!("No config file found"));
         }
+        let content =
+            fs::read_to_string(&path).map_err(|e| anyhow!("Failed to read config file: {}", e))?;
+        let config: Config = serde_json::from_str(&content)
+            .map_err(|e| anyhow!("Failed to parse config file: {}", e))?;
 
-        let content = fs::read_to_string(&path)
-            .map_err(|e| anyhow!("Failed to read credentials file: {}", e))?;
+        let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
+            .map_err(|e| anyhow!("Failed to access keyring: {}", e))?;
+        let token = entry
+            .get_password()
+            .map_err(|e| anyhow!("No token found in keyring: {}", e))?;
 
-        let creds: Credentials = serde_json::from_str(&content)
-            .map_err(|e| anyhow!("Failed to parse credentials file: {}", e))?;
-
-        Ok((creds.url, creds.token))
+        Ok((config.url, token))
     }
 }
 
@@ -192,7 +143,7 @@ mod tests {
     async fn test_jellyfin_connection_success() {
         let mut server = Server::new_async().await;
         let url = server.url();
-        let token = "test-token";
+        let token = "test-token-1234567890";
 
         let _mock = server
             .mock("GET", "/System/Info")
@@ -254,45 +205,19 @@ mod tests {
             .contains("must start with http"));
     }
 
-    #[tokio::test]
-    async fn test_validation_empty_token() {
-        let client = JellyfinClient::new();
-        let res = client.test_connection("http://localhost:8096", "").await;
-
-        assert!(res.is_err());
-        assert!(res
-            .unwrap_err()
-            .to_string()
-            .contains("Token cannot be empty"));
-    }
-
-    #[tokio::test]
-    async fn test_validation_short_token() {
-        let client = JellyfinClient::new();
-        let res = client
-            .test_connection("http://localhost:8096", "short")
-            .await;
-
-        assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("too short"));
-    }
-
     #[test]
     fn test_credential_validation() {
-        // Valid inputs
-        assert!(FileCredentialManager::validate_url("http://localhost:8096").is_ok());
-        assert!(FileCredentialManager::validate_url("https://jellyfin.example.com").is_ok());
-        assert!(FileCredentialManager::validate_token("valid-token-1234567890").is_ok());
+        assert!(CredentialManager::validate_url("http://localhost:8096").is_ok());
+        assert!(CredentialManager::validate_url("https://jellyfin.example.com").is_ok());
+        assert!(CredentialManager::validate_token("valid-token-1234567890").is_ok());
 
-        // Invalid URLs
-        assert!(FileCredentialManager::validate_url("").is_err());
-        assert!(FileCredentialManager::validate_url("   ").is_err());
-        assert!(FileCredentialManager::validate_url("ftp://invalid.com").is_err());
-        assert!(FileCredentialManager::validate_url("localhost:8096").is_err());
+        assert!(CredentialManager::validate_url("").is_err());
+        assert!(CredentialManager::validate_url("   ").is_err());
+        assert!(CredentialManager::validate_url("ftp://invalid.com").is_err());
+        assert!(CredentialManager::validate_url("localhost:8096").is_err());
 
-        // Invalid tokens
-        assert!(FileCredentialManager::validate_token("").is_err());
-        assert!(FileCredentialManager::validate_token("   ").is_err());
-        assert!(FileCredentialManager::validate_token("short").is_err());
+        assert!(CredentialManager::validate_token("").is_err());
+        assert!(CredentialManager::validate_token("   ").is_err());
+        assert!(CredentialManager::validate_token("short").is_err());
     }
 }
