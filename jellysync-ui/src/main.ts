@@ -25,6 +25,10 @@ async function init() {
     // If we are on the main page (index.html)
     console.log("JellyfinSync Hub Initialized");
     document.body.classList.add('ready');
+
+    // Initialize library view
+    const { initLibraryView } = await import('./library');
+    initLibraryView();
 }
 
 async function initSplashScreen(mainWin: Window | null, splashWin: Window | null) {

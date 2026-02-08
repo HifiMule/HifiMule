@@ -40,7 +40,8 @@ body {
   box-sizing: border-box;
 }
 
-h1, h2 {
+h1,
+h2 {
   margin-top: 0;
   font-weight: 600;
   letter-spacing: -0.025em;
@@ -52,4 +53,112 @@ h1, h2 {
   border-radius: 12px;
   padding: 1rem;
   margin-bottom: 1rem;
+}
+
+/* Media Grid Styles */
+.media-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 1.5rem;
+  padding: 1rem 0;
+}
+
+/* Media Card Styles */
+.media-card {
+  --border-radius: var(--sl-border-radius-medium);
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.media-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.3);
+}
+
+.card-image {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  background-color: var(--sl-color-neutral-800);
+  background-size: cover;
+  background-position: center;
+  border-radius: var(--sl-border-radius-medium) var(--sl-border-radius-medium) 0 0;
+  overflow: hidden;
+}
+
+.image-skeleton {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.synced-badge {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  background: var(--sl-color-success-600);
+  color: white;
+  padding: 0.25rem 0.5rem;
+  border-radius: var(--sl-border-radius-medium);
+  font-size: 1.2rem;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+.card-content {
+  padding: 0.75rem;
+}
+
+.card-content strong {
+  display: block;
+  font-size: 0.9rem;
+  margin-bottom: 0.25rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-subtitle {
+  font-size: 0.8rem;
+  color: var(--sl-color-neutral-400);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-year {
+  font-size: 0.75rem;
+  color: var(--sl-color-neutral-500);
+  margin-top: 0.25rem;
+}
+
+/* Synced card styling */
+.media-card.synced {
+  opacity: 0.7;
+}
+
+/* Error and loading states */
+.error-message {
+  text-align: center;
+  padding: 2rem;
+  color: var(--sl-color-danger-600);
+}
+
+.pagination-info {
+  text-align: center;
+  padding: 1rem;
+  color: var(--sl-color-neutral-400);
+  font-size: 0.9rem;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .media-grid {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 1rem;
+  }
 }

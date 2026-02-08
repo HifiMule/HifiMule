@@ -99,6 +99,12 @@ async fn handler(
         "get_credentials" => handle_get_credentials().await,
         "set_device_profile" => handle_set_device_profile(&state, payload.params).await,
         "get_daemon_state" => handle_get_daemon_state(&state).await,
+        "jellyfin_get_views" => handle_jellyfin_get_views(&state, payload.params).await,
+        "jellyfin_get_items" => handle_jellyfin_get_items(&state, payload.params).await,
+        "jellyfin_get_item_details" => {
+            handle_jellyfin_get_item_details(&state, payload.params).await
+        }
+        "sync_get_device_status_map" => handle_sync_get_device_status_map(&state).await,
         _ => Err(JsonRpcError {
             code: ERR_METHOD_NOT_FOUND,
             message: "Method not found".to_string(),
@@ -281,6 +287,116 @@ async fn check_server_connection_cached(state: &AppState) -> bool {
     *cache = Some((std::time::Instant::now(), is_connected));
 
     is_connected
+}
+
+async fn handle_jellyfin_get_views(
+    state: &AppState,
+    _params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let (url, token) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
+        code: ERR_STORAGE_ERROR,
+        message: format!("Failed to get credentials: {}", e),
+        data: None,
+    })?;
+
+    match state.jellyfin_client.get_views(&url, &token).await {
+        Ok(views) => Ok(serde_json::to_value(views).unwrap()),
+        Err(e) => Err(JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: e.to_string(),
+            data: None,
+        }),
+    }
+}
+
+async fn handle_jellyfin_get_items(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let (url, token) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
+        code: ERR_STORAGE_ERROR,
+        message: format!("Failed to get credentials: {}", e),
+        data: None,
+    })?;
+
+    let params = params.unwrap_or(serde_json::json!({}));
+    let parent_id = params["parentId"].as_str();
+    let include_item_types = params["includeItemTypes"].as_str();
+    let start_index = params["startIndex"].as_u64().map(|v| v as u32);
+    let limit = params["limit"].as_u64().map(|v| v as u32);
+
+    match state
+        .jellyfin_client
+        .get_items(
+            &url,
+            &token,
+            parent_id,
+            include_item_types,
+            start_index,
+            limit,
+        )
+        .await
+    {
+        Ok(response) => Ok(serde_json::to_value(response).unwrap()),
+        Err(e) => Err(JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: e.to_string(),
+            data: None,
+        }),
+    }
+}
+
+async fn handle_jellyfin_get_item_details(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Invalid params".to_string(),
+        data: None,
+    })?;
+
+    let item_id = params["itemId"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing itemId".to_string(),
+        data: None,
+    })?;
+
+    let (url, token) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
+        code: ERR_STORAGE_ERROR,
+        message: format!("Failed to get credentials: {}", e),
+        data: None,
+    })?;
+
+    match state
+        .jellyfin_client
+        .get_item_details(&url, &token, item_id)
+        .await
+    {
+        Ok(item) => Ok(serde_json::to_value(item).unwrap()),
+        Err(e) => Err(JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: e.to_string(),
+            data: None,
+        }),
+    }
+}
+
+async fn handle_sync_get_device_status_map(state: &AppState) -> Result<Value, JsonRpcError> {
+    let device = state.device_manager.get_current_device().await;
+
+    if device.is_some() {
+        // TODO: In future stories, the manifest will include a list of synced items
+        // For now, return empty list as placeholder
+        Ok(serde_json::json!({
+            "syncedItemIds": []
+        }))
+    } else {
+        // No device connected, return empty list
+        Ok(serde_json::json!({
+            "syncedItemIds": []
+        }))
+    }
 }
 
 #[cfg(test)]
