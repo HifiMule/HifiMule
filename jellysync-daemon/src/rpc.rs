@@ -62,7 +62,15 @@ pub async fn run_server(
         device_manager,
     });
 
-    let app = Router::new().route("/", post(handler)).with_state(state);
+    let app = Router::new()
+        .route("/", post(handler))
+        .layer(
+            tower_http::cors::CorsLayer::new()
+                .allow_origin(tower_http::cors::Any)
+                .allow_methods(tower_http::cors::Any)
+                .allow_headers(tower_http::cors::Any),
+        )
+        .with_state(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     println!("RPC server listening on {}", addr);
@@ -224,9 +232,12 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         None
     };
 
+    let server_connected = CredentialManager::get_credentials().is_ok();
+
     Ok(serde_json::json!({
         "currentDevice": device,
         "deviceMapping": mapping,
+        "serverConnected": server_connected,
     }))
 }
 

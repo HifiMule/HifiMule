@@ -50,7 +50,7 @@ development_status:
   2-1-secure-jellyfin-server-link: done
   2-2-mass-storage-heartbeat-autodetection: done
   2-3-multi-device-profile-mapping: done
-  2-4-startup-splash-screen-with-connection-status: ready-for-dev
+  2-4-startup-splash-screen-with-connection-status: in-progress
   epic-2-retrospective: optional
 
   epic-3: backlog

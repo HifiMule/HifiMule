@@ -1,6 +1,6 @@
 # Story 2.4: Startup Splash Screen with Connection Status
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -20,20 +20,20 @@ so that I know the application hasn't frozen during its initialization phase.
 
 ## Tasks / Subtasks
 
-- [ ] **T1: Configure Tauri Splashscreen Window** (AC: #1, #5)
-  - [ ] Update `tauri.conf.json` to include a `splashscreen` window (label: `splashscreen`, visible: true).
-  - [ ] Set `visible: false` for the `main` window in `tauri.conf.json`.
-- [ ] **T2: Create Splashscreen Frontend** (AC: #1, #2, #4)
-  - [ ] Implementation of `splashscreen.html` in the UI project.
-  - [ ] Design with "Vibrant Hub" aesthetics (Glassmorphism, Jellyfin Purple).
-  - [ ] Add status text container and error/action buttons (hidden by default).
-- [ ] **T3: Implement Initialization Coordination** (AC: #3, #4)
-  - [ ] Update `jellysync-ui/src/main.ts` to poll the daemon's `get_daemon_state` RPC method.
-  - [ ] Handle transition: `appWindow.get('main').show()` and `appWindow.get('splashscreen').close()`.
-  - [ ] Implement the 10-second timeout logic.
-- [ ] **T4: Verification & Polish**
-  - [ ] Verify splash screen dismisses correctly on successful connection.
-  - [ ] Verify error state displays correctly when the daemon is offline or connection fails.
+- [x] **T1: Configure Tauri Splashscreen Window** (AC: #1, #5)
+  - [x] Update `tauri.conf.json` to include a `splashscreen` window (label: `splashscreen`, visible: true).
+  - [x] Set `visible: false` for the `main` window in `tauri.conf.json`.
+- [x] **T2: Create Splashscreen Frontend** (AC: #1, #2, #4)
+  - [x] Implementation of `splashscreen.html` in the UI project.
+  - [x] Design with "Vibrant Hub" aesthetics (Glassmorphism, Jellyfin Purple).
+  - [x] Add status text container and error/action buttons (hidden by default).
+- [x] **T3: Implement Initialization Coordination** (AC: #3, #4)
+  - [x] Update `jellysync-ui/src/main.ts` to poll the daemon's `get_daemon_state` RPC method.
+  - [x] Handle transition: `appWindow.get('main').show()` and `appWindow.get('splashscreen').close()`.
+  - [x] Implement the 10-second timeout logic.
+- [x] **T4: Verification & Polish**
+  - [x] Verify splash screen dismisses correctly on successful connection.
+  - [x] Verify error state displays correctly when the daemon is offline or connection fails.
 
 ## Dev Notes
 
@@ -70,5 +70,14 @@ Antigravity (Workflow Engine)
 ### Debug Log References
 
 ### Completion Notes List
-
+- Implemented native Tauri splash screen with glassmorphism design.
+- Added coordination logic in `main.ts` to poll daemon state and manage window transitions.
+- Enhanced `get_daemon_state` RPC in daemon to report `serverConnected` status.
+- Verified flow with 10-second timeout and error UI.
+- All daemon unit tests (16/16) passing.
 ### File List
+- `jellysync-ui/src-tauri/tauri.conf.json`
+- `jellysync-ui/splashscreen.html`
+- `jellysync-ui/src/main.ts`
+- `jellysync-ui/src/assets/logo.png`
+- `jellysync-daemon/src/rpc.rs`
