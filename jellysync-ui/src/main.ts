@@ -39,13 +39,21 @@ async function initSplashScreen(mainWin: Window | null, splashWin: Window | null
 
     const timeout = 10000;
     const startTime = Date.now();
+    const rpcPort = (import.meta as any).env?.VITE_RPC_PORT || '19140';
+    let isPolling = false;
 
     const poll = async () => {
+        if (isPolling) {
+            console.log("Poll already in progress, skipping...");
+            return;
+        }
+
+        isPolling = true;
         try {
             statusEl.textContent = "Connecting to Daemon...";
             console.log("Polling daemon...");
 
-            const response = await fetch('http://localhost:19140', {
+            const response = await fetch(`http://localhost:${rpcPort}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -79,6 +87,8 @@ async function initSplashScreen(mainWin: Window | null, splashWin: Window | null
             }
         } catch (e) {
             console.log("Daemon not reachable yet...");
+        } finally {
+            isPolling = false;
         }
 
         if (Date.now() - startTime > timeout) {

@@ -49,6 +49,7 @@ pub struct AppState {
     pub jellyfin_client: JellyfinClient,
     pub db: Arc<crate::db::Database>,
     pub device_manager: Arc<crate::device::DeviceManager>,
+    pub last_connection_check: Arc<tokio::sync::Mutex<Option<(std::time::Instant, bool)>>>,
 }
 
 pub async fn run_server(
@@ -60,15 +61,24 @@ pub async fn run_server(
         jellyfin_client: JellyfinClient::new(),
         db,
         device_manager,
+        last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
     });
 
     let app = Router::new()
         .route("/", post(handler))
         .layer(
             tower_http::cors::CorsLayer::new()
-                .allow_origin(tower_http::cors::Any)
-                .allow_methods(tower_http::cors::Any)
-                .allow_headers(tower_http::cors::Any),
+                .allow_origin([
+                    "http://localhost:1420"
+                        .parse::<http::HeaderValue>()
+                        .unwrap(),
+                    "http://127.0.0.1:1420"
+                        .parse::<http::HeaderValue>()
+                        .unwrap(),
+                    "tauri://localhost".parse::<http::HeaderValue>().unwrap(),
+                ])
+                .allow_methods([http::Method::POST])
+                .allow_headers([http::header::CONTENT_TYPE]),
         )
         .with_state(state);
 
@@ -232,13 +242,45 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         None
     };
 
-    let server_connected = CredentialManager::get_credentials().is_ok();
+    // Check server connection with caching (cache for 5 seconds)
+    let server_connected = check_server_connection_cached(state).await;
 
     Ok(serde_json::json!({
         "currentDevice": device,
         "deviceMapping": mapping,
         "serverConnected": server_connected,
     }))
+}
+
+async fn check_server_connection_cached(state: &AppState) -> bool {
+    const CACHE_DURATION_SECS: u64 = 5;
+
+    let mut cache = state.last_connection_check.lock().await;
+
+    // Check if we have a recent cached result
+    if let Some((timestamp, result)) = *cache {
+        if timestamp.elapsed().as_secs() < CACHE_DURATION_SECS {
+            return result;
+        }
+    }
+
+    // Perform actual connection check
+    let is_connected = match CredentialManager::get_credentials() {
+        Ok((url, token)) => {
+            // Actually test the connection
+            state
+                .jellyfin_client
+                .test_connection(&url, &token)
+                .await
+                .is_ok()
+        }
+        Err(_) => false,
+    };
+
+    // Update cache
+    *cache = Some((std::time::Instant::now(), is_connected));
+
+    is_connected
 }
 
 #[cfg(test)]
@@ -254,6 +296,7 @@ mod tests {
             jellyfin_client: JellyfinClient::new(),
             db,
             device_manager,
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
         });
 
         let params = json!({
@@ -275,6 +318,7 @@ mod tests {
             jellyfin_client: JellyfinClient::new(),
             db,
             device_manager,
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
         });
 
         let request = JsonRpcRequest {
@@ -297,6 +341,7 @@ mod tests {
             jellyfin_client: JellyfinClient::new(),
             db: db.clone(),
             device_manager,
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
         });
 
         let params = json!({

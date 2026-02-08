@@ -1,6 +1,6 @@
 # Story 2.4: Startup Splash Screen with Connection Status
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -75,9 +75,18 @@ Antigravity (Workflow Engine)
 - Enhanced `get_daemon_state` RPC in daemon to report `serverConnected` status.
 - Verified flow with 10-second timeout and error UI.
 - All daemon unit tests (16/16) passing.
+- **Code Review Fixes Applied:**
+  - Fixed CORS policy to restrict origins to localhost/Tauri only (security fix)
+  - Implemented proper server connection verification with 5-second caching
+  - Added polling guard to prevent race conditions in frontend
+  - Externalized hardcoded RPC port to environment variable
+  - Added http crate dependency for CORS configuration
 ### File List
 - `jellysync-ui/src-tauri/tauri.conf.json`
 - `jellysync-ui/splashscreen.html`
 - `jellysync-ui/src/main.ts`
 - `jellysync-ui/src/assets/logo.png`
+- `jellysync-ui/.env`
 - `jellysync-daemon/src/rpc.rs`
+- `jellysync-daemon/Cargo.toml`
+- `Cargo.toml`

@@ -1794,11 +1794,12 @@ dependencies = [
 
 [[package]]
 name = "http"
-version = "1.4.0"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3ba2a386d7f85a81f119ad7498ebe444d2e22c2af0b86b069416ace48b3311a"
+checksum = "21b9ddb458710bc376481b842f5da65cdf31522de232c1ca8146abce2a358258"
 dependencies = [
  "bytes",
+ "fnv",
  "itoa",
 ]
 
@@ -2205,6 +2206,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "http",
  "image",
  "keyring",
  "mockito",
