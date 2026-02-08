@@ -202,6 +202,25 @@ So that I know the application hasn't frozen during its initialization phase.
 **Then** the splash screen displays a clear error message with a "Retry" or "Open Settings" option.
 
 
+### Story 2.5: Interactive Login & Identity Management
+
+As a Ritualist (Arthur),
+I want a clear, guided login screen where I can select my server and enter my credentials,
+So that I can easily connect to my library without manually copying API tokens.
+
+**Acceptance Criteria:**
+
+**Given** the application is unconfigured or a connection error occurs
+**When** the Login View is displayed
+**Then** I can enter a Jellyfin URL (with optional "Auto-detect" for local servers).
+**And** I can enter my Username and Password.
+**When** I click "Connect"
+**Then** the daemon attempts to authenticate and retrieve a session token.
+**And** the token is securely stored in the system Keyring (replacing any existing token).
+**And** the UI transitions to the main Library Browser on success.
+**When** authentication fails
+**Then** a clear error message is shown (e.g., "Invalid Credentials" or "Server Unreachable").
+
 ## Epic 3: The Curation Hub (Basket & Library)
 
 Develop the high-confidence Library Browser and Selection Basket with storage projection.

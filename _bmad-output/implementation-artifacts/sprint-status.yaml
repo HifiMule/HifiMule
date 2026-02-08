@@ -51,6 +51,7 @@ development_status:
   2-2-mass-storage-heartbeat-autodetection: done
   2-3-multi-device-profile-mapping: done
   2-4-startup-splash-screen-with-connection-status: done
+  2-5-interactive-login-and-identity-management: backlog
   epic-2-retrospective: done
 
   epic-3: in-progress
