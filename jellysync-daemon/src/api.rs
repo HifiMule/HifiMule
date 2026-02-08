@@ -185,6 +185,37 @@ impl JellyfinClient {
         let item = response.json::<JellyfinItem>().await?;
         Ok(item)
     }
+
+    pub async fn get_image(
+        &self,
+        url: &str,
+        token: &str,
+        item_id: &str,
+    ) -> Result<reqwest::Response> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        // Fetch primary image
+        let endpoint = format!(
+            "{}/Items/{}/Images/Primary",
+            url.trim_end_matches('/'),
+            item_id
+        );
+
+        let response = self.client.get(&endpoint).headers(headers).send().await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!("Server returned status: {}", response.status()));
+        }
+
+        Ok(response)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

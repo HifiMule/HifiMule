@@ -162,3 +162,27 @@ h2 {
     gap: 1rem;
   }
 }
+
+/* Breadcrumbs */
+.breadcrumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-bottom: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.breadcrumbs .separator {
+  color: var(--sl-color-neutral-500);
+  margin: 0 0.25rem;
+}
+
+/* Pagination */
+.load-more-container {
+  display: flex;
+  justify-content: center;
+  padding: 2rem 0;
+  width: 100%;
+}

@@ -1,5 +1,10 @@
 use crate::api::{CredentialManager, JellyfinClient};
-use axum::{extract::State, routing::post, Json, Router};
+use axum::{
+    extract::{Path, State},
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::net::SocketAddr;
@@ -66,6 +71,7 @@ pub async fn run_server(
 
     let app = Router::new()
         .route("/", post(handler))
+        .route("/jellyfin/image/{id}", get(handle_proxy_image))
         .layer(
             tower_http::cors::CorsLayer::new()
                 .allow_origin([
@@ -396,6 +402,37 @@ async fn handle_sync_get_device_status_map(state: &AppState) -> Result<Value, Js
         Ok(serde_json::json!({
             "syncedItemIds": []
         }))
+    }
+}
+
+async fn handle_proxy_image(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let (url, token) = match CredentialManager::get_credentials() {
+        Ok(creds) => creds,
+        Err(_) => return http::StatusCode::UNAUTHORIZED.into_response(),
+    };
+
+    match state.jellyfin_client.get_image(&url, &token, &id).await {
+        Ok(resp) => {
+            let status = http::StatusCode::from_u16(resp.status().as_u16())
+                .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
+            let mut builder = axum::response::Response::builder().status(status);
+
+            if let Some(ct) = resp.headers().get(reqwest::header::CONTENT_TYPE) {
+                builder = builder.header(http::header::CONTENT_TYPE, ct);
+            }
+
+            // Buffer the body
+            match resp.bytes().await {
+                Ok(bytes) => builder
+                    .body(axum::body::Body::from(bytes))
+                    .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+                Err(_) => http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            }
+        }
+        Err(_) => http::StatusCode::NOT_FOUND.into_response(),
     }
 }
 

@@ -1,6 +1,6 @@
 # Story 3.1: Immersive Media Browser (Jellyfin Integration)
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -38,6 +38,14 @@ so that **I can enjoy the curation process as I do on the server.**
 - [x] **T5: UI - Sync Status Integration** (AC: #4)
     - [x] Fetch device status map on load.
     - [x] Apply "Synced" visual indicator (e.g., Green check badge or opacity fade) to `MediaCard` if ID exists in the map.
+
+### Review Follow-ups (AI)
+
+- [x] [AI-Review][CRITICAL] Broken Image Loading: Implemented `/jellyfin/image` proxy in daemon to handle authenticated image requests. [rpc.rs]
+- [x] [AI-Review][CRITICAL] Interaction Dead End: Added click handlers to MediaCard to allow navigation. [library.ts]
+- [x] [AI-Review][HIGH] Hardcoded Library View: Implemented view selection screen and home button. [library.ts]
+- [x] [AI-Review][HIGH] Pagination Missing: Added "Load More" button with status indication. [library.ts]
+- [x] [AI-Review][MEDIUM] Hardcoded RPC Port: Improved port detection in UI. [library.ts]
 
 ## Dev Notes
 
