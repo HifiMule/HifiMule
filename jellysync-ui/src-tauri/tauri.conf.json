@@ -13,9 +13,23 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "jellysync-ui",
-        "width": 800,
-        "height": 600
+        "label": "main",
+        "title": "JellyfinSync Hub",
+        "width": 1024,
+        "height": 768,
+        "visible": false,
+        "center": true
+      },
+      {
+        "label": "splashscreen",
+        "title": "JellyfinSync Starting...",
+        "width": 400,
+        "height": 500,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "center": true,
+        "url": "/splashscreen.html"
       }
     ],
     "security": {
