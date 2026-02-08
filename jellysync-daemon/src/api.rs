@@ -250,8 +250,11 @@ impl JellyfinClient {
 
         // Authorization Header
         // TODO: Use persistent DeviceId
+        let device_id = CredentialManager::get_device_id()
+            .unwrap_or_else(|_| "JellyfinSync-Desktop-Fallback".to_string());
         let auth_header = format!(
-            "MediaBrowser Client=\"JellyfinSync\", Device=\"Desktop\", DeviceId=\"JellyfinSync-Desktop\", Version=\"{}\"",
+            "MediaBrowser Client=\"JellyfinSync\", Device=\"Desktop\", DeviceId=\"{}\", Version=\"{}\"",
+            device_id,
             env!("CARGO_PKG_VERSION")
         );
 
@@ -279,9 +282,12 @@ impl JellyfinClient {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Config {
+    #[serde(default)]
     pub url: String,
     #[serde(default)]
     pub user_id: Option<String>,
+    #[serde(default)]
+    pub device_id: Option<String>,
 }
 
 pub struct CredentialManager;
@@ -333,6 +339,7 @@ impl CredentialManager {
         let config = Config {
             url: url.to_string(),
             user_id: user_id.map(|s| s.to_string()),
+            device_id: Self::get_device_id().ok(),
         };
         let json = serde_json::to_string_pretty(&config)?;
         let path = Self::get_config_path()?;
@@ -364,6 +371,60 @@ impl CredentialManager {
             .map_err(|e| anyhow!("No token found in keyring: {}", e))?;
 
         Ok((config.url, token, config.user_id))
+    }
+
+    pub fn get_device_id() -> Result<String> {
+        let path = Self::get_config_path()?;
+
+        // Try to read existing config
+        let mut config = if path.exists() {
+            let content = fs::read_to_string(&path)
+                .map_err(|e| anyhow!("Failed to read config file: {}", e))?;
+            serde_json::from_str::<Config>(&content).unwrap_or(Config {
+                url: "".to_string(),
+                user_id: None,
+                device_id: None,
+            })
+        } else {
+            Config {
+                url: "".to_string(),
+                user_id: None,
+                device_id: None,
+            }
+        };
+
+        if let Some(id) = &config.device_id {
+            return Ok(id.clone());
+        }
+
+        // Generate new ID
+        let new_id = format!(
+            "JellyfinSync-Desktop-{:x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        );
+
+        config.device_id = Some(new_id.clone());
+
+        // Save back if path exists or we have other data,
+        // but if it's a fresh file we might just perform a save if we have a valid path
+        // For simplicity, we only save if we can, ignoring errors if directory doesn't exist yet
+        // (CredentialManager::save_credentials handles dir creation usually via get_app_data_dir)
+
+        // We only save if we have a valid path. The actual save_credentials checks for dir existence.
+        // Here we just try to write if the file/dir structure is plausible.
+        // Actually, let's just write checking for errors.
+
+        if let Ok(json) = serde_json::to_string_pretty(&config) {
+            // Ensure dir exists
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::write(&path, json);
+        }
+
+        Ok(new_id)
     }
 }
 

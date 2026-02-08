@@ -42,7 +42,8 @@ export function initLoginView(onLoginSuccess: () => void) {
         const username = formData.get('username') as string;
         const password = formData.get('password') as string;
 
-        const btn = form.querySelector('sl-button') as any;
+        // Shoelace button has a 'loading' property
+        const btn = form.querySelector('sl-button') as HTMLElement & { loading: boolean };
         const errorEl = document.getElementById('login-error');
 
         if (btn) btn.loading = true;
