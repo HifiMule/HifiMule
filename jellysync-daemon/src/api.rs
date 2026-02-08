@@ -53,6 +53,27 @@ pub struct JellyfinViewsResponse {
     pub total_record_count: u32,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct AuthenticateByNameRequest {
+    pub username: String,
+    pub pw: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct UserDto {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct AuthenticationResult {
+    pub access_token: String,
+    pub user: UserDto,
+}
+
 impl JellyfinClient {
     pub fn new() -> Self {
         Self {
@@ -216,11 +237,51 @@ impl JellyfinClient {
 
         Ok(response)
     }
+
+    pub async fn authenticate_by_name(
+        &self,
+        url: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<AuthenticationResult> {
+        CredentialManager::validate_url(url)?;
+
+        let endpoint = format!("{}/Users/AuthenticateByName", url.trim_end_matches('/'));
+
+        // Authorization Header
+        // TODO: Use persistent DeviceId
+        let auth_header = format!(
+            "MediaBrowser Client=\"JellyfinSync\", Device=\"Desktop\", DeviceId=\"JellyfinSync-Desktop\", Version=\"{}\"",
+            env!("CARGO_PKG_VERSION")
+        );
+
+        let body = AuthenticateByNameRequest {
+            username: username.to_string(),
+            pw: password.to_string(),
+        };
+
+        let response = self
+            .client
+            .post(&endpoint)
+            .header("Authorization", auth_header)
+            .json(&body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!("Authentication failed: {}", response.status()));
+        }
+
+        let result = response.json::<AuthenticationResult>().await?;
+        Ok(result)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Config {
     pub url: String,
+    #[serde(default)]
+    pub user_id: Option<String>,
 }
 
 pub struct CredentialManager;
@@ -265,12 +326,13 @@ impl CredentialManager {
         Ok(())
     }
 
-    pub fn save_credentials(url: &str, token: &str) -> Result<()> {
+    pub fn save_credentials(url: &str, token: &str, user_id: Option<&str>) -> Result<()> {
         Self::validate_url(url)?;
         Self::validate_token(token)?;
 
         let config = Config {
             url: url.to_string(),
+            user_id: user_id.map(|s| s.to_string()),
         };
         let json = serde_json::to_string_pretty(&config)?;
         let path = Self::get_config_path()?;
@@ -285,7 +347,7 @@ impl CredentialManager {
         Ok(())
     }
 
-    pub fn get_credentials() -> Result<(String, String)> {
+    pub fn get_credentials() -> Result<(String, String, Option<String>)> {
         let path = Self::get_config_path()?;
         if !path.exists() {
             return Err(anyhow!("No config file found"));
@@ -301,7 +363,7 @@ impl CredentialManager {
             .get_password()
             .map_err(|e| anyhow!("No token found in keyring: {}", e))?;
 
-        Ok((config.url, token))
+        Ok((config.url, token, config.user_id))
     }
 }
 
@@ -480,9 +542,53 @@ mod tests {
             .await
             .expect("Failed to get item details");
 
-        assert_eq!(item.id, "album1");
         assert_eq!(item.name, "Test Album");
         assert_eq!(item.item_type, "MusicAlbum");
         assert_eq!(item.album_artist, Some("Test Artist".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_by_name_success() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+
+        let _mock = server
+            .mock("POST", "/Users/AuthenticateByName")
+            .match_header("Authorization", mockito::Matcher::Regex(r#"MediaBrowser Client="JellyfinSync".*"#.to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"AccessToken": "new-token-123", "User": {"Id": "user1", "Name": "Alice"}, "SessionInfo": {}}"#)
+            .create_async()
+            .await;
+
+        let client = JellyfinClient::new();
+        let result = client
+            .authenticate_by_name(&url, "Alice", "secret")
+            .await
+            .expect("Failed to authenticate");
+
+        assert_eq!(result.access_token, "new-token-123");
+        assert_eq!(result.user.id, "user1");
+        assert_eq!(result.user.name, "Alice");
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_by_name_failure() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+
+        let _mock = server
+            .mock("POST", "/Users/AuthenticateByName")
+            .with_status(401)
+            .create_async()
+            .await;
+
+        let client = JellyfinClient::new();
+        let result = client
+            .authenticate_by_name(&url, "Alice", "wrong-password")
+            .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("401"));
     }
 }

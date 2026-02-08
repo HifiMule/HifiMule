@@ -186,3 +186,22 @@ h2 {
   padding: 2rem 0;
   width: 100%;
 }
+
+/* Login View */
+.login-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  background: var(--sl-color-neutral-100);
+}
+
+.login-card {
+  width: 100%;
+  max-width: 400px;
+}
+
+.login-card h3 {
+  margin: 0;
+  text-align: center;
+}

@@ -101,6 +101,7 @@ async fn handler(
 ) -> Json<JsonRpcResponse> {
     let result = match payload.method.as_str() {
         "test_connection" => handle_test_connection(&state, payload.params).await,
+        "login" => handle_login(&state, payload.params).await,
         "save_credentials" => handle_save_credentials(payload.params).await,
         "get_credentials" => handle_get_credentials().await,
         "set_device_profile" => handle_set_device_profile(&state, payload.params).await,
@@ -166,6 +167,58 @@ async fn handle_test_connection(
     }
 }
 
+async fn handle_login(state: &AppState, params: Option<Value>) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Invalid params".to_string(),
+        data: None,
+    })?;
+
+    let url = params["url"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing url".to_string(),
+        data: None,
+    })?;
+
+    let username = params["username"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing username".to_string(),
+        data: None,
+    })?;
+
+    let password = params["password"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing password".to_string(),
+        data: None,
+    })?;
+
+    match state
+        .jellyfin_client
+        .authenticate_by_name(url, username, password)
+        .await
+    {
+        Ok(result) => {
+            if let Err(e) = CredentialManager::save_credentials(
+                url,
+                &result.access_token,
+                Some(&result.user.id),
+            ) {
+                return Err(JsonRpcError {
+                    code: ERR_STORAGE_ERROR,
+                    message: e.to_string(),
+                    data: None,
+                });
+            }
+            Ok(serde_json::to_value(result).unwrap())
+        }
+        Err(e) => Err(JsonRpcError {
+            code: ERR_INVALID_CREDENTIALS,
+            message: e.to_string(),
+            data: None,
+        }),
+    }
+}
+
 async fn handle_save_credentials(params: Option<Value>) -> Result<Value, JsonRpcError> {
     let params = params.ok_or(JsonRpcError {
         code: ERR_INVALID_PARAMS,
@@ -185,7 +238,9 @@ async fn handle_save_credentials(params: Option<Value>) -> Result<Value, JsonRpc
         data: None,
     })?;
 
-    match CredentialManager::save_credentials(url, token) {
+    let user_id = params["userId"].as_str();
+
+    match CredentialManager::save_credentials(url, token, user_id) {
         Ok(_) => Ok(serde_json::Value::Bool(true)),
         Err(e) => Err(JsonRpcError {
             code: ERR_STORAGE_ERROR,
@@ -197,9 +252,10 @@ async fn handle_save_credentials(params: Option<Value>) -> Result<Value, JsonRpc
 
 async fn handle_get_credentials() -> Result<Value, JsonRpcError> {
     match CredentialManager::get_credentials() {
-        Ok((url, token)) => Ok(serde_json::json!({
+        Ok((url, token, user_id)) => Ok(serde_json::json!({
             "url": url,
-            "token": token
+            "token": token,
+            "userId": user_id
         })),
         Err(e) => Err(JsonRpcError {
             code: ERR_STORAGE_ERROR,
@@ -278,7 +334,7 @@ async fn check_server_connection_cached(state: &AppState) -> bool {
 
     // Perform actual connection check
     let is_connected = match CredentialManager::get_credentials() {
-        Ok((url, token)) => {
+        Ok((url, token, _)) => {
             // Actually test the connection
             state
                 .jellyfin_client
@@ -299,7 +355,7 @@ async fn handle_jellyfin_get_views(
     state: &AppState,
     _params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
-    let (url, token) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
+    let (url, token, _) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
         code: ERR_STORAGE_ERROR,
         message: format!("Failed to get credentials: {}", e),
         data: None,
@@ -319,7 +375,7 @@ async fn handle_jellyfin_get_items(
     state: &AppState,
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
-    let (url, token) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
+    let (url, token, _) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
         code: ERR_STORAGE_ERROR,
         message: format!("Failed to get credentials: {}", e),
         data: None,
@@ -368,7 +424,7 @@ async fn handle_jellyfin_get_item_details(
         data: None,
     })?;
 
-    let (url, token) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
+    let (url, token, _) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
         code: ERR_STORAGE_ERROR,
         message: format!("Failed to get credentials: {}", e),
         data: None,
@@ -409,7 +465,7 @@ async fn handle_proxy_image(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let (url, token) = match CredentialManager::get_credentials() {
+    let (url, token, _) = match CredentialManager::get_credentials() {
         Ok(creds) => creds,
         Err(_) => return http::StatusCode::UNAUTHORIZED.into_response(),
     };

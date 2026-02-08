@@ -1,8 +1,6 @@
 // Library View - Handles Jellyfin library browsing and media grid display
 
-const RPC_PORT = (import.meta as any).env?.VITE_RPC_PORT || '19140';
-const RPC_URL = `http://localhost:${RPC_PORT}`;
-const IMAGE_PROXY_URL = `${RPC_URL}/jellyfin/image`;
+import { rpcCall, IMAGE_PROXY_URL } from './rpc';
 
 interface JellyfinView {
     Id: string;
@@ -50,25 +48,7 @@ let state: AppState = {
     loading: false
 };
 
-// RPC Helper
-async function rpcCall(method: string, params: any = {}): Promise<any> {
-    const response = await fetch(RPC_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            jsonrpc: '2.0',
-            method,
-            params,
-            id: Date.now()
-        })
-    });
-
-    const data = await response.json();
-    if (data.error) {
-        throw new Error(data.error.message);
-    }
-    return data.result;
-}
+// RPC Helper removed - imported from rpc.ts
 
 export async function fetchViews(): Promise<JellyfinView[]> {
     return await rpcCall('jellyfin_get_views');

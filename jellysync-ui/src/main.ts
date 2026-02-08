@@ -26,9 +26,72 @@ async function init() {
     console.log("JellyfinSync Hub Initialized");
     document.body.classList.add('ready');
 
-    // Initialize library view
-    const { initLibraryView } = await import('./library');
-    initLibraryView();
+    const { rpcCall } = await import('./rpc');
+
+    try {
+        const state = await rpcCall('get_daemon_state');
+        if (state.serverConnected) {
+            console.log("Server connected, loading library view");
+            const { initLibraryView } = await import('./library');
+            initLibraryView();
+        } else {
+            console.log("Server not connected, showing login view");
+            const { initLoginView } = await import('./login');
+            const { initLibraryView } = await import('./library');
+
+            initLoginView(() => {
+                console.log("Login success callback triggered");
+                renderMainLayout();
+                initLibraryView();
+            });
+        }
+    } catch (e) {
+        console.error("Failed to check daemon state", e);
+        // Fallback to login
+        const { initLoginView } = await import('./login');
+        const { initLibraryView } = await import('./library');
+        initLoginView(() => {
+            renderMainLayout();
+            initLibraryView();
+        });
+    }
+}
+
+function renderMainLayout() {
+    const root = document.querySelector('.app-container');
+    if (!root) return;
+
+    root.innerHTML = `
+    <sl-split-panel position="70" class="split-panel">
+      <div slot="start" class="library-view">
+        <header>
+          <h1>Library</h1>
+          <p>Select media to sync to your device.</p>
+        </header>
+
+        <div id="library-content" class="content">
+          <!-- Media grid will be rendered here by library.ts -->
+        </div>
+      </div>
+
+      <div slot="end" class="basket-view">
+        <h2>Basket</h2>
+        <p>Ready to sync</p>
+
+        <div class="basket-placeholder">
+          <sl-icon name="basket" style="font-size: 2rem; opacity: 0.5;"></sl-icon>
+          <p style="opacity: 0.5;">Your basket is empty</p>
+        </div>
+
+        <div style="margin-top: auto;">
+          <sl-button variant="primary" style="width: 100%;" disabled>
+            <sl-icon slot="prefix" name="cloud-download"></sl-icon>
+            Start Sync
+          </sl-button>
+        </div>
+      </div>
+    </sl-split-panel>
+    `;
 }
 
 async function initSplashScreen(mainWin: Window | null, splashWin: Window | null) {
