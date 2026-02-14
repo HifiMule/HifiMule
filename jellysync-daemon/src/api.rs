@@ -5,6 +5,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+pub const MUSIC_ITEM_TYPES: &str = "MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo";
+
 pub struct JellyfinClient {
     client: reqwest::Client,
 }
@@ -24,6 +26,8 @@ pub struct JellyfinView {
     pub name: String,
     #[serde(rename = "Type")]
     pub view_type: String,
+    #[serde(default)]
+    pub collection_type: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -584,7 +588,7 @@ mod tests {
         let token = "test-token-1234567890";
 
         let _mock = server
-            .mock("GET", "/Users/user1/Items?ParentId=lib1&IncludeItemTypes=MusicAlbum&Limit=50")
+            .mock("GET", "/Users/user1/Items?ParentId=lib1&IncludeItemTypes=MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo&Limit=50")
             .match_header("X-Emby-Token", token)
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -599,7 +603,7 @@ mod tests {
                 token,
                 "user1",
                 Some("lib1"),
-                Some("MusicAlbum"),
+                Some(MUSIC_ITEM_TYPES),
                 None,
                 Some(50),
             )

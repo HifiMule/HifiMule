@@ -1,7 +1,8 @@
-// Library View - Handles Jellyfin library browsing and media grid display
-
 import { rpcCall } from './rpc';
 import { MediaCard, JellyfinItem, JellyfinView } from './components/MediaCard';
+
+const MUSIC_ITEM_TYPES = 'MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo';
+const ALLOWED_COLLECTION_TYPES = ['music', 'playlists'];
 
 interface JellyfinItemsResponse {
     Items: JellyfinItem[];
@@ -99,11 +100,13 @@ async function renderLibrarySelection() {
     const container = document.getElementById('library-content');
     if (!container) return;
 
-    container.innerHTML = '<sl-spinner style="font-size: 3rem;"></sl-spinner>';
-
     try {
         const views = await fetchViews();
-        renderGrid(views, 'libraries');
+        // Filter for music and playlists collection types only
+        const musicViews = views.filter(view =>
+            view.CollectionType && ALLOWED_COLLECTION_TYPES.includes(view.CollectionType.toLowerCase())
+        );
+        renderGrid(musicViews, 'libraries');
     } catch (e) {
         renderError(e as Error);
     }
@@ -157,7 +160,7 @@ async function loadItems(reset: boolean) {
     state.loading = true;
     try {
         const [itemsResponse, deviceStatus] = await Promise.all([
-            fetchItems(state.parentId, undefined, state.pagination.startIndex, state.pagination.limit),
+            fetchItems(state.parentId, MUSIC_ITEM_TYPES, state.pagination.startIndex, state.pagination.limit),
             fetchDeviceStatusMap()
         ]);
 

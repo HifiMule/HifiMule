@@ -16,6 +16,7 @@ export interface JellyfinView {
     Id: string;
     Name: string;
     Type: string;
+    CollectionType?: string;
 }
 
 export class MediaCard {

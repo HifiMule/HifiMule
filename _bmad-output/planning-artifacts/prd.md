@@ -170,6 +170,7 @@ As a cross-platform desktop application, JellyfinSync consists of a performance-
 - **FR21:** Users can toggle "Launch on Startup" behavior.
 - **FR22:** The system can provide tray-icon status updates for sync progress and hardware state.
 - **FR23:** The system can send OS-native notifications for sync completion or errors.
+- **FR25:** The system retrieves and displays only music-centric content (Playlists, Albums, Artists, Tracks), automatically filtering out movies, series, and books from Jellyfin views.
 
 ## Quality & Non-Functional Requirements
 

@@ -277,6 +277,19 @@ So that I don't accidentally mark them for deletion.
 **Then** unmanaged folders are shown as "Locked/Shielded" and cannot be modified by the tool.
 
 
+### Story 3.5: Music-Only Library Filtering
+
+As a Ritualist (Arthur),
+I want the application to automatically filter out non-music content (movies, series, books) from my Jellyfin library,
+So that I can focus purely on my music collection for my DAP.
+
+**Acceptance Criteria:**
+
+**Given** a Jellyfin library with mixed content types
+**When** browsing the library in JellyfinSync
+**Then** only MusicAlbums, Playlists, Artists, and MusicVideos (optional) are retrieved.
+**And** Movies, Series, and Books are explicitly excluded from the UI views.
+
 ## Epic 4: The Sync Engine & Self-Healing Core
 
 Build the performant, atomic sync logic with built-in core resume capabilities.
