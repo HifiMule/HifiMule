@@ -355,13 +355,19 @@ async fn handle_jellyfin_get_views(
     state: &AppState,
     _params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
-    let (url, token, _) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
+    let (url, token, user_id) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
         code: ERR_STORAGE_ERROR,
         message: format!("Failed to get credentials: {}", e),
         data: None,
     })?;
 
-    match state.jellyfin_client.get_views(&url, &token).await {
+    let user_id = user_id.unwrap_or_else(|| "Me".to_string());
+
+    match state
+        .jellyfin_client
+        .get_views(&url, &token, &user_id)
+        .await
+    {
         Ok(views) => Ok(serde_json::to_value(views).unwrap()),
         Err(e) => Err(JsonRpcError {
             code: ERR_CONNECTION_FAILED,
@@ -375,11 +381,13 @@ async fn handle_jellyfin_get_items(
     state: &AppState,
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
-    let (url, token, _) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
+    let (url, token, user_id) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
         code: ERR_STORAGE_ERROR,
         message: format!("Failed to get credentials: {}", e),
         data: None,
     })?;
+
+    let user_id = user_id.unwrap_or_else(|| "Me".to_string());
 
     let params = params.unwrap_or(serde_json::json!({}));
     let parent_id = params["parentId"].as_str();
@@ -392,6 +400,7 @@ async fn handle_jellyfin_get_items(
         .get_items(
             &url,
             &token,
+            &user_id,
             parent_id,
             include_item_types,
             start_index,
@@ -424,15 +433,17 @@ async fn handle_jellyfin_get_item_details(
         data: None,
     })?;
 
-    let (url, token, _) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
+    let (url, token, user_id) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
         code: ERR_STORAGE_ERROR,
         message: format!("Failed to get credentials: {}", e),
         data: None,
     })?;
 
+    let user_id = user_id.unwrap_or_else(|| "Me".to_string());
+
     match state
         .jellyfin_client
-        .get_item_details(&url, &token, item_id)
+        .get_item_details(&url, &token, &user_id, item_id)
         .await
     {
         Ok(item) => Ok(serde_json::to_value(item).unwrap()),

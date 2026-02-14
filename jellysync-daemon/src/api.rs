@@ -95,16 +95,24 @@ impl JellyfinClient {
         let endpoint = format!("{}/System/Info", url.trim_end_matches('/'));
 
         let response = self.client.get(&endpoint).headers(headers).send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+        println!("DEBUG: Jellyfin Response [{}] - Body: {}", status, text);
 
-        if !response.status().is_success() {
-            return Err(anyhow!("Server returned status: {}", response.status()));
+        if !status.is_success() {
+            return Err(anyhow!("Server returned status: {}", status));
         }
 
-        let info = response.json::<SystemInfo>().await?;
+        let info = serde_json::from_str::<SystemInfo>(&text)?;
         Ok(info)
     }
 
-    pub async fn get_views(&self, url: &str, token: &str) -> Result<Vec<JellyfinView>> {
+    pub async fn get_views(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+    ) -> Result<Vec<JellyfinView>> {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
@@ -114,15 +122,18 @@ impl JellyfinClient {
             HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
         );
 
-        let endpoint = format!("{}/Users/Me/Views", url.trim_end_matches('/'));
+        let endpoint = format!("{}/Users/{}/Views", url.trim_end_matches('/'), user_id);
 
         let response = self.client.get(&endpoint).headers(headers).send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+        println!("DEBUG: Jellyfin Response [{}] - Body: {}", status, text);
 
-        if !response.status().is_success() {
-            return Err(anyhow!("Server returned status: {}", response.status()));
+        if !status.is_success() {
+            return Err(anyhow!("Server returned status: {}", status));
         }
 
-        let views_response = response.json::<JellyfinViewsResponse>().await?;
+        let views_response = serde_json::from_str::<JellyfinViewsResponse>(&text)?;
         Ok(views_response.items)
     }
 
@@ -130,6 +141,7 @@ impl JellyfinClient {
         &self,
         url: &str,
         token: &str,
+        user_id: &str,
         parent_id: Option<&str>,
         include_item_types: Option<&str>,
         start_index: Option<u32>,
@@ -165,18 +177,22 @@ impl JellyfinClient {
         };
 
         let endpoint = format!(
-            "{}/Users/Me/Items{}",
+            "{}/Users/{}/Items{}",
             url.trim_end_matches('/'),
+            user_id,
             query_string
         );
 
         let response = self.client.get(&endpoint).headers(headers).send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+        println!("DEBUG: Jellyfin Response [{}] - Body: {}", status, text);
 
-        if !response.status().is_success() {
-            return Err(anyhow!("Server returned status: {}", response.status()));
+        if !status.is_success() {
+            return Err(anyhow!("Server returned status: {}", status));
         }
 
-        let items_response = response.json::<JellyfinItemsResponse>().await?;
+        let items_response = serde_json::from_str::<JellyfinItemsResponse>(&text)?;
         Ok(items_response)
     }
 
@@ -184,6 +200,7 @@ impl JellyfinClient {
         &self,
         url: &str,
         token: &str,
+        user_id: &str,
         item_id: &str,
     ) -> Result<JellyfinItem> {
         CredentialManager::validate_url(url)?;
@@ -195,15 +212,23 @@ impl JellyfinClient {
             HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
         );
 
-        let endpoint = format!("{}/Users/Me/Items/{}", url.trim_end_matches('/'), item_id);
+        let endpoint = format!(
+            "{}/Users/{}/Items/{}",
+            url.trim_end_matches('/'),
+            user_id,
+            item_id
+        );
 
         let response = self.client.get(&endpoint).headers(headers).send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+        println!("DEBUG: Jellyfin Response [{}] - Body: {}", status, text);
 
-        if !response.status().is_success() {
-            return Err(anyhow!("Server returned status: {}", response.status()));
+        if !status.is_success() {
+            return Err(anyhow!("Server returned status: {}", status));
         }
 
-        let item = response.json::<JellyfinItem>().await?;
+        let item = serde_json::from_str::<JellyfinItem>(&text)?;
         Ok(item)
     }
 
@@ -271,11 +296,15 @@ impl JellyfinClient {
             .send()
             .await?;
 
-        if !response.status().is_success() {
-            return Err(anyhow!("Authentication failed: {}", response.status()));
+        let status = response.status();
+        let text = response.text().await?;
+        println!("DEBUG: Jellyfin Response [{}] - Body: {}", status, text);
+
+        if !status.is_success() {
+            return Err(anyhow!("Authentication failed: {}", status));
         }
 
-        let result = response.json::<AuthenticationResult>().await?;
+        let result = serde_json::from_str::<AuthenticationResult>(&text)?;
         Ok(result)
     }
 }
@@ -522,7 +551,7 @@ mod tests {
         let token = "test-token-1234567890";
 
         let _mock = server
-            .mock("GET", "/Users/Me/Views")
+            .mock("GET", "/Users/user1/Views")
             .match_header("X-Emby-Token", token)
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -532,7 +561,7 @@ mod tests {
 
         let client = JellyfinClient::new();
         let views = client
-            .get_views(&url, token)
+            .get_views(&url, token, "user1")
             .await
             .expect("Failed to get views");
 
@@ -549,7 +578,7 @@ mod tests {
         let token = "test-token-1234567890";
 
         let _mock = server
-            .mock("GET", "/Users/Me/Items?ParentId=lib1&IncludeItemTypes=MusicAlbum&Limit=50")
+            .mock("GET", "/Users/user1/Items?ParentId=lib1&IncludeItemTypes=MusicAlbum&Limit=50")
             .match_header("X-Emby-Token", token)
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -562,6 +591,7 @@ mod tests {
             .get_items(
                 &url,
                 token,
+                "user1",
                 Some("lib1"),
                 Some("MusicAlbum"),
                 None,
@@ -589,7 +619,7 @@ mod tests {
         let token = "test-token-1234567890";
 
         let _mock = server
-            .mock("GET", "/Users/Me/Items/album1")
+            .mock("GET", "/Users/user1/Items/album1")
             .match_header("X-Emby-Token", token)
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -599,7 +629,7 @@ mod tests {
 
         let client = JellyfinClient::new();
         let item = client
-            .get_item_details(&url, token, "album1")
+            .get_item_details(&url, token, "user1", "album1")
             .await
             .expect("Failed to get item details");
 
