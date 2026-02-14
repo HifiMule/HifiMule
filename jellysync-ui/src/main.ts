@@ -3,6 +3,8 @@ import { Window } from '@tauri-apps/api/window';
 // JellyfinSync UI Main Entry Point
 // Coordinates splash screen and main window lifecycle.
 
+let activeBasketSidebar: any = null;
+
 async function init() {
     console.log("init() called, path:", window.location.pathname);
 
@@ -30,6 +32,8 @@ async function init() {
 
     try {
         const state = await rpcCall('get_daemon_state');
+        renderMainLayout();
+
         if (state.serverConnected) {
             console.log("Server connected, loading library view");
             const { initLibraryView } = await import('./library');
@@ -37,22 +41,22 @@ async function init() {
         } else {
             console.log("Server not connected, showing login view");
             const { initLoginView } = await import('./login');
-            const { initLibraryView } = await import('./library');
+            // const { initLibraryView } = await import('./library'); // Removed double import
 
             initLoginView(() => {
                 console.log("Login success callback triggered");
                 renderMainLayout();
-                initLibraryView();
+                import('./library').then(({ initLibraryView }) => initLibraryView());
             });
         }
     } catch (e) {
         console.error("Failed to check daemon state", e);
+        renderMainLayout();
         // Fallback to login
         const { initLoginView } = await import('./login');
-        const { initLibraryView } = await import('./library');
         initLoginView(() => {
             renderMainLayout();
-            initLibraryView();
+            import('./library').then(({ initLibraryView }) => initLibraryView());
         });
     }
 }
@@ -74,24 +78,22 @@ function renderMainLayout() {
         </div>
       </div>
 
-      <div slot="end" class="basket-view">
-        <h2>Basket</h2>
-        <p>Ready to sync</p>
-
-        <div class="basket-placeholder">
-          <sl-icon name="basket" style="font-size: 2rem; opacity: 0.5;"></sl-icon>
-          <p style="opacity: 0.5;">Your basket is empty</p>
-        </div>
-
-        <div style="margin-top: auto;">
-          <sl-button variant="primary" style="width: 100%;" disabled>
-            <sl-icon slot="prefix" name="cloud-download"></sl-icon>
-            Start Sync
-          </sl-button>
-        </div>
+      <div slot="end" class="basket-view" id="basket-sidebar-container">
+        <!-- BasketSidebar component will render here -->
       </div>
     </sl-split-panel>
     `;
+
+    // Initialize Basket Sidebar
+    import('./components/BasketSidebar').then(({ BasketSidebar }) => {
+        if (activeBasketSidebar) {
+            activeBasketSidebar.destroy();
+        }
+        const container = document.getElementById('basket-sidebar-container');
+        if (container) {
+            activeBasketSidebar = new BasketSidebar(container);
+        }
+    });
 }
 
 async function initSplashScreen(mainWin: Window | null, splashWin: Window | null) {

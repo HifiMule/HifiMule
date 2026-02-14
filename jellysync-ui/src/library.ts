@@ -1,20 +1,7 @@
 // Library View - Handles Jellyfin library browsing and media grid display
 
-import { rpcCall, IMAGE_PROXY_URL } from './rpc';
-
-interface JellyfinView {
-    Id: string;
-    Name: string;
-    Type: string;
-}
-
-interface JellyfinItem {
-    Id: string;
-    Name: string;
-    Type: string;
-    AlbumArtist?: string;
-    ProductionYear?: number;
-}
+import { rpcCall } from './rpc';
+import { MediaCard, JellyfinItem, JellyfinView } from './components/MediaCard';
 
 interface JellyfinItemsResponse {
     Items: JellyfinItem[];
@@ -48,8 +35,6 @@ let state: AppState = {
     loading: false
 };
 
-// RPC Helper removed - imported from rpc.ts
-
 export async function fetchViews(): Promise<JellyfinView[]> {
     return await rpcCall('jellyfin_get_views');
 }
@@ -71,8 +56,6 @@ export async function fetchItems(
 export async function fetchDeviceStatusMap(): Promise<DeviceStatusMap> {
     return await rpcCall('sync_get_device_status_map');
 }
-
-// ... UI Components ...
 
 function createBreadcrumbs(): HTMLElement {
     const nav = document.createElement('nav');
@@ -106,53 +89,6 @@ function createBreadcrumbs(): HTMLElement {
     });
 
     return nav;
-}
-
-function createMediaCard(item: JellyfinItem | JellyfinView, isSynced: boolean, onClick: () => void): HTMLElement {
-    const card = document.createElement('sl-card');
-    card.className = 'media-card';
-    card.onclick = onClick;
-
-    if (isSynced) {
-        card.classList.add('synced');
-    }
-
-    // Use proxy URL - Append timestamp to prevent aggressive caching if needed, but for now ID is enough
-    const imageUrl = `${IMAGE_PROXY_URL}/${item.Id}?maxHeight=300&quality=90`;
-
-    card.innerHTML = `
-        <div class="card-image" style="background-image: url('${imageUrl}');">
-            ${isSynced ? '<div class="synced-badge"><sl-icon name="check-circle-fill"></sl-icon></div>' : ''}
-            <sl-skeleton effect="sheen" class="image-skeleton"></sl-skeleton>
-        </div>
-        <div class="card-content">
-            <strong>${escapeHtml(item.Name)}</strong>
-            ${(item as JellyfinItem).AlbumArtist ? `<div class="card-subtitle">${escapeHtml((item as JellyfinItem).AlbumArtist!)}</div>` : ''}
-            ${(item as JellyfinItem).ProductionYear ? `<div class="card-year">${(item as JellyfinItem).ProductionYear}</div>` : ''}
-             ${(item as JellyfinView).Type === 'CollectionFolder' ? '<div class="card-subtitle">Library</div>' : ''}
-        </div>
-    `;
-
-    // Handle image load
-    const img = new Image();
-    img.onload = () => {
-        const cardImage = card.querySelector('.card-image') as HTMLElement;
-        const skeleton = card.querySelector('.image-skeleton') as HTMLElement;
-        if (cardImage && skeleton) {
-            cardImage.style.backgroundImage = `url('${imageUrl}')`;
-            skeleton.style.display = 'none';
-        }
-    };
-    img.onerror = () => {
-        const skeleton = card.querySelector('.image-skeleton') as HTMLElement;
-        if (skeleton) {
-            skeleton.style.display = 'none';
-            // cardImage.style.backgroundImage = 'url(/assets/placeholder.png)'; // Optional fallback
-        }
-    };
-    img.src = imageUrl;
-
-    return card;
 }
 
 async function renderLibrarySelection() {
@@ -269,7 +205,7 @@ function renderGrid(items: (JellyfinItem | JellyfinView)[], mode: 'libraries' | 
             ? () => navigateToLibrary(item as JellyfinView)
             : () => navigateToItem(item as JellyfinItem);
 
-        const card = createMediaCard(item, isSynced, onClick);
+        const card = MediaCard.create(item, mode, isSynced, onClick);
         grid.appendChild(card);
     });
 
@@ -302,15 +238,13 @@ function renderError(error: Error) {
         <div class="error-message">
             <sl-icon name="exclamation-triangle" style="font-size: 2rem;"></sl-icon>
             <p>Error: ${error.message}</p>
-            <sl-button onclick="initLibraryView()">Retry</sl-button>
+            <sl-button id="retry-library-btn">Retry</sl-button>
         </div>
     `;
-}
 
-function escapeHtml(text: string): string {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    container.querySelector('#retry-library-btn')?.addEventListener('click', () => {
+        initLibraryView();
+    });
 }
 
 // Global scope init for module
