@@ -111,6 +111,7 @@ async fn handler(
         "jellyfin_get_item_details" => {
             handle_jellyfin_get_item_details(&state, payload.params).await
         }
+        "jellyfin_get_item_counts" => handle_jellyfin_get_item_counts(&state, payload.params).await,
         "sync_get_device_status_map" => handle_sync_get_device_status_map(&state).await,
         _ => Err(JsonRpcError {
             code: ERR_METHOD_NOT_FOUND,
@@ -455,6 +456,60 @@ async fn handle_jellyfin_get_item_details(
     }
 }
 
+async fn handle_jellyfin_get_item_counts(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Invalid params".to_string(),
+        data: None,
+    })?;
+
+    let ids = params["itemIds"].as_array().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing or invalid itemIds list".to_string(),
+        data: None,
+    })?;
+
+    let (url, token, user_id) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
+        code: ERR_STORAGE_ERROR,
+        message: format!("Failed to get credentials: {}", e),
+        data: None,
+    })?;
+
+    let user_id = user_id.unwrap_or_else(|| "Me".to_string());
+    let futures = ids.iter().filter_map(|id_val| {
+        id_val.as_str().map(|id| {
+            let client = &state.jellyfin_client;
+            let url = &url;
+            let token = &token;
+            let user_id = &user_id;
+            async move {
+                match client.get_item_details(url, token, user_id, id).await {
+                    Ok(item) => Some(serde_json::json!({
+                        "id": item.id,
+                        "recursiveItemCount": item.recursive_item_count.unwrap_or(0),
+                        "cumulativeRunTimeTicks": item.cumulative_run_time_ticks.unwrap_or(0),
+                    })),
+                    Err(e) => {
+                        println!("Warning: Failed to fetch metadata for item {}: {}", id, e);
+                        None
+                    }
+                }
+            }
+        })
+    });
+
+    let results: Vec<Value> = futures::future::join_all(futures)
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+
+    Ok(serde_json::to_value(results).unwrap())
+}
+
 async fn handle_sync_get_device_status_map(state: &AppState) -> Result<Value, JsonRpcError> {
     let device = state.device_manager.get_current_device().await;
 
@@ -584,5 +639,57 @@ mod tests {
         // Verify it was persisted
         let mapping = db.get_device_mapping("test-device").unwrap().unwrap();
         assert_eq!(mapping.jellyfin_user_id, Some("user-123".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_rpc_get_item_counts_basic() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        let state = Arc::new(AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db: db.clone(),
+            device_manager,
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+        });
+
+        // We can't easily mock the network call inside the RPC handler without a mock server or traits,
+        // but we can test the parameter parsing and error handling for now.
+        // If we want to test success, we'd need to mock CredentialManager or use a real mockito server.
+
+        // Test missing params
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "jellyfin_get_item_counts".to_string(),
+            params: None,
+            id: json!(1),
+        };
+        let response = handler(axum::extract::State(state.clone()), Json(request)).await;
+        assert!(response.0.error.is_some());
+        assert_eq!(response.0.error.as_ref().unwrap().code, -32602);
+
+        // Test invalid params (missing itemIds)
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "jellyfin_get_item_counts".to_string(),
+            params: Some(json!({})),
+            id: json!(1),
+        };
+        let response = handler(axum::extract::State(state.clone()), Json(request)).await;
+        assert!(response.0.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_jellyfin_item_serialization_metadata() {
+        // Verify that our JellyfinItem struct correctly handles the metadata we care about
+        let json = json!({
+            "Id": "item1",
+            "Name": "Item 1",
+            "Type": "MusicAlbum",
+            "RecursiveItemCount": 10,
+            "CumulativeRunTimeTicks": 1000000
+        });
+        let item: crate::api::JellyfinItem = serde_json::from_value(json).unwrap();
+        assert_eq!(item.recursive_item_count, Some(10));
+        assert_eq!(item.cumulative_run_time_ticks, Some(1000000));
     }
 }

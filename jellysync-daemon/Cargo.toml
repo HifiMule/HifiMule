@@ -26,6 +26,7 @@ axum.workspace = true
 tower-http.workspace = true
 http.workspace = true
 keyring = "2.3"
+futures = "0.3"
 windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]

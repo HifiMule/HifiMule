@@ -32,3 +32,10 @@ codegen-units = 1
 panic = "abort"
 strip = true
 opt-level = "z"
+
+[profile.no-opt]
+inherits = "dev"
+opt-level = 0
+debug = true
+debug-assertions = true
+overflow-checks = true

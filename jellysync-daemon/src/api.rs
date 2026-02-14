@@ -10,10 +10,11 @@ pub struct JellyfinClient {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "PascalCase")]
 pub struct SystemInfo {
     pub server_name: String,
     pub version: String,
+    pub id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -36,6 +37,10 @@ pub struct JellyfinItem {
     pub album_artist: Option<String>,
     #[serde(default)]
     pub production_year: Option<u32>,
+    #[serde(default)]
+    pub recursive_item_count: Option<u32>,
+    #[serde(default)]
+    pub cumulative_run_time_ticks: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -473,7 +478,7 @@ mod tests {
             .match_header("X-Emby-Token", token)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"serverName": "TestServer", "version": "10.8.10"}"#)
+            .with_body(r#"{"ServerName": "TestServer", "Version": "10.8.10", "Id": "8d5613157d2547e9b35fd762fe1f253e"}"#)
             .create_async()
             .await;
 
@@ -485,6 +490,7 @@ mod tests {
 
         assert_eq!(info.server_name, "TestServer");
         assert_eq!(info.version, "10.8.10");
+        assert_eq!(info.id, "8d5613157d2547e9b35fd762fe1f253e");
     }
 
     #[tokio::test]
@@ -636,6 +642,20 @@ mod tests {
         assert_eq!(item.name, "Test Album");
         assert_eq!(item.item_type, "MusicAlbum");
         assert_eq!(item.album_artist, Some("Test Artist".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_get_item_metadata_serialization() {
+        let json = r#"{
+            "Id": "item1",
+            "Name": "Item 1",
+            "Type": "MusicAlbum",
+            "RecursiveItemCount": 12,
+            "CumulativeRunTimeTicks": 123456789
+        }"#;
+        let item: JellyfinItem = serde_json::from_str(json).unwrap();
+        assert_eq!(item.recursive_item_count, Some(12));
+        assert_eq!(item.cumulative_run_time_ticks, Some(123456789));
     }
 
     #[tokio::test]
