@@ -5,9 +5,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-pub const MUSIC_ITEM_TYPES: &str = "MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo";
-
 const CONTAINER_TYPES: &[&str] = &["MusicAlbum", "Playlist"];
+#[cfg(test)]
+const MUSIC_ITEM_TYPES: &str = "MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo";
 
 pub struct JellyfinClient {
     client: reqwest::Client,
