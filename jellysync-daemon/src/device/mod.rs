@@ -226,6 +226,20 @@ pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
     }
 }
 
+/// Checks if a path is an actual mount point by comparing its filesystem
+/// device ID with its parent's. A mounted filesystem will have a different
+/// device ID than the directory it's mounted on.
+#[cfg(unix)]
+fn is_mount_point(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    if let (Some(parent), Ok(path_meta)) = (path.parent(), std::fs::metadata(path)) {
+        if let Ok(parent_meta) = std::fs::metadata(parent) {
+            return parent_meta.dev() != path_meta.dev();
+        }
+    }
+    false
+}
+
 #[cfg(target_os = "windows")]
 fn get_mounts() -> Vec<PathBuf> {
     use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
@@ -245,7 +259,10 @@ fn get_mounts() -> Vec<PathBuf> {
     let mut mounts = Vec::new();
     if let Ok(entries) = std::fs::read_dir("/Volumes") {
         for entry in entries.flatten() {
-            mounts.push(entry.path());
+            let path = entry.path();
+            if is_mount_point(&path) {
+                mounts.push(path);
+            }
         }
     }
     mounts
@@ -261,7 +278,10 @@ fn get_mounts() -> Vec<PathBuf> {
                 if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                     if let Ok(sub_entries) = std::fs::read_dir(entry.path()) {
                         for sub_entry in sub_entries.flatten() {
-                            mounts.push(sub_entry.path());
+                            let path = sub_entry.path();
+                            if is_mount_point(&path) {
+                                mounts.push(path);
+                            }
                         }
                     }
                 }
