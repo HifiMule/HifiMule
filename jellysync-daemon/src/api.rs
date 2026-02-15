@@ -7,6 +7,8 @@ use std::sync::Mutex;
 
 pub const MUSIC_ITEM_TYPES: &str = "MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo";
 
+const CONTAINER_TYPES: &[&str] = &["MusicAlbum", "Playlist"];
+
 pub struct JellyfinClient {
     client: reqwest::Client,
 }
@@ -32,6 +34,13 @@ pub struct JellyfinView {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "PascalCase")]
+pub struct MediaSource {
+    #[serde(default)]
+    pub size: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "PascalCase")]
 pub struct JellyfinItem {
     pub id: String,
     pub name: String,
@@ -45,6 +54,8 @@ pub struct JellyfinItem {
     pub recursive_item_count: Option<u32>,
     #[serde(default)]
     pub cumulative_run_time_ticks: Option<u64>,
+    #[serde(default)]
+    pub media_sources: Option<Vec<MediaSource>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -239,6 +250,150 @@ impl JellyfinClient {
 
         let item = serde_json::from_str::<JellyfinItem>(&text)?;
         Ok(item)
+    }
+
+    pub async fn get_item_with_media_sources(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        item_id: &str,
+    ) -> Result<JellyfinItem> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let endpoint = format!(
+            "{}/Users/{}/Items/{}?Fields=MediaSources",
+            url.trim_end_matches('/'),
+            user_id,
+            item_id
+        );
+
+        let response = self.client.get(&endpoint).headers(headers).send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+        println!("DEBUG: Jellyfin Response [{}] - Body: {}", status, text);
+
+        if !status.is_success() {
+            return Err(anyhow!("Server returned status: {}", status));
+        }
+
+        let item = serde_json::from_str::<JellyfinItem>(&text)?;
+        Ok(item)
+    }
+
+    pub async fn get_child_items_with_sizes(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        parent_id: &str,
+    ) -> Result<Vec<JellyfinItem>> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let endpoint = format!(
+            "{}/Users/{}/Items?ParentId={}&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true",
+            url.trim_end_matches('/'),
+            user_id,
+            parent_id
+        );
+
+        let response = self.client.get(&endpoint).headers(headers).send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+        println!("DEBUG: Jellyfin Response [{}] - Body: {}", status, text);
+
+        if !status.is_success() {
+            return Err(anyhow!("Server returned status: {}", status));
+        }
+
+        let items_response = serde_json::from_str::<JellyfinItemsResponse>(&text)?;
+        Ok(items_response.items)
+    }
+
+    /// Get total size in bytes for each item. For containers (Albums, Playlists),
+    /// recursively fetches child items and sums their MediaSources sizes.
+    pub async fn get_item_sizes(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        ids: Vec<String>,
+    ) -> Vec<(String, u64)> {
+        let futures = ids.into_iter().map(|id| {
+            let url = url.to_string();
+            let token = token.to_string();
+            let user_id = user_id.to_string();
+            async move {
+                let size = self.get_single_item_size(&url, &token, &user_id, &id).await;
+                match size {
+                    Ok(bytes) => Some((id, bytes)),
+                    Err(e) => {
+                        println!("Warning: Failed to fetch size for item {}: {}", id, e);
+                        None
+                    }
+                }
+            }
+        });
+
+        futures::future::join_all(futures)
+            .await
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
+    async fn get_single_item_size(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        item_id: &str,
+    ) -> Result<u64> {
+        let item = self
+            .get_item_with_media_sources(url, token, user_id, item_id)
+            .await?;
+
+        if CONTAINER_TYPES.contains(&item.item_type.as_str()) {
+            // Container item: fetch children and sum their sizes
+            let children = self
+                .get_child_items_with_sizes(url, token, user_id, item_id)
+                .await?;
+            let total: u64 = children
+                .iter()
+                .filter_map(|child| {
+                    child
+                        .media_sources
+                        .as_ref()
+                        .and_then(|sources| sources.first())
+                        .and_then(|source| source.size)
+                        .map(|s| s as u64)
+                })
+                .sum();
+            Ok(total)
+        } else {
+            // Individual item: read MediaSources[0].Size
+            let size = item
+                .media_sources
+                .as_ref()
+                .and_then(|sources| sources.first())
+                .and_then(|source| source.size)
+                .unwrap_or(0) as u64;
+            Ok(size)
+        }
     }
 
     pub async fn get_image(
@@ -705,5 +860,122 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("401"));
+    }
+
+    #[test]
+    fn test_media_source_deserialization() {
+        let json = r#"{
+            "Id": "track1",
+            "Name": "Track 1",
+            "Type": "Audio",
+            "MediaSources": [{"Size": 5242880}]
+        }"#;
+        let item: JellyfinItem = serde_json::from_str(json).unwrap();
+        assert!(item.media_sources.is_some());
+        let sources = item.media_sources.unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].size, Some(5242880));
+    }
+
+    #[test]
+    fn test_media_source_missing() {
+        let json = r#"{
+            "Id": "track1",
+            "Name": "Track 1",
+            "Type": "Audio"
+        }"#;
+        let item: JellyfinItem = serde_json::from_str(json).unwrap();
+        assert!(item.media_sources.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_item_sizes_individual_track() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let token = "test-token-1234567890";
+
+        // Mock: fetch individual Audio item with MediaSources
+        let _mock = server
+            .mock("GET", "/Users/user1/Items/track1?Fields=MediaSources")
+            .match_header("X-Emby-Token", token)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Id": "track1", "Name": "Track 1", "Type": "Audio", "MediaSources": [{"Size": 5242880}]}"#)
+            .create_async()
+            .await;
+
+        let client = JellyfinClient::new();
+        let results = client
+            .get_item_sizes(&url, token, "user1", vec!["track1".to_string()])
+            .await;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "track1");
+        assert_eq!(results[0].1, 5242880);
+    }
+
+    #[tokio::test]
+    async fn test_get_item_sizes_album_container() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let token = "test-token-1234567890";
+
+        // Mock: fetch album item (container type)
+        let _mock_album = server
+            .mock("GET", "/Users/user1/Items/album1?Fields=MediaSources")
+            .match_header("X-Emby-Token", token)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Id": "album1", "Name": "Test Album", "Type": "MusicAlbum"}"#)
+            .create_async()
+            .await;
+
+        // Mock: fetch child items of album
+        let _mock_children = server
+            .mock("GET", "/Users/user1/Items?ParentId=album1&IncludeItemTypes=Audio&Fields=MediaSources&Recursive=true")
+            .match_header("X-Emby-Token", token)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Items": [
+                {"Id": "t1", "Name": "Track 1", "Type": "Audio", "MediaSources": [{"Size": 3000000}]},
+                {"Id": "t2", "Name": "Track 2", "Type": "Audio", "MediaSources": [{"Size": 4000000}]}
+            ], "TotalRecordCount": 2, "StartIndex": 0}"#)
+            .create_async()
+            .await;
+
+        let client = JellyfinClient::new();
+        let results = client
+            .get_item_sizes(&url, token, "user1", vec!["album1".to_string()])
+            .await;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "album1");
+        assert_eq!(results[0].1, 7000000); // 3MB + 4MB
+    }
+
+    #[tokio::test]
+    async fn test_get_item_sizes_no_media_sources() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let token = "test-token-1234567890";
+
+        // Mock: item with no MediaSources
+        let _mock = server
+            .mock("GET", "/Users/user1/Items/track1?Fields=MediaSources")
+            .match_header("X-Emby-Token", token)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Id": "track1", "Name": "Track 1", "Type": "Audio"}"#)
+            .create_async()
+            .await;
+
+        let client = JellyfinClient::new();
+        let results = client
+            .get_item_sizes(&url, token, "user1", vec!["track1".to_string()])
+            .await;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "track1");
+        assert_eq!(results[0].1, 0); // No MediaSources means 0 bytes
     }
 }

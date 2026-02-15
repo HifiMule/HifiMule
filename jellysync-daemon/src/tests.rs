@@ -73,7 +73,7 @@ async fn test_device_recognition_integration() {
     };
 
     let state = manager
-        .handle_device_detected(manifest)
+        .handle_device_detected(std::path::PathBuf::from("/tmp/test-device"), manifest)
         .await
         .expect("Failed to handle detection");
 
@@ -85,8 +85,18 @@ async fn test_device_recognition_integration() {
         panic!("Expected DeviceRecognized state, got {:?}", state);
     }
 
-    // 6. Simulate removal
+    // 6. Verify path is stored
+    let path = manager.get_current_device_path().await;
+    assert_eq!(path, Some(std::path::PathBuf::from("/tmp/test-device")));
+
+    // 7. Verify storage info returns Some (on a real path, it should return info)
+    // Note: /tmp/test-device probably doesn't exist, so get_device_storage may return None
+    // This is expected behavior per T2.3
+
+    // 8. Simulate removal
     manager.handle_device_removed().await;
     let device = manager.get_current_device().await;
     assert!(device.is_none());
+    let path = manager.get_current_device_path().await;
+    assert!(path.is_none());
 }

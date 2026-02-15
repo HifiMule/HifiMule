@@ -7,6 +7,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -55,6 +56,7 @@ pub struct AppState {
     pub db: Arc<crate::db::Database>,
     pub device_manager: Arc<crate::device::DeviceManager>,
     pub last_connection_check: Arc<tokio::sync::Mutex<Option<(std::time::Instant, bool)>>>,
+    pub size_cache: Arc<tokio::sync::RwLock<HashMap<String, u64>>>,
 }
 
 pub async fn run_server(
@@ -67,6 +69,7 @@ pub async fn run_server(
         db,
         device_manager,
         last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+        size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
     });
 
     let app = Router::new()
@@ -112,6 +115,8 @@ async fn handler(
             handle_jellyfin_get_item_details(&state, payload.params).await
         }
         "jellyfin_get_item_counts" => handle_jellyfin_get_item_counts(&state, payload.params).await,
+        "jellyfin_get_item_sizes" => handle_jellyfin_get_item_sizes(&state, payload.params).await,
+        "device_get_storage_info" => handle_device_get_storage_info(&state).await,
         "sync_get_device_status_map" => handle_sync_get_device_status_map(&state).await,
         _ => Err(JsonRpcError {
             code: ERR_METHOD_NOT_FOUND,
@@ -510,6 +515,77 @@ async fn handle_jellyfin_get_item_counts(
     Ok(serde_json::to_value(results).unwrap())
 }
 
+async fn handle_jellyfin_get_item_sizes(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Invalid params".to_string(),
+        data: None,
+    })?;
+
+    let ids = params["itemIds"].as_array().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing or invalid itemIds list".to_string(),
+        data: None,
+    })?;
+
+    let (url, token, user_id) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
+        code: ERR_STORAGE_ERROR,
+        message: format!("Failed to get credentials: {}", e),
+        data: None,
+    })?;
+
+    let user_id = user_id.unwrap_or_else(|| "Me".to_string());
+
+    // Check cache for already-known sizes, collect uncached IDs
+    let cache = state.size_cache.read().await;
+    let mut results: Vec<Value> = Vec::new();
+    let mut uncached_ids: Vec<String> = Vec::new();
+
+    for id_val in ids {
+        if let Some(id) = id_val.as_str() {
+            if let Some(&cached_size) = cache.get(id) {
+                results.push(serde_json::json!({
+                    "id": id,
+                    "totalSizeBytes": cached_size,
+                }));
+            } else {
+                uncached_ids.push(id.to_string());
+            }
+        }
+    }
+    drop(cache);
+
+    // Fetch uncached sizes
+    if !uncached_ids.is_empty() {
+        let fetched = state
+            .jellyfin_client
+            .get_item_sizes(&url, &token, &user_id, uncached_ids)
+            .await;
+
+        // Update cache and results
+        let mut cache = state.size_cache.write().await;
+        for (id, size) in fetched {
+            cache.insert(id.clone(), size);
+            results.push(serde_json::json!({
+                "id": id,
+                "totalSizeBytes": size,
+            }));
+        }
+    }
+
+    Ok(serde_json::to_value(results).unwrap())
+}
+
+async fn handle_device_get_storage_info(state: &AppState) -> Result<Value, JsonRpcError> {
+    match state.device_manager.get_device_storage().await {
+        Some(info) => Ok(serde_json::to_value(info).unwrap()),
+        None => Ok(Value::Null),
+    }
+}
+
 async fn handle_sync_get_device_status_map(state: &AppState) -> Result<Value, JsonRpcError> {
     let device = state.device_manager.get_current_device().await;
 
@@ -572,6 +648,7 @@ mod tests {
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         });
 
         let params = json!({
@@ -594,6 +671,7 @@ mod tests {
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         });
 
         let request = JsonRpcRequest {
@@ -617,6 +695,7 @@ mod tests {
             db: db.clone(),
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         });
 
         let params = json!({
@@ -650,6 +729,7 @@ mod tests {
             db: db.clone(),
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         });
 
         // We can't easily mock the network call inside the RPC handler without a mock server or traits,
@@ -676,6 +756,41 @@ mod tests {
         };
         let response = handler(axum::extract::State(state.clone()), Json(request)).await;
         assert!(response.0.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_rpc_get_item_sizes_missing_params() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        let state = Arc::new(AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db: db.clone(),
+            device_manager,
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        });
+
+        // Test missing params
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "jellyfin_get_item_sizes".to_string(),
+            params: None,
+            id: json!(1),
+        };
+        let response = handler(axum::extract::State(state.clone()), Json(request)).await;
+        assert!(response.0.error.is_some());
+        assert_eq!(response.0.error.as_ref().unwrap().code, -32602);
+
+        // Test invalid params (missing itemIds)
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "jellyfin_get_item_sizes".to_string(),
+            params: Some(json!({})),
+            id: json!(1),
+        };
+        let response = handler(axum::extract::State(state.clone()), Json(request)).await;
+        assert!(response.0.error.is_some());
+        assert_eq!(response.0.error.as_ref().unwrap().code, -32602);
     }
 
     #[tokio::test]

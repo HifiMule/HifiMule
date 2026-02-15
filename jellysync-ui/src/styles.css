@@ -120,8 +120,79 @@ body {
 }
 
 .basket-summary {
-  margin-bottom: 1rem;
+  margin-bottom: 0.75rem;
   font-size: 0.9rem;
+}
+
+/* Capacity Bar */
+.capacity-section {
+  margin-bottom: 1rem;
+}
+
+.capacity-bar-container {
+  margin-bottom: 0.5rem;
+}
+
+.capacity-bar {
+  display: flex;
+  height: 8px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.capacity-segment {
+  transition: width 0.3s ease;
+}
+
+.capacity-used {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.capacity-projected {
+  /* color set inline via zone */
+}
+
+.capacity-free {
+  background: transparent;
+}
+
+.capacity-grey {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.capacity-bar-disabled {
+  opacity: 0.4;
+}
+
+.capacity-status {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  opacity: 0.85;
+}
+
+.capacity-zone-amber .capacity-status {
+  color: #EBB334;
+}
+
+.capacity-zone-red .capacity-status {
+  color: var(--sl-color-danger-500);
+}
+
+.capacity-selection-total {
+  font-size: 0.95rem;
+  margin-bottom: 0.5rem;
+}
+
+.capacity-no-device-label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  opacity: 0.5;
+  margin-top: 0.25rem;
 }
 
 h1,

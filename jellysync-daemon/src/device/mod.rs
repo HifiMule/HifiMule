@@ -37,6 +37,7 @@ impl DeviceProber {
 pub struct DeviceManager {
     db: std::sync::Arc<crate::db::Database>,
     current_device: std::sync::Arc<tokio::sync::RwLock<Option<DeviceManifest>>>,
+    current_device_path: std::sync::Arc<tokio::sync::RwLock<Option<PathBuf>>>,
 }
 
 impl DeviceManager {
@@ -44,15 +45,23 @@ impl DeviceManager {
         Self {
             db,
             current_device: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            current_device_path: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
     pub async fn handle_device_detected(
         &self,
+        path: PathBuf,
         manifest: DeviceManifest,
     ) -> Result<crate::DaemonState> {
-        let mut current = self.current_device.write().await;
-        *current = Some(manifest.clone());
+        {
+            let mut current = self.current_device.write().await;
+            *current = Some(manifest.clone());
+        }
+        {
+            let mut current_path = self.current_device_path.write().await;
+            *current_path = Some(path);
+        }
 
         let name = manifest
             .name
@@ -77,10 +86,107 @@ impl DeviceManager {
     pub async fn handle_device_removed(&self) {
         let mut current = self.current_device.write().await;
         *current = None;
+        let mut current_path = self.current_device_path.write().await;
+        *current_path = None;
     }
 
     pub async fn get_current_device(&self) -> Option<DeviceManifest> {
         self.current_device.read().await.clone()
+    }
+
+    pub async fn get_current_device_path(&self) -> Option<PathBuf> {
+        self.current_device_path.read().await.clone()
+    }
+
+    pub async fn get_device_storage(&self) -> Option<StorageInfo> {
+        let path = self.get_current_device_path().await?;
+        get_storage_info(&path)
+    }
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageInfo {
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub used_bytes: u64,
+    pub device_path: String,
+}
+
+#[cfg(target_os = "windows")]
+fn get_storage_info(path: &Path) -> Option<StorageInfo> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let mut free_bytes_available: u64 = 0;
+    let mut total_bytes: u64 = 0;
+    let mut total_free_bytes: u64 = 0;
+
+    let success = unsafe {
+        GetDiskFreeSpaceExW(
+            wide_path.as_ptr(),
+            &mut free_bytes_available as *mut u64,
+            &mut total_bytes as *mut u64,
+            &mut total_free_bytes as *mut u64,
+        )
+    };
+
+    if success != 0 {
+        Some(StorageInfo {
+            total_bytes,
+            free_bytes: total_free_bytes,
+            used_bytes: total_bytes.saturating_sub(total_free_bytes),
+            device_path: path.to_string_lossy().to_string(),
+        })
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn get_storage_info(path: &Path) -> Option<StorageInfo> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let result = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+
+    if result == 0 {
+        let total = stat.f_blocks as u64 * stat.f_frsize as u64;
+        let free = stat.f_bfree as u64 * stat.f_frsize as u64;
+        Some(StorageInfo {
+            total_bytes: total,
+            free_bytes: free,
+            used_bytes: total.saturating_sub(free),
+            device_path: path.to_string_lossy().to_string(),
+        })
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn get_storage_info(path: &Path) -> Option<StorageInfo> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let result = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+
+    if result == 0 {
+        let total = stat.f_blocks as u64 * stat.f_frsize as u64;
+        let free = stat.f_bfree as u64 * stat.f_frsize as u64;
+        Some(StorageInfo {
+            total_bytes: total,
+            free_bytes: free,
+            used_bytes: total.saturating_sub(free),
+            device_path: path.to_string_lossy().to_string(),
+        })
+    } else {
+        None
     }
 }
 

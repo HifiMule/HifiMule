@@ -82,11 +82,15 @@ export class MediaCard {
                 if (basketStore.has(item.Id)) {
                     basketStore.remove(item.Id);
                 } else {
-                    // Fetch metadata (track count) from daemon if not cached
+                    // Fetch metadata (track count + file size) from daemon
                     toggleBtn.loading = true;
                     try {
-                        const metadata = await rpcCall('jellyfin_get_item_counts', { itemIds: [item.Id] });
+                        const [metadata, sizeData] = await Promise.all([
+                            rpcCall('jellyfin_get_item_counts', { itemIds: [item.Id] }),
+                            rpcCall('jellyfin_get_item_sizes', { itemIds: [item.Id] }),
+                        ]);
                         const info = metadata[0] || { recursiveItemCount: 0, cumulativeRunTimeTicks: 0 };
+                        const sizeInfo = sizeData[0] || { totalSizeBytes: 0 };
 
                         basketStore.add({
                             id: item.Id,
@@ -94,7 +98,8 @@ export class MediaCard {
                             type: item.Type,
                             artist: (item as JellyfinItem).AlbumArtist,
                             childCount: info.recursiveItemCount,
-                            sizeTicks: info.cumulativeRunTimeTicks
+                            sizeTicks: info.cumulativeRunTimeTicks,
+                            sizeBytes: sizeInfo.totalSizeBytes,
                         });
                     } catch (err) {
                         console.error("Failed to fetch item metadata:", err);

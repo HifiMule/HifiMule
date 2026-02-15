@@ -99,7 +99,7 @@ fn main() -> Result<()> {
                     match event {
                         device::DeviceEvent::Detected { path, manifest } => {
                             println!("Device detected at {:?}: {:?}", path, manifest);
-                            match device_manager.handle_device_detected(manifest).await {
+                            match device_manager.handle_device_detected(path, manifest).await {
                                 Ok(new_state) => {
                                     let _ = state_tx_clone.send(new_state);
                                 }

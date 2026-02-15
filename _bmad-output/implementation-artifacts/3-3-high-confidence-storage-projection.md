@@ -1,6 +1,6 @@
 # Story 3.3: High-Confidence Storage Projection
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -20,28 +20,28 @@ so that **I don't trigger a "Disk Full" error mid-sync.**
 
 ## Tasks / Subtasks
 
-- [ ] **T1: Daemon - Jellyfin File Size API** (AC: #1, #4)
-    - [ ] T1.1: Add a new RPC method `jellyfin_get_item_sizes(itemIds: Vec<String>)` that fetches each item's `MediaSources` and returns `{id, totalSizeBytes}` for each item.
-    - [ ] T1.2: For container items (Albums, Playlists), recursively fetch child items' `MediaSources` and sum their `Size` fields to get the total byte count.
-    - [ ] T1.3: Add caching for size lookups to avoid repeated API calls for the same items (in-memory HashMap keyed by item ID, cleared on server reconnect).
-- [ ] **T2: Daemon - Device Free Space RPC** (AC: #3)
-    - [ ] T2.1: Add a new RPC method `device_get_storage_info()` that returns `{totalBytes, freeBytes, usedBytes, devicePath}` for the currently connected device.
-    - [ ] T2.2: Use `std::fs::metadata` / platform-specific calls or the `fs2` crate's `available_space()` / `total_space()` to query disk space on the device mount path.
-    - [ ] T2.3: Return an error/null if no device is currently connected.
-- [ ] **T3: UI - BasketItem Size Enhancement** (AC: #1, #4)
-    - [ ] T3.1: Add `sizeBytes: number` field to the `BasketItem` interface in `basket.ts`.
-    - [ ] T3.2: When adding an item to the basket, call `jellyfin_get_item_sizes` (instead of or alongside `jellyfin_get_item_counts`) and populate `sizeBytes`.
-    - [ ] T3.3: Add a `getTotalSizeBytes(): number` method to `BasketStore`.
-- [ ] **T4: UI - Capacity Bar Component** (AC: #2, #3, #5)
-    - [ ] T4.1: Create a `CapacityBar` rendering function (or small component) in `BasketSidebar.ts` that draws a segmented bar: [Used | Projected | Free].
-    - [ ] T4.2: Fetch device storage info via `device_get_storage_info` RPC when basket updates and a device is connected.
-    - [ ] T4.3: Implement 3-zone color logic: **Green** (comfortable fit, >10% free remaining), **Amber** `#EBB334` (tight fit, <10% free remaining — show "Tight fit — X MB remaining"), **Red** (over limit — show "Selection exceeds available space by X MB" and disable Sync button). Add a subtle checkmark icon in Green state.
-    - [ ] T4.4: Display human-readable sizes with scale-appropriate precision: "342 MB", "1.2 GB", "4.7 GB" (NOT raw bytes or excessive decimals). Use `GB` above 1024 MB, `MB` otherwise.
-    - [ ] T4.5: No-device state: Show total selection size prominently (e.g., "Your selection: 1.2 GB") with a styled greyed-out capacity bar placeholder and "No device connected" indicator. Must feel intentional, not broken.
-- [ ] **T5: UI - BasketSidebar Integration** (AC: #1, #2)
-    - [ ] T5.1: Update `BasketSidebar.ts` footer to show total size (e.g., "24 tracks | 342 MB") instead of just track count.
-    - [ ] T5.2: Integrate CapacityBar above the "Start Sync" button.
-    - [ ] T5.3: Disable "Start Sync" button with clear red messaging when projected size exceeds available space. Show exactly how much to remove (e.g., "Remove 128 MB to fit").
+- [x] **T1: Daemon - Jellyfin File Size API** (AC: #1, #4)
+    - [x] T1.1: Add a new RPC method `jellyfin_get_item_sizes(itemIds: Vec<String>)` that fetches each item's `MediaSources` and returns `{id, totalSizeBytes}` for each item.
+    - [x] T1.2: For container items (Albums, Playlists), recursively fetch child items' `MediaSources` and sum their `Size` fields to get the total byte count.
+    - [x] T1.3: Add caching for size lookups to avoid repeated API calls for the same items (in-memory HashMap keyed by item ID, cleared on server reconnect).
+- [x] **T2: Daemon - Device Free Space RPC** (AC: #3)
+    - [x] T2.1: Add a new RPC method `device_get_storage_info()` that returns `{totalBytes, freeBytes, usedBytes, devicePath}` for the currently connected device.
+    - [x] T2.2: Use `std::fs::metadata` / platform-specific calls or the `fs2` crate's `available_space()` / `total_space()` to query disk space on the device mount path.
+    - [x] T2.3: Return an error/null if no device is currently connected.
+- [x] **T3: UI - BasketItem Size Enhancement** (AC: #1, #4)
+    - [x] T3.1: Add `sizeBytes: number` field to the `BasketItem` interface in `basket.ts`.
+    - [x] T3.2: When adding an item to the basket, call `jellyfin_get_item_sizes` (instead of or alongside `jellyfin_get_item_counts`) and populate `sizeBytes`.
+    - [x] T3.3: Add a `getTotalSizeBytes(): number` method to `BasketStore`.
+- [x] **T4: UI - Capacity Bar Component** (AC: #2, #3, #5)
+    - [x] T4.1: Create a `CapacityBar` rendering function (or small component) in `BasketSidebar.ts` that draws a segmented bar: [Used | Projected | Free].
+    - [x] T4.2: Fetch device storage info via `device_get_storage_info` RPC when basket updates and a device is connected.
+    - [x] T4.3: Implement 3-zone color logic: **Green** (comfortable fit, >10% free remaining), **Amber** `#EBB334` (tight fit, <10% free remaining — show "Tight fit — X MB remaining"), **Red** (over limit — show "Selection exceeds available space by X MB" and disable Sync button). Add a subtle checkmark icon in Green state.
+    - [x] T4.4: Display human-readable sizes with scale-appropriate precision: "342 MB", "1.2 GB", "4.7 GB" (NOT raw bytes or excessive decimals). Use `GB` above 1024 MB, `MB` otherwise.
+    - [x] T4.5: No-device state: Show total selection size prominently (e.g., "Your selection: 1.2 GB") with a styled greyed-out capacity bar placeholder and "No device connected" indicator. Must feel intentional, not broken.
+- [x] **T5: UI - BasketSidebar Integration** (AC: #1, #2)
+    - [x] T5.1: Update `BasketSidebar.ts` footer to show total size (e.g., "24 tracks | 342 MB") instead of just track count.
+    - [x] T5.2: Integrate CapacityBar above the "Start Sync" button.
+    - [x] T5.3: Disable "Start Sync" button with clear red messaging when projected size exceeds available space. Show exactly how much to remove (e.g., "Remove 128 MB to fit").
 
 ## Dev Notes
 
@@ -106,10 +106,33 @@ so that **I don't trigger a "Disk Full" error mid-sync.**
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6
 
 ### Debug Log References
 
 ### Completion Notes List
 
+- T1 complete: Added `jellyfin_get_item_sizes` RPC method with `MediaSource` struct, container-aware recursive size fetching, and in-memory HashMap cache in AppState. 6 new tests added (3 api, 1 deserialization, 1 missing-field, 1 rpc param validation).
+- T2 complete: Added `device_get_storage_info` RPC method. DeviceManager now stores device path alongside manifest. Platform-specific `get_storage_info` using Windows `GetDiskFreeSpaceExW` and Unix `statvfs`. Returns null when no device connected. Updated existing tests for new `handle_device_detected` signature.
+- T3 complete: Added `sizeBytes` field to BasketItem interface, `getTotalSizeBytes()` method to BasketStore, and parallel `jellyfin_get_item_sizes` RPC call in MediaCard when adding items to basket.
+- T4 complete: Created `renderCapacityBar` function with 3-zone color logic (green/amber/red), `formatSize` helper for human-readable sizes, `getCapacityZone` calculation, no-device state with greyed-out placeholder and "No device connected" indicator, and check icon in green state. CSS styles added for capacity bar segments and zones.
+- T5 complete: Updated BasketSidebar footer to show "X tracks | Y MB" format, integrated capacity bar above sync button, disabled sync button with red "Remove X MB to fit" messaging when over limit. Added `refreshAndRender` to fetch device storage info on basket updates.
+
 ### File List
+
+- jellysync-daemon/src/api.rs (modified: added MediaSource struct, media_sources field to JellyfinItem, get_item_with_media_sources, get_child_items_with_sizes, get_item_sizes, get_single_item_size methods, 5 new tests)
+- jellysync-daemon/src/rpc.rs (modified: added size_cache to AppState, jellyfin_get_item_sizes and device_get_storage_info RPC handlers, 1 new test)
+- jellysync-daemon/src/device/mod.rs (modified: added current_device_path to DeviceManager, StorageInfo struct, get_storage_info platform functions, get_device_storage method, updated handle_device_detected to accept path)
+- jellysync-daemon/src/main.rs (modified: pass path to handle_device_detected)
+- jellysync-daemon/src/tests.rs (modified: updated handle_device_detected call with path, added path tracking assertions)
+- jellysync-daemon/Cargo.toml (modified: added libc dependency for unix targets)
+- jellysync-ui/src/state/basket.ts (modified: added sizeBytes to BasketItem, added getTotalSizeBytes method)
+- jellysync-ui/src/components/MediaCard.ts (modified: parallel jellyfin_get_item_sizes call, populate sizeBytes)
+- jellysync-ui/src/components/BasketSidebar.ts (modified: added capacity bar rendering, device storage fetching, 3-zone color logic, no-device state, size display in footer, over-limit sync disable)
+
+### Code Review Fixes (AI)
+
+- **Fixed High Issue**: Updated `jellysync-daemon/src/api.rs` to include `MusicVideo` in `IncludeItemTypes` when calculating container sizes.
+- **Fixed Medium Issue**: Updated `jellysync-ui/src/state/basket.ts` to hydrate missing `sizeBytes` for existing basket items on startup.
+- **Status Update**: Story marked as DONE.
+

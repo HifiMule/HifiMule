@@ -2227,6 +2227,7 @@ dependencies = [
  "http",
  "image",
  "keyring",
+ "libc",
  "mockito",
  "reqwest",
  "rusqlite",

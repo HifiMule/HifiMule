@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "Bash(rtk git log:*)",
-      "Bash(rtk git diff:*)"
+      "Bash(rtk git diff:*)",
+      "Bash(rtk cargo test -p jellysync-daemon)",
+      "Bash(rtk cargo test -p jellysync-daemon -- --list)",
+      "Bash(cargo test:*)",
+      "Bash(rtk npx tsc:*)",
+      "Bash(node_modules/.bin/tsc:*)"
     ]
   }
 }

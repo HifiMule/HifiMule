@@ -57,7 +57,7 @@ development_status:
   epic-3: in-progress
   3-1-immersive-media-browser-jellyfin-integration: done
   3-2-the-live-selection-basket: done
-  3-3-high-confidence-storage-projection: ready-for-dev
+  3-3-high-confidence-storage-projection: done
   3-4-managed-zone-hardware-shielding: backlog
   3-5-music-only-library-filtering: review
   epic-3-retrospective: optional

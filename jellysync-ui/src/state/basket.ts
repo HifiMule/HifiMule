@@ -1,3 +1,5 @@
+import { rpcCall } from '../rpc';
+
 // Basket State Management
 // Manages the collection of items selected for synchronization.
 
@@ -7,7 +9,8 @@ export interface BasketItem {
     type: string;
     artist?: string;
     childCount: number;
-    sizeTicks: number; // cumulativeRunTimeTicks used for size estimation
+    sizeTicks: number; // cumulativeRunTimeTicks used for duration display
+    sizeBytes: number; // actual file size from MediaSources
 }
 
 class BasketStore extends EventTarget {
@@ -16,6 +19,40 @@ class BasketStore extends EventTarget {
     constructor() {
         super();
         this.loadFromLocalStorage();
+        this.hydrate();
+    }
+
+    private async hydrate() {
+        const missingSizeIds: string[] = [];
+        for (const item of this.items.values()) {
+            if (item.sizeBytes === undefined) {
+                missingSizeIds.push(item.id);
+            }
+        }
+
+        if (missingSizeIds.length > 0) {
+            console.log(`Hydrating sizes for ${missingSizeIds.length} items...`);
+            try {
+                const sizes = await rpcCall('jellyfin_get_item_sizes', { itemIds: missingSizeIds });
+
+                let updated = false;
+                for (const sizeInfo of sizes) {
+                    const item = this.items.get(sizeInfo.id);
+                    if (item) {
+                        item.sizeBytes = sizeInfo.totalSizeBytes;
+                        updated = true;
+                    }
+                }
+
+                if (updated) {
+                    this.saveToLocalStorage();
+                    this.notify();
+                    console.log('Hydration complete.');
+                }
+            } catch (e) {
+                console.error("Failed to hydrate basket item sizes:", e);
+            }
+        }
     }
 
     private loadFromLocalStorage() {
@@ -68,6 +105,14 @@ class BasketStore extends EventTarget {
         this.items.clear();
         this.saveToLocalStorage();
         this.notify();
+    }
+
+    public getTotalSizeBytes(): number {
+        let total = 0;
+        for (const item of this.items.values()) {
+            total += item.sizeBytes || 0;
+        }
+        return total;
     }
 
     private notify() {

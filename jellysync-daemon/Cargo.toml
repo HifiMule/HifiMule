@@ -29,6 +29,9 @@ keyring = "2.3"
 futures = "0.3"
 windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 mockito = "1.5"
 tempfile = "3"
