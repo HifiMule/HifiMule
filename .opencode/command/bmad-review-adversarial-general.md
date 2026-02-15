@@ -2,8 +2,11 @@
 description: 'Cynically review content and produce findings'
 ---
 
-# Adversarial Review (General)
+Execute the BMAD 'review-adversarial-general' task.
 
-Read the entire task file at: _bmad/core/tasks/review-adversarial-general.xml
+TASK INSTRUCTIONS:
+1. LOAD the task file from {project-root}/_bmad/core/tasks/review-adversarial-general.xml
+2. READ its entire contents
+3. FOLLOW every instruction precisely as specified
 
-Follow all instructions in the task file exactly as written.
+TASK FILE: {project-root}/_bmad/core/tasks/review-adversarial-general.xml

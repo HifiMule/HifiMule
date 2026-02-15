@@ -2,8 +2,11 @@
 description: 'Splits large markdown documents into smaller, organized files based on level 2 (default) sections'
 ---
 
-# Shard Document
+Execute the BMAD 'shard-doc' task.
 
-Read the entire task file at: _bmad/core/tasks/shard-doc.xml
+TASK INSTRUCTIONS:
+1. LOAD the task file from {project-root}/_bmad/core/tasks/shard-doc.xml
+2. READ its entire contents
+3. FOLLOW every instruction precisely as specified
 
-Follow all instructions in the task file exactly as written.
+TASK FILE: {project-root}/_bmad/core/tasks/shard-doc.xml

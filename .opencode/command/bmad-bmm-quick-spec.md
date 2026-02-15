@@ -1,6 +1,15 @@
 ---
-name: 'quick-spec'
 description: 'Conversational spec engineering - ask questions, investigate code, produce implementation-ready tech-spec.'
 ---
 
-IT IS CRITICAL THAT YOU FOLLOW THIS COMMAND: LOAD the FULL @{project-root}/_bmad/bmm/workflows/bmad-quick-flow/quick-spec/workflow.md, READ its entire contents and follow its directions exactly!
+Execute the BMAD 'quick-spec' workflow.
+
+CRITICAL: You must load and follow the workflow definition exactly.
+
+WORKFLOW INSTRUCTIONS:
+1. LOAD the workflow file from {project-root}/_bmad/bmm/workflows/bmad-quick-flow/quick-spec/workflow.md
+2. READ its entire contents
+3. FOLLOW every step precisely as specified
+4. DO NOT skip or modify any steps
+
+WORKFLOW FILE: {project-root}/_bmad/bmm/workflows/bmad-quick-flow/quick-spec/workflow.md
