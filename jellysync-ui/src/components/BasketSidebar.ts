@@ -11,6 +11,21 @@ interface StorageInfo {
     devicePath: string;
 }
 
+interface FolderInfo {
+    name: string;
+    relativePath: string;
+    isManaged: boolean;
+}
+
+interface RootFoldersResponse {
+    deviceName: string;
+    devicePath: string;
+    hasManifest: boolean;
+    folders: FolderInfo[];
+    managedCount: number;
+    unmanagedCount: number;
+}
+
 function formatSize(bytes: number): string {
     if (bytes >= 1024 * 1024 * 1024) {
         return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
@@ -71,7 +86,7 @@ function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: numb
 
     const projectedColor = zone === 'green' ? 'var(--sl-color-success-500)'
         : zone === 'amber' ? '#EBB334'
-        : 'var(--sl-color-danger-500)';
+            : 'var(--sl-color-danger-500)';
 
     return `
         <div class="capacity-section capacity-zone-${zone}">
@@ -95,6 +110,8 @@ export class BasketSidebar {
     private updateListener: () => void;
     private isDestroyed: boolean = false;
     private storageInfo: StorageInfo | null = null;
+    private folderInfo: RootFoldersResponse | null = null;
+    private isFoldersExpanded: boolean = false;
 
     constructor(container: HTMLElement) {
         this.container = container;
@@ -108,18 +125,76 @@ export class BasketSidebar {
     }
 
     private async refreshAndRender() {
-        try {
-            const result = await rpcCall('device_get_storage_info');
-            this.storageInfo = result as StorageInfo | null;
-        } catch {
-            this.storageInfo = null;
-        }
+        const [storageResult, foldersResult] = await Promise.allSettled([
+            rpcCall('device_get_storage_info'),
+            rpcCall('device_list_root_folders')
+        ]);
+        this.storageInfo = storageResult.status === 'fulfilled'
+            ? storageResult.value as StorageInfo | null
+            : null;
+        this.folderInfo = foldersResult.status === 'fulfilled'
+            ? foldersResult.value as RootFoldersResponse | null
+            : null;
         this.render();
     }
 
     public destroy() {
         this.isDestroyed = true;
         basketStore.removeEventListener('update', this.updateListener);
+    }
+
+    private renderDeviceFolders(): string {
+        if (!this.folderInfo) {
+            // No device state (AC #5)
+            return `
+                <div class="device-folders-panel">
+                    <div class="capacity-no-device-label" style="opacity: 0.7;">
+                        <sl-icon name="usb-drive" style="font-size: 0.9rem;"></sl-icon>
+                        Connect a device to view folders
+                    </div>
+                </div>
+            `;
+        }
+
+        const { folders, managedCount, unmanagedCount, hasManifest } = this.folderInfo;
+
+        let content = `
+            <div class="device-folders-panel">
+                <div class="device-folders-header" id="device-folders-toggle">
+                    <h3>Device Folders</h3>
+                    <div style="display: flex; align-items: center; gap: 0.5rem;">
+                        <span class="device-folders-summary">${managedCount} managed | ${unmanagedCount} protected</span>
+                        <sl-icon name="${this.isFoldersExpanded ? 'chevron-up' : 'chevron-down'}" style="font-size: 0.8rem; opacity: 0.5;"></sl-icon>
+                    </div>
+                </div>
+        `;
+
+        if (this.isFoldersExpanded) {
+            content += `
+                <div class="device-folders-list">
+                    ${folders.length === 0 ? '<div style="font-size: 0.8rem; opacity: 0.5; padding: 0.5rem;">No folders found</div>' : ''}
+                    ${folders.map(f => `
+                        <div class="folder-item ${f.isManaged ? 'folder-managed' : 'folder-protected'}">
+                            <sl-icon name="${f.isManaged ? 'unlock' : 'shield-lock'}" class="folder-icon"></sl-icon>
+                            <span class="folder-name" title="${this.escapeHtml(f.name)}">${this.escapeHtml(f.name)}</span>
+                            <span class="folder-status">${f.isManaged ? 'Managed' : 'Protected'}</span>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+
+            if (!hasManifest) {
+                content += `
+                    <div class="device-empty-banner">
+                        <sl-icon name="info-circle"></sl-icon>
+                        <span>No managed sync zone — folders created on first sync.</span>
+                    </div>
+                `;
+            }
+        }
+
+        content += `</div>`;
+        return content;
     }
 
     public render() {
@@ -138,12 +213,18 @@ export class BasketSidebar {
                     <p style="opacity: 0.5;">Your basket is empty</p>
                 </div>
                 <div class="basket-footer">
+                    ${this.renderDeviceFolders()}
                      <sl-button variant="primary" style="width: 100%;" disabled>
                         <sl-icon slot="prefix" name="cloud-download"></sl-icon>
                         Start Sync
                     </sl-button>
                 </div>
             `;
+
+            this.container.querySelector('#device-folders-toggle')?.addEventListener('click', () => {
+                this.isFoldersExpanded = !this.isFoldersExpanded;
+                this.render();
+            });
             return;
         }
 
@@ -172,6 +253,7 @@ export class BasketSidebar {
                     <span>${totalTracks} tracks | ${formatSize(totalSizeBytes)}</span>
                 </div>
                 ${renderCapacityBar(this.storageInfo, totalSizeBytes)}
+                ${this.renderDeviceFolders()}
                 ${isOverLimit ? `
                     <sl-button variant="danger" style="width: 100%;" disabled>
                         <sl-icon slot="prefix" name="exclamation-triangle"></sl-icon>
@@ -199,6 +281,11 @@ export class BasketSidebar {
 
         this.container.querySelector('.clear-basket-btn')?.addEventListener('click', () => {
             basketStore.clear();
+        });
+
+        this.container.querySelector('#device-folders-toggle')?.addEventListener('click', () => {
+            this.isFoldersExpanded = !this.isFoldersExpanded;
+            this.render();
         });
     }
 

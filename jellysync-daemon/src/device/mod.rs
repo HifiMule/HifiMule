@@ -8,6 +8,8 @@ pub struct DeviceManifest {
     pub device_id: String,
     pub name: Option<String>,
     pub version: String,
+    #[serde(default)]
+    pub managed_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +104,128 @@ impl DeviceManager {
         let path = self.get_current_device_path().await?;
         get_storage_info(&path)
     }
+
+    pub async fn list_root_folders(&self) -> Result<Option<DeviceRootFoldersResponse>> {
+        let device_path = match self.get_current_device_path().await {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let manifest = self.get_current_device().await;
+        let has_manifest = manifest.is_some();
+        // If manifest doesn't exist, we treat no folders as managed (empty vec)
+        let managed_paths = manifest
+            .as_ref()
+            .map(|m| m.managed_paths.clone())
+            .unwrap_or_default();
+
+        let mut folders = Vec::new();
+        let mut managed_count = 0;
+        let mut unmanaged_count = 0;
+
+        let mut entries = tokio::fs::read_dir(&device_path).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let file_type = entry.file_type().await?;
+            if !file_type.is_dir() {
+                continue;
+            }
+
+            let name = entry.file_name().to_string_lossy().to_string();
+
+            // Skip hidden folders
+            if name.starts_with('.') {
+                continue;
+            }
+
+            // Skip system folders
+            if is_system_folder(&name) {
+                continue;
+            }
+
+            let is_managed = managed_paths.iter().any(|p| is_path_match(&name, p));
+
+            if is_managed {
+                managed_count += 1;
+            } else {
+                unmanaged_count += 1;
+            }
+
+            folders.push(DeviceFolderInfo {
+                name: name.clone(),
+                relative_path: name,
+                is_managed,
+            });
+        }
+
+        // Sort alphabetically
+        folders.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+        let device_name = manifest
+            .and_then(|m| m.name)
+            .unwrap_or_else(|| {
+                device_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "Unknown Device".to_string())
+            });
+
+        Ok(Some(DeviceRootFoldersResponse {
+            device_name,
+            device_path: device_path.to_string_lossy().to_string(),
+            has_manifest,
+            folders,
+            managed_count,
+            unmanaged_count,
+        }))
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceRootFoldersResponse {
+    pub device_name: String,
+    pub device_path: String,
+    pub has_manifest: bool,
+    pub folders: Vec<DeviceFolderInfo>,
+    pub managed_count: usize,
+    pub unmanaged_count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceFolderInfo {
+    pub name: String,
+    pub relative_path: String,
+    pub is_managed: bool,
+}
+
+fn is_system_folder(name: &str) -> bool {
+    let system_folders = [
+        "System Volume Information",
+        "$RECYCLE.BIN",
+        "RECYCLER",
+        ".Spotlight-V100",
+        ".fseventsd",
+        ".Trashes",
+        "lost+found",
+    ];
+    system_folders.iter().any(|&f| f.eq_ignore_ascii_case(name))
+}
+
+fn is_path_match(name: &str, managed_path: &str) -> bool {
+    // For now, we only support top-level managed paths as specified in the story
+    // (e.g., "Music"). Manifest might have "Music/JellyfinSync", but T2.1 says "enumerate top-level directories".
+    // If a top-level directory is a parent of a managed path, should we mark it as managed?
+    // Story 3.4 AC #3 says "When folders on the device match those paths".
+    // Let's keep it simple: exact match of top-level name.
+    #[cfg(target_os = "windows")]
+    {
+        name.eq_ignore_ascii_case(managed_path)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        name == managed_path
+    }
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -118,7 +242,11 @@ fn get_storage_info(path: &Path) -> Option<StorageInfo> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
-    let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let wide_path: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     let mut free_bytes_available: u64 = 0;
     let mut total_bytes: u64 = 0;
     let mut total_free_bytes: u64 = 0;

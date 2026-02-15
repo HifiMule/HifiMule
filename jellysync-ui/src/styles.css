@@ -149,9 +149,7 @@ body {
   background: rgba(255, 255, 255, 0.25);
 }
 
-.capacity-projected {
-  /* color set inline via zone */
-}
+
 
 .capacity-free {
   background: transparent;
@@ -402,4 +400,111 @@ h2 {
 .login-card h3 {
   margin: 0;
   text-align: center;
+}
+
+/* Device Folders Panel (Story 3.4) */
+.device-folders-panel {
+  margin: 1rem 0;
+  padding: 0.75rem;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--sl-border-radius-medium);
+}
+
+.device-folders-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  padding: 0.25rem 0;
+  user-select: none;
+}
+
+.device-folders-header:hover h3 {
+  color: var(--sl-color-primary-500);
+}
+
+.device-folders-header h3 {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--sl-color-neutral-400);
+  transition: color 0.2s ease;
+}
+
+.device-folders-summary {
+  font-size: 0.75rem;
+  color: var(--sl-color-neutral-500);
+}
+
+.device-folders-list {
+  margin-top: 0.75rem;
+  max-height: 250px;
+  overflow-y: auto;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  padding-top: 0.5rem;
+}
+
+.folder-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: var(--sl-border-radius-small);
+  font-size: 0.85rem;
+  transition: background 0.2s ease;
+}
+
+.folder-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.folder-icon {
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+
+.folder-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-status {
+  font-size: 0.7rem;
+  opacity: 0.6;
+}
+
+.folder-protected {
+  opacity: 0.7;
+  color: var(--sl-color-neutral-400);
+}
+
+.folder-protected .folder-icon {
+  color: var(--sl-color-neutral-400);
+}
+
+.folder-managed {
+  color: var(--sl-color-primary-300);
+}
+
+.folder-managed .folder-icon {
+  color: var(--sl-color-primary-400);
+  filter: drop-shadow(0 0 2px var(--sl-color-primary-700));
+}
+
+.device-empty-banner {
+  margin-top: 0.5rem;
+  padding: 0.5rem;
+  background: rgba(var(--sl-color-info-rgb), 0.1);
+  border: 1px solid rgba(var(--sl-color-info-rgb), 0.2);
+  border-radius: var(--sl-border-radius-small);
+  font-size: 0.75rem;
+  color: var(--sl-color-info-600);
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
 }

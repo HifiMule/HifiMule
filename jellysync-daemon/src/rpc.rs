@@ -117,6 +117,7 @@ async fn handler(
         "jellyfin_get_item_counts" => handle_jellyfin_get_item_counts(&state, payload.params).await,
         "jellyfin_get_item_sizes" => handle_jellyfin_get_item_sizes(&state, payload.params).await,
         "device_get_storage_info" => handle_device_get_storage_info(&state).await,
+        "device_list_root_folders" => handle_device_list_root_folders(&state).await,
         "sync_get_device_status_map" => handle_sync_get_device_status_map(&state).await,
         _ => Err(JsonRpcError {
             code: ERR_METHOD_NOT_FOUND,
@@ -583,6 +584,18 @@ async fn handle_device_get_storage_info(state: &AppState) -> Result<Value, JsonR
     match state.device_manager.get_device_storage().await {
         Some(info) => Ok(serde_json::to_value(info).unwrap()),
         None => Ok(Value::Null),
+    }
+}
+
+async fn handle_device_list_root_folders(state: &AppState) -> Result<Value, JsonRpcError> {
+    match state.device_manager.list_root_folders().await {
+        Ok(Some(response)) => Ok(serde_json::to_value(response).unwrap()),
+        Ok(None) => Ok(Value::Null),
+        Err(e) => Err(JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: e.to_string(),
+            data: None,
+        }),
     }
 }
 

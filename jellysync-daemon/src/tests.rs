@@ -70,6 +70,7 @@ async fn test_device_recognition_integration() {
         device_id: test_id.to_string(),
         name: Some("Test Phone".to_string()),
         version: "1.0".to_string(),
+        managed_paths: vec![],
     };
 
     let state = manager

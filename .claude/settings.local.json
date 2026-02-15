@@ -7,7 +7,11 @@
       "Bash(rtk cargo test -p jellysync-daemon -- --list)",
       "Bash(cargo test:*)",
       "Bash(rtk npx tsc:*)",
-      "Bash(node_modules/.bin/tsc:*)"
+      "Bash(node_modules/.bin/tsc:*)",
+      "Bash(rtk git status:*)",
+      "Bash(rtk npm run build)",
+      "Bash(rtk pnpm run build:*)",
+      "Bash(npx tsc:*)"
     ]
   }
 }
