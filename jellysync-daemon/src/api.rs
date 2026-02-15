@@ -932,7 +932,7 @@ mod tests {
 
         // Mock: fetch child items of album
         let _mock_children = server
-            .mock("GET", "/Users/user1/Items?ParentId=album1&IncludeItemTypes=Audio&Fields=MediaSources&Recursive=true")
+            .mock("GET", "/Users/user1/Items?ParentId=album1&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true")
             .match_header("X-Emby-Token", token)
             .with_status(200)
             .with_header("content-type", "application/json")
