@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rtk git log:*)",
+      "Bash(rtk git diff:*)"
+    ]
+  }
+}
