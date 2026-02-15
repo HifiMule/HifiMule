@@ -1,4 +1,4 @@
-# generated: 2026-01-27
+# generated: 2026-02-15
 # project: JellyfinSync
 # project_key: jellyfin-sync
 # tracking_system: file-system
@@ -33,7 +33,7 @@
 # - SM typically creates next story after previous one is 'done' to incorporate learnings
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
-generated: 2026-01-27
+generated: 2026-02-15
 project: JellyfinSync
 project_key: jellyfin-sync
 tracking_system: file-system
@@ -46,7 +46,7 @@ development_status:
   1-3-detachable-tauri-ui-skeleton: done
   epic-1-retrospective: done
 
-  epic-2: in-progress
+  epic-2: done
   2-1-secure-jellyfin-server-link: done
   2-2-mass-storage-heartbeat-autodetection: done
   2-3-multi-device-profile-mapping: done
@@ -54,7 +54,7 @@ development_status:
   2-5-interactive-login-and-identity-management: done
   epic-2-retrospective: done
 
-  epic-3: in-progress
+  epic-3: done
   3-1-immersive-media-browser-jellyfin-integration: done
   3-2-the-live-selection-basket: done
   3-3-high-confidence-storage-projection: done
@@ -62,8 +62,8 @@ development_status:
   3-5-music-only-library-filtering: done
   epic-3-retrospective: optional
 
-  epic-4: backlog
-  4-1-differential-sync-algorithm-manifest-comparison: backlog
+  epic-4: in-progress
+  4-1-differential-sync-algorithm-manifest-comparison: ready-for-dev
   4-2-atomic-buffered-io-streaming: backlog
   4-3-legacy-hardware-constraints-path-char-validation: backlog
   4-4-self-healing-dirty-manifest-resume: backlog
