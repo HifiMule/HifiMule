@@ -9,6 +9,7 @@ const CONTAINER_TYPES: &[&str] = &["MusicAlbum", "Playlist"];
 #[cfg(test)]
 const MUSIC_ITEM_TYPES: &str = "MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo";
 
+#[derive(Clone)]
 pub struct JellyfinClient {
     client: reqwest::Client,
 }

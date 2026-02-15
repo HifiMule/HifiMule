@@ -71,6 +71,7 @@ async fn test_device_recognition_integration() {
         name: Some("Test Phone".to_string()),
         version: "1.0".to_string(),
         managed_paths: vec![],
+        synced_items: vec![],
     };
 
     let state = manager

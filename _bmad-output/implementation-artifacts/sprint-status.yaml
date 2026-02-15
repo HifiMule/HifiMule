@@ -63,7 +63,7 @@ development_status:
   epic-3-retrospective: optional
 
   epic-4: in-progress
-  4-1-differential-sync-algorithm-manifest-comparison: ready-for-dev
+  4-1-differential-sync-algorithm-manifest-comparison: done
   4-2-atomic-buffered-io-streaming: backlog
   4-3-legacy-hardware-constraints-path-char-validation: backlog
   4-4-self-healing-dirty-manifest-resume: backlog

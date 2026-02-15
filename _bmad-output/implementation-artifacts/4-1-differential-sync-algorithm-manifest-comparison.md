@@ -1,6 +1,6 @@
 # Story 4.1: Differential Sync Algorithm (Manifest Comparison)
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -21,31 +21,31 @@ so that **only necessary changes are made to the disk, preserving the hardware's
 
 ## Tasks / Subtasks
 
-- [ ] **T1: Extend DeviceManifest struct** (AC: #1, #4)
-  - [ ] T1.1: Add `synced_items: Vec<SyncedItem>` field to `DeviceManifest` in `jellysync-daemon/src/device/mod.rs`
-  - [ ] T1.2: Define `SyncedItem` struct with fields: `jellyfin_id: String`, `name: String`, `album: Option<String>`, `artist: Option<String>`, `local_path: String`, `size_bytes: u64`, `synced_at: String`
-  - [ ] T1.3: Ensure `#[serde(default)]` on `synced_items` for backward compatibility with existing manifests
-  - [ ] T1.4: Implement atomic manifest write function using Write-Temp-Rename pattern (`write_manifest(path, manifest)`)
+- [x] **T1: Extend DeviceManifest struct** (AC: #1, #4)
+  - [x] T1.1: Add `synced_items: Vec<SyncedItem>` field to `DeviceManifest` in `jellysync-daemon/src/device/mod.rs`
+  - [x] T1.2: Define `SyncedItem` struct with fields: `jellyfin_id: String`, `name: String`, `album: Option<String>`, `artist: Option<String>`, `local_path: String`, `size_bytes: u64`, `synced_at: String`
+  - [x] T1.3: Ensure `#[serde(default)]` on `synced_items` for backward compatibility with existing manifests
+  - [x] T1.4: Implement atomic manifest write function using Write-Temp-Rename pattern (`write_manifest(path, manifest)`)
 
-- [ ] **T2: Create sync engine module** (AC: #2, #3)
-  - [ ] T2.1: Create `jellysync-daemon/src/sync.rs` module
-  - [ ] T2.2: Define `SyncDelta` struct: `adds: Vec<SyncAddItem>`, `deletes: Vec<SyncDeleteItem>`, `unchanged: Vec<String>`
-  - [ ] T2.3: Define `SyncAddItem` (jellyfin_id, name, album, artist, size_bytes) and `SyncDeleteItem` (jellyfin_id, local_path, name)
-  - [ ] T2.4: Implement `calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest) -> SyncDelta`
-  - [ ] T2.5: Implement server ID change detection via metadata matching (name + album + artist fallback)
+- [x] **T2: Create sync engine module** (AC: #2, #3)
+  - [x] T2.1: Create `jellysync-daemon/src/sync.rs` module
+  - [x] T2.2: Define `SyncDelta` struct: `adds: Vec<SyncAddItem>`, `deletes: Vec<SyncDeleteItem>`, `unchanged: Vec<String>`
+  - [x] T2.3: Define `SyncAddItem` (jellyfin_id, name, album, artist, size_bytes) and `SyncDeleteItem` (jellyfin_id, local_path, name)
+  - [x] T2.4: Implement `calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest) -> SyncDelta`
+  - [x] T2.5: Implement server ID change detection via metadata matching (name + album + artist fallback)
 
-- [ ] **T3: RPC integration** (AC: #5, #6)
-  - [ ] T3.1: Add `sync_calculate_delta` RPC handler in `jellysync-daemon/src/rpc.rs` accepting `{ "itemIds": [...] }` params
-  - [ ] T3.2: Handler fetches item details from Jellyfin API for each desired ID, then calls `calculate_delta`
-  - [ ] T3.3: Replace `sync_get_device_status_map` stub with real implementation reading manifest `synced_items`
-  - [ ] T3.4: Register new method in the RPC handler match block
+- [x] **T3: RPC integration** (AC: #5, #6)
+  - [x] T3.1: Add `sync_calculate_delta` RPC handler in `jellysync-daemon/src/rpc.rs` accepting `{ "itemIds": [...] }` params
+  - [x] T3.2: Handler fetches item details from Jellyfin API for each desired ID, then calls `calculate_delta`
+  - [x] T3.3: Replace `sync_get_device_status_map` stub with real implementation reading manifest `synced_items`
+  - [x] T3.4: Register new method in the RPC handler match block
 
-- [ ] **T4: Testing** (AC: #1-#6)
-  - [ ] T4.1: Unit tests for `calculate_delta` — empty manifest, full overlap, partial overlap, complete replacement
-  - [ ] T4.2: Unit tests for server ID change detection via metadata fallback
-  - [ ] T4.3: Unit tests for atomic manifest write (Write-Temp-Rename)
-  - [ ] T4.4: Unit tests for backward compatibility (reading old manifests without `synced_items`)
-  - [ ] T4.5: Integration test for `sync_calculate_delta` RPC method
+- [x] **T4: Testing** (AC: #1-#6)
+  - [x] T4.1: Unit tests for `calculate_delta` — empty manifest, full overlap, partial overlap, complete replacement
+  - [x] T4.2: Unit tests for server ID change detection via metadata fallback
+  - [x] T4.3: Unit tests for atomic manifest write (Write-Temp-Rename)
+  - [x] T4.4: Unit tests for backward compatibility (reading old manifests without `synced_items`)
+  - [x] T4.5: Integration test for `sync_calculate_delta` RPC method
 
 ## Dev Notes
 
@@ -156,14 +156,56 @@ Files to modify:
 - [Story 3.4: Managed Zone](_bmad-output/implementation-artifacts/3-4-managed-zone-hardware-shielding.md) — `managed_paths` pattern reference
 - [Story 3.5: Music Filtering](_bmad-output/implementation-artifacts/3-5-music-only-library-filtering.md) — `MUSIC_ITEM_TYPES` constant
 
+## Change Log
+
+- 2026-02-15: Implemented differential sync algorithm with manifest comparison, atomic writes, RPC integration, and comprehensive tests (Story 4.1)
+
 ## Dev Agent Record
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+Claude Opus 4.6
 
 ### Debug Log References
 
+No blocking issues encountered during implementation.
+
 ### Completion Notes List
 
+- **T1**: Extended `DeviceManifest` with `SyncedItem` struct and `synced_items` field (`#[serde(default)]` for backward compat). Implemented `write_manifest()` using Write-Temp-Rename atomic pattern (write to .tmp, sync_all, rename).
+- **T2**: Created `sync.rs` module with `calculate_delta()` function. Implements set-based delta calculation (adds/deletes/unchanged) with server ID change detection via case-insensitive metadata matching (name + album + artist). When an ID change is detected, the delete is suppressed and only the add remains to update the manifest.
+- **T3**: Added `sync_calculate_delta` RPC handler that accepts `{ "itemIds": [...] }`, fetches item details from Jellyfin API, and returns computed delta. Replaced `sync_get_device_status_map` stub with real implementation reading `synced_items` from manifest.
+- **T4**: 49 tests pass total. Added 6 unit tests for delta calculation (empty, full overlap, partial, complete replacement, ID change detection, case-insensitive matching), 4 device tests (backward compat, synced items deserialization, atomic write, overwrite), and 4 RPC integration tests (missing params, no device, status map empty, status map with items).
+- Existing test in `tests.rs` updated to include `synced_items` field in `DeviceManifest` literal.
+
 ### File List
+
+- `jellysync-daemon/src/sync.rs` (new) — Sync engine module with delta calculation and server ID change detection
+- `jellysync-daemon/src/device/mod.rs` (modified) — Added `SyncedItem` struct, `synced_items` field on `DeviceManifest`, `write_manifest()` function
+- `jellysync-daemon/src/device/tests.rs` (modified) — Added backward compat, serialization, and atomic write tests
+- `jellysync-daemon/src/main.rs` (modified) — Added `mod sync;` declaration
+- `jellysync-daemon/src/rpc.rs` (modified) — Added `sync_calculate_delta` handler, replaced `sync_get_device_status_map` stub, added RPC tests
+- `jellysync-daemon/src/tests.rs` (modified) — Updated `DeviceManifest` literal to include `synced_items`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` (modified) — Story status updated
+
+## Code Review Findings (Adversarial)
+**Date:** 2026-02-15
+**Reviewer:** Antigravity
+
+### Critical Issues
+- [x] **Data Loss Risk**: `sync_calculate_delta` silently dropped items if API call failed, potentially causing unintended deletions.
+    - **Fix**: Updated `rpc.rs` to propagate errors and abort sync if any item fetch fails.
+
+### Medium Issues
+- [x] **Unbounded Concurrency**: `handle_sync_calculate_delta` spawned unlimited futures.
+    - **Fix**: Implemented `stream::buffer_unordered(10)` to limit concurrent requests.
+- [x] **Performance**: Inefficient metadata matching in `calculate_delta`.
+    - **Fix**: Optimized `sync.rs` to build metadata map and delete list in a single pass O(N).
+
+### Low Issues
+- [ ] **Platform Specificity**: Filesystem case sensitivity assumption.
+    - **Note**: Deferring to future story for cross-platform hardening.
+
+## Status
+**Review Status**: Passed (with fixes applied)
+**Implementation Status**: Complete

@@ -1,7 +1,22 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use tokio::time::{sleep, Duration};
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncedItem {
+    pub jellyfin_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub album: Option<String>,
+    #[serde(default)]
+    pub artist: Option<String>,
+    pub local_path: String,
+    pub size_bytes: u64,
+    pub synced_at: String,
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DeviceManifest {
@@ -10,6 +25,26 @@ pub struct DeviceManifest {
     pub version: String,
     #[serde(default)]
     pub managed_paths: Vec<String>,
+    #[serde(default)]
+    pub synced_items: Vec<SyncedItem>,
+}
+
+/// Atomically writes a DeviceManifest to disk using Write-Temp-Rename pattern.
+/// Writes to `.jellysync.json.tmp`, calls `sync_all`, then renames to `.jellysync.json`.
+pub fn write_manifest(device_root: &Path, manifest: &DeviceManifest) -> Result<()> {
+    let manifest_path = device_root.join(".jellysync.json");
+    let tmp_path = device_root.join(".jellysync.json.tmp");
+
+    let json = serde_json::to_string_pretty(manifest)?;
+
+    {
+        let mut file = std::fs::File::create(&tmp_path)?;
+        file.write_all(json.as_bytes())?;
+        file.sync_all()?;
+    }
+
+    std::fs::rename(&tmp_path, &manifest_path)?;
+    Ok(())
 }
 
 #[derive(Debug, Clone)]

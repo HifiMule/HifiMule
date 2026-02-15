@@ -17,6 +17,7 @@ mod db;
 mod device;
 mod paths;
 mod rpc;
+mod sync;
 
 #[cfg(test)]
 mod tests;

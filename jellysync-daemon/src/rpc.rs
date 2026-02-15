@@ -5,6 +5,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use futures::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -119,6 +120,7 @@ async fn handler(
         "device_get_storage_info" => handle_device_get_storage_info(&state).await,
         "device_list_root_folders" => handle_device_list_root_folders(&state).await,
         "sync_get_device_status_map" => handle_sync_get_device_status_map(&state).await,
+        "sync_calculate_delta" => handle_sync_calculate_delta(&state, payload.params).await,
         _ => Err(JsonRpcError {
             code: ERR_METHOD_NOT_FOUND,
             message: "Method not found".to_string(),
@@ -602,18 +604,104 @@ async fn handle_device_list_root_folders(state: &AppState) -> Result<Value, Json
 async fn handle_sync_get_device_status_map(state: &AppState) -> Result<Value, JsonRpcError> {
     let device = state.device_manager.get_current_device().await;
 
-    if device.is_some() {
-        // TODO: In future stories, the manifest will include a list of synced items
-        // For now, return empty list as placeholder
-        Ok(serde_json::json!({
+    match device {
+        Some(manifest) => {
+            let synced_ids: Vec<&str> = manifest
+                .synced_items
+                .iter()
+                .map(|item| item.jellyfin_id.as_str())
+                .collect();
+            Ok(serde_json::json!({
+                "syncedItemIds": synced_ids
+            }))
+        }
+        None => Ok(serde_json::json!({
             "syncedItemIds": []
-        }))
-    } else {
-        // No device connected, return empty list
-        Ok(serde_json::json!({
-            "syncedItemIds": []
-        }))
+        })),
     }
+}
+
+async fn handle_sync_calculate_delta(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let item_ids = params["itemIds"].as_array().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing or invalid itemIds array".to_string(),
+        data: None,
+    })?;
+
+    let item_ids: Vec<String> = item_ids
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect();
+
+    // Get current device manifest
+    let manifest = state
+        .device_manager
+        .get_current_device()
+        .await
+        .ok_or(JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: "No device connected".to_string(),
+            data: None,
+        })?;
+
+    // Fetch item details from Jellyfin for each desired ID
+    let (url, token, user_id) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
+        code: ERR_STORAGE_ERROR,
+        message: format!("Failed to get credentials: {}", e),
+        data: None,
+    })?;
+    let user_id = user_id.unwrap_or_else(|| "Me".to_string());
+
+    let results: Vec<Result<crate::sync::DesiredItem, String>> = stream::iter(item_ids)
+        .map(|id| {
+            let client = state.jellyfin_client.clone();
+            let url = url.clone();
+            let token = token.clone();
+            let user_id = user_id.clone();
+            async move {
+                match client.get_item_details(&url, &token, &user_id, &id).await {
+                    Ok(item) => Ok(crate::sync::DesiredItem {
+                        jellyfin_id: item.id,
+                        name: item.name,
+                        album: None, // JellyfinItem doesn't have album field directly
+                        artist: item.album_artist,
+                        size_bytes: 0, // Size will be determined during actual sync
+                    }),
+                    Err(e) => Err(format!("Failed to fetch item {}: {}", id, e)),
+                }
+            }
+        })
+        .buffer_unordered(10) // Limit concurrency to prevent flooding
+        .collect()
+        .await;
+
+    // Check for errors - if ANY item fails, we must abort to prevent data loss (deleting valid items)
+    let mut desired_items = Vec::with_capacity(results.len());
+    for res in results {
+        match res {
+            Ok(item) => desired_items.push(item),
+            Err(e) => {
+                return Err(JsonRpcError {
+                    code: ERR_CONNECTION_FAILED,
+                    message: format!("Sync aborted: {}", e),
+                    data: None,
+                })
+            }
+        }
+    }
+
+    let delta = crate::sync::calculate_delta(&desired_items, &manifest);
+
+    Ok(serde_json::to_value(delta).unwrap())
 }
 
 async fn handle_proxy_image(
@@ -858,5 +946,232 @@ mod tests {
             assert_ne!(err.code, -32601, "Method should exist");
             assert_ne!(err.code, -32602, "Params should be valid");
         }
+    }
+
+    #[tokio::test]
+    async fn test_rpc_sync_calculate_delta_missing_params() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        let state = Arc::new(AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db: db.clone(),
+            device_manager,
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        });
+
+        // Test missing params
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "sync_calculate_delta".to_string(),
+            params: None,
+            id: json!(1),
+        };
+        let response = handler(axum::extract::State(state.clone()), Json(request)).await;
+        assert!(response.0.error.is_some());
+        assert_eq!(response.0.error.as_ref().unwrap().code, ERR_INVALID_PARAMS);
+
+        // Test invalid params (missing itemIds)
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "sync_calculate_delta".to_string(),
+            params: Some(json!({})),
+            id: json!(1),
+        };
+        let response = handler(axum::extract::State(state.clone()), Json(request)).await;
+        assert!(response.0.error.is_some());
+        assert_eq!(response.0.error.as_ref().unwrap().code, ERR_INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn test_rpc_sync_calculate_delta_no_device() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        let state = Arc::new(AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db: db.clone(),
+            device_manager,
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        });
+
+        // No device connected — should return error
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "sync_calculate_delta".to_string(),
+            params: Some(json!({ "itemIds": ["item-1", "item-2"] })),
+            id: json!(1),
+        };
+        let response = handler(axum::extract::State(state), Json(request)).await;
+        assert!(response.0.error.is_some());
+        assert_eq!(
+            response.0.error.as_ref().unwrap().code,
+            ERR_CONNECTION_FAILED
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rpc_sync_get_device_status_map_no_device() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        let state = Arc::new(AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db: db.clone(),
+            device_manager,
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        });
+
+        let result = handle_sync_get_device_status_map(&state).await.unwrap();
+        let synced_ids = result["syncedItemIds"].as_array().unwrap();
+        assert!(synced_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_rpc_sync_get_device_status_map_with_synced_items() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+
+        // Simulate device with synced items
+        let manifest = crate::device::DeviceManifest {
+            device_id: "test-dev".to_string(),
+            name: Some("Test".to_string()),
+            version: "1.1".to_string(),
+            managed_paths: vec!["Music".to_string()],
+            synced_items: vec![
+                crate::device::SyncedItem {
+                    jellyfin_id: "item-a".to_string(),
+                    name: "Track A".to_string(),
+                    album: None,
+                    artist: None,
+                    local_path: "Music/track_a.flac".to_string(),
+                    size_bytes: 1000,
+                    synced_at: "2026-02-15T10:00:00Z".to_string(),
+                },
+                crate::device::SyncedItem {
+                    jellyfin_id: "item-b".to_string(),
+                    name: "Track B".to_string(),
+                    album: None,
+                    artist: None,
+                    local_path: "Music/track_b.flac".to_string(),
+                    size_bytes: 2000,
+                    synced_at: "2026-02-15T10:00:00Z".to_string(),
+                },
+            ],
+        };
+
+        device_manager
+            .handle_device_detected(std::path::PathBuf::from("/tmp/test"), manifest)
+            .await
+            .unwrap();
+
+        let state = AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db: db.clone(),
+            device_manager,
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        };
+
+        let result = handle_sync_get_device_status_map(&state).await.unwrap();
+        let synced_ids = result["syncedItemIds"].as_array().unwrap();
+        assert_eq!(synced_ids.len(), 2);
+        assert!(synced_ids.contains(&json!("item-a")));
+        assert!(synced_ids.contains(&json!("item-b")));
+    }
+
+    #[tokio::test]
+    async fn test_rpc_sync_calculate_delta_partial_failure() {
+        use mockito::Server;
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let token = "test-token";
+
+        // Mock system info for connection check (implicit or explicit)
+        let _mock_info = server
+            .mock("GET", "/System/Info")
+            .match_header("X-Emby-Token", token)
+            .with_status(200)
+            .with_body(r#"{"ServerName": "Test", "Version": "1.0", "Id": "1"}"#)
+            .create_async()
+            .await;
+
+        // Mock item 1 success
+        let _mock_item1 = server
+            .mock("GET", "/Users/Me/Items/item-1")
+            .match_header("X-Emby-Token", token)
+            .with_status(200)
+            .with_body(
+                r#"{"Id": "item-1", "Name": "Item 1", "Type": "Audio", "AlbumArtist": "Artist"}"#,
+            )
+            .create_async()
+            .await;
+
+        // Mock item 2 failure (404/500)
+        let _mock_item2 = server
+            .mock("GET", "/Users/Me/Items/item-2")
+            .match_header("X-Emby-Token", token)
+            .with_status(500)
+            .create_async()
+            .await;
+
+        // Setup app state
+        // We need to save credentials to the temp config for the RPC handler to pick them up
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+        crate::api::CredentialManager::set_config_path(config_path);
+        crate::api::CredentialManager::save_credentials(&url, token, Some("Me")).unwrap();
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+
+        // Simulate a connected device
+        let manifest = crate::device::DeviceManifest {
+            device_id: "dev-1".to_string(),
+            name: Some("Dev 1".to_string()),
+            version: "1.0".to_string(),
+            managed_paths: vec![],
+            synced_items: vec![],
+        };
+        device_manager
+            .handle_device_detected(std::path::PathBuf::from("/tmp/dev"), manifest)
+            .await
+            .unwrap();
+
+        let state = Arc::new(AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db,
+            device_manager,
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        });
+
+        // Make request
+        let params = json!({
+            "itemIds": ["item-1", "item-2"]
+        });
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "sync_calculate_delta".to_string(),
+            params: Some(params),
+            id: json!(1),
+        };
+
+        let response = handler(axum::extract::State(state), Json(request)).await;
+
+        // Assert ERROR, not partial success
+        let response = response.0; // Unwrap Json wrapper
+        assert!(response.result.is_none());
+        assert!(response.error.is_some());
+        let err = response.error.unwrap();
+        assert_eq!(err.code, ERR_CONNECTION_FAILED);
+        assert!(err.message.contains("Sync aborted"));
+        // buffer_unordered makes order non-deterministic, so either item could fail first
+        assert!(
+            err.message.contains("item-1") || err.message.contains("item-2"),
+            "Expected error to mention an item ID, got: {}",
+            err.message
+        );
     }
 }

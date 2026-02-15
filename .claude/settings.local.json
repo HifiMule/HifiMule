@@ -11,7 +11,9 @@
       "Bash(rtk git status:*)",
       "Bash(rtk npm run build)",
       "Bash(rtk pnpm run build:*)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(rtk cargo check -p jellysync-daemon)",
+      "Bash(rtk cargo test test_rpc_sync_calculate_delta_partial_failure)"
     ]
   }
 }
