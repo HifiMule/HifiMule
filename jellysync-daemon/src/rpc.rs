@@ -807,4 +807,43 @@ mod tests {
         assert_eq!(item.recursive_item_count, Some(10));
         assert_eq!(item.cumulative_run_time_ticks, Some(1000000));
     }
+    #[tokio::test]
+    async fn test_rpc_get_items_params() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        let state = Arc::new(AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db: db.clone(),
+            device_manager,
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        });
+
+        // Test with specific parameters including includeItemTypes
+        let params = json!({
+            "parentId": "lib1",
+            "includeItemTypes": "MusicAlbum,Audio",
+            "startIndex": 0,
+            "limit": 20
+        });
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "jellyfin_get_items".to_string(),
+            params: Some(params),
+            id: json!(1),
+        };
+
+        // We expect this to fail with connection/storage error (since no real creds),
+        // but NOT method not found or invalid params.
+        // This confirms the handler captures the params and tries to execute.
+        let response = handler(axum::extract::State(state), Json(request)).await;
+
+        // It might be error or result depending on how deep it gets,
+        // but definitely shouldn't be "Invalid Params" (-32602) or "Method Not Found" (-32601)
+        if let Some(err) = response.0.error {
+            assert_ne!(err.code, -32601, "Method should exist");
+            assert_ne!(err.code, -32602, "Params should be valid");
+        }
+    }
 }
