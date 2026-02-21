@@ -9,6 +9,7 @@ const CONTAINER_TYPES: &[&str] = &["MusicAlbum", "Playlist"];
 #[cfg(test)]
 const MUSIC_ITEM_TYPES: &str = "MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo";
 
+
 #[derive(Clone)]
 pub struct JellyfinClient {
     client: reqwest::Client,
@@ -48,7 +49,13 @@ pub struct JellyfinItem {
     #[serde(rename = "Type")]
     pub item_type: String,
     #[serde(default)]
+    pub album: Option<String>,
+    #[serde(default)]
     pub album_artist: Option<String>,
+    #[serde(default)]
+    pub index_number: Option<u32>,
+    #[serde(default)]
+    pub container: Option<String>,
     #[serde(default)]
     pub production_year: Option<u32>,
     #[serde(default)]
@@ -471,6 +478,38 @@ impl JellyfinClient {
 
         let result = serde_json::from_str::<AuthenticationResult>(&text)?;
         Ok(result)
+    }
+
+    /// Downloads an item as a streaming response.
+    /// Returns a stream of bytes that can be written to disk incrementally.
+    pub async fn download_item_stream(
+        &self,
+        url: &str,
+        token: &str,
+        item_id: &str,
+    ) -> Result<impl futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>>> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let endpoint = format!(
+            "{}/Items/{}/Download",
+            url.trim_end_matches('/'),
+            item_id
+        );
+
+        let response = self.client.get(&endpoint).headers(headers).send().await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!("Server returned status: {}", response.status()));
+        }
+
+        Ok(response.bytes_stream())
     }
 }
 

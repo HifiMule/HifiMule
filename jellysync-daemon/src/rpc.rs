@@ -58,6 +58,7 @@ pub struct AppState {
     pub device_manager: Arc<crate::device::DeviceManager>,
     pub last_connection_check: Arc<tokio::sync::Mutex<Option<(std::time::Instant, bool)>>>,
     pub size_cache: Arc<tokio::sync::RwLock<HashMap<String, u64>>>,
+    pub sync_operation_manager: Arc<crate::sync::SyncOperationManager>,
 }
 
 pub async fn run_server(
@@ -71,6 +72,7 @@ pub async fn run_server(
         device_manager,
         last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
         size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
     });
 
     let app = Router::new()
@@ -121,6 +123,8 @@ async fn handler(
         "device_list_root_folders" => handle_device_list_root_folders(&state).await,
         "sync_get_device_status_map" => handle_sync_get_device_status_map(&state).await,
         "sync_calculate_delta" => handle_sync_calculate_delta(&state, payload.params).await,
+        "sync_execute" => handle_sync_execute(&state, payload.params).await,
+        "sync_get_operation_status" => handle_sync_get_operation_status(&state, payload.params).await,
         _ => Err(JsonRpcError {
             code: ERR_METHOD_NOT_FOUND,
             message: "Method not found".to_string(),
@@ -704,6 +708,161 @@ async fn handle_sync_calculate_delta(
     Ok(serde_json::to_value(delta).unwrap())
 }
 
+async fn handle_sync_execute(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    // Extract delta from params
+    let delta: crate::sync::SyncDelta = serde_json::from_value(params["delta"].clone())
+        .map_err(|e| JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: format!("Invalid delta parameter: {}", e),
+            data: None,
+        })?;
+
+    // Get current device path
+    let device_path = state
+        .device_manager
+        .get_current_device_path()
+        .await
+        .ok_or(JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: "No device connected".to_string(),
+            data: None,
+        })?;
+
+    // Get credentials
+    let (url, token, user_id) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
+        code: ERR_STORAGE_ERROR,
+        message: format!("Failed to get credentials: {}", e),
+        data: None,
+    })?;
+    let user_id = user_id.unwrap_or_else(|| "Me".to_string());
+
+    // Generate unique operation ID
+    let operation_id = uuid::Uuid::new_v4().to_string();
+
+    // Create operation in manager
+    let total_files = delta.adds.len() + delta.deletes.len();
+    state
+        .sync_operation_manager
+        .create_operation(operation_id.clone(), total_files)
+        .await;
+
+    // Spawn background task to execute sync
+    let jellyfin_client = state.jellyfin_client.clone();
+    let op_manager = state.sync_operation_manager.clone();
+    let op_id = operation_id.clone();
+    let device_manager = state.device_manager.clone();
+
+    tokio::spawn(async move {
+        let result = crate::sync::execute_sync(
+            &delta,
+            &device_path,
+            &jellyfin_client,
+            &url,
+            &token,
+            &user_id,
+            op_manager.clone(),
+            op_id.clone(),
+        )
+        .await;
+
+        match result {
+            Ok((synced_items, errors)) => {
+                // Update manifest with successfully synced items and remove deleted items
+                if let Some(mut manifest) = device_manager.get_current_device().await {
+                    // Add new synced items
+                    manifest.synced_items.extend(synced_items);
+
+                    // Remove successfully deleted items from manifest
+                    let failed_ids: std::collections::HashSet<&str> = errors
+                        .iter()
+                        .map(|e| e.jellyfin_id.as_str())
+                        .collect();
+                    manifest.synced_items.retain(|item| {
+                        !delta.deletes.iter().any(|d| {
+                            d.jellyfin_id == item.jellyfin_id
+                                && !failed_ids.contains(d.jellyfin_id.as_str())
+                        })
+                    });
+
+                    // Write manifest atomically
+                    if let Err(e) = crate::device::write_manifest(&device_path, &manifest) {
+                        eprintln!("Failed to write manifest: {}", e);
+                    }
+                }
+
+                // Update operation status
+                if let Some(mut operation) = op_manager.get_operation(&op_id).await {
+                    operation.status = if errors.is_empty() {
+                        crate::sync::SyncStatus::Complete
+                    } else {
+                        crate::sync::SyncStatus::Failed
+                    };
+                    operation.errors = errors;
+                    op_manager.update_operation(&op_id, operation).await;
+                }
+            }
+            Err(e) => {
+                // Mark operation as failed
+                if let Some(mut operation) = op_manager.get_operation(&op_id).await {
+                    operation.status = crate::sync::SyncStatus::Failed;
+                    operation.errors.push(crate::sync::SyncFileError {
+                        jellyfin_id: String::new(),
+                        filename: String::from("sync_execute"),
+                        error_message: e.to_string(),
+                    });
+                    op_manager.update_operation(&op_id, operation).await;
+                }
+            }
+        }
+    });
+
+    // Return operation ID immediately
+    Ok(serde_json::json!({
+        "operationId": operation_id
+    }))
+}
+
+async fn handle_sync_get_operation_status(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let operation_id = params["operationId"]
+        .as_str()
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing operationId".to_string(),
+            data: None,
+        })?;
+
+    match state
+        .sync_operation_manager
+        .get_operation(operation_id)
+        .await
+    {
+        Some(operation) => Ok(serde_json::to_value(operation).unwrap()),
+        None => Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Operation not found".to_string(),
+            data: None,
+        }),
+    }
+}
+
 async fn handle_proxy_image(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -750,6 +909,7 @@ mod tests {
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
         });
 
         let params = json!({
@@ -773,6 +933,7 @@ mod tests {
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
         });
 
         let request = JsonRpcRequest {
@@ -797,6 +958,7 @@ mod tests {
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
         });
 
         let params = json!({
@@ -831,6 +993,7 @@ mod tests {
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
         });
 
         // We can't easily mock the network call inside the RPC handler without a mock server or traits,
@@ -869,6 +1032,7 @@ mod tests {
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
         });
 
         // Test missing params
@@ -918,6 +1082,7 @@ mod tests {
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
         });
 
         // Test with specific parameters including includeItemTypes
@@ -958,6 +1123,7 @@ mod tests {
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
         });
 
         // Test missing params
@@ -993,6 +1159,7 @@ mod tests {
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
         });
 
         // No device connected — should return error
@@ -1020,6 +1187,7 @@ mod tests {
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
         });
 
         let result = handle_sync_get_device_status_map(&state).await.unwrap();
@@ -1071,6 +1239,7 @@ mod tests {
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
         };
 
         let result = handle_sync_get_device_status_map(&state).await.unwrap();
@@ -1144,6 +1313,7 @@ mod tests {
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
         });
 
         // Make request

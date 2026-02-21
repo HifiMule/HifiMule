@@ -2223,6 +2223,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "bytes",
  "futures",
  "http",
  "image",
@@ -2239,6 +2240,7 @@ dependencies = [
  "tokio",
  "tower-http",
  "tray-icon 0.19.3",
+ "uuid",
  "windows-sys 0.59.0",
 ]
 

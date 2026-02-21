@@ -14,7 +14,10 @@
       "Bash(npx tsc:*)",
       "Bash(rtk cargo check -p jellysync-daemon)",
       "Bash(rtk cargo test test_rpc_sync_calculate_delta_partial_failure)",
-      "Bash(rtk git show:*)"
+      "Bash(rtk git show:*)",
+      "Bash(rtk cargo build:*)",
+      "Bash(rtk cargo check)",
+      "Bash(rtk cargo test:*)"
     ]
   }
 }
