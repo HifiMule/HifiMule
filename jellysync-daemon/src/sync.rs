@@ -137,15 +137,31 @@ impl SyncOperationManager {
     }
 }
 
+/// Maximum characters per path component enforced for FAT32/Rockbox legacy hardware.
+pub const MAX_PATH_COMPONENT_LEN: usize = 255;
+
+/// The result of constructing a file path from Jellyfin metadata.
+///
+/// Contains the resolved filesystem path and an optional mapping of the
+/// original Jellyfin track name if truncation was applied.
+pub struct PathConstructionResult {
+    /// The final path where the file will be written (truncated as necessary).
+    pub path: std::path::PathBuf,
+    /// The original Jellyfin track name, set only if the filename component
+    /// was truncated due to legacy hardware path length constraints.
+    pub original_name: Option<String>,
+}
+
 /// Constructs a file path from Jellyfin item metadata.
 ///
 /// Pattern: `{managed_path}/{AlbumArtist}/{Album}/{TrackNumber} - {Name}.{extension}`
 ///
-/// Sanitizes path components to remove invalid filesystem characters.
+/// Sanitizes path components to remove invalid filesystem characters and enforces
+/// legacy hardware path length limits (255 characters per component).
 pub fn construct_file_path(
     managed_path: &Path,
     item: &crate::api::JellyfinItem,
-) -> Result<std::path::PathBuf> {
+) -> Result<PathConstructionResult> {
     // Extract and sanitize components
     let artist = item
         .album_artist
@@ -166,21 +182,33 @@ pub fn construct_file_path(
         .as_deref()
         .unwrap_or("mp3");
 
-    // Sanitize path components
+    // Step 1: Sanitize path components (remove invalid chars)
     let artist_clean = sanitize_path_component(artist);
     let album_clean = sanitize_path_component(album);
     let track_name_clean = sanitize_path_component(track_name);
 
-    // Build path: managed_path/Artist/Album/## - Track.ext
-    let filename = format!("{} - {}.{}", track_number, track_name_clean, extension);
+    // Step 2: Enforce per-component length limit for legacy hardware (FAT32/Rockbox)
+    let artist_final = truncate_component(&artist_clean, MAX_PATH_COMPONENT_LEN);
+    let album_final = truncate_component(&album_clean, MAX_PATH_COMPONENT_LEN);
+
+    // Step 3: Build filename and check component length
+    let filename_base = format!("{} - {}", track_number, track_name_clean);
+    let filename_candidate = format!("{}.{}", filename_base, extension);
+
+    let (filename, original_name) = if filename_candidate.chars().count() > MAX_PATH_COMPONENT_LEN {
+        let truncated = truncate_filename(&filename_base, extension, MAX_PATH_COMPONENT_LEN);
+        (truncated, Some(item.name.clone()))
+    } else {
+        (filename_candidate, None)
+    };
+
+    // Step 4: Build final path
     let path = managed_path
-        .join(artist_clean)
-        .join(album_clean)
+        .join(artist_final)
+        .join(album_final)
         .join(filename);
 
-    // TODO: Add path length validation for legacy hardware (Story 4.3)
-
-    Ok(path)
+    Ok(PathConstructionResult { path, original_name })
 }
 
 /// Sanitizes a path component by removing/replacing invalid filesystem characters.
@@ -198,6 +226,34 @@ fn sanitize_path_component(component: &str) -> String {
         .collect::<String>()
         .trim()
         .to_string()
+}
+
+/// Truncates a path component (artist or album folder) to `max_len` characters.
+///
+/// Uses `chars().count()` for character-aware length (not byte length), safe for Unicode.
+/// Strips trailing spaces and dots after truncation — forbidden by FAT32.
+fn truncate_component(component: &str, max_len: usize) -> String {
+    if component.chars().count() <= max_len {
+        return component.to_string();
+    }
+    let truncated: String = component.chars().take(max_len).collect();
+    truncated.trim_end_matches(|c| c == ' ' || c == '.').to_string()
+}
+
+/// Truncates a filename (base + extension) to `max_len` characters, preserving the extension.
+///
+/// The extension is always preserved — only the base name is truncated.
+/// Strips trailing spaces and dots from the base after truncation (FAT32 requirement).
+fn truncate_filename(base: &str, extension: &str, max_len: usize) -> String {
+    let ext_len = extension.chars().count() + 1; // +1 for the '.' separator
+    if ext_len >= max_len {
+        // Pathological: extension itself fills the limit — truncate base to nothing
+        return base.chars().take(max_len).collect();
+    }
+    let max_base_len = max_len - ext_len;
+    let truncated_base: String = base.chars().take(max_base_len).collect();
+    let clean_base = truncated_base.trim_end_matches(|c| c == ' ' || c == '.');
+    format!("{}.{}", clean_base, extension)
 }
 
 /// Executes a sync operation by downloading adds and deleting removals.
@@ -242,9 +298,9 @@ pub async fn execute_sync(
             }
         };
 
-        // Construct target path
-        let target_path = match construct_file_path(&managed_path, &item) {
-            Ok(path) => path,
+        // Construct target path (includes legacy hardware path length validation)
+        let construction = match construct_file_path(&managed_path, &item) {
+            Ok(result) => result,
             Err(e) => {
                 errors.push(SyncFileError {
                     jellyfin_id: add_item.jellyfin_id.clone(),
@@ -254,6 +310,7 @@ pub async fn execute_sync(
                 continue;
             }
         };
+        let target_path = construction.path;
 
         // Get download stream
         let stream_result = jellyfin_client
@@ -325,6 +382,7 @@ pub async fn execute_sync(
                         .to_string(),
                     size_bytes: add_item.size_bytes,
                     synced_at: unix_timestamp.to_string(),
+                    original_name: construction.original_name,
                 });
 
                 // Update operation progress
@@ -587,6 +645,29 @@ mod tests {
             local_path: format!("Music/{}/{}.flac", artist.unwrap_or("Unknown"), name),
             size_bytes: 10_000_000,
             synced_at: "2026-02-15T10:00:00Z".to_string(),
+            original_name: None,
+        }
+    }
+
+    fn make_test_item(
+        name: &str,
+        album_artist: Option<&str>,
+        album: Option<&str>,
+        index: Option<u32>,
+        container: Option<&str>,
+    ) -> crate::api::JellyfinItem {
+        crate::api::JellyfinItem {
+            id: "test-id".to_string(),
+            name: name.to_string(),
+            item_type: "Audio".to_string(),
+            album: album.map(|s| s.to_string()),
+            album_artist: album_artist.map(|s| s.to_string()),
+            index_number: index,
+            container: container.map(|s| s.to_string()),
+            production_year: None,
+            recursive_item_count: None,
+            cumulative_run_time_ticks: None,
+            media_sources: None,
         }
     }
 
@@ -725,7 +806,7 @@ mod tests {
             media_sources: None,
         };
 
-        let path = construct_file_path(&managed, &item).unwrap();
+        let path = construct_file_path(&managed, &item).unwrap().path;
         let expected = managed
             .join("Pink Floyd")
             .join("The Dark Side of the Moon")
@@ -750,7 +831,7 @@ mod tests {
             media_sources: None,
         };
 
-        let path = construct_file_path(&managed, &item).unwrap();
+        let path = construct_file_path(&managed, &item).unwrap().path;
         let expected = managed
             .join("Unknown Artist")
             .join("Unknown Album")
@@ -877,5 +958,122 @@ mod tests {
         let delta = calculate_delta(&desired, &manifest);
         assert_eq!(delta.deletes.len(), 0);
         assert_eq!(delta.adds.len(), 1);
+    }
+
+    // ===== Story 4.3 Tests =====
+
+    #[test]
+    fn test_truncate_component_short_name_unchanged() {
+        let name = "A".repeat(255);
+        let result = truncate_component(&name, 255);
+        assert_eq!(result.chars().count(), 255);
+        assert_eq!(result, name);
+    }
+
+    #[test]
+    fn test_truncate_component_300_char_name() {
+        let name = "A".repeat(300);
+        let result = truncate_component(&name, 255);
+        assert_eq!(result.chars().count(), 255);
+    }
+
+    #[test]
+    fn test_truncate_component_trailing_dots_stripped() {
+        // Build a string that is exactly 255 chars with trailing dots
+        let base = "A".repeat(250);
+        let name = format!("{}.....X", base); // 257 chars; after take(255): 250 A's + 5 dots
+        let result = truncate_component(&name, 255);
+        assert!(!result.ends_with('.'), "Trailing dots must be stripped");
+        assert!(result.chars().count() <= 255);
+    }
+
+    #[test]
+    fn test_truncate_component_trailing_spaces_stripped() {
+        // Build a string that truncates to trailing spaces
+        let base = "A".repeat(250);
+        let name = format!("{}     X", base); // 257 chars; after take(255): 250 A's + 5 spaces
+        let result = truncate_component(&name, 255);
+        assert!(!result.ends_with(' '), "Trailing spaces must be stripped");
+        assert!(result.chars().count() <= 255);
+    }
+
+    #[test]
+    fn test_construct_file_path_short_name_no_original_name() {
+        let managed = std::path::PathBuf::from("Music");
+        let item = make_test_item("Short Track", Some("Artist"), Some("Album"), Some(1), Some("flac"));
+        let result = construct_file_path(&managed, &item).unwrap();
+        assert!(result.original_name.is_none(), "original_name must be None for short names");
+    }
+
+    #[test]
+    fn test_construct_file_path_long_filename_extension_preserved() {
+        let long_track_name: String = "A".repeat(300);
+        let managed = std::path::PathBuf::from("Music");
+        let item = make_test_item(&long_track_name, Some("Artist"), Some("Album"), Some(1), Some("flac"));
+        let result = construct_file_path(&managed, &item).unwrap();
+
+        let filename = result.path.file_name().unwrap().to_string_lossy();
+        assert!(
+            filename.ends_with(".flac"),
+            "Extension must be .flac, got: {}",
+            filename
+        );
+        assert!(
+            filename.chars().count() <= 255,
+            "Filename too long: {} chars",
+            filename.chars().count()
+        );
+        assert!(result.original_name.is_some(), "original_name must be set when truncated");
+        assert_eq!(result.original_name.unwrap(), long_track_name);
+    }
+
+    #[test]
+    fn test_construct_file_path_long_album_artist_truncated() {
+        let long_artist: String = "B".repeat(300);
+        let long_album: String = "C".repeat(300);
+        let managed = std::path::PathBuf::from("Music");
+        let item = make_test_item("Track", Some(&long_artist), Some(&long_album), Some(1), Some("mp3"));
+        let result = construct_file_path(&managed, &item).unwrap();
+
+        let components: Vec<_> = result.path.components().collect();
+        // path = Music / artist / album / filename
+        // components[1] = artist, components[2] = album
+        let artist_comp = components[1].as_os_str().to_string_lossy();
+        let album_comp = components[2].as_os_str().to_string_lossy();
+        assert!(
+            artist_comp.chars().count() <= 255,
+            "Artist component too long: {} chars",
+            artist_comp.chars().count()
+        );
+        assert!(
+            album_comp.chars().count() <= 255,
+            "Album component too long: {} chars",
+            album_comp.chars().count()
+        );
+    }
+
+    #[test]
+    fn test_synced_item_original_name_serializes_as_camel_case() {
+        let item = crate::device::SyncedItem {
+            jellyfin_id: "id1".to_string(),
+            name: "Truncated Track".to_string(),
+            album: None,
+            artist: None,
+            local_path: "Music/Track.flac".to_string(),
+            size_bytes: 1000,
+            synced_at: "2026-01-01".to_string(),
+            original_name: Some("Very Long Original Track Name".to_string()),
+        };
+
+        let value = serde_json::to_value(&item).unwrap();
+        assert!(
+            value.get("originalName").is_some(),
+            "Field must serialize as 'originalName' (camelCase)"
+        );
+        assert_eq!(
+            value["originalName"].as_str().unwrap(),
+            "Very Long Original Track Name"
+        );
+        assert!(value.get("original_name").is_none(), "snake_case key must not appear");
     }
 }

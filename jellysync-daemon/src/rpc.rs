@@ -1215,6 +1215,7 @@ mod tests {
                     local_path: "Music/track_a.flac".to_string(),
                     size_bytes: 1000,
                     synced_at: "2026-02-15T10:00:00Z".to_string(),
+                    original_name: None,
                 },
                 crate::device::SyncedItem {
                     jellyfin_id: "item-b".to_string(),
@@ -1224,6 +1225,7 @@ mod tests {
                     local_path: "Music/track_b.flac".to_string(),
                     size_bytes: 2000,
                     synced_at: "2026-02-15T10:00:00Z".to_string(),
+                    original_name: None,
                 },
             ],
         };

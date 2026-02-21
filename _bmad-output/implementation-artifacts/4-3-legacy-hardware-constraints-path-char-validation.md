@@ -1,6 +1,6 @@
 # Story 4.3: Legacy Hardware Constraints (Path & Char Validation)
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -26,45 +26,45 @@ so that **my sync never fails due to filesystem errors**.
 
 ## Tasks / Subtasks
 
-- [ ] **T1: Define constants and result type** (AC: #1, #2, #4)
-  - [ ] T1.1: Add `pub const MAX_PATH_COMPONENT_LEN: usize = 255;` constant to `sync.rs` (FAT32/Rockbox per-component limit)
-  - [ ] T1.2: Define `pub struct PathConstructionResult` in `sync.rs` with fields:
+- [x] **T1: Define constants and result type** (AC: #1, #2, #4)
+  - [x] T1.1: Add `pub const MAX_PATH_COMPONENT_LEN: usize = 255;` constant to `sync.rs` (FAT32/Rockbox per-component limit)
+  - [x] T1.2: Define `pub struct PathConstructionResult` in `sync.rs` with fields:
     - `pub path: std::path::PathBuf` — the final resolved path (truncated as necessary)
     - `pub original_name: Option<String>` — the original Jellyfin track name, set only if the filename was truncated
 
-- [ ] **T2: Implement truncation helpers** (AC: #2, #3)
-  - [ ] T2.1: Add `fn truncate_component(component: &str, max_len: usize) -> String` in `sync.rs`
+- [x] **T2: Implement truncation helpers** (AC: #2, #3)
+  - [x] T2.1: Add `fn truncate_component(component: &str, max_len: usize) -> String` in `sync.rs`
     - If `component.chars().count() <= max_len` → return `component.to_string()` unchanged
     - Otherwise collect the first `max_len` chars: `component.chars().take(max_len).collect::<String>()`
     - Strip trailing `' '` and `'.'` via `.trim_end_matches(|c| c == ' ' || c == '.')`
     - Return the cleaned truncated string
-  - [ ] T2.2: Add `fn truncate_filename(base: &str, extension: &str, max_len: usize) -> String` in `sync.rs`
+  - [x] T2.2: Add `fn truncate_filename(base: &str, extension: &str, max_len: usize) -> String` in `sync.rs`
     - `extension_with_dot_len = extension.chars().count() + 1` (for the dot separator)
     - If `extension_with_dot_len >= max_len` → return `base.chars().take(max_len).collect()` (pathological edge case)
     - Otherwise `max_base_len = max_len - extension_with_dot_len`
     - Truncate base to `max_base_len` chars, then strip trailing `' '` and `'.'`
     - Return `format!("{}.{}", truncated_base, extension)`
 
-- [ ] **T3: Update `construct_file_path` return type and add length validation** (AC: #1, #2, #3, #4, #5, #6)
-  - [ ] T3.1: Change return type from `Result<std::path::PathBuf>` to `Result<PathConstructionResult>`
-  - [ ] T3.2: After sanitizing `artist_clean` and `album_clean` with `sanitize_path_component`, apply `truncate_component(&artist_clean, MAX_PATH_COMPONENT_LEN)` and same for album
-  - [ ] T3.3: Construct the full filename string: `format!("{} - {}.{}", track_number, track_name_clean, extension)`
-  - [ ] T3.4: Check if the filename component (not the full path) exceeds `MAX_PATH_COMPONENT_LEN` chars
+- [x] **T3: Update `construct_file_path` return type and add length validation** (AC: #1, #2, #3, #4, #5, #6)
+  - [x] T3.1: Change return type from `Result<std::path::PathBuf>` to `Result<PathConstructionResult>`
+  - [x] T3.2: After sanitizing `artist_clean` and `album_clean` with `sanitize_path_component`, apply `truncate_component(&artist_clean, MAX_PATH_COMPONENT_LEN)` and same for album
+  - [x] T3.3: Construct the full filename string: `format!("{} - {}.{}", track_number, track_name_clean, extension)`
+  - [x] T3.4: Check if the filename component (not the full path) exceeds `MAX_PATH_COMPONENT_LEN` chars
     - If yes: call `truncate_filename` with the base part (`"{track_number} - {track_name_clean}"`), extension, and max len; set `original_name = Some(item.name.clone())`
     - If no: use filename as-is; set `original_name = None`
-  - [ ] T3.5: Remove the existing `// TODO: Add path length validation for legacy hardware (Story 4.3)` comment
-  - [ ] T3.6: Build `PathBuf` from components, return `Ok(PathConstructionResult { path, original_name })`
+  - [x] T3.5: Remove the existing `// TODO: Add path length validation for legacy hardware (Story 4.3)` comment
+  - [x] T3.6: Build `PathBuf` from components, return `Ok(PathConstructionResult { path, original_name })`
 
-- [ ] **T4: Add `original_name` field to `SyncedItem`** (AC: #4)
-  - [ ] T4.1: In `jellysync-daemon/src/device/mod.rs`, add to `SyncedItem` struct:
+- [x] **T4: Add `original_name` field to `SyncedItem`** (AC: #4)
+  - [x] T4.1: In `jellysync-daemon/src/device/mod.rs`, add to `SyncedItem` struct:
     ```rust
     #[serde(default)]
     pub original_name: Option<String>,
     ```
     (the struct-level `#[serde(rename_all = "camelCase")]` already applies — field serializes as `"originalName"`)
 
-- [ ] **T5: Update `execute_sync` to use new return type** (AC: #4, #5)
-  - [ ] T5.1: In `execute_sync` (`sync.rs`), change the `construct_file_path` call to unpack `PathConstructionResult`:
+- [x] **T5: Update `execute_sync` to use new return type** (AC: #4, #5)
+  - [x] T5.1: In `execute_sync` (`sync.rs`), change the `construct_file_path` call to unpack `PathConstructionResult`:
     ```rust
     let construction = match construct_file_path(&managed_path, &item) {
         Ok(result) => result,
@@ -72,7 +72,7 @@ so that **my sync never fails due to filesystem errors**.
     };
     let target_path = construction.path;
     ```
-  - [ ] T5.2: When pushing to `synced_items` on successful write, include `original_name`:
+  - [x] T5.2: When pushing to `synced_items` on successful write, include `original_name`:
     ```rust
     synced_items.push(crate::device::SyncedItem {
         // ... existing fields ...
@@ -80,17 +80,17 @@ so that **my sync never fails due to filesystem errors**.
     });
     ```
 
-- [ ] **T6: Update test suite for new `construct_file_path` return type** (AC: #1–#6)
-  - [ ] T6.1: Update `test_construct_file_path_basic` and `test_construct_file_path_missing_fields_uses_defaults` in `sync.rs` — unpack `.path` from the result
-  - [ ] T6.2: Add `test_truncate_component_short_name_unchanged` — name ≤ 255 chars returns identical string
-  - [ ] T6.3: Add `test_truncate_component_300_char_name` — 300-char string truncated to exactly 255 chars
-  - [ ] T6.4: Add `test_truncate_component_trailing_dots_stripped` — trailing dots removed after truncation
-  - [ ] T6.5: Add `test_truncate_component_trailing_spaces_stripped` — trailing spaces removed after truncation
-  - [ ] T6.6: Add `test_construct_file_path_short_name_no_original_name` — short track name yields `original_name: None`
-  - [ ] T6.7: Add `test_construct_file_path_long_filename_extension_preserved` — 300-char track name: filename ≤ 255 chars, extension preserved, `original_name` set
-  - [ ] T6.8: Add `test_construct_file_path_long_album_artist_truncated` — long artist and album strings are truncated, each component ≤ 255 chars
-  - [ ] T6.9: Add `test_synced_item_original_name_serializes_as_camel_case` — verify JSON field name is `"originalName"` via `serde_json::to_value`
-  - [ ] T6.10: Verify `cargo build` succeeds with 0 errors and 0 warnings
+- [x] **T6: Update test suite for new `construct_file_path` return type** (AC: #1–#6)
+  - [x] T6.1: Update `test_construct_file_path_basic` and `test_construct_file_path_missing_fields_uses_defaults` in `sync.rs` — unpack `.path` from the result
+  - [x] T6.2: Add `test_truncate_component_short_name_unchanged` — name ≤ 255 chars returns identical string
+  - [x] T6.3: Add `test_truncate_component_300_char_name` — 300-char string truncated to exactly 255 chars
+  - [x] T6.4: Add `test_truncate_component_trailing_dots_stripped` — trailing dots removed after truncation
+  - [x] T6.5: Add `test_truncate_component_trailing_spaces_stripped` — trailing spaces removed after truncation
+  - [x] T6.6: Add `test_construct_file_path_short_name_no_original_name` — short track name yields `original_name: None`
+  - [x] T6.7: Add `test_construct_file_path_long_filename_extension_preserved` — 300-char track name: filename ≤ 255 chars, extension preserved, `original_name` set
+  - [x] T6.8: Add `test_construct_file_path_long_album_artist_truncated` — long artist and album strings are truncated, each component ≤ 255 chars
+  - [x] T6.9: Add `test_synced_item_original_name_serializes_as_camel_case` — verify JSON field name is `"originalName"` via `serde_json::to_value`
+  - [x] T6.10: Verify `cargo build` succeeds with 0 errors and 0 warnings
 
 ## Dev Notes
 
@@ -388,6 +388,26 @@ Claude Sonnet 4.6 (claude-sonnet-4-6)
 
 ### Debug Log References
 
+None — implementation proceeded without blockers.
+
 ### Completion Notes List
 
+- Implemented `MAX_PATH_COMPONENT_LEN = 255` constant and `PathConstructionResult` struct in `sync.rs`
+- Added `truncate_component` (strips trailing spaces/dots, char-aware) and `truncate_filename` (preserves extension) private helpers
+- Updated `construct_file_path` return type from `Result<PathBuf>` to `Result<PathConstructionResult>`; sanitize-then-truncate order enforced for all components
+- Updated `execute_sync` to unpack `PathConstructionResult`; `original_name` propagated to `SyncedItem` on successful write
+- Added `original_name: Option<String>` with `#[serde(default)]` to `SyncedItem` — backward-compatible with existing manifests
+- Updated 4 `SyncedItem` constructors in test files (`sync.rs`, `device/tests.rs`, `rpc.rs`) to include `original_name: None`
+- Added 8 new Story 4.3 tests; updated 2 existing `construct_file_path` tests to unpack `.path`
+- All 65 tests pass, 0 warnings, 0 errors
+
 ### File List
+
+- `jellysync-daemon/src/sync.rs`
+- `jellysync-daemon/src/device/mod.rs`
+- `jellysync-daemon/src/device/tests.rs`
+- `jellysync-daemon/src/rpc.rs`
+
+## Change Log
+
+- 2026-02-21: Story 4.3 implemented — added legacy hardware path/char validation with automatic truncation, `PathConstructionResult` struct, `SyncedItem.original_name` field, and comprehensive test suite (65 tests passing)

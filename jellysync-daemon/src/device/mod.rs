@@ -16,6 +16,8 @@ pub struct SyncedItem {
     pub local_path: String,
     pub size_bytes: u64,
     pub synced_at: String,
+    #[serde(default)]
+    pub original_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

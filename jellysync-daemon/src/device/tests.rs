@@ -202,6 +202,7 @@ fn test_write_manifest_atomic() {
                 local_path: "Music/Artist/Album/Track.flac".to_string(),
                 size_bytes: 1000,
                 synced_at: "2026-02-15T10:00:00Z".to_string(),
+                original_name: None,
             },
         ],
     };
@@ -252,6 +253,7 @@ fn test_write_manifest_overwrites_existing() {
                 local_path: "Music/track.flac".to_string(),
                 size_bytes: 500,
                 synced_at: "2026-02-15T12:00:00Z".to_string(),
+                original_name: None,
             },
         ],
     };
