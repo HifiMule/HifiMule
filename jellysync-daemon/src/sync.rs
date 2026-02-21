@@ -10,6 +10,42 @@ use tokio::sync::RwLock;
 
 use crate::device::DeviceManifest;
 
+/// Returns the current UTC time as an ISO 8601 / RFC 3339 string.
+///
+/// Format: `YYYY-MM-DDTHH:MM:SSZ`
+///
+/// Uses pure `std` arithmetic — no `chrono` dependency required.
+fn now_iso8601() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // Days since epoch
+    let days = secs / 86400;
+    let day_secs = secs % 86400;
+    let hours = day_secs / 3600;
+    let minutes = (day_secs % 3600) / 60;
+    let seconds = day_secs % 60;
+
+    // Civil date from days since 1970-01-01 (algorithm from Howard Hinnant)
+    let z = days as i64 + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y, m, d, hours, minutes, seconds
+    )
+}
+
 /// An item desired for sync (from the UI basket / Jellyfin API).
 #[derive(Debug, Clone)]
 pub struct DesiredItem {
@@ -100,14 +136,12 @@ impl SyncOperationManager {
         }
     }
 
-    pub async fn create_operation(&self, operation_id: String, files_total: usize) -> SyncOperation {
-        // Generate ISO8601/RFC3339 timestamp
-        // Using unix timestamp as placeholder - in production would use proper datetime crate
-        let unix_timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let timestamp = unix_timestamp.to_string();
+    pub async fn create_operation(
+        &self,
+        operation_id: String,
+        files_total: usize,
+    ) -> SyncOperation {
+        let timestamp = now_iso8601();
 
         let operation = SyncOperation {
             id: operation_id.clone(),
@@ -163,10 +197,7 @@ pub fn construct_file_path(
     item: &crate::api::JellyfinItem,
 ) -> Result<PathConstructionResult> {
     // Extract and sanitize components
-    let artist = item
-        .album_artist
-        .as_deref()
-        .unwrap_or("Unknown Artist");
+    let artist = item.album_artist.as_deref().unwrap_or("Unknown Artist");
     let album = item.album.as_deref().unwrap_or("Unknown Album");
     let track_name = &item.name;
 
@@ -177,10 +208,7 @@ pub fn construct_file_path(
         .unwrap_or_else(|| String::from("00"));
 
     // Determine file extension from Container field
-    let extension = item
-        .container
-        .as_deref()
-        .unwrap_or("mp3");
+    let extension = item.container.as_deref().unwrap_or("mp3");
 
     // Step 1: Sanitize path components (remove invalid chars)
     let artist_clean = sanitize_path_component(artist);
@@ -208,7 +236,10 @@ pub fn construct_file_path(
         .join(album_final)
         .join(filename);
 
-    Ok(PathConstructionResult { path, original_name })
+    Ok(PathConstructionResult {
+        path,
+        original_name,
+    })
 }
 
 /// Sanitizes a path component by removing/replacing invalid filesystem characters.
@@ -237,7 +268,9 @@ fn truncate_component(component: &str, max_len: usize) -> String {
         return component.to_string();
     }
     let truncated: String = component.chars().take(max_len).collect();
-    truncated.trim_end_matches(|c| c == ' ' || c == '.').to_string()
+    truncated
+        .trim_end_matches(|c| c == ' ' || c == '.')
+        .to_string()
 }
 
 /// Truncates a filename (base + extension) to `max_len` characters, preserving the extension.
@@ -283,7 +316,12 @@ pub async fn execute_sync(
     for add_item in delta.adds.iter() {
         // Fetch item details to get metadata for path construction
         let item_result = jellyfin_client
-            .get_item_details(jellyfin_url, jellyfin_token, jellyfin_user_id, &add_item.jellyfin_id)
+            .get_item_details(
+                jellyfin_url,
+                jellyfin_token,
+                jellyfin_user_id,
+                &add_item.jellyfin_id,
+            )
             .await;
 
         let item = match item_result {
@@ -354,21 +392,21 @@ pub async fn execute_sync(
                     operation.current_file = Some(file_name_inner);
                     operation.bytes_current = bytes_written;
                     operation.bytes_total = total;
-                    op_manager_inner.update_operation(&op_id_inner, operation).await;
+                    op_manager_inner
+                        .update_operation(&op_id_inner, operation)
+                        .await;
                 }
             });
         }) as ProgressCallback;
 
         // Write file to disk using atomic pattern
-        let write_result = write_file_streamed(stream, &target_path, total_size, progress_callback).await;
+        let write_result =
+            write_file_streamed(stream, &target_path, total_size, progress_callback).await;
 
         match write_result {
             Ok(_) => {
                 // Successfully synced - add to synced items
-                let unix_timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
+                let synced_at = now_iso8601();
 
                 synced_items.push(crate::device::SyncedItem {
                     jellyfin_id: add_item.jellyfin_id.clone(),
@@ -381,14 +419,16 @@ pub async fn execute_sync(
                         .to_string_lossy()
                         .to_string(),
                     size_bytes: add_item.size_bytes,
-                    synced_at: unix_timestamp.to_string(),
+                    synced_at,
                     original_name: construction.original_name,
                 });
 
                 // Update operation progress
                 if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
                     operation.files_completed += 1;
-                    operation_manager.update_operation(&operation_id, operation).await;
+                    operation_manager
+                        .update_operation(&operation_id, operation)
+                        .await;
                 }
             }
             Err(e) => {
@@ -421,7 +461,9 @@ pub async fn execute_sync(
                 // Successfully deleted
                 if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
                     operation.files_completed += 1;
-                    operation_manager.update_operation(&operation_id, operation).await;
+                    operation_manager
+                        .update_operation(&operation_id, operation)
+                        .await;
                 }
             }
             Err(e) => {
@@ -844,7 +886,10 @@ mod tests {
         assert_eq!(sanitize_path_component("Hello: World"), "Hello_ World");
         assert_eq!(sanitize_path_component("A<B>C"), "A_B_C");
         assert_eq!(sanitize_path_component("file/name\\test"), "file_name_test");
-        assert_eq!(sanitize_path_component("pipe|question?star*"), "pipe_question_star_");
+        assert_eq!(
+            sanitize_path_component("pipe|question?star*"),
+            "pipe_question_star_"
+        );
         assert_eq!(sanitize_path_component("ok chars 123"), "ok chars 123");
     }
 
@@ -856,7 +901,11 @@ mod tests {
     #[tokio::test]
     async fn test_write_file_streamed_success() {
         let tmp_dir = tempfile::tempdir().unwrap();
-        let file_path = tmp_dir.path().join("artist").join("album").join("01 - track.flac");
+        let file_path = tmp_dir
+            .path()
+            .join("artist")
+            .join("album")
+            .join("01 - track.flac");
 
         let data: Vec<std::result::Result<bytes::Bytes, reqwest::Error>> = vec![
             Ok(bytes::Bytes::from("chunk1")),
@@ -880,13 +929,13 @@ mod tests {
 
         // Verify .tmp file was cleaned up (renamed to final)
         let tmp_path = file_path.with_file_name("01 - track.flac.tmp");
-        assert!(!tmp_path.exists(), ".tmp file should not remain after success");
+        assert!(
+            !tmp_path.exists(),
+            ".tmp file should not remain after success"
+        );
 
         // Verify progress was called for each chunk
-        assert_eq!(
-            progress_count.load(std::sync::atomic::Ordering::Relaxed),
-            3
-        );
+        assert_eq!(progress_count.load(std::sync::atomic::Ordering::Relaxed), 3);
     }
 
     #[tokio::test]
@@ -1000,16 +1049,31 @@ mod tests {
     #[test]
     fn test_construct_file_path_short_name_no_original_name() {
         let managed = std::path::PathBuf::from("Music");
-        let item = make_test_item("Short Track", Some("Artist"), Some("Album"), Some(1), Some("flac"));
+        let item = make_test_item(
+            "Short Track",
+            Some("Artist"),
+            Some("Album"),
+            Some(1),
+            Some("flac"),
+        );
         let result = construct_file_path(&managed, &item).unwrap();
-        assert!(result.original_name.is_none(), "original_name must be None for short names");
+        assert!(
+            result.original_name.is_none(),
+            "original_name must be None for short names"
+        );
     }
 
     #[test]
     fn test_construct_file_path_long_filename_extension_preserved() {
         let long_track_name: String = "A".repeat(300);
         let managed = std::path::PathBuf::from("Music");
-        let item = make_test_item(&long_track_name, Some("Artist"), Some("Album"), Some(1), Some("flac"));
+        let item = make_test_item(
+            &long_track_name,
+            Some("Artist"),
+            Some("Album"),
+            Some(1),
+            Some("flac"),
+        );
         let result = construct_file_path(&managed, &item).unwrap();
 
         let filename = result.path.file_name().unwrap().to_string_lossy();
@@ -1023,7 +1087,10 @@ mod tests {
             "Filename too long: {} chars",
             filename.chars().count()
         );
-        assert!(result.original_name.is_some(), "original_name must be set when truncated");
+        assert!(
+            result.original_name.is_some(),
+            "original_name must be set when truncated"
+        );
         assert_eq!(result.original_name.unwrap(), long_track_name);
     }
 
@@ -1032,7 +1099,13 @@ mod tests {
         let long_artist: String = "B".repeat(300);
         let long_album: String = "C".repeat(300);
         let managed = std::path::PathBuf::from("Music");
-        let item = make_test_item("Track", Some(&long_artist), Some(&long_album), Some(1), Some("mp3"));
+        let item = make_test_item(
+            "Track",
+            Some(&long_artist),
+            Some(&long_album),
+            Some(1),
+            Some("mp3"),
+        );
         let result = construct_file_path(&managed, &item).unwrap();
 
         let components: Vec<_> = result.path.components().collect();
@@ -1074,6 +1147,9 @@ mod tests {
             value["originalName"].as_str().unwrap(),
             "Very Long Original Track Name"
         );
-        assert!(value.get("original_name").is_none(), "snake_case key must not appear");
+        assert!(
+            value.get("original_name").is_none(),
+            "snake_case key must not appear"
+        );
     }
 }

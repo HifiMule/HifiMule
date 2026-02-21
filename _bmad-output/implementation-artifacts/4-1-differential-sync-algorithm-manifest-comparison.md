@@ -1,6 +1,6 @@
 # Story 4.1: Differential Sync Algorithm (Manifest Comparison)
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -188,23 +188,26 @@ No blocking issues encountered during implementation.
 - `jellysync-daemon/src/tests.rs` (modified) — Updated `DeviceManifest` literal to include `synced_items`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml` (modified) — Story status updated
 
-## Code Review Findings (Adversarial)
-**Date:** 2026-02-15
+## Code Review Findings (Adversarial) — Round 2
+**Date:** 2026-02-21
 **Reviewer:** Antigravity
 
-### Critical Issues
-- [x] **Data Loss Risk**: `sync_calculate_delta` silently dropped items if API call failed, potentially causing unintended deletions.
-    - **Fix**: Updated `rpc.rs` to propagate errors and abort sync if any item fetch fails.
+### High Issues
+- [x] **H1: `album` field silently dropped in `sync_calculate_delta` RPC** — `rpc.rs:679` set `album: None` despite `JellyfinItem` having `album: Option<String>`. Broke AC #3 metadata fallback matching in production.
+    - **Fix**: Changed to `album: item.album`.
 
 ### Medium Issues
-- [x] **Unbounded Concurrency**: `handle_sync_calculate_delta` spawned unlimited futures.
-    - **Fix**: Implemented `stream::buffer_unordered(10)` to limit concurrent requests.
-- [x] **Performance**: Inefficient metadata matching in `calculate_delta`.
-    - **Fix**: Optimized `sync.rs` to build metadata map and delete list in a single pass O(N).
+- [x] **M1: `synced_at` uses unix epoch string instead of ISO 8601** — `sync.rs` wrote `"1708000000"` instead of `"2026-02-15T10:30:00Z"`.
+    - **Fix**: Added `now_iso8601()` helper using Hinnant civil-date algorithm. No new dependencies.
+- [x] **M2: `size_bytes: 0` hardcoded in `sync_calculate_delta`** — `SyncAddItem` inherited zero, breaking UI size projections.
+    - **Fix**: Extracts size from `media_sources[0].size`.
+- [x] **M3: In-memory manifest not refreshed after sync** — `DeviceManager.current_device` was stale after `write_manifest()` to disk.
+    - **Fix**: Added `update_current_device()` to `DeviceManager`, called after sync writes.
 
 ### Low Issues
-- [ ] **Platform Specificity**: Filesystem case sensitivity assumption.
-    - **Note**: Deferring to future story for cross-platform hardening.
+- [x] **L1: Story/sprint status inconsistency** — Story said `review` but sprint-status said `done`.
+    - **Fix**: Story status updated to `done`.
+- [ ] **L2: Managed path hardcoded to `"Music"` in `execute_sync`** — Deferring to future story.
 
 ## Status
 **Review Status**: Passed (with fixes applied)

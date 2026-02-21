@@ -137,6 +137,13 @@ impl DeviceManager {
         self.current_device_path.read().await.clone()
     }
 
+    /// Updates the in-memory manifest without re-detecting the device.
+    /// Used after sync operations write a new manifest to disk.
+    pub async fn update_current_device(&self, manifest: DeviceManifest) {
+        let mut current = self.current_device.write().await;
+        *current = Some(manifest);
+    }
+
     pub async fn get_device_storage(&self) -> Option<StorageInfo> {
         let path = self.get_current_device_path().await?;
         get_storage_info(&path)
@@ -197,14 +204,12 @@ impl DeviceManager {
         // Sort alphabetically
         folders.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
-        let device_name = manifest
-            .and_then(|m| m.name)
-            .unwrap_or_else(|| {
-                device_path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "Unknown Device".to_string())
-            });
+        let device_name = manifest.and_then(|m| m.name).unwrap_or_else(|| {
+            device_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Unknown Device".to_string())
+        });
 
         Ok(Some(DeviceRootFoldersResponse {
             device_name,

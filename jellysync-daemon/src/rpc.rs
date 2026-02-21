@@ -124,7 +124,9 @@ async fn handler(
         "sync_get_device_status_map" => handle_sync_get_device_status_map(&state).await,
         "sync_calculate_delta" => handle_sync_calculate_delta(&state, payload.params).await,
         "sync_execute" => handle_sync_execute(&state, payload.params).await,
-        "sync_get_operation_status" => handle_sync_get_operation_status(&state, payload.params).await,
+        "sync_get_operation_status" => {
+            handle_sync_get_operation_status(&state, payload.params).await
+        }
         _ => Err(JsonRpcError {
             code: ERR_METHOD_NOT_FOUND,
             message: "Method not found".to_string(),
@@ -673,13 +675,21 @@ async fn handle_sync_calculate_delta(
             let user_id = user_id.clone();
             async move {
                 match client.get_item_details(&url, &token, &user_id, &id).await {
-                    Ok(item) => Ok(crate::sync::DesiredItem {
-                        jellyfin_id: item.id,
-                        name: item.name,
-                        album: None, // JellyfinItem doesn't have album field directly
-                        artist: item.album_artist,
-                        size_bytes: 0, // Size will be determined during actual sync
-                    }),
+                    Ok(item) => {
+                        let size_bytes = item
+                            .media_sources
+                            .as_ref()
+                            .and_then(|sources| sources.first())
+                            .and_then(|s| s.size)
+                            .unwrap_or(0) as u64;
+                        Ok(crate::sync::DesiredItem {
+                            jellyfin_id: item.id,
+                            name: item.name,
+                            album: item.album,
+                            artist: item.album_artist,
+                            size_bytes,
+                        })
+                    }
                     Err(e) => Err(format!("Failed to fetch item {}: {}", id, e)),
                 }
             }
@@ -719,8 +729,8 @@ async fn handle_sync_execute(
     })?;
 
     // Extract delta from params
-    let delta: crate::sync::SyncDelta = serde_json::from_value(params["delta"].clone())
-        .map_err(|e| JsonRpcError {
+    let delta: crate::sync::SyncDelta =
+        serde_json::from_value(params["delta"].clone()).map_err(|e| JsonRpcError {
             code: ERR_INVALID_PARAMS,
             message: format!("Invalid delta parameter: {}", e),
             data: None,
@@ -782,10 +792,8 @@ async fn handle_sync_execute(
                     manifest.synced_items.extend(synced_items);
 
                     // Remove successfully deleted items from manifest
-                    let failed_ids: std::collections::HashSet<&str> = errors
-                        .iter()
-                        .map(|e| e.jellyfin_id.as_str())
-                        .collect();
+                    let failed_ids: std::collections::HashSet<&str> =
+                        errors.iter().map(|e| e.jellyfin_id.as_str()).collect();
                     manifest.synced_items.retain(|item| {
                         !delta.deletes.iter().any(|d| {
                             d.jellyfin_id == item.jellyfin_id
@@ -797,6 +805,9 @@ async fn handle_sync_execute(
                     if let Err(e) = crate::device::write_manifest(&device_path, &manifest) {
                         eprintln!("Failed to write manifest: {}", e);
                     }
+
+                    // Update in-memory state so subsequent RPC calls see fresh data
+                    device_manager.update_current_device(manifest).await;
                 }
 
                 // Update operation status
@@ -841,13 +852,11 @@ async fn handle_sync_get_operation_status(
         data: None,
     })?;
 
-    let operation_id = params["operationId"]
-        .as_str()
-        .ok_or(JsonRpcError {
-            code: ERR_INVALID_PARAMS,
-            message: "Missing operationId".to_string(),
-            data: None,
-        })?;
+    let operation_id = params["operationId"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing operationId".to_string(),
+        data: None,
+    })?;
 
     match state
         .sync_operation_manager
