@@ -54,6 +54,7 @@ pub struct DesiredItem {
     pub album: Option<String>,
     pub artist: Option<String>,
     pub size_bytes: u64,
+    pub etag: Option<String>,
 }
 
 /// An item to be added to the device.
@@ -65,6 +66,7 @@ pub struct SyncAddItem {
     pub album: Option<String>,
     pub artist: Option<String>,
     pub size_bytes: u64,
+    pub etag: Option<String>,
 }
 
 /// An item to be deleted from the device.
@@ -76,13 +78,31 @@ pub struct SyncDeleteItem {
     pub name: String,
 }
 
+/// An item whose Jellyfin ID changed but file remains identical.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncIdChangeItem {
+    pub old_jellyfin_id: String,
+    pub new_jellyfin_id: String,
+    pub old_local_path: String,
+    pub name: String,
+    pub album: Option<String>,
+    pub artist: Option<String>,
+    pub size_bytes: u64,
+    pub etag: Option<String>,
+    /// Preserved from the old manifest entry — set if the filename was previously truncated.
+    #[serde(default)]
+    pub original_name: Option<String>,
+}
+
 /// The result of a delta calculation between desired items and current manifest.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncDelta {
     pub adds: Vec<SyncAddItem>,
     pub deletes: Vec<SyncDeleteItem>,
-    pub unchanged: Vec<String>,
+    pub id_changes: Vec<SyncIdChangeItem>,
+    pub unchanged: usize,
 }
 
 /// Status of a sync operation.
@@ -178,6 +198,7 @@ pub const MAX_PATH_COMPONENT_LEN: usize = 255;
 ///
 /// Contains the resolved filesystem path and an optional mapping of the
 /// original Jellyfin track name if truncation was applied.
+#[derive(Debug)]
 pub struct PathConstructionResult {
     /// The final path where the file will be written (truncated as necessary).
     pub path: std::path::PathBuf,
@@ -263,25 +284,39 @@ fn sanitize_path_component(component: &str) -> String {
 ///
 /// Uses `chars().count()` for character-aware length (not byte length), safe for Unicode.
 /// Strips trailing spaces and dots after truncation — forbidden by FAT32.
+/// Falls back to `"_"` if the result would be empty (all chars stripped), preventing
+/// invalid empty path components like `Music//Album/track.flac`.
 fn truncate_component(component: &str, max_len: usize) -> String {
     if component.chars().count() <= max_len {
         return component.to_string();
     }
     let truncated: String = component.chars().take(max_len).collect();
-    truncated
-        .trim_end_matches(|c| c == ' ' || c == '.')
-        .to_string()
+    let cleaned = truncated.trim_end_matches(|c| c == ' ' || c == '.');
+    if cleaned.is_empty() {
+        "_".to_string()
+    } else {
+        cleaned.to_string()
+    }
 }
 
 /// Truncates a filename (base + extension) to `max_len` characters, preserving the extension.
 ///
 /// The extension is always preserved — only the base name is truncated.
 /// Strips trailing spaces and dots from the base after truncation (FAT32 requirement).
+/// In the pathological case where the extension itself is ≥ max_len characters, the extension
+/// is truncated to fit (dot + first N-1 chars) rather than dropping it — preserving extension
+/// is more important than strict length compliance for device compatibility.
 fn truncate_filename(base: &str, extension: &str, max_len: usize) -> String {
     let ext_len = extension.chars().count() + 1; // +1 for the '.' separator
     if ext_len >= max_len {
-        // Pathological: extension itself fills the limit — truncate base to nothing
-        return base.chars().take(max_len).collect();
+        // Pathological: extension itself fills the limit.
+        // Return a truncated extension rather than dropping it entirely.
+        let truncated_ext: String = extension
+            .chars()
+            .take(max_len.saturating_sub(1))
+            .collect();
+        let clean_ext = truncated_ext.trim_end_matches(|c| c == ' ' || c == '.');
+        return format!(".{}", clean_ext);
     }
     let max_base_len = max_len - ext_len;
     let truncated_base: String = base.chars().take(max_base_len).collect();
@@ -421,6 +456,7 @@ pub async fn execute_sync(
                     size_bytes: add_item.size_bytes,
                     synced_at,
                     original_name: construction.original_name,
+                    etag: add_item.etag.clone(),
                 });
 
                 // Update operation progress
@@ -473,6 +509,31 @@ pub async fn execute_sync(
                     error_message: format!("Failed to delete file: {}", e),
                 });
             }
+        }
+    }
+
+    // Process ID changes (virtual adds: we don't download, just update manifest records)
+    for id_change in &delta.id_changes {
+        let synced_at = now_iso8601(); // Or we could try to preserve original synced_at if we wanted
+
+        synced_items.push(crate::device::SyncedItem {
+            jellyfin_id: id_change.new_jellyfin_id.clone(),
+            name: id_change.name.clone(),
+            album: id_change.album.clone(),
+            artist: id_change.artist.clone(),
+            local_path: id_change.old_local_path.clone(), // Keep existing path!
+            size_bytes: id_change.size_bytes,
+            synced_at,
+            original_name: id_change.original_name.clone(), // Preserved from old manifest (AC #4)
+            etag: id_change.etag.clone(),
+        });
+
+        // Update operation progress (an ID change is instantly completed)
+        if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
+            operation.files_completed += 1;
+            operation_manager
+                .update_operation(&operation_id, operation)
+                .await;
         }
     }
 
@@ -582,6 +643,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
             album: i.album.clone(),
             artist: i.artist.clone(),
             size_bytes: i.size_bytes,
+            etag: i.etag.clone(),
         })
         .collect();
 
@@ -590,6 +652,12 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
     let mut deletes: Vec<SyncDeleteItem> = Vec::new();
     let mut delete_by_metadata: HashMap<(String, Option<String>, Option<String>), usize> =
         HashMap::new();
+    // Index original_name by jellyfin_id for ID-change preservation (AC #4 requirement)
+    let original_name_by_id: HashMap<&str, Option<&str>> = manifest
+        .synced_items
+        .iter()
+        .map(|i| (i.jellyfin_id.as_str(), i.original_name.as_deref()))
+        .collect();
 
     for item in &manifest.synced_items {
         if !desired_ids.contains(item.jellyfin_id.as_str()) {
@@ -612,6 +680,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
     // Find adds that match a delete by metadata (ID change detection)
     let mut matched_add_indices: HashSet<usize> = HashSet::new();
     let mut matched_delete_indices: HashSet<usize> = HashSet::new();
+    let mut id_changes: Vec<SyncIdChangeItem> = Vec::new();
 
     for (add_idx, add) in adds.iter().enumerate() {
         let key = (
@@ -624,15 +693,34 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
             if !matched_delete_indices.contains(&del_idx) {
                 matched_add_indices.insert(add_idx);
                 matched_delete_indices.insert(del_idx);
+
+                let del = &deletes[del_idx];
+                // Preserve original_name from the old manifest entry (AC #4: must not lose mapping)
+                let preserved_original_name = original_name_by_id
+                    .get(del.jellyfin_id.as_str())
+                    .and_then(|&v| v)
+                    .map(|s| s.to_string());
+                id_changes.push(SyncIdChangeItem {
+                    old_jellyfin_id: del.jellyfin_id.clone(),
+                    new_jellyfin_id: add.jellyfin_id.clone(),
+                    old_local_path: del.local_path.clone(),
+                    name: add.name.clone(),
+                    album: add.album.clone(),
+                    artist: add.artist.clone(),
+                    size_bytes: add.size_bytes,
+                    etag: add.etag.clone(),
+                    original_name: preserved_original_name,
+                });
             }
         }
     }
 
+    let unchanged: usize = desired_items
+        .iter()
+        .filter(|i| current_ids.contains(i.jellyfin_id.as_str()))
+        .count();
+
     // Remove matched pairs — these are ID reassignments, not real adds/deletes
-    // The add still stays (new ID needs to be recorded), but the delete is removed
-    // since the file content is equivalent.
-    // Actually, for ID changes: we keep the add (new ID) and remove the delete
-    // so the file stays on disk but gets updated in manifest with new ID.
     let deletes: Vec<SyncDeleteItem> = deletes
         .into_iter()
         .enumerate()
@@ -640,20 +728,17 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
         .map(|(_, d)| d)
         .collect();
 
-    // Keep all adds — even ID-changed ones need to be re-recorded with new ID
-    // But actually, matched adds should also stay since the manifest needs updating.
-    // The adds remain as-is; only the deletes are suppressed for matched pairs.
-
-    // Unchanged: items in both sets
-    let unchanged: Vec<String> = desired_items
-        .iter()
-        .filter(|i| current_ids.contains(i.jellyfin_id.as_str()))
-        .map(|i| i.jellyfin_id.clone())
+    let adds: Vec<SyncAddItem> = adds
+        .into_iter()
+        .enumerate()
+        .filter(|(idx, _)| !matched_add_indices.contains(idx))
+        .map(|(_, a)| a)
         .collect();
 
     SyncDelta {
         adds,
         deletes,
+        id_changes,
         unchanged,
     }
 }
@@ -688,6 +773,7 @@ mod tests {
             size_bytes: 10_000_000,
             synced_at: "2026-02-15T10:00:00Z".to_string(),
             original_name: None,
+            etag: Some("test-etag".to_string()),
         }
     }
 
@@ -710,6 +796,7 @@ mod tests {
             recursive_item_count: None,
             cumulative_run_time_ticks: None,
             media_sources: None,
+            etag: None,
         }
     }
 
@@ -725,6 +812,7 @@ mod tests {
             album: album.map(|s| s.to_string()),
             artist: artist.map(|s| s.to_string()),
             size_bytes: 10_000_000,
+            etag: Some("test-etag".to_string()),
         }
     }
 
@@ -739,7 +827,8 @@ mod tests {
         let delta = calculate_delta(&desired, &manifest);
         assert_eq!(delta.adds.len(), 2);
         assert_eq!(delta.deletes.len(), 0);
-        assert_eq!(delta.unchanged.len(), 0);
+        assert_eq!(delta.id_changes.len(), 0);
+        assert_eq!(delta.unchanged, 0);
     }
 
     #[test]
@@ -758,7 +847,8 @@ mod tests {
         let delta = calculate_delta(&desired, &manifest);
         assert_eq!(delta.adds.len(), 0);
         assert_eq!(delta.deletes.len(), 0);
-        assert_eq!(delta.unchanged.len(), 2);
+        assert_eq!(delta.id_changes.len(), 0);
+        assert_eq!(delta.unchanged, 2);
     }
 
     #[test]
@@ -779,8 +869,8 @@ mod tests {
         assert_eq!(delta.adds[0].jellyfin_id, "c");
         assert_eq!(delta.deletes.len(), 1);
         assert_eq!(delta.deletes[0].jellyfin_id, "b");
-        assert_eq!(delta.unchanged.len(), 1);
-        assert_eq!(delta.unchanged[0], "a");
+        assert_eq!(delta.id_changes.len(), 0);
+        assert_eq!(delta.unchanged, 1);
     }
 
     #[test]
@@ -799,7 +889,8 @@ mod tests {
         let delta = calculate_delta(&desired, &manifest);
         assert_eq!(delta.adds.len(), 2);
         assert_eq!(delta.deletes.len(), 2);
-        assert_eq!(delta.unchanged.len(), 0);
+        assert_eq!(delta.id_changes.len(), 0);
+        assert_eq!(delta.unchanged, 0);
     }
 
     #[test]
@@ -821,12 +912,13 @@ mod tests {
         )];
 
         let delta = calculate_delta(&desired, &manifest);
-        // The delete should be suppressed (ID change detected via metadata match)
+        // The delete and add should be suppressed, moved to id_changes
         assert_eq!(delta.deletes.len(), 0);
-        // The add remains so the manifest gets updated with the new ID
-        assert_eq!(delta.adds.len(), 1);
-        assert_eq!(delta.adds[0].jellyfin_id, "new-id-1");
-        assert_eq!(delta.unchanged.len(), 0);
+        assert_eq!(delta.adds.len(), 0);
+        assert_eq!(delta.id_changes.len(), 1);
+        assert_eq!(delta.id_changes[0].new_jellyfin_id, "new-id-1");
+        assert_eq!(delta.id_changes[0].old_jellyfin_id, "old-id-1");
+        assert_eq!(delta.unchanged, 0);
     }
 
     // ===== Story 4.2 Tests =====
@@ -846,6 +938,7 @@ mod tests {
             recursive_item_count: None,
             cumulative_run_time_ticks: None,
             media_sources: None,
+            etag: None,
         };
 
         let path = construct_file_path(&managed, &item).unwrap().path;
@@ -871,6 +964,7 @@ mod tests {
             recursive_item_count: None,
             cumulative_run_time_ticks: None,
             media_sources: None,
+            etag: None,
         };
 
         let path = construct_file_path(&managed, &item).unwrap().path;
@@ -1006,7 +1100,8 @@ mod tests {
 
         let delta = calculate_delta(&desired, &manifest);
         assert_eq!(delta.deletes.len(), 0);
-        assert_eq!(delta.adds.len(), 1);
+        assert_eq!(delta.adds.len(), 0);
+        assert_eq!(delta.id_changes.len(), 1);
     }
 
     // ===== Story 4.3 Tests =====
@@ -1125,6 +1220,76 @@ mod tests {
         );
     }
 
+    // ===== Code Review Fix Tests =====
+
+    #[test]
+    fn test_truncate_component_all_dots_returns_fallback() {
+        // All-dots string truncates and strips to empty → fallback "_"
+        let dots = ".".repeat(300);
+        let result = truncate_component(&dots, 255);
+        assert_eq!(result, "_", "All-dots component must fall back to '_'");
+    }
+
+    #[test]
+    fn test_truncate_component_all_spaces_returns_fallback() {
+        // All-spaces string truncates and strips to empty → fallback "_"
+        let spaces = " ".repeat(300);
+        let result = truncate_component(&spaces, 255);
+        assert_eq!(result, "_", "All-spaces component must fall back to '_'");
+    }
+
+    #[test]
+    fn test_truncate_filename_pathological_extension_preserves_dot() {
+        // Extension longer than max_len — must still return something with a dot
+        let long_ext = "x".repeat(300);
+        let result = truncate_filename("base", &long_ext, 255);
+        assert!(result.starts_with('.'), "Result must start with '.' to preserve extension: {}", result);
+        assert!(result.chars().count() <= 256, "Result should be close to limit: {} chars", result.chars().count());
+    }
+
+    #[test]
+    fn test_truncate_filename_pathological_does_not_drop_extension_entirely() {
+        // Verify old bug is fixed: no extensionless filename returned
+        let long_ext = "flac".repeat(70); // ~280 chars
+        let result = truncate_filename("01 - Track", &long_ext, 255);
+        assert!(result.contains('.'), "Extension dot must be present: {}", result);
+    }
+
+    #[test]
+    fn test_calculate_delta_id_change_preserves_original_name() {
+        let mut manifest = empty_manifest();
+        manifest.synced_items = vec![{
+            let mut item = make_synced_item("old-id", "My Song", Some("My Album"), Some("My Artist"));
+            item.original_name = Some("My Very Long Song Name That Was Truncated".to_string());
+            item
+        }];
+
+        let desired = vec![make_desired("new-id", "My Song", Some("My Album"), Some("My Artist"))];
+        let delta = calculate_delta(&desired, &manifest);
+
+        assert_eq!(delta.id_changes.len(), 1);
+        assert_eq!(
+            delta.id_changes[0].original_name,
+            Some("My Very Long Song Name That Was Truncated".to_string()),
+            "original_name must be preserved through ID changes"
+        );
+    }
+
+    #[test]
+    fn test_calculate_delta_id_change_no_original_name_stays_none() {
+        let mut manifest = empty_manifest();
+        manifest.synced_items = vec![make_synced_item("old-id", "Short Song", Some("Album"), Some("Artist"))];
+
+        let desired = vec![make_desired("new-id", "Short Song", Some("Album"), Some("Artist"))];
+        let delta = calculate_delta(&desired, &manifest);
+
+        assert_eq!(delta.id_changes.len(), 1);
+        assert!(
+            delta.id_changes[0].original_name.is_none(),
+            "original_name must stay None when no truncation occurred"
+        );
+    }
+
     #[test]
     fn test_synced_item_original_name_serializes_as_camel_case() {
         let item = crate::device::SyncedItem {
@@ -1136,6 +1301,7 @@ mod tests {
             size_bytes: 1000,
             synced_at: "2026-01-01".to_string(),
             original_name: Some("Very Long Original Track Name".to_string()),
+            etag: None,
         };
 
         let value = serde_json::to_value(&item).unwrap();

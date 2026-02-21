@@ -9,7 +9,6 @@ const CONTAINER_TYPES: &[&str] = &["MusicAlbum", "Playlist"];
 #[cfg(test)]
 const MUSIC_ITEM_TYPES: &str = "MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo";
 
-
 #[derive(Clone)]
 pub struct JellyfinClient {
     client: reqwest::Client,
@@ -64,6 +63,8 @@ pub struct JellyfinItem {
     pub cumulative_run_time_ticks: Option<u64>,
     #[serde(default)]
     pub media_sources: Option<Vec<MediaSource>>,
+    #[serde(default)]
+    pub etag: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -258,6 +259,46 @@ impl JellyfinClient {
 
         let item = serde_json::from_str::<JellyfinItem>(&text)?;
         Ok(item)
+    }
+
+    pub async fn get_items_by_ids(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        item_ids: &[&str],
+    ) -> Result<Vec<JellyfinItem>> {
+        if item_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let ids_str = item_ids.join(",");
+        let endpoint = format!(
+            "{}/Users/{}/Items?Ids={}&Fields=MediaSources",
+            url.trim_end_matches('/'),
+            user_id,
+            ids_str
+        );
+
+        let response = self.client.get(&endpoint).headers(headers).send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+
+        if !status.is_success() {
+            return Err(anyhow!("Server returned status: {}", status));
+        }
+
+        let items_response = serde_json::from_str::<JellyfinItemsResponse>(&text)?;
+        Ok(items_response.items)
     }
 
     pub async fn get_item_with_media_sources(
@@ -487,7 +528,8 @@ impl JellyfinClient {
         url: &str,
         token: &str,
         item_id: &str,
-    ) -> Result<impl futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>>> {
+    ) -> Result<impl futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>>>
+    {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
@@ -497,11 +539,7 @@ impl JellyfinClient {
             HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
         );
 
-        let endpoint = format!(
-            "{}/Items/{}/Download",
-            url.trim_end_matches('/'),
-            item_id
-        );
+        let endpoint = format!("{}/Items/{}/Download", url.trim_end_matches('/'), item_id);
 
         let response = self.client.get(&endpoint).headers(headers).send().await?;
 

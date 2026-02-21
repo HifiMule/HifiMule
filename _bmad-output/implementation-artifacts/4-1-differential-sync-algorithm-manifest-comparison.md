@@ -208,6 +208,24 @@ No blocking issues encountered during implementation.
 - [x] **L1: Story/sprint status inconsistency** — Story said `review` but sprint-status said `done`.
     - **Fix**: Story status updated to `done`.
 - [ ] **L2: Managed path hardcoded to `"Music"` in `execute_sync`** — Deferring to future story.
+- [ ] **L3: AC#5 Response Format** — `SyncDelta` returned `unchanged: Vec<String>` instead of an integer.
+    - **Fix**: Changed `unchanged` field in `SyncDelta` to `usize`.
+
+## Code Review Findings (Adversarial) — Round 3
+**Date:** 2026-02-21
+**Reviewer:** Antigravity
+
+### High Issues
+- [x] **H1: AC#3 Bypass (File Re-downloaded)** — ID Change Detection logic suppressed the delete but left the item in adds, causing a re-download of the same file under a new ID.
+    - **Fix**: Added `id_changes` array to `SyncDelta`. `execute_sync` now records ID changes in the manifest without downloading.
+- [x] **H2: AC#1 Violation (Missing Version ID)** — `SyncedItem` and `DeviceManifest` lacked a server-side metadata version identifier.
+    - **Fix**: Added `etag: Option<String>` to `DesiredItem`, `SyncAddItem`, `SyncIdChangeItem`, `SyncedItem`, and `JellyfinItem`.
+
+### Medium Issues
+- [x] **H3: Severe N+1 API Queries** — `handle_sync_calculate_delta` made individual `get_item_details` API requests for every item.
+    - **Fix**: Added `get_items_by_ids` method to JellyfinClient to fetch items in batches of 100 via `/Items?Ids=...`.
+- [x] **H4: Blocking I/O in Async Context** — `write_manifest` used synchronous `std::fs::File` inside an async tokio context.
+    - **Fix**: Rewrote `write_manifest` as an `async fn` using `tokio::fs::File` and `AsyncWriteExt`.
 
 ## Status
 **Review Status**: Passed (with fixes applied)

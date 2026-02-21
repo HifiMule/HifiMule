@@ -1,6 +1,5 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use tokio::time::{sleep, Duration};
 
@@ -18,6 +17,8 @@ pub struct SyncedItem {
     pub synced_at: String,
     #[serde(default)]
     pub original_name: Option<String>,
+    #[serde(default)]
+    pub etag: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -33,19 +34,20 @@ pub struct DeviceManifest {
 
 /// Atomically writes a DeviceManifest to disk using Write-Temp-Rename pattern.
 /// Writes to `.jellysync.json.tmp`, calls `sync_all`, then renames to `.jellysync.json`.
-pub fn write_manifest(device_root: &Path, manifest: &DeviceManifest) -> Result<()> {
+pub async fn write_manifest(device_root: &Path, manifest: &DeviceManifest) -> Result<()> {
     let manifest_path = device_root.join(".jellysync.json");
     let tmp_path = device_root.join(".jellysync.json.tmp");
 
     let json = serde_json::to_string_pretty(manifest)?;
 
     {
-        let mut file = std::fs::File::create(&tmp_path)?;
-        file.write_all(json.as_bytes())?;
-        file.sync_all()?;
+        use tokio::io::AsyncWriteExt;
+        let mut file = tokio::fs::File::create(&tmp_path).await?;
+        file.write_all(json.as_bytes()).await?;
+        file.sync_all().await?;
     }
 
-    std::fs::rename(&tmp_path, &manifest_path)?;
+    tokio::fs::rename(&tmp_path, &manifest_path).await?;
     Ok(())
 }
 

@@ -1,8 +1,8 @@
 use super::*;
+use serde_json;
 use std::fs;
 use std::sync::Arc;
 use tempfile::tempdir;
-use serde_json;
 
 #[tokio::test]
 async fn test_probe_no_manifest() {
@@ -106,8 +106,7 @@ async fn test_list_root_folders_empty_device() {
 
     // Create manifest but no folders (only hidden/system entries)
     let manifest_path = root.join(".jellysync.json");
-    let manifest_json =
-        r#"{"device_id": "empty-id", "name": "Empty Device", "version": "1.0"}"#;
+    let manifest_json = r#"{"device_id": "empty-id", "name": "Empty Device", "version": "1.0"}"#;
     fs::write(manifest_path, manifest_json).unwrap();
 
     // Add a hidden folder and a file (should be skipped)
@@ -178,13 +177,19 @@ fn test_manifest_with_synced_items_deserialization() {
     assert_eq!(manifest.synced_items[0].jellyfin_id, "item-1");
     assert_eq!(manifest.synced_items[0].name, "Track One");
     assert_eq!(manifest.synced_items[0].album, Some("Album A".to_string()));
-    assert_eq!(manifest.synced_items[0].artist, Some("Artist X".to_string()));
-    assert_eq!(manifest.synced_items[0].local_path, "Music/Artist X/Album A/01 - Track One.flac");
+    assert_eq!(
+        manifest.synced_items[0].artist,
+        Some("Artist X".to_string())
+    );
+    assert_eq!(
+        manifest.synced_items[0].local_path,
+        "Music/Artist X/Album A/01 - Track One.flac"
+    );
     assert_eq!(manifest.synced_items[0].size_bytes, 34521088);
 }
 
-#[test]
-fn test_write_manifest_atomic() {
+#[tokio::test]
+async fn test_write_manifest_creates_files() {
     let dir = tempdir().unwrap();
     let root = dir.path();
 
@@ -193,21 +198,20 @@ fn test_write_manifest_atomic() {
         name: Some("Test".to_string()),
         version: "1.1".to_string(),
         managed_paths: vec!["Music".to_string()],
-        synced_items: vec![
-            SyncedItem {
-                jellyfin_id: "item-1".to_string(),
-                name: "Track".to_string(),
-                album: Some("Album".to_string()),
-                artist: Some("Artist".to_string()),
-                local_path: "Music/Artist/Album/Track.flac".to_string(),
-                size_bytes: 1000,
-                synced_at: "2026-02-15T10:00:00Z".to_string(),
-                original_name: None,
-            },
-        ],
+        synced_items: vec![SyncedItem {
+            jellyfin_id: "item-1".to_string(),
+            name: "Track".to_string(),
+            album: Some("Album".to_string()),
+            artist: Some("Artist".to_string()),
+            local_path: "Music/Artist/Album/Track.flac".to_string(),
+            size_bytes: 1000,
+            synced_at: "2026-02-15T10:00:00Z".to_string(),
+            original_name: None,
+            etag: None,
+        }],
     };
 
-    write_manifest(root, &manifest).unwrap();
+    write_manifest(root, &manifest).await.unwrap();
 
     // Verify the manifest file exists (not the temp file)
     let manifest_path = root.join(".jellysync.json");
@@ -223,8 +227,8 @@ fn test_write_manifest_atomic() {
     assert_eq!(loaded.synced_items[0].jellyfin_id, "item-1");
 }
 
-#[test]
-fn test_write_manifest_overwrites_existing() {
+#[tokio::test]
+async fn test_write_manifest_overwrites_existing() {
     let dir = tempdir().unwrap();
     let root = dir.path();
 
@@ -236,7 +240,7 @@ fn test_write_manifest_overwrites_existing() {
         managed_paths: vec![],
         synced_items: vec![],
     };
-    write_manifest(root, &manifest1).unwrap();
+    write_manifest(root, &manifest1).await.unwrap();
 
     // Overwrite with updated manifest
     let manifest2 = DeviceManifest {
@@ -244,20 +248,19 @@ fn test_write_manifest_overwrites_existing() {
         name: Some("Updated".to_string()),
         version: "1.1".to_string(),
         managed_paths: vec!["Music".to_string()],
-        synced_items: vec![
-            SyncedItem {
-                jellyfin_id: "new-item".to_string(),
-                name: "New Track".to_string(),
-                album: None,
-                artist: None,
-                local_path: "Music/track.flac".to_string(),
-                size_bytes: 500,
-                synced_at: "2026-02-15T12:00:00Z".to_string(),
-                original_name: None,
-            },
-        ],
+        synced_items: vec![SyncedItem {
+            jellyfin_id: "new-item".to_string(),
+            name: "New Track".to_string(),
+            album: None,
+            artist: None,
+            local_path: "Music/track2.flac".to_string(),
+            size_bytes: 200,
+            synced_at: "2026-02-15T13:00:00Z".to_string(),
+            original_name: None,
+            etag: None,
+        }],
     };
-    write_manifest(root, &manifest2).unwrap();
+    write_manifest(root, &manifest2).await.unwrap();
 
     let content = fs::read_to_string(root.join(".jellysync.json")).unwrap();
     let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();

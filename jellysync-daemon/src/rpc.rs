@@ -5,7 +5,6 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use futures::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -667,36 +666,41 @@ async fn handle_sync_calculate_delta(
     })?;
     let user_id = user_id.unwrap_or_else(|| "Me".to_string());
 
-    let results: Vec<Result<crate::sync::DesiredItem, String>> = stream::iter(item_ids)
-        .map(|id| {
-            let client = state.jellyfin_client.clone();
-            let url = url.clone();
-            let token = token.clone();
-            let user_id = user_id.clone();
-            async move {
-                match client.get_item_details(&url, &token, &user_id, &id).await {
-                    Ok(item) => {
-                        let size_bytes = item
-                            .media_sources
-                            .as_ref()
-                            .and_then(|sources| sources.first())
-                            .and_then(|s| s.size)
-                            .unwrap_or(0) as u64;
-                        Ok(crate::sync::DesiredItem {
-                            jellyfin_id: item.id,
-                            name: item.name,
-                            album: item.album,
-                            artist: item.album_artist,
-                            size_bytes,
-                        })
-                    }
-                    Err(e) => Err(format!("Failed to fetch item {}: {}", id, e)),
+    // Fetch item details from Jellyfin in chunks to avoid URL length limits
+    let mut results = Vec::new();
+    for chunk in item_ids.chunks(100) {
+        let chunk_strs: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
+        match state
+            .jellyfin_client
+            .get_items_by_ids(&url, &token, &user_id, &chunk_strs)
+            .await
+        {
+            Ok(items) => {
+                for item in items {
+                    let size_bytes = item
+                        .media_sources
+                        .as_ref()
+                        .and_then(|sources| sources.first())
+                        .and_then(|s| s.size)
+                        .unwrap_or(0) as u64;
+                    results.push(Ok(crate::sync::DesiredItem {
+                        jellyfin_id: item.id,
+                        name: item.name,
+                        album: item.album,
+                        artist: item.album_artist,
+                        size_bytes,
+                        etag: item.etag.clone(),
+                    }));
                 }
             }
-        })
-        .buffer_unordered(10) // Limit concurrency to prevent flooding
-        .collect()
-        .await;
+            Err(e) => {
+                // If a chunk fails, record the error for these items
+                for id in chunk {
+                    results.push(Err(format!("Failed to fetch item {}: {}", id, e)));
+                }
+            }
+        }
+    }
 
     // Check for errors - if ANY item fails, we must abort to prevent data loss (deleting valid items)
     let mut desired_items = Vec::with_capacity(results.len());
@@ -802,7 +806,7 @@ async fn handle_sync_execute(
                     });
 
                     // Write manifest atomically
-                    if let Err(e) = crate::device::write_manifest(&device_path, &manifest) {
+                    if let Err(e) = crate::device::write_manifest(&device_path, &manifest).await {
                         eprintln!("Failed to write manifest: {}", e);
                     }
 
@@ -1075,11 +1079,13 @@ mod tests {
             "Name": "Item 1",
             "Type": "MusicAlbum",
             "RecursiveItemCount": 10,
-            "CumulativeRunTimeTicks": 1000000
+            "CumulativeRunTimeTicks": 1000000,
+            "Etag": "some_etag"
         });
         let item: crate::api::JellyfinItem = serde_json::from_value(json).unwrap();
         assert_eq!(item.recursive_item_count, Some(10));
         assert_eq!(item.cumulative_run_time_ticks, Some(1000000));
+        assert_eq!(item.etag, Some("some_etag".to_string()));
     }
     #[tokio::test]
     async fn test_rpc_get_items_params() {
@@ -1225,6 +1231,7 @@ mod tests {
                     size_bytes: 1000,
                     synced_at: "2026-02-15T10:00:00Z".to_string(),
                     original_name: None,
+                    etag: Some("etag-a".to_string()),
                 },
                 crate::device::SyncedItem {
                     jellyfin_id: "item-b".to_string(),
@@ -1235,6 +1242,7 @@ mod tests {
                     size_bytes: 2000,
                     synced_at: "2026-02-15T10:00:00Z".to_string(),
                     original_name: None,
+                    etag: Some("etag-b".to_string()),
                 },
             ],
         };

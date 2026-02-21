@@ -1,6 +1,6 @@
 # Story 4.3: Legacy Hardware Constraints (Path & Char Validation)
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -397,9 +397,9 @@ None — implementation proceeded without blockers.
 - Updated `construct_file_path` return type from `Result<PathBuf>` to `Result<PathConstructionResult>`; sanitize-then-truncate order enforced for all components
 - Updated `execute_sync` to unpack `PathConstructionResult`; `original_name` propagated to `SyncedItem` on successful write
 - Added `original_name: Option<String>` with `#[serde(default)]` to `SyncedItem` — backward-compatible with existing manifests
-- Updated 4 `SyncedItem` constructors in test files (`sync.rs`, `device/tests.rs`, `rpc.rs`) to include `original_name: None`
+- Updated `SyncedItem` constructors in test files (`sync.rs`, `device/tests.rs`, `rpc.rs`) to include `original_name: None`
 - Added 8 new Story 4.3 tests; updated 2 existing `construct_file_path` tests to unpack `.path`
-- All 65 tests pass, 0 warnings, 0 errors
+- **Code review fixes applied (2026-02-21):** Removed debug println from `api.rs`, fixed `original_name` preservation through ID-change path (AC #4), guarded `truncate_component` against empty-string result, fixed `truncate_filename` pathological branch to preserve extension, added `#[derive(Debug)]` to `PathConstructionResult`, added `original_name` to `SyncIdChangeItem` for manifest preservation. Added 6 new review-fix tests (71 total, all passing).
 
 ### File List
 
@@ -407,7 +407,23 @@ None — implementation proceeded without blockers.
 - `jellysync-daemon/src/device/mod.rs`
 - `jellysync-daemon/src/device/tests.rs`
 - `jellysync-daemon/src/rpc.rs`
+- `jellysync-daemon/src/api.rs` (pre-existing staged change: etag field on JellyfinItem, get_items_by_ids method; debug println removed by code review)
+
+## Senior Developer Review (AI)
+
+- **Review Date:** 2026-02-21
+- **Outcome:** Changes Requested → All resolved
+
+### Action Items
+
+- [x] [High] Remove debug `println!` logging full API response body from `api.rs:get_items_by_ids` — sensitive data exposure risk (`jellysync-daemon/src/api.rs`)
+- [x] [High] `etag` field added to `SyncedItem` and `api.rs` without story documentation — `api.rs` added to File List with explanation (`jellysync-daemon/src/api.rs`)
+- [x] [High] AC #4 violated: `original_name` silently set to `None` for ID-change items in `execute_sync` — added `original_name` to `SyncIdChangeItem`, preserved in `calculate_delta` (`jellysync-daemon/src/sync.rs:509`)
+- [x] [Medium] `truncate_component` could produce empty string for all-dots/spaces inputs → invalid path component — fallback to `"_"` added (`jellysync-daemon/src/sync.rs:283`)
+- [x] [Medium] `truncate_filename` pathological branch returned filename with no extension — fixed to return `.{truncated_ext}` instead (`jellysync-daemon/src/sync.rs:299`)
+- [x] [Low] `PathConstructionResult` missing `#[derive(Debug)]` — added (`jellysync-daemon/src/sync.rs:198`)
 
 ## Change Log
 
-- 2026-02-21: Story 4.3 implemented — added legacy hardware path/char validation with automatic truncation, `PathConstructionResult` struct, `SyncedItem.original_name` field, and comprehensive test suite (65 tests passing)
+- 2026-02-21: Story 4.3 implemented — added legacy hardware path/char validation with automatic truncation, `PathConstructionResult` struct, `SyncedItem.original_name` field, and comprehensive test suite
+- 2026-02-21: Code review fixes — removed debug println, fixed AC #4 for ID-change path, hardened truncation edge cases, 71 tests passing
