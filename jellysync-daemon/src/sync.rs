@@ -232,7 +232,12 @@ pub fn construct_file_path(
         .unwrap_or_else(|| String::from("00"));
 
     // Determine file extension from Container field
-    let extension = item.container.as_deref().unwrap_or("mp3");
+    let extension = item
+            .media_sources
+            .as_ref()
+            .and_then(|sources| sources.first())
+            .and_then(|s| s.container.as_deref())
+            .unwrap_or(item.container.as_deref().unwrap_or("mp3"));
 
     // Step 1: Sanitize path components (remove invalid chars)
     let artist_clean = sanitize_path_component(artist);

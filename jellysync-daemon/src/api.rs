@@ -38,6 +38,7 @@ pub struct JellyfinView {
 pub struct MediaSource {
     #[serde(default)]
     pub size: Option<i64>,
+    pub container: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
