@@ -30,6 +30,10 @@ pub struct DeviceManifest {
     pub managed_paths: Vec<String>,
     #[serde(default)]
     pub synced_items: Vec<SyncedItem>,
+    #[serde(default)]
+    pub dirty: bool,
+    #[serde(default)]
+    pub pending_item_ids: Vec<String>,
 }
 
 /// Atomically writes a DeviceManifest to disk using Write-Temp-Rename pattern.
@@ -49,6 +53,42 @@ pub async fn write_manifest(device_root: &Path, manifest: &DeviceManifest) -> Re
 
     tokio::fs::rename(&tmp_path, &manifest_path).await?;
     Ok(())
+}
+
+/// Scans the managed zone (`device_root/Music/`) recursively for leftover `.tmp`
+/// files from interrupted writes and deletes them. Returns the count of deleted files.
+/// Non-fatal: individual deletion failures are silently skipped.
+pub async fn cleanup_tmp_files(device_root: &Path) -> Result<usize> {
+    let music_path = device_root.join("Music");
+    if tokio::fs::metadata(&music_path).await.is_err() {
+        return Ok(0); // No Music directory — nothing to clean
+    }
+    let mut count = 0;
+    let mut dirs_to_visit = vec![music_path];
+    while let Some(dir) = dirs_to_visit.pop() {
+        let mut entries = match tokio::fs::read_dir(&dir).await {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let file_type = match entry.file_type().await {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            if file_type.is_dir() {
+                dirs_to_visit.push(path);
+            } else if file_type.is_file() {
+                // Matches files like "01 - Track.flac.tmp" — extension() returns "tmp"
+                if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
+                    if tokio::fs::remove_file(&path).await.is_ok() {
+                        count += 1;
+                    }
+                }
+            }
+        }
+    }
+    Ok(count)
 }
 
 #[derive(Debug, Clone)]

@@ -126,6 +126,7 @@ async fn handler(
         "sync_get_operation_status" => {
             handle_sync_get_operation_status(&state, payload.params).await
         }
+        "sync_get_resume_state" => handle_sync_get_resume_state(&state).await,
         _ => Err(JsonRpcError {
             code: ERR_METHOD_NOT_FOUND,
             message: "Method not found".to_string(),
@@ -327,10 +328,14 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
     // Check server connection with caching (cache for 5 seconds)
     let server_connected = check_server_connection_cached(state).await;
 
+    // Capture dirty before device is moved into json!()
+    let dirty = device.as_ref().map(|d| d.dirty).unwrap_or(false);
+
     Ok(serde_json::json!({
         "currentDevice": device,
         "deviceMapping": mapping,
         "serverConnected": server_connected,
+        "dirtyManifest": dirty,
     }))
 }
 
@@ -740,6 +745,14 @@ async fn handle_sync_execute(
             data: None,
         })?;
 
+    // Derive basket IDs that need downloading — used for dirty-resume (Story 4.4)
+    let pending_item_ids: Vec<String> = delta
+        .adds
+        .iter()
+        .map(|a| a.jellyfin_id.clone())
+        .chain(delta.id_changes.iter().map(|c| c.new_jellyfin_id.clone()))
+        .collect();
+
     // Get current device path
     let device_path = state
         .device_manager
@@ -769,6 +782,19 @@ async fn handle_sync_execute(
         .create_operation(operation_id.clone(), total_files)
         .await;
 
+    // Mark manifest dirty before sync starts — enables interrupted-sync detection (Story 4.4)
+    if let Some(path_for_dirty) = state.device_manager.get_current_device_path().await {
+        if let Some(mut manifest) = state.device_manager.get_current_device().await {
+            manifest.dirty = true;
+            manifest.pending_item_ids = pending_item_ids.clone();
+            if let Err(e) = crate::device::write_manifest(&path_for_dirty, &manifest).await {
+                eprintln!("[Sync] Warning: failed to mark manifest dirty: {}", e);
+            } else {
+                state.device_manager.update_current_device(manifest).await;
+            }
+        }
+    }
+
     // Spawn background task to execute sync
     let jellyfin_client = state.jellyfin_client.clone();
     let op_manager = state.sync_operation_manager.clone();
@@ -785,32 +811,19 @@ async fn handle_sync_execute(
             &user_id,
             op_manager.clone(),
             op_id.clone(),
+            device_manager.clone(),
         )
         .await;
 
         match result {
-            Ok((synced_items, errors)) => {
-                // Update manifest with successfully synced items and remove deleted items
+            Ok((_synced_items, errors)) => {
+                // Clear dirty flag after sync completes — per-file updates already wrote all items (Story 4.4)
                 if let Some(mut manifest) = device_manager.get_current_device().await {
-                    // Add new synced items
-                    manifest.synced_items.extend(synced_items);
-
-                    // Remove successfully deleted items from manifest
-                    let failed_ids: std::collections::HashSet<&str> =
-                        errors.iter().map(|e| e.jellyfin_id.as_str()).collect();
-                    manifest.synced_items.retain(|item| {
-                        !delta.deletes.iter().any(|d| {
-                            d.jellyfin_id == item.jellyfin_id
-                                && !failed_ids.contains(d.jellyfin_id.as_str())
-                        })
-                    });
-
-                    // Write manifest atomically
+                    manifest.dirty = false;
+                    manifest.pending_item_ids = vec![];
                     if let Err(e) = crate::device::write_manifest(&device_path, &manifest).await {
-                        eprintln!("Failed to write manifest: {}", e);
+                        eprintln!("Failed to write final manifest: {}", e);
                     }
-
-                    // Update in-memory state so subsequent RPC calls see fresh data
                     device_manager.update_current_device(manifest).await;
                 }
 
@@ -873,6 +886,35 @@ async fn handle_sync_get_operation_status(
             message: "Operation not found".to_string(),
             data: None,
         }),
+    }
+}
+
+async fn handle_sync_get_resume_state(state: &AppState) -> Result<Value, JsonRpcError> {
+    let device = state.device_manager.get_current_device().await;
+    let device_path = state.device_manager.get_current_device_path().await;
+
+    match (device, device_path) {
+        (Some(manifest), Some(path)) => {
+            let is_dirty = manifest.dirty;
+            let pending_ids = manifest.pending_item_ids.clone();
+
+            let cleaned_tmp_files = if is_dirty {
+                crate::device::cleanup_tmp_files(&path).await.unwrap_or(0)
+            } else {
+                0
+            };
+
+            Ok(serde_json::json!({
+                "isDirty": is_dirty,
+                "pendingItemIds": pending_ids,
+                "cleanedTmpFiles": cleaned_tmp_files,
+            }))
+        }
+        _ => Ok(serde_json::json!({
+            "isDirty": false,
+            "pendingItemIds": [],
+            "cleanedTmpFiles": 0,
+        })),
     }
 }
 
@@ -1245,6 +1287,8 @@ mod tests {
                     etag: Some("etag-b".to_string()),
                 },
             ],
+            dirty: false,
+            pending_item_ids: vec![],
         };
 
         device_manager
@@ -1266,6 +1310,143 @@ mod tests {
         assert_eq!(synced_ids.len(), 2);
         assert!(synced_ids.contains(&json!("item-a")));
         assert!(synced_ids.contains(&json!("item-b")));
+    }
+
+    // ===== Story 4.4 Tests =====
+
+    #[tokio::test]
+    async fn test_rpc_sync_get_resume_state_no_device() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        let state = AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db,
+            device_manager,
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
+        };
+        let result = handle_sync_get_resume_state(&state).await.unwrap();
+        assert_eq!(result["isDirty"], false);
+        assert!(result["pendingItemIds"].as_array().unwrap().is_empty());
+        assert_eq!(result["cleanedTmpFiles"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_rpc_sync_get_resume_state_clean_device() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = crate::device::DeviceManifest {
+            device_id: "clean-dev".to_string(),
+            name: Some("Clean".to_string()),
+            version: "1.0".to_string(),
+            managed_paths: vec![],
+            synced_items: vec![],
+            dirty: false,
+            pending_item_ids: vec![],
+        };
+        device_manager
+            .handle_device_detected(dir.path().to_path_buf(), manifest)
+            .await
+            .unwrap();
+
+        let state = AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db,
+            device_manager,
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
+        };
+        let result = handle_sync_get_resume_state(&state).await.unwrap();
+        assert_eq!(result["isDirty"], false);
+        assert!(result["pendingItemIds"].as_array().unwrap().is_empty());
+        assert_eq!(result["cleanedTmpFiles"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_rpc_sync_get_resume_state_dirty_device() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+
+        let dir = tempfile::tempdir().unwrap();
+        // No .tmp files in Music/ — cleanedTmpFiles should be 0
+        tokio::fs::create_dir(dir.path().join("Music")).await.unwrap();
+
+        let manifest = crate::device::DeviceManifest {
+            device_id: "dirty-dev".to_string(),
+            name: Some("Dirty".to_string()),
+            version: "1.0".to_string(),
+            managed_paths: vec!["Music".to_string()],
+            synced_items: vec![],
+            dirty: true,
+            pending_item_ids: vec!["id-1".to_string()],
+        };
+        device_manager
+            .handle_device_detected(dir.path().to_path_buf(), manifest)
+            .await
+            .unwrap();
+
+        let state = AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db,
+            device_manager,
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
+        };
+        let result = handle_sync_get_resume_state(&state).await.unwrap();
+        assert_eq!(result["isDirty"], true);
+        let ids = result["pendingItemIds"].as_array().unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0], "id-1");
+        assert_eq!(result["cleanedTmpFiles"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_rpc_get_daemon_state_includes_dirty_manifest_field() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+
+        // No device — dirtyManifest should be false
+        let state = AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db: db.clone(),
+            device_manager: device_manager.clone(),
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
+        };
+        let result = handle_get_daemon_state(&state).await.unwrap();
+        assert_eq!(result["dirtyManifest"], false, "No device → dirtyManifest must be false");
+
+        // Dirty device — dirtyManifest should be true
+        let dirty_manifest = crate::device::DeviceManifest {
+            device_id: "dirty-dev".to_string(),
+            name: Some("Dirty".to_string()),
+            version: "1.0".to_string(),
+            managed_paths: vec![],
+            synced_items: vec![],
+            dirty: true,
+            pending_item_ids: vec!["id-1".to_string()],
+        };
+        device_manager
+            .handle_device_detected(std::path::PathBuf::from("/tmp/dirty"), dirty_manifest)
+            .await
+            .unwrap();
+
+        let state2 = AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db,
+            device_manager,
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
+        };
+        let result2 = handle_get_daemon_state(&state2).await.unwrap();
+        assert_eq!(result2["dirtyManifest"], true, "Dirty device → dirtyManifest must be true");
     }
 
     #[tokio::test]
@@ -1320,6 +1501,8 @@ mod tests {
             version: "1.0".to_string(),
             managed_paths: vec![],
             synced_items: vec![],
+            dirty: false,
+            pending_item_ids: vec![],
         };
         device_manager
             .handle_device_detected(std::path::PathBuf::from("/tmp/dev"), manifest)

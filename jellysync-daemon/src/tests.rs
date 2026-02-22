@@ -72,6 +72,8 @@ async fn test_device_recognition_integration() {
         version: "1.0".to_string(),
         managed_paths: vec![],
         synced_items: vec![],
+        dirty: false,
+        pending_item_ids: vec![],
     };
 
     let state = manager
