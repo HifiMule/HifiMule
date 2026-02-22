@@ -1,5 +1,5 @@
 ---
-mode: primary
+name: 'bmad-master'
 description: 'bmad-master agent'
 ---
 

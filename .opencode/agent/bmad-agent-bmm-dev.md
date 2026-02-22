@@ -1,5 +1,5 @@
 ---
-mode: primary
+name: 'dev'
 description: 'dev agent'
 ---
 

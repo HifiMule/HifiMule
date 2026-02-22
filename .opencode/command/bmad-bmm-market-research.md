@@ -1,4 +1,5 @@
 ---
+name: 'market-research'
 description: 'Conduct market research covering market size, growth, competition, and customer insights using current web data and verified sources.'
 ---
 
@@ -7,6 +8,7 @@ Execute the BMAD 'market-research' workflow.
 CRITICAL: You must load and follow the workflow definition exactly.
 
 WORKFLOW INSTRUCTIONS:
+
 1. LOAD the workflow file from {project-root}/_bmad/bmm/workflows/1-analysis/research/workflow-market-research.md
 2. READ its entire contents
 3. FOLLOW every step precisely as specified

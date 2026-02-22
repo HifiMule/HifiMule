@@ -1,5 +1,5 @@
 ---
-mode: primary
+name: 'quick-flow-solo-dev'
 description: 'quick-flow-solo-dev agent'
 ---
 

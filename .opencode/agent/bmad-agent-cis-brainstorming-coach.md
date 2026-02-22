@@ -1,5 +1,5 @@
 ---
-mode: primary
+name: 'brainstorming-coach'
 description: 'brainstorming-coach agent'
 ---
 

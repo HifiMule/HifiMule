@@ -1,4 +1,5 @@
 ---
+name: 'validate-max-parallel-workflow'
 description: 'Run validation checks in MAX-PARALLEL mode against a workflow requires a tool that supports Parallel Sub-Processes'
 ---
 
@@ -7,6 +8,7 @@ Execute the BMAD 'validate-max-parallel-workflow' workflow.
 CRITICAL: You must load and follow the workflow definition exactly.
 
 WORKFLOW INSTRUCTIONS:
+
 1. LOAD the workflow file from {project-root}/_bmad/bmb/workflows/workflow/workflow-validate-max-parallel-workflow.md
 2. READ its entire contents
 3. FOLLOW every step precisely as specified

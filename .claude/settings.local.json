@@ -17,7 +17,8 @@
       "Bash(rtk git show:*)",
       "Bash(rtk cargo build:*)",
       "Bash(rtk cargo check)",
-      "Bash(rtk cargo test:*)"
+      "Bash(rtk cargo test:*)",
+      "Bash(rtk ls:*)"
     ]
   }
 }

@@ -1,4 +1,5 @@
 ---
+name: 'create-workflow'
 description: 'Create a new BMAD workflow with proper structure and best practices'
 ---
 
@@ -7,6 +8,7 @@ Execute the BMAD 'create-workflow' workflow.
 CRITICAL: You must load and follow the workflow definition exactly.
 
 WORKFLOW INSTRUCTIONS:
+
 1. LOAD the workflow file from {project-root}/_bmad/bmb/workflows/workflow/workflow-create-workflow.md
 2. READ its entire contents
 3. FOLLOW every step precisely as specified

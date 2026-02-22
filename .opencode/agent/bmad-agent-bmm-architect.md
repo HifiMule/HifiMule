@@ -1,5 +1,5 @@
 ---
-mode: primary
+name: 'architect'
 description: 'architect agent'
 ---
 

@@ -1,5 +1,5 @@
 ---
-mode: primary
+name: 'qa'
 description: 'qa agent'
 ---
 

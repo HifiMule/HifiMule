@@ -1,4 +1,5 @@
 ---
+name: 'create-module'
 description: 'Create a complete BMAD module with agents, workflows, and infrastructure'
 ---
 
@@ -7,6 +8,7 @@ Execute the BMAD 'create-module' workflow.
 CRITICAL: You must load and follow the workflow definition exactly.
 
 WORKFLOW INSTRUCTIONS:
+
 1. LOAD the workflow file from {project-root}/_bmad/bmb/workflows/module/workflow-create-module.md
 2. READ its entire contents
 3. FOLLOW every step precisely as specified

@@ -1,4 +1,5 @@
 ---
+name: 'edit-agent'
 description: 'Edit existing BMAD agents while maintaining compliance'
 ---
 
@@ -7,6 +8,7 @@ Execute the BMAD 'edit-agent' workflow.
 CRITICAL: You must load and follow the workflow definition exactly.
 
 WORKFLOW INSTRUCTIONS:
+
 1. LOAD the workflow file from {project-root}/_bmad/bmb/workflows/agent/workflow-edit-agent.md
 2. READ its entire contents
 3. FOLLOW every step precisely as specified

@@ -1,4 +1,5 @@
 ---
+name: 'edit-workflow'
 description: 'Edit existing BMAD workflows while maintaining integrity'
 ---
 
@@ -7,6 +8,7 @@ Execute the BMAD 'edit-workflow' workflow.
 CRITICAL: You must load and follow the workflow definition exactly.
 
 WORKFLOW INSTRUCTIONS:
+
 1. LOAD the workflow file from {project-root}/_bmad/bmb/workflows/workflow/workflow-edit-workflow.md
 2. READ its entire contents
 3. FOLLOW every step precisely as specified

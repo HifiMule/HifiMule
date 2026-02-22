@@ -1,5 +1,5 @@
 ---
-mode: primary
+name: 'tech-writer'
 description: 'tech-writer agent'
 ---
 

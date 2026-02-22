@@ -1,5 +1,5 @@
 ---
-mode: primary
+name: 'innovation-strategist'
 description: 'innovation-strategist agent'
 ---
 

@@ -91,7 +91,7 @@ May only have phase-3 entries that integrate into another module's workflow
 Sequence numbers fit logically before/after existing items
 ```
 
-**Standalone/Unitary collections:**
+**Standalone collections:**
 ```
 All entries are anytime
 No sequence numbers
@@ -123,7 +123,7 @@ Load and read:
 
 Extract:
 - `code` - Module identifier
-- `type` - Module type (module, unitary, etc.)
+- `type` - Module type
 - `name` - Module display name
 
 ### Step 3: Check for Existing module-help.csv
@@ -232,7 +232,7 @@ mwm,phase-1,Daily Check In,DCI,10,_bmad/mwm/workflows/daily-checkin/workflow.md,
 mwm,phase-2,Wellness Journal,WJ,20,_bmad/mwm/workflows/wellness-journal/workflow.md,mwm_journal,false,wellness-companion,Journal Mode,"Reflect and track your wellness journey",mwm_output,"entry",
 ```
 
-### Unitary/Standalone Module (like bmad-custom):
+### Standalone Module (like bmad-custom):
 ```csv
 module,phase,name,code,sequence,workflow-file,command,required,agent,options,description,output-location,outputs,
 bmad-custom,anytime,Quiz Master,QM,,"bmad_quiz",false,,Trivia,"Interactive trivia quiz with gameshow atmosphere",bmad_output,"results",

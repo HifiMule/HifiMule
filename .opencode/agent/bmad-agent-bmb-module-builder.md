@@ -1,5 +1,5 @@
 ---
-mode: primary
+name: 'module-builder'
 description: 'module-builder agent'
 ---
 

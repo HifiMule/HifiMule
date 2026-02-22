@@ -1,5 +1,5 @@
 ---
-mode: primary
+name: 'ux-designer'
 description: 'ux-designer agent'
 ---
 

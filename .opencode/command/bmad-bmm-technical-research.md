@@ -1,4 +1,5 @@
 ---
+name: 'technical-research'
 description: 'Conduct technical research covering technology evaluation, architecture decisions, and implementation approaches using current web data and verified sources.'
 ---
 
@@ -7,6 +8,7 @@ Execute the BMAD 'technical-research' workflow.
 CRITICAL: You must load and follow the workflow definition exactly.
 
 WORKFLOW INSTRUCTIONS:
+
 1. LOAD the workflow file from {project-root}/_bmad/bmm/workflows/1-analysis/research/workflow-technical-research.md
 2. READ its entire contents
 3. FOLLOW every step precisely as specified

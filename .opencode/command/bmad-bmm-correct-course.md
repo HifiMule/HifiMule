@@ -1,4 +1,5 @@
 ---
+name: 'correct-course'
 description: 'Navigate significant changes during sprint execution by analyzing impact, proposing solutions, and routing for implementation'
 ---
 
@@ -7,6 +8,7 @@ Execute the BMAD 'correct-course' workflow.
 CRITICAL: You must load and follow the workflow definition exactly.
 
 WORKFLOW INSTRUCTIONS:
+
 1. LOAD the workflow file from {project-root}/_bmad/bmm/workflows/4-implementation/correct-course/workflow.yaml
 2. READ its entire contents
 3. FOLLOW every step precisely as specified

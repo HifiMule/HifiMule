@@ -1,5 +1,5 @@
 ---
-mode: primary
+name: 'presentation-master'
 description: 'presentation-master agent'
 ---
 

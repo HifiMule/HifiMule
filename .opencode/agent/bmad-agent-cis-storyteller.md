@@ -1,5 +1,5 @@
 ---
-mode: primary
+name: 'storyteller'
 description: 'storyteller agent'
 ---
 

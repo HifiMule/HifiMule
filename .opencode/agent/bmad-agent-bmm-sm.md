@@ -1,5 +1,5 @@
 ---
-mode: primary
+name: 'sm'
 description: 'sm agent'
 ---
 

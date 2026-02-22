@@ -1,5 +1,5 @@
 ---
-mode: primary
+name: 'agent-builder'
 description: 'agent-builder agent'
 ---
 

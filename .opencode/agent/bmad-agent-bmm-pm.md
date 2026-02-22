@@ -1,5 +1,5 @@
 ---
-mode: primary
+name: 'pm'
 description: 'pm agent'
 ---
 

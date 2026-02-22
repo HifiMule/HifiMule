@@ -1,5 +1,5 @@
 ---
-mode: primary
+name: 'design-thinking-coach'
 description: 'design-thinking-coach agent'
 ---
 

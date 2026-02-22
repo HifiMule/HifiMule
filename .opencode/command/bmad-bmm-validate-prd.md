@@ -1,4 +1,5 @@
 ---
+name: 'validate-prd'
 description: 'Validate an existing PRD against BMAD standards - comprehensive review for completeness, clarity, and quality'
 ---
 
@@ -7,6 +8,7 @@ Execute the BMAD 'validate-prd' workflow.
 CRITICAL: You must load and follow the workflow definition exactly.
 
 WORKFLOW INSTRUCTIONS:
+
 1. LOAD the workflow file from {project-root}/_bmad/bmm/workflows/2-plan-workflows/create-prd/workflow-validate-prd.md
 2. READ its entire contents
 3. FOLLOW every step precisely as specified
