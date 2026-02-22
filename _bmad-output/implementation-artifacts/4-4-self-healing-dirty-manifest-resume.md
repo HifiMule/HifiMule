@@ -1,6 +1,6 @@
 # Story 4.4: Self-Healing "Dirty Manifest" Resume
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -539,6 +539,7 @@ No blocking issues. One additional struct literal was found in `jellysync-daemon
 - **T6**: Updated `handle_get_daemon_state` to capture `dirty` before `device` moves into `json!()`, and added `"dirtyManifest"` field to the response.
 - **T7**: 12 new tests written (T7.1–T7.12). All 82 tests pass (0 failures).
 - **Build**: `cargo build` produces 0 errors and 0 warnings.
+- **Code Review**: Fixed High and Medium severity issues identified by AI review, including atomic `update_manifest` lock patterns, proper failure abortion for dirty saves, dynamic `managed_paths` handling, symlink mitigation for temp files, and API chunk error text logging.
 
 ### File List
 
@@ -551,3 +552,4 @@ No blocking issues. One additional struct literal was found in `jellysync-daemon
 ## Change Log
 
 - 2026-02-22: Story 4.4 implemented — Self-healing dirty manifest resume. Added `dirty`/`pending_item_ids` fields to `DeviceManifest`, `cleanup_tmp_files` utility, per-file atomic manifest updates in `execute_sync`, dirty flag lifecycle management in `handle_sync_execute`, new `sync_get_resume_state` RPC method, and `dirtyManifest` exposure in `get_daemon_state`. 12 new tests added; all 82 tests pass.
+- 2026-02-22: Completed AI adversarial code review. Fixed 3 High and 2 Medium issues (Data race on manifest save, dirty save error ignoring, hardcoded "Music" path, symlink traversal in tmp cleaning, `.tmp` file blanket deletion). Status updated to done.

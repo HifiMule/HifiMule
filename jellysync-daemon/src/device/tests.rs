@@ -11,7 +11,10 @@ fn test_dirty_flag_serde_default() {
     let json = r#"{"device_id": "dev-1", "name": "iPod", "version": "1.0"}"#;
     let manifest: DeviceManifest = serde_json::from_str(json).unwrap();
     assert!(!manifest.dirty, "dirty must default to false");
-    assert!(manifest.pending_item_ids.is_empty(), "pending_item_ids must default to []");
+    assert!(
+        manifest.pending_item_ids.is_empty(),
+        "pending_item_ids must default to []"
+    );
 }
 
 #[tokio::test]
@@ -27,7 +30,9 @@ async fn test_dirty_manifest_roundtrip() {
         pending_item_ids: vec!["id-1".to_string(), "id-2".to_string()],
     };
     write_manifest(dir.path(), &manifest).await.unwrap();
-    let content = tokio::fs::read_to_string(dir.path().join(".jellysync.json")).await.unwrap();
+    let content = tokio::fs::read_to_string(dir.path().join(".jellysync.json"))
+        .await
+        .unwrap();
     let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
     assert!(loaded.dirty);
     assert_eq!(loaded.pending_item_ids, vec!["id-1", "id-2"]);
@@ -36,15 +41,21 @@ async fn test_dirty_manifest_roundtrip() {
 #[tokio::test]
 async fn test_cleanup_tmp_files_no_music_dir() {
     let dir = tempdir().unwrap();
-    let count = cleanup_tmp_files(dir.path()).await.unwrap();
+    let count = cleanup_tmp_files(dir.path(), &["Music".to_string()])
+        .await
+        .unwrap();
     assert_eq!(count, 0);
 }
 
 #[tokio::test]
 async fn test_cleanup_tmp_files_empty_music_dir() {
     let dir = tempdir().unwrap();
-    tokio::fs::create_dir(dir.path().join("Music")).await.unwrap();
-    let count = cleanup_tmp_files(dir.path()).await.unwrap();
+    tokio::fs::create_dir(dir.path().join("Music"))
+        .await
+        .unwrap();
+    let count = cleanup_tmp_files(dir.path(), &["Music".to_string()])
+        .await
+        .unwrap();
     assert_eq!(count, 0);
 }
 
@@ -57,7 +68,9 @@ async fn test_cleanup_tmp_files_finds_and_deletes() {
     tokio::fs::write(&tmp_file, b"partial").await.unwrap();
     assert!(tmp_file.exists());
 
-    let count = cleanup_tmp_files(dir.path()).await.unwrap();
+    let count = cleanup_tmp_files(dir.path(), &["Music".to_string()])
+        .await
+        .unwrap();
     assert_eq!(count, 1);
     assert!(!tmp_file.exists(), ".tmp file must be deleted");
 }
@@ -66,15 +79,35 @@ async fn test_cleanup_tmp_files_finds_and_deletes() {
 async fn test_cleanup_tmp_files_nested_multiple() {
     let dir = tempdir().unwrap();
     let music = dir.path().join("Music");
-    tokio::fs::create_dir_all(music.join("Artist1").join("Album1")).await.unwrap();
-    tokio::fs::create_dir_all(music.join("Artist2").join("Album2")).await.unwrap();
-    tokio::fs::create_dir_all(music.join("Artist3")).await.unwrap();
+    tokio::fs::create_dir_all(music.join("Artist1").join("Album1"))
+        .await
+        .unwrap();
+    tokio::fs::create_dir_all(music.join("Artist2").join("Album2"))
+        .await
+        .unwrap();
+    tokio::fs::create_dir_all(music.join("Artist3"))
+        .await
+        .unwrap();
 
-    tokio::fs::write(music.join("Artist1").join("Album1").join("01.flac.tmp"), b"a").await.unwrap();
-    tokio::fs::write(music.join("Artist2").join("Album2").join("02.flac.tmp"), b"b").await.unwrap();
-    tokio::fs::write(music.join("Artist3").join("03.flac.tmp"), b"c").await.unwrap();
+    tokio::fs::write(
+        music.join("Artist1").join("Album1").join("01.flac.tmp"),
+        b"a",
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(
+        music.join("Artist2").join("Album2").join("02.flac.tmp"),
+        b"b",
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(music.join("Artist3").join("03.flac.tmp"), b"c")
+        .await
+        .unwrap();
 
-    let count = cleanup_tmp_files(dir.path()).await.unwrap();
+    let count = cleanup_tmp_files(dir.path(), &["Music".to_string()])
+        .await
+        .unwrap();
     assert_eq!(count, 3);
 }
 
@@ -92,7 +125,9 @@ async fn test_cleanup_tmp_files_non_tmp_preserved() {
     tokio::fs::write(&mp3_file, b"real mp3").await.unwrap();
     tokio::fs::write(&tmp_file, b"partial").await.unwrap();
 
-    let count = cleanup_tmp_files(dir.path()).await.unwrap();
+    let count = cleanup_tmp_files(dir.path(), &["Music".to_string()])
+        .await
+        .unwrap();
     assert_eq!(count, 1, "Only .tmp file should be deleted");
     assert!(flac_file.exists(), ".flac file must be preserved");
     assert!(mp3_file.exists(), ".mp3 file must be preserved");

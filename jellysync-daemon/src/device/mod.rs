@@ -55,34 +55,48 @@ pub async fn write_manifest(device_root: &Path, manifest: &DeviceManifest) -> Re
     Ok(())
 }
 
-/// Scans the managed zone (`device_root/Music/`) recursively for leftover `.tmp`
+/// Scans the specified managed paths recursively for leftover `.tmp`
 /// files from interrupted writes and deletes them. Returns the count of deleted files.
 /// Non-fatal: individual deletion failures are silently skipped.
-pub async fn cleanup_tmp_files(device_root: &Path) -> Result<usize> {
-    let music_path = device_root.join("Music");
-    if tokio::fs::metadata(&music_path).await.is_err() {
-        return Ok(0); // No Music directory — nothing to clean
-    }
+pub async fn cleanup_tmp_files(device_root: &Path, managed_paths: &[String]) -> Result<usize> {
     let mut count = 0;
-    let mut dirs_to_visit = vec![music_path];
-    while let Some(dir) = dirs_to_visit.pop() {
-        let mut entries = match tokio::fs::read_dir(&dir).await {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            let file_type = match entry.file_type().await {
-                Ok(ft) => ft,
+    for path_str in managed_paths {
+        let managed_path = device_root.join(path_str);
+
+        // Ensure the path is a directory and not a symlink to prevent traversal
+        if let Ok(meta) = tokio::fs::symlink_metadata(&managed_path).await {
+            if !meta.is_dir() {
+                continue;
+            }
+        } else {
+            continue; // Doesn't exist or access error
+        }
+
+        let mut dirs_to_visit = vec![managed_path];
+        while let Some(dir) = dirs_to_visit.pop() {
+            let mut entries = match tokio::fs::read_dir(&dir).await {
+                Ok(e) => e,
                 Err(_) => continue,
             };
-            if file_type.is_dir() {
-                dirs_to_visit.push(path);
-            } else if file_type.is_file() {
-                // Matches files like "01 - Track.flac.tmp" — extension() returns "tmp"
-                if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
-                    if tokio::fs::remove_file(&path).await.is_ok() {
-                        count += 1;
+            while let Some(entry) = entries.next_entry().await.unwrap_or(None) {
+                let path = entry.path();
+                let file_type = match entry.file_type().await {
+                    Ok(ft) => ft,
+                    Err(_) => continue,
+                };
+
+                if file_type.is_symlink() {
+                    // Prevent symlink traversal out of managed zone
+                    continue;
+                } else if file_type.is_dir() {
+                    dirs_to_visit.push(path);
+                } else if file_type.is_file() {
+                    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+                    // Match files ending in .tmp
+                    if file_name.ends_with(".tmp") {
+                        if tokio::fs::remove_file(&path).await.is_ok() {
+                            count += 1;
+                        }
                     }
                 }
             }
@@ -179,11 +193,20 @@ impl DeviceManager {
         self.current_device_path.read().await.clone()
     }
 
-    /// Updates the in-memory manifest without re-detecting the device.
-    /// Used after sync operations write a new manifest to disk.
-    pub async fn update_current_device(&self, manifest: DeviceManifest) {
+    /// Atomically updates both the in-memory manifest and the on-disk file.
+    /// Used during sync operations to prevent read-modify-write race conditions.
+    pub async fn update_manifest<F>(&self, mutation: F) -> Result<()>
+    where
+        F: FnOnce(&mut DeviceManifest),
+    {
         let mut current = self.current_device.write().await;
-        *current = Some(manifest);
+        if let Some(manifest) = current.as_mut() {
+            mutation(manifest);
+            if let Some(path) = self.current_device_path.read().await.as_ref() {
+                crate::device::write_manifest(path, manifest).await?;
+            }
+        }
+        Ok(())
     }
 
     pub async fn get_device_storage(&self) -> Option<StorageInfo> {

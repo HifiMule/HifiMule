@@ -783,16 +783,20 @@ async fn handle_sync_execute(
         .await;
 
     // Mark manifest dirty before sync starts — enables interrupted-sync detection (Story 4.4)
-    if let Some(path_for_dirty) = state.device_manager.get_current_device_path().await {
-        if let Some(mut manifest) = state.device_manager.get_current_device().await {
-            manifest.dirty = true;
-            manifest.pending_item_ids = pending_item_ids.clone();
-            if let Err(e) = crate::device::write_manifest(&path_for_dirty, &manifest).await {
-                eprintln!("[Sync] Warning: failed to mark manifest dirty: {}", e);
-            } else {
-                state.device_manager.update_current_device(manifest).await;
-            }
-        }
+    // Failing to mark dirty MUST abort the sync to prevent undetectable interruptions.
+    if let Err(e) = state
+        .device_manager
+        .update_manifest(|m| {
+            m.dirty = true;
+            m.pending_item_ids = pending_item_ids.clone();
+        })
+        .await
+    {
+        return Err(JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: format!("Failed to mark manifest dirty, aborting sync: {}", e),
+            data: None,
+        });
     }
 
     // Spawn background task to execute sync
@@ -818,13 +822,14 @@ async fn handle_sync_execute(
         match result {
             Ok((_synced_items, errors)) => {
                 // Clear dirty flag after sync completes — per-file updates already wrote all items (Story 4.4)
-                if let Some(mut manifest) = device_manager.get_current_device().await {
-                    manifest.dirty = false;
-                    manifest.pending_item_ids = vec![];
-                    if let Err(e) = crate::device::write_manifest(&device_path, &manifest).await {
-                        eprintln!("Failed to write final manifest: {}", e);
-                    }
-                    device_manager.update_current_device(manifest).await;
+                if let Err(e) = device_manager
+                    .update_manifest(|m| {
+                        m.dirty = false;
+                        m.pending_item_ids = vec![];
+                    })
+                    .await
+                {
+                    eprintln!("Failed to clear dirty flag on final manifest: {}", e);
                 }
 
                 // Update operation status
@@ -899,7 +904,9 @@ async fn handle_sync_get_resume_state(state: &AppState) -> Result<Value, JsonRpc
             let pending_ids = manifest.pending_item_ids.clone();
 
             let cleaned_tmp_files = if is_dirty {
-                crate::device::cleanup_tmp_files(&path).await.unwrap_or(0)
+                crate::device::cleanup_tmp_files(&path, &manifest.managed_paths)
+                    .await
+                    .unwrap_or(0)
             } else {
                 0
             };
@@ -1373,7 +1380,9 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         // No .tmp files in Music/ — cleanedTmpFiles should be 0
-        tokio::fs::create_dir(dir.path().join("Music")).await.unwrap();
+        tokio::fs::create_dir(dir.path().join("Music"))
+            .await
+            .unwrap();
 
         let manifest = crate::device::DeviceManifest {
             device_id: "dirty-dev".to_string(),
@@ -1420,7 +1429,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
         };
         let result = handle_get_daemon_state(&state).await.unwrap();
-        assert_eq!(result["dirtyManifest"], false, "No device → dirtyManifest must be false");
+        assert_eq!(
+            result["dirtyManifest"], false,
+            "No device → dirtyManifest must be false"
+        );
 
         // Dirty device — dirtyManifest should be true
         let dirty_manifest = crate::device::DeviceManifest {
@@ -1446,7 +1458,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
         };
         let result2 = handle_get_daemon_state(&state2).await.unwrap();
-        assert_eq!(result2["dirtyManifest"], true, "Dirty device → dirtyManifest must be true");
+        assert_eq!(
+            result2["dirtyManifest"], true,
+            "Dirty device → dirtyManifest must be true"
+        );
     }
 
     #[tokio::test]

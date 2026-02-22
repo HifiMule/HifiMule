@@ -375,8 +375,6 @@ pub async fn execute_sync(
     let mut synced_items = Vec::new();
     let mut errors = Vec::new();
 
-    let device_path_buf = device_path.to_path_buf();
-
     // Determine managed path (assume first managed path from device manifest)
     // In a real implementation, this would be passed in or determined from manifest
     let managed_path = device_path.join("Music");
@@ -396,9 +394,15 @@ pub async fn execute_sync(
             }
             Err(e) => {
                 for id in chunk {
+                    let filename = delta
+                        .adds
+                        .iter()
+                        .find(|a| a.jellyfin_id == **id)
+                        .map(|a| a.name.clone())
+                        .unwrap_or_else(|| "Unknown".to_string());
                     errors.push(SyncFileError {
                         jellyfin_id: id.to_string(),
-                        filename: "Unknown".to_string(), // We don't have the original name easily attached here without mapping
+                        filename,
                         error_message: format!("Failed to fetch chunk involving item: {}", e),
                     });
                 }
@@ -524,17 +528,15 @@ pub async fn execute_sync(
 
                 // Per-file manifest update for dirty-resume support (Story 4.4)
                 // Per-file writes ensure manifest always reflects completed work for true delta resume.
-                if let Some(mut manifest) = device_manager.get_current_device().await {
-                    manifest
-                        .synced_items
-                        .push(synced_items.last().unwrap().clone());
-                    if let Err(e) = crate::device::write_manifest(&device_path_buf, &manifest).await
-                    {
-                        eprintln!("[Sync] Warning: per-file manifest write failed: {}", e);
-                        // Non-fatal: sync continues even if per-file write fails
-                    } else {
-                        device_manager.update_current_device(manifest).await;
-                    }
+                let synced_item = synced_items.last().unwrap().clone();
+                if let Err(e) = device_manager
+                    .update_manifest(|m| {
+                        m.synced_items.push(synced_item);
+                    })
+                    .await
+                {
+                    eprintln!("[Sync] Warning: per-file manifest write failed: {}", e);
+                    // Non-fatal: sync continues even if per-file write fails
                 }
             }
             Err(e) => {
@@ -596,16 +598,14 @@ pub async fn execute_sync(
                 }
 
                 // Per-delete manifest update for dirty-resume support (Story 4.4)
-                if let Some(mut manifest) = device_manager.get_current_device().await {
-                    manifest
-                        .synced_items
-                        .retain(|i| i.jellyfin_id != delete_item.jellyfin_id);
-                    if let Err(e) = crate::device::write_manifest(&device_path_buf, &manifest).await
-                    {
-                        eprintln!("[Sync] Warning: per-delete manifest write failed: {}", e);
-                    } else {
-                        device_manager.update_current_device(manifest).await;
-                    }
+                let id_to_remove = delete_item.jellyfin_id.clone();
+                if let Err(e) = device_manager
+                    .update_manifest(|m| {
+                        m.synced_items.retain(|i| i.jellyfin_id != id_to_remove);
+                    })
+                    .await
+                {
+                    eprintln!("[Sync] Warning: per-delete manifest write failed: {}", e);
                 }
             }
             Err(e) => {
@@ -644,18 +644,16 @@ pub async fn execute_sync(
 
         // Per-ID-change manifest update for dirty-resume support (Story 4.4)
         // Remove old ID entry, add new ID entry atomically.
-        if let Some(mut manifest) = device_manager.get_current_device().await {
-            manifest
-                .synced_items
-                .retain(|i| i.jellyfin_id != id_change.old_jellyfin_id);
-            manifest
-                .synced_items
-                .push(synced_items.last().unwrap().clone());
-            if let Err(e) = crate::device::write_manifest(&device_path_buf, &manifest).await {
-                eprintln!("[Sync] Warning: per-ID-change manifest write failed: {}", e);
-            } else {
-                device_manager.update_current_device(manifest).await;
-            }
+        let synced_item = synced_items.last().unwrap().clone();
+        let id_to_remove = id_change.old_jellyfin_id.clone();
+        if let Err(e) = device_manager
+            .update_manifest(|m| {
+                m.synced_items.retain(|i| i.jellyfin_id != id_to_remove);
+                m.synced_items.push(synced_item);
+            })
+            .await
+        {
+            eprintln!("[Sync] Warning: per-ID-change manifest write failed: {}", e);
         }
     }
 
