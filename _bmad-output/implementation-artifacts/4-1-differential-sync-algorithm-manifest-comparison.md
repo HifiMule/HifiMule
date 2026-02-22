@@ -227,6 +227,22 @@ No blocking issues encountered during implementation.
 - [x] **H4: Blocking I/O in Async Context** — `write_manifest` used synchronous `std::fs::File` inside an async tokio context.
     - **Fix**: Rewrote `write_manifest` as an `async fn` using `tokio::fs::File` and `AsyncWriteExt`.
 
+## Code Review Findings (Adversarial) — Round 4
+**Date:** 2026-02-22
+**Reviewer:** Antigravity
+
+### High Issues
+- [x] **H1: Security Vulnerability: Path Traversal on Deletes** — `if !file_path.starts_with(&managed_path)` in `sync.rs` failed to handle relative paths like `../../../etc/passwd` correctly via `starts_with`.
+    - **Fix**: Used `canonicalize()` on both `file_path` and `managed_path` to resolve absolute paths before prefix checking.
+- [x] **H2: N+1 API Queries in `execute_sync`** — Inside the add item loop, `get_item_details` was being called individually for each item to construct paths.
+    - **Fix**: Added a pre-fetch step using `get_items_by_ids` in batches of 100 to gather all item details up front into a HashMap, then pulled from that map within the loop.
+
+### Medium Issues
+- [x] **M1: ID Change Detection Data Loss** — `delete_by_metadata` used a standard `HashMap<(name, album, artist), usize>`, meaning items with identical metadata silently overwrote previous ones. Only one could be recovered via ID change.
+    - **Fix**: Changed map to `HashMap<K, Vec<usize>>` so it stores all indices. When constructing matches, the first unmatched index is safely popped.
+- [x] **M2: Path Length Constraints Ignored during Assembly** — `construct_file_path` enforced 255 chars per component, but the *total* absolute path could easily exceed the Windows 260 character `MAX_PATH` limit, causing filesystem crashes.
+    - **Fix**: Added dynamic total length checking. If the resolved absolute path exceeds 250 characters, components are iteratively shrunk by 25% until it fits safely under the limit.
+
 ## Status
 **Review Status**: Passed (with fixes applied)
 **Implementation Status**: Complete

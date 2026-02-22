@@ -194,6 +194,9 @@ impl SyncOperationManager {
 /// Maximum characters per path component enforced for FAT32/Rockbox legacy hardware.
 pub const MAX_PATH_COMPONENT_LEN: usize = 255;
 
+/// Windows MAX_PATH limit (260). We use a conservative 250 to allow for drive letters and slight overhead.
+pub const WINDOWS_MAX_PATH: usize = 250;
+
 /// The result of constructing a file path from Jellyfin metadata.
 ///
 /// Contains the resolved filesystem path and an optional mapping of the
@@ -237,30 +240,61 @@ pub fn construct_file_path(
     let track_name_clean = sanitize_path_component(track_name);
 
     // Step 2: Enforce per-component length limit for legacy hardware (FAT32/Rockbox)
-    let artist_final = truncate_component(&artist_clean, MAX_PATH_COMPONENT_LEN);
-    let album_final = truncate_component(&album_clean, MAX_PATH_COMPONENT_LEN);
+    // We initially use the max allowed, but we may need to shrink it if the total path exceeds MAX_PATH.
+    let mut current_max_component = MAX_PATH_COMPONENT_LEN;
 
-    // Step 3: Build filename and check component length
-    let filename_base = format!("{} - {}", track_number, track_name_clean);
-    let filename_candidate = format!("{}.{}", filename_base, extension);
+    // We will loop to iteratively shrink the component size if we hit MAX_PATH
+    loop {
+        let artist_final = truncate_component(&artist_clean, current_max_component);
+        let album_final = truncate_component(&album_clean, current_max_component);
 
-    let (filename, original_name) = if filename_candidate.chars().count() > MAX_PATH_COMPONENT_LEN {
-        let truncated = truncate_filename(&filename_base, extension, MAX_PATH_COMPONENT_LEN);
-        (truncated, Some(item.name.clone()))
-    } else {
-        (filename_candidate, None)
-    };
+        // Build filename and check component length
+        let filename_base = format!("{} - {}", track_number, track_name_clean);
+        let filename_candidate = format!("{}.{}", filename_base, extension);
 
-    // Step 4: Build final path
-    let path = managed_path
-        .join(artist_final)
-        .join(album_final)
-        .join(filename);
+        let (filename, original_name) =
+            if filename_candidate.chars().count() > current_max_component {
+                let truncated = truncate_filename(&filename_base, extension, current_max_component);
+                (truncated, Some(item.name.clone()))
+            } else {
+                (filename_candidate, None)
+            };
 
-    Ok(PathConstructionResult {
-        path,
-        original_name,
-    })
+        // Build final path
+        let path = managed_path
+            .join(&artist_final)
+            .join(&album_final)
+            .join(&filename);
+
+        // Check total path length against Windows MAX_PATH
+        // Provide a reasonable absolute path approximation if managed_path is relative
+        let approx_abs_len = match path.canonicalize() {
+            Ok(p) => p.to_string_lossy().chars().count(),
+            // If it doesn't exist yet, we approximate by converting it to an absolute path first
+            Err(_) => match std::env::current_dir() {
+                Ok(cwd) => cwd.join(&path).to_string_lossy().chars().count(),
+                Err(_) => path.to_string_lossy().chars().count() + 30, // rough guess for C:\Workspaces\...
+            },
+        };
+
+        if approx_abs_len > WINDOWS_MAX_PATH {
+            // Path is too long. We need to shrink the components.
+            // Shrinking aggressively to reach a safe length faster.
+            if current_max_component > 30 {
+                current_max_component = (current_max_component * 3) / 4; // Reduce by 25%
+                continue;
+            } else {
+                // Even with minimal components, it's too long. The managed_path itself is probably too long.
+                // We have to return what we have and let the OS error out, or return our own error.
+                return Err(anyhow::anyhow!("Resulting path is too long for Windows MAX_PATH ({}), even after minimal truncation: {}", WINDOWS_MAX_PATH, path.display()));
+            }
+        }
+
+        return Ok(PathConstructionResult {
+            path,
+            original_name,
+        });
+    }
 }
 
 /// Sanitizes a path component by removing/replacing invalid filesystem characters.
@@ -311,10 +345,7 @@ fn truncate_filename(base: &str, extension: &str, max_len: usize) -> String {
     if ext_len >= max_len {
         // Pathological: extension itself fills the limit.
         // Return a truncated extension rather than dropping it entirely.
-        let truncated_ext: String = extension
-            .chars()
-            .take(max_len.saturating_sub(1))
-            .collect();
+        let truncated_ext: String = extension.chars().take(max_len.saturating_sub(1)).collect();
         let clean_ext = truncated_ext.trim_end_matches(|c| c == ' ' || c == '.');
         return format!(".{}", clean_ext);
     }
@@ -350,26 +381,47 @@ pub async fn execute_sync(
     // In a real implementation, this would be passed in or determined from manifest
     let managed_path = device_path.join("Music");
 
+    // Pre-fetch all item details for adds to avoid N+1 queries
+    let mut fetched_items = std::collections::HashMap::new();
+    let add_ids: Vec<&str> = delta.adds.iter().map(|a| a.jellyfin_id.as_str()).collect();
+    for chunk in add_ids.chunks(100) {
+        match jellyfin_client
+            .get_items_by_ids(jellyfin_url, jellyfin_token, jellyfin_user_id, chunk)
+            .await
+        {
+            Ok(items) => {
+                for item in items {
+                    fetched_items.insert(item.id.clone(), item);
+                }
+            }
+            Err(e) => {
+                for id in chunk {
+                    errors.push(SyncFileError {
+                        jellyfin_id: id.to_string(),
+                        filename: "Unknown".to_string(), // We don't have the original name easily attached here without mapping
+                        error_message: format!("Failed to fetch chunk involving item: {}", e),
+                    });
+                }
+            }
+        }
+    }
+
     // Process adds (downloads)
     for add_item in delta.adds.iter() {
-        // Fetch item details to get metadata for path construction
-        let item_result = jellyfin_client
-            .get_item_details(
-                jellyfin_url,
-                jellyfin_token,
-                jellyfin_user_id,
-                &add_item.jellyfin_id,
-            )
-            .await;
-
-        let item = match item_result {
-            Ok(item) => item,
-            Err(e) => {
-                errors.push(SyncFileError {
-                    jellyfin_id: add_item.jellyfin_id.clone(),
-                    filename: add_item.name.clone(),
-                    error_message: format!("Failed to fetch item details: {}", e),
-                });
+        // Find prefetched item
+        let item = match fetched_items.get(&add_item.jellyfin_id) {
+            Some(i) => i,
+            None => {
+                // Not found (either didn't exist or fell into a failed chunk)
+                // If it wasn't a chunk failure, it might just be missing
+                if !errors.iter().any(|e| e.jellyfin_id == add_item.jellyfin_id) {
+                    errors.push(SyncFileError {
+                        jellyfin_id: add_item.jellyfin_id.clone(),
+                        filename: add_item.name.clone(),
+                        error_message: "Failed to fetch item details: Not found or API error."
+                            .to_string(),
+                    });
+                }
                 continue;
             }
         };
@@ -473,8 +525,11 @@ pub async fn execute_sync(
                 // Per-file manifest update for dirty-resume support (Story 4.4)
                 // Per-file writes ensure manifest always reflects completed work for true delta resume.
                 if let Some(mut manifest) = device_manager.get_current_device().await {
-                    manifest.synced_items.push(synced_items.last().unwrap().clone());
-                    if let Err(e) = crate::device::write_manifest(&device_path_buf, &manifest).await {
+                    manifest
+                        .synced_items
+                        .push(synced_items.last().unwrap().clone());
+                    if let Err(e) = crate::device::write_manifest(&device_path_buf, &manifest).await
+                    {
                         eprintln!("[Sync] Warning: per-file manifest write failed: {}", e);
                         // Non-fatal: sync continues even if per-file write fails
                     } else {
@@ -497,7 +552,30 @@ pub async fn execute_sync(
         let file_path = device_path.join(&delete_item.local_path);
 
         // Verify file is in managed zone (security check)
-        if !file_path.starts_with(&managed_path) {
+        // Resolve absolute paths to prevent directory traversal attacks (e.g. local_path = "../../../etc/passwd")
+        let absolute_file_path = match file_path.canonicalize() {
+            Ok(path) => path,
+            Err(_) => {
+                // If it doesn't exist, we can't canonicalize it, but that also means there's nothing to delete.
+                // Just skip it.
+                continue;
+            }
+        };
+
+        // We also need to canonicalize the managed_path for a robust prefix check
+        let absolute_managed_path = match managed_path.canonicalize() {
+            Ok(path) => path,
+            Err(e) => {
+                errors.push(SyncFileError {
+                    jellyfin_id: delete_item.jellyfin_id.clone(),
+                    filename: delete_item.name.clone(),
+                    error_message: format!("Failed to resolve managed path: {}", e),
+                });
+                continue;
+            }
+        };
+
+        if !absolute_file_path.starts_with(&absolute_managed_path) {
             errors.push(SyncFileError {
                 jellyfin_id: delete_item.jellyfin_id.clone(),
                 filename: delete_item.name.clone(),
@@ -506,8 +584,8 @@ pub async fn execute_sync(
             continue;
         }
 
-        // Delete file
-        match tokio::fs::remove_file(&file_path).await {
+        // Delete file using the canonicalized path
+        match tokio::fs::remove_file(&absolute_file_path).await {
             Ok(_) => {
                 // Successfully deleted
                 if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
@@ -519,8 +597,11 @@ pub async fn execute_sync(
 
                 // Per-delete manifest update for dirty-resume support (Story 4.4)
                 if let Some(mut manifest) = device_manager.get_current_device().await {
-                    manifest.synced_items.retain(|i| i.jellyfin_id != delete_item.jellyfin_id);
-                    if let Err(e) = crate::device::write_manifest(&device_path_buf, &manifest).await {
+                    manifest
+                        .synced_items
+                        .retain(|i| i.jellyfin_id != delete_item.jellyfin_id);
+                    if let Err(e) = crate::device::write_manifest(&device_path_buf, &manifest).await
+                    {
                         eprintln!("[Sync] Warning: per-delete manifest write failed: {}", e);
                     } else {
                         device_manager.update_current_device(manifest).await;
@@ -564,8 +645,12 @@ pub async fn execute_sync(
         // Per-ID-change manifest update for dirty-resume support (Story 4.4)
         // Remove old ID entry, add new ID entry atomically.
         if let Some(mut manifest) = device_manager.get_current_device().await {
-            manifest.synced_items.retain(|i| i.jellyfin_id != id_change.old_jellyfin_id);
-            manifest.synced_items.push(synced_items.last().unwrap().clone());
+            manifest
+                .synced_items
+                .retain(|i| i.jellyfin_id != id_change.old_jellyfin_id);
+            manifest
+                .synced_items
+                .push(synced_items.last().unwrap().clone());
             if let Err(e) = crate::device::write_manifest(&device_path_buf, &manifest).await {
                 eprintln!("[Sync] Warning: per-ID-change manifest write failed: {}", e);
             } else {
@@ -687,7 +772,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
     // Initial deletes: manifest items not in desired set
     // AND build the metadata map in the same pass
     let mut deletes: Vec<SyncDeleteItem> = Vec::new();
-    let mut delete_by_metadata: HashMap<(String, Option<String>, Option<String>), usize> =
+    let mut delete_by_metadata: HashMap<(String, Option<String>, Option<String>), Vec<usize>> =
         HashMap::new();
     // Index original_name by jellyfin_id for ID-change preservation (AC #4 requirement)
     let original_name_by_id: HashMap<&str, Option<&str>> = manifest
@@ -710,7 +795,10 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
                 item.album.as_ref().map(|a| a.to_lowercase()),
                 item.artist.as_ref().map(|a| a.to_lowercase()),
             );
-            delete_by_metadata.insert(key, idx);
+            delete_by_metadata
+                .entry(key)
+                .or_insert_with(Vec::new)
+                .push(idx);
         }
     }
 
@@ -726,8 +814,12 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
             add.artist.as_ref().map(|a| a.to_lowercase()),
         );
 
-        if let Some(&del_idx) = delete_by_metadata.get(&key) {
-            if !matched_delete_indices.contains(&del_idx) {
+        if let Some(del_indices) = delete_by_metadata.get(&key) {
+            // Find the first unmatched delete for this metadata
+            if let Some(&del_idx) = del_indices
+                .iter()
+                .find(|&&idx| !matched_delete_indices.contains(&idx))
+            {
                 matched_add_indices.insert(add_idx);
                 matched_delete_indices.insert(del_idx);
 
@@ -1282,8 +1374,16 @@ mod tests {
         // Extension longer than max_len — must still return something with a dot
         let long_ext = "x".repeat(300);
         let result = truncate_filename("base", &long_ext, 255);
-        assert!(result.starts_with('.'), "Result must start with '.' to preserve extension: {}", result);
-        assert!(result.chars().count() <= 256, "Result should be close to limit: {} chars", result.chars().count());
+        assert!(
+            result.starts_with('.'),
+            "Result must start with '.' to preserve extension: {}",
+            result
+        );
+        assert!(
+            result.chars().count() <= 256,
+            "Result should be close to limit: {} chars",
+            result.chars().count()
+        );
     }
 
     #[test]
@@ -1291,19 +1391,29 @@ mod tests {
         // Verify old bug is fixed: no extensionless filename returned
         let long_ext = "flac".repeat(70); // ~280 chars
         let result = truncate_filename("01 - Track", &long_ext, 255);
-        assert!(result.contains('.'), "Extension dot must be present: {}", result);
+        assert!(
+            result.contains('.'),
+            "Extension dot must be present: {}",
+            result
+        );
     }
 
     #[test]
     fn test_calculate_delta_id_change_preserves_original_name() {
         let mut manifest = empty_manifest();
         manifest.synced_items = vec![{
-            let mut item = make_synced_item("old-id", "My Song", Some("My Album"), Some("My Artist"));
+            let mut item =
+                make_synced_item("old-id", "My Song", Some("My Album"), Some("My Artist"));
             item.original_name = Some("My Very Long Song Name That Was Truncated".to_string());
             item
         }];
 
-        let desired = vec![make_desired("new-id", "My Song", Some("My Album"), Some("My Artist"))];
+        let desired = vec![make_desired(
+            "new-id",
+            "My Song",
+            Some("My Album"),
+            Some("My Artist"),
+        )];
         let delta = calculate_delta(&desired, &manifest);
 
         assert_eq!(delta.id_changes.len(), 1);
@@ -1317,9 +1427,19 @@ mod tests {
     #[test]
     fn test_calculate_delta_id_change_no_original_name_stays_none() {
         let mut manifest = empty_manifest();
-        manifest.synced_items = vec![make_synced_item("old-id", "Short Song", Some("Album"), Some("Artist"))];
+        manifest.synced_items = vec![make_synced_item(
+            "old-id",
+            "Short Song",
+            Some("Album"),
+            Some("Artist"),
+        )];
 
-        let desired = vec![make_desired("new-id", "Short Song", Some("Album"), Some("Artist"))];
+        let desired = vec![make_desired(
+            "new-id",
+            "Short Song",
+            Some("Album"),
+            Some("Artist"),
+        )];
         let delta = calculate_delta(&desired, &manifest);
 
         assert_eq!(delta.id_changes.len(), 1);
