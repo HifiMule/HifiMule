@@ -563,7 +563,10 @@ struct Config {
 
 pub struct CredentialManager;
 
-static CONFIG_FILE_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+pub(crate) static CONFIG_FILE_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+#[cfg(test)]
+pub(crate) static CREDENTIAL_TEST_MUTEX: Mutex<()> = Mutex::new(());
+
 const KEYRING_SERVICE: &str = "jellyfinsync-daemon";
 const KEYRING_USER: &str = "jellyfin-token";
 
@@ -1055,5 +1058,33 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "track1");
         assert_eq!(results[0].1, 0); // No MediaSources means 0 bytes
+    }
+
+    #[test]
+    fn test_file_storage() {
+        let _guard = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+
+        let test_url = "http://localhost:8096";
+        let test_token = "test-token-1234567890";
+
+        // Use a unique temporary file for testing to prevent collisions
+        let temp_dir = tempfile::tempdir().unwrap();
+        let temp_config_path = temp_dir.path().join("test_config.json");
+
+        CredentialManager::set_config_path(temp_config_path.clone());
+
+        // Test Save
+        CredentialManager::save_credentials(test_url, test_token, Some("test-user-id"))
+            .expect("Failed to save");
+
+        assert!(temp_config_path.exists());
+
+        // Test Get
+        let (url, token, user_id) =
+            CredentialManager::get_credentials().expect("Failed to retrieve");
+
+        assert_eq!(url, test_url);
+        assert_eq!(token, test_token);
+        assert_eq!(user_id, Some("test-user-id".to_string()));
     }
 }

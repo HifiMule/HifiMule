@@ -7,7 +7,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -671,7 +671,27 @@ async fn handle_sync_calculate_delta(
     })?;
     let user_id = user_id.unwrap_or_else(|| "Me".to_string());
 
-    // Fetch item details from Jellyfin in chunks to avoid URL length limits
+    let is_downloadable_item_type = |item_type: &str| matches!(item_type, "Audio" | "MusicVideo");
+
+    let to_desired_item = |item: crate::api::JellyfinItem| {
+        let size_bytes = item
+            .media_sources
+            .as_ref()
+            .and_then(|sources| sources.first())
+            .and_then(|s| s.size)
+            .unwrap_or(0) as u64;
+        crate::sync::DesiredItem {
+            jellyfin_id: item.id,
+            name: item.name,
+            album: item.album,
+            artist: item.album_artist,
+            size_bytes,
+            etag: item.etag,
+        }
+    };
+
+    // Fetch item details from Jellyfin in chunks to avoid URL length limits.
+    // Container items (playlist/album/artist) are expanded to individual tracks.
     let mut results = Vec::new();
     for chunk in item_ids.chunks(100) {
         let chunk_strs: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
@@ -681,21 +701,40 @@ async fn handle_sync_calculate_delta(
             .await
         {
             Ok(items) => {
+                let mut fetched_ids: HashSet<String> = HashSet::new();
                 for item in items {
-                    let size_bytes = item
-                        .media_sources
-                        .as_ref()
-                        .and_then(|sources| sources.first())
-                        .and_then(|s| s.size)
-                        .unwrap_or(0) as u64;
-                    results.push(Ok(crate::sync::DesiredItem {
-                        jellyfin_id: item.id,
-                        name: item.name,
-                        album: item.album,
-                        artist: item.album_artist,
-                        size_bytes,
-                        etag: item.etag.clone(),
-                    }));
+                    fetched_ids.insert(item.id.clone());
+
+                    if is_downloadable_item_type(&item.item_type) {
+                        results.push(Ok(to_desired_item(item)));
+                        continue;
+                    }
+
+                    match state
+                        .jellyfin_client
+                        .get_child_items_with_sizes(&url, &token, &user_id, &item.id)
+                        .await
+                    {
+                        Ok(children) => {
+                            for child in children {
+                                if is_downloadable_item_type(&child.item_type) {
+                                    results.push(Ok(to_desired_item(child)));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            results.push(Err(format!("Failed to expand item {}: {}", item.id, e)));
+                        }
+                    }
+                }
+
+                for requested_id in chunk {
+                    if !fetched_ids.contains(requested_id) {
+                        results.push(Err(format!(
+                            "Failed to fetch item {}: Not found",
+                            requested_id
+                        )));
+                    }
                 }
             }
             Err(e) => {
@@ -709,9 +748,14 @@ async fn handle_sync_calculate_delta(
 
     // Check for errors - if ANY item fails, we must abort to prevent data loss (deleting valid items)
     let mut desired_items = Vec::with_capacity(results.len());
+    let mut seen_ids = HashSet::new();
     for res in results {
         match res {
-            Ok(item) => desired_items.push(item),
+            Ok(item) => {
+                if seen_ids.insert(item.jellyfin_id.clone()) {
+                    desired_items.push(item);
+                }
+            }
             Err(e) => {
                 return Err(JsonRpcError {
                     code: ERR_CONNECTION_FAILED,
@@ -959,6 +1003,7 @@ async fn handle_proxy_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::CREDENTIAL_TEST_MUTEX;
     use serde_json::json;
 
     #[tokio::test]
@@ -1465,8 +1510,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_rpc_sync_calculate_delta_expands_playlist_to_tracks() {
+        use mockito::{Matcher, Server};
+        let _credentials_guard = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let token = "test-token-1234567890";
+
+        let _mock_playlist = server
+            .mock("GET", "/Users/Me/Items")
+            .match_header("X-Emby-Token", token)
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("Ids".into(), "playlist-1".into()),
+                Matcher::UrlEncoded("Fields".into(), "MediaSources".into()),
+            ]))
+            .with_status(200)
+            .with_body(r#"{"Items":[{"Id":"playlist-1","Name":"Road Trip","Type":"Playlist","Etag":"pl-etag"}],"TotalRecordCount":1,"StartIndex":0}"#)
+            .create_async()
+            .await;
+
+        let _mock_playlist_children = server
+            .mock("GET", "/Users/Me/Items")
+            .match_header("X-Emby-Token", token)
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("ParentId".into(), "playlist-1".into()),
+                Matcher::UrlEncoded("IncludeItemTypes".into(), "Audio,MusicVideo".into()),
+                Matcher::UrlEncoded("Fields".into(), "MediaSources".into()),
+                Matcher::UrlEncoded("Recursive".into(), "true".into()),
+            ]))
+            .with_status(200)
+            .with_body(r#"{"Items":[{"Id":"track-1","Name":"Track 1","Type":"Audio","Album":"Album A","AlbumArtist":"Artist A","MediaSources":[{"Size":12345}],"Etag":"track-etag"}],"TotalRecordCount":1,"StartIndex":0}"#)
+            .create_async()
+            .await;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+        crate::api::CredentialManager::set_config_path(config_path);
+        crate::api::CredentialManager::save_credentials(&url, token, Some("Me")).unwrap();
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        device_manager
+            .handle_device_detected(
+                std::path::PathBuf::from("/tmp/dev"),
+                crate::device::DeviceManifest {
+                    device_id: "dev-1".to_string(),
+                    name: Some("Dev 1".to_string()),
+                    version: "1.0".to_string(),
+                    managed_paths: vec![],
+                    synced_items: vec![],
+                    dirty: false,
+                    pending_item_ids: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        let state = Arc::new(AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db,
+            device_manager,
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
+        });
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "sync_calculate_delta".to_string(),
+            params: Some(json!({ "itemIds": ["playlist-1"] })),
+            id: json!(1),
+        };
+
+        let response = handler(axum::extract::State(state), Json(request)).await.0;
+        assert!(
+            response.error.is_none(),
+            "Unexpected RPC error: {:?}",
+            response.error
+        );
+
+        let delta: crate::sync::SyncDelta =
+            serde_json::from_value(response.result.unwrap()).unwrap();
+        assert_eq!(delta.adds.len(), 1);
+        assert_eq!(delta.adds[0].jellyfin_id, "track-1");
+        assert_eq!(delta.adds[0].name, "Track 1");
+        assert_eq!(delta.adds[0].size_bytes, 12345);
+    }
+
+    #[tokio::test]
     async fn test_rpc_sync_calculate_delta_partial_failure() {
         use mockito::Server;
+        let _credentials_guard = CREDENTIAL_TEST_MUTEX.lock().unwrap();
         let mut server = Server::new_async().await;
         let url = server.url();
         let token = "test-token";
