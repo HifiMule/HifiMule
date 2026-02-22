@@ -38,6 +38,12 @@ interface SyncOperation {
     errors: Array<{ jellyfinId: string; filename: string; errorMessage: string }>;
 }
 
+function getBasename(path: string): string {
+    const normalized = path.replace(/\\/g, '/');
+    const segments = normalized.split('/');
+    return segments[segments.length - 1] || path;
+}
+
 function formatSize(bytes: number): string {
     if (bytes >= 1024 * 1024 * 1024) {
         return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
@@ -143,6 +149,10 @@ export class BasketSidebar {
     }
 
     private async refreshAndRender() {
+        if (this.isSyncing || this.showSyncComplete || this.syncErrorMessages !== null) {
+            this.render();
+            return;
+        }
         const [storageResult, foldersResult] = await Promise.allSettled([
             rpcCall('device_get_storage_info'),
             rpcCall('device_list_root_folders')
@@ -408,7 +418,7 @@ export class BasketSidebar {
             ? Math.round((op.filesCompleted / op.filesTotal) * 100)
             : 0;
         const currentFileName = op.currentFile
-            ? this.getBasename(op.currentFile)
+            ? getBasename(op.currentFile)
             : 'Preparing...';
 
         this.container.innerHTML = `
@@ -488,6 +498,7 @@ export class BasketSidebar {
     }
 
     private handleSyncComplete() {
+        if (this.isDestroyed) return;
         this.isSyncing = false;
         this.currentOperationId = null;
         this.currentOperation = null;
@@ -498,6 +509,7 @@ export class BasketSidebar {
     }
 
     private handleSyncFailed(operation: SyncOperation) {
+        if (this.isDestroyed) return;
         this.isSyncing = false;
         this.currentOperationId = null;
         this.currentOperation = null;
@@ -515,12 +527,6 @@ export class BasketSidebar {
         this.showSyncComplete = false;
         this.syncErrorMessages = [message];
         this.renderSyncError(this.syncErrorMessages);
-    }
-
-    private getBasename(path: string): string {
-        const normalized = path.replace(/\\/g, '/');
-        const segments = normalized.split('/');
-        return segments[segments.length - 1] || path;
     }
 
     private renderItem(item: BasketItem): string {

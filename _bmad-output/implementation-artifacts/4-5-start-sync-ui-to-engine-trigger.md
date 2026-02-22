@@ -1,6 +1,6 @@
 # Story 4.5: "Start Sync" UI-to-Engine Trigger
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -50,7 +50,10 @@ so that **I can execute my prepared sync selection and monitor real-time progres
     private currentOperationId: string | null = null;
     private currentOperation: SyncOperation | null = null;
     private pollingInterval: number | null = null;
+    private showSyncComplete: boolean = false;
+    private syncErrorMessages: string[] | null = null;
     ```
+    **Implementation note**: `showSyncComplete` and `syncErrorMessages` are additional state fields (beyond the original spec) needed to persist the success/error state across `render()` calls. They allow `render()` to be a single re-render entry point that correctly restores the sync result view when the basket 'update' event triggers a re-render.
   - [x] T1.3: Modify the "Start Sync" `<sl-button>` in the non-empty basket render path (around line 263) to include an `id` and conditional `loading`/`disabled` attributes based on `this.isSyncing`. Change:
     ```html
     <sl-button variant="primary" style="width: 100%;">
@@ -515,8 +518,8 @@ GPT-5 Codex
 
 - Added SyncOperation UI type and sync lifecycle state (isSyncing, currentOperationId, currentOperation, pollingInterval) in basket sidebar.
 - Wired Start Sync button to two-step RPC flow: sync_calculate_delta then sync_execute.
-- Implemented 500ms polling via sync_get_operation_status with stop conditions for complete and ailed.
-- Added sync progress panel with ria-live="polite" and ria-label="Sync progress".
+- Implemented 500ms polling via sync_get_operation_status with stop conditions for complete and failed.
+- Added sync progress panel with aria-live="polite" and aria-label="Sync progress".
 - Added completion flow with basket clear and explicit Done action to return to normal basket view.
 - Added failure/error flows with dismiss behavior that preserves basket selection.
 - Added polling cleanup in destroy() to avoid orphaned intervals after unmount/navigation.
@@ -527,7 +530,12 @@ GPT-5 Codex
 - jellysync-ui/src/components/BasketSidebar.ts (modified)
 - jellysync-ui/src/styles.css (modified)
 - _bmad-output/implementation-artifacts/sprint-status.yaml (modified)
+- jellysync-daemon/src/api.rs (modified — added `container` field to `JellyfinItem`, moved credential test, added test mutex)
+- jellysync-daemon/src/rpc.rs (modified — added deduplication logic for `sync_calculate_delta`, added playlist expansion test)
+- jellysync-daemon/src/tests.rs (modified — moved `test_file_storage` to api.rs)
+- jellysync-daemon/src/sync.rs (modified — fixed file extension derivation to use `media_sources[0].container`)
 
 ## Change Log
 
 - 2026-02-22: Implemented Start Sync UI-to-engine trigger (all tasks T1–T7 complete). Added isSyncing state, two-step RPC flow (sync_calculate_delta → sync_execute), 500ms polling, progress/success/error panels with ARIA, destroy() cleanup. Daemon regression: 82/82 cargo tests passed. Story moved to review.
+- 2026-02-22: Code review fixes (M1, M2). Added `isDestroyed` guard to `handleSyncComplete()` and `handleSyncFailed()` to prevent basket-clear side effects after component unmount. Added sync-state guard to `refreshAndRender()` to skip device RPC calls when in syncing/complete/error states.
