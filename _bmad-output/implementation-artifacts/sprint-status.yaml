@@ -67,6 +67,7 @@ development_status:
   4-2-atomic-buffered-io-streaming: done
   4-3-legacy-hardware-constraints-path-char-validation: done
   4-4-self-healing-dirty-manifest-resume: done
+  4-5-start-sync-ui-to-engine-trigger: backlog
   epic-4-retrospective: optional
 
   epic-5: backlog

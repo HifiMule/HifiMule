@@ -346,6 +346,36 @@ So that I don't lose progress after an accidental unplug.
 **Then** the engine detects the "Dirty" manifest flag.
 **And** it identifies which files were only partially written and initiates a resume of the remaining delta.
 
+### Story 4.5: "Start Sync" UI-to-Engine Trigger
+
+As a Convenience Seeker (Sarah) and Ritualist (Arthur),
+I want to click a "Start Sync" button in the Sync Basket sidebar to initiate the synchronization process with the daemon,
+So that I can execute my prepared sync selection and monitor real-time progress without leaving the UI.
+
+**Acceptance Criteria:**
+
+**Given** the Sync Basket is populated with items and storage projection is within safe limits
+**When** I click the "Start Sync" button
+**Then** the UI sends a `sync.start` JSON-RPC request to the daemon, including the basket's item list (Jellyfin IDs) and target device path.
+**And** the daemon responds immediately with `{ "status": "success", "data": { "jobId": "<uuid>" } }`.
+**And** the "Start Sync" button transitions to a disabled "Syncing..." state with a Shoelace progress indicator.
+**And** the UI subscribes to the `on_sync_progress` event stream and displays real-time progress (files completed, percentage, current filename).
+
+**When** the sync completes successfully
+**Then** the UI displays "Sync Complete" status.
+**And** the Sync Basket clears and the button resets to its default enabled state.
+
+**When** the daemon returns an error or the device disconnects mid-sync
+**Then** the UI displays a clear error message.
+**And** the daemon marks the manifest as "Dirty" (per Story 4.4 behaviour).
+**And** the UI offers a "Retry" or "Dismiss" option.
+
+**Technical Notes:**
+- IPC pattern: JSON-RPC 2.0 · Request: `sync.start` · Response: `{ jobId }` · Events: `on_sync_progress`
+- Follows the architecture's Request-Response-Event communication pattern
+- Button must be disabled when: basket is empty, storage projection is Over Limit, or a sync is already in progress
+- ARIA-live region required for progress updates (WCAG 2.1 AA)
+
 
 ## Epic 5: Ecosystem Lifecycle & Advanced Tools
 
