@@ -96,8 +96,9 @@ fn main() -> Result<()> {
             let db_clone = Arc::clone(&db);
             let dm_clone = Arc::clone(&device_manager);
             let scrobbler_result_rpc = Arc::clone(&last_scrobbler_result);
+            let state_tx_rpc = state_tx.clone();
             tokio::spawn(async move {
-                rpc::run_server(19140, db_clone, dm_clone, scrobbler_result_rpc).await;
+                rpc::run_server(19140, db_clone, dm_clone, scrobbler_result_rpc, state_tx_rpc).await;
             });
 
             // Handle Device Events

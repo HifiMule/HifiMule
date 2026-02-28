@@ -60,6 +60,16 @@ pub struct AppState {
     pub sync_operation_manager: Arc<crate::sync::SyncOperationManager>,
     pub last_scrobbler_result:
         Arc<tokio::sync::RwLock<Option<crate::scrobbler::ScrobblerResult>>>,
+    pub state_tx: std::sync::mpsc::Sender<crate::DaemonState>,
+}
+
+fn send_sync_complete_notification() {
+    if let Err(e) = notify_rust::Notification::new()
+        .summary("Sync Complete. Ready to Run.")
+        .show()
+    {
+        eprintln!("[Notification] Failed to show OS notification: {}", e);
+    }
 }
 
 pub async fn run_server(
@@ -69,6 +79,7 @@ pub async fn run_server(
     last_scrobbler_result: Arc<
         tokio::sync::RwLock<Option<crate::scrobbler::ScrobblerResult>>,
     >,
+    state_tx: std::sync::mpsc::Sender<crate::DaemonState>,
 ) {
     let state = Arc::new(AppState {
         jellyfin_client: JellyfinClient::new(),
@@ -78,6 +89,7 @@ pub async fn run_server(
         size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
         last_scrobbler_result,
+        state_tx,
     });
 
     let app = Router::new()
@@ -855,6 +867,8 @@ async fn handle_sync_execute(
     let op_manager = state.sync_operation_manager.clone();
     let op_id = operation_id.clone();
     let device_manager = state.device_manager.clone();
+    let state_tx = state.state_tx.clone();
+    let _ = state.state_tx.send(crate::DaemonState::Syncing);
 
     tokio::spawn(async move {
         let result = crate::sync::execute_sync(
@@ -890,9 +904,15 @@ async fn handle_sync_execute(
                     } else {
                         crate::sync::SyncStatus::Failed
                     };
-                    operation.errors = errors;
+                    operation.errors = errors.clone();
                     op_manager.update_operation(&op_id, operation).await;
                 }
+
+                // Notify OS and return tray to Idle — Story 5.3
+                if errors.is_empty() {
+                    tokio::task::spawn_blocking(send_sync_complete_notification);
+                }
+                let _ = state_tx.send(crate::DaemonState::Idle);
             }
             Err(e) => {
                 // Mark operation as failed
@@ -905,6 +925,8 @@ async fn handle_sync_execute(
                     });
                     op_manager.update_operation(&op_id, operation).await;
                 }
+
+                let _ = state_tx.send(crate::DaemonState::Error);
             }
         }
     });
@@ -1039,6 +1061,7 @@ mod tests {
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
         });
 
         let params = json!({
@@ -1064,6 +1087,7 @@ mod tests {
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
         });
 
         let request = JsonRpcRequest {
@@ -1090,6 +1114,7 @@ mod tests {
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
         });
 
         let params = json!({
@@ -1126,6 +1151,7 @@ mod tests {
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
         });
 
         // We can't easily mock the network call inside the RPC handler without a mock server or traits,
@@ -1166,6 +1192,7 @@ mod tests {
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
         });
 
         // Test missing params
@@ -1219,6 +1246,7 @@ mod tests {
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
         });
 
         // Test with specific parameters including includeItemTypes
@@ -1261,6 +1289,7 @@ mod tests {
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
         });
 
         // Test missing params
@@ -1298,6 +1327,7 @@ mod tests {
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
         });
 
         // No device connected — should return error
@@ -1327,6 +1357,7 @@ mod tests {
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
         });
 
         let result = handle_sync_get_device_status_map(&state).await.unwrap();
@@ -1386,6 +1417,7 @@ mod tests {
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
         };
 
         let result = handle_sync_get_device_status_map(&state).await.unwrap();
@@ -1409,6 +1441,7 @@ mod tests {
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
         };
         let result = handle_sync_get_resume_state(&state).await.unwrap();
         assert_eq!(result["isDirty"], false);
@@ -1444,6 +1477,7 @@ mod tests {
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
         };
         let result = handle_sync_get_resume_state(&state).await.unwrap();
         assert_eq!(result["isDirty"], false);
@@ -1484,6 +1518,7 @@ mod tests {
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
         };
         let result = handle_sync_get_resume_state(&state).await.unwrap();
         assert_eq!(result["isDirty"], true);
@@ -1507,6 +1542,7 @@ mod tests {
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
         };
         let result = handle_get_daemon_state(&state).await.unwrap();
         assert_eq!(
@@ -1537,6 +1573,7 @@ mod tests {
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
         };
         let result2 = handle_get_daemon_state(&state2).await.unwrap();
         assert_eq!(
@@ -1611,6 +1648,7 @@ mod tests {
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
         });
 
         let request = JsonRpcRequest {
@@ -1704,6 +1742,7 @@ mod tests {
             size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
         });
 
         // Make request

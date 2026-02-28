@@ -1,6 +1,6 @@
 # Story 5.3: OS-Native "Safe to Eject" Handshake
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -22,17 +22,17 @@ so that I can unplug and leave without checking the app.
 
 ## Tasks / Subtasks
 
-- [ ] **T1: Add `notify-rust` dependency** (AC: #1)
-  - [ ] T1.1: In `Cargo.toml` (workspace), add: `notify-rust = "~4.12"`
-  - [ ] T1.2: In `jellysync-daemon/Cargo.toml`, add: `notify-rust.workspace = true`
+- [x] **T1: Add `notify-rust` dependency** (AC: #1)
+  - [x] T1.1: In `Cargo.toml` (workspace), add: `notify-rust = "~4.12"`
+  - [x] T1.2: In `jellysync-daemon/Cargo.toml`, add: `notify-rust.workspace = true`
 
-- [ ] **T2: Add `state_tx` to `AppState` and wire tray state transitions** (AC: #2)
-  - [ ] T2.1: In `rpc.rs`, add field to `AppState`:
+- [x] **T2: Add `state_tx` to `AppState` and wire tray state transitions** (AC: #2)
+  - [x] T2.1: In `rpc.rs`, add field to `AppState`:
     ```rust
     pub state_tx: std::sync::mpsc::Sender<crate::DaemonState>,
     ```
     Place after `last_scrobbler_result` for logical grouping.
-  - [ ] T2.2: Update `run_server()` signature in `rpc.rs` to accept `state_tx`:
+  - [x] T2.2: Update `run_server()` signature in `rpc.rs` to accept `state_tx`:
     ```rust
     pub async fn run_server(
         port: u16,
@@ -42,8 +42,8 @@ so that I can unplug and leave without checking the app.
         state_tx: std::sync::mpsc::Sender<crate::DaemonState>,
     ) {
     ```
-  - [ ] T2.3: In `run_server()`, include `state_tx` in the `AppState { ... }` constructor literal.
-  - [ ] T2.4: In `main.rs`, clone `state_tx` before the RPC spawn:
+  - [x] T2.3: In `run_server()`, include `state_tx` in the `AppState { ... }` constructor literal.
+  - [x] T2.4: In `main.rs`, clone `state_tx` before the RPC spawn:
     ```rust
     let state_tx_rpc = state_tx.clone();
     tokio::spawn(async move {
@@ -52,8 +52,8 @@ so that I can unplug and leave without checking the app.
     ```
     **CRITICAL**: `state_tx` is already moved into the daemon tokio block. Clone it BEFORE the `tokio::spawn` that runs `run_server` (line ~96 in main.rs), alongside the other `Arc::clone` calls already there.
 
-- [ ] **T3: Implement `send_sync_complete_notification()` helper** (AC: #1, #4)
-  - [ ] T3.1: Add a free function in `rpc.rs` (NOT in impl block):
+- [x] **T3: Implement `send_sync_complete_notification()` helper** (AC: #1, #4)
+  - [x] T3.1: Add a free function in `rpc.rs` (NOT in impl block):
     ```rust
     fn send_sync_complete_notification() {
         if let Err(e) = notify_rust::Notification::new()
@@ -66,18 +66,18 @@ so that I can unplug and leave without checking the app.
     ```
     Non-fatal: error is logged, not propagated. No return value.
 
-- [ ] **T4: Wire state transitions and notification into `handle_sync_execute`** (AC: #1, #2, #3)
-  - [ ] T4.1: At the top of `handle_sync_execute`, after extracting the device path and before spawning the background task, send Syncing state:
+- [x] **T4: Wire state transitions and notification into `handle_sync_execute`** (AC: #1, #2, #3)
+  - [x] T4.1: At the top of `handle_sync_execute`, after extracting the device path and before spawning the background task, send Syncing state:
     ```rust
     let _ = state.state_tx.send(crate::DaemonState::Syncing);
     ```
     Place this immediately before the `tokio::spawn(async move { ... })` block.
-  - [ ] T4.2: In the `tokio::spawn` background task, capture `state_tx` via clone:
+  - [x] T4.2: In the `tokio::spawn` background task, capture `state_tx` via clone:
     ```rust
     let state_tx = state.state_tx.clone();
     ```
     Add alongside the existing clones (`jellyfin_client`, `op_manager`, etc.) on lines ~854-857 in rpc.rs.
-  - [ ] T4.3: In the `Ok((_synced_items, errors))` success arm, after updating operation status, add:
+  - [x] T4.3: In the `Ok((_synced_items, errors))` success arm, after updating operation status, add:
     ```rust
     // Notify OS and return tray to Idle — Story 5.3
     if errors.is_empty() {
@@ -86,15 +86,15 @@ so that I can unplug and leave without checking the app.
     let _ = state_tx.send(crate::DaemonState::Idle);
     ```
     **Order matters**: notification fires only if `errors.is_empty()` (true Complete, not Failed-with-errors). Tray ALWAYS returns to Idle after the operation ends (even if there were partial errors).
-  - [ ] T4.4: In the `Err(e)` failure arm, after marking operation as Failed, add:
+  - [x] T4.4: In the `Err(e)` failure arm, after marking operation as Failed, add:
     ```rust
     let _ = state_tx.send(crate::DaemonState::Error);
     ```
     On hard failure (no Ok), tray goes to Error state (not Idle).
 
-- [ ] **T5: Verification** (AC: all)
-  - [ ] T5.1: `cargo build` in workspace root — zero errors (confirms new dependency resolves and API compiles correctly).
-  - [ ] T5.2: `cargo test` in `jellysync-daemon/` — all existing 96 tests pass, zero regressions.
+- [x] **T5: Verification** (AC: all)
+  - [x] T5.1: `cargo build` in workspace root — zero errors (confirms new dependency resolves and API compiles correctly).
+  - [x] T5.2: `cargo test` in `jellysync-daemon/` — all existing 96 tests pass, zero regressions.
   - [ ] T5.3: Manual — run a sync, verify: (a) tray icon changes to Syncing during sync, (b) OS notification "Sync Complete. Ready to Run." appears on completion, (c) tray returns to Idle (green).
   - [ ] T5.4: Manual — simulate a sync failure (disconnect device mid-sync), verify: (a) no notification, (b) tray shows Error state.
 
@@ -269,6 +269,26 @@ claude-sonnet-4-6
 
 ### Debug Log References
 
+Test constructors in rpc.rs needed `state_tx` added. Used `std::sync::mpsc::channel::<crate::DaemonState>().0` as a discard sender for tests — matches the existing test isolation pattern (no real event loop in tests).
+
 ### Completion Notes List
 
+- ✅ Added `notify-rust = "~4.12"` to workspace and daemon Cargo.toml. Cross-platform: Linux (D-Bus), macOS (NSUserNotification), Windows (WinRT toast).
+- ✅ Added `state_tx: std::sync::mpsc::Sender<crate::DaemonState>` to `AppState` and threaded it from `main.rs` through `run_server()`.
+- ✅ Added `send_sync_complete_notification()` free function — non-fatal, fire-and-forget pattern. Only uses `.summary()` for cross-platform compatibility (no `.body()`, `.icon()`, `.hint()`).
+- ✅ Wired `DaemonState::Syncing` send before background task spawn in `handle_sync_execute`; `DaemonState::Idle` on clean success; `DaemonState::Error` on `Err` arm.
+- ✅ Notification only fires when `errors.is_empty()` (true Complete). Tray always returns to Idle/Error after sync concludes.
+- ✅ `tokio::task::spawn_blocking` used for notification to avoid blocking async runtime — fire-and-forget (JoinHandle not awaited).
+- ✅ All 17 existing test `AppState` constructors updated with discard `state_tx`. `cargo build`: 0 errors, 1 pre-existing warning. `cargo test`: 96/96 passed, 0 regressions.
+- T5.3/T5.4: Manual verification required by Alexis (OS event loop and notification daemon required).
+
 ### File List
+
+Cargo.toml
+jellysync-daemon/Cargo.toml
+jellysync-daemon/src/main.rs
+jellysync-daemon/src/rpc.rs
+
+## Change Log
+
+- 2026-02-28: Story 5.3 implemented. Added `notify-rust` dependency, wired `state_tx` into `AppState` and `run_server`, added `send_sync_complete_notification()` helper, and connected `Syncing`/`Idle`/`Error` tray state transitions to `handle_sync_execute`. 96 tests pass, 0 regressions.
