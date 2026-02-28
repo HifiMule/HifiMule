@@ -1,6 +1,6 @@
 # Story 5.3: OS-Native "Safe to Eject" Handshake
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -284,6 +284,7 @@ Test constructors in rpc.rs needed `state_tx` added. Used `std::sync::mpsc::chan
 
 ### File List
 
+Cargo.lock
 Cargo.toml
 jellysync-daemon/Cargo.toml
 jellysync-daemon/src/main.rs
@@ -292,3 +293,4 @@ jellysync-daemon/src/rpc.rs
 ## Change Log
 
 - 2026-02-28: Story 5.3 implemented. Added `notify-rust` dependency, wired `state_tx` into `AppState` and `run_server`, added `send_sync_complete_notification()` helper, and connected `Syncing`/`Idle`/`Error` tray state transitions to `handle_sync_execute`. 96 tests pass, 0 regressions.
+- 2026-02-28: Code review fixes applied. Added `use notify_rust::Notification` import (L1: style consistency). Changed `state.state_tx.send(Syncing)` → `state_tx.send(Syncing)` to use clone consistently (L2). Added explanatory comment on dropped `spawn_blocking` JoinHandle (L3). Added `Cargo.lock` to File List (M1). M2 (notify-rust feature flags / libdbus-dev dependency) flagged for Alexis decision — no change made.

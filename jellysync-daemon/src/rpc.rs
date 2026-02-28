@@ -1,4 +1,5 @@
 use crate::api::{CredentialManager, JellyfinClient};
+use notify_rust::Notification;
 use axum::{
     extract::{Path, State},
     response::IntoResponse,
@@ -64,7 +65,7 @@ pub struct AppState {
 }
 
 fn send_sync_complete_notification() {
-    if let Err(e) = notify_rust::Notification::new()
+    if let Err(e) = Notification::new()
         .summary("Sync Complete. Ready to Run.")
         .show()
     {
@@ -868,7 +869,7 @@ async fn handle_sync_execute(
     let op_id = operation_id.clone();
     let device_manager = state.device_manager.clone();
     let state_tx = state.state_tx.clone();
-    let _ = state.state_tx.send(crate::DaemonState::Syncing);
+    let _ = state_tx.send(crate::DaemonState::Syncing);
 
     tokio::spawn(async move {
         let result = crate::sync::execute_sync(
@@ -910,7 +911,10 @@ async fn handle_sync_execute(
 
                 // Notify OS and return tray to Idle — Story 5.3
                 if errors.is_empty() {
-                    tokio::task::spawn_blocking(send_sync_complete_notification);
+                    // JoinHandle intentionally dropped: fire-and-forget per AC #4.
+                    // Err(e) path inside the function logs the failure; panics are silently
+                    // absorbed, which is acceptable for a best-effort OS notification.
+                    let _ = tokio::task::spawn_blocking(send_sync_complete_notification);
                 }
                 let _ = state_tx.send(crate::DaemonState::Idle);
             }
