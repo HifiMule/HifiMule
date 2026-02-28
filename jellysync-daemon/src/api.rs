@@ -71,6 +71,8 @@ pub struct JellyfinItem {
     #[serde(default)]
     pub album_artist: Option<String>,
     #[serde(default)]
+    pub artists: Option<Vec<String>>,
+    #[serde(default)]
     pub index_number: Option<u32>,
     #[serde(default)]
     pub container: Option<String>,
@@ -545,7 +547,6 @@ impl JellyfinClient {
         url: &str,
         token: &str,
         user_id: &str,
-        artist: &str,
         title: &str,
     ) -> Result<Vec<JellyfinItem>> {
         CredentialManager::validate_url(url)?;
@@ -574,20 +575,7 @@ impl JellyfinClient {
         }
 
         let items_response = serde_json::from_str::<JellyfinItemsResponse>(&text)?;
-
-        let artist_lower = artist.to_lowercase();
-        let filtered: Vec<JellyfinItem> = items_response
-            .items
-            .into_iter()
-            .filter(|item| {
-                item.album_artist
-                    .as_ref()
-                    .map(|a| a.to_lowercase() == artist_lower)
-                    .unwrap_or(false)
-            })
-            .collect();
-
-        Ok(filtered)
+        Ok(items_response.items)
     }
 
     pub async fn report_item_played(

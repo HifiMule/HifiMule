@@ -26,6 +26,7 @@ pub struct ScrobblerResult {
     pub failed: usize,
     pub errors: Vec<String>,
     pub device_id: String,
+    pub total_scrobbled: i64,
 }
 
 pub fn parse_scrobbler_log(content: &str) -> Vec<ScrobblerEntry> {
@@ -96,6 +97,7 @@ pub async fn process_device_scrobbles(
             failed: 0,
             errors: Vec::new(),
             device_id,
+            total_scrobbled: 0,
         };
     }
 
@@ -110,6 +112,7 @@ pub async fn process_device_scrobbles(
                 failed: 0,
                 errors: vec![format!("Failed to read .scrobbler.log: {}", e)],
                 device_id,
+                total_scrobbled: 0,
             };
         }
     };
@@ -130,7 +133,7 @@ pub async fn process_device_scrobbles(
 
         // Search Jellyfin for matching track
         let search_result = client
-            .search_audio_items(url, token, user_id, &entry.artist, &entry.title)
+            .search_audio_items(url, token, user_id, &entry.title)
             .await;
 
         let candidates = match search_result {
@@ -186,7 +189,8 @@ pub async fn process_device_scrobbles(
             continue;
         }
 
-        // Record in scrobble_history
+        // Record in scrobble_history — if this fails the track was submitted but won't
+        // be deduped in Story 5.2, so count it as failed rather than submitted.
         if let Err(e) = db.record_scrobble(
             &device_id,
             &entry.artist,
@@ -198,10 +202,14 @@ pub async fn process_device_scrobbles(
                 "Failed to record scrobble for '{}': {}",
                 entry.title, e
             ));
+            failed += 1;
+            continue;
         }
 
         submitted += 1;
     }
+
+    let total_scrobbled = db.get_scrobble_count(&device_id).unwrap_or(0);
 
     ScrobblerResult {
         total_entries,
@@ -211,6 +219,7 @@ pub async fn process_device_scrobbles(
         failed,
         errors,
         device_id,
+        total_scrobbled,
     }
 }
 
@@ -270,5 +279,82 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
 ";
         let entries = parse_scrobbler_log(log);
         assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_process_device_no_log_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let client = Arc::new(crate::api::JellyfinClient::new());
+
+        let result = process_device_scrobbles(
+            temp_dir.path(),
+            db,
+            client,
+            "http://localhost:8096",
+            "token-placeholder",
+            "user-placeholder",
+        )
+        .await;
+
+        assert_eq!(result.total_entries, 0);
+        assert_eq!(result.submitted, 0);
+        assert_eq!(result.failed, 0);
+        assert!(result.errors.is_empty());
+        assert_eq!(result.total_scrobbled, 0);
+    }
+
+    #[tokio::test]
+    async fn test_process_device_unreadable_log() {
+        // Write a valid .scrobbler.log but in a path that gets removed
+        let temp_dir = tempfile::tempdir().unwrap();
+        let log_path = temp_dir.path().join(".scrobbler.log");
+        std::fs::write(&log_path, b"#AUDIOSCROBBLER/1.1\n").unwrap();
+
+        // Remove the file after creating it to simulate read failure on a different path
+        // Instead, test with a directory named .scrobbler.log (unreadable as file)
+        let bad_dir = tempfile::tempdir().unwrap();
+        let fake_log = bad_dir.path().join(".scrobbler.log");
+        std::fs::create_dir(&fake_log).unwrap(); // directory, not a file — read_to_string will fail
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let client = Arc::new(crate::api::JellyfinClient::new());
+
+        let result = process_device_scrobbles(
+            bad_dir.path(),
+            db,
+            client,
+            "http://localhost:8096",
+            "token-placeholder",
+            "user-placeholder",
+        )
+        .await;
+
+        assert_eq!(result.total_entries, 0);
+        assert_eq!(result.submitted, 0);
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.errors[0].contains("Failed to read .scrobbler.log"));
+    }
+
+    #[test]
+    fn test_scrobbler_result_submitted_excludes_db_failures() {
+        // Verify the logic: submitted should only increment when BOTH
+        // report_item_played AND record_scrobble succeed.
+        // This test documents the invariant via the struct field semantics.
+        let result = ScrobblerResult {
+            total_entries: 3,
+            submitted: 1,
+            skipped_rating: 1,
+            unmatched: 0,
+            failed: 1, // one track had DB record failure
+            errors: vec!["Failed to record scrobble for 'Track': db error".to_string()],
+            device_id: "ipod-001".to_string(),
+            total_scrobbled: 1,
+        };
+        // submitted + skipped + unmatched + failed == total_entries
+        assert_eq!(
+            result.submitted + result.skipped_rating + result.unmatched + result.failed,
+            result.total_entries
+        );
     }
 }

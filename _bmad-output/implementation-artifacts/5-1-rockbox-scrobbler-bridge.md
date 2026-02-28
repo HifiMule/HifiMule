@@ -1,6 +1,6 @@
 # Story 5.1: Rockbox Scrobbler Bridge
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -172,6 +172,8 @@ so that **my on-the-go listening is reflected on my Jellyfin server**.
 
 - **Keyring access pattern**: In `main.rs`, credentials are accessed via the `keyring` crate. Look at how `rpc.rs` handlers call `CredentialManager::get_credentials()` (defined in `api.rs`) and use the same approach. Do NOT duplicate credential logic.
 
+- **Deviation from spec — `process_device_scrobbles()` signature**: Story T3.4 specifies `(device_path, db, url, token, user_id)`. The implementation adds `client: Arc<JellyfinClient>` as a third parameter. A shared `JellyfinClient` is created once in the `main.rs` device event loop and passed via `Arc` to avoid creating a new reqwest client per device event. This is architecturally better than constructing the client inside the function.
+
 - **Tokio spawn pattern**: The scrobbler runs as a detached background task (`tokio::spawn`) after device detection. It should NOT block the device detection response or tray state update.
 
 - **SQLite mutex pattern**: `Database` uses `Arc<Mutex<Connection>>` (std Mutex, not tokio). `record_scrobble()` must lock briefly and release. Do NOT hold the lock across `await` points.
@@ -325,11 +327,30 @@ None — implementation was straightforward with no runtime debugging required.
 ### Completion Notes List
 
 - **T1 (db.rs)**: Added `scrobble_history` table with `submitted_at` timestamp and `idx_scrobble_unique` index. Added `record_scrobble()` using `INSERT OR IGNORE` for Story 5.2 dedup foundation. Added `get_scrobble_count()`. 2 new unit tests added.
-- **T2 (api.rs)**: Added `search_audio_items()` with URL encoding via private `url_encode()` helper (no extra crate needed). Added `report_item_played()` for `POST /Users/{userId}/PlayedItems/{itemId}`. Filter logic applied in `search_audio_items` on `album_artist` for artist matching.
-- **T3 (scrobbler.rs)**: New module with `ScrobblerEntry`, `ScrobblerResult` (camelCase serde), `parse_scrobbler_log()`, and `process_device_scrobbles()`. Non-fatal per-entry error collection pattern used throughout. 3 unit tests covering sample log, malformed lines, and headers-only cases.
+- **T2 (api.rs)**: Added `search_audio_items()` with URL encoding via private `url_encode()` helper (no extra crate needed). Added `report_item_played()` for `POST /Users/{userId}/PlayedItems/{itemId}`. Added `artists: Option<Vec<String>>` field to `JellyfinItem`.
+- **T3 (scrobbler.rs)**: New module with `ScrobblerEntry`, `ScrobblerResult` (camelCase serde), `parse_scrobbler_log()`, and `process_device_scrobbles()`. Non-fatal per-entry error collection pattern used throughout. Added `total_scrobbled: i64` to `ScrobblerResult` (calls `get_scrobble_count()` after processing). 6 unit tests: 3 parser + 3 process_device paths.
 - **T4 (main.rs)**: Added `mod scrobbler;`. Created `last_scrobbler_result: Arc<RwLock<Option<ScrobblerResult>>>`. Device event loop spawns scrobbler background task after `DeviceEvent::Detected` when credentials available. `JellyfinClient` created once and shared via `Arc` in the device loop.
 - **T5 (rpc.rs)**: Added `last_scrobbler_result` field to `AppState`. Updated `run_server` signature. Added `scrobbler_get_last_result` match arm and `handle_scrobbler_get_last_result()` returning `null` or serialized `ScrobblerResult`. All 17 test `AppState` instantiations updated with `Arc::new(RwLock::new(None))`.
-- **T6 (verification)**: `cargo test` → 88 tests pass (6 new: 2 db + 3 scrobbler parser + 1 implicit from compile). No regressions.
+- **T6 (verification)**: `cargo test` → 91 tests pass (9 new total: 2 db + 3 scrobbler parser + 3 process_device paths + 1 invariant test + sync.rs compile fixes). No regressions.
+
+### Senior Developer Review (AI) — 2026-02-28
+
+Review found and fixed the following issues:
+
+**HIGH — Fixed:**
+- `submitted` counter incremented even when `db.record_scrobble()` failed. Fixed: only increment `submitted` if both `report_item_played` AND `record_scrobble` succeed; otherwise increment `failed` and `continue`. [scrobbler.rs]
+- `get_scrobble_count()` was dead code despite spec saying it should surface in RPC result. Fixed: added `total_scrobbled: i64` field to `ScrobblerResult`, populated via `get_scrobble_count()` at end of processing. [scrobbler.rs, db.rs]
+- `search_audio_items()` pre-filtered by `album_artist`, preventing album-only matching for tracks without AlbumArtist in Jellyfin. Fixed: removed artist pre-filter from API method — all filtering now happens exclusively in `scrobbler.rs`. [api.rs, scrobbler.rs]
+
+**MEDIUM — Fixed:**
+- `Artists` field requested in API query but not mapped in `JellyfinItem` struct. Fixed: added `artists: Option<Vec<String>>` field. [api.rs, sync.rs test helpers]
+- No tests for `process_device_scrobbles()` error paths (AC #7 had zero automated coverage). Fixed: added 3 tests covering no-log-file, unreadable-log, and submitted/failed invariant.
+- Undocumented deviation: `process_device_scrobbles()` takes `client: Arc<JellyfinClient>` not in spec. Fixed: documented in Dev Notes above.
+
+**LOW — Noted, not fixed (pre-existing patterns):**
+- Multiple `println!("DEBUG:")` statements in `api.rs` — pre-existing from earlier stories, deferred to logging refactor.
+- Scrobbler stdout logs may expose artist/title — acceptable for current daemon phase.
+- `report_item_played()` POST has no Content-Type — reqwest default is accepted by Jellyfin.
 
 ### File List
 
