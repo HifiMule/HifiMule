@@ -72,7 +72,7 @@ development_status:
 
   epic-5: in-progress
   5-1-rockbox-scrobbler-bridge: done
-  5-2-scrobble-submission-tracking-deduplication: backlog
+  5-2-scrobble-submission-tracking-deduplication: ready-for-dev
   5-3-os-native-safe-to-eject-handshake: backlog
   5-4-visual-manifest-repair-utility: backlog
   epic-5-retrospective: optional
