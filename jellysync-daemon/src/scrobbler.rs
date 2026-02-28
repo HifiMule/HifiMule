@@ -22,6 +22,7 @@ pub struct ScrobblerResult {
     pub total_entries: usize,
     pub submitted: usize,
     pub skipped_rating: usize,
+    pub skipped_duplicate: usize,
     pub unmatched: usize,
     pub failed: usize,
     pub errors: Vec<String>,
@@ -93,6 +94,7 @@ pub async fn process_device_scrobbles(
             total_entries: 0,
             submitted: 0,
             skipped_rating: 0,
+            skipped_duplicate: 0,
             unmatched: 0,
             failed: 0,
             errors: Vec::new(),
@@ -108,6 +110,7 @@ pub async fn process_device_scrobbles(
                 total_entries: 0,
                 submitted: 0,
                 skipped_rating: 0,
+                skipped_duplicate: 0,
                 unmatched: 0,
                 failed: 0,
                 errors: vec![format!("Failed to read .scrobbler.log: {}", e)],
@@ -121,6 +124,7 @@ pub async fn process_device_scrobbles(
     let total_entries = entries.len();
     let mut submitted = 0usize;
     let mut skipped_rating = 0usize;
+    let mut skipped_duplicate = 0usize;
     let mut unmatched = 0usize;
     let mut failed = 0usize;
     let mut errors: Vec<String> = Vec::new();
@@ -129,6 +133,20 @@ pub async fn process_device_scrobbles(
         if entry.rating != "L" {
             skipped_rating += 1;
             continue;
+        }
+
+        // Dedup check — skip if already submitted (Story 5.2)
+        match db.is_scrobble_recorded(&device_id, &entry.artist, &entry.album, &entry.title, entry.timestamp_unix) {
+            Ok(true) => {
+                println!("[Scrobbler] Skipping duplicate: '{}' by '{}'", entry.title, entry.artist);
+                skipped_duplicate += 1;
+                continue;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                // Non-fatal: log and proceed with submission attempt
+                println!("[Scrobbler] Warning: dedup check failed for '{}': {} — will attempt submission", entry.title, e);
+            }
         }
 
         // Search Jellyfin for matching track
@@ -215,6 +233,7 @@ pub async fn process_device_scrobbles(
         total_entries,
         submitted,
         skipped_rating,
+        skipped_duplicate,
         unmatched,
         failed,
         errors,
@@ -336,6 +355,40 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
         assert!(result.errors[0].contains("Failed to read .scrobbler.log"));
     }
 
+    #[tokio::test]
+    async fn test_process_device_skips_already_scrobbled() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let log_path = temp_dir.path().join(".scrobbler.log");
+        std::fs::write(&log_path, SAMPLE_LOG.as_bytes()).unwrap();
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_id = temp_dir.path().to_string_lossy().to_string();
+
+        // Pre-populate scrobble_history with both "L" entries from SAMPLE_LOG
+        db.record_scrobble(&device_id, "Pink Floyd", "The Dark Side of the Moon", "Money", 1706745600)
+            .unwrap();
+        db.record_scrobble(&device_id, "Led Zeppelin", "Led Zeppelin IV", "Stairway to Heaven", 1706752800)
+            .unwrap();
+
+        let client = Arc::new(crate::api::JellyfinClient::new());
+        let result = process_device_scrobbles(
+            temp_dir.path(),
+            db,
+            client,
+            "http://localhost:8096",
+            "token-placeholder",
+            "user-placeholder",
+        )
+        .await;
+
+        assert_eq!(result.total_entries, 3);
+        assert_eq!(result.skipped_duplicate, 2);
+        assert_eq!(result.skipped_rating, 1);
+        assert_eq!(result.submitted, 0);
+        assert_eq!(result.unmatched, 0);
+        assert_eq!(result.failed, 0);
+    }
+
     #[test]
     fn test_scrobbler_result_submitted_excludes_db_failures() {
         // Verify the logic: submitted should only increment when BOTH
@@ -345,15 +398,16 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
             total_entries: 3,
             submitted: 1,
             skipped_rating: 1,
+            skipped_duplicate: 0,
             unmatched: 0,
             failed: 1, // one track had DB record failure
             errors: vec!["Failed to record scrobble for 'Track': db error".to_string()],
             device_id: "ipod-001".to_string(),
             total_scrobbled: 1,
         };
-        // submitted + skipped + unmatched + failed == total_entries
+        // submitted + skipped_rating + skipped_duplicate + unmatched + failed == total_entries
         assert_eq!(
-            result.submitted + result.skipped_rating + result.unmatched + result.failed,
+            result.submitted + result.skipped_rating + result.skipped_duplicate + result.unmatched + result.failed,
             result.total_entries
         );
     }

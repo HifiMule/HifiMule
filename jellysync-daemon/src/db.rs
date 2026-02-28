@@ -112,6 +112,26 @@ impl Database {
         Ok(())
     }
 
+    pub fn is_scrobble_recorded(
+        &self,
+        device_id: &str,
+        artist: &str,
+        album: &str,
+        title: &str,
+        timestamp_unix: i64,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM scrobble_history
+                 WHERE device_id=?1 AND artist=?2 AND album=?3 AND title=?4 AND timestamp_unix=?5",
+                params![device_id, artist, album, title, timestamp_unix],
+                |row| row.get(0),
+            )
+            .map_err(|e| anyhow!("Failed to check scrobble record: {}", e))?;
+        Ok(count > 0)
+    }
+
     pub fn get_scrobble_count(&self, device_id: &str) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn
@@ -186,6 +206,37 @@ mod tests {
 
         let count = db.get_scrobble_count(device_id).unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_is_scrobble_recorded_false() {
+        let db = Database::memory().unwrap();
+        let result = db
+            .is_scrobble_recorded("ipod-001", "Pink Floyd", "The Dark Side of the Moon", "Money", 1706745600)
+            .unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_is_scrobble_recorded_true() {
+        let db = Database::memory().unwrap();
+        db.record_scrobble("ipod-001", "Pink Floyd", "The Dark Side of the Moon", "Money", 1706745600)
+            .unwrap();
+        let result = db
+            .is_scrobble_recorded("ipod-001", "Pink Floyd", "The Dark Side of the Moon", "Money", 1706745600)
+            .unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_is_scrobble_recorded_different_timestamp() {
+        let db = Database::memory().unwrap();
+        db.record_scrobble("ipod-001", "Pink Floyd", "The Dark Side of the Moon", "Money", 1706745600)
+            .unwrap();
+        let result = db
+            .is_scrobble_recorded("ipod-001", "Pink Floyd", "The Dark Side of the Moon", "Money", 9999999999)
+            .unwrap();
+        assert!(!result);
     }
 
     #[test]

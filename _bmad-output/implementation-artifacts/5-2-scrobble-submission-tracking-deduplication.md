@@ -1,6 +1,6 @@
 # Story 5.2: Scrobble Submission Tracking (Deduplication)
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -24,8 +24,8 @@ so that reconnecting the same device multiple times never creates duplicate play
 
 ## Tasks / Subtasks
 
-- [ ] **T1: Add `is_scrobble_recorded()` to `db.rs`** (AC: #1, #5)
-  - [ ] T1.1: Add method to `impl Database`:
+- [x] **T1: Add `is_scrobble_recorded()` to `db.rs`** (AC: #1, #5)
+  - [x] T1.1: Add method to `impl Database`:
     ```rust
     pub fn is_scrobble_recorded(
         &self,
@@ -47,28 +47,28 @@ so that reconnecting the same device multiple times never creates duplicate play
     ```
     - Uses the same `idx_scrobble_unique` index created in Story 5.1 — the query hits the index directly (no full table scan).
     - Lock, query, release — do NOT hold lock across `await` (none here; this is sync).
-  - [ ] T1.2: Add unit tests in `db.rs` mod tests:
+  - [x] T1.2: Add unit tests in `db.rs` mod tests:
     - `test_is_scrobble_recorded_false`: call `is_scrobble_recorded()` on an empty DB → returns `false`.
     - `test_is_scrobble_recorded_true`: call `record_scrobble()` then `is_scrobble_recorded()` with the same params → returns `true`.
     - `test_is_scrobble_recorded_different_timestamp`: same track but different `timestamp_unix` → returns `false` (distinct listen events are not deduped against each other).
 
-- [ ] **T2: Add `skipped_duplicate` to `ScrobblerResult` in `scrobbler.rs`** (AC: #2, #3)
-  - [ ] T2.1: Add field to the struct:
+- [x] **T2: Add `skipped_duplicate` to `ScrobblerResult` in `scrobbler.rs`** (AC: #2, #3)
+  - [x] T2.1: Add field to the struct:
     ```rust
     pub skipped_duplicate: usize,
     ```
     Place after `skipped_rating` for logical grouping. Serde `rename_all = "camelCase"` gives JSON key `skippedDuplicate` automatically.
-  - [ ] T2.2: Initialize to `0` in **all three** early-return `ScrobblerResult` construction sites:
+  - [x] T2.2: Initialize to `0` in **all three** early-return `ScrobblerResult` construction sites:
     - The "no `.scrobbler.log`" early return.
     - The "failed to read `.scrobbler.log`" early return.
     - The final return at the bottom of the processing loop.
-  - [ ] T2.3: Update the existing `test_scrobbler_result_submitted_excludes_db_failures` invariant test:
+  - [x] T2.3: Update the existing `test_scrobbler_result_submitted_excludes_db_failures` invariant test:
     - Add `skipped_duplicate: 0` to the struct literal.
     - Update the assertion to: `submitted + skipped_rating + skipped_duplicate + unmatched + failed == total_entries`.
 
-- [ ] **T3: Implement dedup pre-check in `process_device_scrobbles()`** (AC: #1, #4, #5)
-  - [ ] T3.1: Add `let mut skipped_duplicate = 0usize;` alongside the existing counters.
-  - [ ] T3.2: Insert the dedup check **immediately after** the `entry.rating != "L"` gate and **before** `client.search_audio_items()`:
+- [x] **T3: Implement dedup pre-check in `process_device_scrobbles()`** (AC: #1, #4, #5)
+  - [x] T3.1: Add `let mut skipped_duplicate = 0usize;` alongside the existing counters.
+  - [x] T3.2: Insert the dedup check **immediately after** the `entry.rating != "L"` gate and **before** `client.search_audio_items()`:
     ```rust
     // Dedup check — skip if already submitted (Story 5.2)
     match db.is_scrobble_recorded(&device_id, &entry.artist, &entry.album, &entry.title, entry.timestamp_unix) {
@@ -84,10 +84,10 @@ so that reconnecting the same device multiple times never creates duplicate play
         }
     }
     ```
-  - [ ] T3.3: Include `skipped_duplicate` in the final `ScrobblerResult { ... }` construction.
+  - [x] T3.3: Include `skipped_duplicate` in the final `ScrobblerResult { ... }` construction.
 
-- [ ] **T4: Add unit test for dedup behavior in `scrobbler.rs`** (AC: #1, #2, #3)
-  - [ ] T4.1: Add `test_process_device_skips_already_scrobbled` test:
+- [x] **T4: Add unit test for dedup behavior in `scrobbler.rs`** (AC: #1, #2, #3)
+  - [x] T4.1: Add `test_process_device_skips_already_scrobbled` test:
     - Create a temp dir with a `.scrobbler.log` containing 2 "L" entries + 1 "S" entry (use `SAMPLE_LOG` constant already defined in the file).
     - Write the sample log to `temp_dir.path().join(".scrobbler.log")`.
     - Create a `Database::memory()` and pre-populate `scrobble_history` with both "L" entries (Pink Floyd "Money" and Led Zeppelin "Stairway to Heaven").
@@ -96,8 +96,8 @@ so that reconnecting the same device multiple times never creates duplicate play
     - Assert: `total_entries == 3`, `skipped_duplicate == 2`, `skipped_rating == 1`, `submitted == 0`, `unmatched == 0`, `failed == 0`.
     - This test is **network-free** because the dedup check short-circuits all Jellyfin API calls.
 
-- [ ] **T5: Verification** (AC: all)
-  - [ ] T5.1: `cargo test` in `jellysync-daemon/` — all existing 91 tests pass + 4 new tests pass (T1.2 ×3, T4.1 ×1).
+- [x] **T5: Verification** (AC: all)
+  - [x] T5.1: `cargo test` in `jellysync-daemon/` — all existing 91 tests pass + 4 new tests pass (T1.2 ×3, T4.1 ×1). Result: 95 tests passed.
   - [ ] T5.2: Manual — reconnect the same iPod twice. Second connection: `scrobbler_get_last_result` returns `skippedDuplicate > 0` and `submitted == 0`. No new play-count entries added on Jellyfin server.
 
 ## Dev Notes
@@ -228,10 +228,26 @@ No open technical debt affecting Story 5.2 scope.
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+claude-sonnet-4-6
 
 ### Debug Log References
 
+None — clean implementation with no debug iterations required.
+
 ### Completion Notes List
 
+- **T1**: Added `is_scrobble_recorded()` to `db.rs` after `record_scrobble()`. Synchronous method using same `Arc<Mutex<Connection>>` lock pattern. Hits `idx_scrobble_unique` index directly via 5-param WHERE clause. Returns `Result<bool>` via `anyhow`.
+- **T1 tests**: Added 3 unit tests: `test_is_scrobble_recorded_false` (empty DB → false), `test_is_scrobble_recorded_true` (record then check → true), `test_is_scrobble_recorded_different_timestamp` (same track, different timestamp → false).
+- **T2**: Added `pub skipped_duplicate: usize` to `ScrobblerResult` after `skipped_rating`. Serde `rename_all = "camelCase"` yields `skippedDuplicate` in JSON automatically. Added `skipped_duplicate: 0` to both early-return sites and final result construction. Updated invariant test to include field in struct literal and sum assertion.
+- **T3**: Added `let mut skipped_duplicate = 0usize;` counter. Inserted dedup pre-check block after `rating != "L"` gate, before `search_audio_items()`. `Ok(true)` → log + increment + `continue`. `Ok(false)` → fall through. `Err(e)` → log warning, proceed with submission (non-fatal, AC #5 compliant). `skipped_duplicate` included in final `ScrobblerResult`.
+- **T4**: Added `test_process_device_skips_already_scrobbled` — async, uses `Database::memory()` pre-populated with both "L" entries from `SAMPLE_LOG`. Network-free: dedup check short-circuits before any `reqwest` calls. Asserts: `total_entries=3, skipped_duplicate=2, skipped_rating=1, submitted=0, unmatched=0, failed=0`.
+- **T5**: `cargo test` — 95 passed (91 prior + 3 db tests + 1 scrobbler test). 0 failures, 0 regressions.
+
 ### File List
+
+- jellysync-daemon/src/db.rs
+- jellysync-daemon/src/scrobbler.rs
+
+## Change Log
+
+- 2026-02-28: Story 5.2 implemented — added `is_scrobble_recorded()` to `db.rs`, `skipped_duplicate` field to `ScrobblerResult`, dedup pre-check in `process_device_scrobbles()`, 4 new tests (95 total). Status: review.
