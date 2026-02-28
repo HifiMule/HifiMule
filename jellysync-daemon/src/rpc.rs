@@ -1,11 +1,11 @@
 use crate::api::{CredentialManager, JellyfinClient};
-use notify_rust::Notification;
 use axum::{
     extract::{Path, State},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
+use notify_rust::Notification;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -59,8 +59,7 @@ pub struct AppState {
     pub last_connection_check: Arc<tokio::sync::Mutex<Option<(std::time::Instant, bool)>>>,
     pub size_cache: Arc<tokio::sync::RwLock<HashMap<String, u64>>>,
     pub sync_operation_manager: Arc<crate::sync::SyncOperationManager>,
-    pub last_scrobbler_result:
-        Arc<tokio::sync::RwLock<Option<crate::scrobbler::ScrobblerResult>>>,
+    pub last_scrobbler_result: Arc<tokio::sync::RwLock<Option<crate::scrobbler::ScrobblerResult>>>,
     pub state_tx: std::sync::mpsc::Sender<crate::DaemonState>,
 }
 
@@ -77,9 +76,7 @@ pub async fn run_server(
     port: u16,
     db: Arc<crate::db::Database>,
     device_manager: Arc<crate::device::DeviceManager>,
-    last_scrobbler_result: Arc<
-        tokio::sync::RwLock<Option<crate::scrobbler::ScrobblerResult>>,
-    >,
+    last_scrobbler_result: Arc<tokio::sync::RwLock<Option<crate::scrobbler::ScrobblerResult>>>,
     state_tx: std::sync::mpsc::Sender<crate::DaemonState>,
 ) {
     let state = Arc::new(AppState {
@@ -147,6 +144,10 @@ async fn handler(
         }
         "sync_get_resume_state" => handle_sync_get_resume_state(&state).await,
         "scrobbler_get_last_result" => handle_scrobbler_get_last_result(&state).await,
+        "manifest_get_discrepancies" => handle_manifest_get_discrepancies(&state).await,
+        "manifest_prune" => handle_manifest_prune(&state, payload.params).await,
+        "manifest_relink" => handle_manifest_relink(&state, payload.params).await,
+        "manifest_clear_dirty" => handle_manifest_clear_dirty(&state).await,
         _ => Err(JsonRpcError {
             code: ERR_METHOD_NOT_FOUND,
             message: "Method not found".to_string(),
@@ -1033,17 +1034,108 @@ async fn handle_proxy_image(
     }
 }
 
-async fn handle_scrobbler_get_last_result(
-    state: &AppState,
-) -> Result<Value, JsonRpcError> {
+async fn handle_scrobbler_get_last_result(state: &AppState) -> Result<Value, JsonRpcError> {
     let result = state.last_scrobbler_result.read().await;
-    match &*result {
-        Some(r) => serde_json::to_value(r).map_err(|e| JsonRpcError {
-            code: ERR_INTERNAL_ERROR,
-            message: format!("Failed to serialize scrobbler result: {}", e),
+    match result.as_ref() {
+        Some(r) => Ok(serde_json::to_value(r).unwrap()),
+        None => Ok(serde_json::json!({
+            "status": "none",
+            "message": "No scrobble submission has been performed yet."
+        })),
+    }
+}
+
+async fn handle_manifest_get_discrepancies(state: &AppState) -> Result<Value, JsonRpcError> {
+    match state.device_manager.get_discrepancies().await {
+        Ok(Some(discrepancies)) => Ok(serde_json::to_value(discrepancies).unwrap()),
+        Ok(None) => Err(JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: "No device connected".to_string(),
             data: None,
         }),
-        None => Ok(Value::Null),
+        Err(e) => Err(JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: format!("Failed to scan device: {}", e),
+            data: None,
+        }),
+    }
+}
+
+async fn handle_manifest_prune(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let item_ids = params["itemIds"]
+        .as_array()
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing or invalid itemIds array".to_string(),
+            data: None,
+        })?
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect::<Vec<String>>();
+
+    match state.device_manager.prune_items(&item_ids).await {
+        Ok(removed) => Ok(serde_json::json!({ "removed": removed })),
+        Err(e) => Err(JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: format!("Failed to prune items: {}", e),
+            data: None,
+        }),
+    }
+}
+
+async fn handle_manifest_relink(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let jellyfin_id = params["jellyfinId"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing jellyfinId".to_string(),
+        data: None,
+    })?;
+
+    let new_local_path = params["newLocalPath"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing newLocalPath".to_string(),
+        data: None,
+    })?;
+
+    match state
+        .device_manager
+        .relink_item(jellyfin_id, new_local_path)
+        .await
+    {
+        Ok(found) => Ok(serde_json::json!({ "success": found })),
+        Err(e) => Err(JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: format!("Failed to relink item: {}", e),
+            data: None,
+        }),
+    }
+}
+
+async fn handle_manifest_clear_dirty(state: &AppState) -> Result<Value, JsonRpcError> {
+    match state.device_manager.clear_dirty_flag().await {
+        Ok(()) => Ok(serde_json::json!({ "success": true })),
+        Err(e) => Err(JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: format!("Failed to clear dirty flag: {}", e),
+            data: None,
+        }),
     }
 }
 

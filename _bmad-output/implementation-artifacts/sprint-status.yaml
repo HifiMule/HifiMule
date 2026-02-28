@@ -74,5 +74,5 @@ development_status:
   5-1-rockbox-scrobbler-bridge: done
   5-2-scrobble-submission-tracking-deduplication: done
   5-3-os-native-safe-to-eject-handshake: done
-  5-4-visual-manifest-repair-utility: ready-for-dev
+  5-4-visual-manifest-repair-utility: review
   epic-5-retrospective: optional

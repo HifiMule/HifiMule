@@ -579,3 +579,169 @@ h2 {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ========================
+   Repair Modal (Story 5.4)
+   ======================== */
+.repair-body {
+  min-height: 200px;
+}
+
+.repair-loading,
+.repair-error,
+.repair-clean {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 2rem;
+  text-align: center;
+}
+
+.repair-clean h3 {
+  margin: 0;
+  color: var(--sl-color-success-600);
+}
+
+.repair-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.repair-column {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--sl-border-radius-medium);
+  padding: 0.75rem;
+  min-height: 150px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.repair-col-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+
+.repair-col-header h4 {
+  margin: 0;
+  font-size: 0.9rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.repair-col-desc {
+  margin: 0 0 0.75rem;
+  font-size: 0.75rem;
+  opacity: 0.5;
+}
+
+.repair-item-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.repair-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--sl-border-radius-small);
+  transition: background 0.15s ease;
+}
+
+.repair-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.repair-item-info {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.repair-item-name {
+  font-size: 0.8rem;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repair-item-path {
+  font-size: 0.7rem;
+  opacity: 0.5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repair-item-path strong {
+  opacity: 0.8;
+}
+
+.repair-item-actions {
+  flex-shrink: 0;
+}
+
+.repair-no-items {
+  font-size: 0.8rem;
+  opacity: 0.4;
+  padding: 1rem;
+  text-align: center;
+}
+
+.repair-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Dirty manifest warning banner */
+.dirty-manifest-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  margin: 0.75rem 0;
+  background: rgba(235, 179, 52, 0.12);
+  border: 1px solid rgba(235, 179, 52, 0.3);
+  border-radius: var(--sl-border-radius-medium);
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.dirty-manifest-banner:hover {
+  background: rgba(235, 179, 52, 0.2);
+}
+
+.dirty-manifest-banner sl-icon {
+  color: #EBB334;
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+
+.dirty-manifest-banner-text {
+  flex: 1;
+  font-size: 0.8rem;
+  color: #EBB334;
+}
+
+.dirty-manifest-banner-text strong {
+  display: block;
+  font-size: 0.85rem;
+}

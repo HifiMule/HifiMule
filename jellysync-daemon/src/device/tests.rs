@@ -404,3 +404,281 @@ async fn test_write_manifest_overwrites_existing() {
     assert_eq!(loaded.synced_items.len(), 1);
     assert_eq!(loaded.synced_items[0].jellyfin_id, "new-item");
 }
+
+// ===== Story 5.4 Tests =====
+
+#[tokio::test]
+async fn test_get_discrepancies_missing_file() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    // Create managed path but no files in it
+    fs::create_dir_all(root.join("Music").join("Artist").join("Album")).unwrap();
+
+    // Write manifest with a synced item that DOESN'T exist on disk
+    let manifest = DeviceManifest {
+        device_id: "dev-1".to_string(),
+        name: Some("Test Device".to_string()),
+        version: "1.0".to_string(),
+        managed_paths: vec!["Music".to_string()],
+        synced_items: vec![SyncedItem {
+            jellyfin_id: "item-1".to_string(),
+            name: "Track One".to_string(),
+            album: Some("Album".to_string()),
+            artist: Some("Artist".to_string()),
+            local_path: "Music/Artist/Album/01 - Track One.flac".to_string(),
+            size_bytes: 1000,
+            synced_at: "2026-02-28T10:00:00Z".to_string(),
+            original_name: None,
+            etag: None,
+        }],
+        dirty: true,
+        pending_item_ids: vec![],
+    };
+    write_manifest(root, &manifest).await.unwrap();
+
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+    manager
+        .handle_device_detected(root.to_path_buf(), manifest)
+        .await
+        .unwrap();
+
+    let discrepancies = manager.get_discrepancies().await.unwrap().unwrap();
+    assert_eq!(
+        discrepancies.missing.len(),
+        1,
+        "Should detect one missing file"
+    );
+    assert_eq!(discrepancies.missing[0].jellyfin_id, "item-1");
+    assert_eq!(discrepancies.orphaned.len(), 0);
+}
+
+#[tokio::test]
+async fn test_get_discrepancies_orphaned_file() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    // Create managed path with a file
+    let music_path = root.join("Music").join("Rogue").join("Album");
+    fs::create_dir_all(&music_path).unwrap();
+    fs::write(music_path.join("track.flac"), b"audio data").unwrap();
+
+    // Write manifest WITHOUT that file
+    let manifest = DeviceManifest {
+        device_id: "dev-1".to_string(),
+        name: Some("Test Device".to_string()),
+        version: "1.0".to_string(),
+        managed_paths: vec!["Music".to_string()],
+        synced_items: vec![],
+        dirty: true,
+        pending_item_ids: vec![],
+    };
+    write_manifest(root, &manifest).await.unwrap();
+
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+    manager
+        .handle_device_detected(root.to_path_buf(), manifest)
+        .await
+        .unwrap();
+
+    let discrepancies = manager.get_discrepancies().await.unwrap().unwrap();
+    assert_eq!(discrepancies.missing.len(), 0);
+    assert_eq!(
+        discrepancies.orphaned.len(),
+        1,
+        "Should detect one orphaned file"
+    );
+    assert_eq!(
+        discrepancies.orphaned[0].local_path,
+        "Music/Rogue/Album/track.flac"
+    );
+}
+
+#[tokio::test]
+async fn test_get_discrepancies_no_issues() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    // Create managed path with files matching the manifest
+    let music_path = root.join("Music").join("Artist").join("Album");
+    fs::create_dir_all(&music_path).unwrap();
+    fs::write(music_path.join("01 - Track.flac"), b"audio data").unwrap();
+
+    let manifest = DeviceManifest {
+        device_id: "dev-1".to_string(),
+        name: None,
+        version: "1.0".to_string(),
+        managed_paths: vec!["Music".to_string()],
+        synced_items: vec![SyncedItem {
+            jellyfin_id: "item-1".to_string(),
+            name: "Track".to_string(),
+            album: None,
+            artist: None,
+            local_path: "Music/Artist/Album/01 - Track.flac".to_string(),
+            size_bytes: 1000,
+            synced_at: "2026-02-28T10:00:00Z".to_string(),
+            original_name: None,
+            etag: None,
+        }],
+        dirty: false,
+        pending_item_ids: vec![],
+    };
+    write_manifest(root, &manifest).await.unwrap();
+
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+    manager
+        .handle_device_detected(root.to_path_buf(), manifest)
+        .await
+        .unwrap();
+
+    let discrepancies = manager.get_discrepancies().await.unwrap().unwrap();
+    assert_eq!(discrepancies.missing.len(), 0);
+    assert_eq!(discrepancies.orphaned.len(), 0);
+}
+
+#[tokio::test]
+async fn test_prune_items() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir(root.join("Music")).unwrap();
+
+    let manifest = DeviceManifest {
+        device_id: "dev-1".to_string(),
+        name: None,
+        version: "1.0".to_string(),
+        managed_paths: vec!["Music".to_string()],
+        synced_items: vec![
+            SyncedItem {
+                jellyfin_id: "item-1".to_string(),
+                name: "Track 1".to_string(),
+                album: None,
+                artist: None,
+                local_path: "Music/track1.flac".to_string(),
+                size_bytes: 100,
+                synced_at: "2026-02-28T10:00:00Z".to_string(),
+                original_name: None,
+                etag: None,
+            },
+            SyncedItem {
+                jellyfin_id: "item-2".to_string(),
+                name: "Track 2".to_string(),
+                album: None,
+                artist: None,
+                local_path: "Music/track2.flac".to_string(),
+                size_bytes: 200,
+                synced_at: "2026-02-28T10:00:00Z".to_string(),
+                original_name: None,
+                etag: None,
+            },
+        ],
+        dirty: true,
+        pending_item_ids: vec![],
+    };
+    write_manifest(root, &manifest).await.unwrap();
+
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+    manager
+        .handle_device_detected(root.to_path_buf(), manifest)
+        .await
+        .unwrap();
+
+    let removed = manager.prune_items(&["item-1".to_string()]).await.unwrap();
+    assert_eq!(removed, 1);
+
+    let device = manager.get_current_device().await.unwrap();
+    assert_eq!(device.synced_items.len(), 1);
+    assert_eq!(device.synced_items[0].jellyfin_id, "item-2");
+
+    // Verify persisted to disk
+    let content = fs::read_to_string(root.join(".jellysync.json")).unwrap();
+    let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
+    assert_eq!(loaded.synced_items.len(), 1);
+}
+
+#[tokio::test]
+async fn test_relink_item() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir(root.join("Music")).unwrap();
+
+    let manifest = DeviceManifest {
+        device_id: "dev-1".to_string(),
+        name: None,
+        version: "1.0".to_string(),
+        managed_paths: vec!["Music".to_string()],
+        synced_items: vec![SyncedItem {
+            jellyfin_id: "item-1".to_string(),
+            name: "Track".to_string(),
+            album: None,
+            artist: None,
+            local_path: "Music/old_path.flac".to_string(),
+            size_bytes: 100,
+            synced_at: "2026-02-28T10:00:00Z".to_string(),
+            original_name: None,
+            etag: None,
+        }],
+        dirty: true,
+        pending_item_ids: vec![],
+    };
+    write_manifest(root, &manifest).await.unwrap();
+
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+    manager
+        .handle_device_detected(root.to_path_buf(), manifest)
+        .await
+        .unwrap();
+
+    let found = manager
+        .relink_item("item-1", "Music/new_path.flac")
+        .await
+        .unwrap();
+    assert!(found);
+
+    let device = manager.get_current_device().await.unwrap();
+    assert_eq!(device.synced_items[0].local_path, "Music/new_path.flac");
+    assert_eq!(
+        device.synced_items[0].original_name,
+        Some("Music/old_path.flac".to_string())
+    );
+}
+
+#[tokio::test]
+async fn test_clear_dirty_flag() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    let manifest = DeviceManifest {
+        device_id: "dev-1".to_string(),
+        name: None,
+        version: "1.0".to_string(),
+        managed_paths: vec![],
+        synced_items: vec![],
+        dirty: true,
+        pending_item_ids: vec!["pending-1".to_string()],
+    };
+    write_manifest(root, &manifest).await.unwrap();
+
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+    manager
+        .handle_device_detected(root.to_path_buf(), manifest)
+        .await
+        .unwrap();
+
+    manager.clear_dirty_flag().await.unwrap();
+
+    let device = manager.get_current_device().await.unwrap();
+    assert!(!device.dirty);
+    assert!(device.pending_item_ids.is_empty());
+
+    // Verify persisted to disk
+    let content = fs::read_to_string(root.join(".jellysync.json")).unwrap();
+    let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
+    assert!(!loaded.dirty);
+    assert!(loaded.pending_item_ids.is_empty());
+}

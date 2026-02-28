@@ -1,6 +1,6 @@
 # Story 5.4: Visual Manifest Repair Utility
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -20,18 +20,18 @@ so that I can recover my "Managed" status without a full wipe.
 
 ## Tasks / Subtasks
 
-- [ ] **T1: Implement Discrepancy Detection in Daemon**
-  - [ ] T1.1: Add logic in `device/mod.rs` or `sync.rs` to scan a connected device's managed paths.
-  - [ ] T1.2: Compare scanned files against `DeviceManifest` to identify missing files (in manifest, not on disk) and orphaned files (on disk, not in manifest).
-- [ ] **T2: Add RPC Methods for Repair Operations**
-  - [ ] T2.1: Add `manifest.get_discrepancies` to return the lists of missing and orphaned files.
-  - [ ] T2.2: Add `manifest.prune` to remove a set of item IDs from the manifest safely using the atomic write pattern.
-  - [ ] T2.3: Add `manifest.relink` to update a manifest item's `original_name` or path to match an existing file.
-- [ ] **T3: Build the Repair UI Component**
-  - [ ] T3.1: Create a `RepairModal` or dedicated repair view in the UI using Shoelace components (`<sl-dialog>`, `<sl-button>`, etc.).
-  - [ ] T3.2: Trigger the repair UI from the "Device State" panel when a manifest is flagged as "Dirty".
-  - [ ] T3.3: Implement the side-by-side view displaying discrepancies fetched via `manifest.get_discrepancies`.
-  - [ ] T3.4: Wire up the "Prune" and "Re-link" buttons to call their respective RPC methods and refresh the UI state.
+- [x] **T1: Implement Discrepancy Detection in Daemon**
+  - [x] T1.1: Add logic in `device/mod.rs` to scan a connected device's managed paths.
+  - [x] T1.2: Compare scanned files against `DeviceManifest` to identify missing files (in manifest, not on disk) and orphaned files (on disk, not in manifest).
+- [x] **T2: Add RPC Methods for Repair Operations**
+  - [x] T2.1: Add `manifest_get_discrepancies` to return the lists of missing and orphaned files.
+  - [x] T2.2: Add `manifest_prune` to remove a set of item IDs from the manifest safely using the atomic write pattern.
+  - [x] T2.3: Add `manifest_relink` to update a manifest item's `original_name` or path to match an existing file.
+- [x] **T3: Build the Repair UI Component**
+  - [x] T3.1: Create a `RepairModal` repair view in the UI using Shoelace components (`<sl-dialog>`, `<sl-button>`, etc.).
+  - [x] T3.2: Trigger the repair UI from the "Device State" panel when a manifest is flagged as "Dirty".
+  - [x] T3.3: Implement the side-by-side view displaying discrepancies fetched via `manifest_get_discrepancies`.
+  - [x] T3.4: Wire up the "Prune" and "Re-link" buttons to call their respective RPC methods and refresh the UI state.
 
 ## Dev Notes
 
@@ -58,10 +58,30 @@ claude-3.7-sonnet
 
 ### Debug Log References
 
-
+All 102 tests pass (0 failures, 0 ignored).
 
 ### Completion Notes List
 
-
+- ✅ T1: Implemented `get_discrepancies()` on `DeviceManager` — scans managed paths on device, compares files against manifest, returns `ManifestDiscrepancies` with `missing` and `orphaned` lists.
+- ✅ T2.1: Added `manifest_get_discrepancies` RPC handler returning discrepancy data as JSON.
+- ✅ T2.2: Added `manifest_prune` RPC handler + `prune_items()` on DeviceManager — removes items by Jellyfin ID using atomic write.
+- ✅ T2.3: Added `manifest_relink` RPC handler + `relink_item()` on DeviceManager — updates local_path, preserves old path as original_name.
+- ✅ T2 (bonus): Added `manifest_clear_dirty` RPC handler + `clear_dirty_flag()` — clears dirty flag and pending_item_ids.
+- ✅ T3.1: Created `RepairModal.ts` component using `<sl-dialog>` with loading, error, clean, and discrepancy states.
+- ✅ T3.2: Added dirty manifest warning banner in `BasketSidebar.ts` Device Folders panel — polls `get_daemon_state` for dirty flag.
+- ✅ T3.3: Implemented side-by-side column layout (Missing Files | Orphaned Files) with item cards showing name, path, and action buttons.
+- ✅ T3.4: Wired Prune (single + bulk) and Re-link buttons to RPC calls with automatic UI refresh after each operation.
+- ✅ Added 6 new unit tests: discrepancy detection (missing, orphaned, clean), prune, relink, clear dirty flag.
 
 ### File List
+
+- `jellysync-daemon/src/device/mod.rs` — Added `get_discrepancies()`, `prune_items()`, `relink_item()`, `clear_dirty_flag()` methods + `ManifestDiscrepancies`, `DiscrepancyItem` types
+- `jellysync-daemon/src/device/tests.rs` — Added 6 new Story 5.4 tests
+- `jellysync-daemon/src/rpc.rs` — Added 4 new RPC handler functions + dispatch entries
+- `jellysync-ui/src/components/RepairModal.ts` — [NEW] Repair modal dialog component
+- `jellysync-ui/src/components/BasketSidebar.ts` — Added dirty manifest detection, warning banner, repair modal integration
+- `jellysync-ui/src/styles.css` — Added repair modal and dirty banner CSS styles
+
+### Change Log
+
+- 2026-02-28: Story 5.4 implementation — Visual Manifest Repair Utility with discrepancy detection, RPC repair methods, and RepairModal UI component.

@@ -285,6 +285,156 @@ impl DeviceManager {
             unmanaged_count,
         }))
     }
+
+    /// Scans managed paths on device and compares against manifest to find discrepancies.
+    /// Returns lists of missing files (in manifest but not on disk) and orphaned files
+    /// (on disk but not tracked in manifest).
+    pub async fn get_discrepancies(&self) -> Result<Option<ManifestDiscrepancies>> {
+        let device_path = match self.get_current_device_path().await {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let manifest = match self.get_current_device().await {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+
+        // Collect all actual files on disk within managed paths
+        let mut on_disk_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for managed_path in &manifest.managed_paths {
+            let full_path = device_path.join(managed_path);
+            if let Ok(meta) = tokio::fs::symlink_metadata(&full_path).await {
+                if !meta.is_dir() {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+
+            let mut dirs_to_visit = vec![full_path];
+            while let Some(dir) = dirs_to_visit.pop() {
+                let mut entries = match tokio::fs::read_dir(&dir).await {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                while let Some(entry) = entries.next_entry().await.unwrap_or(None) {
+                    let path = entry.path();
+                    let file_type = match entry.file_type().await {
+                        Ok(ft) => ft,
+                        Err(_) => continue,
+                    };
+
+                    if file_type.is_symlink() {
+                        continue;
+                    } else if file_type.is_dir() {
+                        dirs_to_visit.push(path);
+                    } else if file_type.is_file() {
+                        let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+                        // Skip hidden files and temp files
+                        if file_name.starts_with('.') || file_name.ends_with(".tmp") {
+                            continue;
+                        }
+                        // Store as relative path from device root using forward slashes
+                        if let Ok(rel) = path.strip_prefix(&device_path) {
+                            let rel_str = rel.to_string_lossy().replace('\\', "/");
+                            on_disk_files.insert(rel_str);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build set of manifest paths
+        let manifest_paths: std::collections::HashSet<&str> = manifest
+            .synced_items
+            .iter()
+            .map(|item| item.local_path.as_str())
+            .collect();
+
+        // Missing: in manifest but not on disk
+        let missing: Vec<DiscrepancyItem> = manifest
+            .synced_items
+            .iter()
+            .filter(|item| !on_disk_files.contains(&item.local_path))
+            .map(|item| DiscrepancyItem {
+                jellyfin_id: item.jellyfin_id.clone(),
+                name: item.name.clone(),
+                local_path: item.local_path.clone(),
+                album: item.album.clone(),
+                artist: item.artist.clone(),
+            })
+            .collect();
+
+        // Orphaned: on disk but not in manifest
+        let orphaned: Vec<DiscrepancyItem> = on_disk_files
+            .iter()
+            .filter(|path| !manifest_paths.contains(path.as_str()))
+            .map(|path| {
+                let file_name = Path::new(path)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                DiscrepancyItem {
+                    jellyfin_id: String::new(),
+                    name: file_name,
+                    local_path: path.clone(),
+                    album: None,
+                    artist: None,
+                }
+            })
+            .collect();
+
+        Ok(Some(ManifestDiscrepancies { missing, orphaned }))
+    }
+
+    /// Removes items from the manifest by their Jellyfin IDs using atomic write.
+    pub async fn prune_items(&self, item_ids: &[String]) -> Result<usize> {
+        let id_set: std::collections::HashSet<&str> = item_ids.iter().map(|s| s.as_str()).collect();
+        let mut removed = 0usize;
+        self.update_manifest(|manifest| {
+            let before = manifest.synced_items.len();
+            manifest
+                .synced_items
+                .retain(|item| !id_set.contains(item.jellyfin_id.as_str()));
+            removed = before - manifest.synced_items.len();
+        })
+        .await?;
+        Ok(removed)
+    }
+
+    /// Re-links an orphaned file on disk to a missing manifest entry by updating
+    /// the manifest item's local_path (and optionally original_name) to match the
+    /// actual file on disk.
+    pub async fn relink_item(&self, jellyfin_id: &str, new_local_path: &str) -> Result<bool> {
+        let mut found = false;
+        self.update_manifest(|manifest| {
+            if let Some(item) = manifest
+                .synced_items
+                .iter_mut()
+                .find(|i| i.jellyfin_id == jellyfin_id)
+            {
+                // Store old path as original_name if not already set
+                if item.original_name.is_none() {
+                    item.original_name = Some(item.local_path.clone());
+                }
+                item.local_path = new_local_path.to_string();
+                found = true;
+            }
+        })
+        .await?;
+        Ok(found)
+    }
+
+    /// Clears the dirty flag on the manifest if no discrepancies remain.
+    pub async fn clear_dirty_flag(&self) -> Result<()> {
+        self.update_manifest(|manifest| {
+            manifest.dirty = false;
+            manifest.pending_item_ids.clear();
+        })
+        .await
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -304,6 +454,25 @@ pub struct DeviceFolderInfo {
     pub name: String,
     pub relative_path: String,
     pub is_managed: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestDiscrepancies {
+    pub missing: Vec<DiscrepancyItem>,
+    pub orphaned: Vec<DiscrepancyItem>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscrepancyItem {
+    pub jellyfin_id: String,
+    pub name: String,
+    pub local_path: String,
+    #[serde(default)]
+    pub album: Option<String>,
+    #[serde(default)]
+    pub artist: Option<String>,
 }
 
 fn is_system_folder(name: &str) -> bool {

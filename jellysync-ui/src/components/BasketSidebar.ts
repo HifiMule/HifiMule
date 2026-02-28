@@ -3,6 +3,7 @@
 
 import { basketStore, BasketItem } from '../state/basket';
 import { IMAGE_PROXY_URL, rpcCall } from '../rpc';
+import { RepairModal } from './RepairModal';
 
 interface StorageInfo {
     totalBytes: number;
@@ -136,6 +137,7 @@ export class BasketSidebar {
     private pollingInterval: number | null = null;
     private showSyncComplete: boolean = false;
     private syncErrorMessages: string[] | null = null;
+    private isDirtyManifest: boolean = false;
 
     constructor(container: HTMLElement) {
         this.container = container;
@@ -153,9 +155,10 @@ export class BasketSidebar {
             this.render();
             return;
         }
-        const [storageResult, foldersResult] = await Promise.allSettled([
+        const [storageResult, foldersResult, daemonStateResult] = await Promise.allSettled([
             rpcCall('device_get_storage_info'),
-            rpcCall('device_list_root_folders')
+            rpcCall('device_list_root_folders'),
+            rpcCall('get_daemon_state')
         ]);
         this.storageInfo = storageResult.status === 'fulfilled'
             ? storageResult.value as StorageInfo | null
@@ -163,6 +166,8 @@ export class BasketSidebar {
         this.folderInfo = foldersResult.status === 'fulfilled'
             ? foldersResult.value as RootFoldersResponse | null
             : null;
+        this.isDirtyManifest = daemonStateResult.status === 'fulfilled'
+            && daemonStateResult.value?.dirtyManifest === true;
         this.render();
     }
 
@@ -220,6 +225,20 @@ export class BasketSidebar {
                     </div>
                 `;
             }
+        }
+
+        // Show dirty manifest banner if flagged
+        if (this.isDirtyManifest) {
+            content += `
+                <div class="dirty-manifest-banner" id="open-repair-btn" title="Open Manifest Repair">
+                    <sl-icon name="exclamation-triangle-fill"></sl-icon>
+                    <div class="dirty-manifest-banner-text">
+                        <strong>Manifest Dirty</strong>
+                        Interrupted sync detected — click to repair
+                    </div>
+                    <sl-icon name="chevron-right" style="opacity: 0.5;"></sl-icon>
+                </div>
+            `;
         }
 
         content += `</div>`;
@@ -280,6 +299,7 @@ export class BasketSidebar {
                 this.isFoldersExpanded = !this.isFoldersExpanded;
                 this.render();
             });
+            this.container.querySelector('#open-repair-btn')?.addEventListener('click', () => this.openRepairModal());
             return;
         }
 
@@ -347,6 +367,15 @@ export class BasketSidebar {
             this.isFoldersExpanded = !this.isFoldersExpanded;
             this.render();
         });
+        this.container.querySelector('#open-repair-btn')?.addEventListener('click', () => this.openRepairModal());
+    }
+
+    private openRepairModal() {
+        const modal = new RepairModal(this.container, () => {
+            this.isDirtyManifest = false;
+            this.refreshAndRender();
+        });
+        modal.open();
     }
 
     private async handleStartSync() {
