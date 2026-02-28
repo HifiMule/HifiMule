@@ -70,8 +70,8 @@ development_status:
   4-5-start-sync-ui-to-engine-trigger: done
   epic-4-retrospective: optional
 
-  epic-5: backlog
-  5-1-rockbox-scrobbler-bridge: backlog
+  epic-5: in-progress
+  5-1-rockbox-scrobbler-bridge: ready-for-dev
   5-2-scrobble-submission-tracking-deduplication: backlog
   5-3-os-native-safe-to-eject-handshake: backlog
   5-4-visual-manifest-repair-utility: backlog

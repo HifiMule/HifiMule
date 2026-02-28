@@ -20,7 +20,9 @@
       "Bash(rtk cargo test:*)",
       "Bash(rtk ls:*)",
       "Bash(rtk git rev-parse:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(rtk read jellysync-daemon/Cargo.toml)",
+      "Bash(rtk grep \"PlaybackInfo\\\\|report_play\\\\|scrobble\\\\|UserPlayedItems\\\\|Playing\\\\|Playback\" jellysync-daemon/src/api.rs)"
     ]
   }
 }
