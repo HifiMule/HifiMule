@@ -6,6 +6,24 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 const CONTAINER_TYPES: &[&str] = &["MusicAlbum", "Playlist"];
+
+fn url_encode(s: &str) -> String {
+    let mut encoded = String::new();
+    for c in s.chars() {
+        match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => encoded.push(c),
+            ' ' => encoded.push('+'),
+            c => {
+                let mut buf = [0u8; 4];
+                let bytes = c.encode_utf8(&mut buf);
+                for b in bytes.bytes() {
+                    encoded.push_str(&format!("%{:02X}", b));
+                }
+            }
+        }
+    }
+    encoded
+}
 #[cfg(test)]
 const MUSIC_ITEM_TYPES: &str = "MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo";
 
@@ -520,6 +538,94 @@ impl JellyfinClient {
 
         let result = serde_json::from_str::<AuthenticationResult>(&text)?;
         Ok(result)
+    }
+
+    pub async fn search_audio_items(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        artist: &str,
+        title: &str,
+    ) -> Result<Vec<JellyfinItem>> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let encoded_title = url_encode(title);
+        let endpoint = format!(
+            "{}/Users/{}/Items?SearchTerm={}&IncludeItemTypes=Audio&Limit=10&Fields=Id,Name,Album,AlbumArtist,Artists",
+            url.trim_end_matches('/'),
+            user_id,
+            encoded_title
+        );
+
+        let response = self.client.get(&endpoint).headers(headers).send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+
+        if !status.is_success() {
+            return Err(anyhow!("Server returned status: {}", status));
+        }
+
+        let items_response = serde_json::from_str::<JellyfinItemsResponse>(&text)?;
+
+        let artist_lower = artist.to_lowercase();
+        let filtered: Vec<JellyfinItem> = items_response
+            .items
+            .into_iter()
+            .filter(|item| {
+                item.album_artist
+                    .as_ref()
+                    .map(|a| a.to_lowercase() == artist_lower)
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        Ok(filtered)
+    }
+
+    pub async fn report_item_played(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        item_id: &str,
+    ) -> Result<()> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let endpoint = format!(
+            "{}/Users/{}/PlayedItems/{}",
+            url.trim_end_matches('/'),
+            user_id,
+            item_id
+        );
+
+        let response = self
+            .client
+            .post(&endpoint)
+            .headers(headers)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(anyhow!("Server returned status: {}", status));
+        }
+
+        Ok(())
     }
 
     /// Downloads an item as a streaming response.

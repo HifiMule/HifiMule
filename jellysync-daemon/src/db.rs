@@ -52,6 +52,25 @@ impl Database {
             [],
         )
         .map_err(|e| anyhow!("Failed to create devices table: {}", e))?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS scrobble_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id TEXT NOT NULL,
+                artist TEXT NOT NULL,
+                album TEXT NOT NULL,
+                title TEXT NOT NULL,
+                timestamp_unix INTEGER NOT NULL,
+                submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )
+        .map_err(|e| anyhow!("Failed to create scrobble_history table: {}", e))?;
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_scrobble_unique
+             ON scrobble_history(device_id, artist, album, title, timestamp_unix)",
+            [],
+        )
+        .map_err(|e| anyhow!("Failed to create scrobble unique index: {}", e))?;
         Ok(())
     }
 
@@ -73,6 +92,36 @@ impl Database {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn record_scrobble(
+        &self,
+        device_id: &str,
+        artist: &str,
+        album: &str,
+        title: &str,
+        timestamp_unix: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO scrobble_history (device_id, artist, album, title, timestamp_unix)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![device_id, artist, album, title, timestamp_unix],
+        )
+        .map_err(|e| anyhow!("Failed to record scrobble: {}", e))?;
+        Ok(())
+    }
+
+    pub fn get_scrobble_count(&self, device_id: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM scrobble_history WHERE device_id = ?1",
+                params![device_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| anyhow!("Failed to get scrobble count: {}", e))?;
+        Ok(count)
     }
 
     pub fn upsert_device_mapping(
@@ -107,6 +156,36 @@ mod tests {
         let db = Database::memory().unwrap();
         // Just checking it doesn't crash and table exists
         db.get_device_mapping("test").unwrap();
+    }
+
+    #[test]
+    fn test_record_scrobble_and_get_count() {
+        let db = Database::memory().unwrap();
+        let device_id = "ipod-001";
+
+        // Insert two scrobbles
+        db.record_scrobble(device_id, "Pink Floyd", "The Dark Side of the Moon", "Money", 1706745600)
+            .unwrap();
+        db.record_scrobble(device_id, "Led Zeppelin", "Led Zeppelin IV", "Stairway to Heaven", 1706752800)
+            .unwrap();
+
+        let count = db.get_scrobble_count(device_id).unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_record_scrobble_dedup() {
+        let db = Database::memory().unwrap();
+        let device_id = "ipod-001";
+
+        // Insert same scrobble twice — second should be ignored
+        db.record_scrobble(device_id, "Pink Floyd", "The Dark Side of the Moon", "Money", 1706745600)
+            .unwrap();
+        db.record_scrobble(device_id, "Pink Floyd", "The Dark Side of the Moon", "Money", 1706745600)
+            .unwrap();
+
+        let count = db.get_scrobble_count(device_id).unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]

@@ -17,6 +17,7 @@ mod db;
 mod device;
 mod paths;
 mod rpc;
+mod scrobbler;
 mod sync;
 
 #[cfg(test)]
@@ -86,21 +87,28 @@ fn main() -> Result<()> {
             // Initialize Device Manager
             let device_manager = Arc::new(device::DeviceManager::new(Arc::clone(&db)));
 
+            // Shared scrobbler result state
+            let last_scrobbler_result: Arc<
+                tokio::sync::RwLock<Option<scrobbler::ScrobblerResult>>,
+            > = Arc::new(tokio::sync::RwLock::new(None));
+
             // Start RPC server
             let db_clone = Arc::clone(&db);
             let dm_clone = Arc::clone(&device_manager);
+            let scrobbler_result_rpc = Arc::clone(&last_scrobbler_result);
             tokio::spawn(async move {
-                rpc::run_server(19140, db_clone, dm_clone).await;
+                rpc::run_server(19140, db_clone, dm_clone, scrobbler_result_rpc).await;
             });
 
             // Handle Device Events
             let state_tx_clone = state_tx.clone();
+            let jellyfin_client = Arc::new(api::JellyfinClient::new());
             tokio::spawn(async move {
                 while let Some(event) = device_rx.recv().await {
                     match event {
                         device::DeviceEvent::Detected { path, manifest } => {
                             println!("Device detected at {:?}: {:?}", path, manifest);
-                            match device_manager.handle_device_detected(path, manifest).await {
+                            match device_manager.handle_device_detected(path.clone(), manifest).await {
                                 Ok(new_state) => {
                                     let _ = state_tx_clone.send(new_state);
                                 }
@@ -108,6 +116,30 @@ fn main() -> Result<()> {
                                     eprintln!("Error handling device detection: {}", e);
                                     let _ = state_tx_clone.send(DaemonState::Error);
                                 }
+                            }
+
+                            // Spawn background scrobbler task
+                            if let Ok((url, token, Some(user_id))) =
+                                api::CredentialManager::get_credentials()
+                            {
+                                let db_scrobble = Arc::clone(&db);
+                                let client_scrobble = Arc::clone(&jellyfin_client);
+                                let device_path_clone = path.clone();
+                                let scrobbler_result_clone = Arc::clone(&last_scrobbler_result);
+                                tokio::spawn(async move {
+                                    let result = scrobbler::process_device_scrobbles(
+                                        &device_path_clone,
+                                        db_scrobble,
+                                        client_scrobble,
+                                        &url,
+                                        &token,
+                                        &user_id,
+                                    )
+                                    .await;
+                                    println!("[Scrobbler] Result: {:?}", result);
+                                    let mut guard = scrobbler_result_clone.write().await;
+                                    *guard = Some(result);
+                                });
                             }
                         }
                         device::DeviceEvent::Removed(path) => {
