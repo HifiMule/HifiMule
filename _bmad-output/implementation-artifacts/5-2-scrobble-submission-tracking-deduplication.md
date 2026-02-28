@@ -1,6 +1,6 @@
 # Story 5.2: Scrobble Submission Tracking (Deduplication)
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -248,6 +248,33 @@ None — clean implementation with no debug iterations required.
 - jellysync-daemon/src/db.rs
 - jellysync-daemon/src/scrobbler.rs
 
+## Senior Developer Review (AI)
+
+**Reviewer:** Alexis (AI) — 2026-02-28
+**Outcome:** Approved with fixes applied
+
+### Findings Fixed
+
+**[MEDIUM] M1 — Missing `errors.is_empty()` assertion in dedup test** (`scrobbler.rs`)
+Added `assert!(result.errors.is_empty())` to `test_process_device_skips_already_scrobbled`. Inconsistency with `test_process_device_no_log_file` which already asserted this.
+
+**[MEDIUM] M2 — AC #5 (non-fatal dedup error path) had no test coverage** (`db.rs`, `scrobbler.rs`)
+Added `#[cfg(test)] drop_scrobble_table_for_test()` to `Database` and new test `test_process_device_dedup_error_is_nonfatal` that drops `scrobble_history` to trigger `Err(e)` in the dedup match, then asserts `skipped_duplicate == 0` and `failed == 2` (entries attempted normal submission). 96 total tests now pass.
+
+**[MEDIUM] M3 — Dead code in `test_process_device_unreadable_log`** (`scrobbler.rs`)
+Removed `temp_dir` creation and `.scrobbler.log` write (lines 329–331) that were never used — the test already used `bad_dir` as its path. Cleaned up misleading comments.
+
+**[MEDIUM] M4 — `record_scrobble` failure after successful API call was a silent dedup blind spot** (`scrobbler.rs`)
+Improved error message in the `record_scrobble` failure branch to explicitly state: *"track was submitted to Jellyfin but will not be deduplicated on next sync"*. Updated the invariant test's error string to match.
+
+### Low-Severity Notes (Not Fixed — Design Decisions)
+
+- **L1**: `COUNT(*)` vs `EXISTS` in `is_scrobble_recorded` — `EXISTS` would be marginally cleaner but SQLite's query planner handles both identically on a unique index at typical log sizes.
+- **L2**: T5.2 manual test (`[ ]`) — physical device reconnect test; outside automated test scope. Story marked done since all ACs are verified by automated tests.
+- **L3**: `device_id` as raw path string — pre-existing architecture decision; path normalization is a future concern.
+- **L4**: `println!` logging — pre-existing systemic pattern.
+
 ## Change Log
 
 - 2026-02-28: Story 5.2 implemented — added `is_scrobble_recorded()` to `db.rs`, `skipped_duplicate` field to `ScrobblerResult`, dedup pre-check in `process_device_scrobbles()`, 4 new tests (95 total). Status: review.
+- 2026-02-28: Code review — 4 medium issues fixed: errors assertion added to dedup test, AC#5 non-fatal path now tested, dead code removed from unreadable-log test, record_scrobble error message clarified. 96 total tests pass. Status: done.

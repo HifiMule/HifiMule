@@ -132,6 +132,12 @@ impl Database {
         Ok(count > 0)
     }
 
+    #[cfg(test)]
+    pub fn drop_scrobble_table_for_test(&self) {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DROP TABLE scrobble_history", []).unwrap();
+    }
+
     pub fn get_scrobble_count(&self, device_id: &str) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn

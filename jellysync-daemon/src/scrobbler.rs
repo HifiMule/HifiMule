@@ -207,8 +207,10 @@ pub async fn process_device_scrobbles(
             continue;
         }
 
-        // Record in scrobble_history — if this fails the track was submitted but won't
-        // be deduped in Story 5.2, so count it as failed rather than submitted.
+        // Record in scrobble_history — if this fails the track was submitted to Jellyfin
+        // but won't appear in scrobble_history, so the dedup check will miss it on the
+        // next sync and submit it again (duplicate play count). Count as failed so the
+        // caller can detect and investigate.
         if let Err(e) = db.record_scrobble(
             &device_id,
             &entry.artist,
@@ -217,8 +219,8 @@ pub async fn process_device_scrobbles(
             entry.timestamp_unix,
         ) {
             errors.push(format!(
-                "Failed to record scrobble for '{}': {}",
-                entry.title, e
+                "Failed to record scrobble for '{}' by '{}': {} — track was submitted to Jellyfin but will not be deduplicated on next sync",
+                entry.title, entry.artist, e
             ));
             failed += 1;
             continue;
@@ -325,13 +327,7 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
 
     #[tokio::test]
     async fn test_process_device_unreadable_log() {
-        // Write a valid .scrobbler.log but in a path that gets removed
-        let temp_dir = tempfile::tempdir().unwrap();
-        let log_path = temp_dir.path().join(".scrobbler.log");
-        std::fs::write(&log_path, b"#AUDIOSCROBBLER/1.1\n").unwrap();
-
-        // Remove the file after creating it to simulate read failure on a different path
-        // Instead, test with a directory named .scrobbler.log (unreadable as file)
+        // Test with a directory named .scrobbler.log — read_to_string will fail on a directory
         let bad_dir = tempfile::tempdir().unwrap();
         let fake_log = bad_dir.path().join(".scrobbler.log");
         std::fs::create_dir(&fake_log).unwrap(); // directory, not a file — read_to_string will fail
@@ -387,6 +383,39 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
         assert_eq!(result.submitted, 0);
         assert_eq!(result.unmatched, 0);
         assert_eq!(result.failed, 0);
+        assert!(result.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_process_device_dedup_error_is_nonfatal() {
+        // AC #5: if is_scrobble_recorded() returns Err, the entry is processed normally
+        // (not skipped, not counted as failed for the dedup check itself).
+        // We trigger the Err path by dropping the scrobble_history table.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let log_path = temp_dir.path().join(".scrobbler.log");
+        std::fs::write(&log_path, SAMPLE_LOG.as_bytes()).unwrap();
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        db.drop_scrobble_table_for_test(); // is_scrobble_recorded() will now return Err("no such table")
+
+        let client = Arc::new(crate::api::JellyfinClient::new());
+        let result = process_device_scrobbles(
+            temp_dir.path(),
+            db,
+            client,
+            "http://localhost:8096",
+            "token-placeholder",
+            "user-placeholder",
+        )
+        .await;
+
+        // No entries skipped as duplicate — the Err path fell through to normal processing
+        assert_eq!(result.skipped_duplicate, 0);
+        // The 2 "L" entries attempted API submission and failed (no server reachable)
+        assert_eq!(result.skipped_rating, 1);
+        assert_eq!(result.failed, 2);
+        assert_eq!(result.submitted, 0);
+        assert_eq!(result.total_entries, 3);
     }
 
     #[test]
@@ -401,7 +430,7 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
             skipped_duplicate: 0,
             unmatched: 0,
             failed: 1, // one track had DB record failure
-            errors: vec!["Failed to record scrobble for 'Track': db error".to_string()],
+            errors: vec!["Failed to record scrobble for 'Track' by 'Artist': db error — track was submitted to Jellyfin but will not be deduplicated on next sync".to_string()],
             device_id: "ipod-001".to_string(),
             total_scrobbled: 1,
         };
