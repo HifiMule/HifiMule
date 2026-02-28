@@ -633,6 +633,8 @@ async fn test_relink_item() {
         .await
         .unwrap();
 
+    fs::write(root.join("Music").join("new_path.flac"), b"audio data").unwrap();
+
     let found = manager
         .relink_item("item-1", "Music/new_path.flac")
         .await
@@ -645,6 +647,35 @@ async fn test_relink_item() {
         device.synced_items[0].original_name,
         Some("Music/old_path.flac".to_string())
     );
+}
+
+#[tokio::test]
+async fn test_relink_item_path_traversal() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir(root.join("Music")).unwrap();
+
+    let manifest = DeviceManifest {
+        device_id: "dev-1".to_string(),
+        name: None,
+        version: "1.0".to_string(),
+        managed_paths: vec!["Music".to_string()],
+        synced_items: vec![],
+        dirty: false,
+        pending_item_ids: vec![],
+    };
+    write_manifest(root, &manifest).await.unwrap();
+
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+    manager
+        .handle_device_detected(root.to_path_buf(), manifest)
+        .await
+        .unwrap();
+
+    let res = manager.relink_item("item-1", "../secret.txt").await;
+    assert!(res.is_err());
+    assert!(res.unwrap_err().to_string().contains("path traversal"));
 }
 
 #[tokio::test]

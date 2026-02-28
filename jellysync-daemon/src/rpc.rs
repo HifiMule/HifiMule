@@ -1045,6 +1045,20 @@ async fn handle_scrobbler_get_last_result(state: &AppState) -> Result<Value, Jso
     }
 }
 
+async fn broadcast_device_state(state: &AppState) {
+    if let Some(device) = state.device_manager.get_current_device().await {
+        if let Some(path) = state.device_manager.get_current_device_path().await {
+            if let Ok(daemon_state) = state
+                .device_manager
+                .handle_device_detected(path, device)
+                .await
+            {
+                let _ = state.state_tx.send(daemon_state);
+            }
+        }
+    }
+}
+
 async fn handle_manifest_get_discrepancies(state: &AppState) -> Result<Value, JsonRpcError> {
     match state.device_manager.get_discrepancies().await {
         Ok(Some(discrepancies)) => Ok(serde_json::to_value(discrepancies).unwrap()),
@@ -1083,7 +1097,10 @@ async fn handle_manifest_prune(
         .collect::<Vec<String>>();
 
     match state.device_manager.prune_items(&item_ids).await {
-        Ok(removed) => Ok(serde_json::json!({ "removed": removed })),
+        Ok(removed) => {
+            broadcast_device_state(state).await;
+            Ok(serde_json::json!({ "removed": removed }))
+        }
         Err(e) => Err(JsonRpcError {
             code: ERR_STORAGE_ERROR,
             message: format!("Failed to prune items: {}", e),
@@ -1119,7 +1136,10 @@ async fn handle_manifest_relink(
         .relink_item(jellyfin_id, new_local_path)
         .await
     {
-        Ok(found) => Ok(serde_json::json!({ "success": found })),
+        Ok(found) => {
+            broadcast_device_state(state).await;
+            Ok(serde_json::json!({ "success": found }))
+        }
         Err(e) => Err(JsonRpcError {
             code: ERR_STORAGE_ERROR,
             message: format!("Failed to relink item: {}", e),
@@ -1130,7 +1150,10 @@ async fn handle_manifest_relink(
 
 async fn handle_manifest_clear_dirty(state: &AppState) -> Result<Value, JsonRpcError> {
     match state.device_manager.clear_dirty_flag().await {
-        Ok(()) => Ok(serde_json::json!({ "success": true })),
+        Ok(()) => {
+            broadcast_device_state(state).await;
+            Ok(serde_json::json!({ "success": true }))
+        }
         Err(e) => Err(JsonRpcError {
             code: ERR_STORAGE_ERROR,
             message: format!("Failed to clear dirty flag: {}", e),

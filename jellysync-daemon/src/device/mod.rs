@@ -408,6 +408,22 @@ impl DeviceManager {
     /// the manifest item's local_path (and optionally original_name) to match the
     /// actual file on disk.
     pub async fn relink_item(&self, jellyfin_id: &str, new_local_path: &str) -> Result<bool> {
+        if new_local_path.contains("..")
+            || new_local_path.starts_with('/')
+            || new_local_path.starts_with('\\')
+        {
+            return Err(anyhow::anyhow!("Invalid path: path traversal detected"));
+        }
+
+        let device_path = self
+            .get_current_device_path()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("No device connected"))?;
+        let full_path = device_path.join(new_local_path);
+        if !tokio::fs::try_exists(&full_path).await.unwrap_or(false) {
+            return Err(anyhow::anyhow!("File does not exist: {}", new_local_path));
+        }
+
         let mut found = false;
         self.update_manifest(|manifest| {
             if let Some(item) = manifest
@@ -429,6 +445,16 @@ impl DeviceManager {
 
     /// Clears the dirty flag on the manifest if no discrepancies remain.
     pub async fn clear_dirty_flag(&self) -> Result<()> {
+        let discrepancies = self
+            .get_discrepancies()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("No device connected"))?;
+        if !discrepancies.missing.is_empty() || !discrepancies.orphaned.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Cannot clear dirty flag: discrepancies still exist"
+            ));
+        }
+
         self.update_manifest(|manifest| {
             manifest.dirty = false;
             manifest.pending_item_ids.clear();

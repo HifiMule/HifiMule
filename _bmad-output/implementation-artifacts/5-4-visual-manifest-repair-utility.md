@@ -1,6 +1,6 @@
 # Story 5.4: Visual Manifest Repair Utility
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -32,6 +32,13 @@ so that I can recover my "Managed" status without a full wipe.
   - [x] T3.2: Trigger the repair UI from the "Device State" panel when a manifest is flagged as "Dirty".
   - [x] T3.3: Implement the side-by-side view displaying discrepancies fetched via `manifest_get_discrepancies`.
   - [x] T3.4: Wire up the "Prune" and "Re-link" buttons to call their respective RPC methods and refresh the UI state.
+- [x] **Review Follow-ups (AI)**
+  - [x] Fixed path traversal vulnerability in `manifest_relink`.
+  - [x] Checked for file existence during `manifest_relink`.
+  - [x] Enforced backend validation checking for zero discrepancies in `clear_dirty_flag`.
+  - [x] Ensured RPC handlers broadcast updated daemon state (`state.state_tx`) to notify UI.
+  - [x] Implemented proper `get_daemon_state` polling in `BasketSidebar.ts`.
+  - [x] Disabled "Start Sync" button when manifest is dirty in `BasketSidebar.ts`.
 
 ## Dev Notes
 
@@ -85,3 +92,4 @@ All 102 tests pass (0 failures, 0 ignored).
 ### Change Log
 
 - 2026-02-28: Story 5.4 implementation — Visual Manifest Repair Utility with discrepancy detection, RPC repair methods, and RepairModal UI component.
+- 2026-02-28: AI Code Review fixes applied — added RPC path traversal/existence checks, fixed dirty flag validation, added missing UI polling, and disabled start sync on dirty manifest.

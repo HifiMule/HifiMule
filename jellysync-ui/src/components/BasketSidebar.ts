@@ -135,6 +135,7 @@ export class BasketSidebar {
     private currentOperationId: string | null = null;
     private currentOperation: SyncOperation | null = null;
     private pollingInterval: number | null = null;
+    private daemonStateInterval: number | null = null;
     private showSyncComplete: boolean = false;
     private syncErrorMessages: string[] | null = null;
     private isDirtyManifest: boolean = false;
@@ -143,6 +144,7 @@ export class BasketSidebar {
         this.container = container;
         this.updateListener = () => this.refreshAndRender();
         this.init();
+        this.startDaemonStatePolling();
     }
 
     private init() {
@@ -174,7 +176,28 @@ export class BasketSidebar {
     public destroy() {
         this.isDestroyed = true;
         this.stopPolling();
+        if (this.daemonStateInterval !== null) {
+            clearInterval(this.daemonStateInterval);
+            this.daemonStateInterval = null;
+        }
         basketStore.removeEventListener('update', this.updateListener);
+    }
+
+    private startDaemonStatePolling() {
+        if (this.daemonStateInterval !== null) return;
+        this.daemonStateInterval = window.setInterval(async () => {
+            if (this.isDestroyed || this.isSyncing || this.showSyncComplete || this.syncErrorMessages) return;
+            try {
+                const daemonStateResult = await rpcCall('get_daemon_state') as any;
+                const newDirty = daemonStateResult?.dirtyManifest === true;
+                if (newDirty !== this.isDirtyManifest) {
+                    this.isDirtyManifest = newDirty;
+                    this.refreshAndRender();
+                }
+            } catch (err) {
+                // Ignore transient errors
+            }
+        }, 2000);
     }
 
     private renderDeviceFolders(): string {
@@ -333,6 +356,11 @@ export class BasketSidebar {
                     <sl-button variant="danger" style="width: 100%;" disabled>
                         <sl-icon slot="prefix" name="exclamation-triangle"></sl-icon>
                         Remove ${formatSize(overAmount)} to fit
+                    </sl-button>
+                ` : this.isDirtyManifest ? `
+                    <sl-button variant="warning" style="width: 100%;" disabled>
+                        <sl-icon slot="prefix" name="exclamation-triangle"></sl-icon>
+                        Repair Manifest First
                     </sl-button>
                 ` : `
                     <sl-button id="start-sync-btn" variant="primary" style="width: 100%;"
