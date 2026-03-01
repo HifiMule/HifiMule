@@ -187,6 +187,15 @@ impl DeviceManager {
 
     pub async fn handle_device_unrecognized(&self, path: PathBuf) -> crate::DaemonState {
         let path_str = path.to_string_lossy().to_string();
+        // Enforce mutual exclusivity: clear recognized device state
+        {
+            let mut current = self.current_device.write().await;
+            *current = None;
+        }
+        {
+            let mut current_path = self.current_device_path.write().await;
+            *current_path = None;
+        }
         {
             let mut unrecognized_path = self.unrecognized_device_path.write().await;
             *unrecognized_path = Some(path);
@@ -241,8 +250,21 @@ impl DeviceManager {
     pub async fn initialize_device(
         &self,
         folder_path: &str,
-        _profile_id: &str,
     ) -> Result<DeviceManifest> {
+        // Validate folder_path: no traversal, no absolute paths, single-level only
+        if !folder_path.is_empty() {
+            if folder_path.contains("..")
+                || folder_path.starts_with('/')
+                || folder_path.starts_with('\\')
+                || folder_path.contains('/')
+                || folder_path.contains('\\')
+            {
+                return Err(anyhow::anyhow!(
+                    "Invalid folder path: must be a single folder name without path separators"
+                ));
+            }
+        }
+
         let device_root = self
             .get_unrecognized_device_path()
             .await
@@ -255,7 +277,13 @@ impl DeviceManager {
         } else {
             // Create the subfolder on the device if it doesn't exist
             let target_folder = device_root.join(folder_path);
-            tokio::fs::create_dir_all(&target_folder).await?;
+            tokio::fs::create_dir(&target_folder).await.or_else(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })?;
             vec![folder_path.to_string()]
         };
 

@@ -1,6 +1,6 @@
 # Story 2.6: Initialize New Device Manifest
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -245,3 +245,4 @@ claude-sonnet-4-6
 ### Change Log
 
 - 2026-03-01: Implemented Story 2.6 — Initialize New Device Manifest. Added unrecognized device detection pipeline (DeviceEvent::Unrecognized, is_removable_drive guard, DeviceManager.handle_device_unrecognized/initialize_device), device_initialize RPC endpoint, pendingDevicePath in get_daemon_state, InitDeviceModal UI component, and Initialize Device banner in BasketSidebar.
+- 2026-03-01: Code Review (AI) — Fixed 6 issues: (H1) Added path traversal and single-level folder validation to initialize_device, (M1) handle_device_unrecognized now clears current_device fields enforcing mutual exclusivity, (M2) DeviceRecognized state uses human-readable device path name instead of UUID, (M3) Replaced create_dir_all with create_dir to prevent nested directory creation, (M4) Removed unused _profile_id parameter from DeviceManager::initialize_device, (M5) Added pendingDevicePath test for get_daemon_state, path traversal test, and mutual exclusivity test. 117 tests pass.

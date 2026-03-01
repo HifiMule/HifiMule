@@ -1195,7 +1195,7 @@ async fn handle_device_initialize(
 
     let manifest = state
         .device_manager
-        .initialize_device(folder_path, profile_id)
+        .initialize_device(folder_path)
         .await
         .map_err(|e| JsonRpcError {
             code: ERR_STORAGE_ERROR,
@@ -1212,10 +1212,21 @@ async fn handle_device_initialize(
             data: None,
         })?;
 
+    // Derive a human-readable name from the device path rather than using the UUID
+    let device_name = state
+        .device_manager
+        .get_current_device_path()
+        .await
+        .and_then(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| manifest.device_id.clone());
+
     let _ = state
         .state_tx
         .send(crate::DaemonState::DeviceRecognized {
-            name: manifest.device_id.clone(),
+            name: device_name,
             profile_id: profile_id.to_string(),
         });
 
@@ -1765,6 +1776,46 @@ mod tests {
         assert_eq!(
             result2["dirtyManifest"], true,
             "Dirty device → dirtyManifest must be true"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rpc_get_daemon_state_includes_pending_device_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+
+        // No unrecognized device → pendingDevicePath should be null
+        let state = AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db: db.clone(),
+            device_manager: device_manager.clone(),
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
+            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+        };
+        let result = handle_get_daemon_state(&state).await.unwrap();
+        assert!(
+            result["pendingDevicePath"].is_null(),
+            "No unrecognized device → pendingDevicePath must be null"
+        );
+
+        // Set an unrecognized device → pendingDevicePath should be present
+        device_manager
+            .handle_device_unrecognized(dir.path().to_path_buf())
+            .await;
+
+        let result2 = handle_get_daemon_state(&state).await.unwrap();
+        assert!(
+            result2["pendingDevicePath"].is_string(),
+            "Unrecognized device → pendingDevicePath must be a string"
+        );
+        let pending_path = result2["pendingDevicePath"].as_str().unwrap();
+        assert!(
+            !pending_path.is_empty(),
+            "pendingDevicePath must not be empty"
         );
     }
 

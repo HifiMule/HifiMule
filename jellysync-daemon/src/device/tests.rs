@@ -810,7 +810,7 @@ async fn test_initialize_device_root() {
     manager.handle_device_unrecognized(dir.path().to_path_buf()).await;
 
     // Initialize with root (empty folder_path)
-    let manifest = manager.initialize_device("", "user-123").await.unwrap();
+    let manifest = manager.initialize_device("").await.unwrap();
 
     assert!(manifest.managed_paths.is_empty());
     assert_eq!(manifest.version, "1.0");
@@ -836,7 +836,7 @@ async fn test_initialize_device_subfolder() {
     manager.handle_device_unrecognized(dir.path().to_path_buf()).await;
 
     // Initialize with a subfolder
-    let manifest = manager.initialize_device("Music", "user-abc").await.unwrap();
+    let manifest = manager.initialize_device("Music").await.unwrap();
 
     assert_eq!(manifest.managed_paths, vec!["Music".to_string()]);
 
@@ -858,7 +858,58 @@ async fn test_initialize_device_requires_unrecognized_path() {
     let manager = DeviceManager::new(db);
 
     // No unrecognized path set → should fail
-    let res = manager.initialize_device("", "user-1").await;
+    let res = manager.initialize_device("").await;
     assert!(res.is_err());
     assert!(res.unwrap_err().to_string().contains("No unrecognized device"));
+}
+
+#[tokio::test]
+async fn test_initialize_device_rejects_path_traversal() {
+    let dir = tempdir().unwrap();
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+
+    manager.handle_device_unrecognized(dir.path().to_path_buf()).await;
+
+    // Path traversal with ".."
+    let res = manager.initialize_device("../escape").await;
+    assert!(res.is_err());
+    assert!(res.unwrap_err().to_string().contains("Invalid folder path"));
+
+    // Absolute path
+    let res = manager.initialize_device("/etc/hacked").await;
+    assert!(res.is_err());
+
+    // Nested path with separator
+    let res = manager.initialize_device("Music/SubFolder").await;
+    assert!(res.is_err());
+    assert!(res.unwrap_err().to_string().contains("single folder name"));
+
+    // Backslash separator
+    let res = manager.initialize_device("Music\\SubFolder").await;
+    assert!(res.is_err());
+}
+
+#[tokio::test]
+async fn test_handle_device_unrecognized_clears_current_device() {
+    let dir = tempdir().unwrap();
+    let manifest_json = r#"{"device_id": "dev-1", "name": "My Device", "version": "1.0"}"#;
+    fs::write(dir.path().join(".jellysync.json"), manifest_json).unwrap();
+    let manifest: DeviceManifest = serde_json::from_str(manifest_json).unwrap();
+
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+
+    // First detect a recognized device
+    manager.handle_device_detected(dir.path().to_path_buf(), manifest).await.unwrap();
+    assert!(manager.get_current_device().await.is_some());
+    assert!(manager.get_current_device_path().await.is_some());
+
+    // Now handle an unrecognized device — should clear current device fields
+    let dir2 = tempdir().unwrap();
+    manager.handle_device_unrecognized(dir2.path().to_path_buf()).await;
+
+    assert!(manager.get_current_device().await.is_none(), "current_device must be cleared");
+    assert!(manager.get_current_device_path().await.is_none(), "current_device_path must be cleared");
+    assert!(manager.get_unrecognized_device_path().await.is_some());
 }
