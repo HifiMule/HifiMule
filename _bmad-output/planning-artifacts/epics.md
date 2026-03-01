@@ -221,6 +221,32 @@ So that I can easily connect to my library without manually copying API tokens.
 **When** authentication fails
 **Then** a clear error message is shown (e.g., "Invalid Credentials" or "Server Unreachable").
 
+### Story 2.6: Initialize New Device Manifest
+
+As a Ritualist (Arthur) and Convenience Seeker (Sarah),
+I want the application to detect when a connected removable disk has no `.jellysync.json` manifest and guide me through initializing it,
+So that I can bring a brand-new device into the managed sync model without manually creating any files.
+
+**Acceptance Criteria:**
+
+**Given** a USB mass storage device is connected with no `.jellysync.json` present in its root
+**When** the daemon completes its device discovery scan
+**Then** it broadcasts an `on_device_unrecognized` event to the UI.
+**And** the UI displays an "Initialize Device" banner in the Device State panel.
+
+**Given** the "Initialize Device" banner is visible
+**When** I click "Initialize"
+**Then** a dialog prompts me to confirm or change the target sync folder path on the device (defaulting to the device root).
+**And** I can select the associated Jellyfin user profile for this device.
+**When** I click "Confirm"
+**Then** the UI sends a `device.initialize` JSON-RPC request to the daemon with the chosen folder path and profile ID.
+**And** the daemon writes an initial `.jellysync.json` to the device using the atomic Write-Temp-Rename pattern, containing a new unique hardware ID and the selected profile.
+**And** the daemon broadcasts an updated device state marking the device as "Managed".
+**And** the UI transitions to the normal sync-ready state.
+
+**When** the initialization fails (e.g., device is read-only or disk full)
+**Then** the UI displays a clear error message with a "Retry" or "Dismiss" option.
+
 ## Epic 3: The Curation Hub (Basket & Library)
 
 Develop the high-confidence Library Browser and Selection Basket with storage projection.

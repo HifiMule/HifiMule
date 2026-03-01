@@ -141,6 +141,7 @@ As a cross-platform desktop application, JellyfinSync consists of a performance-
 - **FR2:** Users can manually select a target device folder if automatic detection fails.
 - **FR3:** The system can identify the presence of a `.jellysync.json` manifest on discovery.
 - **FR4:** The system can read persistent hardware identifiers to link devices across different sessions.
+- **FR26:** The system can initialize a new `.jellysync.json` manifest on a connected device that has not previously been managed, capturing a hardware identifier, a designated sync folder path, and an associated Jellyfin user profile.
 
 ### 2. Server & Profile Management
 - **FR5:** Users can configure Jellyfin server credentials (URL, username, token).
