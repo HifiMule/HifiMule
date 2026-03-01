@@ -52,7 +52,7 @@ development_status:
   2-3-multi-device-profile-mapping: done
   2-4-startup-splash-screen-with-connection-status: done
   2-5-interactive-login-and-identity-management: done
-  2-6-initialize-new-device-manifest: ready-for-dev
+  2-6-initialize-new-device-manifest: review
   epic-2-retrospective: optional
 
   epic-3: done

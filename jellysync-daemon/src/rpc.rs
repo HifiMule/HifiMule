@@ -148,6 +148,7 @@ async fn handler(
         "manifest_prune" => handle_manifest_prune(&state, payload.params).await,
         "manifest_relink" => handle_manifest_relink(&state, payload.params).await,
         "manifest_clear_dirty" => handle_manifest_clear_dirty(&state).await,
+        "device_initialize" => handle_device_initialize(&state, payload.params).await,
         _ => Err(JsonRpcError {
             code: ERR_METHOD_NOT_FOUND,
             message: "Method not found".to_string(),
@@ -352,11 +353,19 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
     // Capture dirty before device is moved into json!()
     let dirty = device.as_ref().map(|d| d.dirty).unwrap_or(false);
 
+    // Include pending device path for unrecognized devices awaiting initialization
+    let pending_device_path = state
+        .device_manager
+        .get_unrecognized_device_path()
+        .await
+        .map(|p| p.to_string_lossy().to_string());
+
     Ok(serde_json::json!({
         "currentDevice": device,
         "deviceMapping": mapping,
         "serverConnected": server_connected,
         "dirtyManifest": dirty,
+        "pendingDevicePath": pending_device_path,
     }))
 }
 
@@ -1162,6 +1171,64 @@ async fn handle_manifest_clear_dirty(state: &AppState) -> Result<Value, JsonRpcE
     }
 }
 
+async fn handle_device_initialize(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let folder_path = params["folderPath"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing folderPath".to_string(),
+        data: None,
+    })?;
+
+    let profile_id = params["profileId"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing profileId".to_string(),
+        data: None,
+    })?;
+
+    let manifest = state
+        .device_manager
+        .initialize_device(folder_path, profile_id)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: format!("Failed to initialize device: {}", e),
+            data: None,
+        })?;
+
+    state
+        .db
+        .upsert_device_mapping(&manifest.device_id, None, Some(profile_id), None)
+        .map_err(|e| JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: format!("Failed to store device mapping: {}", e),
+            data: None,
+        })?;
+
+    let _ = state
+        .state_tx
+        .send(crate::DaemonState::DeviceRecognized {
+            name: manifest.device_id.clone(),
+            profile_id: profile_id.to_string(),
+        });
+
+    Ok(serde_json::json!({
+        "status": "success",
+        "data": {
+            "deviceId": manifest.device_id,
+            "version": manifest.version,
+            "managedPaths": manifest.managed_paths,
+        }
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1891,5 +1958,150 @@ mod tests {
             "Expected error to mention an item ID, got: {}",
             err.message
         );
+    }
+
+    // ===== Story 2.6 Tests =====
+
+    #[tokio::test]
+    async fn test_rpc_device_initialize_missing_params() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        let state = AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db,
+            device_manager,
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
+            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+        };
+
+        // No params → ERR_INVALID_PARAMS
+        let res = handle_device_initialize(&state, None).await;
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().code, ERR_INVALID_PARAMS);
+
+        // Missing profileId → ERR_INVALID_PARAMS
+        let res = handle_device_initialize(&state, Some(json!({ "folderPath": "" }))).await;
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().code, ERR_INVALID_PARAMS);
+
+        // Missing folderPath → ERR_INVALID_PARAMS
+        let res = handle_device_initialize(&state, Some(json!({ "profileId": "user-1" }))).await;
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().code, ERR_INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn test_rpc_device_initialize_no_unrecognized_device() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        let state = AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db,
+            device_manager,
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
+            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+        };
+
+        // No unrecognized device registered → ERR_STORAGE_ERROR
+        let params = json!({ "folderPath": "", "profileId": "user-1" });
+        let res = handle_device_initialize(&state, Some(params)).await;
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().code, ERR_STORAGE_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_rpc_device_initialize_success_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+
+        // Simulate an unrecognized device
+        device_manager
+            .handle_device_unrecognized(dir.path().to_path_buf())
+            .await;
+
+        let state = AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db: db.clone(),
+            device_manager: device_manager.clone(),
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
+            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+        };
+
+        // Initialize with empty folderPath (device root)
+        let params = json!({ "folderPath": "", "profileId": "user-abc" });
+        let res = handle_device_initialize(&state, Some(params)).await.unwrap();
+
+        assert_eq!(res["status"], "success");
+        let managed_paths = res["data"]["managedPaths"].as_array().unwrap();
+        assert!(managed_paths.is_empty(), "Root init should have no managed paths");
+
+        // Verify manifest was written to disk
+        let manifest_path = dir.path().join(".jellysync.json");
+        assert!(manifest_path.exists(), ".jellysync.json must exist");
+
+        // Verify device is now recognized
+        let current_device = device_manager.get_current_device().await;
+        assert!(current_device.is_some(), "Device should now be recognized");
+        assert!(device_manager.get_unrecognized_device_path().await.is_none());
+
+        // Verify DB mapping was stored
+        let device_id = res["data"]["deviceId"].as_str().unwrap();
+        let mapping = db.get_device_mapping(device_id).unwrap();
+        assert!(mapping.is_some());
+        assert_eq!(mapping.unwrap().jellyfin_user_id, Some("user-abc".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_rpc_device_initialize_success_subfolder() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+
+        device_manager
+            .handle_device_unrecognized(dir.path().to_path_buf())
+            .await;
+
+        let state = AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db: db.clone(),
+            device_manager: device_manager.clone(),
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
+            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+        };
+
+        // Initialize with a subfolder
+        let params = json!({ "folderPath": "Music", "profileId": "user-xyz" });
+        let res = handle_device_initialize(&state, Some(params)).await.unwrap();
+
+        assert_eq!(res["status"], "success");
+        let managed_paths = res["data"]["managedPaths"].as_array().unwrap();
+        assert_eq!(managed_paths.len(), 1);
+        assert_eq!(managed_paths[0], "Music");
+
+        // Verify Music folder was created on device
+        let music_folder = dir.path().join("Music");
+        assert!(music_folder.exists(), "Music subfolder should be created");
+
+        // Verify manifest on disk
+        let content = tokio::fs::read_to_string(dir.path().join(".jellysync.json"))
+            .await
+            .unwrap();
+        let manifest: crate::device::DeviceManifest = serde_json::from_str(&content).unwrap();
+        assert_eq!(manifest.managed_paths, vec!["Music".to_string()]);
+        assert!(manifest.synced_items.is_empty());
+        assert!(!manifest.dirty);
     }
 }

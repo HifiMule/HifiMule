@@ -143,6 +143,11 @@ fn main() -> Result<()> {
                                 });
                             }
                         }
+                        device::DeviceEvent::Unrecognized { path } => {
+                            println!("Unrecognized device at {:?}", path);
+                            let new_state = device_manager.handle_device_unrecognized(path).await;
+                            let _ = state_tx_clone.send(new_state);
+                        }
                         device::DeviceEvent::Removed(path) => {
                             println!("Device removed at {:?}", path);
                             device_manager.handle_device_removed().await;

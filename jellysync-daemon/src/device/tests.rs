@@ -713,3 +713,152 @@ async fn test_clear_dirty_flag() {
     assert!(!loaded.dirty);
     assert!(loaded.pending_item_ids.is_empty());
 }
+
+// ===== Story 2.6 Tests =====
+
+#[tokio::test]
+async fn test_handle_device_unrecognized_stores_path() {
+    let dir = tempdir().unwrap();
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+
+    // Initially no unrecognized path
+    assert!(manager.get_unrecognized_device_path().await.is_none());
+    assert!(manager.get_current_device().await.is_none());
+
+    let state = manager.handle_device_unrecognized(dir.path().to_path_buf()).await;
+
+    // Path should now be set
+    let path = manager.get_unrecognized_device_path().await;
+    assert!(path.is_some());
+    assert_eq!(path.unwrap(), dir.path());
+
+    // State should be DeviceFound with the path string
+    match state {
+        crate::DaemonState::DeviceFound(s) => {
+            assert!(s.contains(&*dir.path().to_string_lossy()));
+        }
+        _ => panic!("Expected DeviceFound state"),
+    }
+}
+
+#[tokio::test]
+async fn test_handle_device_removed_clears_unrecognized_path() {
+    let dir = tempdir().unwrap();
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+
+    manager.handle_device_unrecognized(dir.path().to_path_buf()).await;
+    assert!(manager.get_unrecognized_device_path().await.is_some());
+
+    manager.handle_device_removed().await;
+
+    assert!(manager.get_unrecognized_device_path().await.is_none());
+    assert!(manager.get_current_device().await.is_none());
+}
+
+#[tokio::test]
+async fn test_handle_device_detected_clears_unrecognized_path() {
+    let dir = tempdir().unwrap();
+    let manifest_path = dir.path().join(".jellysync.json");
+    let manifest_json = r#"{"device_id": "dev-1", "name": "My Device", "version": "1.0"}"#;
+    fs::write(&manifest_path, manifest_json).unwrap();
+    let manifest: DeviceManifest = serde_json::from_str(manifest_json).unwrap();
+
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+
+    // Set unrecognized path first
+    manager.handle_device_unrecognized(dir.path().to_path_buf()).await;
+    assert!(manager.get_unrecognized_device_path().await.is_some());
+
+    // Detect device (recognized)
+    manager.handle_device_detected(dir.path().to_path_buf(), manifest).await.unwrap();
+
+    // Unrecognized path should be cleared
+    assert!(manager.get_unrecognized_device_path().await.is_none());
+    assert!(manager.get_current_device().await.is_some());
+}
+
+#[tokio::test]
+async fn test_list_root_folders_unrecognized_device() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    // No manifest — folders should still be listed via unrecognized path fallback
+    fs::create_dir(root.join("Music")).unwrap();
+    fs::create_dir(root.join("Podcasts")).unwrap();
+
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+
+    manager.handle_device_unrecognized(root.to_path_buf()).await;
+
+    let res = manager.list_root_folders().await.unwrap().unwrap();
+
+    assert_eq!(res.folders.len(), 2);
+    assert!(!res.has_manifest, "No manifest should be present");
+    assert_eq!(res.managed_count, 0, "No managed paths without manifest");
+}
+
+#[tokio::test]
+async fn test_initialize_device_root() {
+    let dir = tempdir().unwrap();
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+
+    manager.handle_device_unrecognized(dir.path().to_path_buf()).await;
+
+    // Initialize with root (empty folder_path)
+    let manifest = manager.initialize_device("", "user-123").await.unwrap();
+
+    assert!(manifest.managed_paths.is_empty());
+    assert_eq!(manifest.version, "1.0");
+    assert!(!manifest.dirty);
+    assert!(manifest.synced_items.is_empty());
+
+    // Manifest file should exist on disk
+    let manifest_path = dir.path().join(".jellysync.json");
+    assert!(manifest_path.exists(), ".jellysync.json must be created");
+
+    // Device should now be current (recognized)
+    assert!(manager.get_current_device().await.is_some());
+    assert!(manager.get_unrecognized_device_path().await.is_none());
+    assert!(manager.get_current_device_path().await.is_some());
+}
+
+#[tokio::test]
+async fn test_initialize_device_subfolder() {
+    let dir = tempdir().unwrap();
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+
+    manager.handle_device_unrecognized(dir.path().to_path_buf()).await;
+
+    // Initialize with a subfolder
+    let manifest = manager.initialize_device("Music", "user-abc").await.unwrap();
+
+    assert_eq!(manifest.managed_paths, vec!["Music".to_string()]);
+
+    // Music folder should have been created
+    let music_folder = dir.path().join("Music");
+    assert!(music_folder.exists(), "Music subfolder should be created");
+
+    // Manifest on disk should have managed_paths = ["Music"]
+    let content = tokio::fs::read_to_string(dir.path().join(".jellysync.json"))
+        .await
+        .unwrap();
+    let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
+    assert_eq!(loaded.managed_paths, vec!["Music".to_string()]);
+}
+
+#[tokio::test]
+async fn test_initialize_device_requires_unrecognized_path() {
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+
+    // No unrecognized path set → should fail
+    let res = manager.initialize_device("", "user-1").await;
+    assert!(res.is_err());
+    assert!(res.unwrap_err().to_string().contains("No unrecognized device"));
+}

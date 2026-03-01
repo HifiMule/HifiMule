@@ -112,6 +112,7 @@ pub enum DeviceEvent {
         manifest: DeviceManifest,
     },
     Removed(PathBuf),
+    Unrecognized { path: PathBuf },
 }
 
 pub struct DeviceProber;
@@ -133,6 +134,7 @@ pub struct DeviceManager {
     db: std::sync::Arc<crate::db::Database>,
     current_device: std::sync::Arc<tokio::sync::RwLock<Option<DeviceManifest>>>,
     current_device_path: std::sync::Arc<tokio::sync::RwLock<Option<PathBuf>>>,
+    unrecognized_device_path: std::sync::Arc<tokio::sync::RwLock<Option<PathBuf>>>,
 }
 
 impl DeviceManager {
@@ -141,6 +143,7 @@ impl DeviceManager {
             db,
             current_device: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             current_device_path: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            unrecognized_device_path: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
@@ -156,6 +159,10 @@ impl DeviceManager {
         {
             let mut current_path = self.current_device_path.write().await;
             *current_path = Some(path);
+        }
+        {
+            let mut unrecognized_path = self.unrecognized_device_path.write().await;
+            *unrecognized_path = None;
         }
 
         let name = manifest
@@ -178,11 +185,26 @@ impl DeviceManager {
         }
     }
 
+    pub async fn handle_device_unrecognized(&self, path: PathBuf) -> crate::DaemonState {
+        let path_str = path.to_string_lossy().to_string();
+        {
+            let mut unrecognized_path = self.unrecognized_device_path.write().await;
+            *unrecognized_path = Some(path);
+        }
+        crate::DaemonState::DeviceFound(path_str)
+    }
+
+    pub async fn get_unrecognized_device_path(&self) -> Option<PathBuf> {
+        self.unrecognized_device_path.read().await.clone()
+    }
+
     pub async fn handle_device_removed(&self) {
         let mut current = self.current_device.write().await;
         *current = None;
         let mut current_path = self.current_device_path.write().await;
         *current_path = None;
+        let mut unrecognized_path = self.unrecognized_device_path.write().await;
+        *unrecognized_path = None;
     }
 
     pub async fn get_current_device(&self) -> Option<DeviceManifest> {
@@ -214,10 +236,64 @@ impl DeviceManager {
         get_storage_info(&path)
     }
 
+    /// Initializes a new device by generating a UUID, writing the initial manifest,
+    /// and transitioning the device from unrecognized to recognized state.
+    pub async fn initialize_device(
+        &self,
+        folder_path: &str,
+        _profile_id: &str,
+    ) -> Result<DeviceManifest> {
+        let device_root = self
+            .get_unrecognized_device_path()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("No unrecognized device connected"))?;
+
+        let device_id = uuid::Uuid::new_v4().to_string();
+
+        let managed_paths = if folder_path.is_empty() {
+            vec![]
+        } else {
+            // Create the subfolder on the device if it doesn't exist
+            let target_folder = device_root.join(folder_path);
+            tokio::fs::create_dir_all(&target_folder).await?;
+            vec![folder_path.to_string()]
+        };
+
+        let manifest = DeviceManifest {
+            device_id,
+            name: None,
+            version: "1.0".to_string(),
+            managed_paths,
+            synced_items: vec![],
+            dirty: false,
+            pending_item_ids: vec![],
+        };
+
+        write_manifest(&device_root, &manifest).await?;
+
+        {
+            let mut unrecognized_path = self.unrecognized_device_path.write().await;
+            *unrecognized_path = None;
+        }
+        {
+            let mut current_device = self.current_device.write().await;
+            *current_device = Some(manifest.clone());
+        }
+        {
+            let mut current_path = self.current_device_path.write().await;
+            *current_path = Some(device_root);
+        }
+
+        Ok(manifest)
+    }
+
     pub async fn list_root_folders(&self) -> Result<Option<DeviceRootFoldersResponse>> {
         let device_path = match self.get_current_device_path().await {
             Some(p) => p,
-            None => return Ok(None),
+            None => match self.get_unrecognized_device_path().await {
+                Some(p) => p,
+                None => return Ok(None),
+            },
         };
 
         let manifest = self.get_current_device().await;
@@ -620,6 +696,19 @@ fn get_storage_info(path: &Path) -> Option<StorageInfo> {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn is_removable_drive(path: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    unsafe { GetDriveTypeW(wide.as_ptr()) == 2 } // DRIVE_REMOVABLE
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_removable_drive(_path: &Path) -> bool {
+    true // macOS/Linux already filtered by mount detection
+}
+
 pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
     println!("[Device] Observer thread started");
     let mut known_mounts = std::collections::HashSet::new();
@@ -631,13 +720,23 @@ pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
         for mount in &current_mounts {
             if !known_mounts.contains(mount) {
                 known_mounts.insert(mount.clone());
-                if let Ok(Some(manifest)) = DeviceProber::probe(mount).await {
-                    let _ = tx
-                        .send(DeviceEvent::Detected {
-                            path: mount.clone(),
-                            manifest,
-                        })
-                        .await;
+                match DeviceProber::probe(mount).await {
+                    Ok(Some(manifest)) => {
+                        let _ = tx
+                            .send(DeviceEvent::Detected {
+                                path: mount.clone(),
+                                manifest,
+                            })
+                            .await;
+                    }
+                    Ok(None) => {
+                        if is_removable_drive(mount) {
+                            let _ = tx
+                                .send(DeviceEvent::Unrecognized { path: mount.clone() })
+                                .await;
+                        }
+                    }
+                    Err(_) => {} // Probe failed (e.g., permission error) — ignore
                 }
             }
         }

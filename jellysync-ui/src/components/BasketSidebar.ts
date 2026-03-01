@@ -4,6 +4,7 @@
 import { basketStore, BasketItem } from '../state/basket';
 import { IMAGE_PROXY_URL, rpcCall } from '../rpc';
 import { RepairModal } from './RepairModal';
+import { InitDeviceModal } from './InitDeviceModal';
 
 interface StorageInfo {
     totalBytes: number;
@@ -25,6 +26,7 @@ interface RootFoldersResponse {
     folders: FolderInfo[];
     managedCount: number;
     unmanagedCount: number;
+    pendingDevicePath?: string;
 }
 
 interface SyncOperation {
@@ -190,7 +192,12 @@ export class BasketSidebar {
             try {
                 const daemonStateResult = await rpcCall('get_daemon_state') as any;
                 const newDirty = daemonStateResult?.dirtyManifest === true;
-                if (newDirty !== this.isDirtyManifest) {
+                const newPendingPath = daemonStateResult?.pendingDevicePath ?? null;
+                const currentHasManifest = this.folderInfo?.hasManifest ?? true;
+                const hadPendingDevice = !currentHasManifest && this.folderInfo !== null;
+                const hasPendingDevice = newPendingPath !== null;
+
+                if (newDirty !== this.isDirtyManifest || hasPendingDevice !== hadPendingDevice) {
                     this.isDirtyManifest = newDirty;
                     this.refreshAndRender();
                 }
@@ -214,6 +221,22 @@ export class BasketSidebar {
         }
 
         const { folders, managedCount, unmanagedCount, hasManifest } = this.folderInfo;
+
+        // Show Initialize Device banner when device is connected but has no manifest
+        if (!hasManifest) {
+            return `
+                <div class="device-folders-panel">
+                    <div class="dirty-manifest-banner" id="open-init-device-btn" title="Initialize this device for syncing">
+                        <sl-icon name="usb-drive"></sl-icon>
+                        <div class="dirty-manifest-banner-text">
+                            <strong>New Device Detected</strong>
+                            Click Initialize to set up sync
+                        </div>
+                        <sl-button size="small" variant="primary" id="init-device-btn">Initialize</sl-button>
+                    </div>
+                </div>
+            `;
+        }
 
         let content = `
             <div class="device-folders-panel">
@@ -239,15 +262,6 @@ export class BasketSidebar {
                     `).join('')}
                 </div>
             `;
-
-            if (!hasManifest) {
-                content += `
-                    <div class="device-empty-banner">
-                        <sl-icon name="info-circle"></sl-icon>
-                        <span>No managed sync zone — folders created on first sync.</span>
-                    </div>
-                `;
-            }
         }
 
         // Show dirty manifest banner if flagged
@@ -323,6 +337,7 @@ export class BasketSidebar {
                 this.render();
             });
             this.container.querySelector('#open-repair-btn')?.addEventListener('click', () => this.openRepairModal());
+            this.container.querySelector('#init-device-btn')?.addEventListener('click', () => this.openInitDeviceModal());
             return;
         }
 
@@ -396,11 +411,19 @@ export class BasketSidebar {
             this.render();
         });
         this.container.querySelector('#open-repair-btn')?.addEventListener('click', () => this.openRepairModal());
+        this.container.querySelector('#init-device-btn')?.addEventListener('click', () => this.openInitDeviceModal());
     }
 
     private openRepairModal() {
         const modal = new RepairModal(this.container, () => {
             this.isDirtyManifest = false;
+            this.refreshAndRender();
+        });
+        modal.open();
+    }
+
+    private openInitDeviceModal() {
+        const modal = new InitDeviceModal(this.container, () => {
             this.refreshAndRender();
         });
         modal.open();

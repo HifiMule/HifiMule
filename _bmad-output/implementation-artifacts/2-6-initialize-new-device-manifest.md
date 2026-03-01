@@ -1,6 +1,6 @@
 # Story 2.6: Initialize New Device Manifest
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -53,45 +53,45 @@ so that I can bring a brand-new device into the managed sync model without manua
 
 ## Tasks / Subtasks
 
-- [ ] **Backend: Add `DeviceEvent::Unrecognized` and observer update** (AC: #1, #5)
-  - [ ] Add `Unrecognized { path: PathBuf }` variant to `DeviceEvent` enum in `device/mod.rs`
-  - [ ] Add Windows-only `is_removable_drive(path: &Path) -> bool` helper using `GetDriveTypeW`
-  - [ ] Modify `run_observer` in `device/mod.rs`: when `DeviceProber::probe` returns `Ok(None)`, check `is_removable_drive` (Windows) or use existing mount-point filtering (macOS/Linux), then send `DeviceEvent::Unrecognized { path }`
-  - [ ] Handle `DeviceEvent::Unrecognized` in `main.rs`: call `device_manager.handle_device_unrecognized(path)` and send `DaemonState::DeviceFound(path_string)` via `state_tx`
+- [x] **Backend: Add `DeviceEvent::Unrecognized` and observer update** (AC: #1, #5)
+  - [x] Add `Unrecognized { path: PathBuf }` variant to `DeviceEvent` enum in `device/mod.rs`
+  - [x] Add Windows-only `is_removable_drive(path: &Path) -> bool` helper using `GetDriveTypeW`
+  - [x] Modify `run_observer` in `device/mod.rs`: when `DeviceProber::probe` returns `Ok(None)`, check `is_removable_drive` (Windows) or use existing mount-point filtering (macOS/Linux), then send `DeviceEvent::Unrecognized { path }`
+  - [x] Handle `DeviceEvent::Unrecognized` in `main.rs`: call `device_manager.handle_device_unrecognized(path)` and send `DaemonState::DeviceFound(path_string)` via `state_tx`
 
-- [ ] **Backend: `DeviceManager` changes** (AC: #1, #3)
-  - [ ] Add `unrecognized_device_path: Arc<RwLock<Option<PathBuf>>>` field to `DeviceManager`
-  - [ ] Add `handle_device_unrecognized(path: PathBuf) -> DaemonState` method — stores path and returns `DaemonState::DeviceFound(path.to_string_lossy().to_string())`
-  - [ ] Add `get_unrecognized_device_path() -> Option<PathBuf>` method
-  - [ ] Modify `handle_device_removed` to also clear `unrecognized_device_path`
-  - [ ] Modify `list_root_folders` to also work when `current_device_path` is `None` but `unrecognized_device_path` is set (so the init dialog can list folders)
-  - [ ] Add `initialize_device(folder_path: &str, profile_id: &str) -> Result<DeviceManifest>` method that: generates UUID, constructs `DeviceManifest`, calls `write_manifest`, optionally creates the target folder, clears `unrecognized_device_path`, sets `current_device` and `current_device_path`
+- [x] **Backend: `DeviceManager` changes** (AC: #1, #3)
+  - [x] Add `unrecognized_device_path: Arc<RwLock<Option<PathBuf>>>` field to `DeviceManager`
+  - [x] Add `handle_device_unrecognized(path: PathBuf) -> DaemonState` method — stores path and returns `DaemonState::DeviceFound(path.to_string_lossy().to_string())`
+  - [x] Add `get_unrecognized_device_path() -> Option<PathBuf>` method
+  - [x] Modify `handle_device_removed` to also clear `unrecognized_device_path`
+  - [x] Modify `list_root_folders` to also work when `current_device_path` is `None` but `unrecognized_device_path` is set (so the init dialog can list folders)
+  - [x] Add `initialize_device(folder_path: &str, profile_id: &str) -> Result<DeviceManifest>` method that: generates UUID, constructs `DeviceManifest`, calls `write_manifest`, optionally creates the target folder, clears `unrecognized_device_path`, sets `current_device` and `current_device_path`
 
-- [ ] **Backend: RPC changes** (AC: #1, #3, #4)
-  - [ ] Add `"device_initialize"` branch to `handler` match in `rpc.rs`
-  - [ ] Implement `handle_device_initialize(state, params)`: extract `folderPath` and `profileId` params, call `device_manager.initialize_device`, call `db.upsert_device_mapping`, send `DaemonState::DeviceRecognized` via `state.state_tx`, return success
-  - [ ] Modify `handle_get_daemon_state` to include `pendingDevicePath: Option<String>` in response (from `device_manager.get_unrecognized_device_path()`)
-  - [ ] Add unit tests for `handle_device_initialize` (success, read-only error, invalid folder)
+- [x] **Backend: RPC changes** (AC: #1, #3, #4)
+  - [x] Add `"device_initialize"` branch to `handler` match in `rpc.rs`
+  - [x] Implement `handle_device_initialize(state, params)`: extract `folderPath` and `profileId` params, call `device_manager.initialize_device`, call `db.upsert_device_mapping`, send `DaemonState::DeviceRecognized` via `state.state_tx`, return success
+  - [x] Modify `handle_get_daemon_state` to include `pendingDevicePath: Option<String>` in response (from `device_manager.get_unrecognized_device_path()`)
+  - [x] Add unit tests for `handle_device_initialize` (success, read-only error, invalid folder)
 
-- [ ] **Frontend: "Initialize Device" banner in `BasketSidebar`** (AC: #1, #2)
-  - [ ] Update `RootFoldersResponse` interface to add `pendingDevicePath?: string` (from get_daemon_state polling OR pass through list_root_folders when hasManifest is false)
-  - [ ] In `renderDeviceFolders()`: when `hasManifest` is `false` (device connected but no manifest), render "Initialize Device" banner with an "Initialize" button (style similar to `dirty-manifest-banner`)
-  - [ ] Wire up the "Initialize" button click to open the `InitDeviceModal`
+- [x] **Frontend: "Initialize Device" banner in `BasketSidebar`** (AC: #1, #2)
+  - [x] Update `RootFoldersResponse` interface to add `pendingDevicePath?: string` (from get_daemon_state polling OR pass through list_root_folders when hasManifest is false)
+  - [x] In `renderDeviceFolders()`: when `hasManifest` is `false` (device connected but no manifest), render "Initialize Device" banner with an "Initialize" button (style similar to `dirty-manifest-banner`)
+  - [x] Wire up the "Initialize" button click to open the `InitDeviceModal`
 
-- [ ] **Frontend: New `InitDeviceModal` component** (AC: #2, #3, #4)
-  - [ ] Create `jellysync-ui/src/components/InitDeviceModal.ts` following the `RepairModal.ts` pattern
-  - [ ] Render `sl-dialog` with:
+- [x] **Frontend: New `InitDeviceModal` component** (AC: #2, #3, #4)
+  - [x] Create `jellysync-ui/src/components/InitDeviceModal.ts` following the `RepairModal.ts` pattern
+  - [x] Render `sl-dialog` with:
     - Device path display (non-editable)
     - `sl-input` for sync folder name (placeholder: "Leave empty for device root", default: empty)
     - Profile display: show logged-in user ID (from `get_credentials` RPC call)
     - "Confirm" button (calls `device_initialize` RPC)
     - "Cancel" button (closes dialog)
-  - [ ] On `device_initialize` success: close dialog, call `onComplete` callback to refresh device state
-  - [ ] On error: show `sl-alert` with error message and Retry/Dismiss options
+  - [x] On `device_initialize` success: close dialog, call `onComplete` callback to refresh device state
+  - [x] On error: show `sl-alert` with error message and Retry/Dismiss options
 
-- [ ] **Frontend: Refresh after initialization** (AC: #3)
-  - [ ] Ensure `BasketSidebar.refreshDeviceData()` is called after successful initialization
-  - [ ] The "Initialize Device" banner must disappear once `hasManifest` becomes `true`
+- [x] **Frontend: Refresh after initialization** (AC: #3)
+  - [x] Ensure `BasketSidebar.refreshDeviceData()` is called after successful initialization
+  - [x] The "Initialize Device" banner must disappear once `hasManifest` becomes `true`
 
 ## Dev Notes
 
@@ -213,10 +213,35 @@ The RepairModal.ts pattern (Shoelace `sl-dialog`, class-based, `open()` method, 
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+claude-sonnet-4-6
 
 ### Debug Log References
 
 ### Completion Notes List
 
+- Implemented `DeviceEvent::Unrecognized { path }` variant in `device/mod.rs`. The `run_observer` now uses a `match` on `DeviceProber::probe` result: `Ok(Some(manifest))` → Detected, `Ok(None)` → Unrecognized (if removable), `Err(_)` → ignored.
+- Added `is_removable_drive()` function with `#[cfg(target_os = "windows")]` guard using `GetDriveTypeW`. Non-Windows returns `true` since mount detection already filters appropriately.
+- `DeviceManager` extended with `unrecognized_device_path: Arc<RwLock<Option<PathBuf>>>`. The field is mutually exclusive with `current_device_path`: `handle_device_detected` clears it, `handle_device_removed` clears both.
+- `initialize_device()` generates UUID v4, constructs `DeviceManifest` with `version: "1.0"`, writes atomically via `write_manifest`, creates subfolder if specified, and transitions to recognized state.
+- `list_root_folders` falls through to `unrecognized_device_path` when `current_device_path` is `None` — enabling the init dialog to show folders on the device.
+- RPC `device_initialize` handler extracts `folderPath` + `profileId`, calls `initialize_device`, stores DB mapping, sends `DeviceRecognized` state update.
+- `get_daemon_state` now includes `pendingDevicePath: Option<String>` field.
+- `BasketSidebar.renderDeviceFolders()` shows "New Device Detected" banner (styled like dirty-manifest-banner) when `!hasManifest`, with "Initialize" button opening `InitDeviceModal`.
+- `InitDeviceModal.ts` follows `RepairModal.ts` pattern: `sl-dialog`, `open()` method, loads credentials via `get_credentials` RPC, shows `sl-input` for folder name and read-only userId display, sends `device_initialize` RPC on Confirm, calls `onComplete` on success, shows error with Retry/Dismiss on failure.
+- Daemon state polling in `BasketSidebar.startDaemonStatePolling()` updated to also detect `pendingDevicePath` changes and trigger `refreshAndRender()`.
+- All 114 tests pass (107 pre-existing + 7 new: 3 device/mod.rs + 4 rpc.rs). TypeScript compiles cleanly.
+
 ### File List
+
+- `jellysync-daemon/src/device/mod.rs`
+- `jellysync-daemon/src/device/tests.rs`
+- `jellysync-daemon/src/main.rs`
+- `jellysync-daemon/src/rpc.rs`
+- `jellysync-ui/src/components/InitDeviceModal.ts` (new)
+- `jellysync-ui/src/components/BasketSidebar.ts`
+- `_bmad-output/implementation-artifacts/2-6-initialize-new-device-manifest.md`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
+
+### Change Log
+
+- 2026-03-01: Implemented Story 2.6 — Initialize New Device Manifest. Added unrecognized device detection pipeline (DeviceEvent::Unrecognized, is_removable_drive guard, DeviceManager.handle_device_unrecognized/initialize_device), device_initialize RPC endpoint, pendingDevicePath in get_daemon_state, InitDeviceModal UI component, and Initialize Device banner in BasketSidebar.
