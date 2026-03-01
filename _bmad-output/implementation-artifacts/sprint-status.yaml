@@ -62,7 +62,7 @@ development_status:
   3-5-music-only-library-filtering: done
   epic-3-retrospective: optional
 
-  epic-4: in-progress
+  epic-4: done
   4-1-differential-sync-algorithm-manifest-comparison: done
   4-2-atomic-buffered-io-streaming: done
   4-3-legacy-hardware-constraints-path-char-validation: done
@@ -70,7 +70,7 @@ development_status:
   4-5-start-sync-ui-to-engine-trigger: done
   epic-4-retrospective: optional
 
-  epic-5: in-progress
+  epic-5: done
   5-1-rockbox-scrobbler-bridge: done
   5-2-scrobble-submission-tracking-deduplication: done
   5-3-os-native-safe-to-eject-handshake: done
