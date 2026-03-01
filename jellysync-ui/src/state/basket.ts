@@ -16,6 +16,7 @@ export interface BasketItem {
 class BasketStore extends EventTarget {
     private items: Map<string, BasketItem> = new Map();
     private _syncingFromDaemon: boolean = false;
+    private _dirty: boolean = false;
 
     constructor() {
         super();
@@ -43,6 +44,26 @@ class BasketStore extends EventTarget {
     public hydrateFromDaemon(items: BasketItem[]) {
         if (this._syncingFromDaemon) return;
         this._syncingFromDaemon = true;
+
+        // MD5 or similar check would be better, but let's compare IDs for now
+        const daemonIds = new Set(items.map(i => i.id));
+        const localIds = new Set(this.items.keys());
+
+        let mismatch = daemonIds.size !== localIds.size;
+        if (!mismatch) {
+            for (const id of daemonIds) {
+                if (!localIds.has(id)) {
+                    mismatch = true;
+                    break;
+                }
+            }
+        }
+
+        if (mismatch) {
+            console.log("Basket mismatch detected during hydration, setting dirty flag.");
+            this._dirty = true;
+        }
+
         // Merge: keep local selections, add daemon selections
         // This prevents clobbering if the user rapidly adds items before hydration completes (F2)
         const currentItems = new Map(this.items);
@@ -104,6 +125,9 @@ class BasketStore extends EventTarget {
                 const parsed = JSON.parse(saved);
                 this.items = new Map(Object.entries(parsed));
             }
+
+            const dirty = localStorage.getItem('jellysync-basket-dirty');
+            this._dirty = dirty === 'true';
         } catch (e) {
             console.error("Failed to load basket from localStorage:", e);
         }
@@ -112,6 +136,17 @@ class BasketStore extends EventTarget {
     private saveToLocalStorage() {
         const obj = Object.fromEntries(this.items);
         localStorage.setItem('jellysync-basket', JSON.stringify(obj));
+        localStorage.setItem('jellysync-basket-dirty', this._dirty.toString());
+    }
+
+    public isDirty(): boolean {
+        return this._dirty;
+    }
+
+    public resetDirty() {
+        this._dirty = false;
+        this.saveToLocalStorage();
+        this.notify();
     }
 
     public getItems(): BasketItem[] {
@@ -124,6 +159,7 @@ class BasketStore extends EventTarget {
 
     public add(item: BasketItem) {
         this.items.set(item.id, item);
+        this._dirty = true;
         this.saveToLocalStorage();
         this.saveBasketToDaemon();
         this.notify();
@@ -131,6 +167,7 @@ class BasketStore extends EventTarget {
 
     public remove(id: string) {
         if (this.items.delete(id)) {
+            this._dirty = true;
             this.saveToLocalStorage();
             this.saveBasketToDaemon();
             this.notify();
@@ -147,6 +184,7 @@ class BasketStore extends EventTarget {
 
     public clear() {
         this.items.clear();
+        this._dirty = true;
         this.saveToLocalStorage();
         this.saveBasketToDaemon();
         this.notify();

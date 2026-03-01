@@ -380,6 +380,10 @@ pub async fn execute_sync(
     let mut synced_items = Vec::new();
     let mut errors = Vec::new();
 
+    if delta.adds.is_empty() && delta.deletes.is_empty() && delta.id_changes.is_empty() {
+        println!("[Sync] Executing empty sync to clear device managed paths");
+    }
+
     // Determine managed path (assume first managed path from device manifest)
     // In a real implementation, this would be passed in or determined from manifest
     let managed_path = device_path.join("Music");
@@ -621,6 +625,12 @@ pub async fn execute_sync(
                 });
             }
         }
+    }
+
+    // After all deletions (files), prune any resulting empty directories
+    // We pass the managed_path (Music root) to recursively clean up subfolders
+    if let Err(e) = Box::pin(cleanup_empty_dirs(&managed_path)).await {
+        eprintln!("[Sync] Warning: directory cleanup failed: {}", e);
     }
 
     // Process ID changes (virtual adds: we don't download, just update manifest records)
@@ -1484,4 +1494,34 @@ mod tests {
             "snake_case key must not appear"
         );
     }
+}
+
+/// Recursively removes empty directories within `path`.
+/// The `path` itself (the root of the search) is NOT removed, only its empty children.
+async fn cleanup_empty_dirs(path: &Path) -> Result<()> {
+    if !path.is_dir() {
+        return Ok(());
+    }
+
+    let mut entries = tokio::fs::read_dir(path).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let entry_path = entry.path();
+        if entry.file_type().await?.is_dir() {
+            // Recurse first to clean up subdirectories (post-order traversal)
+            Box::pin(cleanup_empty_dirs(&entry_path)).await?;
+
+            // After recursion, check if this directory is now empty and remove it if so
+            let mut sub_entries = tokio::fs::read_dir(&entry_path).await?;
+            if sub_entries.next_entry().await?.is_none() {
+                if let Err(e) = tokio::fs::remove_dir(&entry_path).await {
+                    eprintln!(
+                        "[Sync] Failed to remove empty directory {}: {}",
+                        entry_path.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
 }

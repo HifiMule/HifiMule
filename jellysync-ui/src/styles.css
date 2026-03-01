@@ -124,6 +124,44 @@ body {
   font-size: 0.9rem;
 }
 
+.basket-status-zone {
+  height: 38px;
+  display: flex;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.sync-proposed-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.75rem;
+  background: rgba(var(--sl-color-warning-rgb), 0.1);
+  border: 1px solid rgba(var(--sl-color-warning-rgb), 0.3);
+  border-radius: var(--sl-border-radius-medium);
+  color: var(--sl-color-warning-700);
+  font-size: 0.8rem;
+  width: 100%;
+  animation: fadeIn 0.3s ease-out;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.sync-proposed-banner sl-icon {
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+
 /* Capacity Bar */
 .capacity-section {
   margin-bottom: 1rem;
@@ -358,7 +396,8 @@ h2 {
   display: flex;
   justify-content: center;
   align-items: center;
-  z-index: 20; /* above .selection-overlay (z-index: 10) and synced-badge (no z-index) */
+  z-index: 20;
+  /* above .selection-overlay (z-index: 10) and synced-badge (no z-index) */
 }
 
 .nav-loading-overlay sl-spinner {

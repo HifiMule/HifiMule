@@ -142,6 +142,7 @@ export class BasketSidebar {
     private syncErrorMessages: string[] | null = null;
     private isDirtyManifest: boolean = false;
     private lastHydratedDeviceId: string | null = null;
+    private syncSnapshotIds: string[] = [];
 
     constructor(container: HTMLElement) {
         this.container = container;
@@ -312,6 +313,21 @@ export class BasketSidebar {
         return content;
     }
 
+    private renderStatusZone(): string {
+        if (!basketStore.isDirty()) {
+            return '<div class="basket-status-zone"></div>';
+        }
+
+        return `
+            <div class="basket-status-zone">
+                <div class="sync-proposed-banner">
+                    <sl-icon name="arrow-repeat"></sl-icon>
+                    <span>Sync Proposed — Basket changed</span>
+                </div>
+            </div>
+        `;
+    }
+
     public render() {
         if (this.isDestroyed) return;
         if (this.showSyncComplete) {
@@ -354,8 +370,9 @@ export class BasketSidebar {
                     <p style="opacity: 0.5;">Your basket is empty</p>
                 </div>
                 <div class="basket-footer">
+                    ${this.renderStatusZone()}
                     ${this.renderDeviceFolders()}
-                     <sl-button variant="primary" style="width: 100%;" disabled>
+                     <sl-button id="start-sync-btn" variant="primary" style="width: 100%;" ${!basketStore.isDirty() ? 'disabled' : ''}>
                         <sl-icon slot="prefix" name="cloud-download"></sl-icon>
                         Start Sync
                     </sl-button>
@@ -368,6 +385,7 @@ export class BasketSidebar {
             });
             this.container.querySelector('#open-repair-btn')?.addEventListener('click', () => this.openRepairModal());
             this.container.querySelector('#init-device-btn')?.addEventListener('click', () => this.openInitDeviceModal());
+            this.container.querySelector('#start-sync-btn')?.addEventListener('click', () => this.handleStartSync());
             return;
         }
 
@@ -396,6 +414,7 @@ export class BasketSidebar {
                     <span>${totalTracks} tracks | ${formatSize(totalSizeBytes)}</span>
                 </div>
                 ${renderCapacityBar(this.storageInfo, totalSizeBytes)}
+                ${this.renderStatusZone()}
                 ${this.renderDeviceFolders()}
                 ${isOverLimit ? `
                     <sl-button variant="danger" style="width: 100%;" disabled>
@@ -461,8 +480,11 @@ export class BasketSidebar {
 
     private async handleStartSync() {
         if (this.isSyncing) return;
-        const itemIds = basketStore.getItems().map(i => i.id);
-        if (itemIds.length === 0) return;
+        const currentItems = basketStore.getItems();
+        const itemIds = currentItems.map(i => i.id);
+
+        // Take snapshot for race-safe dirty reset
+        this.syncSnapshotIds = [...itemIds].sort();
 
         try {
             this.isSyncing = true;
@@ -502,7 +524,7 @@ export class BasketSidebar {
 
                 if (op.status === 'complete') {
                     this.stopPolling();
-                    this.handleSyncComplete();
+                    await this.handleSyncComplete();
                 } else if (op.status === 'failed') {
                     this.stopPolling();
                     this.handleSyncFailed(op);
@@ -575,7 +597,7 @@ export class BasketSidebar {
 
         this.container.querySelector('#sync-done-btn')?.addEventListener('click', () => {
             this.showSyncComplete = false;
-            this.render();
+            this.refreshAndRender();
         });
     }
 
@@ -603,17 +625,35 @@ export class BasketSidebar {
 
         this.container.querySelector('#sync-dismiss-btn')?.addEventListener('click', () => {
             this.syncErrorMessages = null;
-            this.render();
+            this.refreshAndRender();
         });
     }
 
-    private handleSyncComplete() {
+    private async handleSyncComplete() {
         if (this.isDestroyed) return;
         this.isSyncing = false;
+
+        // Fetch fresh storage info so capacity bar is accurate immediately after sync
+        try {
+            this.storageInfo = await rpcCall('device_get_storage_info');
+        } catch (err) {
+            console.error("Failed to refresh storage info after sync", err);
+        }
+
         this.currentOperationId = null;
         this.currentOperation = null;
         this.showSyncComplete = true;
         this.syncErrorMessages = null;
+
+        // Reset dirty if current items match snapshot (no mid-sync changes)
+        const currentIds = basketStore.getItems().map(i => i.id).sort();
+        if (JSON.stringify(currentIds) === JSON.stringify(this.syncSnapshotIds)) {
+            console.log("Sync complete, basket unchanged during sync. Resetting dirty flag.");
+            basketStore.resetDirty();
+        } else {
+            console.log("Sync complete, but basket changed during sync. Keeping dirty flag.");
+        }
+
         this.renderSyncComplete();
     }
 
