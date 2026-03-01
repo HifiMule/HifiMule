@@ -233,11 +233,11 @@ pub fn construct_file_path(
 
     // Determine file extension from Container field
     let extension = item
-            .media_sources
-            .as_ref()
-            .and_then(|sources| sources.first())
-            .and_then(|s| s.container.as_deref())
-            .unwrap_or(item.container.as_deref().unwrap_or("mp3"));
+        .media_sources
+        .as_ref()
+        .and_then(|sources| sources.first())
+        .and_then(|s| s.container.as_deref())
+        .unwrap_or(item.container.as_deref().unwrap_or("mp3"));
 
     // Step 1: Sanitize path components (remove invalid chars)
     let artist_clean = sanitize_path_component(artist);
@@ -889,6 +889,7 @@ mod tests {
             synced_items: vec![],
             dirty: false,
             pending_item_ids: vec![],
+            basket_items: vec![],
         }
     }
 

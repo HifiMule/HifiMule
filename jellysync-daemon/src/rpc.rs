@@ -148,6 +148,8 @@ async fn handler(
         "manifest_prune" => handle_manifest_prune(&state, payload.params).await,
         "manifest_relink" => handle_manifest_relink(&state, payload.params).await,
         "manifest_clear_dirty" => handle_manifest_clear_dirty(&state).await,
+        "manifest_get_basket" => handle_manifest_get_basket(&state).await,
+        "manifest_save_basket" => handle_manifest_save_basket(&state, payload.params).await,
         "device_initialize" => handle_device_initialize(&state, payload.params).await,
         _ => Err(JsonRpcError {
             code: ERR_METHOD_NOT_FOUND,
@@ -367,6 +369,53 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         "dirtyManifest": dirty,
         "pendingDevicePath": pending_device_path,
     }))
+}
+
+async fn handle_manifest_get_basket(state: &AppState) -> Result<Value, JsonRpcError> {
+    let device = state.device_manager.get_current_device().await;
+    let basket_items = device
+        .as_ref()
+        .map(|d| d.basket_items.clone())
+        .unwrap_or_default();
+    Ok(serde_json::json!({
+        "basketItems": basket_items
+    }))
+}
+
+async fn handle_manifest_save_basket(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let mut params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let basket_items_value = params
+        .get_mut("basketItems")
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing basketItems".to_string(),
+            data: None,
+        })?
+        .take();
+
+    let items: Vec<crate::device::BasketItem> = serde_json::from_value(basket_items_value)
+        .map_err(|e| JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: format!("Invalid basketItems format: {}", e),
+            data: None,
+        })?;
+
+    match state.device_manager.save_basket(items).await {
+        Ok(_) => Ok(Value::Bool(true)),
+        Err(e) => Err(JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: e.to_string(),
+            data: None,
+        }),
+    }
 }
 
 async fn check_server_connection_cached(state: &AppState) -> bool {
@@ -1217,18 +1266,13 @@ async fn handle_device_initialize(
         .device_manager
         .get_current_device_path()
         .await
-        .and_then(|p| {
-            p.file_name()
-                .map(|n| n.to_string_lossy().to_string())
-        })
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
         .unwrap_or_else(|| manifest.device_id.clone());
 
-    let _ = state
-        .state_tx
-        .send(crate::DaemonState::DeviceRecognized {
-            name: device_name,
-            profile_id: profile_id.to_string(),
-        });
+    let _ = state.state_tx.send(crate::DaemonState::DeviceRecognized {
+        name: device_name,
+        profile_id: profile_id.to_string(),
+    });
 
     Ok(serde_json::json!({
         "status": "success",
@@ -1599,6 +1643,7 @@ mod tests {
             ],
             dirty: false,
             pending_item_ids: vec![],
+            basket_items: vec![],
         };
 
         device_manager
@@ -1660,6 +1705,7 @@ mod tests {
             synced_items: vec![],
             dirty: false,
             pending_item_ids: vec![],
+            basket_items: vec![],
         };
         device_manager
             .handle_device_detected(dir.path().to_path_buf(), manifest)
@@ -1701,6 +1747,7 @@ mod tests {
             synced_items: vec![],
             dirty: true,
             pending_item_ids: vec!["id-1".to_string()],
+            basket_items: vec![],
         };
         device_manager
             .handle_device_detected(dir.path().to_path_buf(), manifest)
@@ -1756,6 +1803,7 @@ mod tests {
             synced_items: vec![],
             dirty: true,
             pending_item_ids: vec!["id-1".to_string()],
+            basket_items: vec![],
         };
         device_manager
             .handle_device_detected(std::path::PathBuf::from("/tmp/dirty"), dirty_manifest)
@@ -1872,6 +1920,7 @@ mod tests {
                     synced_items: vec![],
                     dirty: false,
                     pending_item_ids: vec![],
+                    basket_items: vec![],
                 },
             )
             .await
@@ -1965,6 +2014,7 @@ mod tests {
             synced_items: vec![],
             dirty: false,
             pending_item_ids: vec![],
+            basket_items: vec![],
         };
         device_manager
             .handle_device_detected(std::path::PathBuf::from("/tmp/dev"), manifest)
@@ -2090,11 +2140,16 @@ mod tests {
 
         // Initialize with empty folderPath (device root)
         let params = json!({ "folderPath": "", "profileId": "user-abc" });
-        let res = handle_device_initialize(&state, Some(params)).await.unwrap();
+        let res = handle_device_initialize(&state, Some(params))
+            .await
+            .unwrap();
 
         assert_eq!(res["status"], "success");
         let managed_paths = res["data"]["managedPaths"].as_array().unwrap();
-        assert!(managed_paths.is_empty(), "Root init should have no managed paths");
+        assert!(
+            managed_paths.is_empty(),
+            "Root init should have no managed paths"
+        );
 
         // Verify manifest was written to disk
         let manifest_path = dir.path().join(".jellysync.json");
@@ -2103,13 +2158,19 @@ mod tests {
         // Verify device is now recognized
         let current_device = device_manager.get_current_device().await;
         assert!(current_device.is_some(), "Device should now be recognized");
-        assert!(device_manager.get_unrecognized_device_path().await.is_none());
+        assert!(device_manager
+            .get_unrecognized_device_path()
+            .await
+            .is_none());
 
         // Verify DB mapping was stored
         let device_id = res["data"]["deviceId"].as_str().unwrap();
         let mapping = db.get_device_mapping(device_id).unwrap();
         assert!(mapping.is_some());
-        assert_eq!(mapping.unwrap().jellyfin_user_id, Some("user-abc".to_string()));
+        assert_eq!(
+            mapping.unwrap().jellyfin_user_id,
+            Some("user-abc".to_string())
+        );
     }
 
     #[tokio::test]
@@ -2135,7 +2196,9 @@ mod tests {
 
         // Initialize with a subfolder
         let params = json!({ "folderPath": "Music", "profileId": "user-xyz" });
-        let res = handle_device_initialize(&state, Some(params)).await.unwrap();
+        let res = handle_device_initialize(&state, Some(params))
+            .await
+            .unwrap();
 
         assert_eq!(res["status"], "success");
         let managed_paths = res["data"]["managedPaths"].as_array().unwrap();

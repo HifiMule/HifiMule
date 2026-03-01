@@ -141,6 +141,7 @@ export class BasketSidebar {
     private showSyncComplete: boolean = false;
     private syncErrorMessages: string[] | null = null;
     private isDirtyManifest: boolean = false;
+    private lastHydratedDeviceId: string | null = null;
 
     constructor(container: HTMLElement) {
         this.container = container;
@@ -171,7 +172,27 @@ export class BasketSidebar {
             ? foldersResult.value as RootFoldersResponse | null
             : null;
         this.isDirtyManifest = daemonStateResult.status === 'fulfilled'
-            && daemonStateResult.value?.dirtyManifest === true;
+            && (daemonStateResult.value as any)?.dirtyManifest === true;
+
+        if (daemonStateResult.status === 'fulfilled' && daemonStateResult.value) {
+            const state = daemonStateResult.value as any;
+            const currentDevice = state.currentDevice;
+            if (currentDevice?.deviceId && currentDevice.deviceId !== this.lastHydratedDeviceId) {
+                this.lastHydratedDeviceId = currentDevice.deviceId;
+                // Fetch the basket properly without polling bloat (F1)
+                rpcCall('manifest_get_basket').then((res: any) => {
+                    if (res?.basketItems && Array.isArray(res.basketItems)) {
+                        basketStore.hydrateFromDaemon(res.basketItems);
+                    }
+                }).catch(err => console.error("Failed to fetch basket", err));
+            } else if (!currentDevice) {
+                if (this.lastHydratedDeviceId !== null) {
+                    basketStore.clearForDevice();
+                }
+                this.lastHydratedDeviceId = null;
+            }
+        }
+
         this.render();
     }
 
@@ -197,9 +218,18 @@ export class BasketSidebar {
                 const hadPendingDevice = !currentHasManifest && this.folderInfo !== null;
                 const hasPendingDevice = newPendingPath !== null;
 
-                if (newDirty !== this.isDirtyManifest || hasPendingDevice !== hadPendingDevice) {
+                const currentDevice = daemonStateResult?.currentDevice;
+                const isNewDevice = currentDevice?.deviceId && currentDevice.deviceId !== this.lastHydratedDeviceId;
+                const deviceDisconnected = !currentDevice && this.lastHydratedDeviceId !== null;
+
+                if (newDirty !== this.isDirtyManifest || hasPendingDevice !== hadPendingDevice || isNewDevice || deviceDisconnected) {
                     this.isDirtyManifest = newDirty;
-                    this.refreshAndRender();
+                    if (isNewDevice || deviceDisconnected) {
+                        // Let refreshAndRender handle the hydration logic reliably on state change (F5)
+                        await this.refreshAndRender();
+                    } else {
+                        this.refreshAndRender();
+                    }
                 }
             } catch (err) {
                 // Ignore transient errors
@@ -584,7 +614,6 @@ export class BasketSidebar {
         this.currentOperation = null;
         this.showSyncComplete = true;
         this.syncErrorMessages = null;
-        basketStore.clear();
         this.renderSyncComplete();
     }
 

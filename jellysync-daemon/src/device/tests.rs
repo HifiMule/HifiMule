@@ -28,6 +28,7 @@ async fn test_dirty_manifest_roundtrip() {
         synced_items: vec![],
         dirty: true,
         pending_item_ids: vec!["id-1".to_string(), "id-2".to_string()],
+        basket_items: vec![],
     };
     write_manifest(dir.path(), &manifest).await.unwrap();
     let content = tokio::fs::read_to_string(dir.path().join(".jellysync.json"))
@@ -341,6 +342,7 @@ async fn test_write_manifest_creates_files() {
         }],
         dirty: false,
         pending_item_ids: vec![],
+        basket_items: vec![],
     };
 
     write_manifest(root, &manifest).await.unwrap();
@@ -373,6 +375,7 @@ async fn test_write_manifest_overwrites_existing() {
         synced_items: vec![],
         dirty: false,
         pending_item_ids: vec![],
+        basket_items: vec![],
     };
     write_manifest(root, &manifest1).await.unwrap();
 
@@ -395,6 +398,7 @@ async fn test_write_manifest_overwrites_existing() {
         }],
         dirty: false,
         pending_item_ids: vec![],
+        basket_items: vec![],
     };
     write_manifest(root, &manifest2).await.unwrap();
 
@@ -434,6 +438,7 @@ async fn test_get_discrepancies_missing_file() {
         }],
         dirty: true,
         pending_item_ids: vec![],
+        basket_items: vec![],
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -473,6 +478,7 @@ async fn test_get_discrepancies_orphaned_file() {
         synced_items: vec![],
         dirty: true,
         pending_item_ids: vec![],
+        basket_items: vec![],
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -524,6 +530,7 @@ async fn test_get_discrepancies_no_issues() {
         }],
         dirty: false,
         pending_item_ids: vec![],
+        basket_items: vec![],
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -576,6 +583,7 @@ async fn test_prune_items() {
         ],
         dirty: true,
         pending_item_ids: vec![],
+        basket_items: vec![],
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -623,6 +631,7 @@ async fn test_relink_item() {
         }],
         dirty: true,
         pending_item_ids: vec![],
+        basket_items: vec![],
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -663,6 +672,7 @@ async fn test_relink_item_path_traversal() {
         synced_items: vec![],
         dirty: false,
         pending_item_ids: vec![],
+        basket_items: vec![],
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -691,6 +701,7 @@ async fn test_clear_dirty_flag() {
         synced_items: vec![],
         dirty: true,
         pending_item_ids: vec!["pending-1".to_string()],
+        basket_items: vec![],
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -726,7 +737,9 @@ async fn test_handle_device_unrecognized_stores_path() {
     assert!(manager.get_unrecognized_device_path().await.is_none());
     assert!(manager.get_current_device().await.is_none());
 
-    let state = manager.handle_device_unrecognized(dir.path().to_path_buf()).await;
+    let state = manager
+        .handle_device_unrecognized(dir.path().to_path_buf())
+        .await;
 
     // Path should now be set
     let path = manager.get_unrecognized_device_path().await;
@@ -748,7 +761,9 @@ async fn test_handle_device_removed_clears_unrecognized_path() {
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
 
-    manager.handle_device_unrecognized(dir.path().to_path_buf()).await;
+    manager
+        .handle_device_unrecognized(dir.path().to_path_buf())
+        .await;
     assert!(manager.get_unrecognized_device_path().await.is_some());
 
     manager.handle_device_removed().await;
@@ -769,11 +784,16 @@ async fn test_handle_device_detected_clears_unrecognized_path() {
     let manager = DeviceManager::new(db);
 
     // Set unrecognized path first
-    manager.handle_device_unrecognized(dir.path().to_path_buf()).await;
+    manager
+        .handle_device_unrecognized(dir.path().to_path_buf())
+        .await;
     assert!(manager.get_unrecognized_device_path().await.is_some());
 
     // Detect device (recognized)
-    manager.handle_device_detected(dir.path().to_path_buf(), manifest).await.unwrap();
+    manager
+        .handle_device_detected(dir.path().to_path_buf(), manifest)
+        .await
+        .unwrap();
 
     // Unrecognized path should be cleared
     assert!(manager.get_unrecognized_device_path().await.is_none());
@@ -807,7 +827,9 @@ async fn test_initialize_device_root() {
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
 
-    manager.handle_device_unrecognized(dir.path().to_path_buf()).await;
+    manager
+        .handle_device_unrecognized(dir.path().to_path_buf())
+        .await;
 
     // Initialize with root (empty folder_path)
     let manifest = manager.initialize_device("").await.unwrap();
@@ -833,7 +855,9 @@ async fn test_initialize_device_subfolder() {
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
 
-    manager.handle_device_unrecognized(dir.path().to_path_buf()).await;
+    manager
+        .handle_device_unrecognized(dir.path().to_path_buf())
+        .await;
 
     // Initialize with a subfolder
     let manifest = manager.initialize_device("Music").await.unwrap();
@@ -860,7 +884,10 @@ async fn test_initialize_device_requires_unrecognized_path() {
     // No unrecognized path set → should fail
     let res = manager.initialize_device("").await;
     assert!(res.is_err());
-    assert!(res.unwrap_err().to_string().contains("No unrecognized device"));
+    assert!(res
+        .unwrap_err()
+        .to_string()
+        .contains("No unrecognized device"));
 }
 
 #[tokio::test]
@@ -869,7 +896,9 @@ async fn test_initialize_device_rejects_path_traversal() {
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
 
-    manager.handle_device_unrecognized(dir.path().to_path_buf()).await;
+    manager
+        .handle_device_unrecognized(dir.path().to_path_buf())
+        .await;
 
     // Path traversal with ".."
     let res = manager.initialize_device("../escape").await;
@@ -901,15 +930,85 @@ async fn test_handle_device_unrecognized_clears_current_device() {
     let manager = DeviceManager::new(db);
 
     // First detect a recognized device
-    manager.handle_device_detected(dir.path().to_path_buf(), manifest).await.unwrap();
+    manager
+        .handle_device_detected(dir.path().to_path_buf(), manifest)
+        .await
+        .unwrap();
     assert!(manager.get_current_device().await.is_some());
     assert!(manager.get_current_device_path().await.is_some());
 
     // Now handle an unrecognized device — should clear current device fields
     let dir2 = tempdir().unwrap();
-    manager.handle_device_unrecognized(dir2.path().to_path_buf()).await;
+    manager
+        .handle_device_unrecognized(dir2.path().to_path_buf())
+        .await;
 
-    assert!(manager.get_current_device().await.is_none(), "current_device must be cleared");
-    assert!(manager.get_current_device_path().await.is_none(), "current_device_path must be cleared");
+    assert!(
+        manager.get_current_device().await.is_none(),
+        "current_device must be cleared"
+    );
+    assert!(
+        manager.get_current_device_path().await.is_none(),
+        "current_device_path must be cleared"
+    );
     assert!(manager.get_unrecognized_device_path().await.is_some());
+}
+
+// ===== Basket Selection Tests =====
+
+#[test]
+fn test_basket_items_serde_default() {
+    let json = r#"{"device_id": "old-device", "name": "Old iPod", "version": "1.0", "managed_paths": ["Music"]}"#;
+    let manifest: DeviceManifest = serde_json::from_str(json).unwrap();
+    assert!(
+        manifest.basket_items.is_empty(),
+        "basket_items should default to empty vec"
+    );
+}
+
+#[tokio::test]
+async fn test_save_basket_roundtrip() {
+    let dir = tempdir().unwrap();
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+
+    let manifest = DeviceManifest {
+        device_id: "dev-basket".to_string(),
+        name: Some("Basket Test".to_string()),
+        version: "1.0".to_string(),
+        managed_paths: vec![],
+        synced_items: vec![],
+        dirty: false,
+        pending_item_ids: vec![],
+        basket_items: vec![],
+    };
+    write_manifest(dir.path(), &manifest).await.unwrap();
+
+    manager
+        .handle_device_detected(dir.path().to_path_buf(), manifest)
+        .await
+        .unwrap();
+
+    let items = vec![BasketItem {
+        id: "basket-1".to_string(),
+        name: "Basket Playlist".to_string(),
+        item_type: "Playlist".to_string(),
+        artist: None,
+        child_count: 5,
+        size_ticks: 1000,
+        size_bytes: 500000,
+    }];
+
+    manager.save_basket(items.clone()).await.unwrap();
+
+    // Verify in-memory state
+    let memory_device = manager.get_current_device().await.unwrap();
+    assert_eq!(memory_device.basket_items.len(), 1);
+    assert_eq!(memory_device.basket_items[0].id, "basket-1");
+
+    // Verify disk state
+    let content = fs::read_to_string(dir.path().join(".jellysync.json")).unwrap();
+    let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
+    assert_eq!(loaded.basket_items.len(), 1);
+    assert_eq!(loaded.basket_items[0].name, "Basket Playlist");
 }

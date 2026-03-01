@@ -15,11 +15,53 @@ export interface BasketItem {
 
 class BasketStore extends EventTarget {
     private items: Map<string, BasketItem> = new Map();
+    private _syncingFromDaemon: boolean = false;
 
     constructor() {
         super();
         this.loadFromLocalStorage();
         this.hydrate();
+    }
+
+    private saveTimeout: number | null = null;
+    private async saveBasketToDaemon() {
+        if (this._syncingFromDaemon) return;
+        if (this.saveTimeout !== null) {
+            window.clearTimeout(this.saveTimeout);
+        }
+        this.saveTimeout = window.setTimeout(async () => {
+            this.saveTimeout = null;
+            try {
+                await rpcCall('manifest_save_basket', { basketItems: this.getItems() });
+            } catch (e) {
+                console.error("Failed to save basket to daemon:", e);
+                window.dispatchEvent(new CustomEvent('toast', { detail: { type: 'error', message: 'Failed to save basket to device' } }));
+            }
+        }, 1000);
+    }
+
+    public hydrateFromDaemon(items: BasketItem[]) {
+        if (this._syncingFromDaemon) return;
+        this._syncingFromDaemon = true;
+        // Merge: keep local selections, add daemon selections
+        // This prevents clobbering if the user rapidly adds items before hydration completes (F2)
+        const currentItems = new Map(this.items);
+        this.items.clear();
+        for (const item of items) {
+            this.items.set(item.id, item);
+        }
+        for (const [id, item] of currentItems) {
+            this.items.set(id, item);
+        }
+        this.saveToLocalStorage();
+        this.notify();
+        this._syncingFromDaemon = false;
+    }
+
+    public clearForDevice() {
+        this.items.clear();
+        this.saveToLocalStorage();
+        this.notify();
     }
 
     private async hydrate() {
@@ -83,12 +125,14 @@ class BasketStore extends EventTarget {
     public add(item: BasketItem) {
         this.items.set(item.id, item);
         this.saveToLocalStorage();
+        this.saveBasketToDaemon();
         this.notify();
     }
 
     public remove(id: string) {
         if (this.items.delete(id)) {
             this.saveToLocalStorage();
+            this.saveBasketToDaemon();
             this.notify();
         }
     }
@@ -104,6 +148,7 @@ class BasketStore extends EventTarget {
     public clear() {
         this.items.clear();
         this.saveToLocalStorage();
+        this.saveBasketToDaemon();
         this.notify();
     }
 

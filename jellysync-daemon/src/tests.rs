@@ -39,6 +39,7 @@ async fn test_device_recognition_integration() {
         synced_items: vec![],
         dirty: false,
         pending_item_ids: vec![],
+        basket_items: vec![],
     };
 
     let state = manager

@@ -21,6 +21,20 @@ pub struct SyncedItem {
     pub etag: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BasketItem {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub item_type: String,
+    #[serde(default)]
+    pub artist: Option<String>,
+    pub child_count: u32,
+    pub size_ticks: i64,
+    pub size_bytes: u64,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DeviceManifest {
     pub device_id: String,
@@ -34,6 +48,8 @@ pub struct DeviceManifest {
     pub dirty: bool,
     #[serde(default)]
     pub pending_item_ids: Vec<String>,
+    #[serde(default)]
+    pub basket_items: Vec<BasketItem>,
 }
 
 /// Atomically writes a DeviceManifest to disk using Write-Temp-Rename pattern.
@@ -112,7 +128,9 @@ pub enum DeviceEvent {
         manifest: DeviceManifest,
     },
     Removed(PathBuf),
-    Unrecognized { path: PathBuf },
+    Unrecognized {
+        path: PathBuf,
+    },
 }
 
 pub struct DeviceProber;
@@ -247,10 +265,7 @@ impl DeviceManager {
 
     /// Initializes a new device by generating a UUID, writing the initial manifest,
     /// and transitioning the device from unrecognized to recognized state.
-    pub async fn initialize_device(
-        &self,
-        folder_path: &str,
-    ) -> Result<DeviceManifest> {
+    pub async fn initialize_device(&self, folder_path: &str) -> Result<DeviceManifest> {
         // Validate folder_path: no traversal, no absolute paths, single-level only
         if !folder_path.is_empty() {
             if folder_path.contains("..")
@@ -295,6 +310,7 @@ impl DeviceManager {
             synced_items: vec![],
             dirty: false,
             pending_item_ids: vec![],
+            basket_items: vec![],
         };
 
         write_manifest(&device_root, &manifest).await?;
@@ -565,6 +581,14 @@ impl DeviceManager {
         })
         .await
     }
+
+    /// Saves the current basket selection to the device manifest
+    pub async fn save_basket(&self, items: Vec<BasketItem>) -> Result<()> {
+        self.update_manifest(|manifest| {
+            manifest.basket_items = items;
+        })
+        .await
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -728,7 +752,11 @@ fn get_storage_info(path: &Path) -> Option<StorageInfo> {
 fn is_removable_drive(path: &Path) -> bool {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     unsafe { GetDriveTypeW(wide.as_ptr()) == 2 } // DRIVE_REMOVABLE
 }
 
@@ -760,7 +788,9 @@ pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
                     Ok(None) => {
                         if is_removable_drive(mount) {
                             let _ = tx
-                                .send(DeviceEvent::Unrecognized { path: mount.clone() })
+                                .send(DeviceEvent::Unrecognized {
+                                    path: mount.clone(),
+                                })
                                 .await;
                         }
                     }
