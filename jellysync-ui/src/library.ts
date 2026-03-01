@@ -136,7 +136,7 @@ async function navigateToCrumb(index: number) {
 async function navigateToItem(item: JellyfinItem) {
     // Only navigate if container
     // Common Jellyfin container types
-    const containerTypes = ['MusicAlbum', 'Playlist', 'Folder', 'CollectionFolder', 'BoxSet', 'Series', 'Season'];
+    const containerTypes = ['MusicArtist', 'MusicAlbum', 'Playlist', 'Folder', 'CollectionFolder', 'BoxSet', 'Series', 'Season']; // MusicArtist: navigates into artist's albums
     if (containerTypes.includes(item.Type)) {
         state.parentId = item.Id;
         state.breadcrumbStack.push({ id: item.Id, name: item.Name });
@@ -154,7 +154,14 @@ async function loadItems(reset: boolean) {
     if (!container) return;
 
     if (reset) {
-        container.innerHTML = '<sl-spinner style="font-size: 3rem;"></sl-spinner>';
+        // Yield one tick so any click-feedback (card overlay, opacity) renders before we wipe the container.
+        await new Promise<void>(resolve => setTimeout(resolve, 0));
+        if (!container.isConnected) return;
+
+        // Only show the big spinner if a card isn't already showing a loading state
+        if (!container.querySelector('.is-navigating')) {
+            container.innerHTML = '<sl-spinner style="font-size: 3rem;"></sl-spinner>';
+        }
     }
 
     state.loading = true;

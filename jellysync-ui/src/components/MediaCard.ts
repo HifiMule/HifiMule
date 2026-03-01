@@ -24,7 +24,7 @@ export class MediaCard {
         item: JellyfinItem | JellyfinView,
         mode: 'libraries' | 'items',
         isSynced: boolean,
-        onNavigate: () => void
+        onNavigate: () => void | Promise<void>
     ): HTMLElement {
         const card = document.createElement('sl-card');
         card.className = 'media-card';
@@ -65,11 +65,16 @@ export class MediaCard {
         `;
 
         // Event: Navigation (click on card but NOT on toggle button)
-        card.addEventListener('click', (e) => {
+        card.addEventListener('click', async (e) => {
             const path = e.composedPath();
             const isButton = path.some(el => (el as HTMLElement).classList?.contains('basket-toggle-btn'));
-            if (!isButton) {
-                onNavigate();
+            if (!isButton && !card.classList.contains('is-navigating')) {
+                card.classList.add('is-navigating');
+                try {
+                    await onNavigate();
+                } finally {
+                    card.classList.remove('is-navigating');
+                }
             }
         });
 
@@ -84,6 +89,18 @@ export class MediaCard {
                 } else {
                     // Fetch metadata (track count + file size) from daemon
                     toggleBtn.loading = true;
+
+                    // Add large spinner to card image
+                    const cardImage = card.querySelector('.card-image');
+                    let overlay: HTMLElement | null = null;
+                    if (cardImage) {
+                        overlay = document.createElement('div');
+                        overlay.className = 'nav-loading-overlay';
+                        const spinner = document.createElement('sl-spinner');
+                        overlay.appendChild(spinner);
+                        cardImage.appendChild(overlay);
+                    }
+
                     try {
                         const [metadata, sizeData] = await Promise.all([
                             rpcCall('jellyfin_get_item_counts', { itemIds: [item.Id] }),
@@ -105,6 +122,9 @@ export class MediaCard {
                         console.error("Failed to fetch item metadata:", err);
                     } finally {
                         toggleBtn.loading = false;
+                        if (overlay) {
+                            overlay.remove();
+                        }
                     }
                 }
             });

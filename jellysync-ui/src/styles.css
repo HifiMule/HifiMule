@@ -220,7 +220,7 @@ h2 {
 .media-card {
   --border-radius: var(--sl-border-radius-medium);
   cursor: pointer;
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.15s ease;
 }
 
 .media-card:hover {
@@ -335,6 +335,36 @@ h2 {
 /* Synced card styling */
 .media-card.synced {
   opacity: 0.7;
+}
+
+/* Navigation loading state */
+.media-card.is-navigating {
+  pointer-events: none;
+  opacity: 0.75;
+}
+
+/* Prevent opacity compounding when both synced and navigating */
+.media-card.synced.is-navigating {
+  opacity: 0.75;
+}
+
+.nav-loading-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 20; /* above .selection-overlay (z-index: 10) and synced-badge (no z-index) */
+}
+
+.nav-loading-overlay sl-spinner {
+  font-size: 2rem;
+  --track-color: rgba(255, 255, 255, 0.2);
+  --indicator-color: white;
 }
 
 /* Error and loading states */

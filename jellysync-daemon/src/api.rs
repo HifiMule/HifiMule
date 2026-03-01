@@ -5,7 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-const CONTAINER_TYPES: &[&str] = &["MusicAlbum", "Playlist"];
+const CONTAINER_TYPES: &[&str] = &["MusicAlbum", "Playlist", "MusicArtist"];
 
 fn url_encode(s: &str) -> String {
     let mut encoded = String::new();
@@ -394,7 +394,7 @@ impl JellyfinClient {
         Ok(items_response.items)
     }
 
-    /// Get total size in bytes for each item. For containers (Albums, Playlists),
+    /// Get total size in bytes for each item. For containers (Albums, Playlists, Artists),
     /// recursively fetches child items and sums their MediaSources sizes.
     pub async fn get_item_sizes(
         &self,
@@ -1126,7 +1126,118 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "album1");
-        assert_eq!(results[0].1, 7000000); // 3MB + 4MB
+        assert_eq!(results[0].1, 7_000_000); // 3MB + 4MB
+    }
+
+    #[tokio::test]
+    async fn test_get_item_sizes_artist_container() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let token = "test-token-1234567890";
+
+        // Mock: fetch artist item (container type; no MediaSources on container is deliberate)
+        let _mock_artist = server
+            .mock("GET", "/Users/user1/Items/artist1?Fields=MediaSources")
+            .match_header("X-Emby-Token", token)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Id": "artist1", "Name": "Test Artist", "Type": "MusicArtist"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        // Mock: fetch all tracks under artist (Recursive=true flattens Artist → Albums → Tracks)
+        let _mock_children = server
+            .mock("GET", "/Users/user1/Items?ParentId=artist1&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true")
+            .match_header("X-Emby-Token", token)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Items": [
+                {"Id": "a1", "Name": "Artist Track 1", "Type": "Audio", "MediaSources": [{"Size": 5000000}]},
+                {"Id": "a2", "Name": "Artist Track 2", "Type": "Audio", "MediaSources": [{"Size": 6000000}]}
+            ], "TotalRecordCount": 2, "StartIndex": 0}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = JellyfinClient::new();
+        let results = client
+            .get_item_sizes(&url, token, "user1", vec!["artist1".to_string()])
+            .await;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "artist1");
+        assert_eq!(results[0].1, 11_000_000); // 5MB + 6MB
+    }
+
+    #[tokio::test]
+    async fn test_get_item_sizes_artist_empty() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let token = "test-token-1234567890";
+
+        let _mock_artist = server
+            .mock("GET", "/Users/user1/Items/artist2?Fields=MediaSources")
+            .match_header("X-Emby-Token", token)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Id": "artist2", "Name": "Empty Artist", "Type": "MusicArtist"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let _mock_children = server
+            .mock("GET", "/Users/user1/Items?ParentId=artist2&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true")
+            .match_header("X-Emby-Token", token)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Items": [], "TotalRecordCount": 0, "StartIndex": 0}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = JellyfinClient::new();
+        let results = client
+            .get_item_sizes(&url, token, "user1", vec!["artist2".to_string()])
+            .await;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "artist2");
+        assert_eq!(results[0].1, 0); // No tracks means 0 bytes
+    }
+
+    #[tokio::test]
+    async fn test_get_item_sizes_artist_children_error() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let token = "test-token-1234567890";
+
+        let _mock_artist = server
+            .mock("GET", "/Users/user1/Items/artist3?Fields=MediaSources")
+            .match_header("X-Emby-Token", token)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Id": "artist3", "Name": "Restricted Artist", "Type": "MusicArtist"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        // Server error on the children endpoint — production code logs and drops the error
+        let _mock_children = server
+            .mock("GET", "/Users/user1/Items?ParentId=artist3&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true")
+            .match_header("X-Emby-Token", token)
+            .with_status(500)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = JellyfinClient::new();
+        let results = client
+            .get_item_sizes(&url, token, "user1", vec!["artist3".to_string()])
+            .await;
+
+        // Error is silently dropped; item is excluded from results
+        assert_eq!(results.len(), 0);
     }
 
     #[tokio::test]
