@@ -8,27 +8,27 @@ export class InitDeviceModal {
     private dialog: HTMLElement | null = null;
     private onComplete: (() => void) | null = null;
 
-    constructor(private container: HTMLElement, onComplete?: () => void) {
+    constructor(_container: HTMLElement, onComplete?: () => void) {
         this.onComplete = onComplete || null;
     }
 
     async open() {
         this.renderDialog();
-        this.showDialog();
+        await this.showDialog();
         await this.loadCredentials();
     }
 
-    private showDialog() {
-        const dialog = this.container.querySelector('#init-device-dialog') as any;
-        if (dialog) {
-            dialog.show();
-            this.dialog = dialog;
+    private async showDialog() {
+        if (this.dialog) {
+            await customElements.whenDefined('sl-dialog');
+            await (this.dialog as any).updateComplete;
+            (this.dialog as any).show();
         }
     }
 
     private renderDialog() {
         // Remove any existing dialog first
-        this.container.querySelector('#init-device-dialog')?.remove();
+        document.body.querySelector('#init-device-dialog')?.remove();
 
         const dialogEl = document.createElement('sl-dialog');
         dialogEl.id = 'init-device-dialog';
@@ -47,15 +47,16 @@ export class InitDeviceModal {
             </sl-button>
         `;
 
-        this.container.appendChild(dialogEl);
+        // Append to document.body so sidebar re-renders don't destroy the dialog
+        document.body.appendChild(dialogEl);
+        this.dialog = dialogEl;
 
         dialogEl.addEventListener('sl-after-hide', () => {
             dialogEl.remove();
         });
 
         dialogEl.querySelector('#init-device-cancel-btn')?.addEventListener('click', () => {
-            const dlg = this.container.querySelector('#init-device-dialog') as any;
-            if (dlg) dlg.hide();
+            (dialogEl as any).hide();
         });
     }
 
@@ -157,8 +158,7 @@ export class InitDeviceModal {
         `;
         body.querySelector('#init-retry-btn')?.addEventListener('click', () => this.loadCredentials());
         body.querySelector('#init-dismiss-btn')?.addEventListener('click', () => {
-            const dlg = this.container.querySelector('#init-device-dialog') as any;
-            if (dlg) dlg.hide();
+            if (this.dialog) (this.dialog as any).hide();
         });
     }
 
@@ -180,8 +180,7 @@ export class InitDeviceModal {
                 profileId: userId,
             });
 
-            const dlg = this.container.querySelector('#init-device-dialog') as any;
-            if (dlg) dlg.hide();
+            if (this.dialog) (this.dialog as any).hide();
 
             this.onComplete?.();
         } catch (err) {
