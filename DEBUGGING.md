@@ -1,12 +1,12 @@
-# Debugging the Jellysync Daemon
+# Debugging the Jellyfinsync Daemon
 
-This guide provides several methods for debugging the `jellysync-daemon`.
+This guide provides several methods for debugging the `-daemon`.
 
 ## 1. VS Code Integrated Debugging (Recommended)
 
 The project includes pre-configured launch targets in `.vscode/launch.json`. To use them:
 1. Open the **Run and Debug** view in VS Code (`Ctrl+Shift+D`).
-2. Select **Debug executable 'jellysync-daemon'** from the dropdown.
+2. Select **Debug executable '-daemon'** from the dropdown.
 3. Press `F5` to start debugging.
 4. You can set breakpoints, inspect variables, and step through the code.
 
@@ -18,13 +18,13 @@ The project includes pre-configured launch targets in `.vscode/launch.json`. To 
 You can run the daemon directly from your terminal to see logs and output.
 
 ```powershell
-cargo run -p jellysync-daemon
+cargo run -p -daemon
 ```
 
 - **Logging**: The daemon currently uses `println!` and `eprintln!` for logging. These will appear directly in your terminal.
 - **Backtraces**: For detailed crash reports, run with:
   ```powershell
-  $env:RUST_BACKTRACE=1; cargo run -p jellysync-daemon
+  $env:RUST_BACKTRACE=1; cargo run -p -daemon
   ```
 
 ## 3. Debugging via JSON-RPC
@@ -48,7 +48,7 @@ curl -X POST http://127.0.0.1:19140/ `
 
 ### Available RPC Methods:
 - `test_connection`: Validate Jellyfin server URL and API key.
-- `save_credentials`: Save credentials to local storage (`.jellysync.json`).
+- `save_credentials`: Save credentials to local storage (`..json`).
 - `get_credentials`: Retrieve currently stored credentials.
 
 ## 4. Running Tests
@@ -56,10 +56,10 @@ curl -X POST http://127.0.0.1:19140/ `
 To run the unit tests for the daemon:
 
 ```powershell
-cargo test -p jellysync-daemon
+cargo test -p -daemon
 ```
 
-Alternatively, use the VS Code target: **Debug unit tests in executable 'jellysync-daemon'**.
+Alternatively, use the VS Code target: **Debug unit tests in executable '-daemon'**.
 
 ## 5. System Tray Icon
 

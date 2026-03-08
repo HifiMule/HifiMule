@@ -72,7 +72,7 @@ so that **I don't trigger a "Disk Full" error mid-sync.**
 
 ### Learnings from Previous Stories (3.1, 3.2, 3.5)
 
-- **Story 3.2 (Basket):** The `BasketStore` in `jellysync-ui/src/state/basket.ts` already has `sizeTicks` field - this stores `cumulativeRunTimeTicks` which is DURATION not file size. Add a new `sizeBytes` field rather than repurposing `sizeTicks`.
+- **Story 3.2 (Basket):** The `BasketStore` in `jellyfinsync-ui/src/state/basket.ts` already has `sizeTicks` field - this stores `cumulativeRunTimeTicks` which is DURATION not file size. Add a new `sizeBytes` field rather than repurposing `sizeTicks`.
 - **Story 3.2 (RPC):** `jellyfin_get_item_counts` in `rpc.rs` already fetches `recursiveItemCount` and `cumulativeRunTimeTicks`. You can extend this or create a parallel method for sizes. Extending is preferred to minimize RPC chatter.
 - **Story 3.1 (Image Proxy):** The image proxy pattern at `http://localhost:19140/jellyfin/image` works well. Follow the same localhost RPC pattern.
 - **Story 3.5 (Filtering):** Music-only filtering (`MUSIC_ITEM_TYPES`) is already in place. Size calculations should only apply to music items.
@@ -83,15 +83,15 @@ so that **I don't trigger a "Disk Full" error mid-sync.**
 - **Files to CREATE:**
   - None expected (all changes are modifications to existing files)
 - **Files to MODIFY:**
-  - `jellysync-daemon/src/api.rs`: Add `get_item_sizes()` method that fetches `MediaSources` with `Size` field.
-  - `jellysync-daemon/src/rpc.rs`: Add `jellyfin_get_item_sizes` and `device_get_storage_info` RPC handlers.
-  - `jellysync-daemon/src/device/mod.rs`: Store device mount path alongside manifest in `DeviceManager`. Add `get_device_storage()` method.
-  - `jellysync-ui/src/state/basket.ts`: Add `sizeBytes` to `BasketItem`, add `getTotalSizeBytes()`.
-  - `jellysync-ui/src/components/BasketSidebar.ts`: Add CapacityBar rendering, update footer with size display.
-  - `jellysync-ui/src/components/MediaCard.ts`: Fetch and populate `sizeBytes` when adding to basket.
+  - `jellyfinsync-daemon/src/api.rs`: Add `get_item_sizes()` method that fetches `MediaSources` with `Size` field.
+  - `jellyfinsync-daemon/src/rpc.rs`: Add `jellyfin_get_item_sizes` and `device_get_storage_info` RPC handlers.
+  - `jellyfinsync-daemon/src/device/mod.rs`: Store device mount path alongside manifest in `DeviceManager`. Add `get_device_storage()` method.
+  - `jellyfinsync-ui/src/state/basket.ts`: Add `sizeBytes` to `BasketItem`, add `getTotalSizeBytes()`.
+  - `jellyfinsync-ui/src/components/BasketSidebar.ts`: Add CapacityBar rendering, update footer with size display.
+  - `jellyfinsync-ui/src/components/MediaCard.ts`: Fetch and populate `sizeBytes` when adding to basket.
 - **Files for REFERENCE (do not modify):**
-  - `jellysync-ui/src/library.ts`: Understand navigation and item structure.
-  - `jellysync-ui/src/rpc.ts`: RPC client wrapper pattern.
+  - `jellyfinsync-ui/src/library.ts`: Understand navigation and item structure.
+  - `jellyfinsync-ui/src/rpc.ts`: RPC client wrapper pattern.
 
 ### References
 
@@ -120,19 +120,19 @@ Claude Opus 4.6
 
 ### File List
 
-- jellysync-daemon/src/api.rs (modified: added MediaSource struct, media_sources field to JellyfinItem, get_item_with_media_sources, get_child_items_with_sizes, get_item_sizes, get_single_item_size methods, 5 new tests)
-- jellysync-daemon/src/rpc.rs (modified: added size_cache to AppState, jellyfin_get_item_sizes and device_get_storage_info RPC handlers, 1 new test)
-- jellysync-daemon/src/device/mod.rs (modified: added current_device_path to DeviceManager, StorageInfo struct, get_storage_info platform functions, get_device_storage method, updated handle_device_detected to accept path)
-- jellysync-daemon/src/main.rs (modified: pass path to handle_device_detected)
-- jellysync-daemon/src/tests.rs (modified: updated handle_device_detected call with path, added path tracking assertions)
-- jellysync-daemon/Cargo.toml (modified: added libc dependency for unix targets)
-- jellysync-ui/src/state/basket.ts (modified: added sizeBytes to BasketItem, added getTotalSizeBytes method)
-- jellysync-ui/src/components/MediaCard.ts (modified: parallel jellyfin_get_item_sizes call, populate sizeBytes)
-- jellysync-ui/src/components/BasketSidebar.ts (modified: added capacity bar rendering, device storage fetching, 3-zone color logic, no-device state, size display in footer, over-limit sync disable)
+- jellyfinsync-daemon/src/api.rs (modified: added MediaSource struct, media_sources field to JellyfinItem, get_item_with_media_sources, get_child_items_with_sizes, get_item_sizes, get_single_item_size methods, 5 new tests)
+- jellyfinsync-daemon/src/rpc.rs (modified: added size_cache to AppState, jellyfin_get_item_sizes and device_get_storage_info RPC handlers, 1 new test)
+- jellyfinsync-daemon/src/device/mod.rs (modified: added current_device_path to DeviceManager, StorageInfo struct, get_storage_info platform functions, get_device_storage method, updated handle_device_detected to accept path)
+- jellyfinsync-daemon/src/main.rs (modified: pass path to handle_device_detected)
+- jellyfinsync-daemon/src/tests.rs (modified: updated handle_device_detected call with path, added path tracking assertions)
+- jellyfinsync-daemon/Cargo.toml (modified: added libc dependency for unix targets)
+- jellyfinsync-ui/src/state/basket.ts (modified: added sizeBytes to BasketItem, added getTotalSizeBytes method)
+- jellyfinsync-ui/src/components/MediaCard.ts (modified: parallel jellyfin_get_item_sizes call, populate sizeBytes)
+- jellyfinsync-ui/src/components/BasketSidebar.ts (modified: added capacity bar rendering, device storage fetching, 3-zone color logic, no-device state, size display in footer, over-limit sync disable)
 
 ### Code Review Fixes (AI)
 
-- **Fixed High Issue**: Updated `jellysync-daemon/src/api.rs` to include `MusicVideo` in `IncludeItemTypes` when calculating container sizes.
-- **Fixed Medium Issue**: Updated `jellysync-ui/src/state/basket.ts` to hydrate missing `sizeBytes` for existing basket items on startup.
+- **Fixed High Issue**: Updated `jellyfinsync-daemon/src/api.rs` to include `MusicVideo` in `IncludeItemTypes` when calculating container sizes.
+- **Fixed Medium Issue**: Updated `jellyfinsync-ui/src/state/basket.ts` to hydrate missing `sizeBytes` for existing basket items on startup.
 - **Status Update**: Story marked as DONE.
 

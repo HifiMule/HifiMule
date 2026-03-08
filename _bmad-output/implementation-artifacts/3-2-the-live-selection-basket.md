@@ -50,15 +50,15 @@ so that **I can see exactly what I'm about to sync without committing yet.**
     -   **Navigation:** Ensure the "Add to Basket" action does NOT conflict with the "Navigate to Album" action. Use a specific button or handle click (add) vs double-click (navigate), or separate click zones. *Decision: Use a dedicated (+) button overlay on hover/focus.*
     -   **Image Proxy:** Continue using the correctly implemented image proxy from Story 3.1.
 -   **Source tree components to touch:**
-    - `jellysync-daemon/src/rpc.rs`: [MODIFY] Add item count helper.
-    - `jellysync-ui/src/state/basket.ts`: [NEW] State management.
-    - `jellysync-ui/src/components/BasketSidebar.ts`: [NEW] Sidebar logic.
-    - `jellysync-ui/src/components/MediaCard.ts`: [NEW] Add selection overlay.
-    - `jellysync-ui/src/library.ts`: [NOTE] Integrate basket sidebar.
+    - `jellyfinsync-daemon/src/rpc.rs`: [MODIFY] Add item count helper.
+    - `jellyfinsync-ui/src/state/basket.ts`: [NEW] State management.
+    - `jellyfinsync-ui/src/components/BasketSidebar.ts`: [NEW] Sidebar logic.
+    - `jellyfinsync-ui/src/components/MediaCard.ts`: [NEW] Add selection overlay.
+    - `jellyfinsync-ui/src/library.ts`: [NOTE] Integrate basket sidebar.
 
 ### Project Structure Notes
 
--   Create `jellysync-ui/src/state/` directory for `basket.ts` if it doesn't exist, to keep state logic separate from UI components.
+-   Create `jellyfinsync-ui/src/state/` directory for `basket.ts` if it doesn't exist, to keep state logic separate from UI components.
 
 ### References
 

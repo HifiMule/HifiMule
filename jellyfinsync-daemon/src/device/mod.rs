@@ -53,10 +53,10 @@ pub struct DeviceManifest {
 }
 
 /// Atomically writes a DeviceManifest to disk using Write-Temp-Rename pattern.
-/// Writes to `.jellysync.json.tmp`, calls `sync_all`, then renames to `.jellysync.json`.
+/// Writes to `.jellyfinsync.json.tmp`, calls `sync_all`, then renames to `.jellyfinsync.json`.
 pub async fn write_manifest(device_root: &Path, manifest: &DeviceManifest) -> Result<()> {
-    let manifest_path = device_root.join(".jellysync.json");
-    let tmp_path = device_root.join(".jellysync.json.tmp");
+    let manifest_path = device_root.join(".jellyfinsync.json");
+    let tmp_path = device_root.join(".jellyfinsync.json.tmp");
 
     let json = serde_json::to_string_pretty(manifest)?;
 
@@ -137,7 +137,7 @@ pub struct DeviceProber;
 
 impl DeviceProber {
     pub async fn probe(path: &Path) -> Result<Option<DeviceManifest>> {
-        let manifest_path = path.join(".jellysync.json");
+        let manifest_path = path.join(".jellyfinsync.json");
         if tokio::fs::metadata(&manifest_path).await.is_err() {
             return Ok(None);
         }

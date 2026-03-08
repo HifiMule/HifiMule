@@ -7,13 +7,13 @@ Status: done
 ## Story
 
 As a Ritualist (Arthur) and Convenience Seeker (Sarah),
-I want the application to detect when a connected removable disk has no `.jellysync.json` manifest and guide me through initializing it,
+I want the application to detect when a connected removable disk has no `.jellyfinsync.json` manifest and guide me through initializing it,
 so that I can bring a brand-new device into the managed sync model without manually creating any files.
 
 ## Acceptance Criteria
 
 1. **Unrecognized Device Detection:**
-   - **Given** a USB mass storage device is connected with no `.jellysync.json` present in its root
+   - **Given** a USB mass storage device is connected with no `.jellyfinsync.json` present in its root
    - **When** the daemon completes its device discovery scan
    - **Then** it broadcasts an `on_device_unrecognized` event (via a new `DeviceEvent::Unrecognized { path }` internal event)
    - **And** the daemon state transitions to `DeviceFound(path_string)`
@@ -33,7 +33,7 @@ so that I can bring a brand-new device into the managed sync model without manua
    - **Given** a valid `device_initialize` RPC call
    - **When** the daemon processes the request
    - **Then** it generates a new unique hardware ID (UUID v4)
-   - **And** it writes an initial `.jellysync.json` to the device using the **atomic Write-Temp-Rename pattern** (`write_manifest`)
+   - **And** it writes an initial `.jellyfinsync.json` to the device using the **atomic Write-Temp-Rename pattern** (`write_manifest`)
    - **And** the manifest contains: `device_id` (new UUID), `version: "1.0"`, `managed_paths` derived from the chosen folder, `synced_items: []`, `dirty: false`
    - **And** if a non-root folder was specified, the daemon creates that folder on the device if it doesn't exist
    - **And** the device profile mapping is stored in SQLite via `db.upsert_device_mapping`
@@ -79,7 +79,7 @@ so that I can bring a brand-new device into the managed sync model without manua
   - [x] Wire up the "Initialize" button click to open the `InitDeviceModal`
 
 - [x] **Frontend: New `InitDeviceModal` component** (AC: #2, #3, #4)
-  - [x] Create `jellysync-ui/src/components/InitDeviceModal.ts` following the `RepairModal.ts` pattern
+  - [x] Create `jellyfinsync-ui/src/components/InitDeviceModal.ts` following the `RepairModal.ts` pattern
   - [x] Render `sl-dialog` with:
     - Device path display (non-editable)
     - `sl-input` for sync folder name (placeholder: "Leave empty for device root", default: empty)
@@ -98,7 +98,7 @@ so that I can bring a brand-new device into the managed sync model without manua
 ### Architecture & Pattern Compliance
 
 - **Atomic Manifest Write:** MUST use the existing `device::write_manifest(device_root, &manifest)` function — it already implements the Write-Temp-Rename pattern with `sync_all`. Do NOT write the manifest any other way.
-- **UUID Generation:** `uuid` crate with `v4` feature is already in `jellysync-daemon/Cargo.toml`. Use `uuid::Uuid::new_v4().to_string()` for `device_id`.
+- **UUID Generation:** `uuid` crate with `v4` feature is already in `jellyfinsync-daemon/Cargo.toml`. Use `uuid::Uuid::new_v4().to_string()` for `device_id`.
 - **RPC Pattern:** Follow the exact pattern in `rpc.rs` — `handle_device_initialize` is an `async fn(state: &AppState, params: Option<Value>) -> Result<Value, JsonRpcError>`. Return `Ok(serde_json::json!({"status": "success", "data": {...}}))` on success.
 - **State Updates from RPC:** `state.state_tx.send(DaemonState::...)` is the approved channel — the field exists in `AppState` (see `rpc.rs:90`).
 - **UI Modal Pattern:** Follow `RepairModal.ts` exactly — create an `sl-dialog` element, append to container, call `.show()`. Use `sl-spinner` for loading and `sl-alert` for errors.
@@ -176,7 +176,7 @@ From Story 2.2 (`2-2-mass-storage-heartbeat-autodetection.md`): The device obser
 
 ### Git Intelligence (Recent Commits)
 
-- `e2f9903 Add story for creating .jellysync.json` — This is the story we're implementing
+- `e2f9903 Add story for creating .jellyfinsync.json` — This is the story we're implementing
 - `3677f2d Done` — Story 5.4 (Visual Manifest Repair Utility) completed
 - `067ec1e Review 5.4` / `434197a Code 5.4` — RepairModal.ts was completed in these commits; use it as the UI modal template
 
@@ -184,11 +184,11 @@ The RepairModal.ts pattern (Shoelace `sl-dialog`, class-based, `open()` method, 
 
 ### File Structure
 
-- `jellysync-daemon/src/device/mod.rs` — Add `DeviceEvent::Unrecognized`, `DeviceManager.unrecognized_device_path`, `handle_device_unrecognized`, `get_unrecognized_device_path`, `initialize_device`, update `run_observer`, update `list_root_folders`, update `handle_device_removed`
-- `jellysync-daemon/src/main.rs` — Add `DeviceEvent::Unrecognized` handler arm
-- `jellysync-daemon/src/rpc.rs` — Add `device_initialize` dispatch, implement `handle_device_initialize`, update `handle_get_daemon_state`
-- `jellysync-ui/src/components/InitDeviceModal.ts` — New component (follow RepairModal.ts pattern)
-- `jellysync-ui/src/components/BasketSidebar.ts` — Add `has_manifest: false` banner rendering and InitDeviceModal integration
+- `jellyfinsync-daemon/src/device/mod.rs` — Add `DeviceEvent::Unrecognized`, `DeviceManager.unrecognized_device_path`, `handle_device_unrecognized`, `get_unrecognized_device_path`, `initialize_device`, update `run_observer`, update `list_root_folders`, update `handle_device_removed`
+- `jellyfinsync-daemon/src/main.rs` — Add `DeviceEvent::Unrecognized` handler arm
+- `jellyfinsync-daemon/src/rpc.rs` — Add `device_initialize` dispatch, implement `handle_device_initialize`, update `handle_get_daemon_state`
+- `jellyfinsync-ui/src/components/InitDeviceModal.ts` — New component (follow RepairModal.ts pattern)
+- `jellyfinsync-ui/src/components/BasketSidebar.ts` — Add `has_manifest: false` banner rendering and InitDeviceModal integration
 
 ### References
 
@@ -203,10 +203,10 @@ The RepairModal.ts pattern (Shoelace `sl-dialog`, class-based, `open()` method, 
 - AppState / run_server: `rpc.rs:75-117`
 - handler dispatch: `rpc.rs:119-172`
 - handle_get_daemon_state: `rpc.rs:341-361`
-- RepairModal pattern: `jellysync-ui/src/components/RepairModal.ts`
-- BasketSidebar device rendering: `jellysync-ui/src/components/BasketSidebar.ts:203-265`
+- RepairModal pattern: `jellyfinsync-ui/src/components/RepairModal.ts`
+- BasketSidebar device rendering: `jellyfinsync-ui/src/components/BasketSidebar.ts:203-265`
 - DB upsert: `db.rs:153-173` — `upsert_device_mapping(id, name, user_id, rules)`
-- uuid v4: `jellysync-daemon/Cargo.toml:30` — already available
+- uuid v4: `jellyfinsync-daemon/Cargo.toml:30` — already available
 - windows_sys GetDriveTypeW: already imported in `device/mod.rs` via `GetLogicalDrives` (same module)
 
 ## Dev Agent Record
@@ -233,12 +233,12 @@ claude-sonnet-4-6
 
 ### File List
 
-- `jellysync-daemon/src/device/mod.rs`
-- `jellysync-daemon/src/device/tests.rs`
-- `jellysync-daemon/src/main.rs`
-- `jellysync-daemon/src/rpc.rs`
-- `jellysync-ui/src/components/InitDeviceModal.ts` (new)
-- `jellysync-ui/src/components/BasketSidebar.ts`
+- `jellyfinsync-daemon/src/device/mod.rs`
+- `jellyfinsync-daemon/src/device/tests.rs`
+- `jellyfinsync-daemon/src/main.rs`
+- `jellyfinsync-daemon/src/rpc.rs`
+- `jellyfinsync-ui/src/components/InitDeviceModal.ts` (new)
+- `jellyfinsync-ui/src/components/BasketSidebar.ts`
 - `_bmad-output/implementation-artifacts/2-6-initialize-new-device-manifest.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
 

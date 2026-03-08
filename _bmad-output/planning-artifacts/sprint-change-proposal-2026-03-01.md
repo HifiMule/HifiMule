@@ -8,16 +8,16 @@
 ## Section 1: Issue Summary
 
 ### Problem Statement
-All five epics (1–5) have been completed, delivering a fully functional JellyfinSync application. However, a gap was identified in the device connection flow: no story covers the **initialization of a new removable disk** that has never been used with JellyfinSync. The application can detect a device (Story 2.2), recognize a known managed device (Story 2.3), and operate against an existing manifest (Epics 3–5), but it has no path for a device that arrives without a `.jellysync.json` manifest.
+All five epics (1–5) have been completed, delivering a fully functional JellyfinSync application. However, a gap was identified in the device connection flow: no story covers the **initialization of a new removable disk** that has never been used with JellyfinSync. The application can detect a device (Story 2.2), recognize a known managed device (Story 2.3), and operate against an existing manifest (Epics 3–5), but it has no path for a device that arrives without a `.jellyfinsync.json` manifest.
 
 ### Discovery Context
 Gap identified by Alexis during a post-sprint review of the completed backlog. The "unrecognized device" state was implied by the manifest-check logic in Story 2.2 but never given its own user-facing story or implementation target.
 
 ### Evidence
-- **FR3 (PRD):** *"The system can identify the presence of a `.jellysync.json` manifest on discovery."* — Covers detection only; prescribes no action when absent.
-- **Story 2.2 AC:** *"it checks for the presence of a `.jellysync.json` manifest in the root directory"* — No branch defined for "manifest not found."
-- **Story 2.3 AC:** *"Given a known device (has `.jellysync.json` with a unique ID)"* — Explicitly assumes the manifest already exists.
-- **PRD MVP scope:** *"Conflict-Free Manifest Sync: Implementation of the `.jellysync.json` logic for managed-folder isolation"* — Creating the initial manifest is a prerequisite for the managed model but was never explicitly scoped as a story.
+- **FR3 (PRD):** *"The system can identify the presence of a `.jellyfinsync.json` manifest on discovery."* — Covers detection only; prescribes no action when absent.
+- **Story 2.2 AC:** *"it checks for the presence of a `.jellyfinsync.json` manifest in the root directory"* — No branch defined for "manifest not found."
+- **Story 2.3 AC:** *"Given a known device (has `.jellyfinsync.json` with a unique ID)"* — Explicitly assumes the manifest already exists.
+- **PRD MVP scope:** *"Conflict-Free Manifest Sync: Implementation of the `.jellyfinsync.json` logic for managed-folder isolation"* — Creating the initial manifest is a prerequisite for the managed model but was never explicitly scoped as a story.
 
 ---
 
@@ -48,7 +48,7 @@ Gap identified by Alexis during a post-sprint review of the completed backlog. T
 Low. The implementation follows fully established patterns:
 - New `on_device_unrecognized` daemon event (same broadcast pattern as existing device events)
 - New `device.initialize` RPC method in `rpc.rs` (same JSON-RPC 2.0 envelope pattern)
-- Initial `.jellysync.json` written using the existing Write-Temp-Rename atomic pattern
+- Initial `.jellyfinsync.json` written using the existing Write-Temp-Rename atomic pattern
 - New "Initialize Device" banner in `BasketSidebar.ts` (same pattern as dirty manifest banner from Story 5.4)
 - New initialization dialog using Shoelace `<sl-dialog>` (same approach as `RepairModal.ts`)
 
@@ -81,15 +81,15 @@ Add Story 2.6 to Epic 2 within the existing sprint plan. Reopen Epic 2 to `in-pr
 
 **OLD:**
 ```
-- FR3: The system can identify the presence of a `.jellysync.json` manifest on discovery.
+- FR3: The system can identify the presence of a `.jellyfinsync.json` manifest on discovery.
 - FR4: The system can read persistent hardware identifiers to link devices across different sessions.
 ```
 
 **NEW:**
 ```
-- FR3: The system can identify the presence of a `.jellysync.json` manifest on discovery.
+- FR3: The system can identify the presence of a `.jellyfinsync.json` manifest on discovery.
 - FR4: The system can read persistent hardware identifiers to link devices across different sessions.
-- FR26: The system can initialize a new `.jellysync.json` manifest on a connected device
+- FR26: The system can initialize a new `.jellyfinsync.json` manifest on a connected device
   that has not previously been managed, capturing a hardware identifier, a designated
   sync folder path, and an associated Jellyfin user profile.
 ```
@@ -112,13 +112,13 @@ Add Story 2.6 to Epic 2 within the existing sprint plan. Reopen Epic 2 to `in-pr
 
 As a Ritualist (Arthur) and Convenience Seeker (Sarah),
 I want the application to detect when a connected removable disk has no
-`.jellysync.json` manifest and guide me through initializing it,
+`.jellyfinsync.json` manifest and guide me through initializing it,
 So that I can bring a brand-new device into the managed sync model without
 manually creating any files.
 
 **Acceptance Criteria:**
 
-**Given** a USB mass storage device is connected with no `.jellysync.json`
+**Given** a USB mass storage device is connected with no `.jellyfinsync.json`
 present in its root
 **When** the daemon completes its device discovery scan
 **Then** it broadcasts an `on_device_unrecognized` event to the UI.
@@ -132,7 +132,7 @@ on the device (defaulting to the device root).
 **When** I click "Confirm"
 **Then** the UI sends a `device.initialize` JSON-RPC request to the daemon
 with the chosen folder path and profile ID.
-**And** the daemon writes an initial `.jellysync.json` to the device using
+**And** the daemon writes an initial `.jellyfinsync.json` to the device using
 the atomic Write-Temp-Rename pattern, containing a new unique hardware ID
 and the selected profile.
 **And** the daemon broadcasts an updated device state marking the device as "Managed".
@@ -191,7 +191,7 @@ and the selected profile.
 **Success Criteria:**
 - Story 2.6 file created in `_bmad-output/implementation-artifacts/`
 - `on_device_unrecognized` daemon event broadcast when no manifest found on device detection
-- `device.initialize` RPC method writes an atomic initial `.jellysync.json` (Write-Temp-Rename pattern)
+- `device.initialize` RPC method writes an atomic initial `.jellyfinsync.json` (Write-Temp-Rename pattern)
 - "Initialize Device" banner visible in `BasketSidebar.ts` when unrecognized device connected
 - Initialization dialog lets user confirm sync folder and select Jellyfin profile
 - Device transitions to "Managed" state after successful initialization

@@ -2152,8 +2152,8 @@ mod tests {
         );
 
         // Verify manifest was written to disk
-        let manifest_path = dir.path().join(".jellysync.json");
-        assert!(manifest_path.exists(), ".jellysync.json must exist");
+        let manifest_path = dir.path().join(".jellyfinsync.json");
+        assert!(manifest_path.exists(), ".jellyfinsync.json must exist");
 
         // Verify device is now recognized
         let current_device = device_manager.get_current_device().await;
@@ -2210,7 +2210,7 @@ mod tests {
         assert!(music_folder.exists(), "Music subfolder should be created");
 
         // Verify manifest on disk
-        let content = tokio::fs::read_to_string(dir.path().join(".jellysync.json"))
+        let content = tokio::fs::read_to_string(dir.path().join(".jellyfinsync.json"))
             .await
             .unwrap();
         let manifest: crate::device::DeviceManifest = serde_json::from_str(&content).unwrap();

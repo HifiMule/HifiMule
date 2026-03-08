@@ -29,7 +29,7 @@ Modern music management solutions almost exclusively focus on mobile app streami
 
 ### Proposed Solution
 
-A desktop-based synchronization client that connects to a Jellyfin server and local mass storage devices. It features a "Split View" UI (Jellyfin Selection vs. Device Capacity) and implements a **Conflict-Free Managed Sync** model. The tool only manages files it "owns" (tracked via a hidden `.jellysync.json` manifest), ensuring that manually added legacy files in the same folder are never accidentally deleted. The tool initiates a "Transcoding Handshake" with Jellyfin to deliver optimized streams (e.g., 256kbps MP3) directly to the device using **Buffered Streaming** to ensure stability on slow legacy hardware.
+A desktop-based synchronization client that connects to a Jellyfin server and local mass storage devices. It features a "Split View" UI (Jellyfin Selection vs. Device Capacity) and implements a **Conflict-Free Managed Sync** model. The tool only manages files it "owns" (tracked via a hidden `.jellyfinsync.json` manifest), ensuring that manually added legacy files in the same folder are never accidentally deleted. The tool initiates a "Transcoding Handshake" with Jellyfin to deliver optimized streams (e.g., 256kbps MP3) directly to the device using **Buffered Streaming** to ensure stability on slow legacy hardware.
 
 ### Key Differentiators
 
@@ -96,7 +96,7 @@ Success for JellyfinSync is defined by the speed and reliability of the data tra
 - **Profile Selection:** Multi-user support to sync against correct Jellyfin accounts.
 - **Metadata Browsing:** Split-view browser for Jellyfin Playlists, Genres, and Artists.
 - **Mass Storage Detection:** Automated detection of mounted USB/removable drives.
-- **Conflict-Free Managed Sync:** Implementation of the `.jellysync.json` manifest with **Repair Utility** for corrupted states.
+- **Conflict-Free Managed Sync:** Implementation of the `.jellyfinsync.json` manifest with **Repair Utility** for corrupted states.
 - **Direct Buffered Transfer:** Streaming files from server to device storage via memory buffer to mitigate slow USB/HDD speeds.
 - **Playback Log Discovery:** Foundational logic to detect Rockbox playback logs during sync to support future scrobbling/smart playlists.
 

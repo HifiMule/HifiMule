@@ -12,7 +12,7 @@ so that my sync rules are applied automatically on connection.
 
 ## Acceptance Criteria
 
-1. **Device Identification:** The daemon MUST extract the unique `id` from the `.jellysync.json` manifest upon device detection. (AC: #1)
+1. **Device Identification:** The daemon MUST extract the unique `id` from the `.jellyfinsync.json` manifest upon device detection. (AC: #1)
 2. **Persistent Storage:** The daemon MUST store mappings between Device IDs and Jellyfin User Profiles in a local SQLite database. (AC: #2)
 3. **Automatic Configuration Loading:** When a known device (one with an existing mapping) is connected, the daemon MUST automatically load the associated Profile ID and Sync Rules. (AC: #3)
 4. **UI Notification:** The daemon MUST emit an event or update state via JSON-RPC to inform the UI that a known device has been recognized and its profile loaded. (AC: #4)
@@ -21,7 +21,7 @@ so that my sync rules are applied automatically on connection.
 ## Tasks / Subtasks
 
 - [x] **T1: Initialize SQLite Database** (AC: #2)
-  - [x] Implement `db` module in `jellysync-daemon`.
+  - [x] Implement `db` module in `jellyfinsync-daemon`.
   - [x] Create `devices` table: `id` (TEXT PRIMARY KEY), `name` (TEXT), `jellyfin_user_id` (TEXT), `sync_rules` (TEXT/JSON), `last_seen_at` (DATETIME).
   - [x] Initialize the database in `main.rs` on startup.
 - [x] **T2: Implement Device Mapping Logic** (AC: #1, #3)
@@ -41,10 +41,10 @@ so that my sync rules are applied automatically on connection.
   - Follow the **Multi-Process Architecture**; ensure the database file is located in the platform-standard AppData directory (similar to `api.rs` credential logic).
   - Use `tokio::task::spawn_blocking` for SQLite operations to avoid blocking the async executor.
 - **Source tree components to touch:**
-  - `jellysync-daemon/src/db.rs`: Database schema and operations.
-  - `jellysync-daemon/src/main.rs`: Database initialization and lifecycle.
-  - `jellysync-daemon/src/device/mod.rs`: Integration of lookups after probing.
-  - `jellysync-daemon/src/rpc.rs`: New methods for mapping management.
+  - `jellyfinsync-daemon/src/db.rs`: Database schema and operations.
+  - `jellyfinsync-daemon/src/main.rs`: Database initialization and lifecycle.
+  - `jellyfinsync-daemon/src/device/mod.rs`: Integration of lookups after probing.
+  - `jellyfinsync-daemon/src/rpc.rs`: New methods for mapping management.
 - **Testing standards summary:**
   - Use `tempfile` for database tests.
   - Mock Jellyfin user IDs for testing the mapping logic.
@@ -78,11 +78,11 @@ Antigravity (Adversarial Code Fix)
 - Added comprehensive integration tests in `src/tests.rs` verifying the full detection-to-recognition flow.
 
 ### File List
-- `jellysync-daemon/src/db.rs` [MODIFIED] (Added Serialize/Deserialize)
-- `jellysync-daemon/src/paths.rs` [MODIFIED] (Added Result error handling)
-- `jellysync-daemon/src/main.rs` [MODIFIED] (Refactored for DeviceManager)
-- `jellysync-daemon/src/rpc.rs` [MODIFIED] (Added get_daemon_state, fixed types)
-- `jellysync-daemon/src/api.rs` [MODIFIED] (Implemented keyring storage)
-- `jellysync-daemon/src/device/mod.rs` [MODIFIED] (Added DeviceManager)
-- `jellysync-daemon/Cargo.toml` [MODIFIED] (Added keyring dependency)
-- `jellysync-daemon/src/tests.rs` [MODIFIED] (Added integration test)
+- `jellyfinsync-daemon/src/db.rs` [MODIFIED] (Added Serialize/Deserialize)
+- `jellyfinsync-daemon/src/paths.rs` [MODIFIED] (Added Result error handling)
+- `jellyfinsync-daemon/src/main.rs` [MODIFIED] (Refactored for DeviceManager)
+- `jellyfinsync-daemon/src/rpc.rs` [MODIFIED] (Added get_daemon_state, fixed types)
+- `jellyfinsync-daemon/src/api.rs` [MODIFIED] (Implemented keyring storage)
+- `jellyfinsync-daemon/src/device/mod.rs` [MODIFIED] (Added DeviceManager)
+- `jellyfinsync-daemon/Cargo.toml` [MODIFIED] (Added keyring dependency)
+- `jellyfinsync-daemon/src/tests.rs` [MODIFIED] (Added integration test)

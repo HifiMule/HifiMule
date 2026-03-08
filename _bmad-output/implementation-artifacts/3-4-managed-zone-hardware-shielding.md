@@ -14,16 +14,16 @@ so that **I don't accidentally mark them for deletion and can trust the sync too
 
 1. **Device Folder Enumeration**: Given a connected device with both managed and unmanaged folders, When the UI displays the "Device State" panel, Then ALL top-level folders on the device root are listed with their names and types (managed vs unmanaged). (AC: #1)
 2. **Unmanaged Folder Shielding**: Given unmanaged folders exist on the device (e.g., `Notes/`, `Podcasts/`, `Recordings/`), When they appear in the Device State panel, Then they are visually marked with a **shield/lock icon** and a "Protected" label, clearly indicating they cannot be modified by JellyfinSync. (AC: #2)
-3. **Managed Folder Identification**: Given the `.jellysync.json` manifest tracks a `managed_paths` array, When folders on the device match those paths, Then they are shown with an unlocked/sync icon and labeled as "Managed by JellyfinSync". (AC: #3)
+3. **Managed Folder Identification**: Given the `.jellyfinsync.json` manifest tracks a `managed_paths` array, When folders on the device match those paths, Then they are shown with an unlocked/sync icon and labeled as "Managed by JellyfinSync". (AC: #3)
 4. **No Modification of Unmanaged Content**: The daemon MUST NOT expose any RPC method or UI affordance that allows deletion, renaming, or modification of unmanaged folders or their contents. The shielding is read-only and absolute. (AC: #4)
-5. **Empty Device / No Manifest State**: Given a device with no `.jellysync.json` manifest (fresh device), When viewing Device State, Then ALL folders are shown as "Unmanaged / Protected" and a message indicates "No managed sync zone configured yet — folders will be created on first sync." (AC: #5)
+5. **Empty Device / No Manifest State**: Given a device with no `.jellyfinsync.json` manifest (fresh device), When viewing Device State, Then ALL folders are shown as "Unmanaged / Protected" and a message indicates "No managed sync zone configured yet — folders will be created on first sync." (AC: #5)
 6. **Integration with BasketSidebar**: The Device State panel MUST be accessible from the BasketSidebar (e.g., as an expandable section or toggle) so users can review device folder protection status while curating their sync basket. (AC: #6)
 
 ## Tasks / Subtasks
 
 - [x] **T1: Daemon - Extend Manifest with Managed Paths** (AC: #3, #5)
   - [x] T1.1: Add `managed_paths: Vec<String>` field to `DeviceManifest` struct in `device/mod.rs` with `#[serde(default)]` for backward compatibility with existing manifests that lack this field.
-  - [x] T1.2: When reading `.jellysync.json`, deserialize `managed_paths` (defaults to empty vec if absent). This field will be populated by Epic 4's sync engine when it creates folders.
+  - [x] T1.2: When reading `.jellyfinsync.json`, deserialize `managed_paths` (defaults to empty vec if absent). This field will be populated by Epic 4's sync engine when it creates folders.
 - [x] **T2: Daemon - Device Folder Listing RPC** (AC: #1, #2, #3)
   - [x] T2.1: Add a new RPC method `device_list_root_folders()` that uses `std::fs::read_dir` on the current device path to enumerate top-level directories (skip files, hidden entries, and system folders like `System Volume Information`).
   - [x] T2.2: For each folder, return `{ name: String, path: String, isManaged: bool }` where `isManaged` is `true` if the folder path exists in the manifest's `managed_paths` array.
@@ -112,14 +112,14 @@ Code conventions from recent commits: modifications follow existing patterns, te
 - **Files to CREATE:**
   - None expected. All changes are modifications to existing files.
 - **Files to MODIFY:**
-  - `jellysync-daemon/src/device/mod.rs`: Add `managed_paths` to `DeviceManifest`, add `list_root_folders()` method to `DeviceManager`, add system folder exclusion list.
-  - `jellysync-daemon/src/rpc.rs`: Add `device_list_root_folders` RPC handler with `DeviceFolderInfo` response struct.
-  - `jellysync-ui/src/components/BasketSidebar.ts`: Add `renderDeviceFoldersPanel()` function, integrate into sidebar layout between capacity bar and sync button, add collapsible toggle.
-  - `jellysync-ui/src/styles.css`: Add styles for `.device-folders-panel`, `.folder-item`, `.folder-managed`, `.folder-protected`, shield icon styling.
+  - `jellyfinsync-daemon/src/device/mod.rs`: Add `managed_paths` to `DeviceManifest`, add `list_root_folders()` method to `DeviceManager`, add system folder exclusion list.
+  - `jellyfinsync-daemon/src/rpc.rs`: Add `device_list_root_folders` RPC handler with `DeviceFolderInfo` response struct.
+  - `jellyfinsync-ui/src/components/BasketSidebar.ts`: Add `renderDeviceFoldersPanel()` function, integrate into sidebar layout between capacity bar and sync button, add collapsible toggle.
+  - `jellyfinsync-ui/src/styles.css`: Add styles for `.device-folders-panel`, `.folder-item`, `.folder-managed`, `.folder-protected`, shield icon styling.
 - **Files for REFERENCE (do not modify):**
-  - `jellysync-ui/src/state/basket.ts`: EventTarget pattern reference.
-  - `jellysync-ui/src/rpc.ts`: RPC client wrapper pattern.
-  - `jellysync-ui/src/library.ts`: Navigation and item structure patterns.
+  - `jellyfinsync-ui/src/state/basket.ts`: EventTarget pattern reference.
+  - `jellyfinsync-ui/src/rpc.ts`: RPC client wrapper pattern.
+  - `jellyfinsync-ui/src/library.ts`: Navigation and item structure patterns.
 
 ### References
 
@@ -150,12 +150,12 @@ Claude Opus 4.6
 
 ### File List
 
-- `jellysync-daemon/src/device/mod.rs` (Modified)
-- `jellysync-daemon/src/rpc.rs` (Modified)
-- `jellysync-daemon/src/device/tests.rs` (Modified)
-- `jellysync-daemon/src/tests.rs` (Modified)
-- `jellysync-ui/src/components/BasketSidebar.ts` (Modified)
-- `jellysync-ui/src/styles.css` (Modified)
+- `jellyfinsync-daemon/src/device/mod.rs` (Modified)
+- `jellyfinsync-daemon/src/rpc.rs` (Modified)
+- `jellyfinsync-daemon/src/device/tests.rs` (Modified)
+- `jellyfinsync-daemon/src/tests.rs` (Modified)
+- `jellyfinsync-ui/src/components/BasketSidebar.ts` (Modified)
+- `jellyfinsync-ui/src/styles.css` (Modified)
 
 ### Senior Developer Review (AI)
 

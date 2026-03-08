@@ -120,13 +120,13 @@ class BasketStore extends EventTarget {
 
     private loadFromLocalStorage() {
         try {
-            const saved = localStorage.getItem('jellysync-basket');
+            const saved = localStorage.getItem('jellyfinsync-basket');
             if (saved) {
                 const parsed = JSON.parse(saved);
                 this.items = new Map(Object.entries(parsed));
             }
 
-            const dirty = localStorage.getItem('jellysync-basket-dirty');
+            const dirty = localStorage.getItem('jellyfinsync-basket-dirty');
             this._dirty = dirty === 'true';
         } catch (e) {
             console.error("Failed to load basket from localStorage:", e);
@@ -135,8 +135,8 @@ class BasketStore extends EventTarget {
 
     private saveToLocalStorage() {
         const obj = Object.fromEntries(this.items);
-        localStorage.setItem('jellysync-basket', JSON.stringify(obj));
-        localStorage.setItem('jellysync-basket-dirty', this._dirty.toString());
+        localStorage.setItem('jellyfinsync-basket', JSON.stringify(obj));
+        localStorage.setItem('jellyfinsync-basket-dirty', this._dirty.toString());
     }
 
     public isDirty(): boolean {

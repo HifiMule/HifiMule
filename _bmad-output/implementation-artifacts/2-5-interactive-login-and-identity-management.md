@@ -43,14 +43,14 @@ So that I can easily connect to my library without manually copying API tokens.
 ## Tasks / Subtasks
 
 - [x] **Backend: Implement Authentication API**
-    - [x] Add `authenticate_by_name` method to `JellyfinClient` in `jellysync-daemon/src/api.rs`.
+    - [x] Add `authenticate_by_name` method to `JellyfinClient` in `jellyfinsync-daemon/src/api.rs`.
     - [x] Define `AuthenticateByNameRequest` and `AuthenticationResult` structs.
     - [x] Implement proper authorization headers for the initial handshake.
 - [x] **Backend: Expose Login RPC**
-    - [x] Create `login(url, username, password)` RPC method in `jellysync-daemon/src/rpc.rs`.
+    - [x] Create `login(url, username, password)` RPC method in `jellyfinsync-daemon/src/rpc.rs`.
     - [x] Wire up `login` to call `client.authenticate_by_name` then `CredentialManager::save_credentials`.
 - [x] **Frontend: Build Login UI**
-    - [x] Create `jellysync-ui/src/components/LoginView.svelte` (or equivalent Web Component/HTML).
+    - [x] Create `jellyfinsync-ui/src/components/LoginView.svelte` (or equivalent Web Component/HTML).
     - [x] Implement form validation (URL format, empty fields).
     - [x] Add visual loading state during authentication request.
 - [x] **Frontend: Implement Navigation Guard**
@@ -61,7 +61,7 @@ So that I can easily connect to my library without manually copying API tokens.
 ## Dev Notes
 
 ### Architecture & Pattern Compliance
-- **Keyring Integration:** The `keyring` crate is already implemented in `jellysync-daemon/src/api.rs`. Reuse `CredentialManager::save_credentials`.
+- **Keyring Integration:** The `keyring` crate is already implemented in `jellyfinsync-daemon/src/api.rs`. Reuse `CredentialManager::save_credentials`.
 - **API Pattern:** Follow the pattern in `api.rs` for `reqwest` calls. Ensure `rename_all = "PascalCase"` or "camelCase" matches Jellyfin API exactly.
 - **RPC Pattern:** Use the established JSON-RPC definitions in `rpc.rs`.
 
@@ -84,9 +84,9 @@ So that I can easily connect to my library without manually copying API tokens.
 - **Device ID**: Implemented a persistent `device_id` in `api.rs` (stored in `config.json`) to uniquely identify the client to the Jellyfin server, replacing the hardcoded "JellyfinSync-Desktop".
 
 ### File Structure
-- `jellysync-daemon/src/api.rs`: Auth logic here.
-- `jellysync-daemon/src/rpc.rs`: RPC handler here.
-- `jellysync-ui/`: Login UI code.
+- `jellyfinsync-daemon/src/api.rs`: Auth logic here.
+- `jellyfinsync-daemon/src/rpc.rs`: RPC handler here.
+- `jellyfinsync-ui/`: Login UI code.
 
 ### References
 - [Story 2.1 (Security)](file:///c:/Workspaces/JellyfinSync/_bmad-output/implementation-artifacts/2-1-secure-jellyfin-server-link.md)

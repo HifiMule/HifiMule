@@ -20,10 +20,10 @@ so that **I can focus purely on my music collection for my DAP.**
 ## Tasks / Subtasks
 
 - [x] **T1: Daemon - Enhance Jellyfin Client** (AC: #1, #3)
-    - [x] Update `jellysync-daemon/src/api.rs`: Modify `get_items` to ensure it correctly handles the `include_item_types` parameter.
+    - [x] Update `jellyfinsync-daemon/src/api.rs`: Modify `get_items` to ensure it correctly handles the `include_item_types` parameter.
     - [x] Define or verify the use of a constant/config for `MUSIC_ITEM_TYPES` (e.g., `"MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo"`).
 - [x] **T2: UI - Apply Filtering in Library View** (AC: #2, #4)
-    - [x] Update `jellysync-ui/src/library.ts`: Modify `loadItems` to pass the music-only filter string to the `fetchItems` RPC call.
+    - [x] Update `jellyfinsync-ui/src/library.ts`: Modify `loadItems` to pass the music-only filter string to the `fetchItems` RPC call.
     - [x] Implement UI-side filtering if necessary to ensure `fetchViews` doesn't show non-music libraries (e.g. Movies/TV).
 - [x] **T3: Verification & Edge Cases** (AC: #1, #2)
     - [x] Verify that libraries containing mixed content only show the music-related items.
@@ -38,8 +38,8 @@ so that **I can focus purely on my music collection for my DAP.**
     - The `/Users/{userId}/Items` endpoint accepts `IncludeItemTypes`.
     - Recommended filter: `MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo`.
 - **Source tree components to touch:**
-    - `jellysync-daemon/src/api.rs`: Verify `get_items` and types.
-    - `jellysync-ui/src/library.ts`: Update `loadItems` call.
+    - `jellyfinsync-daemon/src/api.rs`: Verify `get_items` and types.
+    - `jellyfinsync-ui/src/library.ts`: Update `loadItems` call.
 
 ### Project Structure Notes
 
@@ -66,6 +66,6 @@ Antigravity (Workflow Engine)
 - Verified backend with `cargo test`.
 
 ### File List
-- `jellysync-daemon/src/api.rs`
-- `jellysync-ui/src/components/MediaCard.ts`
-- `jellysync-ui/src/library.ts`
+- `jellyfinsync-daemon/src/api.rs`
+- `jellyfinsync-ui/src/components/MediaCard.ts`
+- `jellyfinsync-ui/src/library.ts`

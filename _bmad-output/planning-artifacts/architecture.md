@@ -24,7 +24,7 @@ Architecture is driven by extreme efficiency (< 10MB RAM) and high stability (At
 ### Technical Constraints & Dependencies
 - **No Heavy Runtimes:** The core engine cannot depend on Electron or Python runtimes if it is to meet the 10MB memory goal.
 - **OS Native IO:** Dependence on `udev` (Linux), `WM_DEVICECHANGE` (Windows), and `DiskArbitration` (macOS) for event-driven discovery.
-- **Manifest-Only Truth:** The `.jellysync.json` file on the target device is the definitive record of "Managed State".
+- **Manifest-Only Truth:** The `.jellyfinsync.json` file on the target device is the definitive record of "Managed State".
 
 ## Starter Template Evaluation
 
@@ -34,7 +34,7 @@ Desktop Utility (Rust Daemon + Tauri UI)
 ### Starter Options Considered
 - **Standard Tauri v2 App:** Single-process; harder to manage a persistent background daemon that lives after the window closes.
 - **Pure egui/Slint:** Leanest (~5-8MB), but UI development is more rigid and requires more boilerplate for media browsing.
-- **[SELECTED] Tauri + Sidecar Workspace:** A Rust Workspace with two members: `jellysync-daemon` (engine) and `jellysync-ui` (Tauri).
+- **[SELECTED] Tauri + Sidecar Workspace:** A Rust Workspace with two members: `jellyfinsync-daemon` (engine) and `jellyfinsync-ui` (Tauri).
 
 ### Selected Starter: Custom Tauri Sidecar Workspace
 
@@ -44,8 +44,8 @@ Isolates the sub-10MB headless engine from the active UI runtime. Allows for a r
 **Initialization Command:**
 ```bash
 # Workspace setup for multi-process isolation
-cargo new jellysync-daemon --bin
-npx create-tauri-app@latest jellysync-ui --template vanilla-ts
+cargo new jellyfinsync-daemon --bin
+npx create-tauri-app@latest jellyfinsync-ui --template vanilla-ts
 ```
 
 **Architectural Decisions Provided by Foundation:**
@@ -107,8 +107,8 @@ npx create-tauri-app@latest jellysync-ui --template vanilla-ts
 ### Structure Patterns
 
 **Project Organization:**
-- Rust Workspace with crates: `jellysync-daemon` (engine) and `jellysync-ui` (Tauri).
-- **Core Logic:** Extracted into a local `jellysync-core` library crate shared between binary crates if needed.
+- Rust Workspace with crates: `jellyfinsync-daemon` (engine) and `jellyfinsync-ui` (Tauri).
+- **Core Logic:** Extracted into a local `jellyfinsync-core` library crate shared between binary crates if needed.
 - **Tests:** Co-located in mod `tests` blocks (Rust) or `*.test.ts` (TypeScript).
 
 ### Format Patterns
@@ -132,7 +132,7 @@ npx create-tauri-app@latest jellysync-ui --template vanilla-ts
 - Background tasks (Syncing/Discovery) are represented as "Job IDs" in the state, allowing the UI to re-attach to long-running tasks.
 
 ### Safety & Atomicity Patterns
-- **Atomic Manifest Commitment:** Utilize the "Write-Temp-Rename" pattern for all `.jellysync.json` updates to prevent state corruption during disconnection.
+- **Atomic Manifest Commitment:** Utilize the "Write-Temp-Rename" pattern for all `.jellyfinsync.json` updates to prevent state corruption during disconnection.
 - **Database Consistency:** Mandatory Transaction wrapping for all multi-row scrobble history updates.
 
 ### Enforcement Guidelines

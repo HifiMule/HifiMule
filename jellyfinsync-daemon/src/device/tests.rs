@@ -31,7 +31,7 @@ async fn test_dirty_manifest_roundtrip() {
         basket_items: vec![],
     };
     write_manifest(dir.path(), &manifest).await.unwrap();
-    let content = tokio::fs::read_to_string(dir.path().join(".jellysync.json"))
+    let content = tokio::fs::read_to_string(dir.path().join(".jellyfinsync.json"))
         .await
         .unwrap();
     let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
@@ -145,7 +145,7 @@ async fn test_probe_no_manifest() {
 #[tokio::test]
 async fn test_probe_with_manifest() {
     let dir = tempdir().unwrap();
-    let manifest_path = dir.path().join(".jellysync.json");
+    let manifest_path = dir.path().join(".jellyfinsync.json");
     let manifest_json = r#"{"device_id": "test-device-123", "name": "My iPod", "version": "1.0"}"#;
     fs::write(manifest_path, manifest_json).unwrap();
 
@@ -161,7 +161,7 @@ async fn test_probe_with_manifest() {
 #[tokio::test]
 async fn test_probe_with_managed_paths() {
     let dir = tempdir().unwrap();
-    let manifest_path = dir.path().join(".jellysync.json");
+    let manifest_path = dir.path().join(".jellyfinsync.json");
     let manifest_json = r#"{"device_id": "test-device-123", "name": "My iPod", "version": "1.0", "managed_paths": ["Music", "Podcasts"]}"#;
     fs::write(manifest_path, manifest_json).unwrap();
 
@@ -177,7 +177,7 @@ async fn test_probe_with_managed_paths() {
 #[tokio::test]
 async fn test_probe_invalid_manifest() {
     let dir = tempdir().unwrap();
-    let manifest_path = dir.path().join(".jellysync.json");
+    let manifest_path = dir.path().join(".jellyfinsync.json");
     let manifest_json = r#"{"id": "test-device-123", "invalid": true"#; // Missing closing brace
     fs::write(manifest_path, manifest_json).unwrap();
 
@@ -199,7 +199,7 @@ async fn test_list_root_folders_mixed() {
     fs::write(root.join("file.txt"), "not a dir").unwrap();
 
     // Create manifest
-    let manifest_path = root.join(".jellysync.json");
+    let manifest_path = root.join(".jellyfinsync.json");
     let manifest_json = r#"{"device_id": "test-id", "name": "Test Device", "version": "1.0", "managed_paths": ["Music"]}"#;
     fs::write(manifest_path, manifest_json).unwrap();
 
@@ -236,7 +236,7 @@ async fn test_list_root_folders_empty_device() {
     let root = dir.path();
 
     // Create manifest but no folders (only hidden/system entries)
-    let manifest_path = root.join(".jellysync.json");
+    let manifest_path = root.join(".jellyfinsync.json");
     let manifest_json = r#"{"device_id": "empty-id", "name": "Empty Device", "version": "1.0"}"#;
     fs::write(manifest_path, manifest_json).unwrap();
 
@@ -348,8 +348,8 @@ async fn test_write_manifest_creates_files() {
     write_manifest(root, &manifest).await.unwrap();
 
     // Verify the manifest file exists (not the temp file)
-    let manifest_path = root.join(".jellysync.json");
-    let tmp_path = root.join(".jellysync.json.tmp");
+    let manifest_path = root.join(".jellyfinsync.json");
+    let tmp_path = root.join(".jellyfinsync.json.tmp");
     assert!(manifest_path.exists());
     assert!(!tmp_path.exists());
 
@@ -402,7 +402,7 @@ async fn test_write_manifest_overwrites_existing() {
     };
     write_manifest(root, &manifest2).await.unwrap();
 
-    let content = fs::read_to_string(root.join(".jellysync.json")).unwrap();
+    let content = fs::read_to_string(root.join(".jellyfinsync.json")).unwrap();
     let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
     assert_eq!(loaded.name, Some("Updated".to_string()));
     assert_eq!(loaded.synced_items.len(), 1);
@@ -602,7 +602,7 @@ async fn test_prune_items() {
     assert_eq!(device.synced_items[0].jellyfin_id, "item-2");
 
     // Verify persisted to disk
-    let content = fs::read_to_string(root.join(".jellysync.json")).unwrap();
+    let content = fs::read_to_string(root.join(".jellyfinsync.json")).unwrap();
     let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
     assert_eq!(loaded.synced_items.len(), 1);
 }
@@ -719,7 +719,7 @@ async fn test_clear_dirty_flag() {
     assert!(device.pending_item_ids.is_empty());
 
     // Verify persisted to disk
-    let content = fs::read_to_string(root.join(".jellysync.json")).unwrap();
+    let content = fs::read_to_string(root.join(".jellyfinsync.json")).unwrap();
     let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
     assert!(!loaded.dirty);
     assert!(loaded.pending_item_ids.is_empty());
@@ -775,7 +775,7 @@ async fn test_handle_device_removed_clears_unrecognized_path() {
 #[tokio::test]
 async fn test_handle_device_detected_clears_unrecognized_path() {
     let dir = tempdir().unwrap();
-    let manifest_path = dir.path().join(".jellysync.json");
+    let manifest_path = dir.path().join(".jellyfinsync.json");
     let manifest_json = r#"{"device_id": "dev-1", "name": "My Device", "version": "1.0"}"#;
     fs::write(&manifest_path, manifest_json).unwrap();
     let manifest: DeviceManifest = serde_json::from_str(manifest_json).unwrap();
@@ -840,8 +840,8 @@ async fn test_initialize_device_root() {
     assert!(manifest.synced_items.is_empty());
 
     // Manifest file should exist on disk
-    let manifest_path = dir.path().join(".jellysync.json");
-    assert!(manifest_path.exists(), ".jellysync.json must be created");
+    let manifest_path = dir.path().join(".jellyfinsync.json");
+    assert!(manifest_path.exists(), ".jellyfinsync.json must be created");
 
     // Device should now be current (recognized)
     assert!(manager.get_current_device().await.is_some());
@@ -869,7 +869,7 @@ async fn test_initialize_device_subfolder() {
     assert!(music_folder.exists(), "Music subfolder should be created");
 
     // Manifest on disk should have managed_paths = ["Music"]
-    let content = tokio::fs::read_to_string(dir.path().join(".jellysync.json"))
+    let content = tokio::fs::read_to_string(dir.path().join(".jellyfinsync.json"))
         .await
         .unwrap();
     let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
@@ -923,7 +923,7 @@ async fn test_initialize_device_rejects_path_traversal() {
 async fn test_handle_device_unrecognized_clears_current_device() {
     let dir = tempdir().unwrap();
     let manifest_json = r#"{"device_id": "dev-1", "name": "My Device", "version": "1.0"}"#;
-    fs::write(dir.path().join(".jellysync.json"), manifest_json).unwrap();
+    fs::write(dir.path().join(".jellyfinsync.json"), manifest_json).unwrap();
     let manifest: DeviceManifest = serde_json::from_str(manifest_json).unwrap();
 
     let db = Arc::new(crate::db::Database::memory().unwrap());
@@ -1007,7 +1007,7 @@ async fn test_save_basket_roundtrip() {
     assert_eq!(memory_device.basket_items[0].id, "basket-1");
 
     // Verify disk state
-    let content = fs::read_to_string(dir.path().join(".jellysync.json")).unwrap();
+    let content = fs::read_to_string(dir.path().join(".jellyfinsync.json")).unwrap();
     let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
     assert_eq!(loaded.basket_items.len(), 1);
     assert_eq!(loaded.basket_items[0].name, "Basket Playlist");

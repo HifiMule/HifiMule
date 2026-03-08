@@ -15,17 +15,17 @@ so that **I can enjoy the curation process as I do on the server.**
 1.  **Vibrant Hub Layout**: The main UI MUST display the "Vibrant Hub" 70/30 split layout, with the Library Browser occupying the left 70% and a placeholder/collapsible Basket sidebar on the right 30%. (AC: #1)
 2.  **Jellyfin Library Integration**: The browser MUST fetch and display a grid of **Albums** and **Playlists** directly from the connected Jellyfin server using the authenticated session from Story 2.1. (AC: #2)
 3.  **High-Quality Artwork**: Items MUST display primary image tags (folder/cover art). Images MUST use lazy-loading and proper aspect ratios (1:1 for albums, 16:9 or 1:1 for playlists). (AC: #3)
-4.  **Synced Status Indicators**: Items that already exist on the connected mass storage device (verified via `.jellysync.json` manifest) MUST display a distinct "Synced" badge or overlay. (AC: #4)
+4.  **Synced Status Indicators**: Items that already exist on the connected mass storage device (verified via `.jellyfinsync.json` manifest) MUST display a distinct "Synced" badge or overlay. (AC: #4)
 5.  **Navigation & Pagination**: Users MUST be able to navigate deeper (e.g., Album List -> Album Details -> Track List) and handle large libraries via pagination or infinite scroll. (AC: #5)
 
 ## Tasks / Subtasks
 
 - [x] **T1: Daemon - Library & Status API** (AC: #2, #4)
-    - [x] Implement `jellyfin_get_views` and `jellyfin_get_items` in `jellysync-daemon` to fetch libraries, albums, and playlists.
+    - [x] Implement `jellyfin_get_views` and `jellyfin_get_items` in `jellyfinsync-daemon` to fetch libraries, albums, and playlists.
     - [x] Implement `jellyfin_get_item_details` to retrieve track lists for a container.
     - [x] Implement `sync_get_device_status_map` RPC: Returns a list/set of Jellyfin Item IDs that currently exist in the active device manifest.
 - [x] **T2: UI - Layout Skeleton** (AC: #1)
-    - [x] Create `jellysync-ui/src/pages/library.html` (or component) implementing the 70/30 grid layout.
+    - [x] Create `jellyfinsync-ui/src/pages/library.html` (or component) implementing the 70/30 grid layout.
     - [x] Integrate **Shoelace** split panel (`<sl-split-panel>`) or CSS Grid for the "Vibrant Hub" structure.
 - [x] **T3: UI - Media Grid & Navigation** (AC: #2, #5)
     - [x] Create `MediaGrid` component: Responsive grid layout for cards.
@@ -59,15 +59,15 @@ so that **I can enjoy the curation process as I do on the server.**
 -   **Security:**
     -   Ensure the Jellyfin Token is NOT exposed in the UI logs.
 -   **Source tree components to touch:**
-    -   `jellysync-daemon/src/jellyfin/api.rs`: [NEW] Library browsing logic.
-    -   `jellysync-daemon/src/rpc.rs`: Expose new methods.
-    -   `jellysync-ui/src/components/MediaCard.ts`: [NEW] Card component.
-    -   `jellysync-ui/src/pages/Library.ts`: [NEW] Main view logic.
+    -   `jellyfinsync-daemon/src/jellyfin/api.rs`: [NEW] Library browsing logic.
+    -   `jellyfinsync-daemon/src/rpc.rs`: Expose new methods.
+    -   `jellyfinsync-ui/src/components/MediaCard.ts`: [NEW] Card component.
+    -   `jellyfinsync-ui/src/pages/Library.ts`: [NEW] Main view logic.
 
 ### Project Structure Notes
 
 -   Keep Shoelace components encapsulated.
--   Ensure `jellysync-ui` connects to the Daemon RPC port defined in `.env`.
+-   Ensure `jellyfinsync-ui` connects to the Daemon RPC port defined in `.env`.
 
 ### References
 
@@ -96,11 +96,11 @@ Antigravity (Workflow Engine)
 ### File List
 
 **Daemon (Backend):**
-- `jellysync-daemon/src/api.rs` - Added Jellyfin API data structures and library browsing methods
-- `jellysync-daemon/src/rpc.rs` - Added RPC handlers for library browsing and device status map
+- `jellyfinsync-daemon/src/api.rs` - Added Jellyfin API data structures and library browsing methods
+- `jellyfinsync-daemon/src/rpc.rs` - Added RPC handlers for library browsing and device status map
 
 **UI (Frontend):**
-- `jellysync-ui/src/library.ts` - [NEW] Library view module with RPC integration and media grid rendering
-- `jellysync-ui/src/main.ts` - Added library view initialization
-- `jellysync-ui/index.html` - Updated to use dynamic library-content container
-- `jellysync-ui/src/styles.css` - Added media grid, card, and synced badge styles
+- `jellyfinsync-ui/src/library.ts` - [NEW] Library view module with RPC integration and media grid rendering
+- `jellyfinsync-ui/src/main.ts` - Added library view initialization
+- `jellyfinsync-ui/index.html` - Updated to use dynamic library-content container
+- `jellyfinsync-ui/src/styles.css` - Added media grid, card, and synced badge styles

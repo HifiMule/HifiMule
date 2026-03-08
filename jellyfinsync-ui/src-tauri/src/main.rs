@@ -5,5 +5,5 @@
 )]
 
 fn main() {
-    jellysync_ui_lib::run()
+    jellyfinsync_ui_lib::run()
 }

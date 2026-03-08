@@ -2218,7 +2218,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "jellysync-daemon"
+name = "jellyfinsync-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2246,7 +2246,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "jellysync-ui"
+name = "jellyfinsync-ui"
 version = "0.1.0"
 dependencies = [
  "serde",

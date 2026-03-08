@@ -15,7 +15,7 @@ This document provides the complete epic and story breakdown for JellyfinSync, d
 
 FR1: Automatically detect Mass Storage devices (USB) on Windows, Linux, and macOS.
 FR2: Manually select a target device folder if automatic detection fails.
-FR3: Identify the presence of a `.jellysync.json` manifest on discovery.
+FR3: Identify the presence of a `.jellyfinsync.json` manifest on discovery.
 FR4: Read persistent hardware identifiers to link devices across different sessions.
 FR5: Configure Jellyfin server credentials (URL, username, token).
 FR6: Select a specific Jellyfin user profile for syncing.
@@ -44,7 +44,7 @@ NFR1: Memory footprint < 10MB during idle states.
 NFR2: Complete manifest audit and be "ready to sync" in < 5 seconds.
 NFR3: Sync throughput limited only by target hardware or network bandwidth.
 NFR4: Utilize OS-level file sync primitives (sync_all) for data integrity.
-NFR5: Atomic `.jellysync.json` manifest updates.
+NFR5: Atomic `.jellyfinsync.json` manifest updates.
 NFR6: Network interruption handling with at least 3 retry cycles.
 NFR7: Graceful "Interrupted" session marking and repair utility trigger on mid-sync disconnect.
 NFR8: 100% feature parity between Windows, Linux, and macOS.
@@ -59,7 +59,7 @@ NFR13: CLI-first architecture for the core sync engine.
 - **Multi-process Architecture:** Rust Daemon + Tauri v2 UI (Detachable).
 - **IPC Mechanism:** JSON-RPC 2.0 over localhost HTTP.
 - **Data Persistence:** SQLite (`rusqlite`) for daemon state and scrobble history.
-- **Project Structure:** Rust Cargo Workspace containing `jellysync-daemon` and `jellysync-ui`.
+- **Project Structure:** Rust Cargo Workspace containing `jellyfinsync-daemon` and `jellyfinsync-ui`.
 - **UI Framework:** Shoelace Web Components for performance and consistency.
 - **Design Layout:** "Basket Centric" (70/30 split view).
 - **Managed Safety:** Visual "Managed Zone" shield to isolate personal data.
@@ -111,8 +111,8 @@ So that the sync engine can operate under the 10MB memory goal independent of th
 
 **Given** a clean project directory
 **When** I run `cargo build`
-**Then** the workspace successfully compiles both `jellysync-daemon` and `jellysync-ui` (Tauri).
-**And** `jellysync-daemon` starts as a standalone headless binary.
+**Then** the workspace successfully compiles both `jellyfinsync-daemon` and `jellyfinsync-ui` (Tauri).
+**And** `jellyfinsync-daemon` starts as a standalone headless binary.
 
 ### Story 1.2: Cross-Platform System Tray Hub
 
@@ -122,7 +122,7 @@ So that I can monitor the sync engine's health (Idle/Syncing/Error) without open
 
 **Acceptance Criteria:**
 
-**Given** the `jellysync-daemon` is running
+**Given** the `jellyfinsync-daemon` is running
 **When** I check the system taskbar/menu bar
 **Then** I see the JellyfinSync icon.
 **And** the icon provides a "Quit" and "Open UI" menu option.
@@ -170,7 +170,7 @@ So that I don't have to manually hunt for folder paths.
 **Given** the daemon is running in the tray
 **When** a USB Mass Storage device is connected
 **Then** the daemon triggers a "Device Detected" event.
-**And** it checks for the presence of a `.jellysync.json` manifest in the root directory.
+**And** it checks for the presence of a `.jellyfinsync.json` manifest in the root directory.
 
 ### Story 2.3: Multi-Device Profile Mapping
 
@@ -180,7 +180,7 @@ So that my sync rules are applied automatically on connection.
 
 **Acceptance Criteria:**
 
-**Given** a known device (has `.jellysync.json` with a unique ID) is connected
+**Given** a known device (has `.jellyfinsync.json` with a unique ID) is connected
 **When** the daemon reads the ID
 **Then** it automatically loads the associated Jellyfin User Profile and Sync Rules.
 
@@ -192,7 +192,7 @@ So that I know the application hasn't frozen during its initialization phase.
 
 **Acceptance Criteria:**
 
-**Given** the `jellysync-ui` is launched
+**Given** the `jellyfinsync-ui` is launched
 **When** the application is initializing (loading daemon, checking connection)
 **Then** a native Tauri splash screen featuring the JellyfinSync logo and name is displayed.
 **And** it clearly indicates the current state via status text (e.g., "Initializing Daemon...", "Connecting to Server...").
@@ -224,12 +224,12 @@ So that I can easily connect to my library without manually copying API tokens.
 ### Story 2.6: Initialize New Device Manifest
 
 As a Ritualist (Arthur) and Convenience Seeker (Sarah),
-I want the application to detect when a connected removable disk has no `.jellysync.json` manifest and guide me through initializing it,
+I want the application to detect when a connected removable disk has no `.jellyfinsync.json` manifest and guide me through initializing it,
 So that I can bring a brand-new device into the managed sync model without manually creating any files.
 
 **Acceptance Criteria:**
 
-**Given** a USB mass storage device is connected with no `.jellysync.json` present in its root
+**Given** a USB mass storage device is connected with no `.jellyfinsync.json` present in its root
 **When** the daemon completes its device discovery scan
 **Then** it broadcasts an `on_device_unrecognized` event to the UI.
 **And** the UI displays an "Initialize Device" banner in the Device State panel.
@@ -240,7 +240,7 @@ So that I can bring a brand-new device into the managed sync model without manua
 **And** I can select the associated Jellyfin user profile for this device.
 **When** I click "Confirm"
 **Then** the UI sends a `device.initialize` JSON-RPC request to the daemon with the chosen folder path and profile ID.
-**And** the daemon writes an initial `.jellysync.json` to the device using the atomic Write-Temp-Rename pattern, containing a new unique hardware ID and the selected profile.
+**And** the daemon writes an initial `.jellyfinsync.json` to the device using the atomic Write-Temp-Rename pattern, containing a new unique hardware ID and the selected profile.
 **And** the daemon broadcasts an updated device state marking the device as "Managed".
 **And** the UI transitions to the normal sync-ready state.
 
@@ -323,14 +323,14 @@ Build the performant, atomic sync logic with built-in core resume capabilities.
 ### Story 4.1: Differential Sync Algorithm (Manifest Comparison)
 
 As a System Admin (Alexis),
-I want the engine to calculate exactly which files to add or delete by comparing the Jellyfin server state with the local `.jellysync.json` manifest,
+I want the engine to calculate exactly which files to add or delete by comparing the Jellyfin server state with the local `.jellyfinsync.json` manifest,
 So that only necessary changes are made to the disk, preserving the hardware's life.
 
 **Acceptance Criteria:**
 
 **Given** a Selection Basket with 50 items
 **When** the sync engine starts
-**Then** it generates a list of "Adds" and "Deletes" based on the `.jellysync.json` record.
+**Then** it generates a list of "Adds" and "Deletes" based on the `.jellyfinsync.json` record.
 **And** it detects if server IDs have changed for existing local files.
 
 ### Story 4.2: Atomic Buffered-IO Streaming

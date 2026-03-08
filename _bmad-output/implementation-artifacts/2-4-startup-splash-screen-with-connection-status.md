@@ -28,7 +28,7 @@ so that I know the application hasn't frozen during its initialization phase.
   - [x] Design with "Vibrant Hub" aesthetics (Glassmorphism, Jellyfin Purple).
   - [x] Add status text container and error/action buttons (hidden by default).
 - [x] **T3: Implement Initialization Coordination** (AC: #3, #4)
-  - [x] Update `jellysync-ui/src/main.ts` to poll the daemon's `get_daemon_state` RPC method.
+  - [x] Update `jellyfinsync-ui/src/main.ts` to poll the daemon's `get_daemon_state` RPC method.
   - [x] Handle transition: `appWindow.get('main').show()` and `appWindow.get('splashscreen').close()`.
   - [x] Implement the 10-second timeout logic.
 - [x] **T4: Verification & Polish**
@@ -42,16 +42,16 @@ so that I know the application hasn't frozen during its initialization phase.
   - Use `tauri::window::WindowBuilder` if dynamic window creation is preferred over `tauri.conf.json`.
   - Rely on the `get_daemon_state` RPC method (implemented in Story 2.3) to check registration and connection status.
 - **Source tree components to touch:**
-  - `jellysync-ui/src-tauri/tauri.conf.json`: Window configurations.
-  - `jellysync-ui/splashscreen.html`: [NEW] The splash screen UI.
-  - `jellysync-ui/src/main.ts`: Initialization logic and window management.
+  - `jellyfinsync-ui/src-tauri/tauri.conf.json`: Window configurations.
+  - `jellyfinsync-ui/splashscreen.html`: [NEW] The splash screen UI.
+  - `jellyfinsync-ui/src/main.ts`: Initialization logic and window management.
 - **Testing standards summary:**
   - Manual verification of the startup flow on at least one platform.
   - Mock the daemon RPC response to test the timeout and error states.
 
 ### Project Structure Notes
 
-- The splash screen should reside in the `jellysync-ui` project to maintain separation from the daemon.
+- The splash screen should reside in the `jellyfinsync-ui` project to maintain separation from the daemon.
 - Ensure the JellyfinSync logo is correctly referenced from `assets`.
 
 ### References
@@ -82,11 +82,11 @@ Antigravity (Workflow Engine)
   - Externalized hardcoded RPC port to environment variable
   - Added http crate dependency for CORS configuration
 ### File List
-- `jellysync-ui/src-tauri/tauri.conf.json`
-- `jellysync-ui/splashscreen.html`
-- `jellysync-ui/src/main.ts`
-- `jellysync-ui/src/assets/logo.png`
-- `jellysync-ui/.env`
-- `jellysync-daemon/src/rpc.rs`
-- `jellysync-daemon/Cargo.toml`
+- `jellyfinsync-ui/src-tauri/tauri.conf.json`
+- `jellyfinsync-ui/splashscreen.html`
+- `jellyfinsync-ui/src/main.ts`
+- `jellyfinsync-ui/src/assets/logo.png`
+- `jellyfinsync-ui/.env`
+- `jellyfinsync-daemon/src/rpc.rs`
+- `jellyfinsync-daemon/Cargo.toml`
 - `Cargo.toml`

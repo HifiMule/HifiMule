@@ -37,7 +37,7 @@ so that **the sync is fast and doesn't consume local temporary disk space.**
    - Return detailed error information in the final sync result
    (AC: #5)
 
-6. **Manifest Update**: After ALL files are successfully written and synced, the engine MUST update the device manifest (`.jellysync.json`) using the atomic Write-Temp-Rename pattern established in Story 4.1, adding all successfully synced items to `synced_items` array. (AC: #6)
+6. **Manifest Update**: After ALL files are successfully written and synced, the engine MUST update the device manifest (`.jellyfinsync.json`) using the atomic Write-Temp-Rename pattern established in Story 4.1, adding all successfully synced items to `synced_items` array. (AC: #6)
 
 7. **RPC Integration**: A new `sync_execute` RPC method MUST accept a delta object (from `sync_calculate_delta`) and execute the sync operation asynchronously, returning an operation ID that can be used to track progress. (AC: #7)
 
@@ -240,14 +240,14 @@ pub enum SyncStatus {
 - None (all modifications to existing files)
 
 **Files to modify:**
-- `jellysync-daemon/src/sync.rs` — Add streaming file write, sync execution engine, operation state management
-- `jellysync-daemon/src/api.rs` — Add `download_item_stream` method to Jellyfin client
-- `jellysync-daemon/src/rpc.rs` — Add `sync_execute` and `sync_get_operation_status` RPC handlers
-- `jellysync-daemon/Cargo.toml` — Potentially add `uuid` crate for operation IDs
+- `jellyfinsync-daemon/src/sync.rs` — Add streaming file write, sync execution engine, operation state management
+- `jellyfinsync-daemon/src/api.rs` — Add `download_item_stream` method to Jellyfin client
+- `jellyfinsync-daemon/src/rpc.rs` — Add `sync_execute` and `sync_get_operation_status` RPC handlers
+- `jellyfinsync-daemon/Cargo.toml` — Potentially add `uuid` crate for operation IDs
 
 **Module Organization:**
 ```
-jellysync-daemon/src/
+jellyfinsync-daemon/src/
 ├── main.rs
 ├── api.rs          <- Add download_item_stream method
 ├── sync.rs         <- Add execute_sync, write_file_streamed, SyncOperation types
@@ -451,10 +451,10 @@ async fn test_write_file_streamed_success() {
 - [UUID Crate](https://docs.rs/uuid/latest/uuid/) — Operation ID generation
 
 **Source Code Locations:**
-- [jellysync-daemon/src/sync.rs](../../jellysync-daemon/src/sync.rs) — Sync engine module (extend here)
-- [jellysync-daemon/src/api.rs](../../jellysync-daemon/src/api.rs) — Jellyfin API client (add download_item_stream)
-- [jellysync-daemon/src/rpc.rs](../../jellysync-daemon/src/rpc.rs) — RPC handlers (add sync_execute)
-- [jellysync-daemon/src/device/mod.rs](../../jellysync-daemon/src/device/mod.rs) — Device manifest (use write_manifest)
+- [jellyfinsync-daemon/src/sync.rs](../../jellyfinsync-daemon/src/sync.rs) — Sync engine module (extend here)
+- [jellyfinsync-daemon/src/api.rs](../../jellyfinsync-daemon/src/api.rs) — Jellyfin API client (add download_item_stream)
+- [jellyfinsync-daemon/src/rpc.rs](../../jellyfinsync-daemon/src/rpc.rs) — RPC handlers (add sync_execute)
+- [jellyfinsync-daemon/src/device/mod.rs](../../jellyfinsync-daemon/src/device/mod.rs) — Device manifest (use write_manifest)
 
 ## Dev Agent Record
 
@@ -530,10 +530,10 @@ None - implementation completed successfully on first attempt with minor compila
 Modified files (relative to repo root):
 - Cargo.toml
 - Cargo.lock
-- jellysync-daemon/Cargo.toml
-- jellysync-daemon/src/sync.rs
-- jellysync-daemon/src/api.rs
-- jellysync-daemon/src/rpc.rs
+- jellyfinsync-daemon/Cargo.toml
+- jellyfinsync-daemon/src/sync.rs
+- jellyfinsync-daemon/src/api.rs
+- jellyfinsync-daemon/src/rpc.rs
 
 ### Senior Developer Review (AI)
 

@@ -56,7 +56,7 @@ fn main() -> Result<()> {
 
             // Initialize database
             let db_path = match paths::get_app_data_dir() {
-                Ok(p) => p.join("jellysync.db"),
+                Ok(p) => p.join("jellyfinsync.db"),
                 Err(e) => {
                     eprintln!("Failed to get app data directory: {}", e);
                     let _ = state_tx.send(DaemonState::Error);
@@ -262,8 +262,8 @@ fn main() -> Result<()> {
                         std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
                     let ui_dir = std::path::Path::new(&manifest_dir)
                         .parent()
-                        .map(|p| p.join("jellysync-ui"))
-                        .unwrap_or_else(|| std::path::PathBuf::from("../jellysync-ui"));
+                        .map(|p| p.join("jellyfinsync-ui"))
+                        .unwrap_or_else(|| std::path::PathBuf::from("../jellyfinsync-ui"));
 
                     #[cfg(windows)]
                     {
@@ -283,9 +283,9 @@ fn main() -> Result<()> {
                     // In release, we assume the UI executable is in the same folder
                     let mut ui_path = std::env::current_exe().unwrap_or_default();
                     let ui_name = if cfg!(windows) {
-                        "jellysync-ui.exe"
+                        "jellyfinsync-ui.exe"
                     } else {
-                        "jellysync-ui"
+                        "jellyfinsync-ui"
                     };
                     ui_path.set_file_name(ui_name);
 

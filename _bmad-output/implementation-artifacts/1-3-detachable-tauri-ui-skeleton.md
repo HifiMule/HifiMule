@@ -20,10 +20,10 @@ so that I can browse my library while the background sync remains active.
 ## Tasks / Subtasks
 
 - [x] Task 1: UI Launch Mechanism (AC: 1, 2)
-  - [x] Implement `Open UI` action in `jellysync-daemon` using `std::process::Command`.
+  - [x] Implement `Open UI` action in `jellyfinsync-daemon` using `std::process::Command`.
   - [x] Ensure the daemon correctly handles the spawn event across platforms.
 - [x] Task 2: Shoelace "Vibrant Hub" Skeleton (AC: 1, 3, 4)
-  - [x] Clean up default Tauri boilerplate in `jellysync-ui`.
+  - [x] Clean up default Tauri boilerplate in `jellyfinsync-ui`.
   - [x] Implement the 70/30 split layout using Shoelace components.
   - [x] Set up the "Basket" sidebar and "Library" main view placeholders.
 - [x] Task 3: Lifecycle and Verification (AC: 2)
@@ -61,15 +61,15 @@ Antigravity (Gemini 2.0 Flash)
 - [Code Review Fix] Added Google Fonts 'Inter' to index.html.
 - [Code Review Fix] Added unit tests for DaemonState and icon loading in `tests.rs`.
 - [Code Review Fix] Refactored `load_icon` for testability.
-- Implemented `Open UI` in `jellysync-daemon` using `std::process::Command`.
+- Implemented `Open UI` in `jellyfinsync-daemon` using `std::process::Command`.
 - The UI is launched via `npm run tauri dev` for development.
-- Implemented "Vibrant Hub" skeleton in `jellysync-ui` using Shoelace.
+- Implemented "Vibrant Hub" skeleton in `jellyfinsync-ui` using Shoelace.
 - Established 70/30 split layout (Library/Basket).
 - Applied dark theme and glassmorphism styling.
 
 ### File List
-- `jellysync-daemon/src/main.rs` (Modified)
-- `jellysync-ui/index.html` (Modified)
-- `jellysync-ui/package.json` (Modified)
-- `jellysync-ui/src/main.ts` (Modified)
-- `jellysync-ui/src/styles.css` (Modified)
+- `jellyfinsync-daemon/src/main.rs` (Modified)
+- `jellyfinsync-ui/index.html` (Modified)
+- `jellyfinsync-ui/package.json` (Modified)
+- `jellyfinsync-ui/src/main.ts` (Modified)
+- `jellyfinsync-ui/src/styles.css` (Modified)

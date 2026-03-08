@@ -63,7 +63,7 @@ so that **my on-the-go listening is reflected on my Jellyfin server**.
     - Returns `Ok(())` on HTTP 2xx, `Err` on any other status
     - Note: Jellyfin returns 200 with `UserItemDataDto` body — parse and discard; we only care about success/failure
 
-- [x] **T3: Create `jellysync-daemon/src/scrobbler.rs` module** (AC: #1, #2, #3, #4, #7)
+- [x] **T3: Create `jellyfinsync-daemon/src/scrobbler.rs` module** (AC: #1, #2, #3, #4, #7)
   - [x] T3.1: Define `ScrobblerEntry` struct:
     ```rust
     #[derive(Debug, Clone)]
@@ -153,7 +153,7 @@ so that **my on-the-go listening is reflected on my Jellyfin server**.
     - Return the `ScrobblerResult` serialized to JSON
 
 - [x] **T6: Verification** (AC: all)
-  - [x] T6.1: `cargo test` in `jellysync-daemon/` — all existing tests pass + new scrobbler unit tests pass (88 tests total, up from 82)
+  - [x] T6.1: `cargo test` in `jellyfinsync-daemon/` — all existing tests pass + new scrobbler unit tests pass (88 tests total, up from 82)
   - [ ] T6.2: Manual — Connect device WITH `.scrobbler.log` → logs show "[Scrobbler]" output with result stats
   - [ ] T6.3: Manual — Connect device WITHOUT `.scrobbler.log` → no scrobbler errors, daemon continues normally
   - [ ] T6.4: Manual — RPC call `scrobbler_get_last_result` → returns result object or null
@@ -242,13 +242,13 @@ Field order: artist, album, title, track_number, duration_seconds, rating, unix_
 ### Source Tree Components to Touch
 
 **Files to CREATE:**
-1. [jellysync-daemon/src/scrobbler.rs](jellysync-daemon/src/scrobbler.rs) — New module: parser, submission logic, result types, unit tests
+1. [jellyfinsync-daemon/src/scrobbler.rs](jellyfinsync-daemon/src/scrobbler.rs) — New module: parser, submission logic, result types, unit tests
 
 **Files to MODIFY:**
-2. [jellysync-daemon/src/db.rs](jellysync-daemon/src/db.rs) — Add `scrobble_history` table + `record_scrobble()` + `get_scrobble_count()` methods
-3. [jellysync-daemon/src/api.rs](jellysync-daemon/src/api.rs) — Add `search_audio_items()` + `report_item_played()` methods
-4. [jellysync-daemon/src/main.rs](jellysync-daemon/src/main.rs) — Declare `mod scrobbler`, add `last_scrobbler_result` Arc, hook device detection event
-5. [jellysync-daemon/src/rpc.rs](jellysync-daemon/src/rpc.rs) — Add `last_scrobbler_result` to `AppState`, add `scrobbler_get_last_result` handler
+2. [jellyfinsync-daemon/src/db.rs](jellyfinsync-daemon/src/db.rs) — Add `scrobble_history` table + `record_scrobble()` + `get_scrobble_count()` methods
+3. [jellyfinsync-daemon/src/api.rs](jellyfinsync-daemon/src/api.rs) — Add `search_audio_items()` + `report_item_played()` methods
+4. [jellyfinsync-daemon/src/main.rs](jellyfinsync-daemon/src/main.rs) — Declare `mod scrobbler`, add `last_scrobbler_result` Arc, hook device detection event
+5. [jellyfinsync-daemon/src/rpc.rs](jellyfinsync-daemon/src/rpc.rs) — Add `last_scrobbler_result` to `AppState`, add `scrobbler_get_last_result` handler
 
 **Files NOT to create or modify:**
 - Do NOT modify `device/mod.rs` — keep device detection clean; hooks go in `main.rs` event loop
@@ -259,14 +259,14 @@ Field order: artist, album, title, track_number, duration_seconds, rating, unix_
 ### Testing Standards Summary
 
 - **Unit tests**: Add `#[cfg(test)] mod tests` block inside `scrobbler.rs` — test the parser with inline log content
-- **Cargo test**: Run `cargo test` in `jellysync-daemon/` — all 82+ existing tests must continue to pass
+- **Cargo test**: Run `cargo test` in `jellyfinsync-daemon/` — all 82+ existing tests must continue to pass
 - **No mockito required for unit tests**: Parser tests don't need network mocking
 - **Integration test for API**: Not required for this story — manual verification is sufficient (same standard as Story 4.5)
 
 ### Project Structure Notes
 
 **Alignment with Unified Structure:**
-- New `scrobbler.rs` follows the existing flat module layout in `jellysync-daemon/src/` (same level as `sync.rs`, `db.rs`, `api.rs`)
+- New `scrobbler.rs` follows the existing flat module layout in `jellyfinsync-daemon/src/` (same level as `sync.rs`, `db.rs`, `api.rs`)
 - `ScrobblerResult` follows the established camelCase serde pattern (`SyncOperation`, `DeviceRootFoldersResponse`, etc.)
 - Background task pattern (`tokio::spawn` in main.rs device event loop) follows the existing device observer spawn pattern
 - `record_scrobble()` follows the `upsert_device_mapping()` UPSERT pattern in `db.rs`
@@ -305,14 +305,14 @@ Recent commits (`ddd3ac3 Review 4.5`, `bc25880 Fix sync`, `8c794c4 Dev for 4.5`)
 - [Source: architecture.md#api--communication-patterns] — "Direct utilization of the Jellyfin Progressive Sync API for scrobbling and playback reporting"
 - [Source: architecture.md#naming-patterns] — camelCase for all JSON-RPC fields
 - [Source: architecture.md#process-patterns] — `anyhow` for binary-level error management
-- [jellysync-daemon/src/db.rs:42](jellysync-daemon/src/db.rs#L42) — `Database::init()` where new table goes
-- [jellysync-daemon/src/db.rs:78](jellysync-daemon/src/db.rs#L78) — `upsert_device_mapping()` pattern for `record_scrobble()`
-- [jellysync-daemon/src/api.rs:107](jellysync-daemon/src/api.rs#L107) — `JellyfinClient` impl block — add new methods here
-- [jellysync-daemon/src/api.rs:170](jellysync-daemon/src/api.rs#L170) — `get_items()` method pattern to follow for `search_audio_items()`
-- [jellysync-daemon/src/rpc.rs:63](jellysync-daemon/src/rpc.rs#L63) — `AppState` struct definition — add `last_scrobbler_result` field
-- [jellysync-daemon/src/rpc.rs:107](jellysync-daemon/src/rpc.rs#L107) — RPC method match table — add `scrobbler_get_last_result` arm
-- [jellysync-daemon/src/main.rs:81](jellysync-daemon/src/main.rs#L81) — Device event channel — spawn scrobbler after DeviceEvent::Detected
-- [jellysync-daemon/src/main.rs:92](jellysync-daemon/src/main.rs#L92) — `rpc::run_server()` call — pass shared scrobbler result Arc here
+- [jellyfinsync-daemon/src/db.rs:42](jellyfinsync-daemon/src/db.rs#L42) — `Database::init()` where new table goes
+- [jellyfinsync-daemon/src/db.rs:78](jellyfinsync-daemon/src/db.rs#L78) — `upsert_device_mapping()` pattern for `record_scrobble()`
+- [jellyfinsync-daemon/src/api.rs:107](jellyfinsync-daemon/src/api.rs#L107) — `JellyfinClient` impl block — add new methods here
+- [jellyfinsync-daemon/src/api.rs:170](jellyfinsync-daemon/src/api.rs#L170) — `get_items()` method pattern to follow for `search_audio_items()`
+- [jellyfinsync-daemon/src/rpc.rs:63](jellyfinsync-daemon/src/rpc.rs#L63) — `AppState` struct definition — add `last_scrobbler_result` field
+- [jellyfinsync-daemon/src/rpc.rs:107](jellyfinsync-daemon/src/rpc.rs#L107) — RPC method match table — add `scrobbler_get_last_result` arm
+- [jellyfinsync-daemon/src/main.rs:81](jellyfinsync-daemon/src/main.rs#L81) — Device event channel — spawn scrobbler after DeviceEvent::Detected
+- [jellyfinsync-daemon/src/main.rs:92](jellyfinsync-daemon/src/main.rs#L92) — `rpc::run_server()` call — pass shared scrobbler result Arc here
 
 ## Dev Agent Record
 
@@ -354,11 +354,11 @@ Review found and fixed the following issues:
 
 ### File List
 
-- `jellysync-daemon/src/scrobbler.rs` (created)
-- `jellysync-daemon/src/db.rs` (modified)
-- `jellysync-daemon/src/api.rs` (modified)
-- `jellysync-daemon/src/main.rs` (modified)
-- `jellysync-daemon/src/rpc.rs` (modified)
+- `jellyfinsync-daemon/src/scrobbler.rs` (created)
+- `jellyfinsync-daemon/src/db.rs` (modified)
+- `jellyfinsync-daemon/src/api.rs` (modified)
+- `jellyfinsync-daemon/src/main.rs` (modified)
+- `jellyfinsync-daemon/src/rpc.rs` (modified)
 
 ## Change Log
 

@@ -12,7 +12,7 @@ so that **I don't lose progress after an accidental unplug**.
 
 ## Acceptance Criteria
 
-1. **Dirty Flag Detection**: When a device is reconnected after an interrupted sync, the engine MUST detect the `dirty: true` flag in the `.jellysync.json` manifest. (AC: #1)
+1. **Dirty Flag Detection**: When a device is reconnected after an interrupted sync, the engine MUST detect the `dirty: true` flag in the `.jellyfinsync.json` manifest. (AC: #1)
 
 2. **Dirty State Exposure**: `get_daemon_state` MUST include a `dirtyManifest` boolean field. A new `sync_get_resume_state` RPC method MUST return `isDirty`, `pendingItemIds`, and `cleanedTmpFiles`. (AC: #2)
 
@@ -29,7 +29,7 @@ so that **I don't lose progress after an accidental unplug**.
 ## Tasks / Subtasks
 
 - [x] **T1: Add `dirty` and `pending_item_ids` fields to `DeviceManifest`** (AC: #1, #4, #6)
-  - [x] T1.1: In `jellysync-daemon/src/device/mod.rs`, add two fields to `DeviceManifest` (after `synced_items`):
+  - [x] T1.1: In `jellyfinsync-daemon/src/device/mod.rs`, add two fields to `DeviceManifest` (after `synced_items`):
     ```rust
     #[serde(default)]
     pub dirty: bool,
@@ -38,12 +38,12 @@ so that **I don't lose progress after an accidental unplug**.
     ```
     Both use `#[serde(default)]` — backward-compatible with existing manifests (missing fields deserialize as `false`/`[]`). `DeviceManifest` does NOT have `#[serde(rename_all)]`, so these serialize as `"dirty"` and `"pending_item_ids"` in JSON (snake_case, matching the existing `device_id`, `managed_paths` etc.).
   - [x] T1.2: Add `dirty: false, pending_item_ids: vec![],` to every `DeviceManifest { ... }` struct literal in the codebase (compilation fails otherwise):
-    - `jellysync-daemon/src/device/tests.rs`: `test_write_manifest_creates_files` (~line 196), `test_write_manifest_overwrites_existing` (two constructions, ~line 237 and ~line 246)
-    - `jellysync-daemon/src/sync.rs`: `empty_manifest()` test helper (~line 752)
-    - `jellysync-daemon/src/rpc.rs`: `test_rpc_sync_get_device_status_map_with_synced_items` (~line 1218), `test_rpc_sync_calculate_delta_partial_failure` (~line 1316)
+    - `jellyfinsync-daemon/src/device/tests.rs`: `test_write_manifest_creates_files` (~line 196), `test_write_manifest_overwrites_existing` (two constructions, ~line 237 and ~line 246)
+    - `jellyfinsync-daemon/src/sync.rs`: `empty_manifest()` test helper (~line 752)
+    - `jellyfinsync-daemon/src/rpc.rs`: `test_rpc_sync_get_device_status_map_with_synced_items` (~line 1218), `test_rpc_sync_calculate_delta_partial_failure` (~line 1316)
 
 - [x] **T2: Add `cleanup_tmp_files` async function** (AC: #3)
-  - [x] T2.1: In `jellysync-daemon/src/device/mod.rs`, add after `write_manifest`:
+  - [x] T2.1: In `jellyfinsync-daemon/src/device/mod.rs`, add after `write_manifest`:
     ```rust
     /// Scans the managed zone (`device_root/Music/`) recursively for leftover `.tmp`
     /// files from interrupted writes and deletes them. Returns the count of deleted files.
@@ -81,10 +81,10 @@ so that **I don't lose progress after an accidental unplug**.
         Ok(count)
     }
     ```
-    **Implementation note**: Uses an iterative stack (no async recursion) to avoid Rust's boxed-future requirement for recursive async functions. Targets only `Music/` because that is the hardcoded managed path used by `execute_sync`. The `.jellysync.json.tmp` at device root is NOT in `Music/`, so it is unaffected.
+    **Implementation note**: Uses an iterative stack (no async recursion) to avoid Rust's boxed-future requirement for recursive async functions. Targets only `Music/` because that is the hardcoded managed path used by `execute_sync`. The `.jellyfinsync.json.tmp` at device root is NOT in `Music/`, so it is unaffected.
 
 - [x] **T3: Modify `execute_sync` for per-file manifest updates** (AC: #5)
-  - [x] T3.1: Add `device_manager: Arc<crate::device::DeviceManager>` as the final parameter to `execute_sync` in `jellysync-daemon/src/sync.rs`. New signature:
+  - [x] T3.1: Add `device_manager: Arc<crate::device::DeviceManager>` as the final parameter to `execute_sync` in `jellyfinsync-daemon/src/sync.rs`. New signature:
     ```rust
     pub async fn execute_sync(
         delta: &SyncDelta,
@@ -286,7 +286,7 @@ so that **I don't lose progress after an accidental unplug**.
             pending_item_ids: vec!["id-1".to_string(), "id-2".to_string()],
         };
         write_manifest(dir.path(), &manifest).await.unwrap();
-        let content = tokio::fs::read_to_string(dir.path().join(".jellysync.json")).await.unwrap();
+        let content = tokio::fs::read_to_string(dir.path().join(".jellyfinsync.json")).await.unwrap();
         let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
         assert!(loaded.dirty);
         assert_eq!(loaded.pending_item_ids, vec!["id-1", "id-2"]);
@@ -336,7 +336,7 @@ so that **I don't lose progress after an accidental unplug**.
 
 **CRITICAL PATTERNS — MANDATORY:**
 
-- **Atomic Manifest Writes** (from `architecture.md`, Safety & Atomicity): Every `write_manifest` call uses the existing Write-Temp-Rename pattern in `device/mod.rs`. Do NOT bypass this — never write `.jellysync.json` directly, always go through `write_manifest`. Per-file manifest updates use this same function.
+- **Atomic Manifest Writes** (from `architecture.md`, Safety & Atomicity): Every `write_manifest` call uses the existing Write-Temp-Rename pattern in `device/mod.rs`. Do NOT bypass this — never write `.jellyfinsync.json` directly, always go through `write_manifest`. Per-file manifest updates use this same function.
 
 - **`sync_all` before rename** (from `architecture.md`, Enforcement Guidelines): `write_manifest` already calls `file.sync_all()` before `rename`. No additional work needed for atomicity.
 
@@ -451,15 +451,15 @@ The existing manifest-update block in the `Ok` branch (6 lines with `extend`, `r
 - `rpc.rs` gains one new handler function + one new route + modifications to two existing handlers
 
 **Files to Modify:**
-1. `jellysync-daemon/src/device/mod.rs` — `DeviceManifest` struct extension, `cleanup_tmp_files` function
-2. `jellysync-daemon/src/device/tests.rs` — struct literal updates + new tests (T7.1–T7.7)
-3. `jellysync-daemon/src/sync.rs` — `execute_sync` signature change + per-file manifest updates + struct literal update in `empty_manifest()`
-4. `jellysync-daemon/src/rpc.rs` — `handle_sync_execute` refactor + `handle_get_daemon_state` update + `handle_sync_get_resume_state` (new) + route table + struct literal updates + new tests (T7.8–T7.12)
+1. `jellyfinsync-daemon/src/device/mod.rs` — `DeviceManifest` struct extension, `cleanup_tmp_files` function
+2. `jellyfinsync-daemon/src/device/tests.rs` — struct literal updates + new tests (T7.1–T7.7)
+3. `jellyfinsync-daemon/src/sync.rs` — `execute_sync` signature change + per-file manifest updates + struct literal update in `empty_manifest()`
+4. `jellyfinsync-daemon/src/rpc.rs` — `handle_sync_execute` refactor + `handle_get_daemon_state` update + `handle_sync_get_resume_state` (new) + route table + struct literal updates + new tests (T7.8–T7.12)
 
 **Files NOT to Modify:**
-- `jellysync-daemon/src/api.rs` — No changes
-- `jellysync-daemon/src/db.rs` — No changes (no SQLite needed for this story)
-- `jellysync-daemon/Cargo.toml` — No new dependencies
+- `jellyfinsync-daemon/src/api.rs` — No changes
+- `jellyfinsync-daemon/src/db.rs` — No changes (no SQLite needed for this story)
+- `jellyfinsync-daemon/Cargo.toml` — No new dependencies
 - `Cargo.lock` — No new dependencies
 
 ### Critical Developer Guardrails
@@ -478,7 +478,7 @@ The existing manifest-update block in the `Ok` branch (6 lines with `extend`, `r
 
 6. **Do NOT write manifest inside `execute_sync` for ID-change items that previously removed the old entry from `synced_items`** — The old entry is in the CURRENT manifest at call time, so `retain` removes it correctly. The issue to avoid: if `get_current_device()` returns `None` (device disconnected mid-sync), skip the per-file write silently.
 
-7. **`cleanup_tmp_files` only scans `Music/`** — Do NOT scan the device root. The `.jellysync.json.tmp` at device root is managed by `write_manifest` itself and must not be deleted by cleanup.
+7. **`cleanup_tmp_files` only scans `Music/`** — Do NOT scan the device root. The `.jellyfinsync.json.tmp` at device root is managed by `write_manifest` itself and must not be deleted by cleanup.
 
 🔥 **COMMON MISTAKES TO PREVENT:**
 
@@ -507,17 +507,17 @@ The existing manifest-update block in the `Ok` branch (6 lines with `extend`, `r
 - [Story 4.3: Code Review Notes](../../_bmad-output/implementation-artifacts/4-3-legacy-hardware-constraints-path-char-validation.md#senior-developer-review-ai) — Per-file manifest pattern consistent with existing atomicity approach; debug `println!` removal reminder
 
 **Source Code Locations:**
-- [jellysync-daemon/src/device/mod.rs:24-33](../../jellysync-daemon/src/device/mod.rs#L24) — `DeviceManifest` struct (add dirty + pending_item_ids after line 33)
-- [jellysync-daemon/src/device/mod.rs:35-52](../../jellysync-daemon/src/device/mod.rs#L35) — `write_manifest` (add `cleanup_tmp_files` after this function)
-- [jellysync-daemon/src/sync.rs:333-541](../../jellysync-daemon/src/sync.rs#L333) — `execute_sync` function (add device_manager param, per-file writes)
-- [jellysync-daemon/src/sync.rs:441-477](../../jellysync-daemon/src/sync.rs#L441) — Successful add block in `execute_sync` (add per-file write after `synced_items.push`)
-- [jellysync-daemon/src/sync.rs:494-512](../../jellysync-daemon/src/sync.rs#L494) — Successful delete block in `execute_sync` (add per-file write after `files_completed += 1`)
-- [jellysync-daemon/src/sync.rs:515-538](../../jellysync-daemon/src/sync.rs#L515) — ID change block in `execute_sync` (add per-file write after `synced_items.push`)
-- [jellysync-daemon/src/sync.rs:751-759](../../jellysync-daemon/src/sync.rs#L751) — `empty_manifest()` test helper (add dirty + pending_item_ids)
-- [jellysync-daemon/src/rpc.rs:107-134](../../jellysync-daemon/src/rpc.rs#L107) — `handler` match (add `sync_get_resume_state` route)
-- [jellysync-daemon/src/rpc.rs:319-334](../../jellysync-daemon/src/rpc.rs#L319) — `handle_get_daemon_state` (add `dirtyManifest` field)
-- [jellysync-daemon/src/rpc.rs:725-847](../../jellysync-daemon/src/rpc.rs#L725) — `handle_sync_execute` (full refactor for T4)
-- [jellysync-daemon/src/rpc.rs:792-815](../../jellysync-daemon/src/rpc.rs#L792) — Existing manifest extend/retain block INSIDE `tokio::spawn` (delete entirely, replace with dirty-clear)
+- [jellyfinsync-daemon/src/device/mod.rs:24-33](../../jellyfinsync-daemon/src/device/mod.rs#L24) — `DeviceManifest` struct (add dirty + pending_item_ids after line 33)
+- [jellyfinsync-daemon/src/device/mod.rs:35-52](../../jellyfinsync-daemon/src/device/mod.rs#L35) — `write_manifest` (add `cleanup_tmp_files` after this function)
+- [jellyfinsync-daemon/src/sync.rs:333-541](../../jellyfinsync-daemon/src/sync.rs#L333) — `execute_sync` function (add device_manager param, per-file writes)
+- [jellyfinsync-daemon/src/sync.rs:441-477](../../jellyfinsync-daemon/src/sync.rs#L441) — Successful add block in `execute_sync` (add per-file write after `synced_items.push`)
+- [jellyfinsync-daemon/src/sync.rs:494-512](../../jellyfinsync-daemon/src/sync.rs#L494) — Successful delete block in `execute_sync` (add per-file write after `files_completed += 1`)
+- [jellyfinsync-daemon/src/sync.rs:515-538](../../jellyfinsync-daemon/src/sync.rs#L515) — ID change block in `execute_sync` (add per-file write after `synced_items.push`)
+- [jellyfinsync-daemon/src/sync.rs:751-759](../../jellyfinsync-daemon/src/sync.rs#L751) — `empty_manifest()` test helper (add dirty + pending_item_ids)
+- [jellyfinsync-daemon/src/rpc.rs:107-134](../../jellyfinsync-daemon/src/rpc.rs#L107) — `handler` match (add `sync_get_resume_state` route)
+- [jellyfinsync-daemon/src/rpc.rs:319-334](../../jellyfinsync-daemon/src/rpc.rs#L319) — `handle_get_daemon_state` (add `dirtyManifest` field)
+- [jellyfinsync-daemon/src/rpc.rs:725-847](../../jellyfinsync-daemon/src/rpc.rs#L725) — `handle_sync_execute` (full refactor for T4)
+- [jellyfinsync-daemon/src/rpc.rs:792-815](../../jellyfinsync-daemon/src/rpc.rs#L792) — Existing manifest extend/retain block INSIDE `tokio::spawn` (delete entirely, replace with dirty-clear)
 
 ## Dev Agent Record
 
@@ -527,7 +527,7 @@ claude-sonnet-4-6
 
 ### Debug Log References
 
-No blocking issues. One additional struct literal was found in `jellysync-daemon/src/tests.rs` (crate integration test file, not listed in story's Dev Notes) — added `dirty: false, pending_item_ids: vec![]` to fix compilation.
+No blocking issues. One additional struct literal was found in `jellyfinsync-daemon/src/tests.rs` (crate integration test file, not listed in story's Dev Notes) — added `dirty: false, pending_item_ids: vec![]` to fix compilation.
 
 ### Completion Notes List
 
@@ -543,11 +543,11 @@ No blocking issues. One additional struct literal was found in `jellysync-daemon
 
 ### File List
 
-- `jellysync-daemon/src/device/mod.rs`
-- `jellysync-daemon/src/device/tests.rs`
-- `jellysync-daemon/src/sync.rs`
-- `jellysync-daemon/src/rpc.rs`
-- `jellysync-daemon/src/tests.rs`
+- `jellyfinsync-daemon/src/device/mod.rs`
+- `jellyfinsync-daemon/src/device/tests.rs`
+- `jellyfinsync-daemon/src/sync.rs`
+- `jellyfinsync-daemon/src/rpc.rs`
+- `jellyfinsync-daemon/src/tests.rs`
 
 ## Change Log
 

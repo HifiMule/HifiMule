@@ -27,7 +27,7 @@ missingFiles:
 
 - **FR1:** The system can automatically detect Mass Storage devices (USB) on Windows, Linux, and macOS.
 - **FR2:** Users can manually select a target device folder if automatic detection fails.
-- **FR3:** The system can identify the presence of a `.jellysync.json` manifest on discovery.
+- **FR3:** The system can identify the presence of a `.jellyfinsync.json` manifest on discovery.
 - **FR4:** The system can read persistent hardware identifiers to link devices across different sessions.
 - **FR5:** Users can configure Jellyfin server credentials (URL, username, token).
 - **FR6:** Users can select a specific Jellyfin user profile for syncing.
