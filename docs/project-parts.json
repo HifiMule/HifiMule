@@ -1,0 +1,49 @@
+{
+  "repository_type": "monorepo",
+  "workspace_type": "cargo",
+  "parts": [
+    {
+      "part_id": "jellyfinsync-daemon",
+      "display_name": "JellyfinSync Daemon",
+      "project_type_id": "backend",
+      "root_path": "jellyfinsync-daemon/",
+      "primary_language": "Rust",
+      "primary_framework": "Axum",
+      "entry_points": ["src/main.rs"],
+      "description": "Background daemon service with system tray, JSON-RPC API, Jellyfin client, SQLite storage"
+    },
+    {
+      "part_id": "jellyfinsync-ui",
+      "display_name": "JellyfinSync UI",
+      "project_type_id": "desktop",
+      "root_path": "jellyfinsync-ui/",
+      "primary_language": "TypeScript",
+      "primary_framework": "Tauri 2",
+      "entry_points": ["src/main.ts", "src-tauri/src/main.rs"],
+      "description": "Tauri 2 desktop application with TypeScript/Vite frontend and Shoelace web components"
+    }
+  ],
+  "integration_points": [
+    {
+      "from": "jellyfinsync-ui",
+      "to": "jellyfinsync-daemon",
+      "type": "JSON-RPC 2.0 over HTTP",
+      "endpoint": "http://127.0.0.1:19140/",
+      "method_count": 24,
+      "details": "UI sends JSON-RPC requests to daemon for all data and operations"
+    },
+    {
+      "from": "jellyfinsync-ui",
+      "to": "jellyfinsync-daemon",
+      "type": "HTTP GET",
+      "endpoint": "http://127.0.0.1:19140/jellyfin/image/{id}",
+      "details": "Image proxy — daemon fetches Jellyfin artwork with auth"
+    },
+    {
+      "from": "jellyfinsync-daemon",
+      "to": "Jellyfin Server (external)",
+      "type": "HTTP/HTTPS",
+      "details": "Daemon communicates with remote Jellyfin server for library data and media downloads"
+    }
+  ]
+}
