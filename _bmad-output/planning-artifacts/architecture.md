@@ -111,6 +111,12 @@ npx create-tauri-app@latest jellyfinsync-ui --template vanilla-ts
 - **Core Logic:** Extracted into a local `jellyfinsync-core` library crate shared between binary crates if needed.
 - **Tests:** Co-located in mod `tests` blocks (Rust) or `*.test.ts` (TypeScript).
 
+**Packaging & Distribution:**
+- **Bundler:** Tauri v2 built-in bundler for platform-native installers (MSI, DMG, AppImage/.deb).
+- **Daemon Bundling:** The `jellyfinsync-daemon` binary is included as a Tauri sidecar, bundled alongside the UI.
+- **CI/CD:** GitHub Actions matrix build targeting Windows, Linux, and macOS with artifact upload to GitHub Releases.
+- **Code Signing:** Platform-specific signing (Windows Authenticode, macOS notarization) deferred to post-MVP unless required for distribution.
+
 ### Format Patterns
 
 **API Response Formats:**

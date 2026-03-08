@@ -173,6 +173,10 @@ As a cross-platform desktop application, JellyfinSync consists of a performance-
 - **FR23:** The system can send OS-native notifications for sync completion or errors.
 - **FR25:** The system retrieves and displays only music-centric content (Playlists, Albums, Artists, Tracks), automatically filtering out movies, series, and books from Jellyfin views.
 
+### 7. Packaging & Distribution
+- **FR27:** The system can be packaged into platform-native installers (MSI for Windows, DMG for macOS, AppImage/.deb for Linux) using the Tauri v2 bundler.
+- **FR28:** The build pipeline can produce signed, distributable artifacts for all three target platforms from a single CI workflow.
+
 ## Quality & Non-Functional Requirements
 
 ### 1. Performance & Efficiency

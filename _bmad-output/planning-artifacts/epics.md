@@ -93,6 +93,8 @@ FR21: Epic 1 - Toggle Launch on Startup
 FR22: Epic 1 - System Tray Lifecycle Hub
 FR23: Epic 5 - OS-Native Sync Notifications
 FR24: Epic 2 - Startup Splash Screen with Connection Status
+FR27: Epic 6 - Platform-Native Installer Bundling
+FR28: Epic 6 - CI/CD Cross-Platform Build Pipeline
 
 ## Epic List
 
@@ -458,3 +460,93 @@ So that I can recover my "Managed" status without a full wipe.
 **When** I open the Repair UI
 **Then** the tool shows a side-by-side view of "Actual Files" vs "Manifest Record".
 **And** allows me to click "Re-link" or "Prune" to fix the state.
+
+## Epic 6: Packaging & Distribution
+
+Package JellyfinSync into platform-native installers and establish automated cross-platform build pipelines.
+
+### Story 6.1: Tauri Bundler Configuration & Sidecar Packaging
+
+As a System Admin (Alexis),
+I want the Tauri bundler configured to include the `jellyfinsync-daemon` binary as a sidecar,
+So that a single installer delivers both the UI and the headless engine as a cohesive application.
+
+**Acceptance Criteria:**
+
+**Given** the Cargo workspace with both crates built
+**When** I run `cargo tauri build`
+**Then** the output produces a platform-native installer containing both the Tauri UI and the daemon sidecar.
+**And** the installed application can launch the daemon from the bundled sidecar path.
+**And** the application icon, name ("JellyfinSync"), and metadata are correctly embedded.
+
+### Story 6.2: Windows Installer (MSI)
+
+As a Ritualist (Arthur),
+I want a standard Windows MSI installer,
+So that I can install JellyfinSync like any other desktop application on my Windows PC.
+
+**Acceptance Criteria:**
+
+**Given** a successful `cargo tauri build` on Windows
+**When** I run the generated MSI
+**Then** JellyfinSync is installed to Program Files with Start Menu shortcuts.
+**And** the daemon sidecar is placed alongside the main executable.
+**And** uninstallation via "Add/Remove Programs" cleanly removes all installed files.
+
+### Story 6.3: macOS Installer (DMG)
+
+As a Convenience Seeker (Sarah),
+I want a macOS DMG with drag-to-Applications install,
+So that I can install JellyfinSync following standard macOS conventions.
+
+**Acceptance Criteria:**
+
+**Given** a successful `cargo tauri build` on macOS
+**When** I open the generated DMG
+**Then** I see the JellyfinSync app bundle with a drag-to-Applications prompt.
+**And** the app runs without requiring root/sudo privileges (macOS sandbox compliance — NFR9).
+**And** the daemon sidecar is embedded within the .app bundle.
+
+### Story 6.4: Linux Packages (AppImage & .deb)
+
+As a System Admin (Alexis),
+I want AppImage and .deb packages for Linux,
+So that I can install JellyfinSync on both Debian-based systems and any Linux distro via AppImage.
+
+**Acceptance Criteria:**
+
+**Given** a successful `cargo tauri build` on Linux
+**When** I run the AppImage
+**Then** JellyfinSync launches without requiring installation.
+**When** I install the .deb package
+**Then** JellyfinSync is installed with a desktop entry and can be launched from the application menu.
+**And** both formats include the daemon sidecar binary.
+
+### Story 6.5: CI/CD Cross-Platform Build Pipeline
+
+As a System Admin (Alexis),
+I want an automated GitHub Actions workflow that builds and publishes installers for all three platforms,
+So that every release produces verified, downloadable artifacts without manual per-platform builds.
+
+**Acceptance Criteria:**
+
+**Given** a tagged release commit (e.g., `v0.1.0`) is pushed
+**When** the GitHub Actions workflow triggers
+**Then** it builds JellyfinSync on Windows, macOS, and Linux runners in parallel.
+**And** each build produces the platform-native installer (MSI, DMG, AppImage, .deb).
+**And** all artifacts are uploaded to a GitHub Release draft.
+**And** the workflow fails clearly if any platform build fails.
+
+### Story 6.6: Installation Smoke Tests
+
+As a System Admin (Alexis),
+I want basic smoke tests that verify each installer produces a working application,
+So that I can catch packaging regressions before releasing.
+
+**Acceptance Criteria:**
+
+**Given** a freshly built installer for any platform
+**When** the smoke test runs (install → launch → verify daemon starts → uninstall)
+**Then** each step completes successfully.
+**And** the test verifies the daemon sidecar is reachable and responds to a health-check RPC call.
+**And** failures produce clear diagnostic output identifying which step failed.
