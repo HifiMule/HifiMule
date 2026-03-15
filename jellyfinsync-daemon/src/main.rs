@@ -15,11 +15,19 @@ use tray_icon::{
 #[cfg(windows)]
 mod service;
 
+const LOG_MAX_BYTES: u64 = 1_048_576; // 1 MB
+
 /// Simple file-based logger for release mode where stdout/stderr are unavailable.
-/// Writes to `%APPDATA%/JellyfinSync/daemon.log`.
+/// Writes to `%APPDATA%/JellyfinSync/daemon.log`. Truncates at 1 MB.
 pub fn log_to_file(msg: &str) {
     if let Ok(dir) = paths::get_app_data_dir() {
         let log_path = dir.join("daemon.log");
+        // Truncate if over 1 MB
+        if let Ok(meta) = std::fs::metadata(&log_path) {
+            if meta.len() > LOG_MAX_BYTES {
+                let _ = std::fs::write(&log_path, "--- log truncated ---\n");
+            }
+        }
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)

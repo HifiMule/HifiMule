@@ -48,24 +48,50 @@ pub fn install() -> anyhow::Result<()> {
         executable_path: exe_path,
         launch_arguments: vec![OsString::from("--service")],
         dependencies: vec![],
-        account_name: None, // LocalSystem
+        account_name: None, // LocalSystem — needed for user keyring access
         account_password: None,
     };
 
-    let service = manager
-        .create_service(&service_info, ServiceAccess::START | ServiceAccess::CHANGE_CONFIG)
-        .map_err(|e| {
-            crate::daemon_log!("--install-service: create_service failed: {}", e);
-            e
-        })?;
+    // Try to open existing service first (upgrade path), fall back to create
+    let service = match manager.open_service(
+        SERVICE_NAME,
+        ServiceAccess::START | ServiceAccess::CHANGE_CONFIG | ServiceAccess::STOP | ServiceAccess::QUERY_STATUS,
+    ) {
+        Ok(existing) => {
+            crate::daemon_log!("--install-service: service already exists, updating config");
+            // Stop existing service before updating
+            let _ = existing.stop();
+            for _ in 0..10 {
+                if let Ok(status) = existing.query_status() {
+                    if status.current_state == ServiceState::Stopped {
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            existing.change_config(&service_info).map_err(|e| {
+                crate::daemon_log!("--install-service: change_config failed: {}", e);
+                e
+            })?;
+            existing
+        }
+        Err(_) => {
+            manager
+                .create_service(&service_info, ServiceAccess::START | ServiceAccess::CHANGE_CONFIG)
+                .map_err(|e| {
+                    crate::daemon_log!("--install-service: create_service failed: {}", e);
+                    e
+                })?
+        }
+    };
 
-    crate::daemon_log!("--install-service: service created, setting description");
+    crate::daemon_log!("--install-service: setting description");
 
     let _ = service.set_description("Background sync service for JellyfinSync media synchronization");
 
     crate::daemon_log!("--install-service: starting service");
 
-    if let Err(e) = service.start(&[OsString::from("--service")]) {
+    if let Err(e) = service.start::<OsString>(&[]) {
         crate::daemon_log!("--install-service: start failed (may need reboot): {}", e);
     }
 
@@ -128,11 +154,10 @@ fn daemon_service_main(_args: Vec<OsString>) {
 }
 
 fn run_service() -> anyhow::Result<()> {
-    // Start the core daemon (RPC server, device observer, etc.)
-    let (shutdown, _state_rx) = crate::start_daemon_core()?;
+    // Register SCM handler FIRST so stop signals aren't lost during startup
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let shutdown_for_handler = shutdown.clone();
 
-    // Register service control handler
     let status_handle = service_control_handler::register(
         SERVICE_NAME,
         move |control| match control {
@@ -144,6 +169,30 @@ fn run_service() -> anyhow::Result<()> {
             _ => ServiceControlHandlerResult::NotImplemented,
         },
     )?;
+
+    // Report StartPending while we initialize
+    status_handle.set_service_status(ServiceStatus {
+        service_type: SERVICE_TYPE,
+        current_state: ServiceState::StartPending,
+        controls_accepted: ServiceControlAccept::empty(),
+        exit_code: ServiceExitCode::Win32(0),
+        checkpoint: 1,
+        wait_hint: Duration::from_secs(10),
+        process_id: None,
+    })?;
+
+    // Now start the core daemon (RPC server, device observer, etc.)
+    let (core_shutdown, _state_rx) = crate::start_daemon_core()?;
+
+    // Link the SCM shutdown signal to the daemon core's shutdown signal
+    let core_shutdown_link = core_shutdown.clone();
+    let scm_shutdown = shutdown.clone();
+    std::thread::spawn(move || {
+        while !scm_shutdown.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        core_shutdown_link.store(true, Ordering::Relaxed);
+    });
 
     // Report running status to SCM
     status_handle.set_service_status(ServiceStatus {
@@ -163,6 +212,8 @@ fn run_service() -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(100));
     }
 
+    // Ensure daemon core also shuts down
+    core_shutdown.store(true, Ordering::Relaxed);
     crate::daemon_log!("Windows Service stopping");
 
     // Report stopped status to SCM

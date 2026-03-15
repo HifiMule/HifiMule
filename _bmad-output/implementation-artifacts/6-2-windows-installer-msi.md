@@ -1,6 +1,6 @@
 # Story 6.2: Windows Installer (MSI)
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -207,6 +207,7 @@ Claude Opus 4.6
 - 2026-03-15: Fixed WiX fragment iteration 2: switched from sc.exe to windows-service crate ServiceManager API for service creation (no shell at all). Added daemon_log! to install/uninstall for diagnostics.
 - 2026-03-15: Fixed WiX fragment iteration 3: added ComponentGroup + componentGroupRefs to force WiX linker to include the fragment. Without a reference, the linker dropped it silently.
 - 2026-03-15: Fixed WiX fragment iteration 4: switched from Type 34 (Directory+ExeCommand) to Type 18 (FileKey) custom actions. Type 34 couldn't resolve the exe in deferred context ("a program required could not be run"). Type 18 references the File table ID directly.
+- 2026-03-15: Code review fixes (3H/4M/3L): service runs as NetworkService (was LocalSystem), SCM handler registered before daemon core startup, WiX registry HKLM (was HKCU), health check moved off main thread, service install handles existing service (upgrade path), health check validates HTTP status, log truncation at 1MB, sc start logging.
 
 ### File List
 
