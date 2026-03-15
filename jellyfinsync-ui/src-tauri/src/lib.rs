@@ -6,6 +6,8 @@ use tauri_plugin_shell::ShellExt;
 struct DaemonProcess(Mutex<Option<CommandChild>>);
 
 /// Stores the sidecar launch status so the frontend can query it.
+/// Values: "starting", "service" (connected to Windows Service), "running (pid=N)",
+/// "spawn_failed: ...", "command_failed: ...", "terminated (code=N)"
 struct SidecarStatus(Mutex<String>);
 
 const RPC_PORT: u16 = 19140;
@@ -13,6 +15,41 @@ const RPC_PORT: u16 = 19140;
 #[tauri::command]
 fn get_sidecar_status(state: tauri::State<'_, SidecarStatus>) -> String {
     state.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Check if the daemon is already running by sending a health-check RPC call.
+fn check_daemon_health() -> bool {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build();
+    let client = match client {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "get_daemon_state",
+        "params": {},
+        "id": 1
+    });
+    client
+        .post(format!("http://127.0.0.1:{}", RPC_PORT))
+        .json(&body)
+        .send()
+        .is_ok()
+}
+
+/// Attempt to start the daemon Windows Service via `sc start`.
+#[cfg(windows)]
+fn try_start_service() -> bool {
+    use std::process::Command;
+    let result = Command::new("sc")
+        .args(["start", "jellyfinsync-daemon"])
+        .output();
+    match result {
+        Ok(output) => output.status.success(),
+        Err(_) => false,
+    }
 }
 
 /// Proxies a Jellyfin image from the daemon, returning it as a base64 data URL.
@@ -92,6 +129,95 @@ async fn rpc_proxy(method: String, params: serde_json::Value) -> Result<serde_js
     Ok(data.get("result").cloned().unwrap_or(serde_json::Value::Null))
 }
 
+/// Spawn the daemon as a sidecar process (fallback when service is not available).
+fn spawn_sidecar(app: &tauri::App) {
+    match app.shell().sidecar("jellyfinsync-daemon") {
+        Ok(sidecar) => {
+            ui_log("Sidecar command created, spawning...");
+            match sidecar.spawn() {
+                Ok((mut rx, child)) => {
+                    ui_log(&format!(
+                        "Sidecar spawned successfully (pid={})",
+                        child.pid()
+                    ));
+                    if let Some(state) = app.try_state::<SidecarStatus>() {
+                        if let Ok(mut s) = state.0.lock() {
+                            *s = format!("running (pid={})", child.pid());
+                        }
+                    }
+                    if let Some(state) = app.try_state::<DaemonProcess>() {
+                        if let Ok(mut daemon_proc) = state.0.lock() {
+                            *daemon_proc = Some(child);
+                        }
+                    }
+
+                    // Listen for sidecar events in background
+                    let app_handle = app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        use tauri_plugin_shell::process::CommandEvent;
+                        while let Some(event) = rx.recv().await {
+                            match event {
+                                CommandEvent::Stdout(line) => {
+                                    ui_log(&format!(
+                                        "Daemon stdout: {}",
+                                        String::from_utf8_lossy(&line)
+                                    ));
+                                }
+                                CommandEvent::Stderr(line) => {
+                                    ui_log(&format!(
+                                        "Daemon stderr: {}",
+                                        String::from_utf8_lossy(&line)
+                                    ));
+                                }
+                                CommandEvent::Terminated(payload) => {
+                                    let msg = format!(
+                                        "Daemon process terminated (code={:?}, signal={:?})",
+                                        payload.code, payload.signal
+                                    );
+                                    ui_log(&msg);
+                                    if let Some(state) =
+                                        app_handle.try_state::<SidecarStatus>()
+                                    {
+                                        if let Ok(mut s) = state.0.lock() {
+                                            *s = format!(
+                                                "terminated (code={:?})",
+                                                payload.code
+                                            );
+                                        }
+                                    }
+                                    break;
+                                }
+                                CommandEvent::Error(err) => {
+                                    ui_log(&format!("Daemon event error: {}", err));
+                                }
+                                _ => {}
+                            }
+                        }
+                    });
+                }
+                Err(e) => {
+                    let msg = format!("Failed to spawn sidecar: {}", e);
+                    ui_log(&msg);
+                    if let Some(state) = app.try_state::<SidecarStatus>() {
+                        if let Ok(mut s) = state.0.lock() {
+                            *s = format!("spawn_failed: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            let msg = format!("Failed to create sidecar command: {}", e);
+            ui_log(&msg);
+            if let Some(state) = app.try_state::<SidecarStatus>() {
+                if let Ok(mut s) = state.0.lock() {
+                    *s = format!("command_failed: {}", e);
+                }
+            }
+        }
+    }
+}
+
 /// Simple file-based log for release mode where stdout/stderr are unavailable.
 fn ui_log(msg: &str) {
     // Always try println (works in debug mode)
@@ -132,79 +258,44 @@ pub fn run() {
             app.manage(DaemonProcess(Mutex::new(None)));
             app.manage(SidecarStatus(Mutex::new("starting".to_string())));
 
-            // Launch the daemon sidecar on startup gracefully without panicking
-            match app.shell().sidecar("jellyfinsync-daemon") {
-                Ok(sidecar) => {
-                    ui_log("Sidecar command created, spawning...");
-                    match sidecar.spawn() {
-                        Ok((mut rx, child)) => {
-                            ui_log(&format!(
-                                "Sidecar spawned successfully (pid={})",
-                                child.pid()
-                            ));
-                            if let Some(state) = app.try_state::<SidecarStatus>() {
-                                if let Ok(mut s) = state.0.lock() {
-                                    *s = format!("running (pid={})", child.pid());
-                                }
-                            }
-                            if let Some(state) = app.try_state::<DaemonProcess>() {
-                                if let Ok(mut daemon_proc) = state.0.lock() {
-                                    *daemon_proc = Some(child);
-                                }
-                            }
-
-                            // Listen for sidecar events in background
-                            let app_handle = app.handle().clone();
-                            tauri::async_runtime::spawn(async move {
-                                use tauri_plugin_shell::process::CommandEvent;
-                                while let Some(event) = rx.recv().await {
-                                    match event {
-                                        CommandEvent::Stdout(line) => {
-                                            ui_log(&format!("Daemon stdout: {}", String::from_utf8_lossy(&line)));
-                                        }
-                                        CommandEvent::Stderr(line) => {
-                                            ui_log(&format!("Daemon stderr: {}", String::from_utf8_lossy(&line)));
-                                        }
-                                        CommandEvent::Terminated(payload) => {
-                                            let msg = format!(
-                                                "Daemon process terminated (code={:?}, signal={:?})",
-                                                payload.code, payload.signal
-                                            );
-                                            ui_log(&msg);
-                                            if let Some(state) = app_handle.try_state::<SidecarStatus>() {
-                                                if let Ok(mut s) = state.0.lock() {
-                                                    *s = format!("terminated (code={:?})", payload.code);
-                                                }
-                                            }
-                                            break;
-                                        }
-                                        CommandEvent::Error(err) => {
-                                            ui_log(&format!("Daemon event error: {}", err));
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            });
-                        }
-                        Err(e) => {
-                            let msg = format!("Failed to spawn sidecar: {}", e);
-                            ui_log(&msg);
-                            if let Some(state) = app.try_state::<SidecarStatus>() {
-                                if let Ok(mut s) = state.0.lock() {
-                                    *s = format!("spawn_failed: {}", e);
-                                }
-                            }
-                        }
+            // Step 1: Check if daemon is already running (e.g., as a Windows Service)
+            if check_daemon_health() {
+                ui_log("Daemon already running (service or existing instance), skipping sidecar spawn");
+                if let Some(state) = app.try_state::<SidecarStatus>() {
+                    if let Ok(mut s) = state.0.lock() {
+                        *s = "service".to_string();
                     }
                 }
-                Err(e) => {
-                    let msg = format!("Failed to create sidecar command: {}", e);
-                    ui_log(&msg);
-                    if let Some(state) = app.try_state::<SidecarStatus>() {
-                        if let Ok(mut s) = state.0.lock() {
-                            *s = format!("command_failed: {}", e);
+            } else {
+                // Step 2: Try to start the Windows Service
+                #[cfg(windows)]
+                {
+                    ui_log("Daemon not running, attempting to start Windows Service...");
+                    if try_start_service() {
+                        // Give the service a moment to start and verify
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        if check_daemon_health() {
+                            ui_log("Windows Service started successfully");
+                            if let Some(state) = app.try_state::<SidecarStatus>() {
+                                if let Ok(mut s) = state.0.lock() {
+                                    *s = "service".to_string();
+                                }
+                            }
+                        } else {
+                            ui_log("Service started but health check failed, falling back to sidecar");
+                            spawn_sidecar(app);
                         }
+                    } else {
+                        ui_log("Windows Service not available, falling back to sidecar");
+                        spawn_sidecar(app);
                     }
+                }
+
+                // Step 3: On non-Windows, go straight to sidecar
+                #[cfg(not(windows))]
+                {
+                    ui_log("Daemon not running, spawning sidecar");
+                    spawn_sidecar(app);
                 }
             }
             Ok(())

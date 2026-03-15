@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -i \"service\\\\|headless\\\\|daemon.*mode\" /c/Workspaces/JellyfinSync/jellyfinsync-daemon/src/*.rs)",
+      "Read(//c/Workspaces/JellyfilSync/jellyfinsync-daemon/src/**)",
+      "Bash(sc create:*)",
+      "Bash(echo \"Exit: $?\")"
+    ]
+  }
+}

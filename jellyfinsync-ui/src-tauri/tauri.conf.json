@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build && node ../scripts/prepare-sidecar.mjs",
+    "beforeBuildCommand": "npm run build --prefix jellyfinsync-ui && node scripts/prepare-sidecar.mjs",
     "frontendDist": "../dist"
   },
   "app": {
@@ -48,6 +48,12 @@
     ],
     "externalBin": [
       "sidecars/jellyfinsync-daemon"
-    ]
+    ],
+    "windows": {
+      "wix": {
+        "fragmentPaths": ["wix/service-fragment.wxs"],
+        "componentGroupRefs": ["ServiceComponents"]
+      }
+    }
   }
 }

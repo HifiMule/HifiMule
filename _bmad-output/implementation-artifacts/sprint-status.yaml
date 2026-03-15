@@ -80,7 +80,7 @@ development_status:
 
   epic-6: in-progress
   6-1-tauri-bundler-configuration-sidecar-packaging: done
-  6-2-windows-installer-msi: ready-for-dev
+  6-2-windows-installer-msi: review
   6-3-macos-installer-dmg: backlog
   6-4-linux-packages-appimage-deb: backlog
   6-5-cicd-cross-platform-build-pipeline: backlog

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <!--
+      Windows Service registration for jellyfinsync-daemon.
+      Uses Type 18 custom actions (FileKey) which reference the daemon's
+      File table entry directly, avoiding directory resolution issues.
+      The File ID "Bin_jellyfinsync_daemon.exe" comes from Tauri's auto-generated main.wxs.
+    -->
+
+    <!-- Anchor component so the linker includes this fragment -->
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="ServiceRegistration" Guid="b7e3f1a2-9c4d-4e8b-a1f6-3d7c2e9b0a5f">
+        <RegistryValue Root="HKCU" Key="Software\alexi\JellyfinSync"
+          Name="ServiceInstalled" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <ComponentGroup Id="ServiceComponents">
+      <ComponentRef Id="ServiceRegistration" />
+    </ComponentGroup>
+
+    <!-- Type 18: run the installed daemon file directly by File ID -->
+    <CustomAction Id="InstallDaemonService"
+      FileKey="Bin_jellyfinsync_daemon.exe"
+      ExeCommand="--install-service"
+      Execute="deferred"
+      Return="check"
+      Impersonate="no" />
+
+    <CustomAction Id="RemoveDaemonService"
+      FileKey="Bin_jellyfinsync_daemon.exe"
+      ExeCommand="--uninstall-service"
+      Execute="deferred"
+      Return="ignore"
+      Impersonate="no" />
+
+    <InstallExecuteSequence>
+      <Custom Action="RemoveDaemonService" Before="RemoveFiles">
+        Installed AND REMOVE~="ALL"
+      </Custom>
+      <Custom Action="InstallDaemonService" After="InstallFiles">
+        NOT REMOVE
+      </Custom>
+    </InstallExecuteSequence>
+  </Fragment>
+</Wix>

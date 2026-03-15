@@ -12,9 +12,12 @@ use tray_icon::{
     Icon, TrayIconBuilder,
 };
 
+#[cfg(windows)]
+mod service;
+
 /// Simple file-based logger for release mode where stdout/stderr are unavailable.
 /// Writes to `%APPDATA%/JellyfinSync/daemon.log`.
-fn log_to_file(msg: &str) {
+pub fn log_to_file(msg: &str) {
     if let Ok(dir) = paths::get_app_data_dir() {
         let log_path = dir.join("daemon.log");
         use std::io::Write;
@@ -32,11 +35,12 @@ fn log_to_file(msg: &str) {
     }
 }
 
+#[macro_export]
 macro_rules! daemon_log {
     ($($arg:tt)*) => {{
         let msg = format!($($arg)*);
         println!("{}", msg);
-        log_to_file(&msg);
+        $crate::log_to_file(&msg);
     }};
 }
 
@@ -63,19 +67,51 @@ pub enum DaemonState {
 }
 
 fn main() -> Result<()> {
-    daemon_log!("Daemon process starting (release={})", !cfg!(debug_assertions));
+    let args: Vec<String> = std::env::args().collect();
+    let service_mode = args.iter().any(|arg| arg == "--service");
+    let install_service = args.iter().any(|arg| arg == "--install-service");
+    let uninstall_service = args.iter().any(|arg| arg == "--uninstall-service");
 
-    // 1. Setup communication channels
-    // State updates from tokio thread to main thread
+    daemon_log!(
+        "Daemon process starting (release={}, service={})",
+        !cfg!(debug_assertions),
+        service_mode
+    );
+
+    #[cfg(windows)]
+    {
+        if install_service {
+            return service::install().map_err(|e| e.into());
+        }
+        if uninstall_service {
+            return service::uninstall().map_err(|e| e.into());
+        }
+        if service_mode {
+            return service::run().map_err(|e| e.into());
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        if service_mode || install_service || uninstall_service {
+            anyhow::bail!("Service flags are only supported on Windows");
+        }
+    }
+
+    run_interactive()
+}
+
+/// Starts the core daemon logic (RPC server, device observer, event handling)
+/// in a background thread. Returns the shutdown signal and state receiver.
+/// The caller is responsible for the main thread's event loop (tray icon or service wait).
+pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonState>)> {
     let (state_tx, state_rx) = mpsc::channel::<DaemonState>();
-    // Shutdown signal from main thread to tokio thread
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = Arc::clone(&shutdown);
 
-    // 2. Start Tokio runtime in a background thread
+    // Start Tokio runtime in a background thread
     // REQUIRED for macOS: main thread MUST handle the event loop
-    // Note: This thread will be terminated when the process exits
-    let _daemon_thread = thread::spawn(move || {
+    thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -191,12 +227,18 @@ fn main() -> Result<()> {
             // Daemon work loop - check for shutdown signal
             while !shutdown_clone.load(Ordering::Relaxed) {
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                // TODO: Actual daemon work will go here in future stories
             }
 
-            println!("JellyfinSync Daemon shutting down gracefully");
+            daemon_log!("JellyfinSync Daemon shutting down gracefully");
         });
     });
+
+    Ok((shutdown, state_rx))
+}
+
+/// Interactive mode: tray icon + event loop on the main thread
+fn run_interactive() -> Result<()> {
+    let (shutdown, state_rx) = start_daemon_core()?;
 
     // 3. Setup Tray Icon and Event Loop on the main thread
     let event_loop = EventLoopBuilder::new().build();

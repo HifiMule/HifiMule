@@ -2,6 +2,28 @@ use super::*;
 use std::sync::Arc;
 
 #[test]
+fn test_start_daemon_core_returns_shutdown_and_receiver() {
+    // Verify start_daemon_core returns a working shutdown signal and state receiver
+    let result = start_daemon_core();
+    assert!(result.is_ok(), "start_daemon_core should succeed");
+
+    let (shutdown, state_rx) = result.unwrap();
+
+    // Should receive initial Idle state from the daemon core
+    let state = state_rx.recv_timeout(std::time::Duration::from_secs(5));
+    assert!(state.is_ok(), "Should receive initial state");
+    assert!(
+        matches!(state.unwrap(), DaemonState::Idle),
+        "Initial state should be Idle"
+    );
+
+    // Signal shutdown
+    shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+    // Give the daemon thread time to clean up
+    std::thread::sleep(std::time::Duration::from_millis(200));
+}
+
+#[test]
 fn test_daemon_state_variants() {
     // Verify all variants can be constructed and debugged
     let idle = DaemonState::Idle;
