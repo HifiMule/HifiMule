@@ -5,8 +5,10 @@
 import { execSync } from "node:child_process";
 import { copyFileSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const projectRoot = resolve(import.meta.dirname, "..");
+const __dirname = fileURLToPath(new URL('.', import.meta.url));
+const projectRoot = resolve(__dirname, "..");
 const sidecarsDir = join(projectRoot, "jellyfinsync-ui", "src-tauri", "sidecars");
 
 // Get the current Rust target triple

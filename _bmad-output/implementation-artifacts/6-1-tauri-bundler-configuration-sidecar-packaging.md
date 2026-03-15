@@ -1,6 +1,6 @@
 # Story 6.1: Tauri Bundler Configuration & Sidecar Packaging
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -132,11 +132,14 @@ Claude Opus 4.6
 
 - `jellyfinsync-ui/src-tauri/tauri.conf.json` — Modified: added `externalBin`, updated `productName`, `identifier`, `beforeBuildCommand`
 - `jellyfinsync-ui/src-tauri/Cargo.toml` — Modified: added `tauri-plugin-shell` dependency
-- `jellyfinsync-ui/src-tauri/src/lib.rs` — Modified: registered shell plugin, added sidecar launch in `setup()`
+- `jellyfinsync-ui/src-tauri/src/lib.rs` — Modified: registered shell plugin, added sidecar launch in `setup()` and properly wrapped in state with exit handling to avoid zombie processes/crashing on startup.
 - `jellyfinsync-ui/src-tauri/capabilities/default.json` — Modified: added `shell:allow-spawn`, `shell:allow-execute` permissions
 - `jellyfinsync-ui/src-tauri/.gitignore` — Modified: added `/sidecars/` exclusion
-- `scripts/prepare-sidecar.mjs` — New: cross-platform sidecar build and copy script
+- `scripts/prepare-sidecar.mjs` — New: cross-platform sidecar build and copy script, updated for Node < 20.11 compatibility using `fileURLToPath`
+- `Cargo.lock` — Modified: automatically updated during build steps
+- `jellyfinsync-ui/package-lock.json` — Modified: automatically updated during frontend build steps
 
 ### Change Log
 
 - 2026-03-15: Implemented Story 6.1 — Configured Tauri sidecar packaging for jellyfinsync-daemon, updated app metadata, added sidecar launch via shell plugin, created pre-build script for daemon binary preparation. Build produces MSI and NSIS installers. 122 tests pass, zero regressions.
+- 2026-03-15: [AI-Review] Handled `.expect()` crashes by matching on sidecar spawn result. Wrapped child process in Tauri managed state for controlled exit. Changed `prepare-sidecar.mjs` `__dirname` to use `fileURLToPath` for broader cross-platform Node.js compatibility. Documented `Cargo.lock` and `package-lock.json` modifications.
