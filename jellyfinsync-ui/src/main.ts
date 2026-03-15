@@ -108,7 +108,6 @@ async function initSplashScreen(mainWin: Window | null, splashWin: Window | null
 
     const timeout = 10000;
     const startTime = Date.now();
-    const rpcPort = (import.meta as any).env?.VITE_RPC_PORT || '19140';
     let isPolling = false;
 
     const poll = async () => {
@@ -120,42 +119,40 @@ async function initSplashScreen(mainWin: Window | null, splashWin: Window | null
         isPolling = true;
         try {
             statusEl.textContent = "Connecting to Daemon...";
-            console.log("Polling daemon...");
+            console.log("Polling daemon via invoke...");
 
-            const response = await fetch(`http://localhost:${rpcPort}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    jsonrpc: "2.0",
-                    method: "get_daemon_state",
-                    params: {},
-                    id: 1
-                })
-            });
+            // Use Tauri invoke to bypass browser security restrictions
+            // (fetch from https://tauri.localhost to http://localhost is blocked as mixed content)
+            const { invoke } = await import('@tauri-apps/api/core');
+            await invoke('rpc_proxy', { method: 'get_daemon_state', params: {} });
 
-            if (response.ok) {
-                console.log("Daemon responded!");
-                statusEl.textContent = "Daemon Ready...";
+            console.log("Daemon responded!");
+            statusEl.textContent = "Daemon Ready...";
 
-                try {
-                    // Show main window and close splash
-                    if (mainWin) {
-                        console.log("Showing main window");
-                        await mainWin.show();
-                    }
-                    if (splashWin) {
-                        console.log("Closing splash screen");
-                        await splashWin.close();
-                    }
-                    return; // Successfully finished
-                } catch (winError) {
-                    console.error("Window API Error (Permissions?):", winError);
-                    statusEl.textContent = "UI API Error - Check Console";
-                    // Don't return, let it timeout or try again if appropriate
+            try {
+                // Show main window and close splash
+                if (mainWin) {
+                    console.log("Showing main window");
+                    await mainWin.show();
                 }
+                if (splashWin) {
+                    console.log("Closing splash screen");
+                    await splashWin.close();
+                }
+                return; // Successfully finished
+            } catch (winError) {
+                console.error("Window API Error (Permissions?):", winError);
+                statusEl.textContent = "UI API Error - Check Console";
             }
-        } catch (e) {
-            console.log("Daemon not reachable yet...");
+        } catch (e: any) {
+            console.log("Daemon not reachable yet:", e?.message);
+            try {
+                const { invoke } = await import('@tauri-apps/api/core');
+                const sidecarStatus = await invoke('get_sidecar_status');
+                statusEl.textContent = `Connecting to Daemon... (sidecar: ${sidecarStatus})`;
+            } catch {
+                statusEl.textContent = `Connecting to Daemon... (${e?.message || 'connection failed'})`;
+            }
         } finally {
             isPolling = false;
         }
@@ -163,7 +160,13 @@ async function initSplashScreen(mainWin: Window | null, splashWin: Window | null
         if (Date.now() - startTime > timeout) {
             console.log("Timeout reached");
             if (container) container.classList.add('error');
-            statusEl.textContent = "Failed to connect to Daemon. Please ensure it is running.";
+            try {
+                const { invoke } = await import('@tauri-apps/api/core');
+                const sidecarStatus = await invoke('get_sidecar_status');
+                statusEl.textContent = `Failed to connect to Daemon (sidecar: ${sidecarStatus}).`;
+            } catch {
+                statusEl.textContent = "Failed to connect to Daemon. Please ensure it is running.";
+            }
             return;
         }
 

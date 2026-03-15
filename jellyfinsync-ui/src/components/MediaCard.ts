@@ -2,7 +2,7 @@
 // Handles rendering of media items in the grid with selection support.
 
 import { basketStore } from '../state/basket';
-import { IMAGE_PROXY_URL, rpcCall } from '../rpc';
+import { getImageUrl, rpcCall } from '../rpc';
 
 export interface JellyfinItem {
     Id: string;
@@ -33,19 +33,17 @@ export class MediaCard {
         const isSelected = basketStore.has(item.Id);
         if (isSelected) card.classList.add('is-selected');
 
-        const imageUrl = `${IMAGE_PROXY_URL}/${item.Id}?maxHeight=300&quality=90`;
-
         // Selection overlay (only for items, not root libraries)
         const showSelection = mode === 'items';
 
         card.innerHTML = `
-            <div class="card-image" style="background-image: url('${imageUrl}');">
+            <div class="card-image">
                 ${isSynced ? '<div class="synced-badge"><sl-icon name="check-circle-fill"></sl-icon></div>' : ''}
-                
+
                 ${showSelection ? `
                     <div class="selection-overlay">
-                        <sl-icon-button 
-                            name="${isSelected ? 'dash-circle-fill' : 'plus-circle-fill'}" 
+                        <sl-icon-button
+                            name="${isSelected ? 'dash-circle-fill' : 'plus-circle-fill'}"
                             class="basket-toggle-btn"
                             variant="${isSelected ? 'danger' : 'primary'}"
                             label="${isSelected ? 'Remove from basket' : 'Add to basket'}"
@@ -63,6 +61,20 @@ export class MediaCard {
                  ${(item as JellyfinView).Type === 'CollectionFolder' ? '<div class="card-subtitle">Library</div>' : ''}
             </div>
         `;
+
+        // Load image asynchronously via Tauri proxy
+        const cardImage = card.querySelector('.card-image') as HTMLElement;
+        getImageUrl(item.Id, 300, 90).then(dataUrl => {
+            if (cardImage) {
+                cardImage.style.backgroundImage = `url('${dataUrl}')`;
+                const skeleton = card.querySelector('.image-skeleton') as HTMLElement;
+                if (skeleton) skeleton.style.display = 'none';
+            }
+        }).catch(err => {
+            console.warn(`Failed to load image for ${item.Id}:`, err);
+            const skeleton = card.querySelector('.image-skeleton') as HTMLElement;
+            if (skeleton) skeleton.style.display = 'none';
+        });
 
         // Event: Navigation (click on card but NOT on toggle button)
         card.addEventListener('click', async (e) => {
@@ -91,7 +103,6 @@ export class MediaCard {
                     toggleBtn.loading = true;
 
                     // Add large spinner to card image
-                    const cardImage = card.querySelector('.card-image');
                     let overlay: HTMLElement | null = null;
                     if (cardImage) {
                         overlay = document.createElement('div');
@@ -128,9 +139,6 @@ export class MediaCard {
                     }
                 }
             });
-
-            // If selected, we might want to show the track count immediately
-            // In a real app we'd cache this metadata in the store
         }
 
         // Listen for store updates to update visual state locally
@@ -144,17 +152,6 @@ export class MediaCard {
                 }
             }
         });
-
-        // Handle image load
-        const img = new Image();
-        img.onload = () => {
-            const cardImage = card.querySelector('.card-image') as HTMLElement;
-            const skeleton = card.querySelector('.image-skeleton') as HTMLElement;
-            if (cardImage && skeleton) {
-                skeleton.style.display = 'none';
-            }
-        };
-        img.src = imageUrl;
 
         return card;
     }

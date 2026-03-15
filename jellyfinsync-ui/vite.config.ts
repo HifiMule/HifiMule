@@ -1,4 +1,5 @@
 import { defineConfig } from "vite";
+import { resolve } from "path";
 
 const host = process.env.TAURI_DEV_HOST;
 
@@ -33,6 +34,12 @@ export default defineConfig(async () => ({
         ? 'chrome105'
         : 'safari13',
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
+    rollupOptions: {
+      input: {
+        main: resolve(__dirname, 'index.html'),
+        splashscreen: resolve(__dirname, 'splashscreen.html'),
+      },
+    },
   },
   outDir: 'dist',
   // Recommended for Tauri to ensure assets are linked correctly

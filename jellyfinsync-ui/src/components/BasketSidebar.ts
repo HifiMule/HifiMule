@@ -2,7 +2,7 @@
 // Displays the list of items selected for synchronization.
 
 import { basketStore, BasketItem } from '../state/basket';
-import { IMAGE_PROXY_URL, rpcCall } from '../rpc';
+import { rpcCall, getImageUrl } from '../rpc';
 import { RepairModal } from './RepairModal';
 import { InitDeviceModal } from './InitDeviceModal';
 
@@ -439,6 +439,9 @@ export class BasketSidebar {
             </div>
         `;
 
+        // Load basket item images asynchronously
+        this.loadBasketImages();
+
         // Bind events
         this.container.querySelectorAll('.remove-item-btn').forEach(btn => {
             btn.addEventListener('click', (e) => {
@@ -679,12 +682,9 @@ export class BasketSidebar {
     }
 
     private renderItem(item: BasketItem): string {
-        // We reuse the image proxy from the daemon
-        const imageUrl = `${IMAGE_PROXY_URL}/${item.id}?maxHeight=100&quality=80`;
-
         return `
             <div class="basket-item-card" data-id="${item.id}">
-                <div class="basket-item-image" style="background-image: url('${imageUrl}')"></div>
+                <div class="basket-item-image" data-image-id="${item.id}"></div>
                 <div class="basket-item-info">
                     <div class="basket-item-name">${this.escapeHtml(item.name)}</div>
                     <div class="basket-item-meta">${item.childCount} tracks • ${item.type}</div>
@@ -692,6 +692,18 @@ export class BasketSidebar {
                 <sl-icon-button name="x" class="remove-item-btn" data-id="${item.id}" label="Remove"></sl-icon-button>
             </div>
         `;
+    }
+
+    /** Load basket item images asynchronously after HTML is in the DOM. */
+    private loadBasketImages(): void {
+        const imageEls = this.container.querySelectorAll<HTMLElement>('.basket-item-image[data-image-id]');
+        for (const el of imageEls) {
+            const id = el.dataset.imageId;
+            if (!id) continue;
+            getImageUrl(id, 100, 80).then(dataUrl => {
+                el.style.backgroundImage = `url('${dataUrl}')`;
+            }).catch(() => { /* image load failed, leave blank */ });
+        }
     }
 
     private escapeHtml(text: string): string {
