@@ -5,3 +5,8 @@
   ; Register daemon as a startup application (runs on user login)
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${PRODUCTNAME}" "$INSTDIR\jellyfinsync-daemon.exe"
 !macroend
+
+!macro NSIS_HOOK_PREUNINSTALL
+  ; Remove daemon startup registration on uninstall
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${PRODUCTNAME}"
+!macroend

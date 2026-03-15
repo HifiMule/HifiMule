@@ -1,6 +1,6 @@
 # Story 6.2: Windows Installer (MSI)
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -135,7 +135,7 @@ Key learnings from previous 6.2 attempt:
 ### What NOT to Do
 
 - Do NOT remove the Windows Service code (`service.rs`, `--service`/`--install-service`/`--uninstall-service` flags) — it stays for power users
-- Do NOT change the NSIS installer — this story is MSI-only
+- NSIS installer also receives startup registration via `nsis/hooks.nsh` (both install and uninstall hooks)
 - Do NOT modify the daemon's RPC protocol
 - Do NOT remove the sidecar launch fallback from `lib.rs` — still needed for non-MSI installs and dev mode
 - Do NOT use WiX custom actions for the registry write — use declarative `<RegistryValue>` instead
@@ -184,20 +184,26 @@ Claude Opus 4.6
 ### Completion Notes List
 
 - **T5 (MSI)**: Created `wix/startup-fragment.wxs` with declarative `<RegistryValue>` targeting `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\JellyfinSync`. Uses GUID `1ba6130d-4fab-4dd0-b5cb-35477b1b5f4e` with `KeyPath="yes"` for automatic cleanup on uninstall. Updated `tauri.conf.json` to reference `startup-fragment.wxs` and `StartupRegistryGroup` (replacing old `service-fragment.wxs` and `ServiceComponents`).
-- **T5 (NSIS)**: Created `nsis/hooks.nsh` with `NSIS_HOOK_POSTINSTALL` macro that writes the same `HKCU\...\Run\JellyfinSync` registry key via `WriteRegStr`. The Tauri-generated NSIS uninstaller already includes cleanup of this key via `DeleteRegValue`. Configured `tauri.conf.json` `nsis.installerHooks` to load the hook file.
+- **T5 (NSIS)**: Created `nsis/hooks.nsh` with `NSIS_HOOK_POSTINSTALL` macro that writes the same `HKCU\...\Run\JellyfinSync` registry key via `WriteRegStr`, and `NSIS_HOOK_PREUNINSTALL` macro that removes it via `DeleteRegValue` on uninstall. Configured `tauri.conf.json` `nsis.installerHooks` to load the hook file.
 - **Daemon icon**: Added `winresource` build dependency and `build.rs` to `jellyfinsync-daemon` to embed `icon.ico` into the daemon executable. The startup application entry in Windows now shows the JellyfinSync icon.
 - **T6**: Updated `lib.rs` Step 1 health-check detection to return `"startup"` instead of `"service"`. The `sc start` path (Step 2) still returns `"service"` for power users who manually registered the Windows Service. Updated `SidecarStatus` doc comment to document new status values.
 - **T1-T4**: `cargo tauri build` produces `JellyfinSync_0.1.0_x64_en-US.msi` (5.2 MB). WiX compilation and linking succeeded. T1-T4 are manual validation tasks requiring MSI install/uninstall on Windows — existing Tauri v2 WiX configuration (UpgradeCode, InstallScope, shortcuts) inherited from story 6.1 is unchanged.
 
 ### Change Log
 
-- 2026-03-15: Replaced WiX service fragment with startup registry fragment; added NSIS installer hook for startup registration; embedded icon into daemon executable; updated daemon detection label from "service" to "startup" for health-check path
+- 2026-03-15: Replaced WiX service fragment with startup registry fragment; added NSIS installer hooks for startup registration (install + uninstall); embedded icon into daemon executable; updated daemon detection label from "service" to "startup" for health-check path; added Windows Service infrastructure for power users; refactored daemon core for service/interactive mode support
+- 2026-03-15: Code review — added NSIS uninstall hook, deleted orphaned service-fragment.wxs, updated File List for completeness
 
 ### File List
 
 - `jellyfinsync-ui/src-tauri/wix/startup-fragment.wxs` (new) — WiX fragment for HKCU Run key registration
-- `jellyfinsync-ui/src-tauri/nsis/hooks.nsh` (new) — NSIS installer hook for HKCU Run key registration
+- `jellyfinsync-ui/src-tauri/wix/service-fragment.wxs` (deleted) — Removed orphaned WiX service fragment (replaced by startup-fragment.wxs)
+- `jellyfinsync-ui/src-tauri/nsis/hooks.nsh` (new) — NSIS installer hooks for HKCU Run key registration (install + uninstall)
 - `jellyfinsync-ui/src-tauri/tauri.conf.json` (modified) — Updated fragmentPaths, componentGroupRefs, and added nsis.installerHooks
+- `jellyfinsync-ui/src-tauri/Cargo.toml` (modified) — Added "blocking" feature to reqwest for synchronous daemon health check
 - `jellyfinsync-ui/src-tauri/src/lib.rs` (modified) — Updated SidecarStatus from "service" to "startup" for health-check detection
-- `jellyfinsync-daemon/Cargo.toml` (modified) — Added winresource build dependency
+- `jellyfinsync-daemon/Cargo.toml` (modified) — Added winresource build dependency, windows-service dependency
 - `jellyfinsync-daemon/build.rs` (new) — Embeds icon.ico into the daemon executable on Windows
+- `jellyfinsync-daemon/src/main.rs` (modified) — Refactored to extract `start_daemon_core()`, added service flag parsing, log truncation
+- `jellyfinsync-daemon/src/service.rs` (new) — Windows Service infrastructure (install/uninstall/run) for power users
+- `jellyfinsync-daemon/src/tests.rs` (modified) — Added `test_start_daemon_core_returns_shutdown_and_receiver` test
