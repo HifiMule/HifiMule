@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "jellyfinsync-ui",
+  "productName": "JellyfinSync",
   "version": "0.1.0",
-  "identifier": "com.alexi.jellyfinsync-ui",
+  "identifier": "com.alexi.jellyfinsync",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build && node ../scripts/prepare-sidecar.mjs",
     "frontendDist": "../dist"
   },
   "app": {
@@ -45,6 +45,9 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "externalBin": [
+      "sidecars/jellyfinsync-daemon"
     ]
   }
 }

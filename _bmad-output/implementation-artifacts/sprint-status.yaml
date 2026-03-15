@@ -78,8 +78,8 @@ development_status:
   5-4-visual-manifest-repair-utility: done
   epic-5-retrospective: optional
 
-  epic-6: backlog
-  6-1-tauri-bundler-configuration-sidecar-packaging: backlog
+  epic-6: in-progress
+  6-1-tauri-bundler-configuration-sidecar-packaging: review
   6-2-windows-installer-msi: backlog
   6-3-macos-installer-dmg: backlog
   6-4-linux-packages-appimage-deb: backlog
