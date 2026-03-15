@@ -51,8 +51,11 @@
     ],
     "windows": {
       "wix": {
-        "fragmentPaths": ["wix/service-fragment.wxs"],
-        "componentGroupRefs": ["ServiceComponents"]
+        "fragmentPaths": ["wix/startup-fragment.wxs"],
+        "componentGroupRefs": ["StartupRegistryGroup"]
+      },
+      "nsis": {
+        "installerHooks": "nsis/hooks.nsh"
       }
     }
   }

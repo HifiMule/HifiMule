@@ -6,7 +6,8 @@ use tauri_plugin_shell::ShellExt;
 struct DaemonProcess(Mutex<Option<CommandChild>>);
 
 /// Stores the sidecar launch status so the frontend can query it.
-/// Values: "starting", "service" (connected to Windows Service), "running (pid=N)",
+/// Values: "starting", "startup" (connected to running daemon via health check),
+/// "service" (started via sc start), "running (pid=N)",
 /// "spawn_failed: ...", "command_failed: ...", "terminated (code=N)"
 struct SidecarStatus(Mutex<String>);
 
@@ -196,12 +197,12 @@ pub fn run() {
             // Perform daemon detection off the main thread to avoid blocking UI startup
             let app_handle = app.handle().clone();
             std::thread::spawn(move || {
-                // Step 1: Check if daemon is already running (e.g., as a Windows Service)
+                // Step 1: Check if daemon is already running (e.g., as startup app or Windows Service)
                 if check_daemon_health() {
-                    ui_log("Daemon already running (service or existing instance), skipping sidecar spawn");
+                    ui_log("Daemon already running (startup app or existing instance), skipping sidecar spawn");
                     if let Some(state) = app_handle.try_state::<SidecarStatus>() {
                         if let Ok(mut s) = state.0.lock() {
-                            *s = "service".to_string();
+                            *s = "startup".to_string();
                         }
                     }
                     return;

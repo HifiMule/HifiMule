@@ -5,7 +5,9 @@
       "Read(//c/Workspaces/JellyfilSync/jellyfinsync-daemon/src/**)",
       "Bash(sc create:*)",
       "Bash(echo \"Exit: $?\")",
-      "Bash(echo \"exit: $?\")"
+      "Bash(echo \"exit: $?\")",
+      "Bash(find /c/Workspaces/JellyfinSync -maxdepth 3 -name *.rs -path */tests/* -type f)",
+      "Bash(msiexec /?)"
     ]
   }
 }
