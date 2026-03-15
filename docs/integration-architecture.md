@@ -48,8 +48,11 @@ JellyfinSync consists of two parts that communicate over a local HTTP API:
 | **Protocol** | JSON-RPC 2.0 over HTTP POST |
 | **Endpoint** | `http://127.0.0.1:19140/` |
 | **Direction** | UI → Daemon (request/response) |
-| **Source** | `jellyfinsync-ui/src/rpc.ts` |
+| **Source (dev)** | `jellyfinsync-ui/src/rpc.ts` → direct HTTP fetch |
+| **Source (release)** | `jellyfinsync-ui/src/rpc.ts` → Tauri `invoke('rpc_proxy')` → `jellyfinsync-ui/src-tauri/src/lib.rs` → HTTP to daemon |
 | **Target** | `jellyfinsync-daemon/src/rpc.rs` |
+
+> **Release mode note:** Tauri serves the frontend from `https://tauri.localhost` in production builds. Direct `fetch()` to `http://localhost:19140` is blocked by mixed-content and CORS policies. All RPC calls route through the Tauri Rust backend via `invoke('rpc_proxy')`. Image requests use `invoke('image_proxy')` which returns base64 data URLs. The daemon CORS config allows both `http://localhost:1420` (dev) and `https://tauri.localhost` (release) origins.
 
 **Method Categories:**
 
@@ -67,10 +70,12 @@ JellyfinSync consists of two parts that communicate over a local HTTP API:
 
 | Property | Value |
 |----------|-------|
-| **Protocol** | HTTP GET |
+| **Protocol** | HTTP GET (daemon endpoint) |
 | **Endpoint** | `http://127.0.0.1:19140/jellyfin/image/{id}` |
-| **Direction** | UI → Daemon → Jellyfin Server |
+| **Direction** | UI → Tauri `invoke('image_proxy')` → Daemon → Jellyfin Server |
 | **Purpose** | Proxy Jellyfin media artwork through daemon (handles auth) |
+
+> **Note:** In release mode, the frontend cannot load images directly from the daemon HTTP endpoint (mixed content). Instead, `image_proxy` in the Tauri Rust backend fetches the image bytes, encodes them as base64 data URLs, and returns the result to the frontend for use in CSS `background-image` or `<img>` src attributes.
 
 ### 3. Daemon → Jellyfin Server (External API)
 

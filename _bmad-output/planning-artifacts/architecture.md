@@ -77,11 +77,13 @@ npx create-tauri-app@latest jellyfinsync-ui --template vanilla-ts
 
 ### API & Communication Patterns
 - **Internal IPC:** JSON-RPC 2.0 protocol implemented over a local HTTP server within the daemon.
+- **Release Mode Proxy:** In release builds, Tauri serves the frontend from `https://tauri.localhost`, which blocks direct `fetch()` to the daemon's `http://localhost:19140` endpoint (mixed content / CORS). All RPC and image requests are proxied through Tauri invoke commands (`rpc_proxy`, `image_proxy`) in the UI's Rust backend, bypassing browser security restrictions. In dev mode, direct HTTP is used.
 - **External API:** Direct utilization of the Jellyfin Progressive Sync API for scrobbling and playback reporting.
 
 ### Frontend Architecture
 - **UI Type:** Webview-based via Tauri v2.
 - **State Management:** Local selection state managed within the webview, synchronized with the daemon manifest via RPC.
+- **Tauri Commands:** The UI Rust backend exposes `rpc_proxy` (JSON-RPC passthrough), `image_proxy` (Jellyfin artwork as base64 data URLs), and `get_sidecar_status` (daemon lifecycle query) via `tauri::command`. These are required in release mode where browser security blocks direct HTTP to localhost.
 
 ## Implementation Patterns & Consistency Rules
 
@@ -140,6 +142,12 @@ npx create-tauri-app@latest jellyfinsync-ui --template vanilla-ts
 ### Safety & Atomicity Patterns
 - **Atomic Manifest Commitment:** Utilize the "Write-Temp-Rename" pattern for all `.jellyfinsync.json` updates to prevent state corruption during disconnection.
 - **Database Consistency:** Mandatory Transaction wrapping for all multi-row scrobble history updates.
+
+### Logging & Diagnostics
+- **Release Mode Logging:** In release builds, stdout/stderr are unavailable. Both the daemon (`daemon_log!` macro) and the UI Rust backend (`ui_log` function) write to file-based logs in the OS application data directory (`%APPDATA%/JellyfinSync/` on Windows).
+  - Daemon log: `daemon.log`
+  - UI log: `ui.log`
+- **Debug Mode:** Standard `println!`/`eprintln!` output to the terminal as usual.
 
 ### Enforcement Guidelines
 

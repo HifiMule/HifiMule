@@ -103,8 +103,11 @@ pub async fn run_server(
                         .parse::<http::HeaderValue>()
                         .unwrap(),
                     "tauri://localhost".parse::<http::HeaderValue>().unwrap(),
+                    "https://tauri.localhost"
+                        .parse::<http::HeaderValue>()
+                        .unwrap(),
                 ])
-                .allow_methods([http::Method::POST])
+                .allow_methods([http::Method::POST, http::Method::GET])
                 .allow_headers([http::header::CONTENT_TYPE]),
         )
         .with_state(state);

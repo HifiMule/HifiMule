@@ -12,6 +12,34 @@ use tray_icon::{
     Icon, TrayIconBuilder,
 };
 
+/// Simple file-based logger for release mode where stdout/stderr are unavailable.
+/// Writes to `%APPDATA%/JellyfinSync/daemon.log`.
+fn log_to_file(msg: &str) {
+    if let Ok(dir) = paths::get_app_data_dir() {
+        let log_path = dir.join("daemon.log");
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let _ = writeln!(f, "[{}] {}", timestamp, msg);
+        }
+    }
+}
+
+macro_rules! daemon_log {
+    ($($arg:tt)*) => {{
+        let msg = format!($($arg)*);
+        println!("{}", msg);
+        log_to_file(&msg);
+    }};
+}
+
 mod api;
 mod db;
 mod device;
@@ -35,6 +63,8 @@ pub enum DaemonState {
 }
 
 fn main() -> Result<()> {
+    daemon_log!("Daemon process starting (release={})", !cfg!(debug_assertions));
+
     // 1. Setup communication channels
     // State updates from tokio thread to main thread
     let (state_tx, state_rx) = mpsc::channel::<DaemonState>();
@@ -52,13 +82,13 @@ fn main() -> Result<()> {
             .expect("Failed to build tokio runtime");
 
         rt.block_on(async {
-            println!("JellyfinSync Daemon started");
+            daemon_log!("JellyfinSync Daemon tokio runtime started");
 
             // Initialize database
             let db_path = match paths::get_app_data_dir() {
                 Ok(p) => p.join("jellyfinsync.db"),
                 Err(e) => {
-                    eprintln!("Failed to get app data directory: {}", e);
+                    daemon_log!("Failed to get app data directory: {}", e);
                     let _ = state_tx.send(DaemonState::Error);
                     return;
                 }
@@ -66,7 +96,7 @@ fn main() -> Result<()> {
             let db = match db::Database::new(db_path) {
                 Ok(db) => Arc::new(db),
                 Err(e) => {
-                    eprintln!("Failed to initialize database: {}", e);
+                    daemon_log!("Failed to initialize database: {}", e);
                     let _ = state_tx.send(DaemonState::Error);
                     return;
                 }
@@ -74,7 +104,7 @@ fn main() -> Result<()> {
 
             // Initial state
             if let Err(e) = state_tx.send(DaemonState::Idle) {
-                eprintln!("Failed to send initial state: {}", e);
+                daemon_log!("Failed to send initial state: {}", e);
                 return;
             }
 
@@ -93,6 +123,7 @@ fn main() -> Result<()> {
             > = Arc::new(tokio::sync::RwLock::new(None));
 
             // Start RPC server
+            daemon_log!("Starting RPC server on port 19140");
             let db_clone = Arc::clone(&db);
             let dm_clone = Arc::clone(&device_manager);
             let scrobbler_result_rpc = Arc::clone(&last_scrobbler_result);

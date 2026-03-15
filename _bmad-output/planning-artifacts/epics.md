@@ -493,6 +493,15 @@ So that I can install JellyfinSync like any other desktop application on my Wind
 **And** the daemon sidecar is placed alongside the main executable.
 **And** uninstallation via "Add/Remove Programs" cleanly removes all installed files.
 
+**Post-MVP: Daemon as Windows Service**
+**Given** the MSI installation completes
+**When** the service registration step runs
+**Then** `jellyfinsync-daemon` is registered as a Windows Service (via `sc.exe` or NSSM).
+**And** the service is configured to start automatically on user login.
+**And** the UI detects the running service via a health-check RPC call instead of spawning a sidecar.
+**And** if the service is not running, the UI attempts to start it via `sc start`.
+**And** uninstallation removes the service registration.
+
 ### Story 6.3: macOS Installer (DMG)
 
 As a Convenience Seeker (Sarah),
@@ -506,6 +515,15 @@ So that I can install JellyfinSync following standard macOS conventions.
 **Then** I see the JellyfinSync app bundle with a drag-to-Applications prompt.
 **And** the app runs without requiring root/sudo privileges (macOS sandbox compliance — NFR9).
 **And** the daemon sidecar is embedded within the .app bundle.
+
+**Post-MVP: Daemon as launchd Agent**
+**Given** the application is installed to /Applications
+**When** first launch completes setup
+**Then** a launchd user agent `.plist` is installed to `~/Library/LaunchAgents/`.
+**And** the daemon starts automatically on user login.
+**And** the UI detects the running daemon via a health-check RPC call instead of spawning a sidecar.
+**And** if the agent is not running, the UI attempts `launchctl load` to start it.
+**And** app removal cleans up the `.plist` from LaunchAgents.
 
 ### Story 6.4: Linux Packages (AppImage & .deb)
 
@@ -521,6 +539,16 @@ So that I can install JellyfinSync on both Debian-based systems and any Linux di
 **When** I install the .deb package
 **Then** JellyfinSync is installed with a desktop entry and can be launched from the application menu.
 **And** both formats include the daemon sidecar binary.
+
+**Post-MVP: Daemon as systemd User Service**
+**Given** the .deb package is installed
+**When** the post-install script runs
+**Then** a systemd user service unit is installed and enabled via `systemctl --user enable jellyfinsync-daemon`.
+**And** the daemon starts automatically on user login.
+**And** the UI detects the running daemon via a health-check RPC call instead of spawning a sidecar.
+**And** if the service is not running, the UI attempts `systemctl --user start jellyfinsync-daemon`.
+**And** package removal disables and removes the service unit.
+**Note:** AppImage cannot register services; it falls back to the sidecar model.
 
 ### Story 6.5: CI/CD Cross-Platform Build Pipeline
 
