@@ -167,8 +167,8 @@ As a cross-platform desktop application, JellyfinSync consists of a performance-
 - **FR19:** The system can track which scrobbles have already been submitted to prevent duplication.
 
 ### 6. Service & System Integration
-- **FR20:** The system can run as a background service (headless) with minimal resource usage. MVP: Tauri sidecar process. Post-MVP: OS-native service (Windows Service, systemd user unit, launchd agent).
-- **FR21:** Users can toggle "Launch on Startup" behavior. Post-MVP: Fulfilled natively by OS service enable/disable rather than a startup shortcut.
+- **FR20:** The system can run as a background service (headless) with minimal resource usage. MVP: Tauri sidecar process. Post-MVP: OS-native user-session daemon (Windows startup application, systemd user unit, launchd agent).
+- **FR21:** Users can toggle "Launch on Startup" behavior. Post-MVP: Fulfilled natively by platform-specific mechanisms (Windows Registry Run key, systemd user unit enable/disable, launchd agent load/unload).
 - **FR22:** The system can provide tray-icon status updates for sync progress and hardware state.
 - **FR23:** The system can send OS-native notifications for sync completion or errors.
 - **FR25:** The system retrieves and displays only music-centric content (Playlists, Albums, Artists, Tracks), automatically filtering out movies, series, and books from Jellyfin views.

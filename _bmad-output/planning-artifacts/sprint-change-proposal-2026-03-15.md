@@ -95,3 +95,109 @@ All documentation updates have been applied directly. No further action needed f
 **Next steps:**
 - Development team continues current sprint with no disruption
 - Post-MVP service stories will be planned when Epic 6 packaging work begins
+
+---
+
+## Change C: Windows Daemon — Service → Startup Application
+
+### Section 1: Issue Summary
+
+**Problem:** Change B (above) added Post-MVP criteria for registering `jellyfinsync-daemon` as a **Windows Service** in Story 6.2. However, a Windows Service runs in Session 0 — an isolated, non-interactive session — which **cannot**:
+
+1. Display a system tray icon (FR22) — the `tray-icon` + `tao` event loop requires a user desktop session
+2. Show OS-native desktop notifications (FR23) — `notify-rust` requires user session access
+3. Launch or interact with the Tauri UI process
+
+Since the daemon's architecture is fundamentally a **tray application** (its main loop is a `tao` event loop managing the tray icon), running it as a Windows Service would strip away core functionality.
+
+**Discovery:** Identified during Epic 6 implementation review. The Post-MVP section was aspirational and has not been implemented in code.
+
+**Evidence:**
+- Daemon architecture uses `tray-icon` + `tao` crate for its main event loop (see `src/main.rs`)
+- Windows Session 0 isolation is a documented OS constraint preventing services from displaying UI elements
+- macOS (`launchd` agent) and Linux (`systemd --user`) Post-MVP sections are already correct — they run in user sessions
+
+### Section 2: Impact Analysis
+
+#### Epic Impact
+- **Epic 6 (Packaging & Distribution):** Only affected epic. Currently `in-progress`.
+- **Story 6.2 (Windows Installer):** Marked `done` — Post-MVP section needs correction. No code changes.
+- **All other epics (1-5):** No impact. All completed.
+- **Stories 6.3-6.6:** No impact. macOS and Linux already use user-session daemon models.
+
+#### Artifact Conflicts
+
+| Artifact | Section | Conflict | Resolution |
+|----------|---------|----------|------------|
+| PRD | FR20 | Says "Windows Service" | Change to "Windows startup application" |
+| PRD | FR21 | Implies service enable/disable for all platforms | Specify per-platform mechanisms |
+| Epics | Story 6.2 Post-MVP | Full section describes Windows Service workflow | Rewrite for startup application (Registry Run key) |
+| Architecture | — | No conflict (already tray-based) | None needed |
+| UX Design | — | No conflict | None needed |
+
+#### Technical Impact
+- **Code:** No changes required. The `install-service` CLI command remains as an optional power-user feature.
+- **Deployment:** When Post-MVP is implemented, the MSI installer will register a Registry `Run` key instead of a Windows Service — simpler to implement.
+
+### Section 3: Recommended Approach
+
+**Selected Path: Direct Adjustment**
+
+Update three documentation sections in planning artifacts to replace the Windows Service model with a startup application model.
+
+**Rationale:**
+- No code has been written for the Windows Service Post-MVP feature — purely a documentation correction
+- Startup application model is the **correct** architectural fit for a tray-icon-based daemon
+- Aligns docs with the existing design intent (tray icon, notifications, UI interaction)
+- macOS and Linux sections already correct and serve as the pattern to follow
+- Zero timeline impact, zero risk to existing functionality
+
+**Effort:** Low | **Risk:** Low | **Timeline Impact:** None
+
+### Section 4: Detailed Change Proposals
+
+#### Change C.1: PRD — FR20
+
+**File:** `_bmad-output/planning-artifacts/prd.md`
+
+**OLD:**
+> FR20: The system can run as a background service (headless) with minimal resource usage. MVP: Tauri sidecar process. Post-MVP: OS-native service (Windows Service, systemd user unit, launchd agent).
+
+**NEW:**
+> FR20: The system can run as a background service (headless) with minimal resource usage. MVP: Tauri sidecar process. Post-MVP: OS-native user-session daemon (Windows startup application, systemd user unit, launchd agent).
+
+#### Change C.2: PRD — FR21
+
+**File:** `_bmad-output/planning-artifacts/prd.md`
+
+**OLD:**
+> FR21: Users can toggle "Launch on Startup" behavior. Post-MVP: Fulfilled natively by OS service enable/disable rather than a startup shortcut.
+
+**NEW:**
+> FR21: Users can toggle "Launch on Startup" behavior. Post-MVP: Fulfilled natively by platform-specific mechanisms (Windows Registry Run key, systemd user unit enable/disable, launchd agent load/unload).
+
+#### Change C.3: Epics — Story 6.2 Post-MVP
+
+**File:** `_bmad-output/planning-artifacts/epics.md`
+
+**OLD:**
+> **Post-MVP: Daemon as Windows Service**
+> Given the MSI installation completes / When the service registration step runs / Then `jellyfinsync-daemon` is registered as a Windows Service (via `sc.exe` or NSSM). And the service is configured to start automatically on user login. And the UI detects the running service via a health-check RPC call instead of spawning a sidecar. And if the service is not running, the UI attempts to start it via `sc start`. And uninstallation removes the service registration.
+
+**NEW:**
+> **Post-MVP: Daemon as Windows Startup Application**
+> Given the MSI installation completes / When the installer registers the startup entry / Then `jellyfinsync-daemon` is registered as a startup application via a Registry `Run` key (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`). And the daemon launches automatically when the user logs in, running in the user session with full tray icon and notification support. And the UI detects the running daemon via a health-check RPC call instead of spawning a sidecar. And if the daemon is not running, the UI attempts to launch it directly. And uninstallation removes the Registry `Run` entry.
+
+### Section 5: Implementation Handoff
+
+**Change Scope: Minor**
+
+Documentation-only change to planning artifacts. Can be implemented immediately by Alexis (solo developer).
+
+**Action items:**
+- [x] Apply Change C.1 — Update FR20 in PRD
+- [x] Apply Change C.2 — Update FR21 in PRD
+- [x] Apply Change C.3 — Rewrite Story 6.2 Post-MVP section in Epics
+- [x] Verify no remaining references to "Windows Service" as default deployment model
+
+**Note:** The `install-service` CLI command in daemon code is retained as-is for power users who want headless operation without tray.

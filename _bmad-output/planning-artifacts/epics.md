@@ -493,14 +493,14 @@ So that I can install JellyfinSync like any other desktop application on my Wind
 **And** the daemon sidecar is placed alongside the main executable.
 **And** uninstallation via "Add/Remove Programs" cleanly removes all installed files.
 
-**Post-MVP: Daemon as Windows Service**
+**Post-MVP: Daemon as Windows Startup Application**
 **Given** the MSI installation completes
-**When** the service registration step runs
-**Then** `jellyfinsync-daemon` is registered as a Windows Service (via `sc.exe` or NSSM).
-**And** the service is configured to start automatically on user login.
-**And** the UI detects the running service via a health-check RPC call instead of spawning a sidecar.
-**And** if the service is not running, the UI attempts to start it via `sc start`.
-**And** uninstallation removes the service registration.
+**When** the installer registers the startup entry
+**Then** `jellyfinsync-daemon` is registered as a startup application via a Registry `Run` key (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`).
+**And** the daemon launches automatically when the user logs in, running in the user session with full tray icon and notification support.
+**And** the UI detects the running daemon via a health-check RPC call instead of spawning a sidecar.
+**And** if the daemon is not running, the UI attempts to launch it directly.
+**And** uninstallation removes the Registry `Run` entry.
 
 ### Story 6.3: macOS Installer (DMG)
 
