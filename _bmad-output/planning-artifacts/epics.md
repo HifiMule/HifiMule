@@ -95,6 +95,8 @@ FR23: Epic 5 - OS-Native Sync Notifications
 FR24: Epic 2 - Startup Splash Screen with Connection Status
 FR27: Epic 6 - Platform-Native Installer Bundling
 FR28: Epic 6 - CI/CD Cross-Platform Build Pipeline
+FR29: Epic 3 - Auto-Fill Priority Selection Algorithm
+FR30: Epic 2 - Auto-Sync on Known Device Detection
 
 ## Epic List
 
@@ -174,17 +176,27 @@ So that I don't have to manually hunt for folder paths.
 **Then** the daemon triggers a "Device Detected" event.
 **And** it checks for the presence of a `.jellyfinsync.json` manifest in the root directory.
 
-### Story 2.3: Multi-Device Profile Mapping
+### Story 2.3: Multi-Device Profile Mapping & Auto-Sync Trigger
 
 As a Convenience Seeker (Sarah),
-I want the tool to remember that my Garmin watch belongs to my "Running" Jellyfin profile,
-So that my sync rules are applied automatically on connection.
+I want the tool to remember that my Garmin watch belongs to my "Running" Jellyfin profile and automatically start syncing,
+So that I can plug in and walk away without any interaction.
 
 **Acceptance Criteria:**
 
 **Given** a known device (has `.jellyfinsync.json` with a unique ID) is connected
 **When** the daemon reads the ID
 **Then** it automatically loads the associated Jellyfin User Profile and Sync Rules.
+
+**Given** a known device with `auto_sync_on_connect` enabled in its profile
+**When** the device is detected and profile is loaded
+**Then** the daemon automatically initiates a sync operation (using auto-fill selection or the last basket configuration).
+**And** the tray icon transitions to "Syncing" state.
+**And** no UI interaction is required.
+
+**When** auto-sync completes
+**Then** an OS-native notification is sent: "Sync Complete. Safe to eject."
+**And** the tray icon returns to "Idle" state.
 
 ### Story 2.4: Startup Splash Screen with Connection Status
 
@@ -318,6 +330,43 @@ So that I can focus purely on my music collection for my DAP.
 **Then** only MusicAlbums, Playlists, Artists, and MusicVideos (optional) are retrieved.
 **And** Movies, Series, and Books are explicitly excluded from the UI views.
 
+### Story 3.6: Auto-Fill Sync Mode (Synchronise All)
+
+As a Convenience Seeker (Sarah),
+I want the basket to automatically fill with music from my entire library prioritized by my favorites, most-played, and newest additions,
+So that I can fill my device without manually browsing and selecting every album.
+
+**Acceptance Criteria:**
+
+**Given** the Basket sidebar is visible
+**When** I enable the "Auto-Fill" toggle
+**Then** the daemon queries the Jellyfin library and ranks all music tracks using the priority algorithm: favorites first, then by play count (descending), then by creation date (descending).
+**And** the basket populates with tracks up to the device's available capacity or a user-defined size limit.
+**And** the Storage Projection bar updates in real-time.
+
+**Given** Auto-Fill is enabled and I have manually added artists/playlists to the basket
+**When** the auto-fill algorithm runs
+**Then** manual selections take priority and occupy space first.
+**And** auto-fill uses the remaining capacity for algorithmically selected tracks.
+**And** duplicates between manual and auto-fill selections are excluded.
+
+**Given** Auto-Fill is active
+**When** I adjust the optional "Max Fill Size" slider
+**Then** the basket recalculates to respect the new limit.
+**And** tracks beyond the limit are removed from the basket in reverse priority order.
+
+**Given** Auto-Fill items are displayed in the basket
+**When** I view the item list
+**Then** auto-filled items show a distinct "Auto" badge to differentiate them from manually added items.
+**And** each item shows its priority reason (e.g., "★ Favorite", "▶ 47 plays", "New").
+
+**Technical Notes:**
+- Priority algorithm runs daemon-side via Jellyfin API queries (IsFavorite, PlayCount, DateCreated)
+- IPC: `basket.autoFill` JSON-RPC method with params: { deviceId, maxBytes?, excludeItemIds[] }
+- Response streams items progressively as the daemon calculates
+- Device profile stores auto-fill preferences: `auto_fill_enabled`, `max_fill_bytes`
+- Post-MVP: allow scoping to specific libraries/collections
+
 ## Epic 4: The Sync Engine & Self-Healing Core
 
 Build the performant, atomic sync logic with built-in core resume capabilities.
@@ -374,11 +423,11 @@ So that I don't lose progress after an accidental unplug.
 **Then** the engine detects the "Dirty" manifest flag.
 **And** it identifies which files were only partially written and initiates a resume of the remaining delta.
 
-### Story 4.5: "Start Sync" UI-to-Engine Trigger
+### Story 4.5: "Start Sync" UI-to-Engine & Daemon-Initiated Trigger
 
 As a Convenience Seeker (Sarah) and Ritualist (Arthur),
-I want to click a "Start Sync" button in the Sync Basket sidebar to initiate the synchronization process with the daemon,
-So that I can execute my prepared sync selection and monitor real-time progress without leaving the UI.
+I want to click a "Start Sync" button in the Sync Basket sidebar or have the daemon automatically trigger sync on device connect,
+So that I can either manually execute my selection or enjoy zero-touch automatic synchronization.
 
 **Acceptance Criteria:**
 
@@ -403,6 +452,13 @@ So that I can execute my prepared sync selection and monitor real-time progress 
 - Follows the architecture's Request-Response-Event communication pattern
 - Button must be disabled when: basket is empty, storage projection is Over Limit, or a sync is already in progress
 - ARIA-live region required for progress updates (WCAG 2.1 AA)
+
+**Given** a known device is connected with `auto_sync_on_connect` enabled
+**When** the daemon detects the device and loads its profile
+**Then** the daemon internally triggers `sync.start` using the device's auto-fill configuration (without a UI-initiated RPC call).
+**And** the sync follows the same differential algorithm, buffered IO, and manifest update logic as a UI-triggered sync.
+**And** if the UI is open, it reflects the in-progress sync state via `on_sync_progress` events.
+**And** if the UI is closed, the tray icon and OS notifications provide progress and completion feedback.
 
 
 ## Epic 5: Ecosystem Lifecycle & Advanced Tools

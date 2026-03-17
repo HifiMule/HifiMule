@@ -67,9 +67,15 @@ npx create-tauri-app@latest jellyfinsync-ui --template vanilla-ts
 - **Data Persistence:** SQLite (`rusqlite`) for daemon state and scrobble history.
 - **Async Runtime:** `tokio` for handling concurrent IO and mount events.
 
+### Daemon Responsibilities
+- **Auto-Fill Algorithm:** Priority-based music selection engine (favorites → play count → creation date) querying Jellyfin API (IsFavorite, PlayCount, DateCreated fields).
+- **Auto-Sync Controller:** Monitors device detection events and triggers sync automatically for configured devices without UI interaction.
+
 ### Data Architecture
 - **Daemon State:** Managed via a local SQLite database to ensure atomic scrobble commits and robust history tracking.
 - **UI Preferences:** Stored in standard JSON configuration files for ease of access from the Tauri frontend.
+- **Device Profile Fields:** `auto_fill_enabled BOOLEAN DEFAULT false`, `max_fill_bytes INTEGER NULL` (null = fill to capacity), `auto_sync_on_connect BOOLEAN DEFAULT false`.
+- **Manifest Extension:** `.jellyfinsync.json` includes an optional `autoFill` block: `{ "enabled": true, "maxBytes": null, "autoSyncOnConnect": true }`.
 
 ### Authentication & Security
 - **Credential Management:** All Jellyfin tokens are stored in the OS-native secure vault (Windows Credential Manager, macOS Keychain, Linux Secret Service) using the `keyring` crate.
@@ -79,6 +85,8 @@ npx create-tauri-app@latest jellyfinsync-ui --template vanilla-ts
 - **Internal IPC:** JSON-RPC 2.0 protocol implemented over a local HTTP server within the daemon.
 - **Release Mode Proxy:** In release builds, Tauri serves the frontend from `https://tauri.localhost`, which blocks direct `fetch()` to the daemon's `http://localhost:19140` endpoint (mixed content / CORS). All RPC and image requests are proxied through Tauri invoke commands (`rpc_proxy`, `image_proxy`) in the UI's Rust backend, bypassing browser security restrictions. In dev mode, direct HTTP is used.
 - **External API:** Direct utilization of the Jellyfin Progressive Sync API for scrobbling and playback reporting.
+- **Auto-Fill IPC:** `basket.autoFill` — Configure and trigger auto-fill calculation. Params: `{ deviceId, maxBytes?, excludeItemIds[] }`. Response streams ranked item list progressively.
+- **Auto-Fill Settings IPC:** `sync.setAutoFill` — Persist auto-fill settings per device profile. Params: `{ deviceId, autoFillEnabled, maxFillBytes?, autoSyncOnConnect }`.
 
 ### Frontend Architecture
 - **UI Type:** Webview-based via Tauri v2.

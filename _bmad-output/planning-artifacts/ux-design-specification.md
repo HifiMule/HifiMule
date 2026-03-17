@@ -16,8 +16,8 @@ completedAt: '2026-01-27'
 To create an "Invisible Sync" experience that automates the synchronization between modern media servers and legacy hardware, removing the friction of manual file management while providing a premium, modern selection interface.
 
 ### 1.2 Target Personas
-*   **The Ritualist (Arthur):** Needs high transparency and "Managed Zone" isolation to protect his manual file structure.
-*   **The Sprinter (Sarah):** Needs zero friction and "One-Click Dash" syncs to get out the door fast.
+*   **The Ritualist (Arthur):** Needs high transparency and "Managed Zone" isolation to protect his manual file structure. Can ignore Auto-Fill entirely and continue manual curation. "Auto" badges provide transparency if mixed mode is used.
+*   **The Sprinter (Sarah):** Needs zero friction. Auto-Fill + Auto-Sync on Connect is her primary path — plug in, walk away.
 *   **The System Admin (Alexis):** Needs a low-footprint background daemon that remains under 10MB RAM.
 
 ---
@@ -62,10 +62,10 @@ A 70/30 split layout where the **Library Browser** (Left) allows for immersive c
 ```mermaid
 graph TD
     A[Sarah Plugs in Garmin] --> B[Daemon Detects Managed Device]
-    B --> C[Tray Pulse: 'Ready to Update Run Mix']
-    C --> D[Sarah Clicks Commit]
-    D --> E[Daemon Performs Background IO]
-    E --> F[OS Bubble: Safe to Eject]
+    B --> C[Auto-Sync Triggers: Auto-Fill by Favorites/Plays/Date]
+    C --> D[Daemon Performs Background IO]
+    D --> E[OS Bubble: 'Sync Complete. Safe to Eject.']
+    E --> F[Sarah Unplugs — Zero Clicks]
 ```
 
 ---
@@ -79,6 +79,19 @@ graph TD
 ### 5.2 Custom Components
 *   **The Sync Basket:** A real-time "Staging Area" component that calculates literal disk bytes based on transcoding rules.
 *   **The Media Delta Overlay:** A visual overlay for album covers showing `(+) Add`, `(-) Remove`, or `(=) Synced` status.
+
+### 5.3 Auto-Fill Components
+*   **Auto-Fill Toggle:** Shoelace `<sl-switch>` in the Basket header area, enabling/disabling automatic library fill.
+*   **Max Fill Size Control:** `<sl-range>` slider (visible when Auto-Fill is active), allowing the user to cap fill size below full device capacity.
+*   **Auto Badge:** Distinct visual indicator on auto-filled items using a muted accent color to differentiate from manually added `(+)` items.
+*   **Priority Reason Tags:** Small inline labels on auto-filled items showing selection reason (★ Favorite, ▶ 47 plays, "New").
+
+### 5.4 Device Profile Settings
+*   **Auto-sync on connect toggle:** `<sl-switch>` in the device profile panel with helper text: "Automatically start syncing when this device is connected. Works with or without the UI open."
+
+### 5.5 Headless Sync Feedback
+*   **Without UI:** Tray icon animation (Syncing state) + OS-native notification on completion.
+*   **With UI open:** Basket reflects live sync state via `on_sync_progress` events, identical to manual "Start Sync" progress display.
 
 ---
 

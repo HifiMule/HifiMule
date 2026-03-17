@@ -47,6 +47,8 @@ workflowType: 'prd'
 - **Destructive Safety Protocol:** Mandatory manual user confirmation for any manifest-repair or cleanup operations exceeding 100MB of data deletion.
 - **Conflict-Free Manifest Sync:** Implementation of the `.jellyfinsync.json` logic for managed-folder isolation.
 - **Profile Selection:** UI/CLI support for selecting the correct Jellyfin user account for playlist/scrobble routing.
+- **Auto-Fill Sync Mode:** Intelligent device-filling that selects music by priority (favorites → play count → creation date) up to capacity or a user-defined limit. Can be mixed with manual basket selections.
+- **Auto-Sync on Connect:** Known devices with auto-sync enabled trigger synchronization automatically on detection, requiring zero user interaction.
 
 ### Growth Features (Post-MVP)
 - **Scrobble Queue & Retry:** Robust handling for offline scrobbling when the server is unreachable during sync.
@@ -60,8 +62,8 @@ workflowType: 'prd'
 *   **Success Moment:** The sync completes in under 20 seconds using the pre-calculated manifest. Arthur ejects the device, confident that his manual "Voice Memos" folder remains untouched.
 
 ### Sarah's Pre-Run Dash (Speed Success)
-*   **Narrative:** At 6:00 AM, Sarah realizes she forgot to update her Garmin watch with her "Marathon Training" playlist. She's at the door. She plugs in the watch, and with the UI already authorized, she clicks a single button: "Update Running Mix".
-*   **Success Moment:** She unplugs and leaves 15 seconds later. The tool handled the file transfers silently via buffered streaming while she tied her shoes.
+*   **Narrative:** At 6:00 AM, Sarah plugs in her Garmin watch on her way out the door. The daemon recognizes the device, auto-syncs her favorites and most-played tracks to fill the watch, and a tray notification confirms "Sync Complete" before she's finished tying her shoes.
+*   **Success Moment:** She unplugs and leaves. Zero clicks. The auto-fill prioritized her favorite running tracks and the tool handled everything silently in the background.
 
 ### The "Silent Engine" (Admin Setup)
 *   **Narrative:** Alexis sets up JellyfinSync on a new Mac Mini. He runs a simple wizard to connect to his Jellyfin server and selects his primary User Profile.
@@ -153,6 +155,8 @@ As a cross-platform desktop application, JellyfinSync consists of a performance-
 - **FR9:** Users can select specific playlists or entities for synchronization.
 - **FR10:** The system can report real-time storage availability on the target device.
 - **FR11:** Users can see a preview of "Proposed Changes" (files to add, remove, or update) before starting a sync.
+- **FR29:** The system can automatically select music to synchronize based on a priority algorithm (favorites first, then by play count, then by creation date) up to the device's available capacity or a user-defined size limit.
+- **FR30:** The system can automatically trigger synchronization when a known, previously configured device is detected, without requiring user interaction.
 
 ### 4. Synchronization Engine
 - **FR12:** The system can perform a differential sync based on the local manifest.
