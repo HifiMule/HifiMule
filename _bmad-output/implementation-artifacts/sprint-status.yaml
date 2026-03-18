@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-03-18
+last_updated: 2026-03-19
 project: JellyfinSync
 project_key: NOKEY
 tracking_system: file-system
@@ -51,7 +51,7 @@ development_status:
   2-1-secure-jellyfin-server-link: done
   2-2-mass-storage-heartbeat-autodetection: done
   2-3-multi-device-profile-mapping: done
-  2-3b-auto-sync-on-connect-trigger: review
+  2-3b-auto-sync-on-connect-trigger: done
   2-4-startup-splash-screen-with-connection-status: done
   2-5-interactive-login-and-identity-management: done
   2-6-initialize-new-device-manifest: done

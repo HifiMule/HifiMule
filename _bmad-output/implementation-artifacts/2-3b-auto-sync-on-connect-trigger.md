@@ -1,6 +1,6 @@
 # Story 2.3b: Auto-Sync on Connect Trigger
 
-Status: review
+Status: done
 
 ## Story
 

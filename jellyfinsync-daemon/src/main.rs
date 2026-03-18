@@ -237,11 +237,7 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                                     .unwrap_or(false);
 
                                 if db_enabled {
-                                    // Duplicate prevention: check no active sync
-                                    let has_active_sync = {
-                                        // Check if any operation is currently running
-                                        false // SyncOperationManager doesn't track by device, so we rely on DaemonState
-                                    };
+                                    let has_active_sync = som_events.has_active_operation().await;
 
                                     if !has_active_sync {
                                         if let Ok((url, token, user_id)) =
@@ -269,7 +265,17 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                                     }
                                 }
                             } else if auto_sync_enabled && !has_basket {
+                                // TODO: story 3-6 (auto-fill-sync-mode) will add auto_fill_enabled fallback here
                                 daemon_log!("[AutoSync] Skipped: auto-sync enabled but no basket items configured");
+                                let _ = tokio::task::spawn_blocking(|| {
+                                    if let Err(e) = notify_rust::Notification::new()
+                                        .summary("JellyfinSync")
+                                        .body("Auto-sync skipped: no basket configured for this device.")
+                                        .show()
+                                    {
+                                        daemon_log!("[AutoSync] Notification failed: {}", e);
+                                    }
+                                });
                             }
                         }
                         device::DeviceEvent::Unrecognized { path } => {
@@ -278,9 +284,36 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                             let _ = state_tx_clone.send(new_state);
                         }
                         device::DeviceEvent::Removed(path) => {
-                            println!("Device removed at {:?}", path);
+                            daemon_log!("Device removed at {:?}", path);
+                            // If a sync is running, mark it as failed before clearing device state
+                            if som_events.has_active_operation().await {
+                                daemon_log!("[AutoSync] Device removed during active sync — marking failed");
+                                let ops_snapshot = som_events.get_all_operations().await;
+                                for mut op in ops_snapshot {
+                                    if op.status == sync::SyncStatus::Running {
+                                        op.status = sync::SyncStatus::Failed;
+                                        op.errors.push(sync::SyncFileError {
+                                            jellyfin_id: String::new(),
+                                            filename: String::new(),
+                                            error_message: "Device removed during sync".to_string(),
+                                        });
+                                        som_events.update_operation(&op.id.clone(), op).await;
+                                    }
+                                }
+                                let _ = tokio::task::spawn_blocking(|| {
+                                    if let Err(e) = notify_rust::Notification::new()
+                                        .summary("JellyfinSync")
+                                        .body("Sync interrupted: device was removed.")
+                                        .show()
+                                    {
+                                        daemon_log!("[AutoSync] Notification failed: {}", e);
+                                    }
+                                });
+                                let _ = state_tx_clone.send(DaemonState::Error);
+                            } else {
+                                let _ = state_tx_clone.send(DaemonState::Idle);
+                            }
                             device_manager.handle_device_removed().await;
-                            let _ = state_tx_clone.send(DaemonState::Idle);
                         }
                     }
                 }
@@ -454,6 +487,9 @@ async fn run_auto_sync(
     token: String,
     user_id: String,
 ) -> anyhow::Result<()> {
+    // Signal syncing state immediately so tray icon updates before any network activity
+    let _ = state_tx.send(DaemonState::Syncing);
+
     let manifest = device_manager
         .get_current_device()
         .await
@@ -461,6 +497,7 @@ async fn run_auto_sync(
 
     if manifest.basket_items.is_empty() {
         daemon_log!("[AutoSync] No basket items configured, skipping");
+        let _ = state_tx.send(DaemonState::Idle);
         return Ok(());
     }
 
@@ -470,31 +507,43 @@ async fn run_auto_sync(
 
     let is_downloadable = |t: &str| matches!(t, "Audio" | "MusicVideo");
 
+    const API_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(30);
+
     for chunk in item_ids.chunks(100) {
         let chunk_strs: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
-        match jellyfin_client
-            .get_items_by_ids(&url, &token, &user_id, &chunk_strs)
-            .await
-        {
+        let fetch_result = tokio::time::timeout(
+            API_TIMEOUT,
+            jellyfin_client.get_items_by_ids(&url, &token, &user_id, &chunk_strs),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Timeout fetching items from Jellyfin"))?;
+
+        match fetch_result {
             Ok(items) => {
                 for item in items {
                     if is_downloadable(&item.item_type) {
                         desired_items.push(to_desired_item(item));
                     } else {
                         // Expand container item (album/playlist)
-                        match jellyfin_client
-                            .get_child_items_with_sizes(&url, &token, &user_id, &item.id)
-                            .await
-                        {
-                            Ok(children) => {
+                        let expand_result = tokio::time::timeout(
+                            API_TIMEOUT,
+                            jellyfin_client.get_child_items_with_sizes(&url, &token, &user_id, &item.id),
+                        )
+                        .await;
+
+                        match expand_result {
+                            Ok(Ok(children)) => {
                                 for child in children {
                                     if is_downloadable(&child.item_type) {
                                         desired_items.push(to_desired_item(child));
                                     }
                                 }
                             }
-                            Err(e) => {
+                            Ok(Err(e)) => {
                                 daemon_log!("[AutoSync] Failed to expand item {}: {}", item.id, e);
+                            }
+                            Err(_) => {
+                                daemon_log!("[AutoSync] Timeout expanding item {}", item.id);
                             }
                         }
                     }
@@ -546,8 +595,6 @@ async fn run_auto_sync(
             m.pending_item_ids = pending_ids;
         })
         .await?;
-
-    let _ = state_tx.send(DaemonState::Syncing);
 
     let result = sync::execute_sync(
         &delta,
@@ -655,7 +702,8 @@ fn to_desired_item(item: api::JellyfinItem) -> sync::DesiredItem {
         .as_ref()
         .and_then(|sources| sources.first())
         .and_then(|s| s.size)
-        .unwrap_or(0) as u64;
+        .unwrap_or(0)
+        .max(0) as u64;
     sync::DesiredItem {
         jellyfin_id: item.id,
         name: item.name,

@@ -189,6 +189,16 @@ impl SyncOperationManager {
         let ops = self.operations.read().await;
         ops.get(operation_id).cloned()
     }
+
+    pub async fn has_active_operation(&self) -> bool {
+        let ops = self.operations.read().await;
+        ops.values().any(|op| op.status == SyncStatus::Running)
+    }
+
+    pub async fn get_all_operations(&self) -> Vec<SyncOperation> {
+        let ops = self.operations.read().await;
+        ops.values().cloned().collect()
+    }
 }
 
 /// Maximum characters per path component enforced for FAT32/Rockbox legacy hardware.
