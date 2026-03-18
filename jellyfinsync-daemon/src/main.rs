@@ -166,30 +166,37 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                 tokio::sync::RwLock<Option<scrobbler::ScrobblerResult>>,
             > = Arc::new(tokio::sync::RwLock::new(None));
 
+            // Initialize shared sync operation manager
+            let sync_operation_manager = Arc::new(sync::SyncOperationManager::new());
+
             // Start RPC server
             daemon_log!("Starting RPC server on port 19140");
             let db_clone = Arc::clone(&db);
             let dm_clone = Arc::clone(&device_manager);
             let scrobbler_result_rpc = Arc::clone(&last_scrobbler_result);
             let state_tx_rpc = state_tx.clone();
+            let som_rpc = Arc::clone(&sync_operation_manager);
             tokio::spawn(async move {
-                rpc::run_server(19140, db_clone, dm_clone, scrobbler_result_rpc, state_tx_rpc).await;
+                rpc::run_server(19140, db_clone, dm_clone, scrobbler_result_rpc, state_tx_rpc, som_rpc).await;
             });
 
             // Handle Device Events
             let state_tx_clone = state_tx.clone();
             let jellyfin_client = Arc::new(api::JellyfinClient::new());
+            let som_events = Arc::clone(&sync_operation_manager);
             tokio::spawn(async move {
                 while let Some(event) = device_rx.recv().await {
                     match event {
                         device::DeviceEvent::Detected { path, manifest } => {
-                            println!("Device detected at {:?}: {:?}", path, manifest);
+                            daemon_log!("Device detected at {:?}: {:?}", path, manifest);
+                            let auto_sync_enabled = manifest.auto_sync_on_connect;
+                            let has_basket = !manifest.basket_items.is_empty();
                             match device_manager.handle_device_detected(path.clone(), manifest).await {
                                 Ok(new_state) => {
                                     let _ = state_tx_clone.send(new_state);
                                 }
                                 Err(e) => {
-                                    eprintln!("Error handling device detection: {}", e);
+                                    daemon_log!("Error handling device detection: {}", e);
                                     let _ = state_tx_clone.send(DaemonState::Error);
                                 }
                             }
@@ -212,10 +219,57 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                                         &user_id,
                                     )
                                     .await;
-                                    println!("[Scrobbler] Result: {:?}", result);
+                                    daemon_log!("[Scrobbler] Result: {:?}", result);
                                     let mut guard = scrobbler_result_clone.write().await;
                                     *guard = Some(result);
                                 });
+                            }
+
+                            // Auto-sync trigger: check if device has auto_sync_on_connect enabled
+                            if auto_sync_enabled && has_basket {
+                                // Check DB mapping also has auto_sync enabled
+                                let device = device_manager.get_current_device().await;
+                                let device_id = device.as_ref().map(|d| d.device_id.clone());
+                                let db_enabled = device_id
+                                    .as_ref()
+                                    .and_then(|id| db.get_device_mapping(id).ok().flatten())
+                                    .map(|m| m.auto_sync_on_connect)
+                                    .unwrap_or(false);
+
+                                if db_enabled {
+                                    // Duplicate prevention: check no active sync
+                                    let has_active_sync = {
+                                        // Check if any operation is currently running
+                                        false // SyncOperationManager doesn't track by device, so we rely on DaemonState
+                                    };
+
+                                    if !has_active_sync {
+                                        if let Ok((url, token, user_id)) =
+                                            api::CredentialManager::get_credentials()
+                                        {
+                                            let user_id = user_id.unwrap_or_else(|| "Me".to_string());
+                                            let client = Arc::clone(&jellyfin_client);
+                                            let dm = Arc::clone(&device_manager);
+                                            let som = Arc::clone(&som_events);
+                                            let state_tx_sync = state_tx_clone.clone();
+                                            let device_path = path.clone();
+
+                                            tokio::spawn(async move {
+                                                daemon_log!("[AutoSync] Starting auto-sync for device");
+                                                if let Err(e) = run_auto_sync(
+                                                    client, dm, som, state_tx_sync,
+                                                    device_path, url, token, user_id,
+                                                ).await {
+                                                    daemon_log!("[AutoSync] Failed: {}", e);
+                                                }
+                                            });
+                                        } else {
+                                            daemon_log!("[AutoSync] Skipped: no credentials available");
+                                        }
+                                    }
+                                }
+                            } else if auto_sync_enabled && !has_basket {
+                                daemon_log!("[AutoSync] Skipped: auto-sync enabled but no basket items configured");
                             }
                         }
                         device::DeviceEvent::Unrecognized { path } => {
@@ -386,6 +440,230 @@ fn run_interactive() -> Result<()> {
             }
         }
     });
+}
+
+/// Runs auto-sync for a device that has `auto_sync_on_connect` enabled.
+/// Resolves basket items into a sync delta, then executes the sync operation.
+async fn run_auto_sync(
+    jellyfin_client: Arc<api::JellyfinClient>,
+    device_manager: Arc<device::DeviceManager>,
+    sync_op_manager: Arc<sync::SyncOperationManager>,
+    state_tx: std::sync::mpsc::Sender<DaemonState>,
+    device_path: std::path::PathBuf,
+    url: String,
+    token: String,
+    user_id: String,
+) -> anyhow::Result<()> {
+    let manifest = device_manager
+        .get_current_device()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("No device connected"))?;
+
+    if manifest.basket_items.is_empty() {
+        daemon_log!("[AutoSync] No basket items configured, skipping");
+        return Ok(());
+    }
+
+    // Resolve basket items to desired items via Jellyfin API
+    let item_ids: Vec<String> = manifest.basket_items.iter().map(|b| b.id.clone()).collect();
+    let mut desired_items = Vec::new();
+
+    let is_downloadable = |t: &str| matches!(t, "Audio" | "MusicVideo");
+
+    for chunk in item_ids.chunks(100) {
+        let chunk_strs: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
+        match jellyfin_client
+            .get_items_by_ids(&url, &token, &user_id, &chunk_strs)
+            .await
+        {
+            Ok(items) => {
+                for item in items {
+                    if is_downloadable(&item.item_type) {
+                        desired_items.push(to_desired_item(item));
+                    } else {
+                        // Expand container item (album/playlist)
+                        match jellyfin_client
+                            .get_child_items_with_sizes(&url, &token, &user_id, &item.id)
+                            .await
+                        {
+                            Ok(children) => {
+                                for child in children {
+                                    if is_downloadable(&child.item_type) {
+                                        desired_items.push(to_desired_item(child));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                daemon_log!("[AutoSync] Failed to expand item {}: {}", item.id, e);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                daemon_log!("[AutoSync] Failed to fetch items from Jellyfin: {}", e);
+                return Err(e.into());
+            }
+        }
+    }
+
+    if desired_items.is_empty() {
+        daemon_log!("[AutoSync] No downloadable items resolved, skipping");
+        return Ok(());
+    }
+
+    let delta = sync::calculate_delta(&desired_items, &manifest);
+    let total_files = delta.adds.len() + delta.deletes.len();
+
+    if total_files == 0 && delta.id_changes.is_empty() {
+        daemon_log!("[AutoSync] Device already in sync, nothing to do");
+        return Ok(());
+    }
+
+    daemon_log!(
+        "[AutoSync] Delta: {} adds, {} deletes, {} id-changes",
+        delta.adds.len(),
+        delta.deletes.len(),
+        delta.id_changes.len()
+    );
+
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    sync_op_manager
+        .create_operation(operation_id.clone(), total_files)
+        .await;
+
+    // Mark manifest dirty before sync
+    let pending_ids: Vec<String> = delta
+        .adds
+        .iter()
+        .map(|a| a.jellyfin_id.clone())
+        .chain(delta.id_changes.iter().map(|c| c.new_jellyfin_id.clone()))
+        .collect();
+
+    device_manager
+        .update_manifest(|m| {
+            m.dirty = true;
+            m.pending_item_ids = pending_ids;
+        })
+        .await?;
+
+    let _ = state_tx.send(DaemonState::Syncing);
+
+    let result = sync::execute_sync(
+        &delta,
+        &device_path,
+        &jellyfin_client,
+        &url,
+        &token,
+        &user_id,
+        sync_op_manager.clone(),
+        operation_id.clone(),
+        device_manager.clone(),
+    )
+    .await;
+
+    match result {
+        Ok((_synced_items, errors)) => {
+            // Clear dirty flag
+            if let Err(e) = device_manager
+                .update_manifest(|m| {
+                    m.dirty = false;
+                    m.pending_item_ids = vec![];
+                })
+                .await
+            {
+                daemon_log!("[AutoSync] Failed to clear dirty flag: {}", e);
+            }
+
+            if let Some(mut operation) = sync_op_manager.get_operation(&operation_id).await {
+                operation.status = if errors.is_empty() {
+                    sync::SyncStatus::Complete
+                } else {
+                    sync::SyncStatus::Failed
+                };
+                operation.errors = errors.clone();
+                sync_op_manager
+                    .update_operation(&operation_id, operation)
+                    .await;
+            }
+
+            if errors.is_empty() {
+                daemon_log!("[AutoSync] Sync completed successfully");
+                let _ = tokio::task::spawn_blocking(|| {
+                    if let Err(e) = notify_rust::Notification::new()
+                        .summary("JellyfinSync")
+                        .body("Sync Complete. Safe to eject.")
+                        .show()
+                    {
+                        daemon_log!("[AutoSync] Notification failed: {}", e);
+                    }
+                });
+                let _ = state_tx.send(DaemonState::Idle);
+            } else {
+                daemon_log!("[AutoSync] Sync completed with {} errors", errors.len());
+                let error_msg = format!(
+                    "Sync completed with {} error(s)",
+                    errors.len()
+                );
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Err(e) = notify_rust::Notification::new()
+                        .summary("JellyfinSync")
+                        .body(&error_msg)
+                        .show()
+                    {
+                        daemon_log!("[AutoSync] Notification failed: {}", e);
+                    }
+                });
+                let _ = state_tx.send(DaemonState::Error);
+            }
+        }
+        Err(e) => {
+            daemon_log!("[AutoSync] Sync failed: {}", e);
+
+            if let Some(mut operation) = sync_op_manager.get_operation(&operation_id).await {
+                operation.status = sync::SyncStatus::Failed;
+                operation.errors.push(sync::SyncFileError {
+                    jellyfin_id: String::new(),
+                    filename: "auto_sync".to_string(),
+                    error_message: e.to_string(),
+                });
+                sync_op_manager
+                    .update_operation(&operation_id, operation)
+                    .await;
+            }
+
+            let error_msg = format!("Sync failed: {}", e);
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Err(e) = notify_rust::Notification::new()
+                    .summary("JellyfinSync")
+                    .body(&error_msg)
+                    .show()
+                {
+                    daemon_log!("[AutoSync] Notification failed: {}", e);
+                }
+            });
+            let _ = state_tx.send(DaemonState::Error);
+        }
+    }
+
+    Ok(())
+}
+
+fn to_desired_item(item: api::JellyfinItem) -> sync::DesiredItem {
+    let size_bytes = item
+        .media_sources
+        .as_ref()
+        .and_then(|sources| sources.first())
+        .and_then(|s| s.size)
+        .unwrap_or(0) as u64;
+    sync::DesiredItem {
+        jellyfin_id: item.id,
+        name: item.name,
+        album: item.album,
+        artist: item.album_artist,
+        size_bytes,
+        etag: item.etag,
+    }
 }
 
 // Helper to load icon with proper error handling

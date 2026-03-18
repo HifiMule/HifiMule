@@ -78,6 +78,7 @@ pub async fn run_server(
     device_manager: Arc<crate::device::DeviceManager>,
     last_scrobbler_result: Arc<tokio::sync::RwLock<Option<crate::scrobbler::ScrobblerResult>>>,
     state_tx: std::sync::mpsc::Sender<crate::DaemonState>,
+    sync_operation_manager: Arc<crate::sync::SyncOperationManager>,
 ) {
     let state = Arc::new(AppState {
         jellyfin_client: JellyfinClient::new(),
@@ -85,7 +86,7 @@ pub async fn run_server(
         device_manager,
         last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
         size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
+        sync_operation_manager,
         last_scrobbler_result,
         state_tx,
     });
@@ -154,6 +155,9 @@ async fn handler(
         "manifest_get_basket" => handle_manifest_get_basket(&state).await,
         "manifest_save_basket" => handle_manifest_save_basket(&state, payload.params).await,
         "device_initialize" => handle_device_initialize(&state, payload.params).await,
+        "device_set_auto_sync_on_connect" => {
+            handle_device_set_auto_sync_on_connect(&state, payload.params).await
+        }
         _ => Err(JsonRpcError {
             code: ERR_METHOD_NOT_FOUND,
             message: "Method not found".to_string(),
@@ -365,12 +369,18 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         .await
         .map(|p| p.to_string_lossy().to_string());
 
+    let auto_sync_on_connect = mapping
+        .as_ref()
+        .map(|m| m.auto_sync_on_connect)
+        .unwrap_or(false);
+
     Ok(serde_json::json!({
         "currentDevice": device,
         "deviceMapping": mapping,
         "serverConnected": server_connected,
         "dirtyManifest": dirty,
         "pendingDevicePath": pending_device_path,
+        "autoSyncOnConnect": auto_sync_on_connect,
     }))
 }
 
@@ -1287,6 +1297,62 @@ async fn handle_device_initialize(
     }))
 }
 
+async fn handle_device_set_auto_sync_on_connect(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let device_id = params["deviceId"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing deviceId".to_string(),
+        data: None,
+    })?;
+
+    let enabled = params["enabled"].as_bool().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing or invalid enabled (boolean)".to_string(),
+        data: None,
+    })?;
+
+    // Update SQLite device profile
+    state
+        .db
+        .set_auto_sync_on_connect(device_id, enabled)
+        .map_err(|e| JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: format!("Failed to update auto_sync_on_connect in DB: {}", e),
+            data: None,
+        })?;
+
+    // Update device manifest on disk (if this device is currently connected)
+    let current_device = state.device_manager.get_current_device().await;
+    if let Some(ref d) = current_device {
+        if d.device_id == device_id {
+            state
+                .device_manager
+                .update_manifest(|m| {
+                    m.auto_sync_on_connect = enabled;
+                })
+                .await
+                .map_err(|e| JsonRpcError {
+                    code: ERR_STORAGE_ERROR,
+                    message: format!("Failed to update manifest: {}", e),
+                    data: None,
+                })?;
+        }
+    }
+
+    Ok(serde_json::json!({
+        "status": "success",
+        "autoSyncOnConnect": enabled,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1647,6 +1713,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            auto_sync_on_connect: false,
         };
 
         device_manager
@@ -1709,6 +1776,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            auto_sync_on_connect: false,
         };
         device_manager
             .handle_device_detected(dir.path().to_path_buf(), manifest)
@@ -1751,6 +1819,7 @@ mod tests {
             dirty: true,
             pending_item_ids: vec!["id-1".to_string()],
             basket_items: vec![],
+            auto_sync_on_connect: false,
         };
         device_manager
             .handle_device_detected(dir.path().to_path_buf(), manifest)
@@ -1807,6 +1876,7 @@ mod tests {
             dirty: true,
             pending_item_ids: vec!["id-1".to_string()],
             basket_items: vec![],
+            auto_sync_on_connect: false,
         };
         device_manager
             .handle_device_detected(std::path::PathBuf::from("/tmp/dirty"), dirty_manifest)
@@ -1924,6 +1994,7 @@ mod tests {
                     dirty: false,
                     pending_item_ids: vec![],
                     basket_items: vec![],
+                    auto_sync_on_connect: false,
                 },
             )
             .await
@@ -2018,6 +2089,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            auto_sync_on_connect: false,
         };
         device_manager
             .handle_device_detected(std::path::PathBuf::from("/tmp/dev"), manifest)
@@ -2220,5 +2292,131 @@ mod tests {
         assert_eq!(manifest.managed_paths, vec!["Music".to_string()]);
         assert!(manifest.synced_items.is_empty());
         assert!(!manifest.dirty);
+    }
+
+    #[tokio::test]
+    async fn test_rpc_device_set_auto_sync_on_connect() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_id = "auto-sync-rpc-test";
+        db.upsert_device_mapping(device_id, Some("Test"), Some("user-1"), None)
+            .unwrap();
+
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+
+        // Simulate device connected with a tempdir for manifest writes
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = crate::device::DeviceManifest {
+            device_id: device_id.to_string(),
+            name: Some("Test".to_string()),
+            version: "1.0".to_string(),
+            managed_paths: vec![],
+            synced_items: vec![],
+            dirty: false,
+            pending_item_ids: vec![],
+            basket_items: vec![],
+            auto_sync_on_connect: false,
+        };
+        crate::device::write_manifest(dir.path(), &manifest)
+            .await
+            .unwrap();
+        device_manager
+            .handle_device_detected(dir.path().to_path_buf(), manifest)
+            .await
+            .unwrap();
+
+        let state = AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db: db.clone(),
+            device_manager: device_manager.clone(),
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
+            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+        };
+
+        // Enable auto-sync via RPC
+        let params = Some(json!({
+            "deviceId": device_id,
+            "enabled": true
+        }));
+        let result = handle_device_set_auto_sync_on_connect(&state, params)
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "success");
+        assert_eq!(result["autoSyncOnConnect"], true);
+
+        // Verify DB was updated
+        let mapping = db.get_device_mapping(device_id).unwrap().unwrap();
+        assert!(mapping.auto_sync_on_connect);
+
+        // Verify manifest was updated on disk
+        let content = tokio::fs::read_to_string(dir.path().join(".jellyfinsync.json"))
+            .await
+            .unwrap();
+        let on_disk: crate::device::DeviceManifest = serde_json::from_str(&content).unwrap();
+        assert!(on_disk.auto_sync_on_connect);
+
+        // Verify in-memory manifest was updated
+        let in_memory = device_manager.get_current_device().await.unwrap();
+        assert!(in_memory.auto_sync_on_connect);
+
+        // Disable auto-sync via RPC
+        let params = Some(json!({
+            "deviceId": device_id,
+            "enabled": false
+        }));
+        let result = handle_device_set_auto_sync_on_connect(&state, params)
+            .await
+            .unwrap();
+        assert_eq!(result["autoSyncOnConnect"], false);
+
+        // Verify DB disabled
+        let mapping = db.get_device_mapping(device_id).unwrap().unwrap();
+        assert!(!mapping.auto_sync_on_connect);
+    }
+
+    #[tokio::test]
+    async fn test_rpc_get_daemon_state_includes_auto_sync_field() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_id = "auto-state-test";
+        db.upsert_device_mapping(device_id, Some("Test"), Some("user-1"), None)
+            .unwrap();
+        db.set_auto_sync_on_connect(device_id, true).unwrap();
+
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+
+        let manifest = crate::device::DeviceManifest {
+            device_id: device_id.to_string(),
+            name: Some("Test".to_string()),
+            version: "1.0".to_string(),
+            managed_paths: vec![],
+            synced_items: vec![],
+            dirty: false,
+            pending_item_ids: vec![],
+            basket_items: vec![],
+            auto_sync_on_connect: true,
+        };
+        device_manager
+            .handle_device_detected(std::path::PathBuf::from("/tmp/auto-state"), manifest)
+            .await
+            .unwrap();
+
+        let state = AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db,
+            device_manager,
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
+            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+        };
+
+        let result = handle_get_daemon_state(&state).await.unwrap();
+        assert_eq!(
+            result["autoSyncOnConnect"], true,
+            "autoSyncOnConnect should be true for device with flag enabled"
+        );
     }
 }

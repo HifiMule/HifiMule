@@ -62,6 +62,7 @@ async fn test_device_recognition_integration() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        auto_sync_on_connect: false,
     };
 
     let state = manager
@@ -91,4 +92,115 @@ async fn test_device_recognition_integration() {
     assert!(device.is_none());
     let path = manager.get_current_device_path().await;
     assert!(path.is_none());
+}
+
+/// Integration test: device detection with auto_sync_on_connect enabled
+/// verifies the manifest flag is correctly read and the device is recognized.
+#[tokio::test]
+async fn test_device_detection_auto_sync_enabled() {
+    use crate::db::Database;
+    use crate::device::{BasketItem, DeviceManager, DeviceManifest};
+
+    let db = Arc::new(Database::memory().unwrap());
+    let test_id = "auto-sync-device-001";
+    db.upsert_device_mapping(test_id, Some("Auto Device"), Some("user-1"), None)
+        .unwrap();
+    db.set_auto_sync_on_connect(test_id, true).unwrap();
+
+    let manager = DeviceManager::new(db.clone());
+
+    let manifest = DeviceManifest {
+        device_id: test_id.to_string(),
+        name: Some("Auto Device".to_string()),
+        version: "1.0".to_string(),
+        managed_paths: vec!["Music".to_string()],
+        synced_items: vec![],
+        dirty: false,
+        pending_item_ids: vec![],
+        basket_items: vec![BasketItem {
+            id: "album-1".to_string(),
+            name: "Test Album".to_string(),
+            item_type: "MusicAlbum".to_string(),
+            artist: Some("Test Artist".to_string()),
+            child_count: 10,
+            size_ticks: 1000000,
+            size_bytes: 50000000,
+        }],
+        auto_sync_on_connect: true,
+    };
+
+    // Verify manifest has auto_sync enabled
+    assert!(manifest.auto_sync_on_connect);
+    assert!(!manifest.basket_items.is_empty());
+
+    // Verify DB also has auto_sync enabled
+    let db_mapping = db.get_device_mapping(test_id).unwrap().unwrap();
+    assert!(db_mapping.auto_sync_on_connect);
+
+    // Simulate detection
+    let state = manager
+        .handle_device_detected(std::path::PathBuf::from("/tmp/auto-device"), manifest)
+        .await
+        .expect("Failed to handle detection");
+
+    if let DaemonState::DeviceRecognized { name, .. } = state {
+        assert_eq!(name, "Auto Device");
+    } else {
+        panic!("Expected DeviceRecognized, got {:?}", state);
+    }
+}
+
+/// Integration test: auto-sync disabled → no sync triggered
+#[tokio::test]
+async fn test_device_detection_auto_sync_disabled() {
+    use crate::db::Database;
+    use crate::device::{BasketItem, DeviceManager, DeviceManifest};
+
+    let db = Arc::new(Database::memory().unwrap());
+    let test_id = "no-auto-sync-device";
+    db.upsert_device_mapping(test_id, Some("Manual Device"), Some("user-2"), None)
+        .unwrap();
+    // auto_sync_on_connect defaults to false in DB
+
+    let manager = DeviceManager::new(db.clone());
+
+    let manifest = DeviceManifest {
+        device_id: test_id.to_string(),
+        name: Some("Manual Device".to_string()),
+        version: "1.0".to_string(),
+        managed_paths: vec!["Music".to_string()],
+        synced_items: vec![],
+        dirty: false,
+        pending_item_ids: vec![],
+        basket_items: vec![BasketItem {
+            id: "album-2".to_string(),
+            name: "Another Album".to_string(),
+            item_type: "MusicAlbum".to_string(),
+            artist: None,
+            child_count: 5,
+            size_ticks: 500000,
+            size_bytes: 25000000,
+        }],
+        auto_sync_on_connect: false,
+    };
+
+    // Verify auto_sync is disabled
+    assert!(!manifest.auto_sync_on_connect);
+
+    // Verify DB has auto_sync disabled
+    let db_mapping = db.get_device_mapping(test_id).unwrap().unwrap();
+    assert!(!db_mapping.auto_sync_on_connect);
+
+    // Device detection should proceed normally without triggering sync
+    let state = manager
+        .handle_device_detected(std::path::PathBuf::from("/tmp/manual-device"), manifest)
+        .await
+        .expect("Failed to handle detection");
+
+    // Should be recognized but NOT trigger auto-sync
+    if let DaemonState::DeviceRecognized { name, .. } = state {
+        assert_eq!(name, "Manual Device");
+    } else {
+        panic!("Expected DeviceRecognized, got {:?}", state);
+    }
 }

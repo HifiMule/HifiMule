@@ -50,6 +50,8 @@ pub struct DeviceManifest {
     pub pending_item_ids: Vec<String>,
     #[serde(default)]
     pub basket_items: Vec<BasketItem>,
+    #[serde(default)]
+    pub auto_sync_on_connect: bool,
 }
 
 /// Atomically writes a DeviceManifest to disk using Write-Temp-Rename pattern.
@@ -311,6 +313,7 @@ impl DeviceManager {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            auto_sync_on_connect: false,
         };
 
         write_manifest(&device_root, &manifest).await?;

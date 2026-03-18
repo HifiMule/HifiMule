@@ -29,6 +29,7 @@ async fn test_dirty_manifest_roundtrip() {
         dirty: true,
         pending_item_ids: vec!["id-1".to_string(), "id-2".to_string()],
         basket_items: vec![],
+        auto_sync_on_connect: false,
     };
     write_manifest(dir.path(), &manifest).await.unwrap();
     let content = tokio::fs::read_to_string(dir.path().join(".jellyfinsync.json"))
@@ -343,6 +344,7 @@ async fn test_write_manifest_creates_files() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        auto_sync_on_connect: false,
     };
 
     write_manifest(root, &manifest).await.unwrap();
@@ -376,6 +378,7 @@ async fn test_write_manifest_overwrites_existing() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        auto_sync_on_connect: false,
     };
     write_manifest(root, &manifest1).await.unwrap();
 
@@ -399,6 +402,7 @@ async fn test_write_manifest_overwrites_existing() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        auto_sync_on_connect: false,
     };
     write_manifest(root, &manifest2).await.unwrap();
 
@@ -439,6 +443,7 @@ async fn test_get_discrepancies_missing_file() {
         dirty: true,
         pending_item_ids: vec![],
         basket_items: vec![],
+        auto_sync_on_connect: false,
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -479,6 +484,7 @@ async fn test_get_discrepancies_orphaned_file() {
         dirty: true,
         pending_item_ids: vec![],
         basket_items: vec![],
+        auto_sync_on_connect: false,
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -531,6 +537,7 @@ async fn test_get_discrepancies_no_issues() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        auto_sync_on_connect: false,
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -584,6 +591,7 @@ async fn test_prune_items() {
         dirty: true,
         pending_item_ids: vec![],
         basket_items: vec![],
+        auto_sync_on_connect: false,
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -632,6 +640,7 @@ async fn test_relink_item() {
         dirty: true,
         pending_item_ids: vec![],
         basket_items: vec![],
+        auto_sync_on_connect: false,
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -673,6 +682,7 @@ async fn test_relink_item_path_traversal() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        auto_sync_on_connect: false,
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -702,6 +712,7 @@ async fn test_clear_dirty_flag() {
         dirty: true,
         pending_item_ids: vec!["pending-1".to_string()],
         basket_items: vec![],
+        auto_sync_on_connect: false,
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -981,6 +992,7 @@ async fn test_save_basket_roundtrip() {
         dirty: false,
         pending_item_ids: vec![],
         basket_items: vec![],
+        auto_sync_on_connect: false,
     };
     write_manifest(dir.path(), &manifest).await.unwrap();
 
@@ -1011,4 +1023,57 @@ async fn test_save_basket_roundtrip() {
     let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
     assert_eq!(loaded.basket_items.len(), 1);
     assert_eq!(loaded.basket_items[0].name, "Basket Playlist");
+}
+
+// ===== Story 2.3b Tests: Auto-Sync on Connect =====
+
+#[test]
+fn test_auto_sync_on_connect_serde_default() {
+    let json = r#"{"device_id": "dev-1", "name": "iPod", "version": "1.0"}"#;
+    let manifest: DeviceManifest = serde_json::from_str(json).unwrap();
+    assert!(
+        !manifest.auto_sync_on_connect,
+        "auto_sync_on_connect must default to false"
+    );
+}
+
+#[tokio::test]
+async fn test_auto_sync_on_connect_roundtrip() {
+    let dir = tempdir().unwrap();
+    let manifest = DeviceManifest {
+        device_id: "dev-auto".to_string(),
+        name: Some("Auto Device".to_string()),
+        version: "1.0".to_string(),
+        managed_paths: vec![],
+        synced_items: vec![],
+        dirty: false,
+        pending_item_ids: vec![],
+        basket_items: vec![],
+        auto_sync_on_connect: true,
+    };
+    write_manifest(dir.path(), &manifest).await.unwrap();
+
+    let content = tokio::fs::read_to_string(dir.path().join(".jellyfinsync.json"))
+        .await
+        .unwrap();
+    let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
+    assert!(loaded.auto_sync_on_connect);
+
+    // Verify snake_case serialization (DeviceManifest doesn't use rename_all)
+    let raw: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(raw["auto_sync_on_connect"], true);
+}
+
+#[test]
+fn test_auto_sync_on_connect_explicit_false() {
+    let json = r#"{"device_id": "dev-1", "version": "1.0", "auto_sync_on_connect": false}"#;
+    let manifest: DeviceManifest = serde_json::from_str(json).unwrap();
+    assert!(!manifest.auto_sync_on_connect);
+}
+
+#[test]
+fn test_auto_sync_on_connect_explicit_true() {
+    let json = r#"{"device_id": "dev-1", "version": "1.0", "auto_sync_on_connect": true}"#;
+    let manifest: DeviceManifest = serde_json::from_str(json).unwrap();
+    assert!(manifest.auto_sync_on_connect);
 }

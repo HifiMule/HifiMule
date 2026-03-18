@@ -900,6 +900,7 @@ mod tests {
             dirty: false,
             pending_item_ids: vec![],
             basket_items: vec![],
+            auto_sync_on_connect: false,
         }
     }
 

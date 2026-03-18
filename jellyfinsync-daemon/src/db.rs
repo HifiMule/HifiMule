@@ -11,6 +11,7 @@ pub struct DeviceMapping {
     pub jellyfin_user_id: Option<String>,
     pub sync_rules: Option<String>,
     pub last_seen_at: Option<String>,
+    pub auto_sync_on_connect: bool,
 }
 
 pub struct Database {
@@ -47,11 +48,24 @@ impl Database {
                 name TEXT,
                 jellyfin_user_id TEXT,
                 sync_rules TEXT,
-                last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                auto_sync_on_connect BOOLEAN DEFAULT 0
             )",
             [],
         )
         .map_err(|e| anyhow!("Failed to create devices table: {}", e))?;
+
+        // Migration: add auto_sync_on_connect column if missing (existing databases)
+        let has_column: bool = conn
+            .prepare("SELECT auto_sync_on_connect FROM devices LIMIT 0")
+            .is_ok();
+        if !has_column {
+            conn.execute(
+                "ALTER TABLE devices ADD COLUMN auto_sync_on_connect BOOLEAN DEFAULT 0",
+                [],
+            )
+            .map_err(|e| anyhow!("Failed to add auto_sync_on_connect column: {}", e))?;
+        }
         conn.execute(
             "CREATE TABLE IF NOT EXISTS scrobble_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,7 +91,7 @@ impl Database {
     pub fn get_device_mapping(&self, id: &str) -> Result<Option<DeviceMapping>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, jellyfin_user_id, sync_rules, last_seen_at FROM devices WHERE id = ?",
+            "SELECT id, name, jellyfin_user_id, sync_rules, last_seen_at, auto_sync_on_connect FROM devices WHERE id = ?",
         )?;
 
         let mut rows = stmt.query(params![id])?;
@@ -88,6 +102,7 @@ impl Database {
                 jellyfin_user_id: row.get(2)?,
                 sync_rules: row.get(3)?,
                 last_seen_at: row.get(4)?,
+                auto_sync_on_connect: row.get::<_, bool>(5).unwrap_or(false),
             }))
         } else {
             Ok(None)
@@ -169,6 +184,20 @@ impl Database {
             params![id, name, user_id, rules],
         )
         .map_err(|e| anyhow!("Failed to upsert device mapping: {}", e))?;
+        Ok(())
+    }
+
+    pub fn set_auto_sync_on_connect(&self, id: &str, enabled: bool) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn
+            .execute(
+                "UPDATE devices SET auto_sync_on_connect = ?1 WHERE id = ?2",
+                params![enabled, id],
+            )
+            .map_err(|e| anyhow!("Failed to update auto_sync_on_connect: {}", e))?;
+        if rows == 0 {
+            return Err(anyhow!("Device not found: {}", id));
+        }
         Ok(())
     }
 }
@@ -266,5 +295,40 @@ mod tests {
         let mapping = db.get_device_mapping(id).unwrap().unwrap();
         assert_eq!(mapping.name, Some("Updated Name".to_string()));
         assert_eq!(mapping.jellyfin_user_id, None);
+    }
+
+    #[test]
+    fn test_auto_sync_on_connect_defaults_false() {
+        let db = Database::memory().unwrap();
+        let id = "device-auto-1";
+        db.upsert_device_mapping(id, Some("Test"), None, None)
+            .unwrap();
+        let mapping = db.get_device_mapping(id).unwrap().unwrap();
+        assert!(!mapping.auto_sync_on_connect);
+    }
+
+    #[test]
+    fn test_set_auto_sync_on_connect() {
+        let db = Database::memory().unwrap();
+        let id = "device-auto-2";
+        db.upsert_device_mapping(id, Some("Test"), None, None)
+            .unwrap();
+
+        // Enable auto-sync
+        db.set_auto_sync_on_connect(id, true).unwrap();
+        let mapping = db.get_device_mapping(id).unwrap().unwrap();
+        assert!(mapping.auto_sync_on_connect);
+
+        // Disable auto-sync
+        db.set_auto_sync_on_connect(id, false).unwrap();
+        let mapping = db.get_device_mapping(id).unwrap().unwrap();
+        assert!(!mapping.auto_sync_on_connect);
+    }
+
+    #[test]
+    fn test_set_auto_sync_on_connect_nonexistent_device() {
+        let db = Database::memory().unwrap();
+        let result = db.set_auto_sync_on_connect("nonexistent", true);
+        assert!(result.is_err());
     }
 }
