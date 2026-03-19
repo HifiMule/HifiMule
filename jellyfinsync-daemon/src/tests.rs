@@ -63,6 +63,7 @@ async fn test_device_recognition_integration() {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: false,
+        auto_fill: crate::device::AutoFillPrefs::default(),
     };
 
     let state = manager
@@ -127,6 +128,7 @@ async fn test_device_detection_auto_sync_enabled() {
             size_bytes: 50000000,
         }],
         auto_sync_on_connect: true,
+        auto_fill: crate::device::AutoFillPrefs::default(),
     };
 
     // Verify manifest has auto_sync enabled
@@ -182,6 +184,7 @@ async fn test_device_detection_auto_sync_disabled() {
             size_bytes: 25000000,
         }],
         auto_sync_on_connect: false,
+        auto_fill: crate::device::AutoFillPrefs::default(),
     };
 
     // Verify auto_sync is disabled

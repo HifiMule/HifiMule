@@ -1,6 +1,6 @@
 # Story 3.6: Auto-Fill Sync Mode (Synchronise All)
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -45,49 +45,49 @@ So that I can fill my device without manually browsing and selecting every album
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Implement priority ranking algorithm in daemon (AC: #1)
-  - [ ] 1.1 Create `auto_fill` module in daemon (`jellyfinsync-daemon/src/auto_fill.rs`)
-  - [ ] 1.2 Implement Jellyfin API query to fetch all music tracks with `IsFavorite`, `PlayCount`, `DateCreated` fields
-  - [ ] 1.3 Implement priority sorting: favorites first → play count desc → creation date desc
-  - [ ] 1.4 Implement capacity-aware truncation using cumulative `sizeBytes` against device free space or `maxFillBytes`
-  - [ ] 1.5 Add unit tests for priority algorithm and capacity truncation
+- [x] Task 1: Implement priority ranking algorithm in daemon (AC: #1)
+  - [x] 1.1 Create `auto_fill` module in daemon (`jellyfinsync-daemon/src/auto_fill.rs`)
+  - [x] 1.2 Implement Jellyfin API query to fetch all music tracks with `IsFavorite`, `PlayCount`, `DateCreated` fields
+  - [x] 1.3 Implement priority sorting: favorites first → play count desc → creation date desc
+  - [x] 1.4 Implement capacity-aware truncation using cumulative `sizeBytes` against device free space or `maxFillBytes`
+  - [x] 1.5 Add unit tests for priority algorithm and capacity truncation
 
-- [ ] Task 2: Add `basket.autoFill` RPC method (AC: #1, #2)
-  - [ ] 2.1 Register `basket.autoFill` in `rpc.rs` RPC dispatch
-  - [ ] 2.2 Params: `{ deviceId: string, maxBytes?: number, excludeItemIds: string[] }`
-  - [ ] 2.3 Call auto_fill module, passing `excludeItemIds` (manual selections) for dedup
-  - [ ] 2.4 Return ranked item list with priority reason metadata (`favorite`, `playCount`, `new`)
-  - [ ] 2.5 Subtract manual selection sizes from available capacity before running algorithm
+- [x] Task 2: Add `basket.autoFill` RPC method (AC: #1, #2)
+  - [x] 2.1 Register `basket.autoFill` in `rpc.rs` RPC dispatch
+  - [x] 2.2 Params: `{ deviceId: string, maxBytes?: number, excludeItemIds: string[] }`
+  - [x] 2.3 Call auto_fill module, passing `excludeItemIds` (manual selections) for dedup
+  - [x] 2.4 Return ranked item list with priority reason metadata (`favorite`, `playCount`, `new`)
+  - [x] 2.5 Subtract manual selection sizes from available capacity before running algorithm
 
-- [ ] Task 3: Persist auto-fill and auto-sync preferences per device (AC: #1, #3, #4)
-  - [ ] 3.1 Add `auto_fill_enabled`, `max_fill_bytes`, and `auto_sync_on_connect` fields to device profile in manifest `.jellyfinsync.json`
-  - [ ] 3.2 Add `sync.setAutoFill` RPC method: `{ deviceId, autoFillEnabled, maxFillBytes?, autoSyncOnConnect }`
-  - [ ] 3.3 Use Write-Temp-Rename pattern for manifest updates (existing pattern)
+- [x] Task 3: Persist auto-fill and auto-sync preferences per device (AC: #1, #3, #4)
+  - [x] 3.1 Add `auto_fill_enabled`, `max_fill_bytes`, and `auto_sync_on_connect` fields to device profile in manifest `.jellyfinsync.json`
+  - [x] 3.2 Add `sync.setAutoFill` RPC method: `{ deviceId, autoFillEnabled, maxFillBytes?, autoSyncOnConnect }`
+  - [x] 3.3 Use Write-Temp-Rename pattern for manifest updates (existing pattern)
 
-- [ ] Task 4: Build Auto-Fill UI toggle, Max Fill Size slider, and Auto-Sync toggle (AC: #1, #3, #4)
-  - [ ] 4.1 Add `<sl-switch>` Auto-Fill toggle in `BasketSidebar.ts` header area
-  - [ ] 4.2 Add `<sl-range>` Max Fill Size slider (visible only when Auto-Fill is active)
-  - [ ] 4.3 Add `<sl-switch>` "Auto-Sync on Connect" toggle below Auto-Fill controls with helper text: "Automatically start syncing when this device is connected. Works with or without the UI open."
-  - [ ] 4.4 Wire Auto-Fill toggle to call `basket.autoFill` RPC via existing `rpc_proxy` Tauri command
-  - [ ] 4.5 Wire Auto-Sync toggle to call `sync.setAutoFill` RPC to persist `autoSyncOnConnect` preference
-  - [ ] 4.6 Wire slider changes to re-trigger auto-fill with updated `maxBytes`
-  - [ ] 4.7 Debounce slider changes (500ms) before re-querying
-  - [ ] 4.8 On device connect, read saved preferences from manifest and set toggle states accordingly
+- [x] Task 4: Build Auto-Fill UI toggle, Max Fill Size slider, and Auto-Sync toggle (AC: #1, #3, #4)
+  - [x] 4.1 Add `<sl-switch>` Auto-Fill toggle in `BasketSidebar.ts` header area
+  - [x] 4.2 Add `<sl-range>` Max Fill Size slider (visible only when Auto-Fill is active)
+  - [x] 4.3 Add `<sl-switch>` "Auto-Sync on Connect" toggle below Auto-Fill controls with helper text: "Automatically start syncing when this device is connected. Works with or without the UI open."
+  - [x] 4.4 Wire Auto-Fill toggle to call `basket.autoFill` RPC via existing `rpc_proxy` Tauri command
+  - [x] 4.5 Wire Auto-Sync toggle to call `sync.setAutoFill` RPC to persist `autoSyncOnConnect` preference
+  - [x] 4.6 Wire slider changes to re-trigger auto-fill with updated `maxBytes`
+  - [x] 4.7 Debounce slider changes (500ms) before re-querying
+  - [x] 4.8 On device connect, read saved preferences from manifest and set toggle states accordingly
 
-- [ ] Task 5: Integrate auto-fill items into basket state (AC: #1, #2, #4)
-  - [ ] 5.1 Extend `BasketItem` interface in `basket.ts` with `autoFilled: boolean` and `priorityReason: string`
-  - [ ] 5.2 When auto-fill response arrives, merge with existing manual items (manual items first)
-  - [ ] 5.3 On manual add/remove while auto-fill is active, re-trigger auto-fill with updated `excludeItemIds`
-  - [ ] 5.4 Track which items are manual vs auto-filled so `clear()` can optionally clear only auto-filled items
+- [x] Task 5: Integrate auto-fill items into basket state (AC: #1, #2, #4)
+  - [x] 5.1 Extend `BasketItem` interface in `basket.ts` with `autoFilled: boolean` and `priorityReason: string`
+  - [x] 5.2 When auto-fill response arrives, merge with existing manual items (manual items first)
+  - [x] 5.3 On manual add/remove while auto-fill is active, re-trigger auto-fill with updated `excludeItemIds`
+  - [x] 5.4 Track which items are manual vs auto-filled so `clear()` can optionally clear only auto-filled items
 
-- [ ] Task 6: Render Auto badges and priority reason tags (AC: #4)
-  - [ ] 6.1 In `BasketSidebar.ts` item rendering, add "Auto" badge with muted accent color for `autoFilled === true` items
-  - [ ] 6.2 Add priority reason inline label: "★ Favorite", "▶ {n} plays", "New"
-  - [ ] 6.3 Ensure visual distinction is clear between manual and auto-filled items
+- [x] Task 6: Render Auto badges and priority reason tags (AC: #4)
+  - [x] 6.1 In `BasketSidebar.ts` item rendering, add "Auto" badge with muted accent color for `autoFilled === true` items
+  - [x] 6.2 Add priority reason inline label: "★ Favorite", "▶ {n} plays", "New"
+  - [x] 6.3 Ensure visual distinction is clear between manual and auto-filled items
 
-- [ ] Task 7: Storage projection integration (AC: #1, #3)
-  - [ ] 7.1 Verify existing `getCapacityZone()` and `renderCapacityBar()` update correctly with auto-fill items
-  - [ ] 7.2 Ensure capacity bar reflects combined manual + auto-fill size in real-time
+- [x] Task 7: Storage projection integration (AC: #1, #3)
+  - [x] 7.1 Verify existing `getCapacityZone()` and `renderCapacityBar()` update correctly with auto-fill items
+  - [x] 7.2 Ensure capacity bar reflects combined manual + auto-fill size in real-time
 
 ## Dev Notes
 
@@ -181,8 +181,36 @@ Add to `.jellyfinsync.json` optional `autoFill` block:
 
 ### Agent Model Used
 
+claude-sonnet-4-6
+
 ### Debug Log References
+
+- Fixed: `DeviceManifest` struct literal exhaustiveness — added `auto_fill: AutoFillPrefs::default()` across all test files (`device/tests.rs`, `sync.rs`, `tests.rs`, `rpc.rs`) using Python batch script after initial `#[cfg(test)]` replace_all missed `auto_sync_on_connect: true` variants and `JellyfinItem` struct literals in sync.rs tests.
 
 ### Completion Notes List
 
+- **Task 1**: Created `jellyfinsync-daemon/src/auto_fill.rs` with `rank_and_truncate()` pure function (unit-testable without network) and `run_auto_fill()` async wrapper. Extended `JellyfinItem` in `api.rs` with optional `user_data: Option<JellyfinUserData>` and `date_created: Option<String>`. Added `get_audio_tracks_for_autofill()` to `JellyfinClient` that paginates in 500-item batches with `IncludeItemTypes=Audio&Recursive=true&Fields=MediaSources,UserData,DateCreated`. Added 6 unit tests covering all sort keys, capacity truncation, exclude list, empty library, and zero-capacity edge cases.
+- **Task 2**: Registered `basket.autoFill` in `rpc.rs` dispatch. Handler resolves `maxFillBytes` from params or falls back to device free space, calls `auto_fill::run_auto_fill`, returns ranked `AutoFillItem` list with `priorityReason`.
+- **Task 3**: Added `AutoFillPrefs { enabled: bool, max_bytes: Option<u64> }` struct with `#[serde(rename_all = "camelCase")]` and `Default` to `device/mod.rs`. Added `auto_fill: AutoFillPrefs` field to `DeviceManifest`. Added `save_auto_fill_prefs()` to `DeviceManager`. Added `sync.setAutoFill` RPC handler that persists prefs to manifest AND updates `auto_sync_on_connect` in both manifest and DB. Updated `get_daemon_state` to expose `autoFill` object to UI.
+- **Task 4**: Added `autoFillEnabled`, `autoFillMaxBytes`, `autoSyncOnConnect`, `autoFillDebounceTimer` state fields to `BasketSidebar`. Added `renderAutoFillControls()` rendering Auto-Fill toggle, conditional GB slider (visible only when enabled), and Auto-Sync toggle with helper text. Added `bindAutoFillEvents()` for `sl-change` events with 500ms debounce on slider. On device connect, reads saved prefs from daemon state and re-triggers auto-fill if enabled.
+- **Task 5**: Extended `BasketItem` interface with optional `autoFilled?: boolean` and `priorityReason?: string`. Added `replaceAutoFilled()`, `getManualItemIds()`, and `getManualSizeBytes()` to `BasketStore`. `replaceAutoFilled` preserves manual items and replaces only auto-fill items atomically.
+- **Task 6**: Updated `renderItem()` to show "Auto" badge (`.basket-item-auto-badge`) and priority reason label (`.basket-item-priority-reason`) for auto-filled items. `renderPriorityLabel()` maps `"favorite"→"★ Favorite"`, `"playCount:N"→"▶ N plays"`, `"new"→"New"`. Auto-filled cards get `.basket-item-auto` CSS class for visual distinction.
+- **Task 7**: Verified `getTotalSizeBytes()` already sums all items including auto-filled, `renderCapacityBar()` uses that total — no changes needed. Existing storage projection correctly reflects combined manual + auto-fill size in real-time.
+- **Build**: 141 tests pass, 0 errors, 1 pre-existing warning (unrelated scrobbler fields).
+
 ### File List
+
+- `jellyfinsync-daemon/src/auto_fill.rs` — NEW: auto-fill priority ranking module with unit tests
+- `jellyfinsync-daemon/src/api.rs` — MODIFIED: extended `JellyfinItem` with `user_data`/`date_created`; added `JellyfinUserData` struct; added `get_audio_tracks_for_autofill()` method
+- `jellyfinsync-daemon/src/device/mod.rs` — MODIFIED: added `AutoFillPrefs` struct; added `auto_fill` field to `DeviceManifest`; added `save_auto_fill_prefs()` to `DeviceManager`
+- `jellyfinsync-daemon/src/rpc.rs` — MODIFIED: registered `basket.autoFill` and `sync.setAutoFill` in dispatch; added `handle_basket_auto_fill()` and `handle_sync_set_auto_fill()` handlers; updated `get_daemon_state` to expose `autoFill` prefs; fixed all `DeviceManifest` test literals
+- `jellyfinsync-daemon/src/main.rs` — MODIFIED: added `mod auto_fill;`; updated TODO comment
+- `jellyfinsync-daemon/src/device/tests.rs` — MODIFIED: added `auto_fill` field to all `DeviceManifest` test literals
+- `jellyfinsync-daemon/src/sync.rs` — MODIFIED: added `auto_fill` field to `DeviceManifest` test literal; added `user_data`/`date_created` to `JellyfinItem` test literals
+- `jellyfinsync-daemon/src/tests.rs` — MODIFIED: added `auto_fill` field to `DeviceManifest` test literals
+- `jellyfinsync-ui/src/state/basket.ts` — MODIFIED: extended `BasketItem` with `autoFilled`/`priorityReason`; added `replaceAutoFilled()`, `getManualItemIds()`, `getManualSizeBytes()`
+- `jellyfinsync-ui/src/components/BasketSidebar.ts` — MODIFIED: added auto-fill state fields; added `triggerAutoFill()`, `scheduleAutoFill()`, `persistAutoFillPrefs()`, `renderAutoFillControls()`, `bindAutoFillEvents()`, `renderPriorityLabel()`; updated `render()` to include controls; updated `renderItem()` with badges; loads prefs on device connect
+
+### Change Log
+
+- Added Story 3.6 Auto-Fill Sync Mode: daemon priority ranking algorithm, basket.autoFill and sync.setAutoFill RPC methods, AutoFillPrefs manifest persistence, Auto-Fill UI controls with debounced slider, Auto badge rendering (Date: 2026-03-19)

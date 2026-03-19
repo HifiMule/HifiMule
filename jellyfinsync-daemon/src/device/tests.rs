@@ -30,6 +30,7 @@ async fn test_dirty_manifest_roundtrip() {
         pending_item_ids: vec!["id-1".to_string(), "id-2".to_string()],
         basket_items: vec![],
         auto_sync_on_connect: false,
+        auto_fill: crate::device::AutoFillPrefs::default(),
     };
     write_manifest(dir.path(), &manifest).await.unwrap();
     let content = tokio::fs::read_to_string(dir.path().join(".jellyfinsync.json"))
@@ -345,6 +346,7 @@ async fn test_write_manifest_creates_files() {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: false,
+        auto_fill: crate::device::AutoFillPrefs::default(),
     };
 
     write_manifest(root, &manifest).await.unwrap();
@@ -379,6 +381,7 @@ async fn test_write_manifest_overwrites_existing() {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: false,
+        auto_fill: crate::device::AutoFillPrefs::default(),
     };
     write_manifest(root, &manifest1).await.unwrap();
 
@@ -403,6 +406,7 @@ async fn test_write_manifest_overwrites_existing() {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: false,
+        auto_fill: crate::device::AutoFillPrefs::default(),
     };
     write_manifest(root, &manifest2).await.unwrap();
 
@@ -444,6 +448,7 @@ async fn test_get_discrepancies_missing_file() {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: false,
+        auto_fill: crate::device::AutoFillPrefs::default(),
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -485,6 +490,7 @@ async fn test_get_discrepancies_orphaned_file() {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: false,
+        auto_fill: crate::device::AutoFillPrefs::default(),
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -538,6 +544,7 @@ async fn test_get_discrepancies_no_issues() {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: false,
+        auto_fill: crate::device::AutoFillPrefs::default(),
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -592,6 +599,7 @@ async fn test_prune_items() {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: false,
+        auto_fill: crate::device::AutoFillPrefs::default(),
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -641,6 +649,7 @@ async fn test_relink_item() {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: false,
+        auto_fill: crate::device::AutoFillPrefs::default(),
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -683,6 +692,7 @@ async fn test_relink_item_path_traversal() {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: false,
+        auto_fill: crate::device::AutoFillPrefs::default(),
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -713,6 +723,7 @@ async fn test_clear_dirty_flag() {
         pending_item_ids: vec!["pending-1".to_string()],
         basket_items: vec![],
         auto_sync_on_connect: false,
+        auto_fill: crate::device::AutoFillPrefs::default(),
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -993,6 +1004,7 @@ async fn test_save_basket_roundtrip() {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: false,
+        auto_fill: crate::device::AutoFillPrefs::default(),
     };
     write_manifest(dir.path(), &manifest).await.unwrap();
 
@@ -1050,6 +1062,7 @@ async fn test_auto_sync_on_connect_roundtrip() {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: true,
+        auto_fill: crate::device::AutoFillPrefs::default(),
     };
     write_manifest(dir.path(), &manifest).await.unwrap();
 

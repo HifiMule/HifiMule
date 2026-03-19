@@ -52,6 +52,16 @@ pub struct DeviceManifest {
     pub basket_items: Vec<BasketItem>,
     #[serde(default)]
     pub auto_sync_on_connect: bool,
+    /// Auto-fill preferences persisted per device.
+    #[serde(default)]
+    pub auto_fill: AutoFillPrefs,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoFillPrefs {
+    pub enabled: bool,
+    pub max_bytes: Option<u64>,
 }
 
 /// Atomically writes a DeviceManifest to disk using Write-Temp-Rename pattern.
@@ -314,6 +324,7 @@ impl DeviceManager {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
+            auto_fill: AutoFillPrefs::default(),
         };
 
         write_manifest(&device_root, &manifest).await?;
@@ -589,6 +600,14 @@ impl DeviceManager {
     pub async fn save_basket(&self, items: Vec<BasketItem>) -> Result<()> {
         self.update_manifest(|manifest| {
             manifest.basket_items = items;
+        })
+        .await
+    }
+
+    /// Persists auto-fill preferences to the device manifest
+    pub async fn save_auto_fill_prefs(&self, prefs: AutoFillPrefs) -> Result<()> {
+        self.update_manifest(|manifest| {
+            manifest.auto_fill = prefs;
         })
         .await
     }

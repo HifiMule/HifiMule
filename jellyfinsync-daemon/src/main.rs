@@ -53,6 +53,7 @@ macro_rules! daemon_log {
 }
 
 mod api;
+mod auto_fill;
 mod db;
 mod device;
 mod paths;
@@ -191,6 +192,7 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                             daemon_log!("Device detected at {:?}: {:?}", path, manifest);
                             let auto_sync_enabled = manifest.auto_sync_on_connect;
                             let has_basket = !manifest.basket_items.is_empty();
+                            let auto_fill_enabled = manifest.auto_fill.enabled;
                             match device_manager.handle_device_detected(path.clone(), manifest).await {
                                 Ok(new_state) => {
                                     let _ = state_tx_clone.send(new_state);
@@ -226,7 +228,7 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                             }
 
                             // Auto-sync trigger: check if device has auto_sync_on_connect enabled
-                            if auto_sync_enabled && has_basket {
+                            if auto_sync_enabled && (has_basket || auto_fill_enabled) {
                                 // Check DB mapping also has auto_sync enabled
                                 let device = device_manager.get_current_device().await;
                                 let device_id = device.as_ref().map(|d| d.device_id.clone());
@@ -264,18 +266,8 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                                         }
                                     }
                                 }
-                            } else if auto_sync_enabled && !has_basket {
-                                // TODO: story 3-6 (auto-fill-sync-mode) will add auto_fill_enabled fallback here
+                            } else if auto_sync_enabled && !has_basket && !auto_fill_enabled {
                                 daemon_log!("[AutoSync] Skipped: auto-sync enabled but no basket items configured");
-                                let _ = tokio::task::spawn_blocking(|| {
-                                    if let Err(e) = notify_rust::Notification::new()
-                                        .summary("JellyfinSync")
-                                        .body("Auto-sync skipped: no basket configured for this device.")
-                                        .show()
-                                    {
-                                        daemon_log!("[AutoSync] Notification failed: {}", e);
-                                    }
-                                });
                             }
                         }
                         device::DeviceEvent::Unrecognized { path } => {
@@ -495,16 +487,65 @@ async fn run_auto_sync(
         .await
         .ok_or_else(|| anyhow::anyhow!("No device connected"))?;
 
-    if manifest.basket_items.is_empty() {
-        daemon_log!("[AutoSync] No basket items configured, skipping");
-        let _ = state_tx.send(DaemonState::Idle);
-        return Ok(());
-    }
-
-    // Resolve basket items to desired items via Jellyfin API
-    let item_ids: Vec<String> = manifest.basket_items.iter().map(|b| b.id.clone()).collect();
     let mut desired_items = Vec::new();
 
+    if manifest.basket_items.is_empty() {
+        if manifest.auto_fill.enabled {
+            // No manual basket — run auto-fill algorithm to derive desired items
+            daemon_log!("[AutoSync] Basket empty, running auto-fill algorithm");
+            let max_fill_bytes = if let Some(mb) = manifest.auto_fill.max_bytes {
+                mb
+            } else {
+                match device_manager.get_device_storage().await {
+                    Some(info) => info.free_bytes,
+                    None => {
+                        daemon_log!("[AutoSync] Cannot determine device capacity for auto-fill");
+                        let _ = state_tx.send(DaemonState::Idle);
+                        return Ok(());
+                    }
+                }
+            };
+            // Pass any already-synced basket item IDs as exclusions so auto-fill
+            // doesn't re-select tracks the device has from a previous manual sync.
+            let exclude_item_ids: Vec<String> =
+                manifest.basket_items.iter().map(|b| b.id.clone()).collect();
+            let fill_params = crate::auto_fill::AutoFillParams {
+                exclude_item_ids,
+                max_fill_bytes,
+            };
+            match crate::auto_fill::run_auto_fill(&jellyfin_client, fill_params).await {
+                Ok(items) if items.is_empty() => {
+                    daemon_log!("[AutoSync] Auto-fill returned no items, skipping");
+                    let _ = state_tx.send(DaemonState::Idle);
+                    return Ok(());
+                }
+                Ok(items) => {
+                    daemon_log!("[AutoSync] Auto-fill resolved {} items", items.len());
+                    for item in items {
+                        desired_items.push(sync::DesiredItem {
+                            jellyfin_id: item.id,
+                            name: item.name,
+                            album: item.album,
+                            artist: item.artist,
+                            size_bytes: item.size_bytes,
+                            etag: None,
+                        });
+                    }
+                }
+                Err(e) => {
+                    daemon_log!("[AutoSync] Auto-fill failed: {}", e);
+                    let _ = state_tx.send(DaemonState::Error);
+                    return Ok(());
+                }
+            }
+        } else {
+            daemon_log!("[AutoSync] No basket items configured, skipping");
+            let _ = state_tx.send(DaemonState::Idle);
+            return Ok(());
+        }
+    } else {
+    // Manual basket: resolve basket items to desired items via Jellyfin API
+    let item_ids: Vec<String> = manifest.basket_items.iter().map(|b| b.id.clone()).collect();
     let is_downloadable = |t: &str| matches!(t, "Audio" | "MusicVideo");
 
     const API_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(30);
@@ -555,6 +596,7 @@ async fn run_auto_sync(
             }
         }
     }
+    } // end else (basket_items non-empty)
 
     if desired_items.is_empty() {
         daemon_log!("[AutoSync] No downloadable items resolved, skipping");

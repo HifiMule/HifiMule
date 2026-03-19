@@ -143,6 +143,12 @@ export class BasketSidebar {
     private isDirtyManifest: boolean = false;
     private lastHydratedDeviceId: string | null = null;
     private syncSnapshotIds: string[] = [];
+    // Auto-fill state
+    private autoFillEnabled: boolean = false;
+    private autoFillMaxBytes: number | null = null;
+    private autoSyncOnConnect: boolean = false;
+    private autoFillDebounceTimer: number | null = null;
+    private isAutoFillLoading: boolean = false;
 
     constructor(container: HTMLElement) {
         this.container = container;
@@ -186,11 +192,22 @@ export class BasketSidebar {
                         basketStore.hydrateFromDaemon(res.basketItems);
                     }
                 }).catch(err => console.error("Failed to fetch basket", err));
+                // Load saved auto-fill preferences from manifest
+                this.autoFillEnabled = currentDevice.autoFill?.enabled ?? false;
+                this.autoFillMaxBytes = currentDevice.autoFill?.maxBytes ?? null;
+                this.autoSyncOnConnect = state.autoSyncOnConnect ?? false;
+                // Re-trigger auto-fill if it was enabled
+                if (this.autoFillEnabled) {
+                    this.triggerAutoFill();
+                }
             } else if (!currentDevice) {
                 if (this.lastHydratedDeviceId !== null) {
                     basketStore.clearForDevice();
                 }
                 this.lastHydratedDeviceId = null;
+                this.autoFillEnabled = false;
+                this.autoFillMaxBytes = null;
+                this.autoSyncOnConnect = false;
             }
         }
 
@@ -204,7 +221,165 @@ export class BasketSidebar {
             clearInterval(this.daemonStateInterval);
             this.daemonStateInterval = null;
         }
+        if (this.autoFillDebounceTimer !== null) {
+            clearTimeout(this.autoFillDebounceTimer);
+            this.autoFillDebounceTimer = null;
+        }
         basketStore.removeEventListener('update', this.updateListener);
+    }
+
+    private async triggerAutoFill() {
+        if (!this.autoFillEnabled) return;
+
+        const manualIds = basketStore.getManualItemIds();
+        const manualSize = basketStore.getManualSizeBytes();
+        const freeBytes = this.storageInfo ? this.storageInfo.freeBytes : undefined;
+
+        // Determine max bytes for auto-fill: user limit OR device free space minus manual
+        // selections. Always clamp the user limit to current free space so that a stored
+        // limit from before a previous sync doesn't overfill the device.
+        let maxBytes: number | undefined;
+        if (this.autoFillMaxBytes !== null) {
+            const effectiveLimit = freeBytes !== undefined
+                ? Math.min(this.autoFillMaxBytes, freeBytes)
+                : this.autoFillMaxBytes;
+            maxBytes = Math.max(0, effectiveLimit - manualSize);
+        } else if (freeBytes !== undefined) {
+            maxBytes = Math.max(0, freeBytes - manualSize);
+        }
+
+        this.isAutoFillLoading = true;
+        this.render();
+        try {
+            const params: Record<string, unknown> = { excludeItemIds: manualIds };
+            if (maxBytes !== undefined) params.maxBytes = maxBytes;
+
+            const items = await rpcCall('basket.autoFill', params) as Array<{
+                id: string; name: string; album?: string; artist?: string;
+                sizeBytes: number; priorityReason: string;
+            }>;
+
+            const basketItems = items.map(item => ({
+                id: item.id,
+                name: item.name,
+                type: 'Audio',
+                artist: item.artist,
+                childCount: 1,
+                sizeTicks: 0,
+                sizeBytes: item.sizeBytes,
+                autoFilled: true,
+                priorityReason: item.priorityReason,
+            }));
+
+            basketStore.replaceAutoFilled(basketItems);
+        } catch (err) {
+            console.error('[AutoFill] Failed to fetch auto-fill items:', err);
+        } finally {
+            this.isAutoFillLoading = false;
+            this.render();
+        }
+    }
+
+    private scheduleAutoFill(delayMs: number = 500) {
+        if (this.autoFillDebounceTimer !== null) {
+            clearTimeout(this.autoFillDebounceTimer);
+        }
+        this.autoFillDebounceTimer = window.setTimeout(() => {
+            this.autoFillDebounceTimer = null;
+            this.triggerAutoFill();
+        }, delayMs);
+    }
+
+    private async persistAutoFillPrefs() {
+        const device = this.folderInfo;
+        if (!device) return;
+        try {
+            await rpcCall('sync.setAutoFill', {
+                autoFillEnabled: this.autoFillEnabled,
+                maxFillBytes: this.autoFillMaxBytes ?? undefined,
+                autoSyncOnConnect: this.autoSyncOnConnect,
+            });
+        } catch (err) {
+            console.error('[AutoFill] Failed to persist preferences:', err);
+        }
+    }
+
+    private bindAutoFillEvents() {
+        const autoFillToggle = this.container.querySelector('#auto-fill-toggle');
+        if (autoFillToggle) {
+            autoFillToggle.addEventListener('sl-change', (e: Event) => {
+                this.autoFillEnabled = (e.target as HTMLInputElement).checked;
+                this.persistAutoFillPrefs();
+                if (this.autoFillEnabled) {
+                    this.triggerAutoFill();
+                } else {
+                    basketStore.replaceAutoFilled([]);
+                }
+                this.render();
+            });
+        }
+
+        const slider = this.container.querySelector('#auto-fill-slider');
+        if (slider) {
+            slider.addEventListener('sl-change', (e: Event) => {
+                const gb = (e.target as HTMLInputElement).valueAsNumber;
+                this.autoFillMaxBytes = gb * 1024 * 1024 * 1024;
+                this.persistAutoFillPrefs();
+                this.scheduleAutoFill(500);
+            });
+        }
+
+        const autoSyncToggle = this.container.querySelector('#auto-sync-toggle');
+        if (autoSyncToggle) {
+            autoSyncToggle.addEventListener('sl-change', (e: Event) => {
+                this.autoSyncOnConnect = (e.target as HTMLInputElement).checked;
+                this.persistAutoFillPrefs();
+            });
+        }
+    }
+
+    private renderAutoFillControls(): string {
+        const hasDevice = this.folderInfo?.hasManifest ?? false;
+        if (!hasDevice) return '';
+
+        const sliderMax = this.storageInfo
+            ? Math.ceil(this.storageInfo.freeBytes / (1024 * 1024 * 1024))
+            : 64;
+        const sliderValue = this.autoFillMaxBytes !== null
+            ? Math.round(this.autoFillMaxBytes / (1024 * 1024 * 1024))
+            : sliderMax;
+
+        return `
+            <div class="auto-fill-controls">
+                <div class="auto-fill-toggle-row">
+                    <sl-switch id="auto-fill-toggle" size="small" ${this.autoFillEnabled ? 'checked' : ''}>
+                        Auto-Fill
+                    </sl-switch>
+                    <span class="auto-fill-hint" style="font-size:0.75rem; opacity:0.6;">
+                        Fill basket automatically
+                    </span>
+                </div>
+                ${this.autoFillEnabled ? `
+                    <div class="auto-fill-slider-row" style="margin-top:0.5rem;">
+                        <label style="font-size:0.75rem; opacity:0.7; display:block; margin-bottom:0.25rem;">
+                            Max Fill Size: <strong>${sliderValue} GB</strong>
+                        </label>
+                        <sl-range id="auto-fill-slider"
+                            min="0" max="${sliderMax}" step="1" value="${sliderValue}"
+                            style="width:100%;">
+                        </sl-range>
+                    </div>
+                ` : ''}
+                <div class="auto-fill-toggle-row" style="margin-top:0.5rem;">
+                    <sl-switch id="auto-sync-toggle" size="small" ${this.autoSyncOnConnect ? 'checked' : ''}>
+                        Auto-Sync on Connect
+                    </sl-switch>
+                </div>
+                <div style="font-size:0.7rem; opacity:0.55; margin-top:0.2rem; padding-left:0.5rem;">
+                    Automatically start syncing when this device is connected. Works with or without the UI open.
+                </div>
+            </div>
+        `;
     }
 
     private startDaemonStatePolling() {
@@ -370,9 +545,10 @@ export class BasketSidebar {
                     <p style="opacity: 0.5;">Your basket is empty</p>
                 </div>
                 <div class="basket-footer">
+                    ${this.renderAutoFillControls()}
                     ${this.renderStatusZone()}
                     ${this.renderDeviceFolders()}
-                     <sl-button id="start-sync-btn" variant="primary" style="width: 100%;" ${!basketStore.isDirty() ? 'disabled' : ''}>
+                     <sl-button id="start-sync-btn" variant="primary" style="width: 100%;" ${(!basketStore.isDirty() && !this.autoFillEnabled) || this.isAutoFillLoading ? 'disabled' : ''}>
                         <sl-icon slot="prefix" name="cloud-download"></sl-icon>
                         Start Sync
                     </sl-button>
@@ -386,6 +562,7 @@ export class BasketSidebar {
             this.container.querySelector('#open-repair-btn')?.addEventListener('click', () => this.openRepairModal());
             this.container.querySelector('#init-device-btn')?.addEventListener('click', () => this.openInitDeviceModal());
             this.container.querySelector('#start-sync-btn')?.addEventListener('click', () => this.handleStartSync());
+            this.bindAutoFillEvents();
             return;
         }
 
@@ -414,6 +591,7 @@ export class BasketSidebar {
                     <span>${totalTracks} tracks | ${formatSize(totalSizeBytes)}</span>
                 </div>
                 ${renderCapacityBar(this.storageInfo, totalSizeBytes)}
+                ${this.renderAutoFillControls()}
                 ${this.renderStatusZone()}
                 ${this.renderDeviceFolders()}
                 ${isOverLimit ? `
@@ -464,6 +642,7 @@ export class BasketSidebar {
         });
         this.container.querySelector('#open-repair-btn')?.addEventListener('click', () => this.openRepairModal());
         this.container.querySelector('#init-device-btn')?.addEventListener('click', () => this.openInitDeviceModal());
+        this.bindAutoFillEvents();
     }
 
     private openRepairModal() {
@@ -681,13 +860,35 @@ export class BasketSidebar {
         this.renderSyncError(this.syncErrorMessages);
     }
 
+    private renderPriorityLabel(reason: string): string {
+        if (reason === 'favorite') return '★ Favorite';
+        if (reason.startsWith('playCount:')) {
+            const count = reason.split(':')[1];
+            return `▶ ${count} plays`;
+        }
+        return 'New';
+    }
+
     private renderItem(item: BasketItem): string {
+        const autoBadge = item.autoFilled
+            ? `<span class="basket-item-auto-badge" title="Added by Auto-Fill">Auto</span>`
+            : '';
+        const priorityLabel = item.autoFilled && item.priorityReason
+            ? `<span class="basket-item-priority-reason">${this.escapeHtml(this.renderPriorityLabel(item.priorityReason))}</span>`
+            : '';
+
         return `
-            <div class="basket-item-card" data-id="${item.id}">
+            <div class="basket-item-card ${item.autoFilled ? 'basket-item-auto' : ''}" data-id="${item.id}">
                 <div class="basket-item-image" data-image-id="${item.id}"></div>
                 <div class="basket-item-info">
-                    <div class="basket-item-name">${this.escapeHtml(item.name)}</div>
-                    <div class="basket-item-meta">${item.childCount} tracks • ${item.type}</div>
+                    <div class="basket-item-name">
+                        ${autoBadge}
+                        ${this.escapeHtml(item.name)}
+                    </div>
+                    <div class="basket-item-meta">
+                        ${item.childCount} tracks • ${item.type}
+                        ${priorityLabel}
+                    </div>
                 </div>
                 <sl-icon-button name="x" class="remove-item-btn" data-id="${item.id}" label="Remove"></sl-icon-button>
             </div>

@@ -11,6 +11,8 @@ export interface BasketItem {
     childCount: number;
     sizeTicks: number; // cumulativeRunTimeTicks used for duration display
     sizeBytes: number; // actual file size from MediaSources
+    autoFilled?: boolean;    // true when added by the auto-fill algorithm
+    priorityReason?: string; // "favorite" | "playCount:N" | "new"
 }
 
 class BasketStore extends EventTarget {
@@ -188,6 +190,44 @@ class BasketStore extends EventTarget {
         this.saveToLocalStorage();
         this.saveBasketToDaemon();
         this.notify();
+    }
+
+    /** Replace all auto-filled items with the new set, preserving manual items. */
+    public replaceAutoFilled(autoFilledItems: BasketItem[]) {
+        // Remove existing auto-filled items
+        for (const [id, item] of this.items) {
+            if (item.autoFilled) {
+                this.items.delete(id);
+            }
+        }
+        // Add new auto-filled items (after manual items in insertion order).
+        // Never overwrite a manually added item with an auto-fill entry — if the daemon
+        // returns a track that the user already added manually, skip it.
+        for (const item of autoFilledItems) {
+            const existing = this.items.get(item.id);
+            if (existing && !existing.autoFilled) continue;
+            this.items.set(item.id, { ...item, autoFilled: true });
+        }
+        this._dirty = true;
+        this.saveToLocalStorage();
+        this.saveBasketToDaemon();
+        this.notify();
+    }
+
+    /** Returns only the IDs of manually added items (for exclude list in auto-fill). */
+    public getManualItemIds(): string[] {
+        return Array.from(this.items.values())
+            .filter(i => !i.autoFilled)
+            .map(i => i.id);
+    }
+
+    /** Returns total size of manually added items only. */
+    public getManualSizeBytes(): number {
+        let total = 0;
+        for (const item of this.items.values()) {
+            if (!item.autoFilled) total += item.sizeBytes || 0;
+        }
+        return total;
     }
 
     public getTotalSizeBytes(): number {

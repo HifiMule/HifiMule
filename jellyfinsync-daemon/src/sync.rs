@@ -911,6 +911,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
+            auto_fill: crate::device::AutoFillPrefs::default(),
         }
     }
 
@@ -954,6 +955,8 @@ mod tests {
             cumulative_run_time_ticks: None,
             media_sources: None,
             etag: None,
+            user_data: None,
+            date_created: None,
         }
     }
 
@@ -1097,6 +1100,8 @@ mod tests {
             cumulative_run_time_ticks: None,
             media_sources: None,
             etag: None,
+            user_data: None,
+            date_created: None,
         };
 
         let path = construct_file_path(&managed, &item).unwrap().path;
@@ -1124,6 +1129,8 @@ mod tests {
             cumulative_run_time_ticks: None,
             media_sources: None,
             etag: None,
+            user_data: None,
+            date_created: None,
         };
 
         let path = construct_file_path(&managed, &item).unwrap().path;

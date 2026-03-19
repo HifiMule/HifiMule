@@ -158,6 +158,8 @@ async fn handler(
         "device_set_auto_sync_on_connect" => {
             handle_device_set_auto_sync_on_connect(&state, payload.params).await
         }
+        "basket.autoFill" => handle_basket_auto_fill(&state, payload.params).await,
+        "sync.setAutoFill" => handle_sync_set_auto_fill(&state, payload.params).await,
         _ => Err(JsonRpcError {
             code: ERR_METHOD_NOT_FOUND,
             message: "Method not found".to_string(),
@@ -374,6 +376,11 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         .map(|m| m.auto_sync_on_connect)
         .unwrap_or(false);
 
+    let auto_fill = device.as_ref().map(|d| serde_json::json!({
+        "enabled": d.auto_fill.enabled,
+        "maxBytes": d.auto_fill.max_bytes,
+    }));
+
     Ok(serde_json::json!({
         "currentDevice": device,
         "deviceMapping": mapping,
@@ -381,6 +388,7 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         "dirtyManifest": dirty,
         "pendingDevicePath": pending_device_path,
         "autoSyncOnConnect": auto_sync_on_connect,
+        "autoFill": auto_fill,
     }))
 }
 
@@ -1353,6 +1361,164 @@ async fn handle_device_set_auto_sync_on_connect(
     }))
 }
 
+/// basket.autoFill — runs the priority ranking algorithm and returns ranked items.
+/// Params: { deviceId: string, maxBytes?: number, excludeItemIds: string[] }
+async fn handle_basket_auto_fill(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.unwrap_or(serde_json::json!({}));
+
+    let max_bytes_param = params["maxBytes"].as_u64();
+
+    let exclude_item_ids: Vec<String> = params["excludeItemIds"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Determine available capacity for auto-fill
+    let max_fill_bytes = if let Some(mb) = max_bytes_param {
+        mb
+    } else {
+        // Fall back to device free bytes
+        match state.device_manager.get_device_storage().await {
+            Some(info) => info.free_bytes,
+            None => {
+                return Err(JsonRpcError {
+                    code: ERR_INVALID_PARAMS,
+                    message: "No device connected and no maxBytes specified".to_string(),
+                    data: None,
+                });
+            }
+        }
+    };
+
+    // Expand any container items (albums, playlists) in exclude_item_ids to their
+    // constituent track IDs so that tracks inside a manually-added album are correctly
+    // excluded from auto-fill results (AC-2).
+    let expanded_exclude_ids = expand_exclude_ids(&state.jellyfin_client, exclude_item_ids).await;
+
+    let fill_params = crate::auto_fill::AutoFillParams {
+        exclude_item_ids: expanded_exclude_ids,
+        max_fill_bytes,
+    };
+
+    match crate::auto_fill::run_auto_fill(&state.jellyfin_client, fill_params).await {
+        Ok(items) => serde_json::to_value(items).map_err(|e| JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: format!("Failed to serialize auto-fill results: {}", e),
+            data: None,
+        }),
+        Err(e) => Err(JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: format!("Auto-fill failed: {}", e),
+            data: None,
+        }),
+    }
+}
+
+/// Expand album/playlist IDs in `ids` to their constituent Audio/MusicVideo track IDs.
+/// Track IDs pass through unchanged. Falls back to the original ID list on any error.
+async fn expand_exclude_ids(client: &crate::api::JellyfinClient, ids: Vec<String>) -> Vec<String> {
+    if ids.is_empty() {
+        return ids;
+    }
+    let (url, token, uid) = match crate::api::CredentialManager::get_credentials() {
+        Ok(c) => c,
+        Err(_) => return ids,
+    };
+    let user_id = uid.unwrap_or_else(|| "Me".to_string());
+    let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+    let items = match client.get_items_by_ids(&url, &token, &user_id, &id_refs).await {
+        Ok(i) => i,
+        Err(_) => return ids,
+    };
+    let mut expanded = Vec::new();
+    for item in items {
+        if matches!(item.item_type.as_str(), "Audio" | "MusicVideo") {
+            expanded.push(item.id);
+        } else {
+            match client.get_child_items_with_sizes(&url, &token, &user_id, &item.id).await {
+                Ok(children) => {
+                    for child in children {
+                        if matches!(child.item_type.as_str(), "Audio" | "MusicVideo") {
+                            expanded.push(child.id);
+                        }
+                    }
+                }
+                Err(_) => expanded.push(item.id),
+            }
+        }
+    }
+    expanded
+}
+
+/// sync.setAutoFill — persists auto-fill preferences to the device manifest.
+/// Params: { deviceId: string, autoFillEnabled: boolean, maxFillBytes?: number, autoSyncOnConnect: boolean }
+async fn handle_sync_set_auto_fill(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let auto_fill_enabled = params["autoFillEnabled"].as_bool().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing or invalid autoFillEnabled (boolean)".to_string(),
+        data: None,
+    })?;
+
+    let max_fill_bytes = params["maxFillBytes"].as_u64();
+
+    let auto_sync_on_connect = params["autoSyncOnConnect"].as_bool().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing or invalid autoSyncOnConnect (boolean)".to_string(),
+        data: None,
+    })?;
+
+    // Persist both auto_fill prefs and auto_sync_on_connect in a single atomic
+    // write-temp-rename operation to prevent inconsistent manifest state on crash.
+    state
+        .device_manager
+        .update_manifest(|m| {
+            m.auto_fill.enabled = auto_fill_enabled;
+            m.auto_fill.max_bytes = max_fill_bytes;
+            m.auto_sync_on_connect = auto_sync_on_connect;
+        })
+        .await
+        .map_err(|e| JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: format!("Failed to save preferences: {}", e),
+            data: None,
+        })?;
+
+    // Update auto_sync_on_connect in DB if device is connected
+    if let Some(device) = state.device_manager.get_current_device().await {
+        state
+            .db
+            .set_auto_sync_on_connect(&device.device_id, auto_sync_on_connect)
+            .map_err(|e| JsonRpcError {
+                code: ERR_STORAGE_ERROR,
+                message: format!("Failed to update auto_sync_on_connect in DB: {}", e),
+                data: None,
+            })?;
+    }
+
+    Ok(serde_json::json!({
+        "status": "success",
+        "autoFillEnabled": auto_fill_enabled,
+        "maxFillBytes": max_fill_bytes,
+        "autoSyncOnConnect": auto_sync_on_connect,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1714,6 +1880,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
+            auto_fill: crate::device::AutoFillPrefs::default(),
         };
 
         device_manager
@@ -1777,6 +1944,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
+            auto_fill: crate::device::AutoFillPrefs::default(),
         };
         device_manager
             .handle_device_detected(dir.path().to_path_buf(), manifest)
@@ -1820,6 +1988,7 @@ mod tests {
             pending_item_ids: vec!["id-1".to_string()],
             basket_items: vec![],
             auto_sync_on_connect: false,
+            auto_fill: crate::device::AutoFillPrefs::default(),
         };
         device_manager
             .handle_device_detected(dir.path().to_path_buf(), manifest)
@@ -1877,6 +2046,7 @@ mod tests {
             pending_item_ids: vec!["id-1".to_string()],
             basket_items: vec![],
             auto_sync_on_connect: false,
+            auto_fill: crate::device::AutoFillPrefs::default(),
         };
         device_manager
             .handle_device_detected(std::path::PathBuf::from("/tmp/dirty"), dirty_manifest)
@@ -1995,6 +2165,7 @@ mod tests {
                     pending_item_ids: vec![],
                     basket_items: vec![],
                     auto_sync_on_connect: false,
+                    auto_fill: crate::device::AutoFillPrefs::default(),
                 },
             )
             .await
@@ -2090,6 +2261,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
+            auto_fill: crate::device::AutoFillPrefs::default(),
         };
         device_manager
             .handle_device_detected(std::path::PathBuf::from("/tmp/dev"), manifest)
@@ -2315,6 +2487,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
+            auto_fill: crate::device::AutoFillPrefs::default(),
         };
         crate::device::write_manifest(dir.path(), &manifest)
             .await
@@ -2396,6 +2569,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: true,
+            auto_fill: crate::device::AutoFillPrefs::default(),
         };
         device_manager
             .handle_device_detected(std::path::PathBuf::from("/tmp/auto-state"), manifest)
