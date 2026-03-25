@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 const CONTAINER_TYPES: &[&str] = &["MusicAlbum", "Playlist", "MusicArtist"];
 
-fn url_encode(s: &str) -> String {
+pub(crate) fn url_encode(s: &str) -> String {
     let mut encoded = String::new();
     for c in s.chars() {
         match c {
@@ -144,6 +144,10 @@ impl JellyfinClient {
         Self {
             client: reqwest::Client::new(),
         }
+    }
+
+    pub(crate) fn http_client(&self) -> &reqwest::Client {
+        &self.client
     }
 
     pub async fn test_connection(&self, url: &str, token: &str) -> Result<SystemInfo> {
@@ -295,70 +299,6 @@ impl JellyfinClient {
 
         let item = serde_json::from_str::<JellyfinItem>(&text)?;
         Ok(item)
-    }
-
-    /// Fetches all Audio tracks from the Jellyfin library for the auto-fill algorithm.
-    /// Requests IsFavorite (via UserData), PlayCount, DateCreated, and MediaSources fields.
-    /// Paginates in batches of 500 to stay under the 10MB memory constraint.
-    pub async fn get_audio_tracks_for_autofill(
-        &self,
-        url: &str,
-        token: &str,
-        user_id: &str,
-    ) -> Result<Vec<JellyfinItem>> {
-        CredentialManager::validate_url(url)?;
-        CredentialManager::validate_token(token)?;
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
-
-        const PAGE_SIZE: u32 = 500;
-        // Guard against runaway pagination in case the server misbehaves.
-        const MAX_PAGES: u32 = 200;
-        let mut all_items: Vec<JellyfinItem> = Vec::new();
-        let mut start_index: u32 = 0;
-        // Capture total_record_count from the first page only; re-reading it each page
-        // can cause premature termination or missed pages if the library changes mid-fetch.
-        let mut total_record_count: Option<u32> = None;
-
-        loop {
-            let endpoint = format!(
-                "{}/Users/{}/Items?IncludeItemTypes=Audio&Recursive=true&Fields=MediaSources,UserData,DateCreated&StartIndex={}&Limit={}",
-                url.trim_end_matches('/'),
-                user_id,
-                start_index,
-                PAGE_SIZE,
-            );
-
-            let response = self
-                .client
-                .get(&endpoint)
-                .headers(headers.clone())
-                .send()
-                .await?;
-            let status = response.status();
-            if !status.is_success() {
-                let text = response.text().await?;
-                return Err(anyhow!("Server returned status: {} - {}", status, text));
-            }
-
-            let text = response.text().await?;
-            let page: JellyfinItemsResponse = serde_json::from_str(&text)?;
-            let fetched = page.items.len() as u32;
-            let total = *total_record_count.get_or_insert(page.total_record_count);
-            all_items.extend(page.items);
-
-            let page_num = start_index / PAGE_SIZE + 1;
-            if fetched < PAGE_SIZE || all_items.len() as u32 >= total || page_num >= MAX_PAGES {
-                break;
-            }
-            start_index += PAGE_SIZE;
-        }
-
-        Ok(all_items)
     }
 
     pub async fn get_items_by_ids(

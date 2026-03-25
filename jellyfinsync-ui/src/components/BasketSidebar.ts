@@ -548,7 +548,9 @@ export class BasketSidebar {
                     ${this.renderAutoFillControls()}
                     ${this.renderStatusZone()}
                     ${this.renderDeviceFolders()}
-                     <sl-button id="start-sync-btn" variant="primary" style="width: 100%;" ${(!basketStore.isDirty() && !this.autoFillEnabled) || this.isAutoFillLoading ? 'disabled' : ''}>
+                </div>
+                <div class="basket-actions">
+                    <sl-button id="start-sync-btn" variant="primary" style="width: 100%;" ${(!basketStore.isDirty() && !this.autoFillEnabled) || this.isAutoFillLoading ? 'disabled' : ''}>
                         <sl-icon slot="prefix" name="cloud-download"></sl-icon>
                         Start Sync
                     </sl-button>
@@ -594,6 +596,8 @@ export class BasketSidebar {
                 ${this.renderAutoFillControls()}
                 ${this.renderStatusZone()}
                 ${this.renderDeviceFolders()}
+            </div>
+            <div class="basket-actions">
                 ${isOverLimit ? `
                     <sl-button variant="danger" style="width: 100%;" disabled>
                         <sl-icon slot="prefix" name="exclamation-triangle"></sl-icon>
@@ -611,7 +615,7 @@ export class BasketSidebar {
                         ${this.isSyncing ? 'Syncing...' : 'Start Sync'}
                     </sl-button>
                 `}
-                <sl-button variant="text" size="small" class="clear-basket-btn" style="width: 100%; margin-top: 0.5rem;">
+                <sl-button variant="text" size="small" class="clear-basket-btn" style="width: 100%;">
                     Clear All
                 </sl-button>
             </div>
