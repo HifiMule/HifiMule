@@ -35,7 +35,7 @@ so that **I can focus purely on my music collection for my DAP.**
     - **IPC:** Use existing `jellyfin_get_items` RPC method.
     - **State Management:** The UI already handles item lists; no change to state structure needed.
 - **Technical Specifics (Jellyfin API):**
-    - The `/Users/{userId}/Items` endpoint accepts `IncludeItemTypes`.
+    - The `/Items?userId={userId}` endpoint accepts `IncludeItemTypes`.
     - Recommended filter: `MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo`.
 - **Source tree components to touch:**
     - `jellyfinsync-daemon/src/api.rs`: Verify `get_items` and types.

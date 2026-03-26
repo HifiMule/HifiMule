@@ -73,7 +73,7 @@ pub async fn run_auto_fill(
 
     'pages: loop {
         let endpoint = format!(
-            "{}/Users/{}/Items?IncludeItemTypes=Audio&Recursive=true\
+            "{}/Items?userId={}&IncludeItemTypes=Audio&Recursive=true\
              &Fields=MediaSources,UserData,DateCreated\
              &SortBy=IsFavoriteOrLiked,PlayCount,DateCreated\
              &SortOrder=Descending,Descending,Descending\

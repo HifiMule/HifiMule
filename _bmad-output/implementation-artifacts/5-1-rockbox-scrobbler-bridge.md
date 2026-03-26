@@ -54,12 +54,12 @@ so that **my on-the-go listening is reflected on my Jellyfin server**.
 
 - [x] **T2: Add Jellyfin API methods to `api.rs`** (AC: #3, #4)
   - [x] T2.1: Add `search_audio_items(url, token, user_id, artist, title)` method:
-    - Endpoint: `GET /Users/{userId}/Items?SearchTerm={title}&IncludeItemTypes=Audio&Limit=10&Fields=Id,Name,Album,AlbumArtist`
+    - Endpoint: `GET /Items?userId={userId}&SearchTerm={title}&IncludeItemTypes=Audio&Limit=10&Fields=Id,Name,Album,AlbumArtist`
     - Returns `Vec<JellyfinItem>`, empty vec on no results (non-fatal)
     - URL-encode the SearchTerm parameter
   - [x] T2.2: Add `report_item_played(url, token, user_id, item_id)` method:
-    - Endpoint: `POST /Users/{userId}/PlayedItems/{item_id}`
-    - No body required (Jellyfin uses path params only)
+    - Endpoint: `POST /UserPlayedItems/{item_id}?userId={userId}`
+    - No body required (Jellyfin uses path + query params only)
     - Returns `Ok(())` on HTTP 2xx, `Err` on any other status
     - Note: Jellyfin returns 200 with `UserItemDataDto` body — parse and discard; we only care about success/failure
 
@@ -186,8 +186,9 @@ so that **my on-the-go listening is reflected on my Jellyfin server**.
 
 **Track Search:**
 ```
-GET /Users/{userId}/Items
-  ?SearchTerm={url_encoded_title}
+GET /Items
+  ?userId={userId}
+  &SearchTerm={url_encoded_title}
   &IncludeItemTypes=Audio
   &Limit=10
   &Fields=Id,Name,Album,AlbumArtist,Artists
@@ -198,7 +199,7 @@ GET /Users/{userId}/Items
 
 **Mark Item as Played (Scrobble Submission):**
 ```
-POST /Users/{userId}/PlayedItems/{itemId}
+POST /UserPlayedItems/{itemId}?userId={userId}
 ```
 - Header: `X-Emby-Token: {token}`
 - Body: empty / no body required
@@ -206,7 +207,7 @@ POST /Users/{userId}/PlayedItems/{itemId}
 - HTTP 404 = item not found on server (treat as failure, add to errors)
 - HTTP 401/403 = auth failure (treat as failure, add to errors)
 
-**IMPORTANT**: The epics reference `/PlaybackInfo/Progress` — this is INCORRECT. The actual Jellyfin endpoint for marking a track as played is `POST /Users/{userId}/PlayedItems/{itemId}`. This is the standard "mark played" API, which increments `PlayCount` and updates `LastPlayedDate` in Jellyfin's `UserData`.
+**IMPORTANT**: The epics reference `/PlaybackInfo/Progress` — this is INCORRECT. The actual Jellyfin endpoint for marking a track as played is `POST /UserPlayedItems/{itemId}?userId={userId}` (per `jellyfin-openapi-stable.json`). This is the standard "mark played" API, which increments `PlayCount` and updates `LastPlayedDate` in Jellyfin's `UserData`.
 
 **Track Matching Algorithm:**
 ```
@@ -272,7 +273,7 @@ Field order: artist, album, title, track_number, duration_seconds, rating, unix_
 - `record_scrobble()` follows the `upsert_device_mapping()` UPSERT pattern in `db.rs`
 
 **Detected Conflicts/Variances:**
-- Epics AC references `/PlaybackInfo/Progress` API → ACTUAL correct endpoint: `POST /Users/{userId}/PlayedItems/{itemId}` (standard Jellyfin mark-played API)
+- Epics AC references `/PlaybackInfo/Progress` API → ACTUAL correct endpoint: `POST /UserPlayedItems/{itemId}?userId={userId}` (per `jellyfin-openapi-stable.json`)
 - Epics say "submits the play counts" — ACTUAL behavior: submits one request per track entry (Jellyfin's PlayedItems API marks played and increments play count; there is no batch endpoint)
 - Device detection auto-trigger requires reading credentials in `main.rs` device loop — this needs the `CredentialManager` (from `api.rs`) to be accessible outside of RPC handlers. This is a minor arch addition but is clean since `CredentialManager` is already public.
 
@@ -327,7 +328,7 @@ None — implementation was straightforward with no runtime debugging required.
 ### Completion Notes List
 
 - **T1 (db.rs)**: Added `scrobble_history` table with `submitted_at` timestamp and `idx_scrobble_unique` index. Added `record_scrobble()` using `INSERT OR IGNORE` for Story 5.2 dedup foundation. Added `get_scrobble_count()`. 2 new unit tests added.
-- **T2 (api.rs)**: Added `search_audio_items()` with URL encoding via private `url_encode()` helper (no extra crate needed). Added `report_item_played()` for `POST /Users/{userId}/PlayedItems/{itemId}`. Added `artists: Option<Vec<String>>` field to `JellyfinItem`.
+- **T2 (api.rs)**: Added `search_audio_items()` with URL encoding via private `url_encode()` helper (no extra crate needed). Added `report_item_played()` for `POST /UserPlayedItems/{itemId}?userId={userId}`. Added `artists: Option<Vec<String>>` field to `JellyfinItem`.
 - **T3 (scrobbler.rs)**: New module with `ScrobblerEntry`, `ScrobblerResult` (camelCase serde), `parse_scrobbler_log()`, and `process_device_scrobbles()`. Non-fatal per-entry error collection pattern used throughout. Added `total_scrobbled: i64` to `ScrobblerResult` (calls `get_scrobble_count()` after processing). 6 unit tests: 3 parser + 3 process_device paths.
 - **T4 (main.rs)**: Added `mod scrobbler;`. Created `last_scrobbler_result: Arc<RwLock<Option<ScrobblerResult>>>`. Device event loop spawns scrobbler background task after `DeviceEvent::Detected` when credentials available. `JellyfinClient` created once and shared via `Arc` in the device loop.
 - **T5 (rpc.rs)**: Added `last_scrobbler_result` field to `AppState`. Updated `run_server` signature. Added `scrobbler_get_last_result` match arm and `handle_scrobbler_get_last_result()` returning `null` or serialized `ScrobblerResult`. All 17 test `AppState` instantiations updated with `Arc::new(RwLock::new(None))`.

@@ -113,7 +113,7 @@ So that I can fill my device without manually browsing and selecting every album
 
 ### Jellyfin API Details
 
-- **Endpoint**: `GET /Users/{userId}/Items`
+- **Endpoint**: `GET /Items?userId={userId}`
 - **Required Fields**: `IsFavorite`, `PlayCount`, `DateCreated`, `MediaSources` (for size)
 - **Filter**: `IncludeItemTypes=Audio` (individual tracks for accurate sizing)
 - **Sort**: Server-side sorting not sufficient (need composite sort); fetch all and sort daemon-side

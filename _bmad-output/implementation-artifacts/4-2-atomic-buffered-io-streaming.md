@@ -284,7 +284,7 @@ Returns: Binary stream (file bytes)
 
 2. **Get Item Details** (already implemented in Story 4.1):
 ```
-GET https://{server}/Users/{userId}/Items/{itemId}
+GET https://{server}/Items/{itemId}?userId={userId}
 Headers:
   X-Emby-Token: {token}
 Returns: JellyfinItem with metadata (name, album, artist, container, size)

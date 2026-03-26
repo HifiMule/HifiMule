@@ -154,7 +154,7 @@ Merge `get_audio_tracks_for_autofill` (api.rs) and `rank_and_truncate` (auto_fil
 
     'pages: loop {
         let endpoint = format!(
-            "{}/Users/{}/Items?IncludeItemTypes=Audio&Recursive=true\
+            "{}/Items?userId={}&IncludeItemTypes=Audio&Recursive=true\
              &Fields=MediaSources,UserData,DateCreated\
              &SortBy=IsFavoriteOrLiked,PlayCount,DateCreated\
              &SortOrder=Descending,Descending,Descending\

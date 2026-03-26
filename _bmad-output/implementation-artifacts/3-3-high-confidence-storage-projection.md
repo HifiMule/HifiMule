@@ -56,8 +56,8 @@ so that **I don't trigger a "Disk Full" error mid-sync.**
 
 - **Jellyfin API - Getting File Sizes:**
   - The `BaseItemDto` contains a `MediaSources` array. Each `MediaSource` has a `Size` field (bytes, `i64`).
-  - For individual audio tracks: call `/Users/{userId}/Items/{itemId}` with `Fields=MediaSources` and read `MediaSources[0].Size`.
-  - For containers (Albums/Playlists): use `/Users/{userId}/Items?ParentId={containerId}&IncludeItemTypes=Audio&Fields=MediaSources&Recursive=true` to get all child audio items with their sizes, then sum.
+  - For individual audio tracks: call `/Items/{itemId}?userId={userId}&Fields=MediaSources` and read `MediaSources[0].Size`.
+  - For containers (Albums/Playlists): use `/Items?userId={userId}&ParentId={containerId}&IncludeItemTypes=Audio&Fields=MediaSources&Recursive=true` to get all child audio items with their sizes, then sum.
   - **IMPORTANT:** `cumulativeRunTimeTicks` is duration, NOT file size. Do NOT use it for storage projection.
 
 - **Device Storage (Cross-Platform):**

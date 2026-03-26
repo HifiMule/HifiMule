@@ -2120,9 +2120,10 @@ mod tests {
         let token = "test-token-1234567890";
 
         let _mock_playlist = server
-            .mock("GET", "/Users/Me/Items")
+            .mock("GET", "/Items")
             .match_header("X-Emby-Token", token)
             .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("userId".into(), "Me".into()),
                 Matcher::UrlEncoded("Ids".into(), "playlist-1".into()),
                 Matcher::UrlEncoded("Fields".into(), "MediaSources".into()),
             ]))
@@ -2132,9 +2133,10 @@ mod tests {
             .await;
 
         let _mock_playlist_children = server
-            .mock("GET", "/Users/Me/Items")
+            .mock("GET", "/Items")
             .match_header("X-Emby-Token", token)
             .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("userId".into(), "Me".into()),
                 Matcher::UrlEncoded("ParentId".into(), "playlist-1".into()),
                 Matcher::UrlEncoded("IncludeItemTypes".into(), "Audio,MusicVideo".into()),
                 Matcher::UrlEncoded("Fields".into(), "MediaSources".into()),
@@ -2212,31 +2214,16 @@ mod tests {
         let url = server.url();
         let token = "test-token";
 
-        // Mock system info for connection check (implicit or explicit)
-        let _mock_info = server
-            .mock("GET", "/System/Info")
+        // Mock bulk item fetch: returns only item-1; item-2 is absent → partial failure
+        let _mock_items = server
+            .mock("GET", "/Items")
             .match_header("X-Emby-Token", token)
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("userId".into(), "Me".into()),
+                mockito::Matcher::UrlEncoded("Fields".into(), "MediaSources".into()),
+            ]))
             .with_status(200)
-            .with_body(r#"{"ServerName": "Test", "Version": "1.0", "Id": "1"}"#)
-            .create_async()
-            .await;
-
-        // Mock item 1 success
-        let _mock_item1 = server
-            .mock("GET", "/Users/Me/Items/item-1")
-            .match_header("X-Emby-Token", token)
-            .with_status(200)
-            .with_body(
-                r#"{"Id": "item-1", "Name": "Item 1", "Type": "Audio", "AlbumArtist": "Artist"}"#,
-            )
-            .create_async()
-            .await;
-
-        // Mock item 2 failure (404/500)
-        let _mock_item2 = server
-            .mock("GET", "/Users/Me/Items/item-2")
-            .match_header("X-Emby-Token", token)
-            .with_status(500)
+            .with_body(r#"{"Items":[{"Id":"item-1","Name":"Item 1","Type":"Audio","AlbumArtist":"Artist","MediaSources":[{"Size":1000}]}],"TotalRecordCount":1,"StartIndex":0}"#)
             .create_async()
             .await;
 

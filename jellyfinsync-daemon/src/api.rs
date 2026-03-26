@@ -191,7 +191,7 @@ impl JellyfinClient {
             HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
         );
 
-        let endpoint = format!("{}/Users/{}/Views", url.trim_end_matches('/'), user_id);
+        let endpoint = format!("{}/UserViews?userId={}", url.trim_end_matches('/'), user_id);
 
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
@@ -240,17 +240,12 @@ impl JellyfinClient {
         }
 
         let query_string = if query_params.is_empty() {
-            String::new()
+            format!("?userId={}", user_id)
         } else {
-            format!("?{}", query_params.join("&"))
+            format!("?userId={}&{}", user_id, query_params.join("&"))
         };
 
-        let endpoint = format!(
-            "{}/Users/{}/Items{}",
-            url.trim_end_matches('/'),
-            user_id,
-            query_string
-        );
+        let endpoint = format!("{}/Items{}", url.trim_end_matches('/'), query_string);
 
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
@@ -282,10 +277,10 @@ impl JellyfinClient {
         );
 
         let endpoint = format!(
-            "{}/Users/{}/Items/{}",
+            "{}/Items/{}?userId={}",
             url.trim_end_matches('/'),
-            user_id,
-            item_id
+            item_id,
+            user_id
         );
 
         let response = self.client.get(&endpoint).headers(headers).send().await?;
@@ -323,7 +318,7 @@ impl JellyfinClient {
 
         let ids_str = item_ids.join(",");
         let endpoint = format!(
-            "{}/Users/{}/Items?Ids={}&Fields=MediaSources",
+            "{}/Items?userId={}&Ids={}&Fields=MediaSources",
             url.trim_end_matches('/'),
             user_id,
             ids_str
@@ -358,10 +353,10 @@ impl JellyfinClient {
         );
 
         let endpoint = format!(
-            "{}/Users/{}/Items/{}?Fields=MediaSources",
+            "{}/Items/{}?userId={}&Fields=MediaSources",
             url.trim_end_matches('/'),
-            user_id,
-            item_id
+            item_id,
+            user_id
         );
 
         let response = self.client.get(&endpoint).headers(headers).send().await?;
@@ -394,7 +389,7 @@ impl JellyfinClient {
         );
 
         let endpoint = format!(
-            "{}/Users/{}/Items?ParentId={}&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true",
+            "{}/Items?userId={}&ParentId={}&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true",
             url.trim_end_matches('/'),
             user_id,
             parent_id
@@ -579,7 +574,7 @@ impl JellyfinClient {
 
         let encoded_title = url_encode(title);
         let endpoint = format!(
-            "{}/Users/{}/Items?SearchTerm={}&IncludeItemTypes=Audio&Limit=10&Fields=Id,Name,Album,AlbumArtist,Artists",
+            "{}/Items?userId={}&SearchTerm={}&IncludeItemTypes=Audio&Limit=10&Fields=Id,Name,Album,AlbumArtist,Artists",
             url.trim_end_matches('/'),
             user_id,
             encoded_title
@@ -614,10 +609,10 @@ impl JellyfinClient {
         );
 
         let endpoint = format!(
-            "{}/Users/{}/PlayedItems/{}",
+            "{}/UserPlayedItems/{}?userId={}",
             url.trim_end_matches('/'),
-            user_id,
-            item_id
+            item_id,
+            user_id
         );
 
         let response = self
@@ -911,7 +906,7 @@ mod tests {
         let token = "test-token-1234567890";
 
         let _mock = server
-            .mock("GET", "/Users/user1/Views")
+            .mock("GET", "/UserViews?userId=user1")
             .match_header("X-Emby-Token", token)
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -938,7 +933,7 @@ mod tests {
         let token = "test-token-1234567890";
 
         let _mock = server
-            .mock("GET", "/Users/user1/Items?ParentId=lib1&IncludeItemTypes=MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo&Limit=50")
+            .mock("GET", "/Items?userId=user1&ParentId=lib1&IncludeItemTypes=MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo&Limit=50")
             .match_header("X-Emby-Token", token)
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -979,7 +974,7 @@ mod tests {
         let token = "test-token-1234567890";
 
         let _mock = server
-            .mock("GET", "/Users/user1/Items/album1")
+            .mock("GET", "/Items/album1?userId=user1")
             .match_header("X-Emby-Token", token)
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -1091,7 +1086,7 @@ mod tests {
 
         // Mock: fetch individual Audio item with MediaSources
         let _mock = server
-            .mock("GET", "/Users/user1/Items/track1?Fields=MediaSources")
+            .mock("GET", "/Items/track1?userId=user1&Fields=MediaSources")
             .match_header("X-Emby-Token", token)
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -1117,7 +1112,7 @@ mod tests {
 
         // Mock: fetch album item (container type)
         let _mock_album = server
-            .mock("GET", "/Users/user1/Items/album1?Fields=MediaSources")
+            .mock("GET", "/Items/album1?userId=user1&Fields=MediaSources")
             .match_header("X-Emby-Token", token)
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -1127,7 +1122,7 @@ mod tests {
 
         // Mock: fetch child items of album
         let _mock_children = server
-            .mock("GET", "/Users/user1/Items?ParentId=album1&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true")
+            .mock("GET", "/Items?userId=user1&ParentId=album1&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true")
             .match_header("X-Emby-Token", token)
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -1156,7 +1151,7 @@ mod tests {
 
         // Mock: fetch artist item (container type; no MediaSources on container is deliberate)
         let _mock_artist = server
-            .mock("GET", "/Users/user1/Items/artist1?Fields=MediaSources")
+            .mock("GET", "/Items/artist1?userId=user1&Fields=MediaSources")
             .match_header("X-Emby-Token", token)
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -1167,7 +1162,7 @@ mod tests {
 
         // Mock: fetch all tracks under artist (Recursive=true flattens Artist → Albums → Tracks)
         let _mock_children = server
-            .mock("GET", "/Users/user1/Items?ParentId=artist1&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true")
+            .mock("GET", "/Items?userId=user1&ParentId=artist1&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true")
             .match_header("X-Emby-Token", token)
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -1196,7 +1191,7 @@ mod tests {
         let token = "test-token-1234567890";
 
         let _mock_artist = server
-            .mock("GET", "/Users/user1/Items/artist2?Fields=MediaSources")
+            .mock("GET", "/Items/artist2?userId=user1&Fields=MediaSources")
             .match_header("X-Emby-Token", token)
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -1206,7 +1201,7 @@ mod tests {
             .await;
 
         let _mock_children = server
-            .mock("GET", "/Users/user1/Items?ParentId=artist2&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true")
+            .mock("GET", "/Items?userId=user1&ParentId=artist2&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true")
             .match_header("X-Emby-Token", token)
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -1232,7 +1227,7 @@ mod tests {
         let token = "test-token-1234567890";
 
         let _mock_artist = server
-            .mock("GET", "/Users/user1/Items/artist3?Fields=MediaSources")
+            .mock("GET", "/Items/artist3?userId=user1&Fields=MediaSources")
             .match_header("X-Emby-Token", token)
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -1243,7 +1238,7 @@ mod tests {
 
         // Server error on the children endpoint — production code logs and drops the error
         let _mock_children = server
-            .mock("GET", "/Users/user1/Items?ParentId=artist3&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true")
+            .mock("GET", "/Items?userId=user1&ParentId=artist3&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true")
             .match_header("X-Emby-Token", token)
             .with_status(500)
             .expect(1)
@@ -1267,7 +1262,7 @@ mod tests {
 
         // Mock: item with no MediaSources
         let _mock = server
-            .mock("GET", "/Users/user1/Items/track1?Fields=MediaSources")
+            .mock("GET", "/Items/track1?userId=user1&Fields=MediaSources")
             .match_header("X-Emby-Token", token)
             .with_status(200)
             .with_header("content-type", "application/json")

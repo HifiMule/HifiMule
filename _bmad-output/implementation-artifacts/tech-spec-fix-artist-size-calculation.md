@@ -40,8 +40,8 @@ Add `"MusicArtist"` to the `CONTAINER_TYPES` constant in `jellyfinsync-daemon/sr
 ### Codebase Patterns
 
 - **Container dispatch via `CONTAINER_TYPES` constant** ([api.rs:8](jellyfinsync-daemon/src/api.rs#L8)): A `&[&str]` slice checked with `.contains()` determines whether an item is fetched recursively (container) or read directly (leaf). This is the single authoritative branching point for size calculation.
-- **`get_child_items_with_sizes()` already uses `Recursive=true`** ([api.rs:378](jellyfinsync-daemon/src/api.rs#L378)): The Jellyfin API call is `GET /Users/{uid}/Items?ParentId={id}&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true`. The `Recursive=true` parameter makes Jellyfin flatten the Artist → Albums → Tracks hierarchy automatically, returning all leaf audio items. No extra recursion is needed in Rust.
-- **Tests use `mockito` with `Server::new_async()`**: Container tests mock two endpoints — the item-details call (`/Users/{uid}/Items/{id}?Fields=MediaSources`) and the children call (`/Users/{uid}/Items?ParentId=...&Recursive=true`). See `test_get_item_sizes_album_container` ([api.rs:1093](jellyfinsync-daemon/src/api.rs#L1093)) as the direct template.
+- **`get_child_items_with_sizes()` already uses `Recursive=true`** ([api.rs:378](jellyfinsync-daemon/src/api.rs#L378)): The Jellyfin API call is `GET /Items?userId={uid}&ParentId={id}&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true`. The `Recursive=true` parameter makes Jellyfin flatten the Artist → Albums → Tracks hierarchy automatically, returning all leaf audio items. No extra recursion is needed in Rust.
+- **Tests use `mockito` with `Server::new_async()`**: Container tests mock two endpoints — the item-details call (`/Items/{id}?userId={uid}&Fields=MediaSources`) and the children call (`/Items?userId={uid}&ParentId=...&Recursive=true`). See `test_get_item_sizes_album_container` ([api.rs:1093](jellyfinsync-daemon/src/api.rs#L1093)) as the direct template.
 - **Async parallelism via `futures::future::join_all`**: `get_item_sizes()` fires all size lookups concurrently; each lookup is self-contained.
 
 ### Files to Reference
@@ -76,8 +76,8 @@ Add `"MusicArtist"` to the `CONTAINER_TYPES` constant in `jellyfinsync-daemon/sr
 - [x] Task 2: Add unit test `test_get_item_sizes_artist_container`
   - File: `jellyfinsync-daemon/src/api.rs` (inside `#[cfg(test)] mod tests`, after `test_get_item_sizes_album_container`)
   - Action: Add a new `#[tokio::test]` following the exact pattern of `test_get_item_sizes_album_container` (line 1093). Mock two endpoints:
-    1. `GET /Users/user1/Items/artist1?Fields=MediaSources` → responds with `{"Id": "artist1", "Name": "Test Artist", "Type": "MusicArtist"}` (no `MediaSources`)
-    2. `GET /Users/user1/Items?ParentId=artist1&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true` → responds with two Audio tracks with sizes (e.g., 3 000 000 and 4 000 000 bytes)
+    1. `GET /Items/artist1?userId=user1&Fields=MediaSources` → responds with `{"Id": "artist1", "Name": "Test Artist", "Type": "MusicArtist"}` (no `MediaSources`)
+    2. `GET /Items?userId=user1&ParentId=artist1&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true` → responds with two Audio tracks with sizes (e.g., 3 000 000 and 4 000 000 bytes)
   - Assert: `results[0].1 == 7_000_000`
   - Notes: The mock URL for the children endpoint must match exactly — including the `Recursive=true` query param — because mockito does exact path+query matching.
 
@@ -96,7 +96,7 @@ Add `"MusicArtist"` to the `CONTAINER_TYPES` constant in `jellyfinsync-daemon/sr
 ### Dependencies
 
 - No new external dependencies.
-- Jellyfin server must support `Recursive=true` on `/Users/{uid}/Items` (standard Jellyfin API — already used by existing album/playlist paths).
+- Jellyfin server must support `Recursive=true` on `/Items?userId={uid}` (standard Jellyfin API — already used by existing album/playlist paths).
 
 ### Testing Strategy
 
