@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-03-19
+last_updated: 2026-03-28
 project: JellyfinSync
 project_key: NOKEY
 tracking_system: file-system
@@ -63,7 +63,8 @@ development_status:
   3-3-high-confidence-storage-projection: done
   3-4-managed-zone-hardware-shielding: done
   3-5-music-only-library-filtering: done
-  3-6-auto-fill-sync-mode-synchronise-all: review
+  3-6-auto-fill-sync-mode-synchronise-all: backlog
+  3-7-artist-view-cache-scroll-state-quick-navigation: backlog
   epic-3-retrospective: optional
 
   epic-4: in-progress
@@ -73,6 +74,8 @@ development_status:
   4-4-self-healing-dirty-manifest-resume: done
   4-5-start-sync-ui-to-engine-trigger: done
   4-5b-daemon-initiated-sync-path: backlog
+  4-6-sync-progress-eta: backlog
+  4-7-playlist-m3u-file-generation: backlog
   epic-4-retrospective: optional
 
   epic-5: done

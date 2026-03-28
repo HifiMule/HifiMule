@@ -47,35 +47,12 @@ class BasketStore extends EventTarget {
         if (this._syncingFromDaemon) return;
         this._syncingFromDaemon = true;
 
-        // MD5 or similar check would be better, but let's compare IDs for now
-        const daemonIds = new Set(items.map(i => i.id));
-        const localIds = new Set(this.items.keys());
-
-        let mismatch = daemonIds.size !== localIds.size;
-        if (!mismatch) {
-            for (const id of daemonIds) {
-                if (!localIds.has(id)) {
-                    mismatch = true;
-                    break;
-                }
-            }
-        }
-
-        if (mismatch) {
-            console.log("Basket mismatch detected during hydration, setting dirty flag.");
-            this._dirty = true;
-        }
-
-        // Merge: keep local selections, add daemon selections
-        // This prevents clobbering if the user rapidly adds items before hydration completes (F2)
-        const currentItems = new Map(this.items);
+        // Device manifest is the source of truth — replace local state entirely
         this.items.clear();
         for (const item of items) {
             this.items.set(item.id, item);
         }
-        for (const [id, item] of currentItems) {
-            this.items.set(id, item);
-        }
+        this._dirty = false;
         this.saveToLocalStorage();
         this.notify();
         this._syncingFromDaemon = false;

@@ -313,6 +313,9 @@ pub fn construct_file_path(
 }
 
 /// Sanitizes a path component by removing/replacing invalid filesystem characters.
+///
+/// Also strips trailing dots and spaces — forbidden by FAT32/Windows for both
+/// files and folders (e.g. `"Once upon a..."` → `"Once upon a"`).
 fn sanitize_path_component(component: &str) -> String {
     component
         .chars()
@@ -326,21 +329,23 @@ fn sanitize_path_component(component: &str) -> String {
         })
         .collect::<String>()
         .trim()
+        .trim_end_matches('.')
         .to_string()
 }
 
 /// Truncates a path component (artist or album folder) to `max_len` characters.
 ///
 /// Uses `chars().count()` for character-aware length (not byte length), safe for Unicode.
-/// Strips trailing spaces and dots after truncation — forbidden by FAT32.
+/// Always strips trailing spaces and dots — forbidden by FAT32 regardless of truncation.
 /// Falls back to `"_"` if the result would be empty (all chars stripped), preventing
 /// invalid empty path components like `Music//Album/track.flac`.
 fn truncate_component(component: &str, max_len: usize) -> String {
-    if component.chars().count() <= max_len {
-        return component.to_string();
-    }
-    let truncated: String = component.chars().take(max_len).collect();
-    let cleaned = truncated.trim_end_matches(|c| c == ' ' || c == '.');
+    let source: String = if component.chars().count() <= max_len {
+        component.to_string()
+    } else {
+        component.chars().take(max_len).collect()
+    };
+    let cleaned = source.trim_end_matches(|c| c == ' ' || c == '.');
     if cleaned.is_empty() {
         "_".to_string()
     } else {
@@ -723,7 +728,7 @@ where
     let write_result: Result<()> = async {
         let mut file = File::create(&tmp_path)
             .await
-            .context("Failed to create temp file")?;
+            .with_context(|| format!("Failed to create temp file: {}", tmp_path.display()))?;
 
         let mut bytes_written = 0u64;
 
@@ -1156,6 +1161,23 @@ mod tests {
     #[test]
     fn test_sanitize_path_component_trims_whitespace() {
         assert_eq!(sanitize_path_component("  trimmed  "), "trimmed");
+    }
+
+    #[test]
+    fn test_sanitize_path_component_strips_trailing_dots() {
+        // FAT32/Windows forbids folder/file names ending with dots
+        assert_eq!(sanitize_path_component("Once upon a..."), "Once upon a");
+        assert_eq!(sanitize_path_component("Album..."), "Album");
+        assert_eq!(sanitize_path_component("no dots"), "no dots");
+        assert_eq!(sanitize_path_component("mid.dot.ok"), "mid.dot.ok");
+    }
+
+    #[test]
+    fn test_truncate_component_strips_trailing_dots_without_truncation() {
+        // Short component (no truncation needed) must still have trailing dots stripped
+        assert_eq!(truncate_component("Once upon a...", 255), "Once upon a");
+        assert_eq!(truncate_component("Album...", 255), "Album");
+        assert_eq!(truncate_component("no dots", 255), "no dots");
     }
 
     #[tokio::test]
