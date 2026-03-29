@@ -171,11 +171,15 @@ class BasketStore extends EventTarget {
 
     /** Replace all auto-filled items with the new set, preserving manual items. */
     public replaceAutoFilled(autoFilledItems: BasketItem[]) {
-        // Remove existing auto-filled items
+        // Collect auto-filled IDs in a first pass, then delete — avoids mutating the
+        // Map while iterating it (ECMAScript spec §24.1.3.5 leaves deletion of
+        // not-yet-visited entries implementation-defined).
+        const autoFilledIds: string[] = [];
         for (const [id, item] of this.items) {
-            if (item.autoFilled) {
-                this.items.delete(id);
-            }
+            if (item.autoFilled) autoFilledIds.push(id);
+        }
+        for (const id of autoFilledIds) {
+            this.items.delete(id);
         }
         // Add new auto-filled items (after manual items in insertion order).
         // Never overwrite a manually added item with an auto-fill entry — if the daemon
@@ -202,7 +206,7 @@ class BasketStore extends EventTarget {
     public getManualSizeBytes(): number {
         let total = 0;
         for (const item of this.items.values()) {
-            if (!item.autoFilled) total += item.sizeBytes || 0;
+            if (!item.autoFilled) total += item.sizeBytes ?? 0;
         }
         return total;
     }

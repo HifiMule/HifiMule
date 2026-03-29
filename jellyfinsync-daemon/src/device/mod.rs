@@ -259,16 +259,19 @@ impl DeviceManager {
 
     /// Atomically updates both the in-memory manifest and the on-disk file.
     /// Used during sync operations to prevent read-modify-write race conditions.
+    /// Returns Err("No device connected") when no device is present — callers must
+    /// handle this case rather than silently discarding writes.
     pub async fn update_manifest<F>(&self, mutation: F) -> Result<()>
     where
         F: FnOnce(&mut DeviceManifest),
     {
         let mut current = self.current_device.write().await;
-        if let Some(manifest) = current.as_mut() {
-            mutation(manifest);
-            if let Some(path) = self.current_device_path.read().await.as_ref() {
-                crate::device::write_manifest(path, manifest).await?;
-            }
+        let manifest = current
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("No device connected"))?;
+        mutation(manifest);
+        if let Some(path) = self.current_device_path.read().await.as_ref() {
+            crate::device::write_manifest(path, manifest).await?;
         }
         Ok(())
     }

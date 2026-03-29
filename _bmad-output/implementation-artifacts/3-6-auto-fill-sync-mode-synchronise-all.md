@@ -1,6 +1,6 @@
 # Story 3.6: Auto-Fill Sync Mode (Synchronise All)
 
-Status: review
+Status: done
 
 ## Story
 
@@ -214,3 +214,4 @@ claude-sonnet-4-6
 ### Change Log
 
 - Added Story 3.6 Auto-Fill Sync Mode: daemon priority ranking algorithm, basket.autoFill and sync.setAutoFill RPC methods, AutoFillPrefs manifest persistence, Auto-Fill UI controls with debounced slider, Auto badge rendering (Date: 2026-03-19)
+- Code review fixes (Date: 2026-03-29): P1 race condition (await basket hydration before triggerAutoFill on reconnect); P2 in-flight guard on triggerAutoFill with pending-retrigger; P3 expand_exclude_ids "Me" userId removed, empty-vec on error; P4 auto_fill pagination total==0 guard (serde default regression); P5/P6 update_manifest returns Err when no device; P7 replaceAutoFilled two-pass Map deletion; P8 two-level container expansion; P9 chunked get_items_by_ids (50 IDs/request); P10 slider NaN guard; P11 device-full notice in Auto-Fill controls; P12 sizeBytes ?? 0; P13 priorityReason fallback for hydrated items; P14 ERR_INTERNAL_ERROR for serialization errors

@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-03-28
+last_updated: 2026-03-29
 project: JellyfinSync
 project_key: NOKEY
 tracking_system: file-system
@@ -63,7 +63,7 @@ development_status:
   3-3-high-confidence-storage-projection: done
   3-4-managed-zone-hardware-shielding: done
   3-5-music-only-library-filtering: done
-  3-6-auto-fill-sync-mode-synchronise-all: backlog
+  3-6-auto-fill-sync-mode-synchronise-all: done
   3-7-artist-view-cache-scroll-state-quick-navigation: backlog
   epic-3-retrospective: optional
 

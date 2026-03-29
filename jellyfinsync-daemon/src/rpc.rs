@@ -1472,7 +1472,7 @@ async fn handle_basket_auto_fill(
 
     match crate::auto_fill::run_auto_fill(&state.jellyfin_client, fill_params).await {
         Ok(items) => serde_json::to_value(items).map_err(|e| JsonRpcError {
-            code: ERR_CONNECTION_FAILED,
+            code: ERR_INTERNAL_ERROR,
             message: format!("Failed to serialize auto-fill results: {}", e),
             data: None,
         }),
@@ -1485,39 +1485,80 @@ async fn handle_basket_auto_fill(
 }
 
 /// Expand album/playlist IDs in `ids` to their constituent Audio/MusicVideo track IDs.
-/// Track IDs pass through unchanged. Falls back to the original ID list on any error.
+/// Track IDs pass through unchanged.
+/// Returns an empty Vec on credential or API errors rather than falling back to raw
+/// container IDs (which Jellyfin ignores in ExcludeItemIds, causing AC-2 violations).
+/// Expands two levels deep to handle playlists whose children are albums.
 async fn expand_exclude_ids(client: &crate::api::JellyfinClient, ids: Vec<String>) -> Vec<String> {
     if ids.is_empty() {
         return ids;
     }
     let (url, token, uid) = match crate::api::CredentialManager::get_credentials() {
         Ok(c) => c,
-        Err(_) => return ids,
+        Err(_) => return Vec::new(),
     };
-    let user_id = uid.unwrap_or_else(|| "Me".to_string());
+    let user_id = match uid {
+        Some(u) => u,
+        None => return Vec::new(), // No authenticated user — cannot expand
+    };
+    // Chunk requests to avoid URL length limits on large baskets.
     let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
-    let items = match client.get_items_by_ids(&url, &token, &user_id, &id_refs).await {
+    let items = match get_items_by_ids_chunked(client, &url, &token, &user_id, &id_refs).await {
         Ok(i) => i,
-        Err(_) => return ids,
+        Err(_) => return Vec::new(),
     };
     let mut expanded = Vec::new();
     for item in items {
         if matches!(item.item_type.as_str(), "Audio" | "MusicVideo") {
             expanded.push(item.id);
         } else {
-            match client.get_child_items_with_sizes(&url, &token, &user_id, &item.id).await {
-                Ok(children) => {
-                    for child in children {
-                        if matches!(child.item_type.as_str(), "Audio" | "MusicVideo") {
-                            expanded.push(child.id);
+            // Level 1: expand container (album, playlist, artist) → children
+            let children = match client
+                .get_child_items_with_sizes(&url, &token, &user_id, &item.id)
+                .await
+            {
+                Ok(c) => c,
+                Err(_) => continue, // Drop this container silently on error
+            };
+            for child in children {
+                if matches!(child.item_type.as_str(), "Audio" | "MusicVideo") {
+                    expanded.push(child.id);
+                } else {
+                    // Level 2: expand nested container (e.g. playlist → album → tracks)
+                    if let Ok(grandchildren) = client
+                        .get_child_items_with_sizes(&url, &token, &user_id, &child.id)
+                        .await
+                    {
+                        for gc in grandchildren {
+                            if matches!(gc.item_type.as_str(), "Audio" | "MusicVideo") {
+                                expanded.push(gc.id);
+                            }
                         }
                     }
+                    // If level-2 expansion fails, silently drop — better than passing
+                    // an unresolvable container ID to Jellyfin's ExcludeItemIds.
                 }
-                Err(_) => expanded.push(item.id),
             }
         }
     }
     expanded
+}
+
+/// Fetches Jellyfin items by ID in chunks of 50 to avoid HTTP URL length limits.
+async fn get_items_by_ids_chunked(
+    client: &crate::api::JellyfinClient,
+    url: &str,
+    token: &str,
+    user_id: &str,
+    ids: &[&str],
+) -> anyhow::Result<Vec<crate::api::JellyfinItem>> {
+    const CHUNK_SIZE: usize = 50;
+    let mut all_items = Vec::new();
+    for chunk in ids.chunks(CHUNK_SIZE) {
+        let items = client.get_items_by_ids(url, token, user_id, chunk).await?;
+        all_items.extend(items);
+    }
+    Ok(all_items)
 }
 
 /// sync.setAutoFill — persists auto-fill preferences to the device manifest.

@@ -143,10 +143,14 @@ pub async fn run_auto_fill(
             });
         }
 
+        // Only use total as an exit condition when the server actually reported a
+        // non-zero value. If total defaulted to 0 (server omitted the field), rely
+        // solely on fetched < PAGE_SIZE (partial page = end of results).
+        let total_known = total > 0;
         let page_num = start_index / PAGE_SIZE + 1;
         if capacity_reached
             || fetched < PAGE_SIZE
-            || start_index + fetched >= total
+            || (total_known && start_index + fetched >= total)
             || page_num >= MAX_PAGES
         {
             break 'pages;

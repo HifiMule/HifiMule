@@ -149,6 +149,11 @@ export class BasketSidebar {
     private autoSyncOnConnect: boolean = false;
     private autoFillDebounceTimer: number | null = null;
     private isAutoFillLoading: boolean = false;
+    // In-flight guard: prevents concurrent basket.autoFill RPCs from racing (P2).
+    // Set to true while a call is running; a second call sets pendingRetrigger so
+    // the latest parameters are applied once the current call completes.
+    private autoFillInFlight: boolean = false;
+    private autoFillPendingRetrigger: boolean = false;
 
     constructor(container: HTMLElement) {
         this.container = container;
@@ -186,17 +191,20 @@ export class BasketSidebar {
             const currentDevice = state.currentDevice;
             if (currentDevice?.deviceId && currentDevice.deviceId !== this.lastHydratedDeviceId) {
                 this.lastHydratedDeviceId = currentDevice.deviceId;
-                // Fetch the basket properly without polling bloat (F1)
-                rpcCall('manifest_get_basket').then((res: any) => {
-                    if (res?.basketItems && Array.isArray(res.basketItems)) {
-                        basketStore.hydrateFromDaemon(res.basketItems);
-                    }
-                }).catch(err => console.error("Failed to fetch basket", err));
                 // Load saved auto-fill preferences from manifest
                 this.autoFillEnabled = currentDevice.autoFill?.enabled ?? false;
                 this.autoFillMaxBytes = currentDevice.autoFill?.maxBytes ?? null;
                 this.autoSyncOnConnect = state.autoSyncOnConnect ?? false;
-                // Re-trigger auto-fill if it was enabled
+                // Await basket hydration before triggering auto-fill so that
+                // getManualItemIds() and getManualSizeBytes() see the correct state (P1).
+                try {
+                    const res = await rpcCall('manifest_get_basket') as any;
+                    if (res?.basketItems && Array.isArray(res.basketItems)) {
+                        basketStore.hydrateFromDaemon(res.basketItems);
+                    }
+                } catch (err) {
+                    console.error("Failed to fetch basket", err);
+                }
                 if (this.autoFillEnabled) {
                     this.triggerAutoFill();
                 }
@@ -225,11 +233,20 @@ export class BasketSidebar {
             clearTimeout(this.autoFillDebounceTimer);
             this.autoFillDebounceTimer = null;
         }
+        this.autoFillPendingRetrigger = false;
         basketStore.removeEventListener('update', this.updateListener);
     }
 
     private async triggerAutoFill() {
         if (!this.autoFillEnabled) return;
+
+        // In-flight guard: if a call is already running, record that we need to
+        // re-run with the latest state once it completes (P2).
+        if (this.autoFillInFlight) {
+            this.autoFillPendingRetrigger = true;
+            return;
+        }
+        this.autoFillInFlight = true;
 
         const manualIds = basketStore.getManualItemIds();
         const manualSize = basketStore.getManualSizeBytes();
@@ -276,7 +293,14 @@ export class BasketSidebar {
             console.error('[AutoFill] Failed to fetch auto-fill items:', err);
         } finally {
             this.isAutoFillLoading = false;
+            this.autoFillInFlight = false;
             this.render();
+            // If a second call arrived while we were running, execute it now with
+            // the latest basket/storage state.
+            if (this.autoFillPendingRetrigger) {
+                this.autoFillPendingRetrigger = false;
+                this.triggerAutoFill();
+            }
         }
     }
 
@@ -323,6 +347,8 @@ export class BasketSidebar {
         if (slider) {
             slider.addEventListener('sl-change', (e: Event) => {
                 const gb = (e.target as HTMLInputElement).valueAsNumber;
+                // Guard against NaN (non-numeric input) and negative values (P10).
+                if (isNaN(gb) || gb < 0) return;
                 this.autoFillMaxBytes = gb * 1024 * 1024 * 1024;
                 this.persistAutoFillPrefs();
                 this.scheduleAutoFill(500);
@@ -349,6 +375,9 @@ export class BasketSidebar {
             ? Math.round(this.autoFillMaxBytes / (1024 * 1024 * 1024))
             : sliderMax;
 
+        // Device is completely full — show feedback instead of a useless zero-width slider (P11).
+        const deviceFull = this.storageInfo !== null && this.storageInfo.freeBytes === 0;
+
         return `
             <div class="auto-fill-controls">
                 <div class="auto-fill-toggle-row">
@@ -359,7 +388,12 @@ export class BasketSidebar {
                         Fill basket automatically
                     </span>
                 </div>
-                ${this.autoFillEnabled ? `
+                ${this.autoFillEnabled && deviceFull ? `
+                    <div class="auto-fill-full-notice" style="margin-top:0.5rem; font-size:0.75rem; opacity:0.7;">
+                        Device is full — no space available for Auto-Fill
+                    </div>
+                ` : ''}
+                ${this.autoFillEnabled && !deviceFull ? `
                     <div class="auto-fill-slider-row" style="margin-top:0.5rem;">
                         <label style="font-size:0.75rem; opacity:0.7; display:block; margin-bottom:0.25rem;">
                             Max Fill Size: <strong>${sliderValue} GB</strong>
@@ -870,15 +904,18 @@ export class BasketSidebar {
             const count = reason.split(':')[1];
             return `▶ ${count} plays`;
         }
-        return 'New';
+        if (reason === 'new' || reason === '') return 'New';
+        return 'Auto';
     }
 
     private renderItem(item: BasketItem): string {
         const autoBadge = item.autoFilled
             ? `<span class="basket-item-auto-badge" title="Added by Auto-Fill">Auto</span>`
             : '';
-        const priorityLabel = item.autoFilled && item.priorityReason
-            ? `<span class="basket-item-priority-reason">${this.escapeHtml(this.renderPriorityLabel(item.priorityReason))}</span>`
+        // Always show priority label for auto-filled items; fall back to empty string
+        // so renderPriorityLabel returns 'Auto' for items hydrated from older manifests (P13).
+        const priorityLabel = item.autoFilled
+            ? `<span class="basket-item-priority-reason">${this.escapeHtml(this.renderPriorityLabel(item.priorityReason ?? ''))}</span>`
             : '';
 
         return `
