@@ -12,6 +12,7 @@ pub struct DeviceMapping {
     pub sync_rules: Option<String>,
     pub last_seen_at: Option<String>,
     pub auto_sync_on_connect: bool,
+    pub transcoding_profile_id: Option<String>,
 }
 
 pub struct Database {
@@ -66,6 +67,18 @@ impl Database {
             )
             .map_err(|e| anyhow!("Failed to add auto_sync_on_connect column: {}", e))?;
         }
+
+        // Migration: add transcoding_profile_id column if missing
+        let has_transcoding_col: bool = conn
+            .prepare("SELECT transcoding_profile_id FROM devices LIMIT 0")
+            .is_ok();
+        if !has_transcoding_col {
+            conn.execute(
+                "ALTER TABLE devices ADD COLUMN transcoding_profile_id TEXT",
+                [],
+            )
+            .map_err(|e| anyhow!("Failed to add transcoding_profile_id column: {}", e))?;
+        }
         conn.execute(
             "CREATE TABLE IF NOT EXISTS scrobble_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -91,7 +104,7 @@ impl Database {
     pub fn get_device_mapping(&self, id: &str) -> Result<Option<DeviceMapping>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, jellyfin_user_id, sync_rules, last_seen_at, auto_sync_on_connect FROM devices WHERE id = ?",
+            "SELECT id, name, jellyfin_user_id, sync_rules, last_seen_at, auto_sync_on_connect, transcoding_profile_id FROM devices WHERE id = ?",
         )?;
 
         let mut rows = stmt.query(params![id])?;
@@ -103,6 +116,7 @@ impl Database {
                 sync_rules: row.get(3)?,
                 last_seen_at: row.get(4)?,
                 auto_sync_on_connect: row.get::<_, bool>(5).unwrap_or(false),
+                transcoding_profile_id: row.get(6)?,
             }))
         } else {
             Ok(None)
@@ -198,6 +212,16 @@ impl Database {
         if rows == 0 {
             return Err(anyhow!("Device not found: {}", id));
         }
+        Ok(())
+    }
+
+    pub fn set_transcoding_profile(&self, device_id: &str, profile_id: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE devices SET transcoding_profile_id = ? WHERE id = ?",
+            params![profile_id, device_id],
+        )
+        .map_err(|e| anyhow!("Failed to set transcoding profile: {}", e))?;
         Ok(())
     }
 }

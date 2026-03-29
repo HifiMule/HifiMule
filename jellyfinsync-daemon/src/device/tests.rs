@@ -31,6 +31,7 @@ async fn test_dirty_manifest_roundtrip() {
         basket_items: vec![],
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
+        transcoding_profile_id: None,
     };
     write_manifest(dir.path(), &manifest).await.unwrap();
     let content = tokio::fs::read_to_string(dir.path().join(".jellyfinsync.json"))
@@ -347,6 +348,7 @@ async fn test_write_manifest_creates_files() {
         basket_items: vec![],
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
+        transcoding_profile_id: None,
     };
 
     write_manifest(root, &manifest).await.unwrap();
@@ -382,6 +384,7 @@ async fn test_write_manifest_overwrites_existing() {
         basket_items: vec![],
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
+        transcoding_profile_id: None,
     };
     write_manifest(root, &manifest1).await.unwrap();
 
@@ -407,6 +410,7 @@ async fn test_write_manifest_overwrites_existing() {
         basket_items: vec![],
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
+        transcoding_profile_id: None,
     };
     write_manifest(root, &manifest2).await.unwrap();
 
@@ -449,6 +453,7 @@ async fn test_get_discrepancies_missing_file() {
         basket_items: vec![],
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
+        transcoding_profile_id: None,
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -491,6 +496,7 @@ async fn test_get_discrepancies_orphaned_file() {
         basket_items: vec![],
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
+        transcoding_profile_id: None,
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -545,6 +551,7 @@ async fn test_get_discrepancies_no_issues() {
         basket_items: vec![],
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
+        transcoding_profile_id: None,
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -600,6 +607,7 @@ async fn test_prune_items() {
         basket_items: vec![],
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
+        transcoding_profile_id: None,
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -650,6 +658,7 @@ async fn test_relink_item() {
         basket_items: vec![],
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
+        transcoding_profile_id: None,
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -693,6 +702,7 @@ async fn test_relink_item_path_traversal() {
         basket_items: vec![],
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
+        transcoding_profile_id: None,
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -724,6 +734,7 @@ async fn test_clear_dirty_flag() {
         basket_items: vec![],
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
+        transcoding_profile_id: None,
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -854,7 +865,7 @@ async fn test_initialize_device_root() {
         .await;
 
     // Initialize with root (empty folder_path)
-    let manifest = manager.initialize_device("").await.unwrap();
+    let manifest = manager.initialize_device("", None).await.unwrap();
 
     assert!(manifest.managed_paths.is_empty());
     assert_eq!(manifest.version, "1.0");
@@ -882,7 +893,7 @@ async fn test_initialize_device_subfolder() {
         .await;
 
     // Initialize with a subfolder
-    let manifest = manager.initialize_device("Music").await.unwrap();
+    let manifest = manager.initialize_device("Music", None).await.unwrap();
 
     assert_eq!(manifest.managed_paths, vec!["Music".to_string()]);
 
@@ -904,7 +915,7 @@ async fn test_initialize_device_requires_unrecognized_path() {
     let manager = DeviceManager::new(db);
 
     // No unrecognized path set → should fail
-    let res = manager.initialize_device("").await;
+    let res = manager.initialize_device("", None).await;
     assert!(res.is_err());
     assert!(res
         .unwrap_err()
@@ -923,21 +934,21 @@ async fn test_initialize_device_rejects_path_traversal() {
         .await;
 
     // Path traversal with ".."
-    let res = manager.initialize_device("../escape").await;
+    let res = manager.initialize_device("../escape", None).await;
     assert!(res.is_err());
     assert!(res.unwrap_err().to_string().contains("Invalid folder path"));
 
     // Absolute path
-    let res = manager.initialize_device("/etc/hacked").await;
+    let res = manager.initialize_device("/etc/hacked", None).await;
     assert!(res.is_err());
 
     // Nested path with separator
-    let res = manager.initialize_device("Music/SubFolder").await;
+    let res = manager.initialize_device("Music/SubFolder", None).await;
     assert!(res.is_err());
     assert!(res.unwrap_err().to_string().contains("single folder name"));
 
     // Backslash separator
-    let res = manager.initialize_device("Music\\SubFolder").await;
+    let res = manager.initialize_device("Music\\SubFolder", None).await;
     assert!(res.is_err());
 }
 
@@ -1005,6 +1016,7 @@ async fn test_save_basket_roundtrip() {
         basket_items: vec![],
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
+        transcoding_profile_id: None,
     };
     write_manifest(dir.path(), &manifest).await.unwrap();
 
@@ -1063,6 +1075,7 @@ async fn test_auto_sync_on_connect_roundtrip() {
         basket_items: vec![],
         auto_sync_on_connect: true,
         auto_fill: crate::device::AutoFillPrefs::default(),
+        transcoding_profile_id: None,
     };
     write_manifest(dir.path(), &manifest).await.unwrap();
 

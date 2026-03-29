@@ -45,3 +45,7 @@ pub fn get_app_data_dir() -> Result<PathBuf> {
 
     Ok(path)
 }
+
+pub fn get_device_profiles_path() -> Result<PathBuf> {
+    Ok(get_app_data_dir()?.join("device-profiles.json"))
+}

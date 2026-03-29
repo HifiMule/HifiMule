@@ -64,6 +64,7 @@ async fn test_device_recognition_integration() {
         basket_items: vec![],
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
+        transcoding_profile_id: None,
     };
 
     let state = manager
@@ -129,6 +130,7 @@ async fn test_device_detection_auto_sync_enabled() {
         }],
         auto_sync_on_connect: true,
         auto_fill: crate::device::AutoFillPrefs::default(),
+        transcoding_profile_id: None,
     };
 
     // Verify manifest has auto_sync enabled
@@ -185,6 +187,7 @@ async fn test_device_detection_auto_sync_disabled() {
         }],
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
+        transcoding_profile_id: None,
     };
 
     // Verify auto_sync is disabled

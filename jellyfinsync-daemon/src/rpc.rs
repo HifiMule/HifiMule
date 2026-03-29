@@ -160,6 +160,10 @@ async fn handler(
         }
         "basket.autoFill" => handle_basket_auto_fill(&state, payload.params).await,
         "sync.setAutoFill" => handle_sync_set_auto_fill(&state, payload.params).await,
+        "device_profiles.list" => handle_device_profiles_list().await,
+        "device.set_transcoding_profile" => {
+            handle_set_transcoding_profile(&state, payload.params).await
+        }
         _ => Err(JsonRpcError {
             code: ERR_METHOD_NOT_FOUND,
             message: "Method not found".to_string(),
@@ -952,6 +956,28 @@ async fn handle_sync_execute(
     let _ = state_tx.send(crate::DaemonState::Syncing);
 
     tokio::spawn(async move {
+        // Load transcoding profile from device manifest
+        let transcoding_profile = {
+            let device = device_manager.get_current_device().await;
+            if let Some(ref manifest) = device {
+                if let Some(ref profile_id) = manifest.transcoding_profile_id {
+                    match crate::paths::get_device_profiles_path()
+                        .and_then(|p| crate::transcoding::find_device_profile(&p, profile_id))
+                    {
+                        Ok(profile) => profile,
+                        Err(e) => {
+                            eprintln!("[Sync] Failed to load transcoding profile '{}': {}", profile_id, e);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
         let result = crate::sync::execute_sync(
             &delta,
             &device_path,
@@ -962,6 +988,7 @@ async fn handle_sync_execute(
             op_manager.clone(),
             op_id.clone(),
             device_manager.clone(),
+            transcoding_profile,
         )
         .await;
 
@@ -1263,9 +1290,33 @@ async fn handle_device_initialize(
         data: None,
     })?;
 
+    // Optional — if not provided, device uses passthrough (no transcoding)
+    let transcoding_profile_id = params["transcodingProfileId"].as_str().map(|s| s.to_string());
+
+    // Validate the transcoding profile ID exists in device-profiles.json (if provided)
+    if let Some(ref tpid) = transcoding_profile_id {
+        let profiles_path = crate::paths::get_device_profiles_path().map_err(|e| JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: e.to_string(),
+            data: None,
+        })?;
+        let profiles = crate::transcoding::load_profiles(&profiles_path).map_err(|e| JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: format!("Failed to load device profiles: {}", e),
+            data: None,
+        })?;
+        if !profiles.iter().any(|p| p.id == *tpid) {
+            return Err(JsonRpcError {
+                code: ERR_INVALID_PARAMS,
+                message: format!("Transcoding profile '{}' not found in device-profiles.json", tpid),
+                data: None,
+            });
+        }
+    }
+
     let manifest = state
         .device_manager
-        .initialize_device(folder_path)
+        .initialize_device(folder_path, transcoding_profile_id.clone())
         .await
         .map_err(|e| JsonRpcError {
             code: ERR_STORAGE_ERROR,
@@ -1281,6 +1332,17 @@ async fn handle_device_initialize(
             message: format!("Failed to store device mapping: {}", e),
             data: None,
         })?;
+
+    if let Some(ref tpid) = transcoding_profile_id {
+        state
+            .db
+            .set_transcoding_profile(&manifest.device_id, Some(tpid))
+            .map_err(|e| JsonRpcError {
+                code: ERR_STORAGE_ERROR,
+                message: format!("Failed to store transcoding profile: {}", e),
+                data: None,
+            })?;
+    }
 
     // Derive a human-readable name from the device path rather than using the UUID
     let device_name = state
@@ -1301,6 +1363,7 @@ async fn handle_device_initialize(
             "deviceId": manifest.device_id,
             "version": manifest.version,
             "managedPaths": manifest.managed_paths,
+            "transcodingProfileId": manifest.transcoding_profile_id,
         }
     }))
 }
@@ -1517,6 +1580,102 @@ async fn handle_sync_set_auto_fill(
         "maxFillBytes": max_fill_bytes,
         "autoSyncOnConnect": auto_sync_on_connect,
     }))
+}
+
+async fn handle_device_profiles_list() -> Result<Value, JsonRpcError> {
+    let path = crate::paths::get_device_profiles_path().map_err(|e| JsonRpcError {
+        code: ERR_STORAGE_ERROR,
+        message: format!("Failed to get profiles path: {}", e),
+        data: None,
+    })?;
+
+    let profiles = crate::transcoding::load_profiles(&path).map_err(|e| JsonRpcError {
+        code: ERR_STORAGE_ERROR,
+        message: format!("Failed to load device profiles: {}", e),
+        data: None,
+    })?;
+
+    // Return id, name, description only — not the full deviceProfile payload
+    let summary: Vec<Value> = profiles
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "id": p.id,
+                "name": p.name,
+                "description": p.description,
+            })
+        })
+        .collect();
+
+    Ok(Value::Array(summary))
+}
+
+async fn handle_set_transcoding_profile(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let device_id = params["deviceId"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing deviceId".to_string(),
+        data: None,
+    })?;
+
+    // profile_id can be null to clear transcoding
+    let profile_id = params["profileId"].as_str();
+
+    // Validate profile_id exists in profiles file (unless null/passthrough)
+    if let Some(id) = profile_id {
+        if id != "passthrough" {
+            let path = crate::paths::get_device_profiles_path().map_err(|e| JsonRpcError {
+                code: ERR_STORAGE_ERROR,
+                message: e.to_string(),
+                data: None,
+            })?;
+            let profiles = crate::transcoding::load_profiles(&path).map_err(|e| JsonRpcError {
+                code: ERR_STORAGE_ERROR,
+                message: e.to_string(),
+                data: None,
+            })?;
+            if !profiles.iter().any(|p| p.id == id) {
+                return Err(JsonRpcError {
+                    code: ERR_INVALID_PARAMS,
+                    message: format!("Profile '{}' not found in device-profiles.json", id),
+                    data: None,
+                });
+            }
+        }
+    }
+
+    // Persist to SQLite DB
+    state
+        .db
+        .set_transcoding_profile(device_id, profile_id)
+        .map_err(|e| JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: e.to_string(),
+            data: None,
+        })?;
+
+    // Update in-memory device manifest
+    state
+        .device_manager
+        .update_manifest(|m| {
+            m.transcoding_profile_id = profile_id.map(|s| s.to_string());
+        })
+        .await
+        .map_err(|e| JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: e.to_string(),
+            data: None,
+        })?;
+
+    Ok(Value::Bool(true))
 }
 
 #[cfg(test)]
@@ -1881,6 +2040,7 @@ mod tests {
             basket_items: vec![],
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillPrefs::default(),
+            transcoding_profile_id: None,
         };
 
         device_manager
@@ -1945,6 +2105,7 @@ mod tests {
             basket_items: vec![],
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillPrefs::default(),
+            transcoding_profile_id: None,
         };
         device_manager
             .handle_device_detected(dir.path().to_path_buf(), manifest)
@@ -1989,6 +2150,7 @@ mod tests {
             basket_items: vec![],
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillPrefs::default(),
+            transcoding_profile_id: None,
         };
         device_manager
             .handle_device_detected(dir.path().to_path_buf(), manifest)
@@ -2047,6 +2209,7 @@ mod tests {
             basket_items: vec![],
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillPrefs::default(),
+            transcoding_profile_id: None,
         };
         device_manager
             .handle_device_detected(std::path::PathBuf::from("/tmp/dirty"), dirty_manifest)
@@ -2168,6 +2331,7 @@ mod tests {
                     basket_items: vec![],
                     auto_sync_on_connect: false,
                     auto_fill: crate::device::AutoFillPrefs::default(),
+                    transcoding_profile_id: None,
                 },
             )
             .await
@@ -2249,6 +2413,7 @@ mod tests {
             basket_items: vec![],
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillPrefs::default(),
+            transcoding_profile_id: None,
         };
         device_manager
             .handle_device_detected(std::path::PathBuf::from("/tmp/dev"), manifest)
@@ -2475,6 +2640,7 @@ mod tests {
             basket_items: vec![],
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillPrefs::default(),
+            transcoding_profile_id: None,
         };
         crate::device::write_manifest(dir.path(), &manifest)
             .await
@@ -2557,6 +2723,7 @@ mod tests {
             basket_items: vec![],
             auto_sync_on_connect: true,
             auto_fill: crate::device::AutoFillPrefs::default(),
+            transcoding_profile_id: None,
         };
         device_manager
             .handle_device_detected(std::path::PathBuf::from("/tmp/auto-state"), manifest)

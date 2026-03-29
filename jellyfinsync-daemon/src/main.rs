@@ -60,6 +60,7 @@ mod paths;
 mod rpc;
 mod scrobbler;
 mod sync;
+mod transcoding;
 
 #[cfg(test)]
 mod tests;
@@ -146,6 +147,15 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                     return;
                 }
             };
+
+            // Seed default device-profiles.json if not present
+            let profiles_default = include_bytes!("../assets/device-profiles.json");
+            if let Ok(profiles_path) = crate::paths::get_device_profiles_path() {
+                if let Err(e) = crate::transcoding::ensure_profiles_file_exists(&profiles_path, profiles_default) {
+                    daemon_log!("Warning: Failed to seed device-profiles.json: {}", e);
+                    // Non-fatal — transcoding will be unavailable until the file exists
+                }
+            }
 
             // Initial state
             if let Err(e) = state_tx.send(DaemonState::Idle) {
@@ -638,6 +648,21 @@ async fn run_auto_sync(
         })
         .await?;
 
+    // Load transcoding profile if set on the device manifest
+    let transcoding_profile = if let Some(ref profile_id) = manifest.transcoding_profile_id {
+        match crate::paths::get_device_profiles_path()
+            .and_then(|p| crate::transcoding::find_device_profile(&p, profile_id))
+        {
+            Ok(profile) => profile,
+            Err(e) => {
+                daemon_log!("[AutoSync] Failed to load transcoding profile '{}': {}", profile_id, e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let result = sync::execute_sync(
         &delta,
         &device_path,
@@ -648,6 +673,7 @@ async fn run_auto_sync(
         sync_op_manager.clone(),
         operation_id.clone(),
         device_manager.clone(),
+        transcoding_profile,
     )
     .await;
 

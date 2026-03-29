@@ -88,6 +88,7 @@ graph TD
 
 ### 5.4 Device Profile Settings
 *   **Auto-sync on connect toggle:** `<sl-switch>` in the device profile panel with helper text: "Automatically start syncing when this device is connected. Works with or without the UI open."
+*   **Multi-Device Picker** (rendered only when `connectedDevices.length > 1`): Positioned above the Device State panel (above the Managed Zone shield). Component: `<sl-select>` or compact device card list. Each option shows: device name (from manifest), truncated device path. The selected device is highlighted. Switching fires the `device.select` RPC and reloads the basket and storage projection for the newly selected device. When a single device is connected the picker is hidden — layout and behaviour are unchanged.
 
 ### 5.5 Headless Sync Feedback
 *   **Without UI:** Tray icon animation (Syncing state) + OS-native notification on completion.

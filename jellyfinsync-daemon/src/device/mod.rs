@@ -55,6 +55,9 @@ pub struct DeviceManifest {
     /// Auto-fill preferences persisted per device.
     #[serde(default)]
     pub auto_fill: AutoFillPrefs,
+    /// ID referencing an entry in device-profiles.json. None = no transcoding (passthrough).
+    #[serde(default)]
+    pub transcoding_profile_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -277,7 +280,11 @@ impl DeviceManager {
 
     /// Initializes a new device by generating a UUID, writing the initial manifest,
     /// and transitioning the device from unrecognized to recognized state.
-    pub async fn initialize_device(&self, folder_path: &str) -> Result<DeviceManifest> {
+    pub async fn initialize_device(
+        &self,
+        folder_path: &str,
+        transcoding_profile_id: Option<String>,
+    ) -> Result<DeviceManifest> {
         // Validate folder_path: no traversal, no absolute paths, single-level only
         if !folder_path.is_empty() {
             if folder_path.contains("..")
@@ -325,6 +332,7 @@ impl DeviceManager {
             basket_items: vec![],
             auto_sync_on_connect: false,
             auto_fill: AutoFillPrefs::default(),
+            transcoding_profile_id,   // NEW — stored in .jellyfinsync.json on the device
         };
 
         write_manifest(&device_root, &manifest).await?;

@@ -50,9 +50,10 @@ workflowType: 'prd'
 - **Auto-Fill Sync Mode:** Intelligent device-filling that selects music by priority (favorites → play count → creation date) up to capacity or a user-defined limit. Can be mixed with manual basket selections.
 - **Auto-Sync on Connect:** Known devices with auto-sync enabled trigger synchronization automatically on detection, requiring zero user interaction.
 
+- **Transcoding Handshake:** Per-device profile selection for server-side re-encoding via Jellyfin PlaybackInfo API. Profiles stored in an editable `device-profiles.json` in the app data directory; passthrough (direct download) is the default.
+
 ### Growth Features (Post-MVP)
 - **Scrobble Queue & Retry:** Robust handling for offline scrobbling when the server is unreachable during sync.
-- **Transcoding Handshake:** Dynamic server-side re-encoding via Jellyfin API for storage optimization.
 - **Repair Utility:** Guided GUI-based recovery for interrupted transfers or "de-synced" manifests.
 
 ## User Journeys
@@ -142,7 +143,8 @@ As a cross-platform desktop application, JellyfinSync consists of a performance-
 - **FR1:** The system can automatically detect Mass Storage devices (USB) on Windows, Linux, and macOS.
 - **FR2:** Users can manually select a target device folder if automatic detection fails.
 - **FR3:** The system can identify the presence of a `.jellyfinsync.json` manifest on discovery.
-- **FR4:** The system can read persistent hardware identifiers to link devices across different sessions.
+- **FR4:** The system can read persistent hardware identifiers to link devices across different sessions. When multiple managed devices are connected simultaneously, the system tracks all of them and allows the user to select the active device context.
+- **FR33:** When multiple managed devices are connected simultaneously, the system presents a device selection UI and allows the user to switch the active device context without restarting or reconnecting.
 - **FR26:** The system can initialize a new `.jellyfinsync.json` manifest on a connected device that has not previously been managed, capturing a hardware identifier, a designated sync folder path, and an associated Jellyfin user profile.
 
 ### 2. Server & Profile Management
@@ -164,6 +166,8 @@ As a cross-platform desktop application, JellyfinSync consists of a performance-
 - **FR14:** The system can stream media files directly from the Jellyfin server to the device via memory-to-disk buffering.
 - **FR15:** The system can validate hardware-specific constraints (path length, character sets) before writing files.
 - **FR16:** The system can resume an interrupted sync session without restarting from scratch.
+- **FR31:** The system can negotiate a transcoded stream URL from the Jellyfin server using a device-specific DeviceProfile payload, falling back to direct download when direct play is supported or transcoding fails.
+- **FR32:** The system can list available device transcoding profiles and assign one to a connected device, persisting the selection in both the device manifest and the local database.
 
 ### 5. Scrobble Management
 - **FR17:** The system can detect Rockbox `.scrobbler.log` files on connected devices.

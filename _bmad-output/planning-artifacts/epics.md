@@ -97,6 +97,9 @@ FR27: Epic 6 - Platform-Native Installer Bundling
 FR28: Epic 6 - CI/CD Cross-Platform Build Pipeline
 FR29: Epic 3 - Auto-Fill Priority Selection Algorithm
 FR30: Epic 2 - Auto-Sync on Known Device Detection
+FR31: Epic 4 - Transcoding Handshake (Story 4.8)
+FR32: Epic 4 - Transcoding Profile RPC (Story 4.8)
+FR33: Epic 2 - Multi-Device Selection (Story 2.7)
 
 ## Epic List
 
@@ -260,6 +263,41 @@ So that I can bring a brand-new device into the managed sync model without manua
 
 **When** the initialization fails (e.g., device is read-only or disk full)
 **Then** the UI displays a clear error message with a "Retry" or "Dismiss" option.
+
+### Story 2.7: Multi-Device Selection Panel
+
+As a System Admin (Alexis) and Ritualist (Arthur),
+I want to see all currently connected managed devices and select which one I am working with,
+So that I can operate on one specific device without the daemon silently overwriting my context when a second device is plugged in.
+
+**Acceptance Criteria:**
+
+**Given** two or more managed devices are connected simultaneously
+**When** I open the main UI (or when a second device is detected while the UI is open)
+**Then** the UI displays a device picker listing all connected managed devices (device name from manifest, device_id, path).
+**And** the currently selected device is highlighted.
+**And** all operations (basket, storage projection, sync, manifest) target the selected device.
+
+**Given** the device picker is visible
+**When** I click a different device
+**Then** the UI switches context to that device (reloads basket from its manifest, updates storage projection).
+**And** the daemon's active device updates via the `device.select` RPC.
+
+**Given** only one managed device is connected
+**Then** no picker is shown and behaviour is identical to the current single-device experience (device is auto-selected).
+
+**Given** the currently selected device is disconnected
+**When** the daemon fires a device-removed event
+**Then** the UI clears device context with no crash or stale state.
+**And** if other devices remain connected, the picker is shown for the remaining devices.
+
+**Technical Notes:**
+- Daemon: `DeviceManager` gains `connected_devices: HashMap<PathBuf, DeviceManifest>` and `selected_device_path: Option<PathBuf>`. `handle_device_detected` adds to map; `handle_device_removed` removes from map and clears selection if needed.
+- `get_current_device()` returns manifest for the `selected_device_path` entry — all existing callers remain unchanged.
+- New RPC `device.list` → `Vec<{path, deviceId, name}>` for all connected devices.
+- New RPC `device.select(params: {path: string})` → sets `selected_device_path`; silently sets for single-device case.
+- `get_daemon_state` gains `connectedDevices: Array<{path, deviceId, name}>` and `selectedDevicePath: string | null`.
+- UI: `<sl-select>` or device card list in the Device State panel header, rendered only when `connectedDevices.length > 1`.
 
 ## Epic 3: The Curation Hub (Basket & Library)
 
@@ -460,6 +498,49 @@ So that I can either manually execute my selection or enjoy zero-touch automatic
 **And** if the UI is open, it reflects the in-progress sync state via `on_sync_progress` events.
 **And** if the UI is closed, the tray icon and OS notifications provide progress and completion feedback.
 
+### Story 4.8: Transcoding Handshake via Device Profiles
+
+As a Ritualist (Arthur) and Convenience Seeker (Sarah),
+I want the sync engine to transcode music to a device-compatible format before writing it,
+So that tracks play correctly on DAPs that don't support FLAC, Opus, or AAC (e.g., iPods running older firmware).
+
+**Acceptance Criteria:**
+
+**Given** `device-profiles.json` is installed in the app data dir (seeded on first run)
+**When** I call the `device_profiles.list` RPC
+**Then** I receive the list of available profiles (id, name, description) including: `passthrough`, `rockbox-mp3-320`, `generic-mp3-192`, `generic-aac-256`.
+
+**Given** I call `device.set_transcoding_profile` with a profileId
+**When** the daemon processes the request
+**Then** the `transcoding_profile_id` is written to the device manifest AND persisted in the SQLite `devices` table.
+
+**Given** a device manifest with `transcoding_profile_id` set to a non-passthrough profile
+**When** `execute_sync` runs for a file
+**Then** the engine calls `POST /Items/{id}/PlaybackInfo` with the `DeviceProfile` payload.
+**And** if Jellyfin returns a `TranscodingUrl` → streams from `{base_url}{TranscodingUrl}`.
+**And** if Jellyfin returns `SupportsDirectPlay: true` → falls back to `/Items/{id}/Download`.
+**And** if the PlaybackInfo call fails → non-fatal; logged in `SyncFileError`; continues with next file.
+
+**Given** a device manifest with `transcoding_profile_id` = null or `"passthrough"`
+**When** `execute_sync` runs
+**Then** the engine uses the existing `/Items/{id}/Download` path unchanged.
+
+**Given** no `device-profiles.json` in the app data dir
+**When** the daemon starts
+**Then** `transcoding::ensure_profiles_file_exists()` seeds the default file from the embedded asset before the RPC server starts.
+
+**Technical Notes (implementation complete — per tech spec, all tasks [x]):**
+- `transcoding.rs`: `DeviceProfileEntry` type, `load_profiles()`, `ensure_profiles_file_exists()`
+- `device-profiles.json` embedded via `include_bytes!` in `main.rs`
+- `DeviceManifest.transcoding_profile_id: Option<String>` in `device/mod.rs`
+- SQLite `transcoding_profile_id TEXT` column + migration in `db.rs`
+- `device_profiles.list` + `device.set_transcoding_profile` handlers in `rpc.rs`
+- `get_playback_info_stream_url()` + `resolve_stream_url()` in `api.rs`
+- `execute_sync()` extended with `transcoding_profile: Option<serde_json::Value>` param
+- Both callers (`rpc.rs` `sync.start`, `main.rs` `run_auto_sync`) load and pass profile
+- Reference: `_bmad-output/implementation-artifacts/tech-spec-transcoding-device-profiles-playback-handshake.md`
+
+**Status:** Implementation complete. Story added to formally track completed work.
 
 ## Epic 5: Ecosystem Lifecycle & Advanced Tools
 

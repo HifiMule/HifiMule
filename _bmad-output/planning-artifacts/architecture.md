@@ -70,12 +70,23 @@ npx create-tauri-app@latest jellyfinsync-ui --template vanilla-ts
 ### Daemon Responsibilities
 - **Auto-Fill Algorithm:** Priority-based music selection engine (favorites → play count → creation date) querying Jellyfin API (IsFavorite, PlayCount, DateCreated fields).
 - **Auto-Sync Controller:** Monitors device detection events and triggers sync automatically for configured devices without UI interaction.
+- **Transcoding Negotiator:** When a device has a `transcoding_profile_id` set, calls `POST /Items/{id}/PlaybackInfo` with the associated `DeviceProfile` payload to negotiate a server-side transcoded stream URL before each file transfer.
+- **Multi-Device Tracker:** Maintains a map of all currently connected managed devices; exposes selection API so the UI can switch the active device context without restart.
 
 ### Data Architecture
 - **Daemon State:** Managed via a local SQLite database to ensure atomic scrobble commits and robust history tracking.
 - **UI Preferences:** Stored in standard JSON configuration files for ease of access from the Tauri frontend.
-- **Device Profile Fields:** `auto_fill_enabled BOOLEAN DEFAULT false`, `max_fill_bytes INTEGER NULL` (null = fill to capacity), `auto_sync_on_connect BOOLEAN DEFAULT false`.
-- **Manifest Extension:** `.jellyfinsync.json` includes an optional `autoFill` block: `{ "enabled": true, "maxBytes": null, "autoSyncOnConnect": true }`.
+- **Device Profile Fields:** `auto_fill_enabled BOOLEAN DEFAULT false`, `max_fill_bytes INTEGER NULL` (null = fill to capacity), `auto_sync_on_connect BOOLEAN DEFAULT false`, `transcoding_profile_id TEXT NULL` (references id in `device-profiles.json`; null = passthrough).
+- **Manifest Extension:** `.jellyfinsync.json` includes `auto_sync_on_connect` (boolean), `auto_fill` block (`{ "enabled": bool, "maxBytes": number | null }`), and `transcoding_profile_id` (string | null).
+- **device-profiles.json:** Seeded to `{app_data_dir}/device-profiles.json` on first daemon startup from an embedded binary asset (`include_bytes!`). User-editable post-install. Contains named `DeviceProfile` payloads for Jellyfin PlaybackInfo negotiation. A `passthrough` profile (`deviceProfile: null`) explicitly disables transcoding.
+
+### DeviceManager Struct
+```
+connected_devices: HashMap<PathBuf, DeviceManifest>  // all currently connected managed devices
+selected_device_path: Option<PathBuf>                // the device targeted by all UI operations
+unrecognized_device_path: Option<PathBuf>            // device awaiting initialization
+```
+`get_current_device()` returns the manifest for `selected_device_path`. All existing callers (basket, sync, manifest, storage) are unchanged. When only one device is connected it is auto-selected.
 
 ### Authentication & Security
 - **Credential Management:** All Jellyfin tokens are stored in the OS-native secure vault (Windows Credential Manager, macOS Keychain, Linux Secret Service) using the `keyring` crate.
@@ -87,6 +98,14 @@ npx create-tauri-app@latest jellyfinsync-ui --template vanilla-ts
 - **External API:** Direct utilization of the Jellyfin Progressive Sync API for scrobbling and playback reporting.
 - **Auto-Fill IPC:** `basket.autoFill` — Configure and trigger auto-fill calculation. Params: `{ deviceId, maxBytes?, excludeItemIds[] }`. Response streams ranked item list progressively.
 - **Auto-Fill Settings IPC:** `sync.setAutoFill` — Persist auto-fill settings per device profile. Params: `{ deviceId, autoFillEnabled, maxFillBytes?, autoSyncOnConnect }`.
+- **Multi-Device IPC:**
+  - `device.list` → `Array<{ path: string, deviceId: string, name: string | null }>` — all connected managed devices.
+  - `device.select(params: { path: string })` → `{ ok: true }` — sets the active device context for all operations.
+  - `get_daemon_state` response extended with `connectedDevices: Array<{path, deviceId, name}>` and `selectedDevicePath: string | null`.
+- **Transcoding IPC:**
+  - `device_profiles.list` → `Array<{ id, name, description, deviceProfile: object | null }>` — reads from `device-profiles.json`.
+  - `device.set_transcoding_profile(params: { deviceId: string, profileId: string })` → `{ ok: true }` — persists to manifest (Write-Temp-Rename) and SQLite `devices` table.
+- **execute_sync() signature:** `execute_sync(..., transcoding_profile: Option<serde_json::Value>)` — both callers (`rpc.rs` `sync.start` handler and `main.rs` `run_auto_sync`) load the device's profile from the manifest and pass it through.
 
 ### Frontend Architecture
 - **UI Type:** Webview-based via Tauri v2.

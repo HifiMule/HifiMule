@@ -47,12 +47,13 @@ export class InitDeviceModal {
             </sl-button>
         `;
 
-        // Append to document.body so sidebar re-renders don't destroy the dialog
         document.body.appendChild(dialogEl);
         this.dialog = dialogEl;
-
-        dialogEl.addEventListener('sl-after-hide', () => {
-            dialogEl.remove();
+        
+        dialogEl.addEventListener('sl-after-hide', (e: Event) => {
+            if (e.target === dialogEl) {
+                dialogEl.remove();
+            }
         });
 
         dialogEl.querySelector('#init-device-cancel-btn')?.addEventListener('click', () => {
@@ -65,15 +66,18 @@ export class InitDeviceModal {
         if (!body) return;
 
         try {
-            const creds = await rpcCall('get_credentials') as any;
+            const [creds, profiles] = await Promise.all([
+                rpcCall('get_credentials') as any,
+                rpcCall('device_profiles.list') as any,
+            ]);
             const userId = creds?.userId || null;
-            this.renderContent(body as HTMLElement, userId);
+            this.renderContent(body as HTMLElement, userId, profiles);
         } catch (err) {
             this.renderError(body as HTMLElement, (err as Error).message);
         }
     }
 
-    private renderContent(body: HTMLElement, userId: string | null) {
+    private renderContent(body: HTMLElement, userId: string | null, profiles: any[]) {
         if (!userId) {
             body.innerHTML = `
                 <div class="init-device-no-login">
@@ -83,6 +87,11 @@ export class InitDeviceModal {
             `;
             return;
         }
+
+        const profileOptions = (profiles || []).map(p => 
+            `<sl-option value="${this.escapeHtml(p.id)}">${this.escapeHtml(p.name)}</sl-option>`
+        ).join('');
+        const defaultPassthroughDesc = (profiles || []).find(p => p.id === 'passthrough')?.description || '';
 
         body.innerHTML = `
             <div class="init-device-form">
@@ -103,6 +112,17 @@ export class InitDeviceModal {
                         Example: "Music" — leave empty to use the entire device
                     </div>
                 </div>
+                <div style="margin-bottom: 1.25rem;">
+                    <label style="font-size: 0.8rem; opacity: 0.7; display: block; margin-bottom: 0.25rem;">
+                        Transcoding Profile
+                    </label>
+                    <sl-select id="init-transcoding-profile" value="passthrough">
+                        ${profileOptions}
+                    </sl-select>
+                    <div style="font-size: 0.75rem; opacity: 0.55; margin-top: 0.3rem;" id="init-transcoding-desc">
+                        ${this.escapeHtml(defaultPassthroughDesc)}
+                    </div>
+                </div>
                 <div style="padding: 0.75rem; background: rgba(255,255,255,0.04); border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);">
                     <div style="font-size: 0.75rem; opacity: 0.55; margin-bottom: 0.25rem;">Linked Jellyfin Profile</div>
                     <div style="font-size: 0.85rem;">
@@ -112,6 +132,17 @@ export class InitDeviceModal {
                 </div>
             </div>
         `;
+
+        // Update description when selection changes
+        const selectEl = body.querySelector('#init-transcoding-profile') as any;
+        const descEl = body.querySelector('#init-transcoding-desc') as HTMLElement;
+        if (selectEl && descEl) {
+            selectEl.addEventListener('sl-change', (e: any) => {
+                const selectedId = e.target.value;
+                const profile = (profiles || []).find(p => p.id === selectedId);
+                if (profile) descEl.innerHTML = this.escapeHtml(profile.description);
+            });
+        }
 
         // Enable confirm button once content is rendered
         const confirmBtn = this.dialog?.querySelector('#init-device-confirm-btn') as any;
@@ -169,6 +200,9 @@ export class InitDeviceModal {
         const folderInput = this.dialog?.querySelector('#init-folder-input') as any;
         const folderPath: string = folderInput?.value?.trim() ?? '';
 
+        const profileSelect = this.dialog?.querySelector('#init-transcoding-profile') as any;
+        let transcodingProfileId = profileSelect?.value;
+
         const confirmBtn = this.dialog?.querySelector('#init-device-confirm-btn') as any;
         if (confirmBtn) confirmBtn.loading = true;
 
@@ -178,6 +212,7 @@ export class InitDeviceModal {
             await rpcCall('device_initialize', {
                 folderPath,
                 profileId: userId,
+                transcodingProfileId,
             });
 
             if (this.dialog) (this.dialog as any).hide();

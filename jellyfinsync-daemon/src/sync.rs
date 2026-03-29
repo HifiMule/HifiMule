@@ -391,6 +391,7 @@ pub async fn execute_sync(
     operation_manager: Arc<SyncOperationManager>,
     operation_id: String,
     device_manager: Arc<crate::device::DeviceManager>,
+    transcoding_profile: Option<serde_json::Value>,
 ) -> Result<(Vec<crate::device::SyncedItem>, Vec<SyncFileError>)> {
     let mut synced_items = Vec::new();
     let mut errors = Vec::new();
@@ -468,9 +469,15 @@ pub async fn execute_sync(
         };
         let target_path = construction.path;
 
-        // Get download stream
+        // Resolve stream via PlaybackInfo if a profile is set, else direct /Download
         let stream_result = jellyfin_client
-            .download_item_stream(jellyfin_url, jellyfin_token, &add_item.jellyfin_id)
+            .get_item_stream(
+                jellyfin_url,
+                jellyfin_token,
+                jellyfin_user_id,
+                &add_item.jellyfin_id,
+                transcoding_profile.as_ref(),
+            )
             .await;
 
         let stream = match stream_result {
@@ -479,7 +486,7 @@ pub async fn execute_sync(
                 errors.push(SyncFileError {
                     jellyfin_id: add_item.jellyfin_id.clone(),
                     filename: add_item.name.clone(),
-                    error_message: format!("Failed to get download stream: {}", e),
+                    error_message: format!("Failed to get stream: {}", e),
                 });
                 continue;
             }
@@ -917,6 +924,7 @@ mod tests {
             basket_items: vec![],
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillPrefs::default(),
+            transcoding_profile_id: None,
         }
     }
 

@@ -658,6 +658,121 @@ impl JellyfinClient {
 
         Ok(response.bytes_stream())
     }
+
+    /// Unified item stream resolver. If `transcoding_profile` is Some, calls
+    /// POST /Items/{id}/PlaybackInfo to negotiate the stream URL. Falls back to
+    /// /Items/{id}/Download if direct play is supported or PlaybackInfo returns no
+    /// transcoding URL. If `transcoding_profile` is None, uses /Download directly.
+    ///
+    /// Both code paths call `response.bytes_stream()` on a `reqwest::Response`,
+    /// so the return type is a single concrete impl Stream (no type erasure needed).
+    pub async fn get_item_stream(
+        &self,
+        base_url: &str,
+        token: &str,
+        user_id: &str,
+        item_id: &str,
+        transcoding_profile: Option<&serde_json::Value>,
+    ) -> Result<impl futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>>> {
+        CredentialManager::validate_url(base_url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        // Resolve the URL to stream from
+        let stream_url = if let Some(profile) = transcoding_profile {
+            self.resolve_stream_url(base_url, token, user_id, item_id, profile)
+                .await?
+        } else {
+            format!("{}/Items/{}/Download", base_url.trim_end_matches('/'), item_id)
+        };
+
+        let response = self
+            .client
+            .get(&stream_url)
+            .headers(headers)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!("Stream returned status: {}", response.status()));
+        }
+
+        Ok(response.bytes_stream())
+    }
+
+    /// Calls POST /Items/{itemId}/PlaybackInfo with the given DeviceProfile.
+    /// Returns the URL to stream from:
+    ///   - TranscodingUrl from PlaybackInfo if server must transcode
+    ///   - /Items/{id}/Download if direct play is supported or no transcoding URL
+    async fn resolve_stream_url(
+        &self,
+        base_url: &str,
+        token: &str,
+        user_id: &str,
+        item_id: &str,
+        device_profile: &serde_json::Value,
+    ) -> Result<String> {
+        let endpoint = format!(
+            "{}/Items/{}/PlaybackInfo?userId={}",
+            base_url.trim_end_matches('/'),
+            item_id,
+            user_id
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let body = serde_json::json!({
+            "DeviceProfile": device_profile,
+            "UserId": user_id,
+            "IsPlayback": true,
+            "AutoOpenLiveStream": true
+        });
+
+        let response = self
+            .client
+            .post(&endpoint)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!("PlaybackInfo returned status: {}", response.status()));
+        }
+
+        let json: serde_json::Value = response.json().await?;
+
+        if let Some(source) = json["MediaSources"].as_array().and_then(|a| a.first()) {
+            let supports_direct_play = source["SupportsDirectPlay"].as_bool().unwrap_or(false);
+            if !supports_direct_play {
+                if let Some(transcode_path) = source["TranscodingUrl"].as_str() {
+                    // TranscodingUrl is a path (e.g. "/Videos/abc/stream.mp3?...")
+                    // Prepend the base URL to form the full URL
+                    return Ok(format!(
+                        "{}{}",
+                        base_url.trim_end_matches('/'),
+                        transcode_path
+                    ));
+                }
+            }
+        }
+
+        // Direct play supported or no TranscodingUrl — use Download endpoint
+        Ok(format!(
+            "{}/Items/{}/Download",
+            base_url.trim_end_matches('/'),
+            item_id
+        ))
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
