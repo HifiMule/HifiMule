@@ -465,11 +465,6 @@ h2 {
   letter-spacing: 0.02em;
 }
 
-.quick-nav-bar sl-button[disabled]::part(base) {
-  opacity: 0.25;
-  cursor: default;
-}
-
 /* Breadcrumbs */
 .breadcrumbs {
   display: flex;

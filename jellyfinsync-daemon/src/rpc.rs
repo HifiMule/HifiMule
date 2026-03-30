@@ -517,8 +517,10 @@ async fn handle_jellyfin_get_items(
     let include_item_types = params["includeItemTypes"].as_str();
     let start_index = params["startIndex"].as_u64().map(|v| v as u32);
     let limit = params["limit"].as_u64().map(|v| v as u32);
-    let name_starts_with = params["nameStartsWith"].as_str();
-    let name_less_than = params["nameLessThan"].as_str();
+    let name_starts_with = params["nameStartsWith"].as_str()
+        .filter(|s| s.len() == 1 && s.chars().all(|c| c.is_ascii_alphabetic()));
+    let name_less_than = params["nameLessThan"].as_str()
+        .filter(|s| s.len() == 1 && s.chars().all(|c| c.is_ascii_alphabetic()));
 
     match state
         .jellyfin_client

@@ -26,9 +26,9 @@ So that browsing a large music library feels snappy and I never lose my place wh
    - Given the current folder contains 20 or more items of type `MusicArtist`
    - When the grid renders
    - Then an alphabetical quick-nav bar is displayed (letters A–Z plus `#` for non-alpha)
-   - And clicking a letter scrolls the grid to the first artist whose name starts with that letter
-   - And letters with no matching artists are rendered as disabled/muted
+   - And clicking a letter filters the grid to show only artists whose name starts with that letter (via server-side API filter — `NameStartsWith` / `NameLessThan` params); clicking the active letter again clears the filter and restores the full list
    - And the quick-nav bar is NOT shown for views with fewer than 20 items or for non-artist views
+   - _Design note (accepted post user-test): filter-based approach replaces the original scrollIntoView mechanism. Rationale: for large libraries the filter gives cleaner focus; the full list is restored by re-clicking the active letter or navigating away._
 
 4. **Cache Invalidation on Device Change:**
    - Given a device is disconnected or a different device is selected
@@ -50,13 +50,14 @@ So that browsing a large music library feels snappy and I never lose my place wh
   - [x] 2.2 Export `clearNavigationCache` for use by `main.ts` (called on `device-changed` or `device-removed` daemon events, same pattern as basket's `clearForDevice()`)
 
 - [x] Task 3: Render A–Z Quick Navigation bar (AC: #3)
-  - [x] 3.1 Add `function renderQuickNav(items: JellyfinItem[], container: HTMLElement): void` in `library.ts`
-  - [x] 3.2 Only render when `items[0]?.Type === 'MusicArtist'` AND `items.length >= 20`
-  - [x] 3.3 Build a `Set<string>` of first-letter initials from `items.map(i => i.Name[0]?.toUpperCase() || '#')`; use `#` for non-alpha
-  - [x] 3.4 Render a `<div class="quick-nav-bar">` with one `<sl-button>` per letter (A–Z + #); buttons whose letter is absent from the set get `disabled` attribute and muted opacity
-  - [x] 3.5 On letter button click: find the first `.media-card` whose `data-name` attribute starts with that letter (case-insensitive); call `card.scrollIntoView({ behavior: 'smooth', block: 'start' })`
-  - [x] 3.6 Set `data-name` attribute on each card element inside `renderGrid()` for the quick-nav to target
+  - [x] 3.1 Add `function renderQuickNav(): HTMLElement | null` in `library.ts`
+  - [x] 3.2 Only render when `state.artistViewTotal >= 20` (uses total count, not current filtered count, so bar persists during letter-filtered views)
+  - [x] 3.3 Render a `<div class="quick-nav-bar">` with one `<sl-button>` per letter (A–Z + #); all letters always enabled (server-side filter handles empty results gracefully)
+  - [x] 3.4 On letter button click: call `loadItemsByLetter(letter)` which issues `jellyfin_get_items` with `NameStartsWith` / `NameLessThan` filter params and re-renders the grid; `#` maps to `NameLessThan='A'`; clicking the active letter clears the filter and reloads from `pageCache`
+  - [x] 3.5 Active letter button rendered with `variant='primary'`; inactive with `variant='text'`
+  - [x] 3.6 Set `data-name` attribute on each card element inside `renderGrid()` (retained for potential future scrollIntoView use)
   - [x] 3.7 Insert quick-nav bar between breadcrumbs and the media grid in `renderGrid()` (after breadcrumbs, before `grid`)
+  - [x] 3.8 Add `nameStartsWith` / `nameLessThan` params to `jellyfin_get_items` RPC and `JellyfinClient::get_items` in daemon (`api.rs`, `rpc.rs`)
 
 - [x] Task 4: CSS for quick-nav bar (AC: #3)
   - [x] 4.1 Add `.quick-nav-bar` styles in the UI's CSS: horizontal flex row, sticky below the breadcrumbs, compact button sizing, muted disabled state
@@ -89,28 +90,19 @@ The scrollable element is the `.library-view` div (the left panel of the `<sl-sp
 
 ### Quick-Nav Implementation Details
 
+Letter clicks issue a server-side filter request (not a client-side scroll). `loadItemsByLetter(letter)` calls `jellyfin_get_items` with:
+- Letters A–Z: `nameStartsWith = letter`
+- `#` (non-alpha): `nameLessThan = 'A'` (captures names sorting before 'A'; behaviour for digits is server-locale-dependent)
+- Limit: 200 items (covers all artists under a single letter for typical libraries)
+
+Clicking the currently-active letter clears `state.activeLetter` and reloads from `pageCache` (instant, no re-fetch).
+
+`data-name` is still set on card elements in `renderGrid()` for potential future use:
 ```typescript
-// Pseudocode for letter → card scroll
-function jumpToLetter(letter: string, container: HTMLElement) {
-    const cards = container.querySelectorAll('[data-name]');
-    for (const card of cards) {
-        const name = (card.getAttribute('data-name') || '').toUpperCase();
-        const initial = /^[A-Z]/.test(name) ? name[0] : '#';
-        if (initial === letter) {
-            card.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            return;
-        }
-    }
-}
+card.setAttribute('data-name', (item as JellyfinItem).Name || '');
 ```
 
-Set `data-name` on the card's root element:
-```typescript
-// In renderGrid(), when creating each card:
-const card = MediaCard.create(item, mode, isSynced, onClick);
-card.setAttribute('data-name', (item as JellyfinItem).Name || '');
-grid.appendChild(card);
-```
+_Original scrollIntoView approach was superseded post user-test — see AC3 design note._
 
 ### Page Cache Strategy
 

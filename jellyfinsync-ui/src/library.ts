@@ -200,6 +200,7 @@ async function loadItems(reset: boolean) {
                 state.items = cached.items;
                 state.pagination.total = cached.total;
                 state.pagination.startIndex = 0;
+                state.artistViewTotal = state.items[0]?.Type === 'MusicArtist' ? cached.total : 0;
                 renderGrid(state.items, 'items', deviceStatus);
                 // Restore scroll position after DOM is painted
                 const cachedScroll = state.scrollCache.get(targetParentId);
@@ -207,8 +208,8 @@ async function loadItems(reset: boolean) {
                     requestAnimationFrame(() => {
                         const libraryView = document.querySelector('.library-view') as HTMLElement;
                         if (libraryView) libraryView.scrollTop = cachedScroll;
+                        state.scrollCache.delete(targetParentId);
                     });
-                    state.scrollCache.delete(targetParentId);
                 }
             } catch (e) {
                 renderError(e as Error);
@@ -233,7 +234,7 @@ async function loadItems(reset: boolean) {
     state.loading = true;
     try {
         const [itemsResponse, deviceStatus] = await Promise.all([
-            fetchItems(state.parentId, MUSIC_ITEM_TYPES, state.pagination.startIndex, state.pagination.limit),
+            fetchItems(targetParentId, MUSIC_ITEM_TYPES, state.pagination.startIndex, state.pagination.limit),
             fetchDeviceStatusMap()
         ]);
 
@@ -263,8 +264,8 @@ async function loadItems(reset: boolean) {
                 requestAnimationFrame(() => {
                     const libraryView = document.querySelector('.library-view') as HTMLElement;
                     if (libraryView) libraryView.scrollTop = cachedScroll;
+                    state.scrollCache.delete(targetParentId);
                 });
-                state.scrollCache.delete(targetParentId);
             }
         }
 
@@ -276,6 +277,7 @@ async function loadItems(reset: boolean) {
 }
 
 async function loadMore() {
+    if (state.loading) return;
     state.pagination.startIndex += state.pagination.limit;
     await loadItems(false);
 }
@@ -291,6 +293,7 @@ async function loadItemsByLetter(letter: string) {
         return;
     }
     state.activeLetter = letter;
+    state.loading = true;
 
     // '#' = non-alpha names (sort before 'A' in Jellyfin)
     const nameStartsWith = letter === '#' ? undefined : letter;
@@ -300,16 +303,18 @@ async function loadItemsByLetter(letter: string) {
     // Yield to the event loop so any pending mouseup from the letter-button click
     // fires on the spinner before we render cards, preventing click-through navigation.
     await new Promise<void>(resolve => setTimeout(resolve, 0));
-    if (!container.isConnected) return;
+    if (!container.isConnected) {
+        state.loading = false;
+        return;
+    }
 
-    state.loading = true;
     try {
         const [itemsResponse, deviceStatus] = await Promise.all([
             fetchItems(state.parentId, MUSIC_ITEM_TYPES, 0, 200, nameStartsWith, nameLessThan),
             fetchDeviceStatusMap()
         ]);
         state.items = itemsResponse.Items;
-        state.pagination = { startIndex: 0, limit: 200, total: itemsResponse.TotalRecordCount };
+        // Do not overwrite state.pagination — Load More is suppressed while activeLetter is set
         renderGrid(state.items, 'items', deviceStatus);
     } catch (e) {
         renderError(e as Error);
@@ -370,8 +375,8 @@ function renderGrid(items: (JellyfinItem | JellyfinView)[], mode: 'libraries' | 
 
     container.appendChild(grid);
 
-    // Pagination controls
-    if (mode === 'items' && state.items.length < state.pagination.total) {
+    // Pagination controls — hidden during letter-filtered views
+    if (mode === 'items' && state.activeLetter === null && state.items.length < state.pagination.total) {
         const loadMoreContainer = document.createElement('div');
         loadMoreContainer.className = 'load-more-container';
 
@@ -379,10 +384,6 @@ function renderGrid(items: (JellyfinItem | JellyfinView)[], mode: 'libraries' | 
         loadMoreBtn.className = 'load-more-btn';
         loadMoreBtn.textContent = `Load More (${state.pagination.total - state.items.length} remaining)`;
         loadMoreBtn.onclick = () => loadMore();
-
-        if (state.loading) {
-            loadMoreBtn.loading = true;
-        }
 
         loadMoreContainer.appendChild(loadMoreBtn);
         container.appendChild(loadMoreContainer);
