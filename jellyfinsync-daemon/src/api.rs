@@ -215,6 +215,8 @@ impl JellyfinClient {
         include_item_types: Option<&str>,
         start_index: Option<u32>,
         limit: Option<u32>,
+        name_starts_with: Option<&str>,
+        name_less_than: Option<&str>,
     ) -> Result<JellyfinItemsResponse> {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
@@ -237,6 +239,12 @@ impl JellyfinClient {
         }
         if let Some(lim) = limit {
             query_params.push(format!("Limit={}", lim));
+        }
+        if let Some(starts_with) = name_starts_with {
+            query_params.push(format!("NameStartsWith={}", starts_with));
+        }
+        if let Some(less_than) = name_less_than {
+            query_params.push(format!("NameLessThan={}", less_than));
         }
 
         let query_string = if query_params.is_empty() {
@@ -1066,6 +1074,8 @@ mod tests {
                 Some(MUSIC_ITEM_TYPES),
                 None,
                 Some(50),
+                None,
+                None,
             )
             .await
             .expect("Failed to get items");

@@ -26,6 +26,10 @@ interface AppState {
         total: number;
     };
     loading: boolean;
+    scrollCache: Map<string, number>;
+    pageCache: Map<string, { items: JellyfinItem[]; total: number }>;
+    artistViewTotal: number; // Total MusicArtist count for the current parent; 0 when not in artist view
+    activeLetter: string | null; // Currently selected quick-nav letter, null = no filter
 }
 
 let state: AppState = {
@@ -33,7 +37,11 @@ let state: AppState = {
     breadcrumbStack: [],
     items: [],
     pagination: { startIndex: 0, limit: 50, total: 0 },
-    loading: false
+    loading: false,
+    scrollCache: new Map(),
+    pageCache: new Map(),
+    artistViewTotal: 0,
+    activeLetter: null,
 };
 
 export async function fetchViews(): Promise<JellyfinView[]> {
@@ -44,18 +52,32 @@ export async function fetchItems(
     parentId?: string,
     includeItemTypes?: string,
     startIndex?: number,
-    limit: number = 50
+    limit: number = 50,
+    nameStartsWith?: string,
+    nameLessThan?: string,
 ): Promise<JellyfinItemsResponse> {
     return await rpcCall('jellyfin_get_items', {
         parentId,
         includeItemTypes,
         startIndex,
-        limit
+        limit,
+        ...(nameStartsWith !== undefined && { nameStartsWith }),
+        ...(nameLessThan !== undefined && { nameLessThan }),
     });
 }
 
 export async function fetchDeviceStatusMap(): Promise<DeviceStatusMap> {
     return await rpcCall('sync_get_device_status_map');
+}
+
+export function clearNavigationCache() {
+    state.scrollCache = new Map();
+    state.pageCache = new Map();
+    state.breadcrumbStack = [];
+    state.items = [];
+    state.pagination = { startIndex: 0, limit: 50, total: 0 };
+    state.artistViewTotal = 0;
+    state.activeLetter = null;
 }
 
 function createBreadcrumbs(): HTMLElement {
@@ -93,9 +115,8 @@ function createBreadcrumbs(): HTMLElement {
 }
 
 async function renderLibrarySelection() {
+    clearNavigationCache();
     state.view = 'libraries';
-    state.breadcrumbStack = [];
-    state.items = [];
 
     const container = document.getElementById('library-content');
     if (!container) return;
@@ -124,6 +145,13 @@ async function navigateToLibrary(view: JellyfinView) {
 }
 
 async function navigateToCrumb(index: number) {
+    state.activeLetter = null;
+    // Save scroll position for the page being left
+    const libraryView = document.querySelector('.library-view') as HTMLElement;
+    if (libraryView && state.parentId) {
+        state.scrollCache.set(state.parentId, libraryView.scrollTop);
+    }
+
     // Truncate stack
     state.breadcrumbStack = state.breadcrumbStack.slice(0, index + 1);
     const target = state.breadcrumbStack[index];
@@ -138,6 +166,13 @@ async function navigateToItem(item: JellyfinItem) {
     // Common Jellyfin container types
     const containerTypes = ['MusicArtist', 'MusicAlbum', 'Playlist', 'Folder', 'CollectionFolder', 'BoxSet', 'Series', 'Season']; // MusicArtist: navigates into artist's albums
     if (containerTypes.includes(item.Type)) {
+        state.activeLetter = null;
+        // Save scroll position for the page being left
+        const libraryView = document.querySelector('.library-view') as HTMLElement;
+        if (libraryView && state.parentId) {
+            state.scrollCache.set(state.parentId, libraryView.scrollTop);
+        }
+
         state.parentId = item.Id;
         state.breadcrumbStack.push({ id: item.Id, name: item.Name });
         state.pagination.startIndex = 0;
@@ -152,6 +187,37 @@ async function navigateToItem(item: JellyfinItem) {
 async function loadItems(reset: boolean) {
     const container = document.getElementById('library-content');
     if (!container) return;
+
+    const targetParentId = state.parentId;
+
+    // Cache hit path: render from page cache instantly (no spinner, no items re-fetch)
+    if (reset && targetParentId) {
+        const cached = state.pageCache.get(targetParentId);
+        if (cached) {
+            state.loading = true;
+            try {
+                const deviceStatus = await fetchDeviceStatusMap();
+                state.items = cached.items;
+                state.pagination.total = cached.total;
+                state.pagination.startIndex = 0;
+                renderGrid(state.items, 'items', deviceStatus);
+                // Restore scroll position after DOM is painted
+                const cachedScroll = state.scrollCache.get(targetParentId);
+                if (cachedScroll !== undefined) {
+                    requestAnimationFrame(() => {
+                        const libraryView = document.querySelector('.library-view') as HTMLElement;
+                        if (libraryView) libraryView.scrollTop = cachedScroll;
+                    });
+                    state.scrollCache.delete(targetParentId);
+                }
+            } catch (e) {
+                renderError(e as Error);
+            } finally {
+                state.loading = false;
+            }
+            return;
+        }
+    }
 
     if (reset) {
         // Yield one tick so any click-feedback (card overlay, opacity) renders before we wipe the container.
@@ -175,11 +241,32 @@ async function loadItems(reset: boolean) {
 
         if (reset) {
             state.items = itemsResponse.Items;
+            // Track whether this is an artist view so the quick-nav bar visibility
+            // survives letter-filtered re-renders (which return fewer than 20 items)
+            state.artistViewTotal = state.items[0]?.Type === 'MusicArtist'
+                ? state.pagination.total
+                : 0;
+            // Cache the page for back-navigation
+            if (targetParentId) {
+                state.pageCache.set(targetParentId, { items: state.items, total: state.pagination.total });
+            }
         } else {
             state.items = [...state.items, ...itemsResponse.Items];
         }
 
         renderGrid(state.items, 'items', deviceStatus);
+
+        // Restore scroll position after DOM is painted (for back-navigation)
+        if (reset && targetParentId) {
+            const cachedScroll = state.scrollCache.get(targetParentId);
+            if (cachedScroll !== undefined) {
+                requestAnimationFrame(() => {
+                    const libraryView = document.querySelector('.library-view') as HTMLElement;
+                    if (libraryView) libraryView.scrollTop = cachedScroll;
+                });
+                state.scrollCache.delete(targetParentId);
+            }
+        }
 
     } catch (e) {
         renderError(e as Error);
@@ -193,6 +280,64 @@ async function loadMore() {
     await loadItems(false);
 }
 
+async function loadItemsByLetter(letter: string) {
+    const container = document.getElementById('library-content');
+    if (!container || state.loading) return;
+
+    // Clicking the active letter clears the filter and reloads all artists
+    if (state.activeLetter === letter) {
+        state.activeLetter = null;
+        await loadItems(true);
+        return;
+    }
+    state.activeLetter = letter;
+
+    // '#' = non-alpha names (sort before 'A' in Jellyfin)
+    const nameStartsWith = letter === '#' ? undefined : letter;
+    const nameLessThan = letter === '#' ? 'A' : undefined;
+
+    container.innerHTML = '<sl-spinner style="font-size: 3rem;"></sl-spinner>';
+    // Yield to the event loop so any pending mouseup from the letter-button click
+    // fires on the spinner before we render cards, preventing click-through navigation.
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+    if (!container.isConnected) return;
+
+    state.loading = true;
+    try {
+        const [itemsResponse, deviceStatus] = await Promise.all([
+            fetchItems(state.parentId, MUSIC_ITEM_TYPES, 0, 200, nameStartsWith, nameLessThan),
+            fetchDeviceStatusMap()
+        ]);
+        state.items = itemsResponse.Items;
+        state.pagination = { startIndex: 0, limit: 200, total: itemsResponse.TotalRecordCount };
+        renderGrid(state.items, 'items', deviceStatus);
+    } catch (e) {
+        renderError(e as Error);
+    } finally {
+        state.loading = false;
+    }
+}
+
+function renderQuickNav(): HTMLElement | null {
+    if (state.artistViewTotal < 20) return null;
+
+    const allLetters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').concat('#');
+
+    const navBar = document.createElement('div');
+    navBar.className = 'quick-nav-bar';
+
+    for (const letter of allLetters) {
+        const btn = document.createElement('sl-button') as any;
+        btn.size = 'small';
+        btn.variant = letter === state.activeLetter ? 'primary' : 'text';
+        btn.textContent = letter;
+        btn.addEventListener('click', () => loadItemsByLetter(letter));
+        navBar.appendChild(btn);
+    }
+
+    return navBar;
+}
+
 function renderGrid(items: (JellyfinItem | JellyfinView)[], mode: 'libraries' | 'items', deviceStatus?: DeviceStatusMap) {
     const container = document.getElementById('library-content');
     if (!container) return;
@@ -202,6 +347,9 @@ function renderGrid(items: (JellyfinItem | JellyfinView)[], mode: 'libraries' | 
     // Breadcrumbs
     if (mode === 'items') {
         container.appendChild(createBreadcrumbs());
+        // Quick-nav bar (only for MusicArtist views with 20+ total items)
+        const quickNav = renderQuickNav();
+        if (quickNav) container.appendChild(quickNav);
     }
 
     const grid = document.createElement('div');
@@ -216,6 +364,7 @@ function renderGrid(items: (JellyfinItem | JellyfinView)[], mode: 'libraries' | 
             : () => navigateToItem(item as JellyfinItem);
 
         const card = MediaCard.create(item, mode, isSynced, onClick);
+        card.setAttribute('data-name', (item as JellyfinItem).Name || '');
         grid.appendChild(card);
     });
 
@@ -258,7 +407,7 @@ function renderError(error: Error) {
 }
 
 // Global scope init for module
-// Make initLibraryView global so main.ts can access it if imported as module, 
+// Make initLibraryView global so main.ts can access it if imported as module,
 // but typically main calls it directly if imported.
 export function initLibraryView() {
     console.log('Initializing library view...');

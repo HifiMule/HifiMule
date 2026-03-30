@@ -441,6 +441,35 @@ h2 {
   }
 }
 
+/* Quick Navigation A-Z Bar (Story 3.7) */
+.quick-nav-bar {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 0.1rem;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: rgba(30, 41, 59, 0.92);
+  backdrop-filter: blur(8px);
+  padding: 0.4rem 0.25rem;
+  margin-bottom: 0.75rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.quick-nav-bar sl-button::part(base) {
+  min-width: 1.75rem;
+  padding: 0 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.quick-nav-bar sl-button[disabled]::part(base) {
+  opacity: 0.25;
+  cursor: default;
+}
+
 /* Breadcrumbs */
 .breadcrumbs {
   display: flex;
