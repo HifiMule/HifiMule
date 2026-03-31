@@ -12,7 +12,8 @@
       "Bash(grep \"missing \\\\`auto_fill\\\\`\" -B3)",
       "Bash(grep \"missing \\\\`date_created\\\\`\" -B3)",
       "Bash(rtk tsc:*)",
-      "Bash(rtk grep:*)"
+      "Bash(rtk grep:*)",
+      "Bash(grep -l \"4-6\\\\|4\\\\.6\\\\|sync.progress.eta\\\\|sync-progress-eta\\\\|ETA\\\\|4-7\\\\|4\\\\.7\\\\|playlist\\\\|m3u\" c:/Workspaces/JellyfinSync/_bmad-output/planning-artifacts/sprint-change-proposal-*.md)"
     ]
   }
 }
