@@ -64,7 +64,7 @@ development_status:
   3-4-managed-zone-hardware-shielding: done
   3-5-music-only-library-filtering: done
   3-6-auto-fill-sync-mode-synchronise-all: done
-  3-7-artist-view-cache-scroll-state-quick-navigation: review
+  3-7-artist-view-cache-scroll-state-quick-navigation: done
   epic-3-retrospective: optional
 
   epic-4: in-progress

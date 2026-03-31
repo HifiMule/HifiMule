@@ -226,12 +226,11 @@ export class BasketSidebar {
                 const activeOpId = state.activeOperationId as string | null;
                 if (activeOpId) {
                     this.isSyncing = true;
-                    this.showSyncComplete = false;
-                    this.syncErrorMessages = null;
                     this.currentOperationId = activeOpId;
                     this.currentOperation = null;
                     this.startPolling();
-                    return;  // startPolling() will call renderSyncProgress() once data arrives
+                    this.render();
+                    return;
                 }
             }
         }
@@ -448,11 +447,12 @@ export class BasketSidebar {
                 const currentDevice = daemonStateResult?.currentDevice;
                 const isNewDevice = currentDevice?.deviceId && currentDevice.deviceId !== this.lastHydratedDeviceId;
                 const deviceDisconnected = !currentDevice && this.lastHydratedDeviceId !== null;
+                const activeOperationId = daemonStateResult?.activeOperationId ?? null;
 
-                if (newDirty !== this.isDirtyManifest || hasPendingDevice !== hadPendingDevice || isNewDevice || deviceDisconnected) {
+                if (newDirty !== this.isDirtyManifest || hasPendingDevice !== hadPendingDevice || isNewDevice || deviceDisconnected || activeOperationId) {
                     this.isDirtyManifest = newDirty;
-                    if (isNewDevice || deviceDisconnected) {
-                        // Let refreshAndRender handle the hydration logic reliably on state change (F5)
+                    if (isNewDevice || deviceDisconnected || activeOperationId) {
+                        // Let refreshAndRender handle the hydration/attach logic reliably on state change (F5)
                         await this.refreshAndRender();
                     } else {
                         this.refreshAndRender();
@@ -747,6 +747,7 @@ export class BasketSidebar {
 
     private startPolling() {
         this.stopPolling();
+        let consecutiveFailures = 0;
         this.pollingInterval = window.setInterval(async () => {
             if (!this.currentOperationId) {
                 this.stopPolling();
@@ -756,6 +757,7 @@ export class BasketSidebar {
                 const op = await rpcCall('sync_get_operation_status', {
                     operationId: this.currentOperationId
                 }) as SyncOperation;
+                consecutiveFailures = 0;
                 this.currentOperation = op;
                 this.renderSyncProgress();
 
@@ -768,6 +770,14 @@ export class BasketSidebar {
                 }
             } catch (err) {
                 console.error('[Sync] Progress poll failed:', err);
+                consecutiveFailures++;
+                if (consecutiveFailures >= 3) {
+                    this.stopPolling();
+                    this.isSyncing = false;
+                    this.currentOperationId = null;
+                    this.currentOperation = null;
+                    this.render();
+                }
             }
         }, 500);
     }

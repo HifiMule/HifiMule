@@ -191,8 +191,7 @@ impl SyncOperationManager {
     }
 
     pub async fn has_active_operation(&self) -> bool {
-        let ops = self.operations.read().await;
-        ops.values().any(|op| op.status == SyncStatus::Running)
+        self.get_active_operation_id().await.is_some()
     }
 
     pub async fn get_active_operation_id(&self) -> Option<String> {
