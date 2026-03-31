@@ -36,6 +36,8 @@ interface SyncOperation {
     currentFile: string | null;
     bytesCurrent: number;
     bytesTotal: number;
+    bytesTransferred: number;
+    totalBytes: number;
     filesCompleted: number;
     filesTotal: number;
     errors: Array<{ jellyfinId: string; filename: string; errorMessage: string }>;
@@ -154,6 +156,7 @@ export class BasketSidebar {
     // the latest parameters are applied once the current call completes.
     private autoFillInFlight: boolean = false;
     private autoFillPendingRetrigger: boolean = false;
+    private etaText: string = 'Calculating\u2026';
 
     constructor(container: HTMLElement) {
         this.container = container;
@@ -735,6 +738,7 @@ export class BasketSidebar {
             const result = await rpcCall('sync_execute', { delta });
             this.currentOperationId = result.operationId as string;
 
+            this.etaText = 'Calculating\u2026';
             this.startPolling();
         } catch (err) {
             this.stopPolling();
@@ -789,6 +793,24 @@ export class BasketSidebar {
         }
     }
 
+    private computeEta(op: SyncOperation): string {
+        if (op.totalBytes <= 0 || op.bytesTransferred <= 0) return 'Calculating\u2026';
+
+        const elapsedSeconds = (Date.now() - new Date(op.startedAt).getTime()) / 1000;
+        if (elapsedSeconds <= 0) return 'Calculating\u2026';
+
+        const totalRate = op.bytesTransferred / elapsedSeconds;
+
+        const remaining = op.totalBytes - op.bytesTransferred;
+        if (remaining <= 0) return 'Almost done\u2026';
+
+        const etaSeconds = remaining / totalRate;
+
+        if (etaSeconds < 10) return 'Almost done\u2026';
+        if (etaSeconds < 60) return `~${Math.round(etaSeconds)} sec left`;
+        return `~${Math.round(etaSeconds / 60)} min left`;
+    }
+
     private renderSyncProgress() {
         if (!this.currentOperation || this.isDestroyed) return;
 
@@ -799,6 +821,8 @@ export class BasketSidebar {
         const currentFileName = op.currentFile
             ? getBasename(op.currentFile)
             : 'Preparing...';
+
+        this.etaText = this.computeEta(op);
 
         this.container.innerHTML = `
             <div class="basket-header">
@@ -813,6 +837,8 @@ export class BasketSidebar {
                     <span title="${this.escapeHtml(op.currentFile || '')}">${this.escapeHtml(currentFileName)}</span>
                 </div>
                 <div class="sync-file-counter">${op.filesCompleted} of ${op.filesTotal} files</div>
+                <div class="sync-bytes">${formatSize(op.bytesTransferred)} of ${formatSize(op.totalBytes)}</div>
+                <div class="sync-eta">${this.escapeHtml(this.etaText)}</div>
             </div>
             <div class="basket-footer">
                 <sl-button variant="primary" style="width: 100%;" disabled loading>
@@ -891,6 +917,7 @@ export class BasketSidebar {
         this.currentOperation = null;
         this.showSyncComplete = true;
         this.syncErrorMessages = null;
+        this.etaText = 'Calculating\u2026';
 
         // Reset dirty if current items match snapshot (no mid-sync changes)
         const currentIds = basketStore.getItems().map(i => i.id).sort();
@@ -910,6 +937,7 @@ export class BasketSidebar {
         this.currentOperationId = null;
         this.currentOperation = null;
         this.showSyncComplete = false;
+        this.etaText = 'Calculating\u2026';
         this.syncErrorMessages = operation.errors.length > 0
             ? operation.errors.map(e => `${e.filename || e.jellyfinId}: ${e.errorMessage}`)
             : ['Sync failed - check device connection and try again.'];

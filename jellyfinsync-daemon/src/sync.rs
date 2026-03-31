@@ -133,6 +133,8 @@ pub struct SyncOperation {
     pub current_file: Option<String>,
     pub bytes_current: u64,
     pub bytes_total: u64,
+    pub bytes_transferred: u64,
+    pub total_bytes: u64,
     pub files_completed: usize,
     pub files_total: usize,
     pub errors: Vec<SyncFileError>,
@@ -170,6 +172,8 @@ impl SyncOperationManager {
             current_file: None,
             bytes_current: 0,
             bytes_total: 0,
+            bytes_transferred: 0,
+            total_bytes: 0,
             files_completed: 0,
             files_total,
             errors: vec![],
@@ -406,6 +410,17 @@ pub async fn execute_sync(
         println!("[Sync] Executing empty sync to clear device managed paths");
     }
 
+    // Compute total bytes for ETA (adds + id_changes both contribute bytes)
+    let total_job_bytes: u64 = delta.adds.iter().map(|a| a.size_bytes).sum::<u64>()
+        + delta.id_changes.iter().map(|c| c.size_bytes).sum::<u64>();
+    if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
+        operation.total_bytes = total_job_bytes;
+        operation_manager.update_operation(&operation_id, operation).await;
+    }
+
+    // Shared counter for cumulative bytes written across all files (for ETA)
+    let completed_bytes_arc = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
     // Determine managed path (assume first managed path from device manifest)
     // In a real implementation, this would be passed in or determined from manifest
     let managed_path = device_path.join("Music");
@@ -507,6 +522,7 @@ pub async fn execute_sync(
         // Throttle progress updates to avoid spawning a task per chunk.
         // Only updates every 256KB or on the final chunk.
         let last_reported = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let completed_bytes_for_cb = completed_bytes_arc.clone();
         let progress_callback = Arc::new(move |bytes_written: u64, total: u64| {
             let last = last_reported.load(std::sync::atomic::Ordering::Relaxed);
             if bytes_written.saturating_sub(last) < 256 * 1024 && bytes_written < total {
@@ -517,12 +533,15 @@ pub async fn execute_sync(
             let op_manager_inner = op_manager.clone();
             let op_id_inner = op_id.clone();
             let file_name_inner = file_name.clone();
+            let completed_bytes_snapshot =
+                completed_bytes_for_cb.load(std::sync::atomic::Ordering::Relaxed);
 
             tokio::spawn(async move {
                 if let Some(mut operation) = op_manager_inner.get_operation(&op_id_inner).await {
                     operation.current_file = Some(file_name_inner);
                     operation.bytes_current = bytes_written;
                     operation.bytes_total = total;
+                    operation.bytes_transferred = completed_bytes_snapshot + bytes_written;
                     op_manager_inner
                         .update_operation(&op_id_inner, operation)
                         .await;
@@ -555,9 +574,13 @@ pub async fn execute_sync(
                     etag: add_item.etag.clone(),
                 });
 
-                // Update operation progress
+                // Update operation progress and cumulative bytes
+                completed_bytes_arc
+                    .fetch_add(add_item.size_bytes, std::sync::atomic::Ordering::Relaxed);
+                let cumulative = completed_bytes_arc.load(std::sync::atomic::Ordering::Relaxed);
                 if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
                     operation.files_completed += 1;
+                    operation.bytes_transferred = cumulative;
                     operation_manager
                         .update_operation(&operation_id, operation)
                         .await;
@@ -677,9 +700,13 @@ pub async fn execute_sync(
             etag: id_change.etag.clone(),
         });
 
-        // Update operation progress (an ID change is instantly completed)
+        // Update operation progress and cumulative bytes (an ID change is instantly completed)
+        completed_bytes_arc
+            .fetch_add(id_change.size_bytes, std::sync::atomic::Ordering::Relaxed);
+        let cumulative = completed_bytes_arc.load(std::sync::atomic::Ordering::Relaxed);
         if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
             operation.files_completed += 1;
+            operation.bytes_transferred = cumulative;
             operation_manager
                 .update_operation(&operation_id, operation)
                 .await;
@@ -1263,6 +1290,8 @@ mod tests {
         assert_eq!(op.status, SyncStatus::Running);
         assert_eq!(op.files_total, 10);
         assert_eq!(op.files_completed, 0);
+        assert_eq!(op.bytes_transferred, 0);
+        assert_eq!(op.total_bytes, 0);
 
         // Get operation
         let fetched = manager.get_operation("op-1").await;

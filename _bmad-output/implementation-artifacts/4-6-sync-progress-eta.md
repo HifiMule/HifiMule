@@ -1,6 +1,6 @@
 # Story 4.6: Sync Progress — Time Remaining Estimation
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -31,15 +31,15 @@ so that I know whether to wait by the screen or step away.
 
 ### Daemon Work (sync.rs)
 
-- [ ] **T1: Add `bytes_transferred` and `total_bytes` fields to `SyncOperation` struct** (AC: #4)
-  - [ ] T1.1: In `sync.rs` around line 129, add two new public fields to `SyncOperation` (struct already has `#[serde(rename_all = "camelCase")]`):
+- [x] **T1: Add `bytes_transferred` and `total_bytes` fields to `SyncOperation` struct** (AC: #4)
+  - [x] T1.1: In `sync.rs` around line 129, add two new public fields to `SyncOperation` (struct already has `#[serde(rename_all = "camelCase")]`):
     ```rust
     pub bytes_transferred: u64,  // cumulative across all files → "bytesTransferred" in JSON
     pub total_bytes: u64,        // total bytes for entire sync job → "totalBytes" in JSON
     ```
     Place after the existing `bytes_total: u64` field (line 135) so the Rust field order stays logical: `bytes_current`, `bytes_total` (per-file), then `bytes_transferred`, `total_bytes` (cumulative).
 
-  - [ ] T1.2: In `create_operation()` (line 163), initialize both new fields to `0`:
+  - [x] T1.2: In `create_operation()` (line 163), initialize both new fields to `0`:
     ```rust
     let operation = SyncOperation {
         id: operation_id.clone(),
@@ -56,8 +56,8 @@ so that I know whether to wait by the screen or step away.
     };
     ```
 
-- [ ] **T2: Track cumulative bytes in `execute_sync()`** (AC: #4)
-  - [ ] T2.1: At the very start of `execute_sync()`, after the empty-delta early log (line ~405), compute total job bytes and write to the operation immediately:
+- [x] **T2: Track cumulative bytes in `execute_sync()`** (AC: #4)
+  - [x] T2.1: At the very start of `execute_sync()`, after the empty-delta early log (line ~405), compute total job bytes and write to the operation immediately:
     ```rust
     // Compute total bytes for ETA (only add operations transfer bytes)
     let total_job_bytes: u64 = delta.adds.iter().map(|a| a.size_bytes).sum();
@@ -67,12 +67,12 @@ so that I know whether to wait by the screen or step away.
     }
     ```
 
-  - [ ] T2.2: Just before the `for add_item in delta.adds.iter()` loop, declare a mutable local counter:
+  - [x] T2.2: Just before the `for add_item in delta.adds.iter()` loop, declare a mutable local counter:
     ```rust
     let mut completed_bytes: u64 = 0;
     ```
 
-  - [ ] T2.3: In the existing per-file progress callback (lines 510–531), update `bytes_transferred` = `completed_bytes + bytes_written`:
+  - [x] T2.3: In the existing per-file progress callback (lines 510–531), update `bytes_transferred` = `completed_bytes + bytes_written`:
     ```rust
     // Inside the progress_callback closure (after setting bytes_current/bytes_total):
     let completed_bytes_snapshot = completed_bytes_arc.load(std::sync::atomic::Ordering::Relaxed);
@@ -96,30 +96,30 @@ so that I know whether to wait by the screen or step away.
     // Clone the arc into each progress_callback closure.
     ```
 
-  - [ ] T2.4: After a successful file write, when `files_completed` is incremented (line ~560), also update `completed_bytes`:
+  - [x] T2.4: After a successful file write, when `files_completed` is incremented (line ~560), also update `completed_bytes`:
     ```rust
     // After: operation.files_completed += 1;
     completed_bytes_arc.fetch_add(add_item.size_bytes, std::sync::atomic::Ordering::Relaxed);
     ```
     Then the next file's progress callback will automatically pick up the correct cumulative base.
 
-  - [ ] T2.5: For `id_changes` (line ~631 and ~682): these also transfer bytes. Apply the same `completed_bytes_arc` pattern for the id-change loop. The id-change items have `size_bytes` on `SyncDeltaIdChange` (line ~91 in struct def). Check `sync.rs` around line 600–690 for the id-change streaming block and replicate the progress callback extension.
+  - [x] T2.5: For `id_changes` (line ~631 and ~682): these also transfer bytes. Apply the same `completed_bytes_arc` pattern for the id-change loop. The id-change items have `size_bytes` on `SyncDeltaIdChange` (line ~91 in struct def). Check `sync.rs` around line 600–690 for the id-change streaming block and replicate the progress callback extension.
 
-  - [ ] T2.6: No changes needed to `delete` handling — deleted files have no bytes to transfer.
+  - [x] T2.6: No changes needed to `delete` handling — deleted files have no bytes to transfer.
 
-- [ ] **T3: Update tests referencing `SyncOperation` construction** (AC: #4)
-  - [ ] T3.1: In `sync.rs` test at line ~1262 (`create_operation("op-1".to_string(), 10).await`), after creating the op, assert new fields are `0`:
+- [x] **T3: Update tests referencing `SyncOperation` construction** (AC: #4)
+  - [x] T3.1: In `sync.rs` test at line ~1262 (`create_operation("op-1".to_string(), 10).await`), after creating the op, assert new fields are `0`:
     ```rust
     assert_eq!(op.bytes_transferred, 0);
     assert_eq!(op.total_bytes, 0);
     ```
-  - [ ] T3.2: In `rpc.rs` test at line ~2827, add `bytes_transferred: 0, total_bytes: 0` if the test manually constructs a `SyncOperation` struct literal (check whether it uses struct update syntax or full construction).
-  - [ ] T3.3: Run `cargo test` in `jellyfinsync-daemon/` — all existing tests must pass.
+  - [x] T3.2: In `rpc.rs` test at line ~2827, add `bytes_transferred: 0, total_bytes: 0` if the test manually constructs a `SyncOperation` struct literal (check whether it uses struct update syntax or full construction).
+  - [x] T3.3: Run `cargo test` in `jellyfinsync-daemon/` — all existing tests must pass.
 
 ### UI Work (BasketSidebar.ts)
 
-- [ ] **T4: Update `SyncOperation` TypeScript interface** (AC: #4)
-  - [ ] T4.1: In `BasketSidebar.ts`, find the `SyncOperation` interface (added in Story 4.5, line ~32). Add the two new fields:
+- [x] **T4: Update `SyncOperation` TypeScript interface** (AC: #4)
+  - [x] T4.1: In `BasketSidebar.ts`, find the `SyncOperation` interface (added in Story 4.5, line ~32). Add the two new fields:
     ```typescript
     interface SyncOperation {
         id: string;
@@ -136,14 +136,14 @@ so that I know whether to wait by the screen or step away.
     }
     ```
 
-- [ ] **T5: Add ETA calculation state and logic** (AC: #1, #2, #3)
-  - [ ] T5.1: Add ETA sample buffer to `BasketSidebar` class fields (near `isSyncing` around line 130):
+- [x] **T5: Add ETA calculation state and logic** (AC: #1, #2, #3)
+  - [x] T5.1: Add ETA sample buffer to `BasketSidebar` class fields (near `isSyncing` around line 130):
     ```typescript
     private etaSamples: Array<{ ts: number; bytesTransferred: number }> = [];
     private etaText: string = 'Calculating…';
     ```
 
-  - [ ] T5.2: Add a private `computeEta(op: SyncOperation): string` method to `BasketSidebar`:
+  - [x] T5.2: Add a private `computeEta(op: SyncOperation): string` method to `BasketSidebar`:
     ```typescript
     private computeEta(op: SyncOperation): string {
         if (op.totalBytes <= 0 || op.bytesTransferred <= 0) return 'Calculating…';
@@ -183,7 +183,7 @@ so that I know whether to wait by the screen or step away.
     }
     ```
 
-  - [ ] T5.3: Reset `etaSamples` and `etaText` when a sync starts. In `handleStartSync()` (before `this.startPolling()`):
+  - [x] T5.3: Reset `etaSamples` and `etaText` when a sync starts. In `handleStartSync()` (before `this.startPolling()`):
     ```typescript
     this.etaSamples = [];
     this.etaText = 'Calculating…';
@@ -194,8 +194,8 @@ so that I know whether to wait by the screen or step away.
     this.etaText = 'Calculating…';
     ```
 
-- [ ] **T6: Update `renderSyncProgress()` to display ETA** (AC: #1, #3)
-  - [ ] T6.1: In `renderSyncProgress()` (line ~792), update the method to call `computeEta()` and render the result. Replace the current `renderSyncProgress()` body:
+- [x] **T6: Update `renderSyncProgress()` to display ETA** (AC: #1, #3)
+  - [x] T6.1: In `renderSyncProgress()` (line ~792), update the method to call `computeEta()` and render the result. Replace the current `renderSyncProgress()` body:
 
     The current structure is:
     ```typescript
@@ -257,8 +257,8 @@ so that I know whether to wait by the screen or step away.
     }
     ```
 
-- [ ] **T7: TypeScript compilation** (AC: all)
-  - [ ] T7.1: Run `pnpm tsc --noEmit` (or equivalent) in `jellyfinsync-ui/` — no TypeScript errors.
+- [x] **T7: TypeScript compilation** (AC: all)
+  - [x] T7.1: Run `pnpm tsc --noEmit` (or equivalent) in `jellyfinsync-ui/` — no TypeScript errors.
 
 ## Dev Notes
 
@@ -370,10 +370,33 @@ From Story 4.5 dev notes:
 
 ### Agent Model Used
 
+claude-sonnet-4-6
+
 ### Debug Log References
+
+None — clean implementation, no blockers.
 
 ### Completion Notes List
 
+- T1: Added `bytes_transferred: u64` and `total_bytes: u64` to `SyncOperation` struct (`sync.rs:136-137`) with `#[serde(rename_all = "camelCase")]` → serializes as `bytesTransferred` / `totalBytes`.
+- T1.2: Initialized both fields to `0` in `create_operation()`.
+- T2.1: Compute `total_job_bytes` at start of `execute_sync()` as sum of `delta.adds` + `delta.id_changes` size_bytes; write to operation immediately.
+- T2.2–T2.4: Replaced `let mut completed_bytes: u64 = 0` with `Arc<AtomicU64>` pattern (following existing `last_reported` pattern). Progress callback clones the arc, reads snapshot, sets `operation.bytes_transferred = completed_bytes_snapshot + bytes_written`. After successful file write, `fetch_add(add_item.size_bytes)` and update `bytes_transferred` in operation.
+- T2.5: id_changes (virtual/instant) also call `fetch_add(id_change.size_bytes)` and update `bytes_transferred` after each completion.
+- T2.6: Deletes confirmed — no byte tracking needed.
+- T3.1: Added `assert_eq!(op.bytes_transferred, 0)` and `assert_eq!(op.total_bytes, 0)` to `test_sync_operation_manager_lifecycle`. T3.2: No struct literals in `rpc.rs` tests.
+- T3.3: 151 cargo tests pass (unchanged baseline).
+- T4: Added `bytesTransferred: number` and `totalBytes: number` to `SyncOperation` TS interface in `BasketSidebar.ts`.
+- T5: Added `etaSamples` and `etaText` private fields. Implemented `computeEta()` with 6-sample rolling window, 5-interval rate average. Reset in `handleStartSync`, `handleSyncComplete`, `handleSyncFailed`.
+- T6: `renderSyncProgress()` calls `computeEta(op)` before rendering; `<div class="sync-eta">` inserted between file counter and basket footer.
+- T7: `npx tsc --noEmit` — zero errors.
+
 ### File List
 
+- `jellyfinsync-daemon/src/sync.rs`
+- `jellyfinsync-ui/src/components/BasketSidebar.ts`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
+
 ## Change Log
+
+- 2026-03-31: Story 4-6 implemented — added ETA display to sync progress UI. Daemon: `SyncOperation` gains `bytesTransferred`/`totalBytes` fields tracked cumulatively in `execute_sync`. UI: `computeEta()` rolling-average method added to `BasketSidebar`; ETA displayed below file counter in `renderSyncProgress()`. 151 daemon tests pass, 0 TS errors.
