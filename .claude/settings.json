@@ -11,7 +11,8 @@
       "Bash(rtk git:*)",
       "Bash(grep \"missing \\\\`auto_fill\\\\`\" -B3)",
       "Bash(grep \"missing \\\\`date_created\\\\`\" -B3)",
-      "Bash(rtk tsc:*)"
+      "Bash(rtk tsc:*)",
+      "Bash(rtk grep:*)"
     ]
   }
 }
