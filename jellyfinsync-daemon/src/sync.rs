@@ -195,6 +195,13 @@ impl SyncOperationManager {
         ops.values().any(|op| op.status == SyncStatus::Running)
     }
 
+    pub async fn get_active_operation_id(&self) -> Option<String> {
+        let ops = self.operations.read().await;
+        ops.values()
+            .find(|op| op.status == SyncStatus::Running)
+            .map(|op| op.id.clone())
+    }
+
     pub async fn get_all_operations(&self) -> Vec<SyncOperation> {
         let ops = self.operations.read().await;
         ops.values().cloned().collect()

@@ -219,6 +219,23 @@ export class BasketSidebar {
             }
         }
 
+        // Attach to daemon-initiated sync if one is running and we're not already tracking it
+        if (!this.isSyncing && !this.showSyncComplete && this.syncErrorMessages === null) {
+            if (daemonStateResult.status === 'fulfilled' && daemonStateResult.value) {
+                const state = daemonStateResult.value as any;
+                const activeOpId = state.activeOperationId as string | null;
+                if (activeOpId) {
+                    this.isSyncing = true;
+                    this.showSyncComplete = false;
+                    this.syncErrorMessages = null;
+                    this.currentOperationId = activeOpId;
+                    this.currentOperation = null;
+                    this.startPolling();
+                    return;  // startPolling() will call renderSyncProgress() once data arrives
+                }
+            }
+        }
+
         this.render();
     }
 

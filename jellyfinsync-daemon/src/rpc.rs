@@ -385,6 +385,8 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         "maxBytes": d.auto_fill.max_bytes,
     }));
 
+    let active_operation_id = state.sync_operation_manager.get_active_operation_id().await;
+
     Ok(serde_json::json!({
         "currentDevice": device,
         "deviceMapping": mapping,
@@ -393,6 +395,7 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         "pendingDevicePath": pending_device_path,
         "autoSyncOnConnect": auto_sync_on_connect,
         "autoFill": auto_fill,
+        "activeOperationId": active_operation_id,
     }))
 }
 
@@ -2792,6 +2795,52 @@ mod tests {
         assert_eq!(
             result["autoSyncOnConnect"], true,
             "autoSyncOnConnect should be true for device with flag enabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rpc_get_daemon_state_includes_active_operation_id() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+
+        // No running operation → activeOperationId should be null
+        let state = AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db: db.clone(),
+            device_manager: device_manager.clone(),
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
+            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+        };
+        let result = handle_get_daemon_state(&state).await.unwrap();
+        assert_eq!(
+            result["activeOperationId"],
+            serde_json::Value::Null,
+            "No running operation → activeOperationId must be null"
+        );
+
+        // Running operation → activeOperationId should be the operation UUID
+        let manager = Arc::new(crate::sync::SyncOperationManager::new());
+        let op_id = "test-uuid-1234".to_string();
+        manager.create_operation(op_id.clone(), 5).await;
+
+        let state2 = AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db,
+            device_manager,
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: manager,
+            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+        };
+        let result2 = handle_get_daemon_state(&state2).await.unwrap();
+        assert_eq!(
+            result2["activeOperationId"],
+            serde_json::Value::String(op_id),
+            "Running operation → activeOperationId must be the operation UUID"
         );
     }
 }

@@ -90,6 +90,8 @@ export class StatusBar {
                     // Derive daemon state from response fields
                     if (r.serverConnected === false) {
                         this.state.daemonState = 'Not logged in';
+                    } else if (r.activeOperationId) {
+                        this.state.daemonState = 'Syncing';
                     } else if (r.currentDevice) {
                         this.state.daemonState = r.currentDevice.dirty ? 'Device (dirty)' : 'Idle';
                     } else {
