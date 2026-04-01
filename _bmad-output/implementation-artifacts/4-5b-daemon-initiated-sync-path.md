@@ -1,6 +1,6 @@
 # Story 4.5b: Daemon-Initiated Sync Path
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
