@@ -10,13 +10,13 @@ so that my DAP or Rockbox player can natively load and play the playlist in the 
 
 ## Acceptance Criteria
 
-1. **M3U file written on sync**: When at least one basket item has `item_type = "Playlist"` and sync runs successfully, a `.m3u` file is written to the root of the managed sync folder (`device_path`) for each playlist. (AC: #1)
+1. **M3U file written on sync**: When at least one basket item has `item_type = "Playlist"` and sync runs successfully, a `.m3u` file is written to the managed sync folder (`manifest.managed_paths[0]`, e.g. `device_path/Music`) for each playlist. (AC: #1)
 
 2. **Filename sanitization**: The `.m3u` filename is derived from the playlist name by calling the existing `sanitize_path_component()` function, then appending `.m3u`. If the result exceeds 255 characters, it is truncated using `truncate_filename(base, "m3u", 255)`. (AC: #2)
 
 3. **Extended M3U format**: The file begins with `#EXTM3U`. Each track is preceded by an `#EXTINF:<seconds>,<Artist> - <Title>` line (or `#EXTINF:<seconds>,<Title>` if artist is absent), followed by the track's relative path. (AC: #3)
 
-4. **Relative track paths**: Paths in the `.m3u` are relative to the `.m3u` file location (device root). For a track at `Music/Artist/Album/01 - Name.flac`, the path entry is `Music/Artist/Album/01 - Name.flac` using forward slashes. (AC: #4)
+4. **Relative track paths**: Paths in the `.m3u` are relative to the `.m3u` file location (`managed_path`). For a track whose `local_path` is `Music/Artist/Album/01 - Name.flac` (relative to `device_path`) and the `.m3u` sits in `Music/`, the path entry is `Artist/Album/01 - Name.flac` using forward slashes — the managed subfolder prefix is stripped. (AC: #4)
 
 5. **Duration from RunTimeTicks**: The `#EXTINF` seconds value is `RunTimeTicks ÷ 10,000,000`, cast to `i64`. If `RunTimeTicks` is absent (zero or None), the value is `-1` (standard M3U convention for unknown duration). No additional Jellyfin API calls are made. (AC: #5)
 
@@ -377,18 +377,20 @@ sync.execute RPC:
   receives SyncDelta (playlists field round-trips from UI)
   → spawns execute_sync(delta, ...) in background
   → execute_sync processes adds/deletes/id_changes as before
-  → at end: calls generate_m3u_files(delta.playlists, device_path, manifest.synced_items, &mut manifest)
+  → at end: calls generate_m3u_files(delta.playlists, device_path, managed_path, manifest.synced_items, &mut manifest)
   → write_manifest() persists updated playlists array
 ```
 
 ### M3U Path Construction Detail
 
-The `.m3u` is written to `device_path` (device root), NOT inside the `Music/` subfolder. Track entries use the `local_path` stored in `SyncedItem.local_path`, which is already relative to `device_path` and follows the pattern `Music/Artist/Album/NN - Name.ext`.
+The `.m3u` is written to `managed_path` (the first entry of `manifest.managed_paths`, e.g. `device_path/Music`), NOT the device root. `managed_path` is resolved at runtime from `device_manager.get_current_device()`, with `"Music"` as a fallback if `managed_paths` is empty.
+
+Track entries use `SyncedItem.local_path` (relative to `device_path`), stripped of the `managed_path` prefix so the path is relative to the `.m3u` file's location.
 
 ```
 device_path/
-  Mixes Playlist.m3u          ← written here
-  Music/
+  Music/                        ← managed_path (managed_paths[0])
+    Mixes Playlist.m3u          ← written here
     Pink Floyd/
       The Wall/
         01 - In the Flesh.flac   ← local_path = "Music/Pink Floyd/The Wall/01 - In the Flesh.flac"
@@ -396,11 +398,11 @@ device_path/
 
 The M3U entry for the track above:
 ```
-#EXTINF:210,Pink Floyd - In the Flesh
-Music/Pink Floyd/The Wall/01 - In the Flesh.flac
+#EXTINF:210,Pink Floyd - 01 - In the Flesh
+Pink Floyd/The Wall/01 - In the Flesh.flac
 ```
 
-Use `rel_path.replace('\\', "/")` to normalize Windows backslashes to forward slashes for DAP/Rockbox compatibility.
+Strip the managed subfolder prefix with `device_path.join(rel_path).strip_prefix(managed_path)`, then normalize backslashes to forward slashes for DAP/Rockbox compatibility.
 
 ### PlaylistSyncItem Track Name Resolution
 
@@ -482,7 +484,7 @@ From Story 4.6 dev notes:
 - **Playlist ordering**: `get_child_items_with_sizes` returns tracks in the order Jellyfin provides. For playlists, Jellyfin respects the user-defined order. Do NOT sort the tracks — preserve insertion order for M3U generation.
 - **Playlist in auto-sync path**: `main.rs` also expands playlist items (for track downloads). The `generate_m3u_files()` call is added to `execute_sync` which is called from both paths — M3U generation happens automatically for auto-sync too. The auto-sync path calls `execute_sync` directly with `delta.playlists = vec![]` (because `main.rs` does not populate this field). Use the `if !delta.playlists.is_empty()` guard (T6.1) — no M3U generation if no playlist context passed.
 - **Empty track list**: If a playlist has zero downloadable tracks, skip writing the `.m3u` (no point in an empty playlist file). Guard with `if included_count == 0 { continue; }` (already in T5.1).
-- **`device_path` vs `managed_path`**: `.m3u` files go to `device_path` (device root). Audio tracks go to `device_path/Music/` (managed_path). Do not conflate these.
+- **`device_path` vs `managed_path`**: `.m3u` files go to `managed_path` (`manifest.managed_paths[0]`, e.g. `device_path/Music`), not the device root. Audio tracks also live under `managed_path`. Track paths in the `.m3u` are relative to `managed_path` (the managed subfolder prefix is stripped from `SyncedItem.local_path`). `managed_path` is read from `device_manager.get_current_device()` at the start of M3U generation, with `"Music"` as a fallback.
 - **`write_m3u_atomic` tmp naming**: Use `format!("{}.tmp", m3u_filename)` not `format!("{}.m3u.tmp", sanitized_name)` to avoid double-extension issues with the rename.
 
 ### Source References
@@ -514,7 +516,7 @@ _None_
 - Added `PlaylistTrackInfo`, `PlaylistSyncItem` structs and `playlists: Vec<PlaylistSyncItem>` to `SyncDelta` with `#[serde(default)]` for backward compat.
 - Added `PlaylistManifestEntry` struct and `playlists: Vec<PlaylistManifestEntry>` to `DeviceManifest` with `#[serde(default)]`.
 - Modified `handle_sync_calculate_delta` in rpc.rs to capture `PlaylistSyncItem`s while expanding playlist children (no extra API calls).
-- Implemented `generate_m3u_files()` with cleanup (AC #8), differential skip (AC #6), atomic write via `write_m3u_atomic()` (AC #9), missing-track omission (AC #11), Extended M3U format (AC #3), relative forward-slash paths (AC #4), RunTimeTicks duration (AC #5).
+- Implemented `generate_m3u_files()` with cleanup (AC #8), differential skip (AC #6), atomic write via `write_m3u_atomic()` (AC #9), missing-track omission (AC #11), Extended M3U format (AC #3), RunTimeTicks duration (AC #5). .m3u files written to `managed_path` (read from `manifest.managed_paths[0]`); track paths are relative to `managed_path` (managed subfolder prefix stripped from `SyncedItem.local_path`) (AC #4).
 - Called `generate_m3u_files()` at end of `execute_sync()` behind `if !delta.playlists.is_empty()` guard.
 - M3U generation uses `update_manifest` pattern to persist updated playlists array back through `DeviceManager`.
 - All `DeviceManifest` struct literals in tests updated with `playlists: vec![]`; `JellyfinItem` literals updated with `run_time_ticks: None`.

@@ -441,9 +441,16 @@ pub async fn execute_sync(
     // Shared counter for cumulative bytes written across all files (for ETA)
     let completed_bytes_arc = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-    // Determine managed path (assume first managed path from device manifest)
-    // In a real implementation, this would be passed in or determined from manifest
-    let managed_path = device_path.join("Music");
+    // Determine managed path from the device manifest's first managed_paths entry.
+    let managed_path = {
+        let snapshot = device_manager.get_current_device().await;
+        let subfolder = snapshot
+            .as_ref()
+            .and_then(|m| m.managed_paths.first())
+            .map(|s| s.as_str())
+            .unwrap_or("Music");
+        device_path.join(subfolder)
+    };
 
     // Pre-fetch all item details for adds to avoid N+1 queries
     let mut fetched_items = std::collections::HashMap::new();
@@ -754,6 +761,7 @@ pub async fn execute_sync(
             let warnings = generate_m3u_files(
                 &delta.playlists,
                 device_path,
+                &managed_path,
                 &manifest_snapshot.synced_items.clone(),
                 &mut manifest_snapshot,
             )
@@ -882,9 +890,14 @@ async fn write_m3u_atomic(tmp_path: &Path, final_path: &Path, content: &[u8]) ->
 ///
 /// Called once per sync run, after all file transfers complete.
 /// Uses Write-Temp-Rename (atomic write) for all .m3u writes.
+///
+/// `device_path` is the device root (local_path in SyncedItem is relative to this).
+/// `managed_path` is the music folder (e.g. `device_path/Music`) — .m3u files are written here,
+/// and track paths in the .m3u are made relative to this folder.
 async fn generate_m3u_files(
     playlist_items: &[PlaylistSyncItem],
     device_path: &Path,
+    managed_path: &Path,
     all_synced_items: &[crate::device::SyncedItem],
     manifest: &mut crate::device::DeviceManifest,
 ) -> Vec<String> {
@@ -910,7 +923,7 @@ async fn generate_m3u_files(
         .cloned()
         .collect();
     for entry in &to_remove {
-        let m3u_path = device_path.join(&entry.filename);
+        let m3u_path = managed_path.join(&entry.filename);
         if m3u_path.exists() {
             if let Err(e) = tokio::fs::remove_file(&m3u_path).await {
                 warnings.push(format!("[M3U] Failed to delete {}: {}", entry.filename, e));
@@ -944,7 +957,7 @@ async fn generate_m3u_files(
         // Build .m3u filename
         let sanitized_name = sanitize_path_component(&playlist.name);
         let m3u_filename = truncate_filename(&sanitized_name, "m3u", 255);
-        let m3u_path = device_path.join(&m3u_filename);
+        let m3u_path = managed_path.join(&m3u_filename);
 
         if !needs_write {
             println!("[M3U] Playlist unchanged, skipping: {}", m3u_filename);
@@ -968,8 +981,16 @@ async fn generate_m3u_files(
                         None => extract_display_name(rel_path).to_string(),
                     };
                     lines.push(format!("#EXTINF:{},{}", track.run_time_seconds, label));
-                    // Normalize path separators to forward slash for DAP/Rockbox compat
-                    lines.push(rel_path.replace('\\', "/"));
+                    // Make path relative to managed_path (where the .m3u lives).
+                    // local_path is relative to device_path (e.g. "Music/Artist/Album/track.flac").
+                    // Strip the managed subfolder prefix so the .m3u entry is just
+                    // "Artist/Album/track.flac" for a Rockbox/DAP player in the Music folder.
+                    let track_entry = device_path
+                        .join(rel_path)
+                        .strip_prefix(managed_path)
+                        .map(|p| p.to_string_lossy().replace('\\', "/"))
+                        .unwrap_or_else(|_| rel_path.replace('\\', "/"));
+                    lines.push(track_entry);
                     included_count += 1;
                 }
             }
@@ -986,7 +1007,7 @@ async fn generate_m3u_files(
         let content = lines.join("\n") + "\n";
 
         // Write-Temp-Rename (atomic)
-        let tmp_path = device_path.join(format!("{}.tmp", m3u_filename));
+        let tmp_path = managed_path.join(format!("{}.tmp", m3u_filename));
         match write_m3u_atomic(&tmp_path, &m3u_path, content.as_bytes()).await {
             Ok(()) => {
                 println!("[M3U] Wrote {}: {} tracks", m3u_filename, included_count);
@@ -1808,6 +1829,8 @@ mod tests {
     async fn test_generate_m3u_basic() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let device_path = tmp_dir.path();
+        let managed_path = device_path.join("Music");
+        tokio::fs::create_dir_all(&managed_path).await.unwrap();
 
         let playlist_items = vec![
             PlaylistSyncItem {
@@ -1850,23 +1873,31 @@ mod tests {
         ];
 
         let mut manifest = empty_manifest();
-        let warnings =
-            generate_m3u_files(&playlist_items, device_path, &all_synced, &mut manifest).await;
+        let warnings = generate_m3u_files(
+            &playlist_items,
+            device_path,
+            &managed_path,
+            &all_synced,
+            &mut manifest,
+        )
+        .await;
 
         // No warnings expected (all tracks resolved)
         assert!(warnings.is_empty(), "Expected no warnings, got: {:?}", warnings);
 
-        // .m3u files should exist
-        let m3u1 = device_path.join("My Playlist.m3u");
-        let m3u2 = device_path.join("Second Playlist.m3u");
-        assert!(m3u1.exists(), "My Playlist.m3u should exist");
-        assert!(m3u2.exists(), "Second Playlist.m3u should exist");
+        // .m3u files should be in the Music folder, not the device root
+        let m3u1 = managed_path.join("My Playlist.m3u");
+        let m3u2 = managed_path.join("Second Playlist.m3u");
+        assert!(m3u1.exists(), "My Playlist.m3u should exist in Music/");
+        assert!(m3u2.exists(), "Second Playlist.m3u should exist in Music/");
+        assert!(!device_path.join("My Playlist.m3u").exists(), ".m3u must NOT be at device root");
 
-        // Check content of first playlist
+        // Check content — paths are relative to Music/, so no "Music/" prefix
         let content1 = tokio::fs::read_to_string(&m3u1).await.unwrap();
         assert!(content1.starts_with("#EXTM3U\n"), "Must start with #EXTM3U");
         assert!(content1.contains("#EXTINF:210,Pink Floyd - 01 - In the Flesh"));
-        assert!(content1.contains("Music/Pink Floyd/The Wall/01 - In the Flesh.flac"));
+        assert!(content1.contains("Pink Floyd/The Wall/01 - In the Flesh.flac"));
+        assert!(!content1.contains("Music/Pink Floyd"), "Path must NOT include Music/ prefix");
         assert!(content1.contains("#EXTINF:-1,03 - Unknown"), "No-artist track uses filename only");
 
         // manifest.playlists should have two entries
@@ -1880,6 +1911,8 @@ mod tests {
     async fn test_generate_m3u_no_rewrite_if_unchanged() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let device_path = tmp_dir.path();
+        let managed_path = device_path.join("Music");
+        tokio::fs::create_dir_all(&managed_path).await.unwrap();
 
         let playlist_items = vec![PlaylistSyncItem {
             jellyfin_id: "pl1".to_string(),
@@ -1895,8 +1928,15 @@ mod tests {
         let mut manifest = empty_manifest();
 
         // First call — writes file
-        generate_m3u_files(&playlist_items, device_path, &all_synced, &mut manifest).await;
-        let m3u_path = device_path.join("Stable Playlist.m3u");
+        generate_m3u_files(
+            &playlist_items,
+            device_path,
+            &managed_path,
+            &all_synced,
+            &mut manifest,
+        )
+        .await;
+        let m3u_path = managed_path.join("Stable Playlist.m3u");
         assert!(m3u_path.exists());
 
         let mtime1 = tokio::fs::metadata(&m3u_path)
@@ -1909,7 +1949,14 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
         // Second call with same track_ids — should NOT rewrite
-        generate_m3u_files(&playlist_items, device_path, &all_synced, &mut manifest).await;
+        generate_m3u_files(
+            &playlist_items,
+            device_path,
+            &managed_path,
+            &all_synced,
+            &mut manifest,
+        )
+        .await;
 
         let mtime2 = tokio::fs::metadata(&m3u_path)
             .await
@@ -1924,9 +1971,11 @@ mod tests {
     async fn test_generate_m3u_cleanup() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let device_path = tmp_dir.path();
+        let managed_path = device_path.join("Music");
+        tokio::fs::create_dir_all(&managed_path).await.unwrap();
 
-        // Pre-populate manifest with an entry and a corresponding .m3u file on disk
-        let m3u_path = device_path.join("Old Playlist.m3u");
+        // Pre-populate manifest with an entry and a corresponding .m3u file in Music/
+        let m3u_path = managed_path.join("Old Playlist.m3u");
         tokio::fs::write(&m3u_path, b"#EXTM3U\n").await.unwrap();
 
         let mut manifest = empty_manifest();
@@ -1939,10 +1988,11 @@ mod tests {
         });
 
         // Call with empty playlist_items (playlist removed from basket)
-        let warnings = generate_m3u_files(&[], device_path, &[], &mut manifest).await;
+        let warnings =
+            generate_m3u_files(&[], device_path, &managed_path, &[], &mut manifest).await;
 
         assert!(warnings.is_empty(), "No warnings expected: {:?}", warnings);
-        assert!(!m3u_path.exists(), "Old .m3u file should have been deleted");
+        assert!(!m3u_path.exists(), "Old .m3u file should have been deleted from Music/");
         assert!(
             manifest.playlists.is_empty(),
             "Manifest playlists entry should have been removed"
@@ -1953,6 +2003,8 @@ mod tests {
     async fn test_generate_m3u_missing_track_omitted() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let device_path = tmp_dir.path();
+        let managed_path = device_path.join("Music");
+        tokio::fs::create_dir_all(&managed_path).await.unwrap();
 
         let playlist_items = vec![PlaylistSyncItem {
             jellyfin_id: "pl1".to_string(),
@@ -1983,15 +2035,21 @@ mod tests {
         ];
 
         let mut manifest = empty_manifest();
-        let warnings =
-            generate_m3u_files(&playlist_items, device_path, &all_synced, &mut manifest).await;
+        let warnings = generate_m3u_files(
+            &playlist_items,
+            device_path,
+            &managed_path,
+            &all_synced,
+            &mut manifest,
+        )
+        .await;
 
         // One warning for the missing track
         assert_eq!(warnings.len(), 1, "Expected 1 warning for missing track");
         assert!(warnings[0].contains("t2-missing"), "Warning should name the missing track");
 
-        // .m3u should exist with 2 tracks (t1 and t3)
-        let m3u_path = device_path.join("Partial Playlist.m3u");
+        // .m3u should exist in Music/ with 2 tracks (t1 and t3)
+        let m3u_path = managed_path.join("Partial Playlist.m3u");
         assert!(m3u_path.exists());
 
         let content = tokio::fs::read_to_string(&m3u_path).await.unwrap();
