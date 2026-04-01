@@ -732,13 +732,13 @@ export class BasketSidebar {
             this.syncErrorMessages = null;
             this.currentOperation = null;
             this.currentOperationId = null;
+            this.etaText = 'Calculating\u2026';
             this.render();
 
             const delta = await rpcCall('sync_calculate_delta', { itemIds });
             const result = await rpcCall('sync_execute', { delta });
             this.currentOperationId = result.operationId as string;
 
-            this.etaText = 'Calculating\u2026';
             this.startPolling();
         } catch (err) {
             this.stopPolling();
@@ -797,11 +797,12 @@ export class BasketSidebar {
         if (op.totalBytes <= 0 || op.bytesTransferred <= 0) return 'Calculating\u2026';
 
         const elapsedSeconds = (Date.now() - new Date(op.startedAt).getTime()) / 1000;
-        if (elapsedSeconds <= 0) return 'Calculating\u2026';
+        if (elapsedSeconds <= 0 || isNaN(elapsedSeconds)) return 'Calculating\u2026';
 
         const totalRate = op.bytesTransferred / elapsedSeconds;
+        if (totalRate <= 0) return 'Calculating\u2026';
 
-        const remaining = op.totalBytes - op.bytesTransferred;
+        const remaining = Math.max(0, op.totalBytes - op.bytesTransferred);
         if (remaining <= 0) return 'Almost done\u2026';
 
         const etaSeconds = remaining / totalRate;
@@ -837,7 +838,6 @@ export class BasketSidebar {
                     <span title="${this.escapeHtml(op.currentFile || '')}">${this.escapeHtml(currentFileName)}</span>
                 </div>
                 <div class="sync-file-counter">${op.filesCompleted} of ${op.filesTotal} files</div>
-                <div class="sync-bytes">${formatSize(op.bytesTransferred)} of ${formatSize(op.totalBytes)}</div>
                 <div class="sync-eta">${this.escapeHtml(this.etaText)}</div>
             </div>
             <div class="basket-footer">

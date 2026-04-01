@@ -74,7 +74,7 @@ development_status:
   4-4-self-healing-dirty-manifest-resume: done
   4-5-start-sync-ui-to-engine-trigger: done
   4-5b-daemon-initiated-sync-path: done
-  4-6-sync-progress-eta: review
+  4-6-sync-progress-eta: done
   4-7-playlist-m3u-file-generation: backlog
   epic-4-retrospective: optional
 

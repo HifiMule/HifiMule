@@ -1,6 +1,6 @@
 # Story 4.6: Sync Progress — Time Remaining Estimation
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -14,7 +14,7 @@ so that I know whether to wait by the screen or step away.
 
 1. **ETA displayed after ≥ 2 samples**: After at least 2 polling cycles with non-zero `bytesTransferred`, a time-remaining estimate is displayed below the progress bar in the Sync Basket sidebar. Before 2 samples, display "Calculating…". (AC: #1)
 
-2. **Rolling-average ETA formula**: ETA = `bytes_remaining / avg_bytes_per_second`, where `avg_bytes_per_second` is the mean transfer rate across the last 5 sample intervals (each interval = difference in `bytesTransferred` / difference in timestamps). (AC: #2)
+2. **ETA formula**: ETA = `bytes_remaining / avg_bytes_per_second`, where `avg_bytes_per_second` = `bytesTransferred / elapsed_seconds` (cumulative average since sync start, using `op.startedAt` as the reference). (AC: #2)
 
 3. **ETA format**:
    - `>= 60s` → `"~N min left"` (e.g. "~3 min left")
@@ -59,8 +59,9 @@ so that I know whether to wait by the screen or step away.
 - [x] **T2: Track cumulative bytes in `execute_sync()`** (AC: #4)
   - [x] T2.1: At the very start of `execute_sync()`, after the empty-delta early log (line ~405), compute total job bytes and write to the operation immediately:
     ```rust
-    // Compute total bytes for ETA (only add operations transfer bytes)
-    let total_job_bytes: u64 = delta.adds.iter().map(|a| a.size_bytes).sum();
+    // Compute total bytes for ETA (adds + id_changes both stream file content and contribute bytes)
+    let total_job_bytes: u64 = delta.adds.iter().map(|a| a.size_bytes).sum::<u64>()
+        + delta.id_changes.iter().map(|c| c.size_bytes).sum::<u64>();
     if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
         operation.total_bytes = total_job_bytes;
         operation_manager.update_operation(&operation_id, operation).await;
@@ -137,45 +138,25 @@ so that I know whether to wait by the screen or step away.
     ```
 
 - [x] **T5: Add ETA calculation state and logic** (AC: #1, #2, #3)
-  - [x] T5.1: Add ETA sample buffer to `BasketSidebar` class fields (near `isSyncing` around line 130):
+  - [x] T5.1: Add ETA text field to `BasketSidebar` class fields (near `isSyncing` around line 130):
     ```typescript
-    private etaSamples: Array<{ ts: number; bytesTransferred: number }> = [];
     private etaText: string = 'Calculating…';
     ```
 
-  - [x] T5.2: Add a private `computeEta(op: SyncOperation): string` method to `BasketSidebar`:
+  - [x] T5.2: Add a private `computeEta(op: SyncOperation): string` method to `BasketSidebar`. Uses cumulative average rate (`bytesTransferred / elapsedSeconds` since `op.startedAt`):
     ```typescript
     private computeEta(op: SyncOperation): string {
         if (op.totalBytes <= 0 || op.bytesTransferred <= 0) return 'Calculating…';
 
-        const now = Date.now();
-        this.etaSamples.push({ ts: now, bytesTransferred: op.bytesTransferred });
+        const elapsedSeconds = (Date.now() - new Date(op.startedAt).getTime()) / 1000;
+        if (elapsedSeconds <= 0) return 'Calculating…';
 
-        // Keep only the last 5 samples (plus one earlier sample to compute intervals)
-        if (this.etaSamples.length > 6) {
-            this.etaSamples = this.etaSamples.slice(-6);
-        }
+        const totalRate = op.bytesTransferred / elapsedSeconds;
 
-        // Need at least 2 samples to compute a rate
-        if (this.etaSamples.length < 2) return 'Calculating…';
-
-        // Compute per-interval rates from consecutive sample pairs
-        const rates: number[] = [];
-        for (let i = 1; i < this.etaSamples.length; i++) {
-            const dt = (this.etaSamples[i].ts - this.etaSamples[i - 1].ts) / 1000; // seconds
-            const db = this.etaSamples[i].bytesTransferred - this.etaSamples[i - 1].bytesTransferred;
-            if (dt > 0 && db > 0) {
-                rates.push(db / dt); // bytes/second
-            }
-        }
-
-        if (rates.length === 0) return 'Calculating…';
-
-        const avgRate = rates.reduce((a, b) => a + b, 0) / rates.length;
         const remaining = op.totalBytes - op.bytesTransferred;
         if (remaining <= 0) return 'Almost done…';
 
-        const etaSeconds = remaining / avgRate;
+        const etaSeconds = remaining / totalRate;
 
         if (etaSeconds < 10) return 'Almost done…';
         if (etaSeconds < 60) return `~${Math.round(etaSeconds)} sec left`;
@@ -183,14 +164,12 @@ so that I know whether to wait by the screen or step away.
     }
     ```
 
-  - [x] T5.3: Reset `etaSamples` and `etaText` when a sync starts. In `handleStartSync()` (before `this.startPolling()`):
+  - [x] T5.3: Reset `etaText` when a sync starts. In `handleStartSync()` (before `this.startPolling()`):
     ```typescript
-    this.etaSamples = [];
     this.etaText = 'Calculating…';
     ```
     Also reset in `handleSyncComplete()` and `handleSyncFailed()`:
     ```typescript
-    this.etaSamples = [];
     this.etaText = 'Calculating…';
     ```
 
@@ -286,7 +265,7 @@ so that I know whether to wait by the screen or step away.
 The existing `SyncOperation` fields `bytes_current` / `bytesTotal` (Rust: `bytes_current` / `bytes_total`) track **per-file progress only** — they reset to the new file's values on each file start. Do NOT use them for ETA — they are meaningless for cross-file rate calculation.
 
 The new fields `bytesTransferred` / `totalBytes` are **cumulative for the entire sync job**:
-- `totalBytes`: set once at sync start = sum of `size_bytes` for all `delta.adds` (+ `delta.id_changes`)
+- `totalBytes`: set once at sync start = sum of `size_bytes` for all `delta.adds` + `delta.id_changes` (both loop types stream file content)
 - `bytesTransferred`: continuously updated = all completed files' bytes + current in-progress file's written bytes
 
 ### `AtomicU64` Pattern for Progress Callback
@@ -304,14 +283,13 @@ let completed_bytes_for_cb = completed_bytes_arc.clone();
 
 The `id_changes` loop (lines ~600–690) also streams file content. The `SyncDeltaIdChange` struct has `size_bytes: u64` (confirmed at `sync.rs:91`). The id-change flow uses the same `write_file_streamed` pattern with a `ProgressCallback`. Apply the same `completed_bytes_arc` approach there. The `completed_bytes_arc` is shared across both loops — the id-changes loop runs after the adds loop completes, so the cumulative counter remains correct.
 
-### ETA Sample Buffer Behavior
+### ETA Calculation Behavior
 
-- `etaSamples` stores `{ ts: Date.now(), bytesTransferred }` tuples
-- Capped at the last 6 entries (enough for 5 intervals)
-- Rate = `Δbytes / Δtime` per consecutive pair; average of up to 5 intervals
-- Early in sync when `totalBytes === 0` (daemon hasn't set it yet) or `bytesTransferred === 0`: show "Calculating…"
+- Rate = `bytesTransferred / elapsedSeconds` (cumulative average from `op.startedAt`)
+- When `totalBytes === 0` (daemon hasn't set it yet) or `bytesTransferred === 0`: show "Calculating…"
+- When `elapsedSeconds <= 0`: show "Calculating…"
 - When `remaining <= 0`: show "Almost done…" (already at 100% bytes, final flush in progress)
-- Reset buffer on sync start, complete, and error to avoid stale data bleeding into next sync
+- Reset `etaText` on sync start, complete, and error to avoid stale text bleeding into next sync
 
 ### Source Tree
 
@@ -387,7 +365,7 @@ None — clean implementation, no blockers.
 - T3.1: Added `assert_eq!(op.bytes_transferred, 0)` and `assert_eq!(op.total_bytes, 0)` to `test_sync_operation_manager_lifecycle`. T3.2: No struct literals in `rpc.rs` tests.
 - T3.3: 151 cargo tests pass (unchanged baseline).
 - T4: Added `bytesTransferred: number` and `totalBytes: number` to `SyncOperation` TS interface in `BasketSidebar.ts`.
-- T5: Added `etaSamples` and `etaText` private fields. Implemented `computeEta()` with 6-sample rolling window, 5-interval rate average. Reset in `handleStartSync`, `handleSyncComplete`, `handleSyncFailed`.
+- T5: Added `etaText` private field. Implemented `computeEta()` using cumulative average rate (`bytesTransferred / elapsedSeconds` since `op.startedAt`). Reset in `handleStartSync`, `handleSyncComplete`, `handleSyncFailed`.
 - T6: `renderSyncProgress()` calls `computeEta(op)` before rendering; `<div class="sync-eta">` inserted between file counter and basket footer.
 - T7: `npx tsc --noEmit` — zero errors.
 

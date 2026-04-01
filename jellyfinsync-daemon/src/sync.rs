@@ -521,8 +521,9 @@ pub async fn execute_sync(
 
         // Throttle progress updates to avoid spawning a task per chunk.
         // Only updates every 256KB or on the final chunk.
+        // Note: bytes_transferred is only updated at file completion (not mid-file) to avoid
+        // a race where a stale spawned task could overwrite a higher post-completion value.
         let last_reported = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let completed_bytes_for_cb = completed_bytes_arc.clone();
         let progress_callback = Arc::new(move |bytes_written: u64, total: u64| {
             let last = last_reported.load(std::sync::atomic::Ordering::Relaxed);
             if bytes_written.saturating_sub(last) < 256 * 1024 && bytes_written < total {
@@ -533,15 +534,12 @@ pub async fn execute_sync(
             let op_manager_inner = op_manager.clone();
             let op_id_inner = op_id.clone();
             let file_name_inner = file_name.clone();
-            let completed_bytes_snapshot =
-                completed_bytes_for_cb.load(std::sync::atomic::Ordering::Relaxed);
 
             tokio::spawn(async move {
                 if let Some(mut operation) = op_manager_inner.get_operation(&op_id_inner).await {
                     operation.current_file = Some(file_name_inner);
                     operation.bytes_current = bytes_written;
                     operation.bytes_total = total;
-                    operation.bytes_transferred = completed_bytes_snapshot + bytes_written;
                     op_manager_inner
                         .update_operation(&op_id_inner, operation)
                         .await;
