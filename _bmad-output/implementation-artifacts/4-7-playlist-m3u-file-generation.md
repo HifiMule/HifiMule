@@ -1,6 +1,6 @@
 # Story 4.7: Playlist M3U File Generation
 
-**Status: review**
+**Status: done**
 
 ## Story
 
@@ -485,7 +485,7 @@ From Story 4.6 dev notes:
 - **Playlist in auto-sync path**: `main.rs` also expands playlist items (for track downloads). The `generate_m3u_files()` call is added to `execute_sync` which is called from both paths — M3U generation happens automatically for auto-sync too. The auto-sync path calls `execute_sync` directly with `delta.playlists = vec![]` (because `main.rs` does not populate this field). Use the `if !delta.playlists.is_empty()` guard (T6.1) — no M3U generation if no playlist context passed.
 - **Empty track list**: If a playlist has zero downloadable tracks, skip writing the `.m3u` (no point in an empty playlist file). Guard with `if included_count == 0 { continue; }` (already in T5.1).
 - **`device_path` vs `managed_path`**: `.m3u` files go to `managed_path` (`manifest.managed_paths[0]`, e.g. `device_path/Music`), not the device root. Audio tracks also live under `managed_path`. Track paths in the `.m3u` are relative to `managed_path` (the managed subfolder prefix is stripped from `SyncedItem.local_path`). `managed_path` is read from `device_manager.get_current_device()` at the start of M3U generation, with `"Music"` as a fallback.
-- **`write_m3u_atomic` tmp naming**: Use `format!("{}.tmp", m3u_filename)` not `format!("{}.m3u.tmp", sanitized_name)` to avoid double-extension issues with the rename.
+- **`write_m3u_atomic` tmp naming**: Use `format!("{}.tmp", m3u_filename)`. Since `m3u_filename` already ends in `.m3u`, this produces `"My Playlist.m3u.tmp"`.
 
 ### Source References
 

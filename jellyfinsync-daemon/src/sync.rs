@@ -753,11 +753,11 @@ pub async fn execute_sync(
     }
 
     // --- M3U Playlist Generation ---
-    // Only runs when the delta includes playlist basket items (populated by the RPC handler).
-    // The auto-sync path calls execute_sync with delta.playlists = [] so this guard skips it.
-    if !delta.playlists.is_empty() {
-        // Get current manifest state (already updated incrementally by the sync above).
-        if let Some(mut manifest_snapshot) = device_manager.get_current_device().await {
+    // Runs when there are playlist basket items OR manifest entries that need cleanup.
+    // The auto-sync path calls execute_sync with delta.playlists = []; the inner guard
+    // skips work when both sides are empty, avoiding unnecessary manifest reads.
+    if let Some(mut manifest_snapshot) = device_manager.get_current_device().await {
+        if !delta.playlists.is_empty() || !manifest_snapshot.playlists.is_empty() {
             let warnings = generate_m3u_files(
                 &delta.playlists,
                 device_path,
@@ -874,16 +874,23 @@ fn extract_display_name(rel_path: &str) -> &str {
 }
 
 /// Atomically writes content to `final_path` via a Write-Temp-Rename pattern.
+/// Deletes the tmp file if any step fails, preventing stale .tmp accumulation.
 async fn write_m3u_atomic(tmp_path: &Path, final_path: &Path, content: &[u8]) -> Result<()> {
     if let Some(parent) = tmp_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    let mut file = tokio::fs::File::create(tmp_path).await?;
-    file.write_all(content).await?;
-    file.sync_all().await?;
-    drop(file);
-    tokio::fs::rename(tmp_path, final_path).await?;
-    Ok(())
+    let write_result = async {
+        let mut file = tokio::fs::File::create(tmp_path).await?;
+        file.write_all(content).await?;
+        file.sync_all().await?;
+        drop(file);
+        tokio::fs::rename(tmp_path, final_path).await
+    }
+    .await;
+    if write_result.is_err() {
+        let _ = tokio::fs::remove_file(tmp_path).await;
+    }
+    Ok(write_result?)
 }
 
 /// Generates, regenerates, or cleans up .m3u files for playlists in the sync basket.
@@ -924,11 +931,18 @@ async fn generate_m3u_files(
         .collect();
     for entry in &to_remove {
         let m3u_path = managed_path.join(&entry.filename);
-        if m3u_path.exists() {
-            if let Err(e) = tokio::fs::remove_file(&m3u_path).await {
-                warnings.push(format!("[M3U] Failed to delete {}: {}", entry.filename, e));
-            } else {
+        match tokio::fs::try_exists(&m3u_path).await {
+            Ok(true) => {
+                if let Err(e) = tokio::fs::remove_file(&m3u_path).await {
+                    warnings.push(format!("[M3U] Failed to delete {}: {}", entry.filename, e));
+                    continue; // Don't remove from manifest if file deletion failed
+                }
                 println!("[M3U] Deleted removed playlist: {}", entry.filename);
+            }
+            Ok(false) => {} // Already gone; still remove the manifest entry
+            Err(e) => {
+                warnings.push(format!("[M3U] Failed to check {}: {}", entry.filename, e));
+                continue; // Don't remove from manifest if existence check failed
             }
         }
         manifest
@@ -936,37 +950,42 @@ async fn generate_m3u_files(
             .retain(|e2| e2.jellyfin_id != entry.jellyfin_id);
     }
 
+    // Track filenames committed this run to detect collisions across playlists
+    let mut used_filenames: HashSet<String> = HashSet::new();
+
     // GENERATE / REGENERATE for each playlist in basket
     for playlist in playlist_items {
-        let track_ids: Vec<String> = playlist
-            .tracks
-            .iter()
-            .map(|t| t.jellyfin_id.clone())
-            .collect();
-
-        // Determine if regeneration is needed
-        let existing = manifest
-            .playlists
-            .iter()
-            .find(|e| e.jellyfin_id == playlist.jellyfin_id);
-        let needs_write = match existing {
-            None => true,
-            Some(e) => e.track_ids != track_ids,
-        };
-
-        // Build .m3u filename
+        // Build .m3u filename — fall back to jellyfin_id if name sanitizes to empty
         let sanitized_name = sanitize_path_component(&playlist.name);
-        let m3u_filename = truncate_filename(&sanitized_name, "m3u", 255);
+        let base_name = if sanitized_name.is_empty() {
+            playlist.jellyfin_id[..playlist.jellyfin_id.len().min(32)].to_string()
+        } else {
+            sanitized_name
+        };
+        let m3u_filename = {
+            let candidate = truncate_filename(&base_name, "m3u", 255);
+            if used_filenames.contains(&candidate) {
+                // Two playlists produced the same sanitized name — disambiguate with a short ID tag
+                let id_tag = &playlist.jellyfin_id[..8.min(playlist.jellyfin_id.len())];
+                let tagged = format!("{} ({})", base_name, id_tag);
+                let deduped = truncate_filename(&tagged, "m3u", 255);
+                warnings.push(format!(
+                    "[M3U] Filename collision for '{}', using '{}'",
+                    playlist.name, deduped
+                ));
+                deduped
+            } else {
+                candidate
+            }
+        };
+        used_filenames.insert(m3u_filename.clone());
         let m3u_path = managed_path.join(&m3u_filename);
 
-        if !needs_write {
-            println!("[M3U] Playlist unchanged, skipping: {}", m3u_filename);
-            continue;
-        }
-
-        // Build M3U content
-        let mut lines: Vec<String> = vec!["#EXTM3U".to_string()];
-        let mut included_count = 0u32;
+        // Resolve which tracks are available; emit warnings for missing ones.
+        // Only resolved tracks are written to the M3U and stored in track_ids — this ensures
+        // the manifest accurately reflects file content and re-triggers a write if a previously
+        // missing track becomes available on the next sync.
+        let mut resolved_tracks: Vec<(&PlaylistTrackInfo, &str)> = Vec::new();
         for track in &playlist.tracks {
             match path_lookup.get(track.jellyfin_id.as_str()) {
                 None => {
@@ -976,32 +995,55 @@ async fn generate_m3u_files(
                     ));
                 }
                 Some(rel_path) => {
-                    let label = match &track.artist {
-                        Some(a) => format!("{} - {}", a, extract_display_name(rel_path)),
-                        None => extract_display_name(rel_path).to_string(),
-                    };
-                    lines.push(format!("#EXTINF:{},{}", track.run_time_seconds, label));
-                    // Make path relative to managed_path (where the .m3u lives).
-                    // local_path is relative to device_path (e.g. "Music/Artist/Album/track.flac").
-                    // Strip the managed subfolder prefix so the .m3u entry is just
-                    // "Artist/Album/track.flac" for a Rockbox/DAP player in the Music folder.
-                    let track_entry = device_path
-                        .join(rel_path)
-                        .strip_prefix(managed_path)
-                        .map(|p| p.to_string_lossy().replace('\\', "/"))
-                        .unwrap_or_else(|_| rel_path.replace('\\', "/"));
-                    lines.push(track_entry);
-                    included_count += 1;
+                    resolved_tracks.push((track, rel_path));
                 }
             }
         }
 
-        if included_count == 0 {
+        if resolved_tracks.is_empty() {
             warnings.push(format!(
                 "[M3U] No tracks resolved for playlist {} — skipping write",
                 playlist.name
             ));
             continue;
+        }
+
+        let resolved_track_ids: Vec<String> =
+            resolved_tracks.iter().map(|(t, _)| t.jellyfin_id.clone()).collect();
+
+        // Determine if regeneration is needed (filename or resolved track list changed)
+        let (needs_write, old_filename_opt) =
+            match manifest.playlists.iter().find(|e| e.jellyfin_id == playlist.jellyfin_id) {
+                None => (true, None),
+                Some(e) => {
+                    let changed = e.filename != m3u_filename || e.track_ids != resolved_track_ids;
+                    (changed, Some(e.filename.clone()))
+                }
+            };
+
+        if !needs_write {
+            println!("[M3U] Playlist unchanged, skipping: {}", m3u_filename);
+            continue;
+        }
+
+        // Build M3U content
+        let mut lines: Vec<String> = vec!["#EXTM3U".to_string()];
+        for (track, rel_path) in &resolved_tracks {
+            let label = match &track.artist {
+                Some(a) => format!("{} - {}", a, extract_display_name(rel_path)),
+                None => extract_display_name(rel_path).to_string(),
+            };
+            lines.push(format!("#EXTINF:{},{}", track.run_time_seconds, label));
+            // Make path relative to managed_path (where the .m3u lives).
+            // local_path is relative to device_path (e.g. "Music/Artist/Album/track.flac").
+            // Strip the managed subfolder prefix so the .m3u entry is just
+            // "Artist/Album/track.flac" for a Rockbox/DAP player in the Music folder.
+            let track_entry = device_path
+                .join(rel_path)
+                .strip_prefix(managed_path)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| rel_path.replace('\\', "/"));
+            lines.push(track_entry);
         }
 
         let content = lines.join("\n") + "\n";
@@ -1010,7 +1052,21 @@ async fn generate_m3u_files(
         let tmp_path = managed_path.join(format!("{}.tmp", m3u_filename));
         match write_m3u_atomic(&tmp_path, &m3u_path, content.as_bytes()).await {
             Ok(()) => {
-                println!("[M3U] Wrote {}: {} tracks", m3u_filename, included_count);
+                println!("[M3U] Wrote {}: {} tracks", m3u_filename, resolved_tracks.len());
+
+                // Delete old file if the playlist was renamed
+                if let Some(old_fn) = &old_filename_opt {
+                    if *old_fn != m3u_filename {
+                        let old_path = managed_path.join(old_fn);
+                        if let Err(e) = tokio::fs::remove_file(&old_path).await {
+                            warnings.push(format!(
+                                "[M3U] Failed to delete old file {}: {}",
+                                old_fn, e
+                            ));
+                        }
+                    }
+                }
+
                 let now = now_iso8601();
                 manifest
                     .playlists
@@ -1018,8 +1074,8 @@ async fn generate_m3u_files(
                 manifest.playlists.push(crate::device::PlaylistManifestEntry {
                     jellyfin_id: playlist.jellyfin_id.clone(),
                     filename: m3u_filename,
-                    track_count: included_count,
-                    track_ids,
+                    track_count: resolved_tracks.len() as u32,
+                    track_ids: resolved_track_ids,
                     last_modified: now,
                 });
             }
