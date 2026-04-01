@@ -805,6 +805,7 @@ async fn handle_sync_calculate_delta(
 
     // Fetch item details from Jellyfin in chunks to avoid URL length limits.
     // Container items (playlist/album/artist) are expanded to individual tracks.
+    let mut playlist_sync_items: Vec<crate::sync::PlaylistSyncItem> = Vec::new();
     let mut results = Vec::new();
     for chunk in item_ids.chunks(100) {
         let chunk_strs: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
@@ -823,12 +824,35 @@ async fn handle_sync_calculate_delta(
                         continue;
                     }
 
+                    let is_playlist = item.item_type == "Playlist";
+                    let item_id = item.id.clone();
+                    let item_name = item.name.clone();
+
                     match state
                         .jellyfin_client
                         .get_child_items_with_sizes(&url, &token, &user_id, &item.id)
                         .await
                     {
                         Ok(children) => {
+                            if is_playlist {
+                                let tracks: Vec<crate::sync::PlaylistTrackInfo> = children
+                                    .iter()
+                                    .filter(|c| is_downloadable_item_type(&c.item_type))
+                                    .map(|c| crate::sync::PlaylistTrackInfo {
+                                        jellyfin_id: c.id.clone(),
+                                        artist: c.album_artist.clone(),
+                                        run_time_seconds: c
+                                            .run_time_ticks
+                                            .map(|t| (t / 10_000_000) as i64)
+                                            .unwrap_or(-1),
+                                    })
+                                    .collect();
+                                playlist_sync_items.push(crate::sync::PlaylistSyncItem {
+                                    jellyfin_id: item_id,
+                                    name: item_name,
+                                    tracks,
+                                });
+                            }
                             for child in children {
                                 if is_downloadable_item_type(&child.item_type) {
                                     results.push(Ok(to_desired_item(child)));
@@ -879,7 +903,8 @@ async fn handle_sync_calculate_delta(
         }
     }
 
-    let delta = crate::sync::calculate_delta(&desired_items, &manifest);
+    let mut delta = crate::sync::calculate_delta(&desired_items, &manifest);
+    delta.playlists = playlist_sync_items;
 
     Ok(serde_json::to_value(delta).unwrap())
 }
@@ -2091,6 +2116,7 @@ mod tests {
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
+                playlists: vec![],
         };
 
         device_manager
@@ -2156,6 +2182,7 @@ mod tests {
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
+                playlists: vec![],
         };
         device_manager
             .handle_device_detected(dir.path().to_path_buf(), manifest)
@@ -2201,6 +2228,7 @@ mod tests {
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
+                playlists: vec![],
         };
         device_manager
             .handle_device_detected(dir.path().to_path_buf(), manifest)
@@ -2260,6 +2288,7 @@ mod tests {
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
+                playlists: vec![],
         };
         device_manager
             .handle_device_detected(std::path::PathBuf::from("/tmp/dirty"), dirty_manifest)
@@ -2382,6 +2411,7 @@ mod tests {
                     auto_sync_on_connect: false,
                     auto_fill: crate::device::AutoFillPrefs::default(),
                     transcoding_profile_id: None,
+                playlists: vec![],
                 },
             )
             .await
@@ -2464,6 +2494,7 @@ mod tests {
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
+                playlists: vec![],
         };
         device_manager
             .handle_device_detected(std::path::PathBuf::from("/tmp/dev"), manifest)
@@ -2691,6 +2722,7 @@ mod tests {
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
+                playlists: vec![],
         };
         crate::device::write_manifest(dir.path(), &manifest)
             .await
@@ -2774,6 +2806,7 @@ mod tests {
             auto_sync_on_connect: true,
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
+                playlists: vec![],
         };
         device_manager
             .handle_device_detected(std::path::PathBuf::from("/tmp/auto-state"), manifest)

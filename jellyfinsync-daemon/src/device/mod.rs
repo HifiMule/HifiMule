@@ -35,6 +35,16 @@ pub struct BasketItem {
     pub size_bytes: u64,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaylistManifestEntry {
+    pub jellyfin_id: String,
+    pub filename: String,
+    pub track_count: u32,
+    pub track_ids: Vec<String>,  // ordered Jellyfin IDs — used for change detection
+    pub last_modified: String,   // ISO 8601 timestamp
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DeviceManifest {
     pub device_id: String,
@@ -58,6 +68,8 @@ pub struct DeviceManifest {
     /// ID referencing an entry in device-profiles.json. None = no transcoding (passthrough).
     #[serde(default)]
     pub transcoding_profile_id: Option<String>,
+    #[serde(default)]
+    pub playlists: Vec<PlaylistManifestEntry>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -336,6 +348,7 @@ impl DeviceManager {
             auto_sync_on_connect: false,
             auto_fill: AutoFillPrefs::default(),
             transcoding_profile_id,   // NEW — stored in .jellyfinsync.json on the device
+            playlists: vec![],
         };
 
         write_manifest(&device_root, &manifest).await?;

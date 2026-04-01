@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-03-31  # 4-6 review
+last_updated: 2026-04-01  # 4-7 implemented, ready for review
 project: JellyfinSync
 project_key: NOKEY
 tracking_system: file-system
@@ -75,7 +75,7 @@ development_status:
   4-5-start-sync-ui-to-engine-trigger: done
   4-5b-daemon-initiated-sync-path: done
   4-6-sync-progress-eta: done
-  4-7-playlist-m3u-file-generation: backlog
+  4-7-playlist-m3u-file-generation: review
   epic-4-retrospective: optional
 
   epic-5: done

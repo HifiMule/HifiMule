@@ -83,6 +83,8 @@ pub struct JellyfinItem {
     #[serde(default)]
     pub cumulative_run_time_ticks: Option<u64>,
     #[serde(default)]
+    pub run_time_ticks: Option<u64>,
+    #[serde(default)]
     pub media_sources: Option<Vec<MediaSource>>,
     #[serde(default)]
     pub etag: Option<String>,

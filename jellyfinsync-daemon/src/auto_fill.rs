@@ -249,6 +249,7 @@ mod tests {
             production_year: None,
             recursive_item_count: None,
             cumulative_run_time_ticks: None,
+            run_time_ticks: None,
             media_sources: Some(vec![MediaSource {
                 size: Some(size_bytes),
                 container: None,

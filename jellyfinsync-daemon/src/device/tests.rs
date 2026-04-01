@@ -32,6 +32,7 @@ async fn test_dirty_manifest_roundtrip() {
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
         transcoding_profile_id: None,
+        playlists: vec![],
     };
     write_manifest(dir.path(), &manifest).await.unwrap();
     let content = tokio::fs::read_to_string(dir.path().join(".jellyfinsync.json"))
@@ -349,6 +350,7 @@ async fn test_write_manifest_creates_files() {
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
         transcoding_profile_id: None,
+        playlists: vec![],
     };
 
     write_manifest(root, &manifest).await.unwrap();
@@ -385,6 +387,7 @@ async fn test_write_manifest_overwrites_existing() {
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
         transcoding_profile_id: None,
+        playlists: vec![],
     };
     write_manifest(root, &manifest1).await.unwrap();
 
@@ -411,6 +414,7 @@ async fn test_write_manifest_overwrites_existing() {
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
         transcoding_profile_id: None,
+        playlists: vec![],
     };
     write_manifest(root, &manifest2).await.unwrap();
 
@@ -454,6 +458,7 @@ async fn test_get_discrepancies_missing_file() {
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
         transcoding_profile_id: None,
+        playlists: vec![],
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -497,6 +502,7 @@ async fn test_get_discrepancies_orphaned_file() {
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
         transcoding_profile_id: None,
+        playlists: vec![],
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -552,6 +558,7 @@ async fn test_get_discrepancies_no_issues() {
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
         transcoding_profile_id: None,
+        playlists: vec![],
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -608,6 +615,7 @@ async fn test_prune_items() {
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
         transcoding_profile_id: None,
+        playlists: vec![],
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -659,6 +667,7 @@ async fn test_relink_item() {
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
         transcoding_profile_id: None,
+        playlists: vec![],
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -703,6 +712,7 @@ async fn test_relink_item_path_traversal() {
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
         transcoding_profile_id: None,
+        playlists: vec![],
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -735,6 +745,7 @@ async fn test_clear_dirty_flag() {
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
         transcoding_profile_id: None,
+        playlists: vec![],
     };
     write_manifest(root, &manifest).await.unwrap();
 
@@ -1017,6 +1028,7 @@ async fn test_save_basket_roundtrip() {
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
         transcoding_profile_id: None,
+        playlists: vec![],
     };
     write_manifest(dir.path(), &manifest).await.unwrap();
 
@@ -1076,6 +1088,7 @@ async fn test_auto_sync_on_connect_roundtrip() {
         auto_sync_on_connect: true,
         auto_fill: crate::device::AutoFillPrefs::default(),
         transcoding_profile_id: None,
+        playlists: vec![],
     };
     write_manifest(dir.path(), &manifest).await.unwrap();
 
