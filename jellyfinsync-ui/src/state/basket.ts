@@ -43,6 +43,21 @@ class BasketStore extends EventTarget {
         }, 1000);
     }
 
+    /** Immediately flush any pending debounced basket save to the daemon.
+     * Must be called before switching devices so the current device's basket
+     * is persisted before the selection changes. */
+    public async flushPendingSave(): Promise<void> {
+        if (this.saveTimeout !== null) {
+            window.clearTimeout(this.saveTimeout);
+            this.saveTimeout = null;
+            try {
+                await rpcCall('manifest_save_basket', { basketItems: this.getItems() });
+            } catch (e) {
+                console.error("Failed to flush basket save:", e);
+            }
+        }
+    }
+
     public hydrateFromDaemon(items: BasketItem[]) {
         if (this._syncingFromDaemon) return;
         this._syncingFromDaemon = true;

@@ -164,6 +164,8 @@ async fn handler(
         "device.set_transcoding_profile" => {
             handle_set_transcoding_profile(&state, payload.params).await
         }
+        "device.list" => handle_device_list(&state).await,
+        "device.select" => handle_device_select(&state, payload.params).await,
         _ => Err(JsonRpcError {
             code: ERR_METHOD_NOT_FOUND,
             message: "Method not found".to_string(),
@@ -309,11 +311,9 @@ async fn handle_get_credentials() -> Result<Value, JsonRpcError> {
             "token": token,
             "userId": user_id
         })),
-        Err(e) => Err(JsonRpcError {
-            code: ERR_STORAGE_ERROR,
-            message: e.to_string(),
-            data: None,
-        }),
+        // "Not configured" is a valid state, not an error. Return null so callers
+        // can distinguish "no credentials" from an actual storage failure.
+        Err(_) => Ok(Value::Null),
     }
 }
 
@@ -387,6 +387,23 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
 
     let active_operation_id = state.sync_operation_manager.get_active_operation_id().await;
 
+    let connected_devices_snapshot = state.device_manager.get_connected_devices().await;
+    let selected_device_path = state
+        .device_manager
+        .get_current_device_path()
+        .await
+        .map(|p| p.to_string_lossy().to_string());
+    let connected_devices_json: Vec<_> = connected_devices_snapshot
+        .iter()
+        .map(|(p, m)| {
+            serde_json::json!({
+                "path": p.to_string_lossy(),
+                "deviceId": m.device_id,
+                "name": m.name.clone().unwrap_or_else(|| m.device_id.clone()),
+            })
+        })
+        .collect();
+
     Ok(serde_json::json!({
         "currentDevice": device,
         "deviceMapping": mapping,
@@ -396,6 +413,8 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         "autoSyncOnConnect": auto_sync_on_connect,
         "autoFill": auto_fill,
         "activeOperationId": active_operation_id,
+        "connectedDevices": connected_devices_json,
+        "selectedDevicePath": selected_device_path,
     }))
 }
 
@@ -1664,6 +1683,20 @@ async fn handle_device_profiles_list() -> Result<Value, JsonRpcError> {
         data: None,
     })?;
 
+    // Seed the default profiles file on-demand if it doesn't exist.
+    // This handles the case where the daemon was already running before the
+    // seeding code was added (Windows Service / startup app from an older build).
+    if !path.exists() {
+        let profiles_default = include_bytes!("../assets/device-profiles.json");
+        crate::transcoding::ensure_profiles_file_exists(&path, profiles_default).map_err(
+            |e| JsonRpcError {
+                code: ERR_STORAGE_ERROR,
+                message: format!("Failed to seed device profiles: {}", e),
+                data: None,
+            },
+        )?;
+    }
+
     let profiles = crate::transcoding::load_profiles(&path).map_err(|e| JsonRpcError {
         code: ERR_STORAGE_ERROR,
         message: format!("Failed to load device profiles: {}", e),
@@ -1751,6 +1784,49 @@ async fn handle_set_transcoding_profile(
         })?;
 
     Ok(Value::Bool(true))
+}
+
+async fn handle_device_list(state: &AppState) -> Result<Value, JsonRpcError> {
+    let devices = state.device_manager.get_connected_devices().await;
+    let data: Vec<_> = devices
+        .iter()
+        .map(|(p, m)| {
+            serde_json::json!({
+                "path": p.to_string_lossy(),
+                "deviceId": m.device_id,
+                "name": m.name.clone().unwrap_or_else(|| m.device_id.clone()),
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({ "status": "success", "data": data }))
+}
+
+async fn handle_device_select(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let path_str = params["path"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing path".to_string(),
+        data: None,
+    })?;
+
+    let path = std::path::PathBuf::from(path_str);
+    if !state.device_manager.select_device(path).await {
+        return Err(JsonRpcError {
+            code: 404,
+            message: "Device not connected".to_string(),
+            data: None,
+        });
+    }
+
+    Ok(serde_json::json!({ "status": "success", "data": { "ok": true } }))
 }
 
 #[cfg(test)]
@@ -2875,5 +2951,121 @@ mod tests {
             serde_json::Value::String(op_id),
             "Running operation → activeOperationId must be the operation UUID"
         );
+    }
+
+    // ===== Story 2.7: device.list and device.select tests =====
+
+    fn make_app_state_for_device_tests() -> Arc<AppState> {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        Arc::new(AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db,
+            device_manager,
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
+            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+        })
+    }
+
+    #[tokio::test]
+    async fn test_device_list_returns_connected_devices() {
+        use tempfile::tempdir;
+        let dir1 = tempdir().unwrap();
+        let dir2 = tempdir().unwrap();
+        let path1 = dir1.path().to_path_buf();
+        let path2 = dir2.path().to_path_buf();
+
+        let state = make_app_state_for_device_tests();
+
+        let manifest1 = crate::device::DeviceManifest {
+            device_id: "dev-list-1".to_string(),
+            name: Some("DeviceA".to_string()),
+            version: "1.0".to_string(),
+            managed_paths: vec![],
+            synced_items: vec![],
+            dirty: false,
+            pending_item_ids: vec![],
+            basket_items: vec![],
+            auto_sync_on_connect: false,
+            auto_fill: crate::device::AutoFillPrefs::default(),
+            transcoding_profile_id: None,
+            playlists: vec![],
+        };
+        let manifest2 = crate::device::DeviceManifest {
+            device_id: "dev-list-2".to_string(),
+            name: Some("DeviceB".to_string()),
+            version: "1.0".to_string(),
+            managed_paths: vec![],
+            synced_items: vec![],
+            dirty: false,
+            pending_item_ids: vec![],
+            basket_items: vec![],
+            auto_sync_on_connect: false,
+            auto_fill: crate::device::AutoFillPrefs::default(),
+            transcoding_profile_id: None,
+            playlists: vec![],
+        };
+
+        state.device_manager.handle_device_detected(path1, manifest1).await.unwrap();
+        state.device_manager.handle_device_detected(path2, manifest2).await.unwrap();
+
+        let result = handle_device_list(&state).await.unwrap();
+        let data = result["data"].as_array().unwrap();
+        assert_eq!(data.len(), 2, "device.list must return all connected devices");
+
+        let ids: Vec<&str> = data.iter().map(|d| d["deviceId"].as_str().unwrap()).collect();
+        assert!(ids.contains(&"dev-list-1"));
+        assert!(ids.contains(&"dev-list-2"));
+    }
+
+    #[tokio::test]
+    async fn test_device_select_valid_path_returns_ok() {
+        use tempfile::tempdir;
+        let dir1 = tempdir().unwrap();
+        let dir2 = tempdir().unwrap();
+        let path1 = dir1.path().to_path_buf();
+        let path2 = dir2.path().to_path_buf();
+
+        let state = make_app_state_for_device_tests();
+
+        let make_manifest = |id: &str| crate::device::DeviceManifest {
+            device_id: id.to_string(),
+            name: None,
+            version: "1.0".to_string(),
+            managed_paths: vec![],
+            synced_items: vec![],
+            dirty: false,
+            pending_item_ids: vec![],
+            basket_items: vec![],
+            auto_sync_on_connect: false,
+            auto_fill: crate::device::AutoFillPrefs::default(),
+            transcoding_profile_id: None,
+            playlists: vec![],
+        };
+
+        state.device_manager.handle_device_detected(path1.clone(), make_manifest("sel-dev-1")).await.unwrap();
+        state.device_manager.handle_device_detected(path2.clone(), make_manifest("sel-dev-2")).await.unwrap();
+
+        // Switch to path2
+        let params = Some(json!({ "path": path2.to_string_lossy() }));
+        let result = handle_device_select(&state, params).await.unwrap();
+        assert_eq!(result["status"], "success");
+        assert_eq!(result["data"]["ok"], true);
+
+        let selected = state.device_manager.get_current_device_path().await;
+        assert_eq!(selected, Some(path2));
+    }
+
+    #[tokio::test]
+    async fn test_device_select_unknown_path_returns_error() {
+        let state = make_app_state_for_device_tests();
+
+        let params = Some(json!({ "path": "/nonexistent/path/device" }));
+        let err = handle_device_select(&state, params).await.unwrap_err();
+        assert_eq!(err.code, 404, "Unknown path must return 404 error");
+        assert!(err.message.contains("not connected"));
     }
 }

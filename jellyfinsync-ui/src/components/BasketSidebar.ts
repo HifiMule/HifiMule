@@ -157,6 +157,9 @@ export class BasketSidebar {
     private autoFillInFlight: boolean = false;
     private autoFillPendingRetrigger: boolean = false;
     private etaText: string = 'Calculating\u2026';
+    // Multi-device picker state
+    private connectedDevices: Array<{ path: string; deviceId: string; name: string }> = [];
+    private selectedDevicePath: string | null = null;
 
     constructor(container: HTMLElement) {
         this.container = container;
@@ -383,6 +386,26 @@ export class BasketSidebar {
         }
     }
 
+    private bindDevicePickerEvents() {
+        const devicePicker = this.container.querySelector('sl-select.device-picker') as any;
+        if (devicePicker) {
+            devicePicker.addEventListener('sl-change', async (e: Event) => {
+                const newPath = (e.target as any).value;
+                try {
+                    // Flush any unsaved basket changes for the current device before switching.
+                    await basketStore.flushPendingSave();
+                    await rpcCall('device.select', { path: newPath });
+                    // Reload basket for the newly selected device
+                    const basketResult = await rpcCall('manifest_get_basket') as any;
+                    basketStore.hydrateFromDaemon(basketResult?.basketItems ?? []);
+                    this.refreshAndRender();
+                } catch (err) {
+                    console.error('[DevicePicker] Failed to switch device:', err);
+                }
+            });
+        }
+    }
+
     private renderAutoFillControls(): string {
         const hasDevice = this.folderInfo?.hasManifest ?? false;
         if (!hasDevice) return '';
@@ -452,9 +475,18 @@ export class BasketSidebar {
                 const deviceDisconnected = !currentDevice && this.lastHydratedDeviceId !== null;
                 const activeOperationId = daemonStateResult?.activeOperationId ?? null;
 
-                if (newDirty !== this.isDirtyManifest || hasPendingDevice !== hadPendingDevice || isNewDevice || deviceDisconnected || activeOperationId) {
+                // Detect multi-device changes
+                const newConnectedDevices: Array<{ path: string; deviceId: string; name: string }> =
+                    daemonStateResult?.connectedDevices ?? [];
+                const newSelectedDevicePath: string | null = daemonStateResult?.selectedDevicePath ?? null;
+                const deviceCountChanged = newConnectedDevices.length !== this.connectedDevices.length;
+                const selectedDeviceChanged = newSelectedDevicePath !== this.selectedDevicePath;
+                this.connectedDevices = newConnectedDevices;
+                this.selectedDevicePath = newSelectedDevicePath;
+
+                if (newDirty !== this.isDirtyManifest || hasPendingDevice !== hadPendingDevice || isNewDevice || deviceDisconnected || activeOperationId || deviceCountChanged || selectedDeviceChanged) {
                     this.isDirtyManifest = newDirty;
-                    if (isNewDevice || deviceDisconnected || activeOperationId) {
+                    if (isNewDevice || deviceDisconnected || activeOperationId || deviceCountChanged || selectedDeviceChanged) {
                         // Let refreshAndRender handle the hydration/attach logic reliably on state change (F5)
                         await this.refreshAndRender();
                     } else {
@@ -465,6 +497,24 @@ export class BasketSidebar {
                 // Ignore transient errors
             }
         }, 2000);
+    }
+
+    private truncatePath(path: string, maxLen = 30): string {
+        if (path.length <= maxLen) return path;
+        return '...' + path.slice(path.length - maxLen + 3);
+    }
+
+    private renderDevicePicker(): string {
+        if (this.connectedDevices.length <= 1) return '';
+        return `
+            <div class="device-picker-panel">
+                <sl-select class="device-picker" value="${this.escapeHtml(this.selectedDevicePath ?? '')}" size="small" hoist>
+                    ${this.connectedDevices.map(d => `
+                        <sl-option value="${this.escapeHtml(d.path)}">${this.escapeHtml(d.name)} — ${this.escapeHtml(this.truncatePath(d.path))}</sl-option>
+                    `).join('')}
+                </sl-select>
+            </div>
+        `;
     }
 
     private renderDeviceFolders(): string {
@@ -601,6 +651,7 @@ export class BasketSidebar {
                 <div class="basket-footer">
                     ${this.renderAutoFillControls()}
                     ${this.renderStatusZone()}
+                    ${this.renderDevicePicker()}
                     ${this.renderDeviceFolders()}
                 </div>
                 <div class="basket-actions">
@@ -619,6 +670,7 @@ export class BasketSidebar {
             this.container.querySelector('#init-device-btn')?.addEventListener('click', () => this.openInitDeviceModal());
             this.container.querySelector('#start-sync-btn')?.addEventListener('click', () => this.handleStartSync());
             this.bindAutoFillEvents();
+            this.bindDevicePickerEvents();
             return;
         }
 
@@ -649,6 +701,7 @@ export class BasketSidebar {
                 ${renderCapacityBar(this.storageInfo, totalSizeBytes)}
                 ${this.renderAutoFillControls()}
                 ${this.renderStatusZone()}
+                ${this.renderDevicePicker()}
                 ${this.renderDeviceFolders()}
             </div>
             <div class="basket-actions">
@@ -701,6 +754,7 @@ export class BasketSidebar {
         this.container.querySelector('#open-repair-btn')?.addEventListener('click', () => this.openRepairModal());
         this.container.querySelector('#init-device-btn')?.addEventListener('click', () => this.openInitDeviceModal());
         this.bindAutoFillEvents();
+        this.bindDevicePickerEvents();
     }
 
     private openRepairModal() {

@@ -805,12 +805,13 @@ async fn test_handle_device_removed_clears_unrecognized_path() {
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
 
+    let path = dir.path().to_path_buf();
     manager
-        .handle_device_unrecognized(dir.path().to_path_buf())
+        .handle_device_unrecognized(path.clone())
         .await;
     assert!(manager.get_unrecognized_device_path().await.is_some());
 
-    manager.handle_device_removed().await;
+    manager.handle_device_removed(&path).await;
 
     assert!(manager.get_unrecognized_device_path().await.is_none());
     assert!(manager.get_current_device().await.is_none());
@@ -964,7 +965,9 @@ async fn test_initialize_device_rejects_path_traversal() {
 }
 
 #[tokio::test]
-async fn test_handle_device_unrecognized_clears_current_device() {
+async fn test_handle_device_unrecognized_preserves_recognized_device() {
+    // Story 2.7: When an unrecognized device arrives, recognized devices must NOT be cleared.
+    // Other recognized devices may still be connected; only unrecognized_device_path is updated.
     let dir = tempdir().unwrap();
     let manifest_json = r#"{"device_id": "dev-1", "name": "My Device", "version": "1.0"}"#;
     fs::write(dir.path().join(".jellyfinsync.json"), manifest_json).unwrap();
@@ -981,21 +984,30 @@ async fn test_handle_device_unrecognized_clears_current_device() {
     assert!(manager.get_current_device().await.is_some());
     assert!(manager.get_current_device_path().await.is_some());
 
-    // Now handle an unrecognized device — should clear current device fields
+    // Now handle an unrecognized device at a DIFFERENT path — recognized device must remain
     let dir2 = tempdir().unwrap();
     manager
         .handle_device_unrecognized(dir2.path().to_path_buf())
         .await;
 
     assert!(
-        manager.get_current_device().await.is_none(),
-        "current_device must be cleared"
+        manager.get_current_device().await.is_some(),
+        "Recognized device must remain selected when an unrecognized device arrives"
     );
     assert!(
-        manager.get_current_device_path().await.is_none(),
-        "current_device_path must be cleared"
+        manager.get_current_device_path().await.is_some(),
+        "selected_device_path must remain set"
     );
-    assert!(manager.get_unrecognized_device_path().await.is_some());
+    assert!(
+        manager.get_unrecognized_device_path().await.is_some(),
+        "unrecognized_device_path must be set"
+    );
+    // The unrecognized path must NOT appear in connected_devices
+    let devices = manager.get_connected_devices().await;
+    assert!(
+        devices.iter().all(|(p, _)| p != dir2.path()),
+        "Unrecognized device path must not be in connected_devices"
+    );
 }
 
 // ===== Basket Selection Tests =====
@@ -1115,4 +1127,161 @@ fn test_auto_sync_on_connect_explicit_true() {
     let json = r#"{"device_id": "dev-1", "version": "1.0", "auto_sync_on_connect": true}"#;
     let manifest: DeviceManifest = serde_json::from_str(json).unwrap();
     assert!(manifest.auto_sync_on_connect);
+}
+
+// ===== Story 2.7 Tests =====
+
+fn make_manifest(device_id: &str, name: &str) -> DeviceManifest {
+    DeviceManifest {
+        device_id: device_id.to_string(),
+        name: Some(name.to_string()),
+        version: "1.0".to_string(),
+        managed_paths: vec![],
+        synced_items: vec![],
+        dirty: false,
+        pending_item_ids: vec![],
+        basket_items: vec![],
+        auto_sync_on_connect: false,
+        auto_fill: crate::device::AutoFillPrefs::default(),
+        transcoding_profile_id: None,
+        playlists: vec![],
+    }
+}
+
+#[tokio::test]
+async fn test_handle_device_detected_two_sequential_devices() {
+    let dir1 = tempdir().unwrap();
+    let dir2 = tempdir().unwrap();
+    let path1 = dir1.path().to_path_buf();
+    let path2 = dir2.path().to_path_buf();
+
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+
+    let manifest1 = make_manifest("device-1", "iPod");
+    let manifest2 = make_manifest("device-2", "Walkman");
+
+    // Write manifests so handle_device_detected can store them
+    write_manifest(&path1, &manifest1).await.unwrap();
+    write_manifest(&path2, &manifest2).await.unwrap();
+
+    manager.handle_device_detected(path1.clone(), manifest1).await.unwrap();
+    manager.handle_device_detected(path2.clone(), manifest2).await.unwrap();
+
+    let devices = manager.get_connected_devices().await;
+    assert_eq!(devices.len(), 2, "Both devices must be in connected_devices");
+
+    // First device should be auto-selected (second doesn't override)
+    let selected = manager.get_current_device_path().await;
+    assert_eq!(selected, Some(path1.clone()), "First device must remain selected");
+
+    // get_current_device returns the manifest for the selected path
+    let current = manager.get_current_device().await;
+    assert!(current.is_some());
+    assert_eq!(current.unwrap().device_id, "device-1");
+}
+
+#[tokio::test]
+async fn test_handle_device_removed_selected_with_remaining_autoselects() {
+    let dir1 = tempdir().unwrap();
+    let dir2 = tempdir().unwrap();
+    let path1 = dir1.path().to_path_buf();
+    let path2 = dir2.path().to_path_buf();
+
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+
+    let manifest1 = make_manifest("device-1", "iPod");
+    let manifest2 = make_manifest("device-2", "Walkman");
+
+    write_manifest(&path1, &manifest1).await.unwrap();
+    write_manifest(&path2, &manifest2).await.unwrap();
+
+    manager.handle_device_detected(path1.clone(), manifest1).await.unwrap();
+    manager.handle_device_detected(path2.clone(), manifest2).await.unwrap();
+
+    // Selected is path1 — remove it
+    manager.handle_device_removed(&path1).await;
+
+    let devices = manager.get_connected_devices().await;
+    assert_eq!(devices.len(), 1, "Only one device should remain");
+
+    // Remaining device (path2) must be auto-selected
+    let selected = manager.get_current_device_path().await;
+    assert_eq!(selected, Some(path2.clone()), "Remaining device must be auto-selected");
+}
+
+#[tokio::test]
+async fn test_handle_device_removed_non_selected_selection_unchanged() {
+    let dir1 = tempdir().unwrap();
+    let dir2 = tempdir().unwrap();
+    let path1 = dir1.path().to_path_buf();
+    let path2 = dir2.path().to_path_buf();
+
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+
+    let manifest1 = make_manifest("device-1", "iPod");
+    let manifest2 = make_manifest("device-2", "Walkman");
+
+    write_manifest(&path1, &manifest1).await.unwrap();
+    write_manifest(&path2, &manifest2).await.unwrap();
+
+    manager.handle_device_detected(path1.clone(), manifest1).await.unwrap();
+    manager.handle_device_detected(path2.clone(), manifest2).await.unwrap();
+
+    // Selected is path1 — remove path2 (non-selected)
+    manager.handle_device_removed(&path2).await;
+
+    let devices = manager.get_connected_devices().await;
+    assert_eq!(devices.len(), 1, "Only one device should remain");
+
+    // path1 must still be selected
+    let selected = manager.get_current_device_path().await;
+    assert_eq!(selected, Some(path1.clone()), "Selection must remain unchanged");
+}
+
+#[tokio::test]
+async fn test_select_device_valid_path() {
+    let dir1 = tempdir().unwrap();
+    let dir2 = tempdir().unwrap();
+    let path1 = dir1.path().to_path_buf();
+    let path2 = dir2.path().to_path_buf();
+
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+
+    let manifest1 = make_manifest("device-1", "iPod");
+    let manifest2 = make_manifest("device-2", "Walkman");
+
+    write_manifest(&path1, &manifest1).await.unwrap();
+    write_manifest(&path2, &manifest2).await.unwrap();
+
+    manager.handle_device_detected(path1.clone(), manifest1).await.unwrap();
+    manager.handle_device_detected(path2.clone(), manifest2).await.unwrap();
+
+    // Switch to path2
+    let ok = manager.select_device(path2.clone()).await;
+    assert!(ok, "select_device must return true for a connected device");
+
+    let selected = manager.get_current_device_path().await;
+    assert_eq!(selected, Some(path2.clone()));
+
+    let current = manager.get_current_device().await;
+    assert_eq!(current.unwrap().device_id, "device-2");
+}
+
+#[tokio::test]
+async fn test_select_device_unknown_path_returns_false() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+
+    // No devices connected — selecting an unknown path must fail
+    let ok = manager.select_device(path).await;
+    assert!(!ok, "select_device must return false for an unconnected path");
+
+    assert!(manager.get_current_device_path().await.is_none());
 }

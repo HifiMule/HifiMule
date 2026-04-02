@@ -315,7 +315,7 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                             } else {
                                 let _ = state_tx_clone.send(DaemonState::Idle);
                             }
-                            device_manager.handle_device_removed().await;
+                            device_manager.handle_device_removed(&path).await;
                         }
                     }
                 }

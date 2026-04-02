@@ -1,6 +1,6 @@
 # Story 2.7: Multi-Device Selection Panel
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -41,98 +41,89 @@ So that I can operate on one specific device without the daemon silently overwri
 
 ## Tasks / Subtasks
 
-- [ ] **Backend: Refactor `DeviceManager` struct for multi-device tracking** (AC: #1, #3, #4, #5)
-  - [ ] Replace `current_device: Arc<RwLock<Option<DeviceManifest>>>` and `current_device_path: Arc<RwLock<Option<PathBuf>>>` with:
+- [x] **Backend: Refactor `DeviceManager` struct for multi-device tracking** (AC: #1, #3, #4, #5)
+  - [x] Replace `current_device: Arc<RwLock<Option<DeviceManifest>>>` and `current_device_path: Arc<RwLock<Option<PathBuf>>>` with:
     - `connected_devices: Arc<RwLock<HashMap<PathBuf, DeviceManifest>>>` — all currently connected managed devices
     - `selected_device_path: Arc<RwLock<Option<PathBuf>>>` — the device targeted by all UI operations
-  - [ ] Update `DeviceManager::new()` to initialize both new fields
-  - [ ] Update `get_current_device()`: acquire read lock on `connected_devices`, read `selected_device_path`, return clone of the matching entry (or `None`)
-  - [ ] Update `get_current_device_path()`: acquire read lock on `selected_device_path`, return clone
-  - [ ] Update `update_manifest()`: acquire write lock on `connected_devices`, mutate the entry at `selected_device_path`, write to disk via `write_manifest`
-  - [ ] Update `get_device_storage()`: call `get_current_device_path()` as before — no change needed at call site
+  - [x] Update `DeviceManager::new()` to initialize both new fields
+  - [x] Update `get_current_device()`: acquire read lock on `connected_devices`, read `selected_device_path`, return clone of the matching entry (or `None`)
+  - [x] Update `get_current_device_path()`: acquire read lock on `selected_device_path`, return clone
+  - [x] Update `update_manifest()`: acquire write lock on `connected_devices`, mutate the entry at `selected_device_path`, write to disk via `write_manifest`
+  - [x] Update `get_device_storage()`: call `get_current_device_path()` as before — no change needed at call site
 
-- [ ] **Backend: Update `handle_device_detected`** (AC: #1, #3)
-  - [ ] Acquire write lock on `connected_devices`, insert `(path, manifest.clone())`
-  - [ ] Read `selected_device_path`; if it is `None`, set `selected_device_path = Some(path)` (auto-select first/only device)
-  - [ ] If `selected_device_path` is already `Some(_)` (another device selected), do NOT change selection — just add to map
-  - [ ] Clear `unrecognized_device_path` (preserve mutual exclusivity with unrecognized path)
-  - [ ] Return `DaemonState::DeviceRecognized` / `DeviceFound` based on DB mapping as before
+- [x] **Backend: Update `handle_device_detected`** (AC: #1, #3)
+  - [x] Acquire write lock on `connected_devices`, insert `(path, manifest.clone())`
+  - [x] Read `selected_device_path`; if it is `None`, set `selected_device_path = Some(path)` (auto-select first/only device)
+  - [x] If `selected_device_path` is already `Some(_)` (another device selected), do NOT change selection — just add to map
+  - [x] Clear `unrecognized_device_path` (preserve mutual exclusivity with unrecognized path)
+  - [x] Return `DaemonState::DeviceRecognized` / `DeviceFound` based on DB mapping as before
 
-- [ ] **Backend: Update `handle_device_removed`** (AC: #4)
-  - [ ] Acquire write lock on `connected_devices`, remove the entry for the removed `path`
-  - [ ] Read `selected_device_path`; if it matches removed path, clear it: `selected_device_path = None`
-  - [ ] If after removal exactly one device remains, auto-select it (`selected_device_path = Some(remaining_path)`)
-  - [ ] Clear `unrecognized_device_path` as before
-  - [ ] Callers in `main.rs` send `DaemonState::Idle` when no devices remain — no change needed there
+- [x] **Backend: Update `handle_device_removed`** (AC: #4)
+  - [x] Acquire write lock on `connected_devices`, remove the entry for the removed `path`
+  - [x] Read `selected_device_path`; if it matches removed path, clear it: `selected_device_path = None`
+  - [x] If after removal exactly one device remains, auto-select it (`selected_device_path = Some(remaining_path)`)
+  - [x] Clear `unrecognized_device_path` as before
+  - [x] Callers in `main.rs` send `DaemonState::Idle` when no devices remain — no change needed there
 
-- [ ] **Backend: Update `handle_device_unrecognized`** (AC: no direct change, but mutual exclusivity)
-  - [ ] This method currently clears `current_device` and `current_device_path` — update to clear `connected_devices` entry for the path and `selected_device_path` if it matches
-  - [ ] Actually: `Unrecognized` means device has no manifest yet — it should NOT be in `connected_devices`. Just ensure `unrecognized_device_path` is set and no entry exists in `connected_devices` for that path
+- [x] **Backend: Update `handle_device_unrecognized`** (AC: no direct change, but mutual exclusivity)
+  - [x] This method currently clears `current_device` and `current_device_path` — update to clear `connected_devices` entry for the path and `selected_device_path` if it matches
+  - [x] Actually: `Unrecognized` means device has no manifest yet — it should NOT be in `connected_devices`. Just ensure `unrecognized_device_path` is set and no entry exists in `connected_devices` for that path
 
-- [ ] **Backend: Add helper `get_connected_devices()`** (AC: #1)
-  - [ ] `pub async fn get_connected_devices(&self) -> Vec<(PathBuf, DeviceManifest)>`
-  - [ ] Returns snapshot of all entries in `connected_devices` HashMap
-  - [ ] Used by `device.list` RPC and `get_daemon_state`
+- [x] **Backend: Add helper `get_connected_devices()`** (AC: #1)
+  - [x] `pub async fn get_connected_devices(&self) -> Vec<(PathBuf, DeviceManifest)>`
+  - [x] Returns snapshot of all entries in `connected_devices` HashMap
+  - [x] Used by `device.list` RPC and `get_daemon_state`
 
-- [ ] **Backend: New RPC `device.list`** (AC: #1)
-  - [ ] Add `"device.list"` arm to `handler` match in `rpc.rs`
-  - [ ] Implement `handle_device_list(state: &AppState) -> Result<Value, JsonRpcError>`
-  - [ ] Call `state.device_manager.get_connected_devices().await`
-  - [ ] Return `Ok(json!({ "status": "success", "data": [ { "path": ..., "deviceId": ..., "name": ... }, ... ] }))`
-  - [ ] `name` = `manifest.name.clone().unwrap_or_else(|| manifest.device_id.clone())`
+- [x] **Backend: New RPC `device.list`** (AC: #1)
+  - [x] Add `"device.list"` arm to `handler` match in `rpc.rs`
+  - [x] Implement `handle_device_list(state: &AppState) -> Result<Value, JsonRpcError>`
+  - [x] Call `state.device_manager.get_connected_devices().await`
+  - [x] Return `Ok(json!({ "status": "success", "data": [ { "path": ..., "deviceId": ..., "name": ... }, ... ] }))`
+  - [x] `name` = `manifest.name.clone().unwrap_or_else(|| manifest.device_id.clone())`
 
-- [ ] **Backend: New RPC `device.select`** (AC: #2)
-  - [ ] Add `"device.select"` arm to `handler` match in `rpc.rs`
-  - [ ] Implement `handle_device_select(state: &AppState, params: Option<Value>) -> Result<Value, JsonRpcError>`
-  - [ ] Extract `path: String` from params; return `ERR_INVALID_PARAMS` if missing
-  - [ ] Convert to `PathBuf`; verify it exists in `connected_devices` — if not, return error `{ "code": 404, "message": "Device not connected" }`
-  - [ ] Acquire write lock on `selected_device_path`, set to `Some(PathBuf::from(path))`
-  - [ ] Return `Ok(json!({ "status": "success", "data": { "ok": true } }))`
-  - [ ] Add unit test: select valid path → ok; select unknown path → error
+- [x] **Backend: New RPC `device.select`** (AC: #2)
+  - [x] Add `"device.select"` arm to `handler` match in `rpc.rs`
+  - [x] Implement `handle_device_select(state: &AppState, params: Option<Value>) -> Result<Value, JsonRpcError>`
+  - [x] Extract `path: String` from params; return `ERR_INVALID_PARAMS` if missing
+  - [x] Convert to `PathBuf`; verify it exists in `connected_devices` — if not, return error `{ "code": 404, "message": "Device not connected" }`
+  - [x] Acquire write lock on `selected_device_path`, set to `Some(PathBuf::from(path))`
+  - [x] Return `Ok(json!({ "status": "success", "data": { "ok": true } }))`
+  - [x] Add unit test: select valid path → ok; select unknown path → error
 
-- [ ] **Backend: Extend `get_daemon_state` response** (AC: #1, #4)
-  - [ ] In `handle_get_daemon_state`, call `state.device_manager.get_connected_devices().await`
-  - [ ] Read `selected_device_path` from `state.device_manager.get_current_device_path().await`
-  - [ ] Add to response JSON:
+- [x] **Backend: Extend `get_daemon_state` response** (AC: #1, #4)
+  - [x] In `handle_get_daemon_state`, call `state.device_manager.get_connected_devices().await`
+  - [x] Read `selected_device_path` from `state.device_manager.get_current_device_path().await`
+  - [x] Add to response JSON:
     ```json
     "connectedDevices": [{ "path": "...", "deviceId": "...", "name": "..." }],
     "selectedDevicePath": "E:\\" | null
     ```
-  - [ ] All existing fields (`currentDevice`, `pendingDevicePath`, etc.) remain unchanged
+  - [x] All existing fields (`currentDevice`, `pendingDevicePath`, etc.) remain unchanged
 
-- [ ] **Frontend: `startDaemonStatePolling` — track multi-device state** (AC: #1, #4)
-  - [ ] Add instance variables `connectedDevices: Array<{path, deviceId, name}>` and `selectedDevicePath: string | null` to `BasketSidebar`
-  - [ ] In polling callback, read `daemonStateResult.connectedDevices` and `daemonStateResult.selectedDevicePath`
-  - [ ] Detect changes: if device count changes OR `selectedDevicePath` changes → call `refreshAndRender()`
-  - [ ] Update stored values after comparison
+- [x] **Frontend: `startDaemonStatePolling` — track multi-device state** (AC: #1, #4)
+  - [x] Add instance variables `connectedDevices: Array<{path, deviceId, name}>` and `selectedDevicePath: string | null` to `BasketSidebar`
+  - [x] In polling callback, read `daemonStateResult.connectedDevices` and `daemonStateResult.selectedDevicePath`
+  - [x] Detect changes: if device count changes OR `selectedDevicePath` changes → call `refreshAndRender()`
+  - [x] Update stored values after comparison
 
-- [ ] **Frontend: Device picker in `renderDeviceFolders` / separate render method** (AC: #1, #2, #3)
-  - [ ] Create `private renderDevicePicker(): string` method
-  - [ ] If `connectedDevices.length <= 1` → return empty string (no picker)
-  - [ ] If `connectedDevices.length > 1` → render a `<sl-select>` positioned above the Device Folders panel:
-    ```html
-    <div class="device-picker-panel">
-      <sl-select value="${selectedDevicePath}" size="small" hoist>
-        ${connectedDevices.map(d => `
-          <sl-option value="${d.path}">${d.name} — ${truncatePath(d.path)}</sl-option>
-        `).join('')}
-      </sl-select>
-    </div>
-    ```
-  - [ ] Wire the `sl-select` `sl-change` event: on change, call `device.select` RPC with `{ path: event.target.value }`, then call `refreshAndRender()`
-  - [ ] Call `renderDevicePicker()` from both render paths (narrow and standard layouts) — insert ABOVE `renderDeviceFolders()`
+- [x] **Frontend: Device picker in `renderDeviceFolders` / separate render method** (AC: #1, #2, #3)
+  - [x] Create `private renderDevicePicker(): string` method
+  - [x] If `connectedDevices.length <= 1` → return empty string (no picker)
+  - [x] If `connectedDevices.length > 1` → render a `<sl-select>` positioned above the Device Folders panel
+  - [x] Wire the `sl-select` `sl-change` event: on change, call `device.select` RPC with `{ path: event.target.value }`, then call `refreshAndRender()`
+  - [x] Call `renderDevicePicker()` from both render paths (narrow and standard layouts) — insert ABOVE `renderDeviceFolders()`
 
-- [ ] **Frontend: Basket reload on device switch** (AC: #2)
-  - [ ] After `device.select` RPC succeeds, call `manifest_get_basket` RPC to reload basket items for the newly selected device
-  - [ ] Update `basketStore` with the new basket items
-  - [ ] Call `refreshAndRender()` to reflect the new device's state in the full UI
+- [x] **Frontend: Basket reload on device switch** (AC: #2)
+  - [x] After `device.select` RPC succeeds, call `manifest_get_basket` RPC to reload basket items for the newly selected device
+  - [x] Update `basketStore` with the new basket items via `hydrateFromDaemon`
+  - [x] Call `refreshAndRender()` to reflect the new device's state in the full UI
 
-- [ ] **Unit tests** (AC: all)
-  - [ ] `device/mod.rs`: test `handle_device_detected` with two sequential devices → both in `connected_devices`, first is auto-selected
-  - [ ] `device/mod.rs`: test `handle_device_removed` for selected device with another remaining → remaining device is auto-selected
-  - [ ] `device/mod.rs`: test `handle_device_removed` for non-selected device → selection unchanged
-  - [ ] `rpc.rs`: test `device.list` returns all connected devices
-  - [ ] `rpc.rs`: test `device.select` with valid path → ok, with unknown path → error
+- [x] **Unit tests** (AC: all)
+  - [x] `device/mod.rs`: test `handle_device_detected` with two sequential devices → both in `connected_devices`, first is auto-selected
+  - [x] `device/mod.rs`: test `handle_device_removed` for selected device with another remaining → remaining device is auto-selected
+  - [x] `device/mod.rs`: test `handle_device_removed` for non-selected device → selection unchanged
+  - [x] `rpc.rs`: test `device.list` returns all connected devices
+  - [x] `rpc.rs`: test `device.select` with valid path → ok, with unknown path → error
 
 ## Dev Notes
 
@@ -317,10 +308,36 @@ From Story 2.6 implementation:
 
 ### Agent Model Used
 
+claude-sonnet-4-6
+
 ### Debug Log References
+
+- Updated existing test `test_handle_device_unrecognized_clears_current_device` → renamed to `test_handle_device_unrecognized_preserves_recognized_device` because Story 2.7 explicitly changes this behavior: unrecognized device no longer clears the selected recognized device.
+- Fixed two existing call sites of `handle_device_removed()` (in `device/tests.rs:813` and `src/tests.rs:93`) that were using the old zero-arg signature.
 
 ### Completion Notes List
 
+- `DeviceManager` refactored: `current_device` + `current_device_path` replaced by `connected_devices: HashMap<PathBuf, DeviceManifest>` + `selected_device_path: Option<PathBuf>`. All public API (`get_current_device`, `get_current_device_path`, `update_manifest`) remains unchanged for callers.
+- `handle_device_detected` now inserts into `connected_devices` map and auto-selects only if no device is currently selected (first/only device).
+- `handle_device_removed` takes a path argument, removes from map, clears/auto-selects as specified. `main.rs` updated to pass the event path.
+- `handle_device_unrecognized` no longer clears `selected_device_path` — recognized devices remain available when an unrecognized device arrives.
+- `initialize_device` updated to insert into `connected_devices` and set `selected_device_path`.
+- New `get_connected_devices()` and `select_device()` helpers added to `DeviceManager`.
+- New RPCs `device.list` and `device.select` added to `rpc.rs`.
+- `get_daemon_state` extended with `connectedDevices` and `selectedDevicePath` fields.
+- `BasketSidebar.ts`: `connectedDevices` + `selectedDevicePath` instance vars; `renderDevicePicker()` renders `<sl-select>` above Device Folders when 2+ devices connected; `bindDevicePickerEvents()` wires `sl-change` → `device.select` RPC + basket reload; both render paths updated.
+- 163 Rust tests pass (0 failures). TypeScript compiles clean.
+
 ### File List
 
+- `jellyfinsync-daemon/src/device/mod.rs`
+- `jellyfinsync-daemon/src/device/tests.rs`
+- `jellyfinsync-daemon/src/main.rs`
+- `jellyfinsync-daemon/src/rpc.rs`
+- `jellyfinsync-daemon/src/tests.rs`
+- `jellyfinsync-ui/src/components/BasketSidebar.ts`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
+
 ### Change Log
+
+- 2026-04-02: Implemented Story 2.7 — Multi-Device Selection Panel. Backend DeviceManager refactored for concurrent device tracking; new `device.list` and `device.select` RPCs; `get_daemon_state` extended; frontend device picker added to BasketSidebar with event wiring and basket reload on device switch. 163 tests pass.

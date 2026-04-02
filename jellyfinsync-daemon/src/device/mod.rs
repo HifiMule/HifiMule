@@ -177,8 +177,10 @@ impl DeviceProber {
 
 pub struct DeviceManager {
     db: std::sync::Arc<crate::db::Database>,
-    current_device: std::sync::Arc<tokio::sync::RwLock<Option<DeviceManifest>>>,
-    current_device_path: std::sync::Arc<tokio::sync::RwLock<Option<PathBuf>>>,
+    /// All currently connected managed devices, keyed by mount path.
+    connected_devices: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<PathBuf, DeviceManifest>>>,
+    /// The device path targeted by all UI operations. None when no device is selected.
+    selected_device_path: std::sync::Arc<tokio::sync::RwLock<Option<PathBuf>>>,
     unrecognized_device_path: std::sync::Arc<tokio::sync::RwLock<Option<PathBuf>>>,
 }
 
@@ -186,8 +188,8 @@ impl DeviceManager {
     pub fn new(db: std::sync::Arc<crate::db::Database>) -> Self {
         Self {
             db,
-            current_device: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-            current_device_path: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            connected_devices: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            selected_device_path: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             unrecognized_device_path: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
@@ -198,12 +200,16 @@ impl DeviceManager {
         manifest: DeviceManifest,
     ) -> Result<crate::DaemonState> {
         {
-            let mut current = self.current_device.write().await;
-            *current = Some(manifest.clone());
+            let mut devices = self.connected_devices.write().await;
+            devices.insert(path.clone(), manifest.clone());
         }
         {
-            let mut current_path = self.current_device_path.write().await;
-            *current_path = Some(path);
+            let mut sel = self.selected_device_path.write().await;
+            if sel.is_none() {
+                // Auto-select first/only device
+                *sel = Some(path.clone());
+            }
+            // If another device is already selected, don't change selection
         }
         {
             let mut unrecognized_path = self.unrecognized_device_path.write().await;
@@ -232,14 +238,11 @@ impl DeviceManager {
 
     pub async fn handle_device_unrecognized(&self, path: PathBuf) -> crate::DaemonState {
         let path_str = path.to_string_lossy().to_string();
-        // Enforce mutual exclusivity: clear recognized device state
+        // Unrecognized devices have no manifest — ensure they are not in connected_devices.
+        // Do NOT change selected_device_path since other recognized devices may still be connected.
         {
-            let mut current = self.current_device.write().await;
-            *current = None;
-        }
-        {
-            let mut current_path = self.current_device_path.write().await;
-            *current_path = None;
+            let mut devices = self.connected_devices.write().await;
+            devices.remove(&path);
         }
         {
             let mut unrecognized_path = self.unrecognized_device_path.write().await;
@@ -252,21 +255,59 @@ impl DeviceManager {
         self.unrecognized_device_path.read().await.clone()
     }
 
-    pub async fn handle_device_removed(&self) {
-        let mut current = self.current_device.write().await;
-        *current = None;
-        let mut current_path = self.current_device_path.write().await;
-        *current_path = None;
-        let mut unrecognized_path = self.unrecognized_device_path.write().await;
-        *unrecognized_path = None;
+    pub async fn handle_device_removed(&self, removed_path: &PathBuf) {
+        {
+            let mut devices = self.connected_devices.write().await;
+            devices.remove(removed_path);
+        }
+        {
+            let mut sel = self.selected_device_path.write().await;
+            if sel.as_ref() == Some(removed_path) {
+                *sel = None;
+                // Auto-select if exactly one device remains
+                let devices = self.connected_devices.read().await;
+                if devices.len() == 1 {
+                    *sel = devices.keys().next().cloned();
+                }
+            }
+        }
+        {
+            let mut unrecognized_path = self.unrecognized_device_path.write().await;
+            *unrecognized_path = None;
+        }
     }
 
     pub async fn get_current_device(&self) -> Option<DeviceManifest> {
-        self.current_device.read().await.clone()
+        let sel = self.selected_device_path.read().await.clone();
+        let path = sel?;
+        let devices = self.connected_devices.read().await;
+        devices.get(&path).cloned()
     }
 
     pub async fn get_current_device_path(&self) -> Option<PathBuf> {
-        self.current_device_path.read().await.clone()
+        self.selected_device_path.read().await.clone()
+    }
+
+    /// Returns a snapshot of all currently connected managed devices.
+    pub async fn get_connected_devices(&self) -> Vec<(PathBuf, DeviceManifest)> {
+        self.connected_devices
+            .read()
+            .await
+            .iter()
+            .map(|(p, m)| (p.clone(), m.clone()))
+            .collect()
+    }
+
+    /// Sets the selected device path. Returns false if path is not in connected_devices.
+    pub async fn select_device(&self, path: PathBuf) -> bool {
+        let devices = self.connected_devices.read().await;
+        if !devices.contains_key(&path) {
+            return false;
+        }
+        drop(devices);
+        let mut sel = self.selected_device_path.write().await;
+        *sel = Some(path);
+        true
     }
 
     /// Atomically updates both the in-memory manifest and the on-disk file.
@@ -277,14 +318,14 @@ impl DeviceManager {
     where
         F: FnOnce(&mut DeviceManifest),
     {
-        let mut current = self.current_device.write().await;
-        let manifest = current
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("No device connected"))?;
+        let selected_path = self.selected_device_path.read().await.clone();
+        let path = selected_path.ok_or_else(|| anyhow::anyhow!("No device connected"))?;
+        let mut devices = self.connected_devices.write().await;
+        let manifest = devices
+            .get_mut(&path)
+            .ok_or_else(|| anyhow::anyhow!("Selected device not in connected map"))?;
         mutation(manifest);
-        if let Some(path) = self.current_device_path.read().await.as_ref() {
-            crate::device::write_manifest(path, manifest).await?;
-        }
+        crate::device::write_manifest(&path, manifest).await?;
         Ok(())
     }
 
@@ -358,12 +399,12 @@ impl DeviceManager {
             *unrecognized_path = None;
         }
         {
-            let mut current_device = self.current_device.write().await;
-            *current_device = Some(manifest.clone());
+            let mut devices = self.connected_devices.write().await;
+            devices.insert(device_root.clone(), manifest.clone());
         }
         {
-            let mut current_path = self.current_device_path.write().await;
-            *current_path = Some(device_root);
+            let mut sel = self.selected_device_path.write().await;
+            *sel = Some(device_root);
         }
 
         Ok(manifest)

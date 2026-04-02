@@ -90,7 +90,8 @@ async fn test_device_recognition_integration() {
     // This is expected behavior per T2.3
 
     // 8. Simulate removal
-    manager.handle_device_removed().await;
+    let removed_path = std::path::PathBuf::from("/tmp/test-device");
+    manager.handle_device_removed(&removed_path).await;
     let device = manager.get_current_device().await;
     assert!(device.is_none());
     let path = manager.get_current_device_path().await;

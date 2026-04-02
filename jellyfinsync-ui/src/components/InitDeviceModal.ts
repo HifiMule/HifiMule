@@ -66,14 +66,23 @@ export class InitDeviceModal {
         if (!body) return;
 
         try {
-            const [creds, profiles] = await Promise.all([
-                rpcCall('get_credentials') as any,
-                rpcCall('device_profiles.list') as any,
+            // Use allSettled so a profiles RPC failure doesn't block the modal.
+            const [credsResult, profilesResult] = await Promise.allSettled([
+                rpcCall('get_credentials') as Promise<any>,
+                rpcCall('device_profiles.list') as Promise<any>,
             ]);
+
+            const creds = credsResult.status === 'fulfilled' ? credsResult.value : null;
+            const profiles = profilesResult.status === 'fulfilled'
+                ? profilesResult.value
+                : [{ id: 'passthrough', name: 'No Transcoding', description: 'Sync audio files as-is without transcoding.' }];
+
             const userId = creds?.userId || null;
             this.renderContent(body as HTMLElement, userId, profiles);
         } catch (err) {
-            this.renderError(body as HTMLElement, (err as Error).message);
+            // Tauri invoke rejects with a plain string, not an Error object
+            const message = typeof err === 'string' ? err : (err instanceof Error ? err.message : String(err));
+            this.renderError(body as HTMLElement, message || 'Unknown error');
         }
     }
 
@@ -219,7 +228,8 @@ export class InitDeviceModal {
 
             this.onComplete?.();
         } catch (err) {
-            this.renderInitError(body, (err as Error).message);
+            const message = typeof err === 'string' ? err : (err instanceof Error ? err.message : String(err));
+            this.renderInitError(body, message);
         }
     }
 
