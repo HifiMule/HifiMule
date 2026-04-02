@@ -47,7 +47,7 @@ workflowType: 'prd'
 - **Destructive Safety Protocol:** Mandatory manual user confirmation for any manifest-repair or cleanup operations exceeding 100MB of data deletion.
 - **Conflict-Free Manifest Sync:** Implementation of the `.jellyfinsync.json` logic for managed-folder isolation.
 - **Profile Selection:** UI/CLI support for selecting the correct Jellyfin user account for playlist/scrobble routing.
-- **Auto-Fill Sync Mode:** Intelligent device-filling that selects music by priority (favorites → play count → creation date) up to capacity or a user-defined limit. Can be mixed with manual basket selections.
+- **Auto-Fill Sync Mode:** Intelligent device-filling using a virtual basket slot. Enabling Auto-Fill places a single slot in the basket representing remaining capacity; the priority algorithm (favorites → play count → creation date) runs at sync time, not at basket-build time. Always uses the freshest library state. Can be mixed with manual basket selections.
 - **Auto-Sync on Connect:** Known devices with auto-sync enabled trigger synchronization automatically on detection, requiring zero user interaction.
 
 - **Transcoding Handshake:** Per-device profile selection for server-side re-encoding via Jellyfin PlaybackInfo API. Profiles stored in an editable `device-profiles.json` in the app data directory; passthrough (direct download) is the default.
@@ -157,7 +157,8 @@ As a cross-platform desktop application, JellyfinSync consists of a performance-
 - **FR9:** Users can select specific playlists or entities for synchronization.
 - **FR10:** The system can report real-time storage availability on the target device.
 - **FR11:** Users can see a preview of "Proposed Changes" (files to add, remove, or update) before starting a sync.
-- **FR29:** The system can automatically select music to synchronize based on a priority algorithm (favorites first, then by play count, then by creation date) up to the device's available capacity or a user-defined size limit.
+- **FR29:** The system can reserve capacity in the sync basket via a virtual Auto-Fill slot; at sync time the daemon expands the slot by running the priority algorithm (favorites first, then by play count, then by creation date) against the current Jellyfin library state, up to the device's available capacity or a user-defined size limit.
+- **FR34:** The system can add an artist to the sync basket as a single entity reference; at sync time the daemon resolves the artist to its current track list, ensuring tracks added to the artist after basket construction are automatically included.
 - **FR30:** The system can automatically trigger synchronization when a known, previously configured device is detected, without requiring user interaction.
 
 ### 4. Synchronization Engine

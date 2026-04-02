@@ -96,8 +96,10 @@ unrecognized_device_path: Option<PathBuf>            // device awaiting initiali
 - **Internal IPC:** JSON-RPC 2.0 protocol implemented over a local HTTP server within the daemon.
 - **Release Mode Proxy:** In release builds, Tauri serves the frontend from `https://tauri.localhost`, which blocks direct `fetch()` to the daemon's `http://localhost:19140` endpoint (mixed content / CORS). All RPC and image requests are proxied through Tauri invoke commands (`rpc_proxy`, `image_proxy`) in the UI's Rust backend, bypassing browser security restrictions. In dev mode, direct HTTP is used.
 - **External API:** Direct utilization of the Jellyfin Progressive Sync API for scrobbling and playback reporting.
-- **Auto-Fill IPC:** `basket.autoFill` — Configure and trigger auto-fill calculation. Params: `{ deviceId, maxBytes?, excludeItemIds[] }`. Response streams ranked item list progressively.
+- **Auto-Fill IPC:** `basket.autoFill` — Preview/debug endpoint for auto-fill calculation. Params: `{ deviceId, maxBytes?, excludeItemIds[] }`. Returns ranked item list. **Not called by the UI to populate the basket** — auto-fill expansion runs inside `sync.start` when the `autoFill` param is present.
 - **Auto-Fill Settings IPC:** `sync.setAutoFill` — Persist auto-fill settings per device profile. Params: `{ deviceId, autoFillEnabled, maxFillBytes?, autoSyncOnConnect }`.
+- **`sync.start` params (extended):** `{ devicePath: string, itemIds: string[], autoFill?: { enabled: boolean, maxBytes?: number, excludeItemIds: string[] } }` — if `autoFill.enabled`, the daemon calls `run_auto_fill()` and merges the resulting IDs with `itemIds` before executing sync. Mirrors the daemon-initiated auto-sync path (`main.rs:503`).
+- **Virtual basket slots:** Two UI-only marker types stored in the basket that represent deferred expansion. `AutoFillSlot` (`id: '__auto_fill_slot__'`) is passed to `sync.start` as the `autoFill` param, not as an `itemId`. `MusicArtist` items are passed as regular `itemIds`; the existing container-expansion logic at `rpc.rs:807–866` resolves them to tracks at sync time.
 - **Multi-Device IPC:**
   - `device.list` → `Array<{ path: string, deviceId: string, name: string | null }>` — all connected managed devices.
   - `device.select(params: { path: string })` → `{ ok: true }` — sets the active device context for all operations.

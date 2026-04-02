@@ -95,11 +95,12 @@ FR23: Epic 5 - OS-Native Sync Notifications
 FR24: Epic 2 - Startup Splash Screen with Connection Status
 FR27: Epic 6 - Platform-Native Installer Bundling
 FR28: Epic 6 - CI/CD Cross-Platform Build Pipeline
-FR29: Epic 3 - Auto-Fill Priority Selection Algorithm
+FR29: Epic 3 - Auto-Fill Virtual Slot (Story 3.8)
 FR30: Epic 2 - Auto-Sync on Known Device Detection
 FR31: Epic 4 - Transcoding Handshake (Story 4.8)
 FR32: Epic 4 - Transcoding Profile RPC (Story 4.8)
 FR33: Epic 2 - Multi-Device Selection (Story 2.7)
+FR34: Epic 3 - Artist Entity Basket Item (Story 3.9)
 
 ## Epic List
 
@@ -405,6 +406,120 @@ So that I can fill my device without manually browsing and selecting every album
 - Device profile stores auto-fill preferences: `auto_fill_enabled`, `max_fill_bytes`
 - Post-MVP: allow scoping to specific libraries/collections
 
+**Status:** Superseded by Story 3.8 — lazy virtual slot model replaces eager basket population.
+
+### Story 3.7: Artist View — Cache, Scroll State & Quick Navigation
+
+As a Ritualist (Arthur),
+I want the Artist view to remember where I was scrolling and load instantly when I navigate back,
+So that browsing a large music library feels snappy and I never lose my place when exploring albums.
+
+**Acceptance Criteria:**
+
+**Given** I have scrolled down the artist/album grid and clicked into a container item
+**When** I press the breadcrumb to navigate back
+**Then** the grid scrolls back to the exact position I was at before navigating in.
+**And** my position is preserved for any level of the breadcrumb stack (library → artist → album).
+
+**Given** I previously loaded a page of items under a parent
+**When** I navigate back to that parent via breadcrumb
+**Then** the grid renders from cache instantly (no spinner, no re-fetch).
+**And** cached data is invalidated if I navigate away to a different branch of the library tree.
+
+**Given** the current folder contains 20 or more items of type `MusicArtist`
+**When** the grid renders
+**Then** an alphabetical quick-nav bar is displayed (letters A–Z plus `#` for non-alpha).
+**And** clicking a letter filters the grid to show only artists whose name starts with that letter (via server-side `NameStartsWith` / `NameLessThan` params); clicking the active letter again clears the filter and restores the full list.
+**And** the quick-nav bar is NOT shown for views with fewer than 20 items or for non-artist views.
+
+**Given** a device is disconnected or a different device is selected
+**When** the library view re-initialises
+**Then** all scroll state and page caches are cleared and the library reloads from scratch.
+
+**Technical Notes:**
+- UI-only change (`library.ts` + CSS); zero new RPC methods
+- `AppState` extended with `scrollCache: Map<string, number>` and `pageCache: Map<string, { items, total }>`
+- `clearNavigationCache()` exported and called on device-change events, matching `clearForDevice()` pattern
+- Quick-nav uses server-side filter (not client-side scrollIntoView) — confirmed via user test post-implementation
+- Scroll restore uses `requestAnimationFrame` after `renderGrid()` to ensure DOM is painted
+
+### Story 3.8: Lazy Auto-Fill Virtual Slot
+
+As a Convenience Seeker (Sarah),
+I want to enable Auto-Fill with a single toggle and have the device fill with my best music at sync time,
+So that I don't wait for a slow basket population and always get the freshest track selection when I actually sync.
+
+**Acceptance Criteria:**
+
+**Given** the basket sidebar is visible
+**When** I enable the "Auto-Fill" toggle
+**Then** a single "Auto-Fill Slot" card appears in the basket (not individual tracks).
+**And** the card shows the configured capacity target (e.g. "Fill remaining 12.4 GB" or the user-set max).
+**And** no Jellyfin API call is made at this point.
+
+**Given** manual items and the Auto-Fill Slot are in the basket
+**When** I view the basket
+**Then** manual items appear as individual cards above the Auto-Fill Slot.
+**And** the Auto-Fill Slot shows "Will fill ~X GB with top-priority tracks at sync time".
+**And** storage projection includes the slot's target bytes in the capacity bar.
+
+**Given** the basket contains the Auto-Fill Slot
+**When** I click "Start Sync"
+**Then** the daemon runs the priority algorithm (`run_auto_fill`) at the start of the sync job.
+**And** expands the slot to real track IDs (favorites first, then play count, then newest).
+**And** excludes any track IDs already covered by manual basket items.
+**And** the expanded track list is merged with manual items for the sync operation.
+**And** the UI shows real-time progress exactly as today (files completed, current filename).
+
+**Given** Auto-Fill is enabled
+**When** I toggle it off
+**Then** the Auto-Fill Slot is removed from the basket immediately (no API call).
+
+**Technical Notes:**
+- Remove from `BasketSidebar.ts`: `triggerAutoFill()`, `scheduleAutoFill()`, `autoFillInFlight`, `autoFillPendingRetrigger`, `autoFillDebounceTimer`, `isAutoFillLoading`, `basketStore.replaceAutoFilled()`
+- Toggle inserts a single `{ id: '__auto_fill_slot__', type: 'AutoFillSlot', maxBytes: N }` virtual item into `basketStore`
+- `basket.autoFill` RPC: retained as preview/debug endpoint, no longer called by UI for basket population
+- `sync.start` RPC handler: if request contains `autoFill: { enabled: true, maxBytes?, excludeItemIds[] }`, call `run_auto_fill()` and merge results with `itemIds` before executing — mirrors existing daemon-initiated path (`main.rs:503`)
+- `sync.start` params gain: `autoFill?: { enabled: boolean, maxBytes?: number, excludeItemIds: string[] }`
+- Auto-fill preferences (enabled, maxBytes) continue to be persisted via `sync.setAutoFill`
+
+### Story 3.9: Artist Entity Basket Item
+
+As a Ritualist (Arthur),
+I want to add an artist to my basket as a single entity rather than a snapshot of their tracks,
+So that any new albums or tracks added to that artist in Jellyfin are automatically included the next time I sync.
+
+**Acceptance Criteria:**
+
+**Given** I am browsing the Artist view
+**When** I click (+) on an artist
+**Then** a single "Artist" card appears in the basket (not individual track cards).
+**And** the card shows: artist name, approximate track count, and estimated size (from artist entity metadata at add-time).
+**And** no per-track child fetch is triggered at add-time.
+
+**Given** an artist card is in the basket
+**When** I view it
+**Then** it shows "Artist · ~N tracks · ~X MB" (approximate).
+**And** storage projection uses this estimate for the capacity bar.
+**And** the card has the same remove (×) interaction as any other basket item.
+
+**Given** the basket contains one or more artist cards
+**When** sync starts
+**Then** the daemon calls `get_child_items_with_sizes` for each artist ID to resolve current tracks (already occurs at `rpc.rs:831` for any container ID).
+**And** newly added tracks from that artist (since the basket was built) are included in the sync.
+
+**Given** artist cards and manually added albums/playlists are both in the basket
+**Then** duplicate tracks are deduplicated by the daemon at sync time via the existing manifest comparison logic.
+
+**When** I click (×) on an artist card
+**Then** the card is removed immediately; no individual track cleanup needed.
+
+**Technical Notes:**
+- UI: on artist (+) click, store `{ id: artistId, type: 'MusicArtist', name, sizeBytes: artistTotalBytes, childCount }` in `basketStore` — use artist-level size from metadata, no child fetch
+- Daemon `sync.start`: no change required — `rpc.rs:807–866` already expands `MusicArtist` container IDs via `get_child_items_with_sizes`
+- `BasketItem.type: 'MusicArtist'` already valid; `sizeBytes` carries artist-level cumulative size
+- Story 3.6's eager artist-track expansion at add-time is superseded by this story
+
 ## Epic 4: The Sync Engine & Self-Healing Core
 
 Build the performant, atomic sync logic with built-in core resume capabilities.
@@ -497,6 +612,68 @@ So that I can either manually execute my selection or enjoy zero-touch automatic
 **And** the sync follows the same differential algorithm, buffered IO, and manifest update logic as a UI-triggered sync.
 **And** if the UI is open, it reflects the in-progress sync state via `on_sync_progress` events.
 **And** if the UI is closed, the tray icon and OS notifications provide progress and completion feedback.
+
+### Story 4.6: Sync Progress — Time Remaining Estimation
+
+As a Convenience Seeker (Sarah),
+I want to see an estimated time remaining during sync,
+So that I know whether to wait by the screen or step away.
+
+**Acceptance Criteria:**
+
+**Given** a sync is in progress
+**When** at least 2 polling cycles have completed with non-zero `bytesTransferred`
+**Then** a time-remaining estimate is displayed below the progress bar ("~N min left" / "~N sec left" / "Almost done…").
+**And** before 2 samples are available, the label shows "Calculating…".
+
+**Given** `bytesTransferred` and `totalBytes` are available
+**When** calculating ETA
+**Then** ETA = `bytes_remaining / avg_bytes_per_second`, where `avg_bytes_per_second` = `bytesTransferred / elapsed_seconds` (cumulative average since `startedAt`).
+**And** format: ≥ 60s → "~N min left"; ≥ 10s → "~N sec left"; < 10s → "Almost done…".
+
+**When** `status === 'complete'`
+**Then** the ETA line is replaced by the existing "Sync Complete" panel.
+
+**Technical Notes:**
+- Daemon: `SyncOperation` gains `bytes_transferred: u64` (cumulative across completed + in-progress file) and `total_bytes: u64` (pre-computed sum of all file sizes at sync start)
+- `total_bytes` written once at start of `execute_sync()`; `bytes_transferred` updated in the per-file progress callback
+- ETA calculation and display are UI-side only (`BasketSidebar.ts`)
+- Tray tooltip remains "JellyfinSync: Syncing…" — ETA is UI-only (known variance)
+
+### Story 4.7: Playlist M3U File Generation
+
+As a Ritualist (Arthur) and Convenience Seeker (Sarah),
+I want `.m3u` playlist files to be written to my device when I sync a Jellyfin playlist,
+So that my DAP or Rockbox player can natively load and play the playlist in the correct order.
+
+**Acceptance Criteria:**
+
+**Given** at least one basket item has `item_type = "Playlist"` and sync runs successfully
+**When** sync completes
+**Then** a `.m3u` file is written to the managed sync folder for each playlist.
+**And** the filename is sanitized via `sanitize_path_component()` and truncated to 255 characters if needed.
+
+**Given** a playlist `.m3u` is being written
+**When** generating its contents
+**Then** the file begins with `#EXTM3U`.
+**And** each track has an `#EXTINF:<seconds>,<Artist> - <Title>` line followed by its relative path (relative to the `.m3u` file location, forward slashes).
+**And** duration is `RunTimeTicks ÷ 10,000,000`; absent ticks → `-1`.
+
+**Given** a playlist's track list is unchanged from the previous sync (same `trackCount` and `trackIds` hash in manifest)
+**Then** the `.m3u` is not rewritten. If changed, it is regenerated atomically (Write-Temp-Rename).
+
+**Given** a playlist was in the previous sync but is absent from the current basket
+**Then** its `.m3u` file is deleted and its entry removed from `manifest.playlists`.
+
+**Given** a playlist track's `jellyfin_id` is not found in `manifest.synced_items` (e.g. download failed)
+**Then** that track is omitted from the `.m3u` with a log entry; remaining tracks are still written.
+
+**Technical Notes:**
+- `PlaylistTrackInfo` and `PlaylistSyncItem` structs added to `sync.rs`
+- `SyncDelta` gains `playlists: Vec<PlaylistSyncItem>` — populated during `sync.start` container expansion
+- Manifest extended with `playlists: Vec<PlaylistManifestEntry>` (`jellyfinId`, `filename`, `trackCount`, `trackIds`, `lastModified`)
+- All writes use Write-Temp-Rename + `sync_all()` for atomicity
+- `run_time_ticks: Option<u64>` added to `JellyfinItem` in `api.rs`
 
 ### Story 4.8: Transcoding Handshake via Device Profiles
 

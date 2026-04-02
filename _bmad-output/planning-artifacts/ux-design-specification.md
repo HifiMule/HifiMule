@@ -83,8 +83,9 @@ graph TD
 ### 5.3 Auto-Fill Components
 *   **Auto-Fill Toggle:** Shoelace `<sl-switch>` in the Basket header area, enabling/disabling automatic library fill.
 *   **Max Fill Size Control:** `<sl-range>` slider (visible when Auto-Fill is active), allowing the user to cap fill size below full device capacity.
-*   **Auto Badge:** Distinct visual indicator on auto-filled items using a muted accent color to differentiate from manually added `(+)` items.
-*   **Priority Reason Tags:** Small inline labels on auto-filled items showing selection reason (★ Favorite, ▶ 47 plays, "New").
+*   **Auto-Fill Slot Card:** A single card in the basket (replaces individual auto-filled track cards) showing the configured capacity target: "Will fill ~X GB with top-priority tracks at sync time". Rendered with a distinct dashed border to signal deferred content. No API call is made when Auto-Fill is toggled on or off — the slot is a local UI marker only.
+*   **Artist Entity Card:** Artist basket items render as a single card (identical structure to album cards) showing "Artist · ~N tracks · ~X MB". The track count and size are estimates from artist-level metadata at add-time; the daemon resolves the actual current track list at sync time, including any tracks added to the artist after the basket was built.
+*   **Auto Badge / Priority Reason Tags:** Removed — individual auto-filled tracks are no longer displayed in the basket prior to sync.
 
 ### 5.4 Device Profile Settings
 *   **Auto-sync on connect toggle:** `<sl-switch>` in the device profile panel with helper text: "Automatically start syncing when this device is connected. Works with or without the UI open."

@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-04-02  # 3-6 marked review
+last_updated: 2026-04-02  # added 3-8, 3-9 (lazy basket expansion)
 project: JellyfinSync
 project_key: NOKEY
 tracking_system: file-system
@@ -55,6 +55,7 @@ development_status:
   2-4-startup-splash-screen-with-connection-status: done
   2-5-interactive-login-and-identity-management: done
   2-6-initialize-new-device-manifest: done
+  2-7-multi-device-selection-panel: backlog
   epic-2-retrospective: optional
 
   epic-3: in-progress
@@ -65,6 +66,8 @@ development_status:
   3-5-music-only-library-filtering: done
   3-6-auto-fill-sync-mode-synchronise-all: done
   3-7-artist-view-cache-scroll-state-quick-navigation: done
+  3-8-lazy-auto-fill-virtual-slot: backlog
+  3-9-artist-entity-basket-item: backlog
   epic-3-retrospective: optional
 
   epic-4: in-progress
@@ -76,6 +79,7 @@ development_status:
   4-5b-daemon-initiated-sync-path: done
   4-6-sync-progress-eta: done
   4-7-playlist-m3u-file-generation: done
+  4-8-transcoding-handshake-via-device-profiles: done
   epic-4-retrospective: optional
 
   epic-5: done
