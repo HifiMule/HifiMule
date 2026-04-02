@@ -1,0 +1,177 @@
+# Story 6.3: macOS Installer (DMG)
+
+Status: ready-for-dev
+
+<!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
+
+## Story
+
+As a **Convenience Seeker (Sarah)**,
+I want a macOS DMG with drag-to-Applications install,
+so that I can install JellyfinSync following standard macOS conventions.
+
+## Acceptance Criteria
+
+1. **DMG generated**: Given a successful `cargo tauri build` on macOS, when I open the generated DMG, then I see the JellyfinSync app bundle with a drag-to-Applications prompt.
+2. **No root required**: The app runs without requiring root/sudo privileges (macOS sandbox compliance — NFR9).
+3. **Daemon sidecar embedded**: The daemon sidecar is embedded within the .app bundle (under `Contents/MacOS/`).
+4. **App metadata correct**: The .app bundle shows the correct product name ("JellyfinSync"), identifier (`com.alexi.jellyfinsync`), and icon.
+5. **Sidecar launches**: JellyfinSync.app launches the daemon sidecar correctly on open and the daemon responds to a health-check at `localhost:19140`.
+
+## Tasks / Subtasks
+
+- [ ] **T1: Configure macOS Bundle Settings** (AC: #1, #4)
+  - [ ] T1.1: Add `bundle.macos` section to `tauri.conf.json` with `minimumSystemVersion: "10.15"`
+  - [ ] T1.2: Verify `icons/icon.icns` is listed in `bundle.icon` (already present — confirm no change needed)
+  - [ ] T1.3: Document in completion notes that code signing and notarization are deferred to post-MVP (Gatekeeper warning expected on first launch — right-click → Open or System Settings → Privacy & Security → Open Anyway)
+
+- [ ] **T2: Verify prepare-sidecar.mjs Handles macOS** (AC: #3)
+  - [ ] T2.1: Review `scripts/prepare-sidecar.mjs` — confirm it detects macOS target triple via `rustc -vV` (`aarch64-apple-darwin` on Apple Silicon, `x86_64-apple-darwin` on Intel)
+  - [ ] T2.2: Confirm the script copies daemon binary to `sidecars/jellyfinsync-daemon-{target-triple}` with no `.exe` suffix on macOS
+  - [ ] T2.3: If the script is Windows-only or has macOS bugs, fix target triple detection and path handling
+
+- [ ] **T3: Run macOS Build and Validate DMG** (AC: #1, #2, #3, #4, #5)
+  - [ ] T3.1: Run `cargo tauri build` on macOS — locate `.app` at `target/release/bundle/macos/` and `.dmg` at `target/release/bundle/dmg/`
+  - [ ] T3.2: Open DMG — verify the drag-to-Applications window appears with the JellyfinSync icon
+  - [ ] T3.3: Copy app to `/Applications` — verify it launches without sudo or admin prompt
+  - [ ] T3.4: Verify daemon sidecar present inside bundle: `JellyfinSync.app/Contents/MacOS/jellyfinsync-daemon-{target-triple}`
+  - [ ] T3.5: Confirm UI starts and daemon responds at `localhost:19140`
+  - [ ] T3.6: Verify product name "JellyfinSync" and icon display correctly in Finder and Dock
+
+- [ ] **T4: Validate Sandbox Compliance** (AC: #2)
+  - [ ] T4.1: Launch app from `/Applications` — no sudo/root required for any user-facing function
+  - [ ] T4.2: Confirm app data writes to `~/Library/Application Support/JellyfinSync/` (daemon.log, ui.log) — no writes to system-protected paths
+
+## Dev Notes
+
+### Architecture & Technical Requirements
+
+- **Tauri v2 macOS Bundler**: `cargo tauri build` on macOS automatically produces both:
+  - `.app` bundle: `target/release/bundle/macos/JellyfinSync.app`
+  - `.dmg` installer: `target/release/bundle/dmg/JellyfinSync_0.1.0_aarch64.dmg` (or `x64`)
+  - No macOS-specific WiX fragments or hooks needed — DMG creation is fully built into Tauri's bundler
+  - The only required config addition is `bundle.macos.minimumSystemVersion`
+
+- **Code Signing & Notarization — DEFERRED to post-MVP** (per architecture.md):
+  - Without signing, Gatekeeper shows "App from unidentified developer" on first launch
+  - Workaround: right-click → Open (or System Settings → Privacy & Security → Open Anyway)
+  - The build itself succeeds without signing — do NOT block on this
+  - Do NOT add `signingIdentity` or `providerShortName` in `tauri.conf.json` for this story
+
+- **macOS Sandbox Compliance (NFR9)**: Tauri apps distributed outside the App Store are NOT sandboxed by default. No entitlements file needed for MVP. The app must not request admin privileges for normal operation — sidecar runs in the user's session.
+
+- **macOS Minimum Version**: Tauri v2 requires macOS 10.15 (Catalina). Set `minimumSystemVersion: "10.15"` in `bundle.macos`.
+
+### Sidecar Target Triple Handling
+
+| Platform | Target Triple | Sidecar Filename |
+|----------|--------------|-----------------|
+| Apple Silicon (M-series) | `aarch64-apple-darwin` | `jellyfinsync-daemon-aarch64-apple-darwin` |
+| Intel Mac | `x86_64-apple-darwin` | `jellyfinsync-daemon-x86_64-apple-darwin` |
+
+`prepare-sidecar.mjs` determines the triple via `rustc -vV`, builds the daemon in release mode, then copies it to `jellyfinsync-ui/src-tauri/sidecars/jellyfinsync-daemon-{triple}`. On macOS there is **no** `.exe` suffix.
+
+Tauri picks up the sidecar from `sidecars/` and places it at `JellyfinSync.app/Contents/MacOS/jellyfinsync-daemon-{triple}` at bundle time. The `bundle.externalBin: ["sidecars/jellyfinsync-daemon"]` config (already set in `tauri.conf.json`) handles this automatically.
+
+### tauri.conf.json Change
+
+Add `macos` key inside the existing `bundle` object:
+
+```json
+"bundle": {
+  "active": true,
+  "targets": "all",
+  "icon": [...],
+  "externalBin": ["sidecars/jellyfinsync-daemon"],
+  "macos": {
+    "minimumSystemVersion": "10.15"
+  },
+  "windows": { ... }
+}
+```
+
+No other macOS-specific bundle fields are needed for MVP.
+
+### App Data Location on macOS
+
+| Artifact | Path |
+|----------|------|
+| Daemon log | `~/Library/Application Support/JellyfinSync/daemon.log` |
+| UI log | `~/Library/Application Support/JellyfinSync/ui.log` |
+| Database | `~/Library/Application Support/JellyfinSync/jellyfinsync.db` |
+
+The `dirs` crate resolves the platform-appropriate data directory transparently — no code changes needed.
+
+### Post-MVP: launchd Agent — NOT in scope for 6.3
+
+The post-MVP daemon auto-start via launchd is explicitly excluded from this story. The existing sidecar spawn in `lib.rs` `setup()` hook is the MVP mechanism. The launchd approach (tracking in the epic) would require:
+- Installing `~/Library/LaunchAgents/com.alexi.jellyfinsync.daemon.plist` on first launch
+- UI switching to health-check detection → `launchctl load` fallback
+- Cleanup on app removal
+
+### Previous Story Intelligence (6.2)
+
+- `cargo tauri build` is confirmed working and produces platform-native installers
+- `bundle.externalBin: ["sidecars/jellyfinsync-daemon"]` already set — sidecar bundling is configured, no changes needed for DMG sidecar inclusion
+- `icon.icns` already at `jellyfinsync-ui/src-tauri/icons/icon.icns` and listed in `bundle.icon` — DMG/app icon is ready
+- `productName` = "JellyfinSync", `identifier` = "com.alexi.jellyfinsync" already configured
+- Daemon sidecar spawned via `app.shell().sidecar("jellyfinsync-daemon")` in `lib.rs` `setup()` — same mechanism works unchanged on macOS
+- **123 tests pass** — do not regress this
+- WiX fragments and NSIS hooks are Windows-only — no macOS equivalent needed
+- 3-tier daemon detection in `lib.rs` (health check → sc start → sidecar) is Windows-specific in its middle tier but the first and third tiers apply cross-platform
+
+### What NOT to Do
+
+- Do NOT implement launchd agent integration (post-MVP)
+- Do NOT configure macOS code signing or notarization (post-MVP, deferred per architecture)
+- Do NOT remove the sidecar launch fallback from `lib.rs` — it is the MVP mechanism for daemon launch on macOS
+- Do NOT add a macOS-specific `bundle.targets` override — `"targets": "all"` correctly produces DMG on macOS
+- Do NOT modify the daemon's RPC protocol
+- Do NOT write to system-protected paths — `~/Library/Application Support/JellyfinSync/` is user-writable without sudo
+- Do NOT add an entitlements file unless a specific macOS API requires it (not needed for MVP)
+- Do NOT create macOS-specific daemon detection code in `lib.rs` — the existing detection is sufficient
+
+### Project Structure Notes
+
+- Workspace: `jellyfinsync-daemon` (standalone Rust binary) + `jellyfinsync-ui/src-tauri` (Tauri Rust backend)
+- Frontend: `jellyfinsync-ui/src/` (Vanilla TypeScript + Shoelace)
+- Tauri config: `jellyfinsync-ui/src-tauri/tauri.conf.json`
+- Icons: `jellyfinsync-ui/src-tauri/icons/` (`icon.icns` already present for macOS)
+- Build output (macOS): `target/release/bundle/macos/JellyfinSync.app` + `target/release/bundle/dmg/*.dmg`
+- Sidecar staging: `jellyfinsync-ui/src-tauri/sidecars/` (gitignored)
+- Pre-build script: `scripts/prepare-sidecar.mjs` (cross-platform daemon binary prep)
+- App data (runtime, macOS): `~/Library/Application Support/JellyfinSync/`
+- Rust edition 2021, MSRV 1.93.0
+
+### Key Files to Modify
+
+| File | Change |
+|------|--------|
+| `jellyfinsync-ui/src-tauri/tauri.conf.json` | Add `bundle.macos.minimumSystemVersion: "10.15"` |
+| `scripts/prepare-sidecar.mjs` | Verify/fix macOS target triple detection if broken (may need no change) |
+
+### References
+
+- [Source: planning-artifacts/epics.md#story-63-macos-installer-dmg] — Epic Requirements & Post-MVP launchd section
+- [Source: planning-artifacts/architecture.md#packaging--distribution] — Tauri v2 bundler, code signing deferred to post-MVP
+- [Source: 6-2-windows-installer-msi.md] — Previous story: confirmed build pipeline, sidecar config, daemon detection
+- [Source: 6-1-tauri-bundler-configuration-sidecar-packaging.md] — prepare-sidecar.mjs implementation details
+- [Source: jellyfinsync-ui/src-tauri/tauri.conf.json] — Current Tauri configuration (no `bundle.macos` yet)
+
+## Dev Agent Record
+
+### Agent Model Used
+
+Claude Sonnet 4.6
+
+### Completion Notes List
+
+(to be filled in by dev agent)
+
+### Change Log
+
+(to be filled in by dev agent)
+
+### File List
+
+(to be filled in by dev agent)

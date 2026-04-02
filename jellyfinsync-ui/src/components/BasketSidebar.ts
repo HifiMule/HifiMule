@@ -195,8 +195,8 @@ export class BasketSidebar {
             if (currentDevice?.deviceId && currentDevice.deviceId !== this.lastHydratedDeviceId) {
                 this.lastHydratedDeviceId = currentDevice.deviceId;
                 // Load saved auto-fill preferences from manifest
-                this.autoFillEnabled = currentDevice.autoFill?.enabled ?? false;
-                this.autoFillMaxBytes = currentDevice.autoFill?.maxBytes ?? null;
+                this.autoFillEnabled = state.autoFill?.enabled ?? false;
+                this.autoFillMaxBytes = state.autoFill?.maxBytes ?? null;
                 this.autoSyncOnConnect = state.autoSyncOnConnect ?? false;
                 // Await basket hydration before triggering auto-fill so that
                 // getManualItemIds() and getManualSizeBytes() see the correct state (P1).
