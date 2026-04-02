@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-04-02  # added 3-8, 3-9 (lazy basket expansion)
+last_updated: 2026-04-02  # added 3-8, 3-9 (lazy basket expansion), 2-7 story created
 project: JellyfinSync
 project_key: NOKEY
 tracking_system: file-system
@@ -55,7 +55,7 @@ development_status:
   2-4-startup-splash-screen-with-connection-status: done
   2-5-interactive-login-and-identity-management: done
   2-6-initialize-new-device-manifest: done
-  2-7-multi-device-selection-panel: backlog
+  2-7-multi-device-selection-panel: ready-for-dev
   epic-2-retrospective: optional
 
   epic-3: in-progress
