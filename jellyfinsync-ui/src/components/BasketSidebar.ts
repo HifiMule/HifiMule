@@ -258,7 +258,7 @@ export class BasketSidebar {
             ? Math.max(this.storageInfo.freeBytes - manualSize, 0)
             : 0;
         const targetBytes = this.autoFillMaxBytes !== null
-            ? Math.min(this.autoFillMaxBytes, available)
+            ? Math.min(this.autoFillMaxBytes, this.storageInfo ? available : this.autoFillMaxBytes)
             : available;
         basketStore.add({
             id: AUTO_FILL_SLOT_ID,
@@ -937,7 +937,7 @@ export class BasketSidebar {
         this.etaText = 'Calculating\u2026';
 
         // Reset dirty if current items match snapshot (no mid-sync changes)
-        const currentIds = basketStore.getItems().map(i => i.id).sort();
+        const currentIds = basketStore.getItems().filter(i => i.id !== AUTO_FILL_SLOT_ID).map(i => i.id).sort();
         if (JSON.stringify(currentIds) === JSON.stringify(this.syncSnapshotIds)) {
             console.log("Sync complete, basket unchanged during sync. Resetting dirty flag.");
             basketStore.resetDirty();
@@ -1006,7 +1006,7 @@ export class BasketSidebar {
                 <div class="basket-item-info">
                     <div class="basket-item-name">${this.escapeHtml(item.name)}</div>
                     <div class="basket-item-meta">
-                        Artist · ~${item.childCount} tracks · ~${formatSize(item.sizeBytes)}
+                        Artist · ~${item.childCount ?? 0} tracks · ~${formatSize(item.sizeBytes ?? 0)}
                     </div>
                 </div>
                 <sl-icon-button name="x" class="remove-item-btn" data-id="${this.escapeHtml(item.id)}" label="Remove"></sl-icon-button>

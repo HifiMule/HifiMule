@@ -1,6 +1,6 @@
 # Story 3.9: Artist Entity Basket Item
 
-Status: review
+Status: done
 
 ## Story
 

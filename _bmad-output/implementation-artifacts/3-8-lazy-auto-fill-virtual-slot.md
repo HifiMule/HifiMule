@@ -1,6 +1,6 @@
 # Story 3.8: Lazy Auto-Fill Virtual Slot
 
-Status: review
+Status: done
 
 ## Story
 

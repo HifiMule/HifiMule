@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-04-03  # 3-9 review
+last_updated: 2026-04-03  # 3-9 done
 project: JellyfinSync
 project_key: NOKEY
 tracking_system: file-system
@@ -66,8 +66,8 @@ development_status:
   3-5-music-only-library-filtering: done
   3-6-auto-fill-sync-mode-synchronise-all: done
   3-7-artist-view-cache-scroll-state-quick-navigation: done
-  3-8-lazy-auto-fill-virtual-slot: review
-  3-9-artist-entity-basket-item: review
+  3-8-lazy-auto-fill-virtual-slot: done
+  3-9-artist-entity-basket-item: done
   epic-3-retrospective: optional
 
   epic-4: in-progress
