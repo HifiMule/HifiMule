@@ -256,24 +256,30 @@ impl DeviceManager {
     }
 
     pub async fn handle_device_removed(&self, removed_path: &PathBuf) {
-        {
+        // Capture remaining keys inside the write block to avoid holding connected_devices
+        // read lock while acquiring selected_device_path write lock (would violate locking order).
+        let remaining_keys: Vec<PathBuf> = {
             let mut devices = self.connected_devices.write().await;
             devices.remove(removed_path);
-        }
+            devices.keys().cloned().collect()
+        };
         {
             let mut sel = self.selected_device_path.write().await;
             if sel.as_ref() == Some(removed_path) {
-                *sel = None;
-                // Auto-select if exactly one device remains
-                let devices = self.connected_devices.read().await;
-                if devices.len() == 1 {
-                    *sel = devices.keys().next().cloned();
-                }
+                *sel = if remaining_keys.len() == 1 {
+                    Some(remaining_keys[0].clone())
+                } else {
+                    None
+                };
             }
         }
         {
             let mut unrecognized_path = self.unrecognized_device_path.write().await;
-            *unrecognized_path = None;
+            // Only clear unrecognized_device_path if it matches the removed path; an
+            // unrelated managed device removing should not erase a pending initialization.
+            if unrecognized_path.as_ref() == Some(removed_path) {
+                *unrecognized_path = None;
+            }
         }
     }
 
@@ -298,13 +304,26 @@ impl DeviceManager {
             .collect()
     }
 
+    /// Returns a consistent snapshot of connected devices and selected path in a single
+    /// atomic read, preventing torn reads in get_daemon_state.
+    pub async fn get_multi_device_snapshot(
+        &self,
+    ) -> (Vec<(PathBuf, DeviceManifest)>, Option<PathBuf>) {
+        let devices = self.connected_devices.read().await;
+        let sel = self.selected_device_path.read().await.clone();
+        let device_list = devices.iter().map(|(p, m)| (p.clone(), m.clone())).collect();
+        (device_list, sel)
+    }
+
     /// Sets the selected device path. Returns false if path is not in connected_devices.
     pub async fn select_device(&self, path: PathBuf) -> bool {
-        let devices = self.connected_devices.read().await;
+        // Hold the write lock through both the existence check and the selection write so
+        // a concurrent handle_device_removed cannot remove the device in between (TOCTOU).
+        // Locking order: connected_devices (1) → selected_device_path (2).
+        let devices = self.connected_devices.write().await;
         if !devices.contains_key(&path) {
             return false;
         }
-        drop(devices);
         let mut sel = self.selected_device_path.write().await;
         *sel = Some(path);
         true
@@ -395,16 +414,20 @@ impl DeviceManager {
         write_manifest(&device_root, &manifest).await?;
 
         {
-            let mut unrecognized_path = self.unrecognized_device_path.write().await;
-            *unrecognized_path = None;
-        }
-        {
             let mut devices = self.connected_devices.write().await;
             devices.insert(device_root.clone(), manifest.clone());
         }
         {
             let mut sel = self.selected_device_path.write().await;
-            *sel = Some(device_root);
+            // Only auto-select if no device is currently selected; don't steal selection
+            // from a device the user has already chosen in a multi-device session.
+            if sel.is_none() {
+                *sel = Some(device_root);
+            }
+        }
+        {
+            let mut unrecognized_path = self.unrecognized_device_path.write().await;
+            *unrecognized_path = None;
         }
 
         Ok(manifest)

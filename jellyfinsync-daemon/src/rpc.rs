@@ -311,9 +311,22 @@ async fn handle_get_credentials() -> Result<Value, JsonRpcError> {
             "token": token,
             "userId": user_id
         })),
-        // "Not configured" is a valid state, not an error. Return null so callers
-        // can distinguish "no credentials" from an actual storage failure.
-        Err(_) => Ok(Value::Null),
+        Err(e) => {
+            let msg = e.to_string();
+            // "No config file found" and "No token found in keyring" are expected
+            // "not yet configured" states — return null so callers show the login screen.
+            // All other errors (I/O failure, corrupted config, keyring access denied) are
+            // real storage faults and should be surfaced so they can be diagnosed.
+            if msg.starts_with("No config file found") || msg.contains("No token found") {
+                Ok(Value::Null)
+            } else {
+                Err(JsonRpcError {
+                    code: ERR_STORAGE_ERROR,
+                    message: msg,
+                    data: None,
+                })
+            }
+        }
     }
 }
 
@@ -387,12 +400,9 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
 
     let active_operation_id = state.sync_operation_manager.get_active_operation_id().await;
 
-    let connected_devices_snapshot = state.device_manager.get_connected_devices().await;
-    let selected_device_path = state
-        .device_manager
-        .get_current_device_path()
-        .await
-        .map(|p| p.to_string_lossy().to_string());
+    let (connected_devices_snapshot, selected_path_buf) =
+        state.device_manager.get_multi_device_snapshot().await;
+    let selected_device_path = selected_path_buf.map(|p| p.to_string_lossy().to_string());
     let connected_devices_json: Vec<_> = connected_devices_snapshot
         .iter()
         .map(|(p, m)| {

@@ -160,6 +160,7 @@ export class BasketSidebar {
     // Multi-device picker state
     private connectedDevices: Array<{ path: string; deviceId: string; name: string }> = [];
     private selectedDevicePath: string | null = null;
+    private deviceSwitchInFlight: boolean = false;
 
     constructor(container: HTMLElement) {
         this.container = container;
@@ -194,6 +195,10 @@ export class BasketSidebar {
 
         if (daemonStateResult.status === 'fulfilled' && daemonStateResult.value) {
             const state = daemonStateResult.value as any;
+            // Sync multi-device state so the picker renders correctly on every refreshAndRender,
+            // not just during the 2s polling cycle.
+            this.connectedDevices = state.connectedDevices ?? this.connectedDevices;
+            this.selectedDevicePath = state.selectedDevicePath ?? this.selectedDevicePath;
             const currentDevice = state.currentDevice;
             if (currentDevice?.deviceId && currentDevice.deviceId !== this.lastHydratedDeviceId) {
                 this.lastHydratedDeviceId = currentDevice.deviceId;
@@ -390,6 +395,8 @@ export class BasketSidebar {
         const devicePicker = this.container.querySelector('sl-select.device-picker') as any;
         if (devicePicker) {
             devicePicker.addEventListener('sl-change', async (e: Event) => {
+                if (this.deviceSwitchInFlight) return;
+                this.deviceSwitchInFlight = true;
                 const newPath = (e.target as any).value;
                 try {
                     // Flush any unsaved basket changes for the current device before switching.
@@ -401,6 +408,8 @@ export class BasketSidebar {
                     this.refreshAndRender();
                 } catch (err) {
                     console.error('[DevicePicker] Failed to switch device:', err);
+                } finally {
+                    this.deviceSwitchInFlight = false;
                 }
             });
         }

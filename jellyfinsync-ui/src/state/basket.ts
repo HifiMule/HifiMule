@@ -50,11 +50,9 @@ class BasketStore extends EventTarget {
         if (this.saveTimeout !== null) {
             window.clearTimeout(this.saveTimeout);
             this.saveTimeout = null;
-            try {
-                await rpcCall('manifest_save_basket', { basketItems: this.getItems() });
-            } catch (e) {
-                console.error("Failed to flush basket save:", e);
-            }
+            // Let errors propagate — the caller (device switch) must not proceed
+            // if the current device's basket could not be persisted.
+            await rpcCall('manifest_save_basket', { basketItems: this.getItems() });
         }
     }
 
