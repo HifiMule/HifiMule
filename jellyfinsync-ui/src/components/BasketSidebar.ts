@@ -258,7 +258,7 @@ export class BasketSidebar {
             ? Math.max(this.storageInfo.freeBytes - manualSize, 0)
             : 0;
         const targetBytes = this.autoFillMaxBytes !== null
-            ? Math.min(this.autoFillMaxBytes, available || this.autoFillMaxBytes)
+            ? Math.min(this.autoFillMaxBytes, available)
             : available;
         basketStore.add({
             id: AUTO_FILL_SLOT_ID,
@@ -724,8 +724,8 @@ export class BasketSidebar {
         const autoFillSlot = currentItems.find(i => i.id === AUTO_FILL_SLOT_ID);
         const manualIds = currentItems.filter(i => i.id !== AUTO_FILL_SLOT_ID).map(i => i.id);
 
-        // Take snapshot for race-safe dirty reset (use all item IDs including slot)
-        this.syncSnapshotIds = [...currentItems.map(i => i.id)].sort();
+        // Take snapshot for race-safe dirty reset (exclude virtual slot — it won't appear in manifest)
+        this.syncSnapshotIds = [...manualIds].sort();
 
         // Build delta request params
         const deltaParams: Record<string, unknown> = { itemIds: manualIds };
@@ -738,7 +738,7 @@ export class BasketSidebar {
                 : autoFillSlot.sizeBytes || 0;
             deltaParams.autoFill = {
                 enabled: true,
-                maxBytes: maxFillBytes || undefined,
+                maxBytes: maxFillBytes > 0 ? maxFillBytes : undefined,
                 excludeItemIds: manualIds,
             };
         }

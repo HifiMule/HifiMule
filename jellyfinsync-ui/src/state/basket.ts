@@ -62,10 +62,12 @@ class BasketStore extends EventTarget {
         if (this._syncingFromDaemon) return;
         this._syncingFromDaemon = true;
 
-        // Device manifest is the source of truth — replace local state entirely
+        // Device manifest is the source of truth — replace local state entirely.
+        // Strip the virtual auto-fill slot: it is runtime-only and must not be
+        // restored from a stale persisted state.
         this.items.clear();
         for (const item of items) {
-            this.items.set(item.id, item);
+            if (item.id !== AUTO_FILL_SLOT_ID) this.items.set(item.id, item);
         }
         this._dirty = false;
         this.saveToLocalStorage();
@@ -117,7 +119,10 @@ class BasketStore extends EventTarget {
             const saved = localStorage.getItem('jellyfinsync-basket');
             if (saved) {
                 const parsed = JSON.parse(saved);
-                this.items = new Map(Object.entries(parsed));
+                // Strip the virtual auto-fill slot on load — it is runtime-only.
+                this.items = new Map(
+                    Object.entries(parsed).filter(([id]) => id !== AUTO_FILL_SLOT_ID) as [string, BasketItem][]
+                );
             }
 
             const dirty = localStorage.getItem('jellyfinsync-basket-dirty');
