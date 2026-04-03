@@ -1,7 +1,7 @@
 // Basket Sidebar Component
 // Displays the list of items selected for synchronization.
 
-import { basketStore, BasketItem } from '../state/basket';
+import { basketStore, BasketItem, AUTO_FILL_SLOT_ID } from '../state/basket';
 import { rpcCall, getImageUrl } from '../rpc';
 import { RepairModal } from './RepairModal';
 import { InitDeviceModal } from './InitDeviceModal';
@@ -149,13 +149,6 @@ export class BasketSidebar {
     private autoFillEnabled: boolean = false;
     private autoFillMaxBytes: number | null = null;
     private autoSyncOnConnect: boolean = false;
-    private autoFillDebounceTimer: number | null = null;
-    private isAutoFillLoading: boolean = false;
-    // In-flight guard: prevents concurrent basket.autoFill RPCs from racing (P2).
-    // Set to true while a call is running; a second call sets pendingRetrigger so
-    // the latest parameters are applied once the current call completes.
-    private autoFillInFlight: boolean = false;
-    private autoFillPendingRetrigger: boolean = false;
     private etaText: string = 'Calculating\u2026';
     // Multi-device picker state
     private connectedDevices: Array<{ path: string; deviceId: string; name: string }> = [];
@@ -216,8 +209,8 @@ export class BasketSidebar {
                 } catch (err) {
                     console.error("Failed to fetch basket", err);
                 }
-                if (this.autoFillEnabled) {
-                    this.triggerAutoFill();
+                if (this.autoFillEnabled && !basketStore.has(AUTO_FILL_SLOT_ID)) {
+                    this.insertAutoFillSlot();
                 }
             } else if (!currentDevice) {
                 if (this.lastHydratedDeviceId !== null) {
@@ -256,89 +249,25 @@ export class BasketSidebar {
             clearInterval(this.daemonStateInterval);
             this.daemonStateInterval = null;
         }
-        if (this.autoFillDebounceTimer !== null) {
-            clearTimeout(this.autoFillDebounceTimer);
-            this.autoFillDebounceTimer = null;
-        }
-        this.autoFillPendingRetrigger = false;
         basketStore.removeEventListener('update', this.updateListener);
     }
 
-    private async triggerAutoFill() {
-        if (!this.autoFillEnabled) return;
-
-        // In-flight guard: if a call is already running, record that we need to
-        // re-run with the latest state once it completes (P2).
-        if (this.autoFillInFlight) {
-            this.autoFillPendingRetrigger = true;
-            return;
-        }
-        this.autoFillInFlight = true;
-
-        const manualIds = basketStore.getManualItemIds();
+    private insertAutoFillSlot(): void {
         const manualSize = basketStore.getManualSizeBytes();
-        const freeBytes = this.storageInfo ? this.storageInfo.freeBytes : undefined;
-
-        // Determine max bytes for auto-fill: user limit OR device free space minus manual
-        // selections. Always clamp the user limit to current free space so that a stored
-        // limit from before a previous sync doesn't overfill the device.
-        let maxBytes: number | undefined;
-        if (this.autoFillMaxBytes !== null) {
-            const effectiveLimit = freeBytes !== undefined
-                ? Math.min(this.autoFillMaxBytes, freeBytes)
-                : this.autoFillMaxBytes;
-            maxBytes = Math.max(0, effectiveLimit - manualSize);
-        } else if (freeBytes !== undefined) {
-            maxBytes = Math.max(0, freeBytes - manualSize);
-        }
-
-        this.isAutoFillLoading = true;
-        this.render();
-        try {
-            const params: Record<string, unknown> = { excludeItemIds: manualIds };
-            if (maxBytes !== undefined) params.maxBytes = maxBytes;
-
-            const items = await rpcCall('basket.autoFill', params) as Array<{
-                id: string; name: string; album?: string; artist?: string;
-                sizeBytes: number; priorityReason: string;
-            }>;
-
-            const basketItems = items.map(item => ({
-                id: item.id,
-                name: item.name,
-                type: 'Audio',
-                artist: item.artist,
-                childCount: 1,
-                sizeTicks: 0,
-                sizeBytes: item.sizeBytes,
-                autoFilled: true,
-                priorityReason: item.priorityReason,
-            }));
-
-            basketStore.replaceAutoFilled(basketItems);
-        } catch (err) {
-            console.error('[AutoFill] Failed to fetch auto-fill items:', err);
-        } finally {
-            this.isAutoFillLoading = false;
-            this.autoFillInFlight = false;
-            this.render();
-            // If a second call arrived while we were running, execute it now with
-            // the latest basket/storage state.
-            if (this.autoFillPendingRetrigger) {
-                this.autoFillPendingRetrigger = false;
-                this.triggerAutoFill();
-            }
-        }
-    }
-
-    private scheduleAutoFill(delayMs: number = 500) {
-        if (this.autoFillDebounceTimer !== null) {
-            clearTimeout(this.autoFillDebounceTimer);
-        }
-        this.autoFillDebounceTimer = window.setTimeout(() => {
-            this.autoFillDebounceTimer = null;
-            this.triggerAutoFill();
-        }, delayMs);
+        const available = this.storageInfo
+            ? Math.max(this.storageInfo.freeBytes - manualSize, 0)
+            : 0;
+        const targetBytes = this.autoFillMaxBytes !== null
+            ? Math.min(this.autoFillMaxBytes, available || this.autoFillMaxBytes)
+            : available;
+        basketStore.add({
+            id: AUTO_FILL_SLOT_ID,
+            name: 'Auto-Fill',
+            type: 'AutoFillSlot',
+            childCount: 0,
+            sizeTicks: 0,
+            sizeBytes: targetBytes,
+        });
     }
 
     private async persistAutoFillPrefs() {
@@ -362,9 +291,9 @@ export class BasketSidebar {
                 this.autoFillEnabled = (e.target as HTMLInputElement).checked;
                 this.persistAutoFillPrefs();
                 if (this.autoFillEnabled) {
-                    this.triggerAutoFill();
+                    this.insertAutoFillSlot();
                 } else {
-                    basketStore.replaceAutoFilled([]);
+                    basketStore.remove(AUTO_FILL_SLOT_ID);
                 }
                 this.render();
             });
@@ -378,7 +307,7 @@ export class BasketSidebar {
                 if (isNaN(gb) || gb < 0) return;
                 this.autoFillMaxBytes = gb * 1024 * 1024 * 1024;
                 this.persistAutoFillPrefs();
-                this.scheduleAutoFill(500);
+                this.insertAutoFillSlot();
             });
         }
 
@@ -664,7 +593,7 @@ export class BasketSidebar {
                     ${this.renderDeviceFolders()}
                 </div>
                 <div class="basket-actions">
-                    <sl-button id="start-sync-btn" variant="primary" style="width: 100%;" ${(!basketStore.isDirty() && !this.autoFillEnabled) || this.isAutoFillLoading ? 'disabled' : ''}>
+                    <sl-button id="start-sync-btn" variant="primary" style="width: 100%;" ${!basketStore.isDirty() && !this.autoFillEnabled ? 'disabled' : ''}>
                         <sl-icon slot="prefix" name="cloud-download"></sl-icon>
                         Start Sync
                     </sl-button>
@@ -744,7 +673,13 @@ export class BasketSidebar {
         this.container.querySelectorAll('.remove-item-btn').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 const id = (e.currentTarget as HTMLElement).getAttribute('data-id');
-                if (id) basketStore.remove(id);
+                if (id) {
+                    if (id === AUTO_FILL_SLOT_ID) {
+                        this.autoFillEnabled = false;
+                        this.persistAutoFillPrefs();
+                    }
+                    basketStore.remove(id);
+                }
             });
         });
 
@@ -784,10 +719,29 @@ export class BasketSidebar {
     private async handleStartSync() {
         if (this.isSyncing) return;
         const currentItems = basketStore.getItems();
-        const itemIds = currentItems.map(i => i.id);
 
-        // Take snapshot for race-safe dirty reset
-        this.syncSnapshotIds = [...itemIds].sort();
+        // Detect and extract the auto-fill slot
+        const autoFillSlot = currentItems.find(i => i.id === AUTO_FILL_SLOT_ID);
+        const manualIds = currentItems.filter(i => i.id !== AUTO_FILL_SLOT_ID).map(i => i.id);
+
+        // Take snapshot for race-safe dirty reset (use all item IDs including slot)
+        this.syncSnapshotIds = [...currentItems.map(i => i.id)].sort();
+
+        // Build delta request params
+        const deltaParams: Record<string, unknown> = { itemIds: manualIds };
+        if (autoFillSlot) {
+            // Recompute fill budget fresh from current storage state — the slot's
+            // sizeBytes may be stale (e.g. set to 0 when storageInfo was null).
+            const manualSize = basketStore.getManualSizeBytes();
+            const maxFillBytes = this.storageInfo
+                ? Math.max(this.storageInfo.freeBytes - manualSize, 0)
+                : autoFillSlot.sizeBytes || 0;
+            deltaParams.autoFill = {
+                enabled: true,
+                maxBytes: maxFillBytes || undefined,
+                excludeItemIds: manualIds,
+            };
+        }
 
         try {
             this.isSyncing = true;
@@ -798,7 +752,7 @@ export class BasketSidebar {
             this.etaText = 'Calculating\u2026';
             this.render();
 
-            const delta = await rpcCall('sync_calculate_delta', { itemIds });
+            const delta = await rpcCall('sync_calculate_delta', deltaParams);
             const result = await rpcCall('sync_execute', { delta });
             this.currentOperationId = result.operationId as string;
 
@@ -1026,7 +980,27 @@ export class BasketSidebar {
         return 'Auto';
     }
 
+    private renderAutoFillSlotCard(item: BasketItem): string {
+        return `
+            <div class="basket-item-card basket-item-auto-fill-slot" data-id="${AUTO_FILL_SLOT_ID}">
+                <div class="basket-item-auto-fill-icon">
+                    <sl-icon name="stars"></sl-icon>
+                </div>
+                <div class="basket-item-info">
+                    <div class="basket-item-name">Auto-Fill Slot</div>
+                    <div class="basket-item-meta">
+                        Will fill ~${formatSize(item.sizeBytes)} with top-priority tracks at sync time
+                    </div>
+                </div>
+                <sl-icon-button name="x" class="remove-item-btn" data-id="${AUTO_FILL_SLOT_ID}" label="Remove"></sl-icon-button>
+            </div>
+        `;
+    }
+
     private renderItem(item: BasketItem): string {
+        if (item.id === AUTO_FILL_SLOT_ID) {
+            return this.renderAutoFillSlotCard(item);
+        }
         const autoBadge = item.autoFilled
             ? `<span class="basket-item-auto-badge" title="Added by Auto-Fill">Auto</span>`
             : '';

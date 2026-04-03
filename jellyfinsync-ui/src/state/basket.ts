@@ -3,6 +3,8 @@ import { rpcCall } from '../rpc';
 // Basket State Management
 // Manages the collection of items selected for synchronization.
 
+export const AUTO_FILL_SLOT_ID = '__auto_fill_slot__';
+
 export interface BasketItem {
     id: string;
     name: string;
@@ -182,44 +184,18 @@ class BasketStore extends EventTarget {
         this.notify();
     }
 
-    /** Replace all auto-filled items with the new set, preserving manual items. */
-    public replaceAutoFilled(autoFilledItems: BasketItem[]) {
-        // Collect auto-filled IDs in a first pass, then delete — avoids mutating the
-        // Map while iterating it (ECMAScript spec §24.1.3.5 leaves deletion of
-        // not-yet-visited entries implementation-defined).
-        const autoFilledIds: string[] = [];
-        for (const [id, item] of this.items) {
-            if (item.autoFilled) autoFilledIds.push(id);
-        }
-        for (const id of autoFilledIds) {
-            this.items.delete(id);
-        }
-        // Add new auto-filled items (after manual items in insertion order).
-        // Never overwrite a manually added item with an auto-fill entry — if the daemon
-        // returns a track that the user already added manually, skip it.
-        for (const item of autoFilledItems) {
-            const existing = this.items.get(item.id);
-            if (existing && !existing.autoFilled) continue;
-            this.items.set(item.id, { ...item, autoFilled: true });
-        }
-        this._dirty = true;
-        this.saveToLocalStorage();
-        this.saveBasketToDaemon();
-        this.notify();
-    }
-
     /** Returns only the IDs of manually added items (for exclude list in auto-fill). */
     public getManualItemIds(): string[] {
         return Array.from(this.items.values())
-            .filter(i => !i.autoFilled)
+            .filter(i => i.id !== AUTO_FILL_SLOT_ID)
             .map(i => i.id);
     }
 
-    /** Returns total size of manually added items only. */
+    /** Returns total size of manually added items only (excludes the virtual auto-fill slot). */
     public getManualSizeBytes(): number {
         let total = 0;
         for (const item of this.items.values()) {
-            if (!item.autoFilled) total += item.sizeBytes ?? 0;
+            if (item.id !== AUTO_FILL_SLOT_ID) total += item.sizeBytes ?? 0;
         }
         return total;
     }

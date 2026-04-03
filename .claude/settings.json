@@ -18,7 +18,8 @@
       "Bash(sed -i 's/transcoding_profile_id: None,$/transcoding_profile_id: None,\\\\n                playlists: vec![],/g' rpc.rs)",
       "Bash(sed -i 's/transcoding_profile_id: None,$/transcoding_profile_id: None,\\\\n            playlists: vec![],/g' tests.rs)",
       "Bash(npx eslint:*)",
-      "Bash(npx --version)"
+      "Bash(npx --version)",
+      "Bash(rtk pnpm:*)"
     ]
   }
 }

@@ -932,6 +932,57 @@ async fn handle_sync_calculate_delta(
         }
     }
 
+    // Auto-fill expansion (Story 3.8): if the basket contained an auto-fill slot,
+    // run the priority algorithm now and merge results with manual items.
+    if let Some(af) = params.get("autoFill") {
+        if af["enabled"].as_bool().unwrap_or(false) {
+            let max_fill_bytes = if let Some(mb) = af["maxBytes"].as_u64() {
+                mb
+            } else {
+                match state.device_manager.get_device_storage().await {
+                    Some(info) => info.free_bytes,
+                    None => return Err(JsonRpcError {
+                        code: ERR_CONNECTION_FAILED,
+                        message: "Auto-fill: could not determine device free space".to_string(),
+                        data: None,
+                    }),
+                }
+            };
+            let exclude_ids: Vec<String> = af["excludeItemIds"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let expanded_excludes = expand_exclude_ids(&state.jellyfin_client, exclude_ids).await;
+            let fill_params = crate::auto_fill::AutoFillParams {
+                exclude_item_ids: expanded_excludes,
+                max_fill_bytes,
+            };
+            match crate::auto_fill::run_auto_fill(&state.jellyfin_client, fill_params).await {
+                Ok(af_items) => {
+                    for item in af_items {
+                        if seen_ids.insert(item.id.clone()) {
+                            desired_items.push(crate::sync::DesiredItem {
+                                jellyfin_id: item.id,
+                                name: item.name,
+                                album: item.album,
+                                artist: item.artist,
+                                size_bytes: item.size_bytes,
+                                etag: None,
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(JsonRpcError {
+                        code: ERR_CONNECTION_FAILED,
+                        message: format!("Auto-fill expansion failed at sync time: {}", e),
+                        data: None,
+                    });
+                }
+            }
+        }
+    }
+
     let mut delta = crate::sync::calculate_delta(&desired_items, &manifest);
     delta.playlists = playlist_sync_items;
 

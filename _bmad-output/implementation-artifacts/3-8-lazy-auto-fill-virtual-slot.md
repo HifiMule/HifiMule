@@ -1,6 +1,6 @@
 # Story 3.8: Lazy Auto-Fill Virtual Slot
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -40,43 +40,43 @@ so that I don't wait for a slow basket population and always get the freshest tr
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Update `basket.ts` — remove eager auto-fill, add AutoFillSlot support (AC: #1, #2, #4)
-  - [ ] 1.1 Add export `export const AUTO_FILL_SLOT_ID = '__auto_fill_slot__'` at top of file
-  - [ ] 1.2 Remove the `replaceAutoFilled()` method entirely
-  - [ ] 1.3 Update `getManualItemIds()`: filter out items where `id === AUTO_FILL_SLOT_ID` (previously filtered `!i.autoFilled`)
-  - [ ] 1.4 Update `getTotalSizeBytes()`: AutoFillSlot's `sizeBytes` already contributes to total — no change needed, the existing loop covers it
-  - [ ] 1.5 Keep `autoFilled?: boolean` and `priorityReason?: string` fields in `BasketItem` interface (backward compat: old manifests may have hydrated items with these flags; they'll be treated as regular items)
+- [x] Task 1: Update `basket.ts` — remove eager auto-fill, add AutoFillSlot support (AC: #1, #2, #4)
+  - [x] 1.1 Add export `export const AUTO_FILL_SLOT_ID = '__auto_fill_slot__'` at top of file
+  - [x] 1.2 Remove the `replaceAutoFilled()` method entirely
+  - [x] 1.3 Update `getManualItemIds()`: filter out items where `id === AUTO_FILL_SLOT_ID` (previously filtered `!i.autoFilled`)
+  - [x] 1.4 Update `getTotalSizeBytes()`: AutoFillSlot's `sizeBytes` already contributes to total — no change needed, the existing loop covers it
+  - [x] 1.5 Keep `autoFilled?: boolean` and `priorityReason?: string` fields in `BasketItem` interface (backward compat: old manifests may have hydrated items with these flags; they'll be treated as regular items)
 
-- [ ] Task 2: Update `BasketSidebar.ts` — replace eager trigger with virtual slot insertion (AC: #1, #4)
-  - [ ] 2.1 Remove these private fields: `autoFillDebounceTimer`, `autoFillInFlight`, `autoFillPendingRetrigger`, `isAutoFillLoading`
-  - [ ] 2.2 Remove these methods: `triggerAutoFill()`, `scheduleAutoFill()`
-  - [ ] 2.3 On auto-fill toggle enable (`sl-change` event, `checked = true`): call `persistAutoFillPrefs()` then call new `insertAutoFillSlot()`
-  - [ ] 2.4 On auto-fill toggle disable (`checked = false`): call `persistAutoFillPrefs()`, call `basketStore.remove(AUTO_FILL_SLOT_ID)`, call `basketStore.replaceAutoFilled([])` — **wait**, `replaceAutoFilled` is removed. Instead: just call `basketStore.remove(AUTO_FILL_SLOT_ID)`
-  - [ ] 2.5 Add `private insertAutoFillSlot()`: compute `targetBytes` (= `autoFillMaxBytes ?? (storageInfo?.freeBytes ?? 0) - basketStore.getManualSizeBytes()`), insert `basketStore.add({ id: AUTO_FILL_SLOT_ID, name: 'Auto-Fill', type: 'AutoFillSlot', childCount: 0, sizeTicks: 0, sizeBytes: Math.max(targetBytes, 0) })` — only if slot not already present
-  - [ ] 2.6 On slider change: update `autoFillMaxBytes`, call `persistAutoFillPrefs()`, then call `insertAutoFillSlot()` (which replaces/updates slot via `basketStore.add()` — this overwrites the existing entry since Map key is same `AUTO_FILL_SLOT_ID`)
-  - [ ] 2.7 On device hydration: remove the `this.triggerAutoFill()` call; instead if `this.autoFillEnabled && !basketStore.has(AUTO_FILL_SLOT_ID)` → call `insertAutoFillSlot()` (handles devices where slot was not saved to manifest)
-  - [ ] 2.8 On device disconnect / `clearForDevice()`: slot is cleared automatically since `basketStore.clearForDevice()` clears all items including slot
-  - [ ] 2.9 Add `private renderAutoFillSlotCard(item: BasketItem): string` for the virtual slot card — see Dev Notes for HTML template
-  - [ ] 2.10 Update `renderItem()`: if `item.id === AUTO_FILL_SLOT_ID`, return `this.renderAutoFillSlotCard(item)` instead of the regular card HTML
-  - [ ] 2.11 Update start-sync button disabled logic: remove `|| this.isAutoFillLoading` condition (new logic: `!basketStore.isDirty() && !this.autoFillEnabled` stays the same concept; since slot is now a real basket item, `basketStore.isDirty()` will be true when slot is present)
+- [x] Task 2: Update `BasketSidebar.ts` — replace eager trigger with virtual slot insertion (AC: #1, #4)
+  - [x] 2.1 Remove these private fields: `autoFillDebounceTimer`, `autoFillInFlight`, `autoFillPendingRetrigger`, `isAutoFillLoading`
+  - [x] 2.2 Remove these methods: `triggerAutoFill()`, `scheduleAutoFill()`
+  - [x] 2.3 On auto-fill toggle enable (`sl-change` event, `checked = true`): call `persistAutoFillPrefs()` then call new `insertAutoFillSlot()`
+  - [x] 2.4 On auto-fill toggle disable (`checked = false`): call `persistAutoFillPrefs()`, call `basketStore.remove(AUTO_FILL_SLOT_ID)`, call `basketStore.replaceAutoFilled([])` — **wait**, `replaceAutoFilled` is removed. Instead: just call `basketStore.remove(AUTO_FILL_SLOT_ID)`
+  - [x] 2.5 Add `private insertAutoFillSlot()`: compute `targetBytes` (= `autoFillMaxBytes ?? (storageInfo?.freeBytes ?? 0) - basketStore.getManualSizeBytes()`), insert `basketStore.add({ id: AUTO_FILL_SLOT_ID, name: 'Auto-Fill', type: 'AutoFillSlot', childCount: 0, sizeTicks: 0, sizeBytes: Math.max(targetBytes, 0) })` — only if slot not already present
+  - [x] 2.6 On slider change: update `autoFillMaxBytes`, call `persistAutoFillPrefs()`, then call `insertAutoFillSlot()` (which replaces/updates slot via `basketStore.add()` — this overwrites the existing entry since Map key is same `AUTO_FILL_SLOT_ID`)
+  - [x] 2.7 On device hydration: remove the `this.triggerAutoFill()` call; instead if `this.autoFillEnabled && !basketStore.has(AUTO_FILL_SLOT_ID)` → call `insertAutoFillSlot()` (handles devices where slot was not saved to manifest)
+  - [x] 2.8 On device disconnect / `clearForDevice()`: slot is cleared automatically since `basketStore.clearForDevice()` clears all items including slot
+  - [x] 2.9 Add `private renderAutoFillSlotCard(item: BasketItem): string` for the virtual slot card — see Dev Notes for HTML template
+  - [x] 2.10 Update `renderItem()`: if `item.id === AUTO_FILL_SLOT_ID`, return `this.renderAutoFillSlotCard(item)` instead of the regular card HTML
+  - [x] 2.11 Update start-sync button disabled logic: remove `|| this.isAutoFillLoading` condition (new logic: `!basketStore.isDirty() && !this.autoFillEnabled` stays the same concept; since slot is now a real basket item, `basketStore.isDirty()` will be true when slot is present)
 
-- [ ] Task 3: Update `BasketSidebar.ts` — `handleStartSync()` passes auto-fill params to delta (AC: #3)
-  - [ ] 3.1 Before building `itemIds`, detect slot: `const autoFillSlot = basketStore.getItems().find(i => i.id === AUTO_FILL_SLOT_ID)`
-  - [ ] 3.2 Build `itemIds` from all items **excluding** the slot: `const manualIds = currentItems.filter(i => i.id !== AUTO_FILL_SLOT_ID).map(i => i.id)`
-  - [ ] 3.3 Build delta request: `const deltaParams: any = { itemIds: manualIds }; if (autoFillSlot) { deltaParams.autoFill = { enabled: true, maxBytes: autoFillSlot.sizeBytes || undefined, excludeItemIds: manualIds }; }`
-  - [ ] 3.4 Call `await rpcCall('sync_calculate_delta', deltaParams)` — no other changes to the rest of `handleStartSync()`
+- [x] Task 3: Update `BasketSidebar.ts` — `handleStartSync()` passes auto-fill params to delta (AC: #3)
+  - [x] 3.1 Before building `itemIds`, detect slot: `const autoFillSlot = basketStore.getItems().find(i => i.id === AUTO_FILL_SLOT_ID)`
+  - [x] 3.2 Build `itemIds` from all items **excluding** the slot: `const manualIds = currentItems.filter(i => i.id !== AUTO_FILL_SLOT_ID).map(i => i.id)`
+  - [x] 3.3 Build delta request: `const deltaParams: any = { itemIds: manualIds }; if (autoFillSlot) { deltaParams.autoFill = { enabled: true, maxBytes: autoFillSlot.sizeBytes || undefined, excludeItemIds: manualIds }; }`
+  - [x] 3.4 Call `await rpcCall('sync_calculate_delta', deltaParams)` — no other changes to the rest of `handleStartSync()`
 
-- [ ] Task 4: Update `rpc.rs` — `handle_sync_calculate_delta` expands auto-fill slot (AC: #3)
-  - [ ] 4.1 Extract optional `autoFill` params after `item_ids`: `let auto_fill_param = params.get("autoFill")` (optional object with `enabled: bool`, `maxBytes?: u64`, `excludeItemIds: Vec<String>`)
-  - [ ] 4.2 If `auto_fill_param.enabled == true`: determine `max_fill_bytes` from `maxBytes` param or fall back to `state.device_manager.get_device_storage().await.map(|s| s.free_bytes).unwrap_or(0)`
-  - [ ] 4.3 Expand `excludeItemIds` using existing `expand_exclude_ids(&state.jellyfin_client, ...)` helper (rpc.rs:1555) — this expands albums/playlists to their track IDs
-  - [ ] 4.4 Call `crate::auto_fill::run_auto_fill(&state.jellyfin_client, AutoFillParams { exclude_item_ids: expanded_exclude_ids, max_fill_bytes })` — identical to the pattern in `handle_basket_auto_fill` (rpc.rs:1531–1536)
-  - [ ] 4.5 Convert `AutoFillItem` results into `DesiredItem` using the existing `to_desired_item` closure or inline the same logic: `jellyfin_id: item.id, name: item.name, album: item.album, artist: item.artist, size_bytes: item.size_bytes, etag: None`
-  - [ ] 4.6 Append auto-fill desired items to `desired_items` vec **before** the `seen_ids` dedup pass (dedup already handles duplicates with manual items — auto-fill items added after manual items lose the race, which is correct: manual > auto-fill)
-  - [ ] 4.7 If `run_auto_fill` errors, return `Err(JsonRpcError { code: ERR_CONNECTION_FAILED, message: format!("Auto-fill expansion failed: {}", e), data: None })`
+- [x] Task 4: Update `rpc.rs` — `handle_sync_calculate_delta` expands auto-fill slot (AC: #3)
+  - [x] 4.1 Extract optional `autoFill` params after `item_ids`: `let auto_fill_param = params.get("autoFill")` (optional object with `enabled: bool`, `maxBytes?: u64`, `excludeItemIds: Vec<String>`)
+  - [x] 4.2 If `auto_fill_param.enabled == true`: determine `max_fill_bytes` from `maxBytes` param or fall back to `state.device_manager.get_device_storage().await.map(|s| s.free_bytes).unwrap_or(0)`
+  - [x] 4.3 Expand `excludeItemIds` using existing `expand_exclude_ids(&state.jellyfin_client, ...)` helper (rpc.rs:1555) — this expands albums/playlists to their track IDs
+  - [x] 4.4 Call `crate::auto_fill::run_auto_fill(&state.jellyfin_client, AutoFillParams { exclude_item_ids: expanded_exclude_ids, max_fill_bytes })` — identical to the pattern in `handle_basket_auto_fill` (rpc.rs:1531–1536)
+  - [x] 4.5 Convert `AutoFillItem` results into `DesiredItem` using the existing `to_desired_item` closure or inline the same logic: `jellyfin_id: item.id, name: item.name, album: item.album, artist: item.artist, size_bytes: item.size_bytes, etag: None`
+  - [x] 4.6 Append auto-fill desired items to `desired_items` vec **before** the `seen_ids` dedup pass (dedup already handles duplicates with manual items — auto-fill items added after manual items lose the race, which is correct: manual > auto-fill)
+  - [x] 4.7 If `run_auto_fill` errors, return `Err(JsonRpcError { code: ERR_CONNECTION_FAILED, message: format!("Auto-fill expansion failed: {}", e), data: None })`
 
-- [ ] Task 5: CSS — AutoFillSlot card styling (AC: #1, #2)
-  - [ ] 5.1 Add `.basket-item-auto-fill-slot` class styles in `jellyfinsync-ui/src/styles.css`:
+- [x] Task 5: CSS — AutoFillSlot card styling (AC: #1, #2)
+  - [x] 5.1 Add `.basket-item-auto-fill-slot` class styles in `jellyfinsync-ui/src/styles.css`:
     - Dashed border (e.g. `border: 1.5px dashed var(--sl-color-primary-500)`)
     - Subtle background tint (e.g. `background: color-mix(in srgb, var(--sl-color-primary-100) 20%, transparent)`)
     - No thumbnail/image area (slot card has no artwork)
@@ -258,4 +258,22 @@ claude-sonnet-4-6
 
 ### Completion Notes List
 
+- Replaced eager auto-fill model with lazy virtual slot: toggle now inserts a single `__auto_fill_slot__` item with no RPC call, and the daemon expands it at sync time inside `handle_sync_calculate_delta`.
+- Removed `replaceAutoFilled()`, `triggerAutoFill()`, `scheduleAutoFill()` and the associated fields (`autoFillDebounceTimer`, `autoFillInFlight`, `autoFillPendingRetrigger`, `isAutoFillLoading`).
+- Added `AUTO_FILL_SLOT_ID` constant exported from `basket.ts`. Updated `getManualItemIds()` and `getManualSizeBytes()` to exclude the virtual slot.
+- `insertAutoFillSlot()` computes available space and inserts/overwrites the slot via `basketStore.add()` (Map semantics make this idempotent on slider change).
+- `handleStartSync()` strips the slot from `itemIds`, passes `autoFill` params to `sync_calculate_delta`; daemon runs `run_auto_fill` and merges results before `calculate_delta`.
+- `× click` on slot card also sets `autoFillEnabled = false` and calls `persistAutoFillPrefs()` to keep toggle state consistent.
+- `getManualSizeBytes()` also updated to exclude slot (implied by architecture) to prevent recursive size calculation when slot is updated by slider.
+- TypeScript: 0 errors. Rust: 0 errors, 0 new warnings, 163 tests passed.
+
 ### File List
+
+- jellyfinsync-ui/src/state/basket.ts
+- jellyfinsync-ui/src/components/BasketSidebar.ts
+- jellyfinsync-ui/src/styles.css
+- jellyfinsync-daemon/src/rpc.rs
+
+## Change Log
+
+- 2026-04-03: Implemented lazy auto-fill virtual slot — replaced eager basket.autoFill RPC trigger with a single AutoFillSlot card; daemon now expands the slot to real tracks at sync time inside handle_sync_calculate_delta.
