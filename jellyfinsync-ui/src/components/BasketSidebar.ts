@@ -997,9 +997,29 @@ export class BasketSidebar {
         `;
     }
 
+    private renderArtistCard(item: BasketItem): string {
+        return `
+            <div class="basket-item-card basket-item-artist" data-id="${this.escapeHtml(item.id)}">
+                <div class="basket-item-artist-icon">
+                    <sl-icon name="person-fill"></sl-icon>
+                </div>
+                <div class="basket-item-info">
+                    <div class="basket-item-name">${this.escapeHtml(item.name)}</div>
+                    <div class="basket-item-meta">
+                        Artist · ~${item.childCount} tracks · ~${formatSize(item.sizeBytes)}
+                    </div>
+                </div>
+                <sl-icon-button name="x" class="remove-item-btn" data-id="${this.escapeHtml(item.id)}" label="Remove"></sl-icon-button>
+            </div>
+        `;
+    }
+
     private renderItem(item: BasketItem): string {
         if (item.id === AUTO_FILL_SLOT_ID) {
             return this.renderAutoFillSlotCard(item);
+        }
+        if (item.type === 'MusicArtist') {
+            return this.renderArtistCard(item);
         }
         const autoBadge = item.autoFilled
             ? `<span class="basket-item-auto-badge" title="Added by Auto-Fill">Auto</span>`

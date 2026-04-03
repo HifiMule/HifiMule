@@ -857,6 +857,22 @@ h2 {
   background: color-mix(in srgb, var(--sl-color-primary-100) 20%, transparent);
 }
 
+.basket-item-artist {
+  border: 1.5px solid var(--sl-color-neutral-300);
+  background: color-mix(in srgb, var(--sl-color-neutral-100) 30%, transparent);
+}
+
+.basket-item-artist-icon {
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.5rem;
+  color: var(--sl-color-neutral-500);
+  flex-shrink: 0;
+}
+
 .basket-item-auto-fill-icon {
   width: 48px;
   height: 48px;

@@ -1,6 +1,6 @@
 # Story 3.9: Artist Entity Basket Item
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -40,12 +40,12 @@ so that any new albums or tracks added to that artist in Jellyfin are automatica
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Update `BasketSidebar.ts` — add artist card rendering (AC: #1, #2, #5)
-  - [ ] 1.1 In `renderItem()`, add check before the generic card path: `if (item.type === 'MusicArtist') return this.renderArtistCard(item);`
-  - [ ] 1.2 Add `private renderArtistCard(item: BasketItem): string` — returns HTML with `.basket-item-artist` class, artist icon, name, "~N tracks · ~X MB" meta, and `×` remove button (same `remove-item-btn` pattern as other cards)
+- [x] Task 1: Update `BasketSidebar.ts` — add artist card rendering (AC: #1, #2, #5)
+  - [x] 1.1 In `renderItem()`, add check before the generic card path: `if (item.type === 'MusicArtist') return this.renderArtistCard(item);`
+  - [x] 1.2 Add `private renderArtistCard(item: BasketItem): string` — returns HTML with `.basket-item-artist` class, artist icon, name, "~N tracks · ~X MB" meta, and `×` remove button (same `remove-item-btn` pattern as other cards)
 
-- [ ] Task 2: Add CSS for `.basket-item-artist` in `jellyfinsync-ui/src/styles.css` (AC: #2)
-  - [ ] 2.1 Add `.basket-item-artist` class with a distinct artist-style (e.g. `sl-icon name="music-note-list"` or `"person-fill"`, subtle tint to distinguish from albums/playlists) — closely mirror the `.basket-item-auto-fill-slot` pattern for consistency
+- [x] Task 2: Add CSS for `.basket-item-artist` in `jellyfinsync-ui/src/styles.css` (AC: #2)
+  - [x] 2.1 Add `.basket-item-artist` class with a distinct artist-style (e.g. `sl-icon name="music-note-list"` or `"person-fill"`, subtle tint to distinguish from albums/playlists) — closely mirror the `.basket-item-auto-fill-slot` pattern for consistency
 
 ## Dev Notes
 
@@ -200,4 +200,17 @@ claude-sonnet-4-6
 
 ### Completion Notes List
 
+- Added `renderArtistCard()` to `BasketSidebar.ts` — displays "Artist · ~N tracks · ~X MB" with `person-fill` icon and same `remove-item-btn` pattern as other cards. No per-track expansion at add-time.
+- Added `MusicArtist` type check in `renderItem()` before the generic card path — routes artist items to `renderArtistCard()`.
+- Added `.basket-item-artist` (solid neutral border + subtle neutral tint) and `.basket-item-artist-icon` CSS classes in `styles.css`, mirroring the `.basket-item-auto-fill-slot` / `.basket-item-auto-fill-icon` pattern.
+- All ACs satisfied: AC#1 (single card, no per-track expansion), AC#2 ("Artist · ~N · ~X" display + capacity bar via `sizeBytes`), AC#3 (daemon expansion unchanged — already works), AC#4 (deduplication via `seen_ids` unchanged), AC#5 (×  remove button via existing handler).
+- TypeScript check passed with no errors.
+
 ### File List
+
+- `jellyfinsync-ui/src/components/BasketSidebar.ts`
+- `jellyfinsync-ui/src/styles.css`
+
+## Change Log
+
+- 2026-04-03: Implemented artist entity basket item — added `renderArtistCard()` in `BasketSidebar.ts` and `.basket-item-artist` CSS in `styles.css` (Story 3.9)
