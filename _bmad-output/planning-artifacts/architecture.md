@@ -71,13 +71,13 @@ npx create-tauri-app@latest jellyfinsync-ui --template vanilla-ts
 - **Auto-Fill Algorithm:** Priority-based music selection engine (favorites → play count → creation date) querying Jellyfin API (IsFavorite, PlayCount, DateCreated fields).
 - **Auto-Sync Controller:** Monitors device detection events and triggers sync automatically for configured devices without UI interaction.
 - **Transcoding Negotiator:** When a device has a `transcoding_profile_id` set, calls `POST /Items/{id}/PlaybackInfo` with the associated `DeviceProfile` payload to negotiate a server-side transcoded stream URL before each file transfer.
-- **Multi-Device Tracker:** Maintains a map of all currently connected managed devices; exposes selection API so the UI can switch the active device context without restart.
+- **Multi-Device Tracker:** Maintains a map of all currently connected managed devices; exposes selection API so the UI can switch the active device context at any time. `selectedDevicePath` may be null; when null, the UI enters a locked state (basket empty, add buttons disabled). The device hub is always visible when at least one device is connected.
 
 ### Data Architecture
 - **Daemon State:** Managed via a local SQLite database to ensure atomic scrobble commits and robust history tracking.
 - **UI Preferences:** Stored in standard JSON configuration files for ease of access from the Tauri frontend.
 - **Device Profile Fields:** `auto_fill_enabled BOOLEAN DEFAULT false`, `max_fill_bytes INTEGER NULL` (null = fill to capacity), `auto_sync_on_connect BOOLEAN DEFAULT false`, `transcoding_profile_id TEXT NULL` (references id in `device-profiles.json`; null = passthrough).
-- **Manifest Extension:** `.jellyfinsync.json` includes `auto_sync_on_connect` (boolean), `auto_fill` block (`{ "enabled": bool, "maxBytes": number | null }`), and `transcoding_profile_id` (string | null).
+- **Manifest Extension:** `.jellyfinsync.json` includes `auto_sync_on_connect` (boolean), `auto_fill` block (`{ "enabled": bool, "maxBytes": number | null }`), `transcoding_profile_id` (string | null), `name` (string | null), and `icon` (string | null). Both `name` and `icon` use `#[serde(default)]` for backward compatibility with manifests written before Story 2.9.
 - **device-profiles.json:** Seeded to `{app_data_dir}/device-profiles.json` on first daemon startup from an embedded binary asset (`include_bytes!`). User-editable post-install. Contains named `DeviceProfile` payloads for Jellyfin PlaybackInfo negotiation. A `passthrough` profile (`deviceProfile: null`) explicitly disables transcoding.
 
 ### DeviceManager Struct
@@ -101,9 +101,10 @@ unrecognized_device_path: Option<PathBuf>            // device awaiting initiali
 - **`sync.start` params (extended):** `{ devicePath: string, itemIds: string[], autoFill?: { enabled: boolean, maxBytes?: number, excludeItemIds: string[] } }` — if `autoFill.enabled`, the daemon calls `run_auto_fill()` and merges the resulting IDs with `itemIds` before executing sync. Mirrors the daemon-initiated auto-sync path (`main.rs:503`).
 - **Virtual basket slots:** Two UI-only marker types stored in the basket that represent deferred expansion. `AutoFillSlot` (`id: '__auto_fill_slot__'`) is passed to `sync.start` as the `autoFill` param, not as an `itemId`. `MusicArtist` items are passed as regular `itemIds`; the existing container-expansion logic at `rpc.rs:807–866` resolves them to tracks at sync time.
 - **Multi-Device IPC:**
-  - `device.list` → `Array<{ path: string, deviceId: string, name: string | null }>` — all connected managed devices.
+  - `device.list` → `Array<{ path: string, deviceId: string, name: string | null, icon: string | null }>` — all connected managed devices.
   - `device.select(params: { path: string })` → `{ ok: true }` — sets the active device context for all operations.
-  - `get_daemon_state` response extended with `connectedDevices: Array<{path, deviceId, name}>` and `selectedDevicePath: string | null`.
+  - `device.initialize(params: { folderPath: string, profileId: string, name: string, icon: string | null })` → `{ ok: true }` — writes manifest including name and icon.
+  - `get_daemon_state` response extended with `connectedDevices: Array<{path, deviceId, name, icon}>` and `selectedDevicePath: string | null`.
 - **Transcoding IPC:**
   - `device_profiles.list` → `Array<{ id, name, description, deviceProfile: object | null }>` — reads from `device-profiles.json`.
   - `device.set_transcoding_profile(params: { deviceId: string, profileId: string })` → `{ ok: true }` — persists to manifest (Write-Temp-Rename) and SQLite `devices` table.

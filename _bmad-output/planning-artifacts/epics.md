@@ -99,7 +99,8 @@ FR29: Epic 3 - Auto-Fill Virtual Slot (Story 3.8)
 FR30: Epic 2 - Auto-Sync on Known Device Detection
 FR31: Epic 4 - Transcoding Handshake (Story 4.8)
 FR32: Epic 4 - Transcoding Profile RPC (Story 4.8)
-FR33: Epic 2 - Multi-Device Selection (Story 2.7)
+FR26: Epic 2 - Device Identity (Story 2.9)
+FR33: Epic 2 - Enhanced Multi-Device Hub (Story 2.8)
 FR34: Epic 3 - Artist Entity Basket Item (Story 3.9)
 
 ## Epic List
@@ -299,6 +300,64 @@ So that I can operate on one specific device without the daemon silently overwri
 - New RPC `device.select(params: {path: string})` → sets `selected_device_path`; silently sets for single-device case.
 - `get_daemon_state` gains `connectedDevices: Array<{path, deviceId, name}>` and `selectedDevicePath: string | null`.
 - UI: `<sl-select>` or device card list in the Device State panel header, rendered only when `connectedDevices.length > 1`.
+
+**Status:** Picker behavior superseded by Story 2.8; device identity (name/icon) extended by Story 2.9.
+
+### Story 2.8: Enhanced Multi-Device Hub
+
+As a System Admin (Alexis) and Ritualist (Arthur),
+I want a persistent device hub I can always interact with — switching between connected devices or deselecting one entirely,
+So that I have full, iTunes-style control over which device I'm working with at all times.
+
+**Acceptance Criteria:**
+
+**Given** the main UI is open and 1 or more devices are connected
+**Then** the device hub is always displayed (not hidden for single device).
+**And** each device shows its name (or device_id fallback) and its icon.
+
+**Given** no device is selected (selectedDevicePath === null)
+**Then** the basket shows a placeholder: "Select a device to start curating".
+**And** all (+) add buttons in the library browser are disabled.
+**And** the "Start Sync" button is disabled.
+
+**Given** I click a device in the hub
+**Then** the UI calls `device.select` RPC and loads that device's basket.
+
+**Given** all devices are disconnected
+**Then** the no-device-selected locked state is shown.
+
+**Technical Notes:**
+- `BasketSidebar.ts renderDevicePicker()`: remove `connectedDevices.length > 1` guard — render hub whenever `connectedDevices.length >= 1`.
+- Add no-device check: if `selectedDevicePath === null`, render locked basket placeholder and emit `device-locked` CSS class on library container.
+- Library browser add buttons: check shared device-selected state before executing add RPC.
+- Daemon: no changes needed — `selectedDevicePath` already supports `null`.
+
+### Story 2.9: Device Identity — Name & Icon
+
+As a System Admin (Alexis),
+I want to give each device a custom name and icon when I initialize it,
+So that I can instantly recognize my devices in the hub without staring at raw IDs.
+
+**Acceptance Criteria:**
+
+**Given** the "Initialize Device" dialog is open
+**Then** a "Device Name" text input is shown (required, max 40 chars, prefilled with volume label or "My Device").
+**And** an icon picker is shown with a small library of device-type icons (e.g., iPod Classic, Generic DAP, SD Card, USB Drive, Watch, Phone).
+**When** I click "Confirm"
+**Then** the name and icon are written to the manifest.
+
+**Given** a device with a name and icon is connected
+**When** it appears in the device hub
+**Then** its icon is displayed alongside its name.
+**And** if no icon is set, a default "USB Drive" icon is shown.
+**And** if no name is set, the device_id is shown (existing fallback, unchanged).
+
+**Technical Notes:**
+- `DeviceManifest`: add `icon: Option<String>` with `#[serde(default)]` — backward-compatible with existing manifests.
+- `device.initialize` RPC params: add `name: String` and `icon: Option<String>`.
+- `device/mod.rs initialize_device()`: accept and store name + icon into manifest.
+- `device.list` + `get_daemon_state`: add `icon` field to each device entry.
+- `InitDeviceModal.ts`: add `<sl-input>` for device name + icon picker grid (~6–8 SVG icons embedded in UI).
 
 ## Epic 3: The Curation Hub (Basket & Library)
 

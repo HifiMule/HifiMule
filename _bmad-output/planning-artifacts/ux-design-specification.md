@@ -89,11 +89,22 @@ graph TD
 
 ### 5.4 Device Profile Settings
 *   **Auto-sync on connect toggle:** `<sl-switch>` in the device profile panel with helper text: "Automatically start syncing when this device is connected. Works with or without the UI open."
-*   **Multi-Device Picker** (rendered only when `connectedDevices.length > 1`): Positioned above the Device State panel (above the Managed Zone shield). Component: `<sl-select>` or compact device card list. Each option shows: device name (from manifest), truncated device path. The selected device is highlighted. Switching fires the `device.select` RPC and reloads the basket and storage projection for the newly selected device. When a single device is connected the picker is hidden — layout and behaviour are unchanged.
+*   **Device Identity** (shown in the Initialize Device dialog — Story 2.9):
+    *   `<sl-input>` labelled "Device Name" — required, max 40 chars, prefilled with volume label or "My Device".
+    *   Icon picker: a grid of ~6–8 icon options (iPod Classic, Generic DAP, SD Card, USB Drive, Watch, Phone, etc.) rendered as selectable tiles with a highlighted border on selection.
+    *   Selected icon and name are confirmed with the existing "Confirm" button and written to the manifest.
 
 ### 5.5 Headless Sync Feedback
 *   **Without UI:** Tray icon animation (Syncing state) + OS-native notification on completion.
 *   **With UI open:** Basket reflects live sync state via `on_sync_progress` events, identical to manual "Start Sync" progress display.
+
+### 5.6 Device Hub
+
+The device hub is a persistent panel displayed whenever at least one managed device is connected. It replaces the conditional `<sl-select>` picker from Story 2.7.
+
+*   **Device cards:** Each connected device is shown as a compact card containing its icon (from the built-in library; fallback: generic USB Drive icon) and its display name (fallback: device_id). The currently selected device card is highlighted with an active border/accent. Clicking any card calls `device.select` and reloads the basket for that device.
+*   **No-device-selected state:** When `selectedDevicePath === null`, the hub shows a placeholder: "Select a device to start curating". The basket renders as empty with no storage projection bar. All (+) add buttons in the library browser render as disabled (greyed out, no click interaction). The "Start Sync" button is disabled.
+*   **Single device:** The hub is still visible with a single device (not hidden). The single device is auto-selected by the daemon; its card renders as active.
 
 ---
 

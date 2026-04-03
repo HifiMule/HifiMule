@@ -49,6 +49,7 @@ workflowType: 'prd'
 - **Profile Selection:** UI/CLI support for selecting the correct Jellyfin user account for playlist/scrobble routing.
 - **Auto-Fill Sync Mode:** Intelligent device-filling using a virtual basket slot. Enabling Auto-Fill places a single slot in the basket representing remaining capacity; the priority algorithm (favorites → play count → creation date) runs at sync time, not at basket-build time. Always uses the freshest library state. Can be mixed with manual basket selections.
 - **Auto-Sync on Connect:** Known devices with auto-sync enabled trigger synchronization automatically on detection, requiring zero user interaction.
+- **Device Identity:** During device initialization, users can assign a custom display name and select an icon from a built-in library. The name and icon are stored in the device manifest and displayed in the device hub for instant visual recognition.
 
 - **Transcoding Handshake:** Per-device profile selection for server-side re-encoding via Jellyfin PlaybackInfo API. Profiles stored in an editable `device-profiles.json` in the app data directory; passthrough (direct download) is the default.
 
@@ -144,8 +145,8 @@ As a cross-platform desktop application, JellyfinSync consists of a performance-
 - **FR2:** Users can manually select a target device folder if automatic detection fails.
 - **FR3:** The system can identify the presence of a `.jellyfinsync.json` manifest on discovery.
 - **FR4:** The system can read persistent hardware identifiers to link devices across different sessions. When multiple managed devices are connected simultaneously, the system tracks all of them and allows the user to select the active device context.
-- **FR33:** When multiple managed devices are connected simultaneously, the system presents a device selection UI and allows the user to switch the active device context without restarting or reconnecting.
-- **FR26:** The system can initialize a new `.jellyfinsync.json` manifest on a connected device that has not previously been managed, capturing a hardware identifier, a designated sync folder path, and an associated Jellyfin user profile.
+- **FR33:** The system presents a persistent device hub showing all connected managed devices, each identified by its name and icon. The user can switch the active device context at any time. When no device is selected, the basket is empty and adding items is disabled.
+- **FR26:** The system can initialize a new `.jellyfinsync.json` manifest on a connected device that has not previously been managed, capturing a hardware identifier, a designated sync folder path, an associated Jellyfin user profile, a user-provided display name, and an optional icon identifier selected from a built-in library.
 
 ### 2. Server & Profile Management
 - **FR5:** Users can configure Jellyfin server credentials (URL, username, token).
