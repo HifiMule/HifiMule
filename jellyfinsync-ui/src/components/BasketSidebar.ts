@@ -331,6 +331,7 @@ export class BasketSidebar {
                 if (this.deviceSwitchInFlight) return;
                 const path = (card as HTMLElement).dataset.path;
                 if (!path) return;
+                if (path === this.selectedDevicePath) return;
                 this.deviceSwitchInFlight = true;
                 try {
                     await basketStore.flushPendingSave();
@@ -453,7 +454,7 @@ export class BasketSidebar {
                     ${this.connectedDevices.map(d => `
                         <div class="device-hub-card ${d.path === this.selectedDevicePath ? 'active' : ''}"
                              data-path="${this.escapeHtml(d.path)}">
-                            <sl-icon name="${this.escapeHtml(d.icon ?? 'usb-drive')}"
+                            <sl-icon name="${this.escapeHtml(d.icon || 'usb-drive')}"
                                      class="device-hub-icon"></sl-icon>
                             <span class="device-hub-name">${this.escapeHtml(d.name || d.deviceId)}</span>
                         </div>
@@ -587,25 +588,27 @@ export class BasketSidebar {
             this.isFoldersExpanded = !this.isFoldersExpanded;
             this.render();
         });
-        this.container.querySelector('#open-repair-btn')?.addEventListener('click', () => this.openRepairModal());
-        this.container.querySelector('#init-device-btn')?.addEventListener('click', () => this.openInitDeviceModal());
     }
 
     public render() {
         if (this.isDestroyed) return;
         if (this.showSyncComplete) {
+            this.updateDeviceLockState();
             this.renderSyncComplete();
             return;
         }
         if (this.syncErrorMessages) {
+            this.updateDeviceLockState();
             this.renderSyncError(this.syncErrorMessages);
             return;
         }
         if (this.isSyncing && this.currentOperation) {
+            this.updateDeviceLockState();
             this.renderSyncProgress();
             return;
         }
         if (this.isSyncing) {
+            this.updateDeviceLockState();
             this.container.innerHTML = `
                 <div class="basket-header"><h2>Starting...</h2></div>
                 <div class="sync-progress-panel" aria-live="polite" aria-label="Sync progress">
@@ -620,8 +623,8 @@ export class BasketSidebar {
             return;
         }
 
-        // Locked state: device(s) connected but none selected → show placeholder
-        if (this.selectedDevicePath === null && this.connectedDevices.length > 0) {
+        // Locked state: no device selected (includes all-disconnected case) → show placeholder
+        if (this.selectedDevicePath === null) {
             this.renderLockedBasket();
             return;
         }
@@ -1117,6 +1120,6 @@ export class BasketSidebar {
     private escapeHtml(text: string): string {
         const div = document.createElement('div');
         div.textContent = text;
-        return div.innerHTML;
+        return div.innerHTML.replace(/"/g, '&quot;');
     }
 }

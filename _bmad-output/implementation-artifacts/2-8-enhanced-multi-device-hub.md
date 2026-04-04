@@ -1,6 +1,6 @@
 # Story 2.8: Enhanced Multi-Device Hub
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
