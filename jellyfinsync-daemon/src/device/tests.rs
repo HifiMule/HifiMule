@@ -23,6 +23,7 @@ async fn test_dirty_manifest_roundtrip() {
     let manifest = DeviceManifest {
         device_id: "dev-1".to_string(),
         name: None,
+        icon: None,
         version: "1.0".to_string(),
         managed_paths: vec![],
         synced_items: vec![],
@@ -331,6 +332,7 @@ async fn test_write_manifest_creates_files() {
     let manifest = DeviceManifest {
         device_id: "test-device".to_string(),
         name: Some("Test".to_string()),
+        icon: None,
         version: "1.1".to_string(),
         managed_paths: vec!["Music".to_string()],
         synced_items: vec![SyncedItem {
@@ -378,6 +380,7 @@ async fn test_write_manifest_overwrites_existing() {
     let manifest1 = DeviceManifest {
         device_id: "dev-1".to_string(),
         name: Some("First".to_string()),
+        icon: None,
         version: "1.0".to_string(),
         managed_paths: vec![],
         synced_items: vec![],
@@ -395,6 +398,7 @@ async fn test_write_manifest_overwrites_existing() {
     let manifest2 = DeviceManifest {
         device_id: "dev-1".to_string(),
         name: Some("Updated".to_string()),
+        icon: None,
         version: "1.1".to_string(),
         managed_paths: vec!["Music".to_string()],
         synced_items: vec![SyncedItem {
@@ -439,6 +443,7 @@ async fn test_get_discrepancies_missing_file() {
     let manifest = DeviceManifest {
         device_id: "dev-1".to_string(),
         name: Some("Test Device".to_string()),
+        icon: None,
         version: "1.0".to_string(),
         managed_paths: vec!["Music".to_string()],
         synced_items: vec![SyncedItem {
@@ -493,6 +498,7 @@ async fn test_get_discrepancies_orphaned_file() {
     let manifest = DeviceManifest {
         device_id: "dev-1".to_string(),
         name: Some("Test Device".to_string()),
+        icon: None,
         version: "1.0".to_string(),
         managed_paths: vec!["Music".to_string()],
         synced_items: vec![],
@@ -539,6 +545,7 @@ async fn test_get_discrepancies_no_issues() {
     let manifest = DeviceManifest {
         device_id: "dev-1".to_string(),
         name: None,
+        icon: None,
         version: "1.0".to_string(),
         managed_paths: vec!["Music".to_string()],
         synced_items: vec![SyncedItem {
@@ -583,6 +590,7 @@ async fn test_prune_items() {
     let manifest = DeviceManifest {
         device_id: "dev-1".to_string(),
         name: None,
+        icon: None,
         version: "1.0".to_string(),
         managed_paths: vec!["Music".to_string()],
         synced_items: vec![
@@ -648,6 +656,7 @@ async fn test_relink_item() {
     let manifest = DeviceManifest {
         device_id: "dev-1".to_string(),
         name: None,
+        icon: None,
         version: "1.0".to_string(),
         managed_paths: vec!["Music".to_string()],
         synced_items: vec![SyncedItem {
@@ -703,6 +712,7 @@ async fn test_relink_item_path_traversal() {
     let manifest = DeviceManifest {
         device_id: "dev-1".to_string(),
         name: None,
+        icon: None,
         version: "1.0".to_string(),
         managed_paths: vec!["Music".to_string()],
         synced_items: vec![],
@@ -736,6 +746,7 @@ async fn test_clear_dirty_flag() {
     let manifest = DeviceManifest {
         device_id: "dev-1".to_string(),
         name: None,
+        icon: None,
         version: "1.0".to_string(),
         managed_paths: vec![],
         synced_items: vec![],
@@ -877,7 +888,7 @@ async fn test_initialize_device_root() {
         .await;
 
     // Initialize with root (empty folder_path)
-    let manifest = manager.initialize_device("", None).await.unwrap();
+    let manifest = manager.initialize_device("", None, "My Device".to_string(), None).await.unwrap();
 
     assert!(manifest.managed_paths.is_empty());
     assert_eq!(manifest.version, "1.0");
@@ -905,7 +916,7 @@ async fn test_initialize_device_subfolder() {
         .await;
 
     // Initialize with a subfolder
-    let manifest = manager.initialize_device("Music", None).await.unwrap();
+    let manifest = manager.initialize_device("Music", None, "My Device".to_string(), None).await.unwrap();
 
     assert_eq!(manifest.managed_paths, vec!["Music".to_string()]);
 
@@ -927,7 +938,7 @@ async fn test_initialize_device_requires_unrecognized_path() {
     let manager = DeviceManager::new(db);
 
     // No unrecognized path set → should fail
-    let res = manager.initialize_device("", None).await;
+    let res = manager.initialize_device("", None, "My Device".to_string(), None).await;
     assert!(res.is_err());
     assert!(res
         .unwrap_err()
@@ -946,21 +957,21 @@ async fn test_initialize_device_rejects_path_traversal() {
         .await;
 
     // Path traversal with ".."
-    let res = manager.initialize_device("../escape", None).await;
+    let res = manager.initialize_device("../escape", None, "My Device".to_string(), None).await;
     assert!(res.is_err());
     assert!(res.unwrap_err().to_string().contains("Invalid folder path"));
 
     // Absolute path
-    let res = manager.initialize_device("/etc/hacked", None).await;
+    let res = manager.initialize_device("/etc/hacked", None, "My Device".to_string(), None).await;
     assert!(res.is_err());
 
     // Nested path with separator
-    let res = manager.initialize_device("Music/SubFolder", None).await;
+    let res = manager.initialize_device("Music/SubFolder", None, "My Device".to_string(), None).await;
     assert!(res.is_err());
     assert!(res.unwrap_err().to_string().contains("single folder name"));
 
     // Backslash separator
-    let res = manager.initialize_device("Music\\SubFolder", None).await;
+    let res = manager.initialize_device("Music\\SubFolder", None, "My Device".to_string(), None).await;
     assert!(res.is_err());
 }
 
@@ -1031,6 +1042,7 @@ async fn test_save_basket_roundtrip() {
     let manifest = DeviceManifest {
         device_id: "dev-basket".to_string(),
         name: Some("Basket Test".to_string()),
+        icon: None,
         version: "1.0".to_string(),
         managed_paths: vec![],
         synced_items: vec![],
@@ -1091,6 +1103,7 @@ async fn test_auto_sync_on_connect_roundtrip() {
     let manifest = DeviceManifest {
         device_id: "dev-auto".to_string(),
         name: Some("Auto Device".to_string()),
+        icon: None,
         version: "1.0".to_string(),
         managed_paths: vec![],
         synced_items: vec![],
@@ -1135,6 +1148,7 @@ fn make_manifest(device_id: &str, name: &str) -> DeviceManifest {
     DeviceManifest {
         device_id: device_id.to_string(),
         name: Some(name.to_string()),
+        icon: None,
         version: "1.0".to_string(),
         managed_paths: vec![],
         synced_items: vec![],

@@ -48,7 +48,10 @@ pub struct PlaylistManifestEntry {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DeviceManifest {
     pub device_id: String,
+    #[serde(default)]
     pub name: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
     pub version: String,
     #[serde(default)]
     pub managed_paths: Vec<String>,
@@ -359,6 +362,8 @@ impl DeviceManager {
         &self,
         folder_path: &str,
         transcoding_profile_id: Option<String>,
+        name: String,
+        icon: Option<String>,
     ) -> Result<DeviceManifest> {
         // Validate folder_path: no traversal, no absolute paths, single-level only
         if !folder_path.is_empty() {
@@ -398,7 +403,8 @@ impl DeviceManager {
 
         let manifest = DeviceManifest {
             device_id,
-            name: None,
+            name: Some(name).filter(|s| !s.is_empty()),
+            icon,
             version: "1.0".to_string(),
             managed_paths,
             synced_items: vec![],

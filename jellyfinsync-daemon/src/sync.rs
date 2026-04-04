@@ -1232,6 +1232,7 @@ mod tests {
         DeviceManifest {
             device_id: "test-device".to_string(),
             name: Some("Test".to_string()),
+            icon: None,
             version: "1.0".to_string(),
             managed_paths: vec!["Music".to_string()],
             synced_items: vec![],

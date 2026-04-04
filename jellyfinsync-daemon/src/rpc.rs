@@ -410,6 +410,7 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
                 "path": p.to_string_lossy(),
                 "deviceId": m.device_id,
                 "name": m.name.clone().unwrap_or_else(|| m.device_id.clone()),
+                "icon": m.icon.clone(),
             })
         })
         .collect();
@@ -1407,6 +1408,20 @@ async fn handle_device_initialize(
     // Optional — if not provided, device uses passthrough (no transcoding)
     let transcoding_profile_id = params["transcodingProfileId"].as_str().map(|s| s.to_string());
 
+    let device_name = params["name"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing name".to_string(),
+        data: None,
+    })?.to_string();
+    if device_name.len() > 40 {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Device name exceeds 40 characters".to_string(),
+            data: None,
+        });
+    }
+    let device_icon = params["icon"].as_str().map(|s| s.to_string());
+
     // Validate the transcoding profile ID exists in device-profiles.json (if provided)
     if let Some(ref tpid) = transcoding_profile_id {
         let profiles_path = crate::paths::get_device_profiles_path().map_err(|e| JsonRpcError {
@@ -1430,7 +1445,7 @@ async fn handle_device_initialize(
 
     let manifest = state
         .device_manager
-        .initialize_device(folder_path, transcoding_profile_id.clone())
+        .initialize_device(folder_path, transcoding_profile_id.clone(), device_name, device_icon)
         .await
         .map_err(|e| JsonRpcError {
             code: ERR_STORAGE_ERROR,
@@ -1856,6 +1871,7 @@ async fn handle_device_list(state: &AppState) -> Result<Value, JsonRpcError> {
                 "path": p.to_string_lossy(),
                 "deviceId": m.device_id,
                 "name": m.name.clone().unwrap_or_else(|| m.device_id.clone()),
+                "icon": m.icon.clone(),
             })
         })
         .collect();
@@ -2221,6 +2237,7 @@ mod tests {
         let manifest = crate::device::DeviceManifest {
             device_id: "test-dev".to_string(),
             name: Some("Test".to_string()),
+            icon: None,
             version: "1.1".to_string(),
             managed_paths: vec!["Music".to_string()],
             synced_items: vec![
@@ -2310,6 +2327,7 @@ mod tests {
         let manifest = crate::device::DeviceManifest {
             device_id: "clean-dev".to_string(),
             name: Some("Clean".to_string()),
+            icon: None,
             version: "1.0".to_string(),
             managed_paths: vec![],
             synced_items: vec![],
@@ -2356,6 +2374,7 @@ mod tests {
         let manifest = crate::device::DeviceManifest {
             device_id: "dirty-dev".to_string(),
             name: Some("Dirty".to_string()),
+            icon: None,
             version: "1.0".to_string(),
             managed_paths: vec!["Music".to_string()],
             synced_items: vec![],
@@ -2416,6 +2435,7 @@ mod tests {
         let dirty_manifest = crate::device::DeviceManifest {
             device_id: "dirty-dev".to_string(),
             name: Some("Dirty".to_string()),
+            icon: None,
             version: "1.0".to_string(),
             managed_paths: vec![],
             synced_items: vec![],
@@ -2539,6 +2559,7 @@ mod tests {
                 crate::device::DeviceManifest {
                     device_id: "dev-1".to_string(),
                     name: Some("Dev 1".to_string()),
+                    icon: None,
                     version: "1.0".to_string(),
                     managed_paths: vec![],
                     synced_items: vec![],
@@ -2622,6 +2643,7 @@ mod tests {
         let manifest = crate::device::DeviceManifest {
             device_id: "dev-1".to_string(),
             name: Some("Dev 1".to_string()),
+            icon: None,
             version: "1.0".to_string(),
             managed_paths: vec![],
             synced_items: vec![],
@@ -2727,7 +2749,7 @@ mod tests {
         };
 
         // No unrecognized device registered → ERR_STORAGE_ERROR
-        let params = json!({ "folderPath": "", "profileId": "user-1" });
+        let params = json!({ "folderPath": "", "profileId": "user-1", "name": "My Device" });
         let res = handle_device_initialize(&state, Some(params)).await;
         assert!(res.is_err());
         assert_eq!(res.unwrap_err().code, ERR_STORAGE_ERROR);
@@ -2756,7 +2778,7 @@ mod tests {
         };
 
         // Initialize with empty folderPath (device root)
-        let params = json!({ "folderPath": "", "profileId": "user-abc" });
+        let params = json!({ "folderPath": "", "profileId": "user-abc", "name": "My Device" });
         let res = handle_device_initialize(&state, Some(params))
             .await
             .unwrap();
@@ -2812,7 +2834,7 @@ mod tests {
         };
 
         // Initialize with a subfolder
-        let params = json!({ "folderPath": "Music", "profileId": "user-xyz" });
+        let params = json!({ "folderPath": "Music", "profileId": "user-xyz", "name": "My Device" });
         let res = handle_device_initialize(&state, Some(params))
             .await
             .unwrap();
@@ -2850,6 +2872,7 @@ mod tests {
         let manifest = crate::device::DeviceManifest {
             device_id: device_id.to_string(),
             name: Some("Test".to_string()),
+            icon: None,
             version: "1.0".to_string(),
             managed_paths: vec![],
             synced_items: vec![],
@@ -2934,6 +2957,7 @@ mod tests {
         let manifest = crate::device::DeviceManifest {
             device_id: device_id.to_string(),
             name: Some("Test".to_string()),
+            icon: None,
             version: "1.0".to_string(),
             managed_paths: vec![],
             synced_items: vec![],
@@ -3044,6 +3068,7 @@ mod tests {
         let manifest1 = crate::device::DeviceManifest {
             device_id: "dev-list-1".to_string(),
             name: Some("DeviceA".to_string()),
+            icon: None,
             version: "1.0".to_string(),
             managed_paths: vec![],
             synced_items: vec![],
@@ -3058,6 +3083,7 @@ mod tests {
         let manifest2 = crate::device::DeviceManifest {
             device_id: "dev-list-2".to_string(),
             name: Some("DeviceB".to_string()),
+            icon: None,
             version: "1.0".to_string(),
             managed_paths: vec![],
             synced_items: vec![],
@@ -3095,6 +3121,7 @@ mod tests {
         let make_manifest = |id: &str| crate::device::DeviceManifest {
             device_id: id.to_string(),
             name: None,
+            icon: None,
             version: "1.0".to_string(),
             managed_paths: vec![],
             synced_items: vec![],

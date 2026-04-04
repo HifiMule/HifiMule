@@ -588,6 +588,7 @@ export class BasketSidebar {
             this.isFoldersExpanded = !this.isFoldersExpanded;
             this.render();
         });
+        this.container.querySelector('#init-device-btn')?.addEventListener('click', () => this.openInitDeviceModal());
     }
 
     public render() {

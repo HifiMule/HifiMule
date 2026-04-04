@@ -56,6 +56,7 @@ async fn test_device_recognition_integration() {
     let manifest = DeviceManifest {
         device_id: test_id.to_string(),
         name: Some("Test Phone".to_string()),
+        icon: None,
         version: "1.0".to_string(),
         managed_paths: vec![],
         synced_items: vec![],
@@ -116,6 +117,7 @@ async fn test_device_detection_auto_sync_enabled() {
     let manifest = DeviceManifest {
         device_id: test_id.to_string(),
         name: Some("Auto Device".to_string()),
+        icon: None,
         version: "1.0".to_string(),
         managed_paths: vec!["Music".to_string()],
         synced_items: vec![],
@@ -174,6 +176,7 @@ async fn test_device_detection_auto_sync_disabled() {
     let manifest = DeviceManifest {
         device_id: test_id.to_string(),
         name: Some("Manual Device".to_string()),
+        icon: None,
         version: "1.0".to_string(),
         managed_paths: vec!["Music".to_string()],
         synced_items: vec![],

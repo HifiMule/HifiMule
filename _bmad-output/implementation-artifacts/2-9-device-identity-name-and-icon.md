@@ -1,6 +1,6 @@
 # Story 2.9: Device Identity — Name & Icon
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -27,16 +27,16 @@ So that I can instantly recognize my devices in the hub without staring at raw I
 
 ## Tasks / Subtasks
 
-- [ ] **Daemon: `device/mod.rs` — Add `icon` to `DeviceManifest` + fix `name` serde(default)** (AC: #1, #2)
-  - [ ] Add `#[serde(default)]` to the existing `name: Option<String>` field (line ~51) — **this is missing and breaks deserialization of old manifests that lack the `name` key**
-  - [ ] Add `icon: Option<String>` with `#[serde(default)]` immediately below the `name` field:
+- [x] **Daemon: `device/mod.rs` — Add `icon` to `DeviceManifest` + fix `name` serde(default)** (AC: #1, #2)
+  - [x] Add `#[serde(default)]` to the existing `name: Option<String>` field (line ~51) — **this is missing and breaks deserialization of old manifests that lack the `name` key**
+  - [x] Add `icon: Option<String>` with `#[serde(default)]` immediately below the `name` field:
     ```rust
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
     pub icon: Option<String>,
     ```
-  - [ ] Update `initialize_device()` signature (line ~358) to accept `name: String` and `icon: Option<String>`:
+  - [x] Update `initialize_device()` signature (line ~358) to accept `name: String` and `icon: Option<String>`:
     ```rust
     pub async fn initialize_device(
         &self,
@@ -46,15 +46,15 @@ So that I can instantly recognize my devices in the hub without staring at raw I
         icon: Option<String>,
     ) -> Result<DeviceManifest>
     ```
-  - [ ] In the `DeviceManifest { ... }` construction inside `initialize_device()`, set:
+  - [x] In the `DeviceManifest { ... }` construction inside `initialize_device()`, set:
     ```rust
     name: Some(name).filter(|s| !s.is_empty()),
     icon,
     ```
     (The existing `name: None` line at ~line 401 must be replaced)
 
-- [ ] **Daemon: `rpc.rs` — Extract `name`/`icon` in `handle_device_initialize()`** (AC: #1)
-  - [ ] After extracting `transcoding_profile_id` (~line 1408), extract `name` and `icon`:
+- [x] **Daemon: `rpc.rs` — Extract `name`/`icon` in `handle_device_initialize()`** (AC: #1)
+  - [x] After extracting `transcoding_profile_id` (~line 1408), extract `name` and `icon`:
     ```rust
     let device_name = params["name"].as_str().ok_or(JsonRpcError {
         code: ERR_INVALID_PARAMS,
@@ -70,13 +70,13 @@ So that I can instantly recognize my devices in the hub without staring at raw I
     }
     let device_icon = params["icon"].as_str().map(|s| s.to_string());
     ```
-  - [ ] Update the `initialize_device()` call (~line 1433) to pass the new params:
+  - [x] Update the `initialize_device()` call (~line 1433) to pass the new params:
     ```rust
     .initialize_device(folder_path, transcoding_profile_id.clone(), device_name, device_icon)
     ```
 
-- [ ] **Daemon: `rpc.rs` — Add `icon` to `handle_device_list()` and `connectedDevices` in `handle_get_daemon_state()`** (AC: #2)
-  - [ ] In `handle_device_list()` (~line 1855), add `"icon": m.icon.clone()` to the JSON object:
+- [x] **Daemon: `rpc.rs` — Add `icon` to `handle_device_list()` and `connectedDevices` in `handle_get_daemon_state()`** (AC: #2)
+  - [x] In `handle_device_list()` (~line 1855), add `"icon": m.icon.clone()` to the JSON object:
     ```rust
     serde_json::json!({
         "path": p.to_string_lossy(),
@@ -85,7 +85,7 @@ So that I can instantly recognize my devices in the hub without staring at raw I
         "icon": m.icon.clone(),   // NEW
     })
     ```
-  - [ ] In `handle_get_daemon_state()` (~line 409), add `"icon": m.icon.clone()` to `connected_devices_json`:
+  - [x] In `handle_get_daemon_state()` (~line 409), add `"icon": m.icon.clone()` to `connected_devices_json`:
     ```rust
     serde_json::json!({
         "path": p.to_string_lossy(),
@@ -95,112 +95,19 @@ So that I can instantly recognize my devices in the hub without staring at raw I
     })
     ```
 
-- [ ] **Frontend: `InitDeviceModal.ts` — Add name input + icon picker to `renderContent()`** (AC: #1)
-  - [ ] In `renderContent()`, add the name input ABOVE the folder input section:
-    ```html
-    <div style="margin-bottom: 1.25rem;">
-        <label style="font-size: 0.8rem; opacity: 0.7; display: block; margin-bottom: 0.25rem;">
-            Device Name <span style="color: var(--sl-color-danger-500);">*</span>
-        </label>
-        <sl-input
-            id="init-device-name-input"
-            placeholder="My Device"
-            maxlength="40"
-            value="My Device"
-            clearable
-        ></sl-input>
-        <div style="font-size: 0.75rem; opacity: 0.55; margin-top: 0.3rem;">
-            Max 40 characters. Shown in the device hub.
-        </div>
-    </div>
-    <div style="margin-bottom: 1.25rem;">
-        <label style="font-size: 0.8rem; opacity: 0.7; display: block; margin-bottom: 0.5rem;">
-            Device Icon
-        </label>
-        <div id="init-icon-picker" style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
-            ${['usb-drive', 'phone-fill', 'watch', 'sd-card', 'headphones', 'music-note-list'].map(icon => `
-                <div class="init-icon-tile ${icon === 'usb-drive' ? 'selected' : ''}"
-                     data-icon="${icon}"
-                     style="display: flex; flex-direction: column; align-items: center; gap: 0.3rem;
-                            padding: 0.5rem 0.7rem; border-radius: var(--sl-border-radius-medium);
-                            border: 2px solid ${icon === 'usb-drive' ? 'var(--sl-color-primary-500)' : 'var(--sl-color-neutral-200)'};
-                            cursor: pointer; min-width: 52px; text-align: center;
-                            background: ${icon === 'usb-drive' ? 'var(--sl-color-primary-50)' : 'transparent'};
-                            transition: border-color 0.15s, background 0.15s;">
-                    <sl-icon name="${icon}" style="font-size: 1.5rem;"></sl-icon>
-                    <span style="font-size: 0.65rem; opacity: 0.7;">${this.iconLabel(icon)}</span>
-                </div>
-            `).join('')}
-        </div>
-    </div>
-    ```
-  - [ ] Add `private iconLabel(icon: string): string` helper method:
-    ```typescript
-    private iconLabel(icon: string): string {
-        const labels: Record<string, string> = {
-            'usb-drive': 'USB Drive',
-            'phone-fill': 'Phone',
-            'watch': 'Watch',
-            'sd-card': 'SD Card',
-            'headphones': 'Headphones',
-            'music-note-list': 'DAP',
-        };
-        return labels[icon] ?? icon;
-    }
-    ```
-  - [ ] Add a `selectedIcon` closure variable (initialized to `'usb-drive'`) in `renderContent()` before the HTML assignment
-  - [ ] After the HTML assignment, wire up icon tile click listeners:
-    ```typescript
-    let selectedIcon = 'usb-drive';
-    // ... innerHTML assignment ...
-    body.querySelectorAll('.init-icon-tile').forEach(tile => {
-        tile.addEventListener('click', () => {
-            selectedIcon = (tile as HTMLElement).dataset.icon ?? 'usb-drive';
-            body.querySelectorAll('.init-icon-tile').forEach(t => {
-                const el = t as HTMLElement;
-                const isSelected = el.dataset.icon === selectedIcon;
-                el.style.borderColor = isSelected ? 'var(--sl-color-primary-500)' : 'var(--sl-color-neutral-200)';
-                el.style.background = isSelected ? 'var(--sl-color-primary-50)' : 'transparent';
-            });
-        });
-    });
-    ```
-  - [ ] Disable/enable the Confirm button based on name field value:
-    ```typescript
-    const nameInput = body.querySelector('#init-device-name-input') as any;
-    const confirmBtn = this.dialog?.querySelector('#init-device-confirm-btn') as any;
-    // Enable based on initial value
-    if (confirmBtn) {
-        confirmBtn.disabled = !nameInput?.value?.trim();
-        confirmBtn.addEventListener('click', () => this.handleConfirm(userId, selectedIcon, nameInput));
-    }
-    nameInput?.addEventListener('sl-input', () => {
-        if (confirmBtn) confirmBtn.disabled = !nameInput.value?.trim();
-    });
-    ```
-    **IMPORTANT:** Remove the existing `confirmBtn.disabled = false` + `addEventListener('click', ...)` block that was there before — it is replaced by the above.
-  - [ ] Update `handleConfirm()` signature and body to accept and use name/icon:
-    ```typescript
-    private async handleConfirm(userId: string, selectedIcon: string, nameInputEl: any) {
-        ...
-        const deviceName: string = nameInputEl?.value?.trim() ?? 'My Device';
-        ...
-        await rpcCall('device_initialize', {
-            folderPath,
-            profileId: userId,
-            transcodingProfileId,
-            name: deviceName,
-            icon: selectedIcon || null,
-        });
-    }
-    ```
-    **NOTE:** The RPC method name is `device_initialize` (underscore) — not `device.initialize`. Do NOT change the method name.
+- [x] **Frontend: `InitDeviceModal.ts` — Add name input + icon picker to `renderContent()`** (AC: #1)
+  - [x] In `renderContent()`, add the name input ABOVE the folder input section
+  - [x] Add `private iconLabel(icon: string): string` helper method
+  - [x] Add a `selectedIcon` closure variable (initialized to `'usb-drive'`) in `renderContent()` before the HTML assignment
+  - [x] After the HTML assignment, wire up icon tile click listeners
+  - [x] Disable/enable the Confirm button based on name field value; replaced existing `confirmBtn.disabled = false` block
+  - [x] Update `handleConfirm()` signature and body to accept and use name/icon
 
-- [ ] **Verify TypeScript compiles cleanly** (AC: all)
-  - [ ] `rtk tsc` passes with 0 errors after all changes
+- [x] **Verify TypeScript compiles cleanly** (AC: all)
+  - [x] `rtk tsc` passes with 0 errors after all changes
 
-- [ ] **Verify Rust compiles cleanly** (AC: all)
-  - [ ] `rtk cargo build` passes with 0 errors after all changes
+- [x] **Verify Rust compiles cleanly** (AC: all)
+  - [x] `rtk cargo build` passes with 0 errors after all changes
 
 ## Dev Notes
 
@@ -312,20 +219,33 @@ If the user clears the name field and the Confirm button is re-disabled, `select
 
 ### Agent Model Used
 
-_To be filled by dev agent_
+claude-sonnet-4-6
 
 ### Debug Log References
 
-_To be filled by dev agent_
+None — all changes compiled cleanly on first attempt.
 
 ### Completion Notes List
 
-_To be filled by dev agent_
+- Added `#[serde(default)]` to `name: Option<String>` in `DeviceManifest` to fix backward-compat deserialization of old manifests.
+- Added `icon: Option<String>` with `#[serde(default)]` to `DeviceManifest` struct.
+- Updated `initialize_device()` to accept `name: String` and `icon: Option<String>`; stores name as `Some(name).filter(|s| !s.is_empty())` to avoid empty strings.
+- Added `device_name` (required, max 40 chars) and `device_icon` (optional) extraction in `handle_device_initialize()` with server-side length validation.
+- Added `"icon": m.icon.clone()` to JSON responses in both `handle_device_list()` and `handle_get_daemon_state()` `connected_devices_json`.
+- Added Device Name text input (required, prefilled "My Device", max 40 chars, `sl-input` validation) above folder input in `InitDeviceModal.ts renderContent()`.
+- Added icon picker grid with 6 Shoelace Bootstrap Icons tiles (usb-drive default); inline-style selection state toggled on click via closure variable.
+- Replaced old `confirmBtn.disabled = false` + click handler with validation-aware version; confirm button disabled while name is empty, re-enabled via `sl-input` event.
+- Updated `handleConfirm()` to accept `selectedIcon` and `nameInputEl` params; sends `name` and `icon` in `device_initialize` RPC payload.
+- Added `iconLabel()` private helper for human-readable icon tile labels.
+- Rust: 0 errors, 4 pre-existing warnings (unchanged). TypeScript: 0 errors.
 
 ### File List
 
-_To be filled by dev agent_
+- `jellyfinsync-daemon/src/device/mod.rs`
+- `jellyfinsync-daemon/src/rpc.rs`
+- `jellyfinsync-ui/src/components/InitDeviceModal.ts`
 
 ## Change Log
 
 - 2026-04-04: Story created — Device Identity (name + icon) for InitDeviceModal and daemon manifest/RPC extension.
+- 2026-04-04: Implementation complete — all tasks done, Rust and TypeScript compile cleanly.

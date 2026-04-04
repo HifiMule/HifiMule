@@ -102,12 +102,49 @@ export class InitDeviceModal {
         ).join('');
         const defaultPassthroughDesc = (profiles || []).find(p => p.id === 'passthrough')?.description || '';
 
+        let selectedIcon = 'usb-drive';
+
         body.innerHTML = `
             <div class="init-device-form">
                 <p style="margin-bottom: 1rem; opacity: 0.8;">
                     A new device has been detected with no sync configuration.
                     Set up the sync folder to get started.
                 </p>
+                <div style="margin-bottom: 1.25rem;">
+                    <label style="font-size: 0.8rem; opacity: 0.7; display: block; margin-bottom: 0.25rem;">
+                        Device Name <span style="color: var(--sl-color-danger-500);">*</span>
+                    </label>
+                    <sl-input
+                        id="init-device-name-input"
+                        placeholder="My Device"
+                        maxlength="40"
+                        value="My Device"
+                        clearable
+                    ></sl-input>
+                    <div style="font-size: 0.75rem; opacity: 0.55; margin-top: 0.3rem;">
+                        Max 40 characters. Shown in the device hub.
+                    </div>
+                </div>
+                <div style="margin-bottom: 1.25rem;">
+                    <label style="font-size: 0.8rem; opacity: 0.7; display: block; margin-bottom: 0.5rem;">
+                        Device Icon
+                    </label>
+                    <div id="init-icon-picker" style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
+                        ${['usb-drive', 'phone-fill', 'watch', 'sd-card', 'headphones', 'music-note-list'].map(icon => `
+                            <div class="init-icon-tile ${icon === 'usb-drive' ? 'selected' : ''}"
+                                 data-icon="${icon}"
+                                 style="display: flex; flex-direction: column; align-items: center; gap: 0.3rem;
+                                        padding: 0.5rem 0.7rem; border-radius: var(--sl-border-radius-medium);
+                                        border: 2px solid ${icon === 'usb-drive' ? 'var(--sl-color-primary-500)' : 'var(--sl-color-neutral-200)'};
+                                        cursor: pointer; min-width: 52px; text-align: center;
+                                        background: ${icon === 'usb-drive' ? 'var(--sl-color-primary-50)' : 'transparent'};
+                                        transition: border-color 0.15s, background 0.15s;">
+                                <sl-icon name="${icon}" style="font-size: 1.5rem;"></sl-icon>
+                                <span style="font-size: 0.65rem; opacity: 0.7;">${this.iconLabel(icon)}</span>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
                 <div style="margin-bottom: 1.25rem;">
                     <label style="font-size: 0.8rem; opacity: 0.7; display: block; margin-bottom: 0.25rem;">
                         Sync Folder Name (optional)
@@ -153,12 +190,29 @@ export class InitDeviceModal {
             });
         }
 
-        // Enable confirm button once content is rendered
+        // Wire up icon tile click listeners
+        body.querySelectorAll('.init-icon-tile').forEach(tile => {
+            tile.addEventListener('click', () => {
+                selectedIcon = (tile as HTMLElement).dataset.icon ?? 'usb-drive';
+                body.querySelectorAll('.init-icon-tile').forEach(t => {
+                    const el = t as HTMLElement;
+                    const isSelected = el.dataset.icon === selectedIcon;
+                    el.style.borderColor = isSelected ? 'var(--sl-color-primary-500)' : 'var(--sl-color-neutral-200)';
+                    el.style.background = isSelected ? 'var(--sl-color-primary-50)' : 'transparent';
+                });
+            });
+        });
+
+        // Enable/disable confirm button based on name field value
+        const nameInput = body.querySelector('#init-device-name-input') as any;
         const confirmBtn = this.dialog?.querySelector('#init-device-confirm-btn') as any;
         if (confirmBtn) {
-            confirmBtn.disabled = false;
-            confirmBtn.addEventListener('click', () => this.handleConfirm(userId));
+            confirmBtn.disabled = !(nameInput?.getAttribute('value') ?? 'My Device').trim();
+            confirmBtn.addEventListener('click', () => this.handleConfirm(userId, selectedIcon, nameInput));
         }
+        nameInput?.addEventListener('sl-input', () => {
+            if (confirmBtn) confirmBtn.disabled = !nameInput.value?.trim();
+        });
     }
 
     private renderError(body: HTMLElement, message: string) {
@@ -202,9 +256,11 @@ export class InitDeviceModal {
         });
     }
 
-    private async handleConfirm(userId: string) {
+    private async handleConfirm(userId: string, selectedIcon: string, nameInputEl: any) {
         const body = this.dialog?.querySelector('.init-device-body') as HTMLElement | null;
         if (!body) return;
+
+        const deviceName: string = nameInputEl?.value?.trim() ?? 'My Device';
 
         const folderInput = this.dialog?.querySelector('#init-folder-input') as any;
         const folderPath: string = folderInput?.value?.trim() ?? '';
@@ -222,6 +278,8 @@ export class InitDeviceModal {
                 folderPath,
                 profileId: userId,
                 transcodingProfileId,
+                name: deviceName,
+                icon: selectedIcon || null,
             });
 
             if (this.dialog) (this.dialog as any).hide();
@@ -231,6 +289,18 @@ export class InitDeviceModal {
             const message = typeof err === 'string' ? err : (err instanceof Error ? err.message : String(err));
             this.renderInitError(body, message);
         }
+    }
+
+    private iconLabel(icon: string): string {
+        const labels: Record<string, string> = {
+            'usb-drive': 'USB Drive',
+            'phone-fill': 'Phone',
+            'watch': 'Watch',
+            'sd-card': 'SD Card',
+            'headphones': 'Headphones',
+            'music-note-list': 'DAP',
+        };
+        return labels[icon] ?? icon;
     }
 
     private escapeHtml(text: string): string {
