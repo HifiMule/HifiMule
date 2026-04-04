@@ -1,6 +1,6 @@
 # Story 2.8: Enhanced Multi-Device Hub
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -38,14 +38,14 @@ So that I have full, iTunes-style control over which device I'm working with at 
 
 ## Tasks / Subtasks
 
-- [ ] **Frontend: Update `connectedDevices` type in `BasketSidebar.ts`** (AC: #1)
-  - [ ] Add `icon?: string | null` to the array type: `Array<{ path: string; deviceId: string; name: string; icon?: string | null }>`
-  - [ ] Forward-compatible with Story 2.9 which adds `icon` to the daemon response
+- [x] **Frontend: Update `connectedDevices` type in `BasketSidebar.ts`** (AC: #1)
+  - [x] Add `icon?: string | null` to the array type: `Array<{ path: string; deviceId: string; name: string; icon?: string | null }>`
+  - [x] Forward-compatible with Story 2.9 which adds `icon` to the daemon response
 
-- [ ] **Frontend: Rename and rewrite `renderDevicePicker()` → `renderDeviceHub()`** (AC: #1, #2, #4)
-  - [ ] Remove `if (this.connectedDevices.length <= 1) return '';` guard
-  - [ ] Add new guard: `if (this.connectedDevices.length === 0) return '';` (no hub when no devices at all)
-  - [ ] Replace `<sl-select>` / `<sl-option>` with device card divs:
+- [x] **Frontend: Rename and rewrite `renderDevicePicker()` → `renderDeviceHub()`** (AC: #1, #2, #4)
+  - [x] Remove `if (this.connectedDevices.length <= 1) return '';` guard
+  - [x] Add new guard: `if (this.connectedDevices.length === 0) return '';` (no hub when no devices at all)
+  - [x] Replace `<sl-select>` / `<sl-option>` with device card divs:
     ```html
     <div class="device-hub-panel">
       <div class="device-hub-cards">
@@ -60,17 +60,17 @@ So that I have full, iTunes-style control over which device I'm working with at 
       </div>
     </div>
     ```
-  - [ ] Update all call sites: rename `renderDevicePicker()` → `renderDeviceHub()` in both render paths (empty basket at line ~592 and non-empty basket at line ~642)
+  - [x] Update all call sites: rename `renderDevicePicker()` → `renderDeviceHub()` in both render paths (empty basket at line ~592 and non-empty basket at line ~642)
 
-- [ ] **Frontend: Add locked basket placeholder when no device selected** (AC: #2)
-  - [ ] In `render()`, after the existing early-exit guards (sync/error/progress) and BEFORE the `const items = basketStore.getItems()` check, add:
+- [x] **Frontend: Add locked basket placeholder when no device selected** (AC: #2)
+  - [x] In `render()`, after the existing early-exit guards (sync/error/progress) and BEFORE the `const items = basketStore.getItems()` check, add:
     ```typescript
     if (this.selectedDevicePath === null && this.connectedDevices.length > 0) {
         this.renderLockedBasket();
         return;
     }
     ```
-  - [ ] Implement `private renderLockedBasket(): void`:
+  - [x] Implement `private renderLockedBasket(): void`:
     ```typescript
     private renderLockedBasket(): void {
         this.container.innerHTML = `
@@ -97,15 +97,15 @@ So that I have full, iTunes-style control over which device I'm working with at 
     }
     ```
 
-- [ ] **Frontend: Disable Start Sync when no device selected** (AC: #2)
-  - [ ] In the empty basket render path, update the disabled logic on `#start-sync-btn`:
+- [x] **Frontend: Disable Start Sync when no device selected** (AC: #2)
+  - [x] In the empty basket render path, update the disabled logic on `#start-sync-btn`:
     ```typescript
     ${(!basketStore.isDirty() && !this.autoFillEnabled) || !this.selectedDevicePath ? 'disabled' : ''}
     ```
-  - [ ] In the non-empty basket render path, add `|| !this.selectedDevicePath` to the disabled condition on the "Start Sync" / repair-first paths where applicable
+  - [x] In the non-empty basket render path, add `|| !this.selectedDevicePath` to the disabled condition on the "Start Sync" / repair-first paths where applicable
 
-- [ ] **Frontend: Emit `device-locked` CSS class on library container** (AC: #2, #4)
-  - [ ] At the end of `render()` (and `renderLockedBasket()`), toggle the `device-locked` class on the `#library-content` container:
+- [x] **Frontend: Emit `device-locked` CSS class on library container** (AC: #2, #4)
+  - [x] At the end of `render()` (and `renderLockedBasket()`), toggle the `device-locked` class on the `#library-content` container:
     ```typescript
     const libraryContent = document.getElementById('library-content');
     if (libraryContent) {
@@ -113,11 +113,11 @@ So that I have full, iTunes-style control over which device I'm working with at 
             this.selectedDevicePath === null);
     }
     ```
-  - [ ] Call this in `render()` unconditionally (before any `return` in the method body) — add it as a side-effect call at the top of `render()` after the syncing/error early-returns, OR ensure every render path calls it
-  - [ ] Also call in `renderLockedBasket()` and all early-return syncing render paths (or centralize in a `private updateDeviceLockState()` helper)
+  - [x] Call this in `render()` unconditionally (before any `return` in the method body) — add it as a side-effect call at the top of `render()` after the syncing/error early-returns, OR ensure every render path calls it
+  - [x] Also call in `renderLockedBasket()` and all early-return syncing render paths (or centralize in a `private updateDeviceLockState()` helper)
 
-- [ ] **Frontend: Rename `bindDevicePickerEvents()` → `bindDeviceHubEvents()`** (AC: #3)
-  - [ ] Replace `sl-select.device-picker` + `sl-change` listener with `.device-hub-card` click listener:
+- [x] **Frontend: Rename `bindDevicePickerEvents()` → `bindDeviceHubEvents()`** (AC: #3)
+  - [x] Replace `sl-select.device-picker` + `sl-change` listener with `.device-hub-card` click listener:
     ```typescript
     private bindDeviceHubEvents(): void {
         this.container.querySelectorAll('.device-hub-card').forEach(card => {
@@ -141,10 +141,10 @@ So that I have full, iTunes-style control over which device I'm working with at 
         });
     }
     ```
-  - [ ] Update all call sites of `bindDevicePickerEvents()` to `bindDeviceHubEvents()` (2 call sites: in the empty basket render path ~line 611 and in the non-empty basket render path post-render binding)
+  - [x] Update all call sites of `bindDevicePickerEvents()` to `bindDeviceHubEvents()` (2 call sites: in the empty basket render path ~line 611 and in the non-empty basket render path post-render binding)
 
-- [ ] **Frontend: CSS — device hub cards and locked state** (AC: #1, #2)
-  - [ ] Add to `jellyfinsync-ui/src/styles.css`:
+- [x] **Frontend: CSS — device hub cards and locked state** (AC: #1, #2)
+  - [x] Add to `jellyfinsync-ui/src/styles.css`:
     ```css
     /* Device Hub */
     .device-hub-panel {
@@ -197,8 +197,8 @@ So that I have full, iTunes-style control over which device I'm working with at 
     }
     ```
 
-- [ ] **Verify TypeScript compiles cleanly** (AC: all)
-  - [ ] `rtk tsc` passes with 0 errors after all changes
+- [x] **Verify TypeScript compiles cleanly** (AC: all)
+  - [x] `rtk tsc` passes with 0 errors after all changes
 
 ## Dev Notes
 
@@ -324,6 +324,24 @@ claude-sonnet-4-6
 
 ### Debug Log References
 
+_No blockers encountered._
+
 ### Completion Notes List
 
+- Fixed pre-existing `selectedDevicePath` null-coalescing bug in both `refreshAndRender()` and the polling loop: switched from `?? this.selectedDevicePath` to an explicit `'selectedDevicePath' in state` field-presence check so the daemon returning `null` correctly clears local state.
+- Replaced the `<sl-select>` device picker with a card-based `renderDeviceHub()` method that shows every connected device (no `<= 1` guard), with icon (fallback `usb-drive`) and name.
+- Added `renderLockedBasket()` private method for the no-device-selected locked state: shows "Select a device to start curating" placeholder, renders the device hub and folders, and disables Start Sync.
+- Added `updateDeviceLockState()` helper that toggles the `device-locked` class on `#library-content`; called from `render()` normal path and `renderLockedBasket()`.
+- Replaced `bindDevicePickerEvents()` / `sl-change` with `bindDeviceHubEvents()` / click listeners on `.device-hub-card` elements.
+- Start Sync disabled when `!selectedDevicePath` in both the empty and non-empty basket render paths.
+- Removed now-unused `truncatePath()` method (was only used by the old `<sl-option>` labels).
+- TypeScript compiles cleanly with 0 errors.
+
 ### File List
+
+- `jellyfinsync-ui/src/components/BasketSidebar.ts`
+- `jellyfinsync-ui/src/styles.css`
+
+## Change Log
+
+- 2026-04-04: Implemented Enhanced Multi-Device Hub — replaced sl-select device picker with card-based hub, added locked basket state for no-device-selected, fixed selectedDevicePath null-coalescing bug, added device-locked CSS class for library add buttons, and updated Start Sync disabled logic. (claude-sonnet-4-6)

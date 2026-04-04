@@ -150,8 +150,8 @@ export class BasketSidebar {
     private autoFillMaxBytes: number | null = null;
     private autoSyncOnConnect: boolean = false;
     private etaText: string = 'Calculating\u2026';
-    // Multi-device picker state
-    private connectedDevices: Array<{ path: string; deviceId: string; name: string }> = [];
+    // Multi-device hub state
+    private connectedDevices: Array<{ path: string; deviceId: string; name: string; icon?: string | null }> = [];
     private selectedDevicePath: string | null = null;
     private deviceSwitchInFlight: boolean = false;
 
@@ -188,10 +188,15 @@ export class BasketSidebar {
 
         if (daemonStateResult.status === 'fulfilled' && daemonStateResult.value) {
             const state = daemonStateResult.value as any;
-            // Sync multi-device state so the picker renders correctly on every refreshAndRender,
+            // Sync multi-device state so the hub renders correctly on every refreshAndRender,
             // not just during the 2s polling cycle.
             this.connectedDevices = state.connectedDevices ?? this.connectedDevices;
-            this.selectedDevicePath = state.selectedDevicePath ?? this.selectedDevicePath;
+            // Use explicit field-presence check: if field present in response, use it (including null);
+            // otherwise keep current. Fixes the null-coalescing bug where selectedDevicePath: null
+            // would be ignored by the ?? operator.
+            if ('selectedDevicePath' in state) {
+                this.selectedDevicePath = state.selectedDevicePath;
+            }
             const currentDevice = state.currentDevice;
             if (currentDevice?.deviceId && currentDevice.deviceId !== this.lastHydratedDeviceId) {
                 this.lastHydratedDeviceId = currentDevice.deviceId;
@@ -320,28 +325,26 @@ export class BasketSidebar {
         }
     }
 
-    private bindDevicePickerEvents() {
-        const devicePicker = this.container.querySelector('sl-select.device-picker') as any;
-        if (devicePicker) {
-            devicePicker.addEventListener('sl-change', async (e: Event) => {
+    private bindDeviceHubEvents(): void {
+        this.container.querySelectorAll('.device-hub-card').forEach(card => {
+            card.addEventListener('click', async () => {
                 if (this.deviceSwitchInFlight) return;
+                const path = (card as HTMLElement).dataset.path;
+                if (!path) return;
                 this.deviceSwitchInFlight = true;
-                const newPath = (e.target as any).value;
                 try {
-                    // Flush any unsaved basket changes for the current device before switching.
                     await basketStore.flushPendingSave();
-                    await rpcCall('device.select', { path: newPath });
-                    // Reload basket for the newly selected device
+                    await rpcCall('device.select', { path });
                     const basketResult = await rpcCall('manifest_get_basket') as any;
                     basketStore.hydrateFromDaemon(basketResult?.basketItems ?? []);
                     this.refreshAndRender();
                 } catch (err) {
-                    console.error('[DevicePicker] Failed to switch device:', err);
+                    console.error('[DeviceHub] Failed to switch device:', err);
                 } finally {
                     this.deviceSwitchInFlight = false;
                 }
             });
-        }
+        });
     }
 
     private renderAutoFillControls(): string {
@@ -414,9 +417,13 @@ export class BasketSidebar {
                 const activeOperationId = daemonStateResult?.activeOperationId ?? null;
 
                 // Detect multi-device changes
-                const newConnectedDevices: Array<{ path: string; deviceId: string; name: string }> =
+                const newConnectedDevices: Array<{ path: string; deviceId: string; name: string; icon?: string | null }> =
                     daemonStateResult?.connectedDevices ?? [];
-                const newSelectedDevicePath: string | null = daemonStateResult?.selectedDevicePath ?? null;
+                // Use explicit null check so that selectedDevicePath: null from daemon clears local state
+                const newSelectedDevicePath: string | null =
+                    'selectedDevicePath' in (daemonStateResult ?? {})
+                        ? daemonStateResult.selectedDevicePath
+                        : this.selectedDevicePath;
                 const deviceCountChanged = newConnectedDevices.length !== this.connectedDevices.length;
                 const selectedDeviceChanged = newSelectedDevicePath !== this.selectedDevicePath;
                 this.connectedDevices = newConnectedDevices;
@@ -437,20 +444,21 @@ export class BasketSidebar {
         }, 2000);
     }
 
-    private truncatePath(path: string, maxLen = 30): string {
-        if (path.length <= maxLen) return path;
-        return '...' + path.slice(path.length - maxLen + 3);
-    }
 
-    private renderDevicePicker(): string {
-        if (this.connectedDevices.length <= 1) return '';
+    private renderDeviceHub(): string {
+        if (this.connectedDevices.length === 0) return '';
         return `
-            <div class="device-picker-panel">
-                <sl-select class="device-picker" value="${this.escapeHtml(this.selectedDevicePath ?? '')}" size="small" hoist>
+            <div class="device-hub-panel">
+                <div class="device-hub-cards">
                     ${this.connectedDevices.map(d => `
-                        <sl-option value="${this.escapeHtml(d.path)}">${this.escapeHtml(d.name)} — ${this.escapeHtml(this.truncatePath(d.path))}</sl-option>
+                        <div class="device-hub-card ${d.path === this.selectedDevicePath ? 'active' : ''}"
+                             data-path="${this.escapeHtml(d.path)}">
+                            <sl-icon name="${this.escapeHtml(d.icon ?? 'usb-drive')}"
+                                     class="device-hub-icon"></sl-icon>
+                            <span class="device-hub-name">${this.escapeHtml(d.name || d.deviceId)}</span>
+                        </div>
                     `).join('')}
-                </sl-select>
+                </div>
             </div>
         `;
     }
@@ -545,6 +553,44 @@ export class BasketSidebar {
         `;
     }
 
+    private updateDeviceLockState(): void {
+        const libraryContent = document.getElementById('library-content');
+        if (libraryContent) {
+            libraryContent.classList.toggle('device-locked', this.selectedDevicePath === null);
+        }
+    }
+
+    private renderLockedBasket(): void {
+        this.container.innerHTML = `
+            <div class="basket-header">
+                <h2>Basket</h2>
+                <sl-badge variant="neutral" pill>0</sl-badge>
+            </div>
+            <div class="basket-placeholder">
+                <sl-icon name="usb-drive" style="font-size: 2rem; opacity: 0.5;"></sl-icon>
+                <p style="opacity: 0.5;">Select a device to start curating</p>
+            </div>
+            <div class="basket-footer">
+                ${this.renderDeviceHub()}
+                ${this.renderDeviceFolders()}
+            </div>
+            <div class="basket-actions">
+                <sl-button id="start-sync-btn" variant="primary" style="width: 100%;" disabled>
+                    <sl-icon slot="prefix" name="cloud-download"></sl-icon>
+                    Start Sync
+                </sl-button>
+            </div>
+        `;
+        this.updateDeviceLockState();
+        this.bindDeviceHubEvents();
+        this.container.querySelector('#device-folders-toggle')?.addEventListener('click', () => {
+            this.isFoldersExpanded = !this.isFoldersExpanded;
+            this.render();
+        });
+        this.container.querySelector('#open-repair-btn')?.addEventListener('click', () => this.openRepairModal());
+        this.container.querySelector('#init-device-btn')?.addEventListener('click', () => this.openInitDeviceModal());
+    }
+
     public render() {
         if (this.isDestroyed) return;
         if (this.showSyncComplete) {
@@ -574,6 +620,14 @@ export class BasketSidebar {
             return;
         }
 
+        // Locked state: device(s) connected but none selected → show placeholder
+        if (this.selectedDevicePath === null && this.connectedDevices.length > 0) {
+            this.renderLockedBasket();
+            return;
+        }
+
+        this.updateDeviceLockState();
+
         const items = basketStore.getItems();
 
         if (items.length === 0) {
@@ -589,11 +643,11 @@ export class BasketSidebar {
                 <div class="basket-footer">
                     ${this.renderAutoFillControls()}
                     ${this.renderStatusZone()}
-                    ${this.renderDevicePicker()}
+                    ${this.renderDeviceHub()}
                     ${this.renderDeviceFolders()}
                 </div>
                 <div class="basket-actions">
-                    <sl-button id="start-sync-btn" variant="primary" style="width: 100%;" ${!basketStore.isDirty() && !this.autoFillEnabled ? 'disabled' : ''}>
+                    <sl-button id="start-sync-btn" variant="primary" style="width: 100%;" ${(!basketStore.isDirty() && !this.autoFillEnabled) || !this.selectedDevicePath ? 'disabled' : ''}>
                         <sl-icon slot="prefix" name="cloud-download"></sl-icon>
                         Start Sync
                     </sl-button>
@@ -608,7 +662,7 @@ export class BasketSidebar {
             this.container.querySelector('#init-device-btn')?.addEventListener('click', () => this.openInitDeviceModal());
             this.container.querySelector('#start-sync-btn')?.addEventListener('click', () => this.handleStartSync());
             this.bindAutoFillEvents();
-            this.bindDevicePickerEvents();
+            this.bindDeviceHubEvents();
             return;
         }
 
@@ -639,7 +693,7 @@ export class BasketSidebar {
                 ${renderCapacityBar(this.storageInfo, totalSizeBytes)}
                 ${this.renderAutoFillControls()}
                 ${this.renderStatusZone()}
-                ${this.renderDevicePicker()}
+                ${this.renderDeviceHub()}
                 ${this.renderDeviceFolders()}
             </div>
             <div class="basket-actions">
@@ -655,7 +709,7 @@ export class BasketSidebar {
                     </sl-button>
                 ` : `
                     <sl-button id="start-sync-btn" variant="primary" style="width: 100%;"
-                               ${this.isSyncing ? 'loading disabled' : ''}>
+                               ${!this.selectedDevicePath ? 'disabled' : this.isSyncing ? 'loading disabled' : ''}>
                         <sl-icon slot="prefix" name="cloud-download"></sl-icon>
                         ${this.isSyncing ? 'Syncing...' : 'Start Sync'}
                     </sl-button>
@@ -698,7 +752,7 @@ export class BasketSidebar {
         this.container.querySelector('#open-repair-btn')?.addEventListener('click', () => this.openRepairModal());
         this.container.querySelector('#init-device-btn')?.addEventListener('click', () => this.openInitDeviceModal());
         this.bindAutoFillEvents();
-        this.bindDevicePickerEvents();
+        this.bindDeviceHubEvents();
     }
 
     private openRepairModal() {

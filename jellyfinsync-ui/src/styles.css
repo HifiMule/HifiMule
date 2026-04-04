@@ -873,6 +873,56 @@ h2 {
   flex-shrink: 0;
 }
 
+/* Device Hub */
+.device-hub-panel {
+  padding: 0.5rem 0;
+  border-top: 1px solid var(--sl-color-neutral-200);
+}
+.device-hub-cards {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.device-hub-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.4rem 0.6rem;
+  border-radius: var(--sl-border-radius-medium);
+  border: 1px solid var(--sl-color-neutral-200);
+  cursor: pointer;
+  min-width: 60px;
+  max-width: 90px;
+  overflow: hidden;
+  transition: background 0.15s, border-color 0.15s;
+}
+.device-hub-card:hover {
+  background: var(--sl-color-neutral-100);
+}
+.device-hub-card.active {
+  border-color: var(--sl-color-primary-500);
+  background: var(--sl-color-primary-50);
+}
+.device-hub-icon {
+  font-size: 1.4rem;
+}
+.device-hub-name {
+  font-size: 0.7rem;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 80px;
+}
+
+/* Locked state: disable library add buttons when no device is selected */
+#library-content.device-locked .basket-toggle-btn {
+  opacity: 0.3;
+  pointer-events: none;
+}
+
 .basket-item-auto-fill-icon {
   width: 48px;
   height: 48px;
