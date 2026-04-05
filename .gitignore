@@ -24,6 +24,7 @@ Thumbs.db
 dist/
 build/
 out/
+squashfs-root/
 
 # Rust
 target/
