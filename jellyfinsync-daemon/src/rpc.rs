@@ -1413,14 +1413,35 @@ async fn handle_device_initialize(
         message: "Missing name".to_string(),
         data: None,
     })?.to_string();
-    if device_name.len() > 40 {
+    if device_name.trim().is_empty() {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Name cannot be empty".to_string(),
+            data: None,
+        });
+    }
+    if device_name.chars().count() > 40 {
         return Err(JsonRpcError {
             code: ERR_INVALID_PARAMS,
             message: "Device name exceeds 40 characters".to_string(),
             data: None,
         });
     }
-    let device_icon = params["icon"].as_str().map(|s| s.to_string());
+    const VALID_ICONS: &[&str] = &[
+        "usb-drive", "phone-fill", "watch", "sd-card", "headphones", "music-note-list",
+    ];
+    let device_icon = params["icon"].as_str()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    if let Some(ref ic) = device_icon {
+        if !VALID_ICONS.contains(&ic.as_str()) {
+            return Err(JsonRpcError {
+                code: ERR_INVALID_PARAMS,
+                message: format!("Invalid icon '{}'", ic),
+                data: None,
+            });
+        }
+    }
 
     // Validate the transcoding profile ID exists in device-profiles.json (if provided)
     if let Some(ref tpid) = transcoding_profile_id {

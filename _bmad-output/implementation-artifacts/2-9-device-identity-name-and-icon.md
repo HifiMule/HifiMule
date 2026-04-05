@@ -1,6 +1,6 @@
 # Story 2.9: Device Identity — Name & Icon
 
-Status: review
+Status: done
 
 ## Story
 
@@ -193,9 +193,9 @@ If the user clears the name field and the Confirm button is re-disabled, `select
 - `jellyfinsync-daemon/src/device/mod.rs` — `DeviceManifest.name` serde(default), new `icon` field, `initialize_device()` signature
 - `jellyfinsync-daemon/src/rpc.rs` — `handle_device_initialize()` params, `handle_device_list()` response, `handle_get_daemon_state()` connectedDevices
 - `jellyfinsync-ui/src/components/InitDeviceModal.ts` — name input, icon picker, confirm wiring
+- `jellyfinsync-ui/src/components/BasketSidebar.ts` — wire `#init-device-btn` click → `openInitDeviceModal()` (was rendered in Story 2.8 but never connected)
 
 **These files do NOT change:**
-- `jellyfinsync-ui/src/components/BasketSidebar.ts` — already forward-compat
 - `jellyfinsync-ui/src/styles.css` — no new classes needed
 - `jellyfinsync-daemon/src/db.rs` — no DB schema changes
 - `jellyfinsync-daemon/src/main.rs` — no changes
@@ -230,7 +230,7 @@ None — all changes compiled cleanly on first attempt.
 - Added `#[serde(default)]` to `name: Option<String>` in `DeviceManifest` to fix backward-compat deserialization of old manifests.
 - Added `icon: Option<String>` with `#[serde(default)]` to `DeviceManifest` struct.
 - Updated `initialize_device()` to accept `name: String` and `icon: Option<String>`; stores name as `Some(name).filter(|s| !s.is_empty())` to avoid empty strings.
-- Added `device_name` (required, max 40 chars) and `device_icon` (optional) extraction in `handle_device_initialize()` with server-side length validation.
+- Added `device_name` (required, max 40 chars by char count, empty-string rejected) and `device_icon` (optional, whitelist-validated against 6 known icons, empty string filtered to None) extraction in `handle_device_initialize()` with full server-side validation.
 - Added `"icon": m.icon.clone()` to JSON responses in both `handle_device_list()` and `handle_get_daemon_state()` `connected_devices_json`.
 - Added Device Name text input (required, prefilled "My Device", max 40 chars, `sl-input` validation) above folder input in `InitDeviceModal.ts renderContent()`.
 - Added icon picker grid with 6 Shoelace Bootstrap Icons tiles (usb-drive default); inline-style selection state toggled on click via closure variable.
@@ -244,8 +244,10 @@ None — all changes compiled cleanly on first attempt.
 - `jellyfinsync-daemon/src/device/mod.rs`
 - `jellyfinsync-daemon/src/rpc.rs`
 - `jellyfinsync-ui/src/components/InitDeviceModal.ts`
+- `jellyfinsync-ui/src/components/BasketSidebar.ts`
 
 ## Change Log
 
 - 2026-04-04: Story created — Device Identity (name + icon) for InitDeviceModal and daemon manifest/RPC extension.
 - 2026-04-04: Implementation complete — all tasks done, Rust and TypeScript compile cleanly.
+- 2026-04-05: Code review complete — 7 patches applied: char-count name validation, empty-name server guard, icon whitelist + empty-string filter, confirmBtn initial state uses `.value` not `getAttribute`, listener deduplication via clone+replace (fixed: sl-input now references live button), icon label "Music Player". Spec amended to include BasketSidebar.ts (Story 2.8 had rendered #init-device-btn without wiring it).

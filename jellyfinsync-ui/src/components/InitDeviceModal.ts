@@ -207,12 +207,15 @@ export class InitDeviceModal {
         const nameInput = body.querySelector('#init-device-name-input') as any;
         const confirmBtn = this.dialog?.querySelector('#init-device-confirm-btn') as any;
         if (confirmBtn) {
-            confirmBtn.disabled = !(nameInput?.getAttribute('value') ?? 'My Device').trim();
-            confirmBtn.addEventListener('click', () => this.handleConfirm(userId, selectedIcon, nameInput));
+            // Clone to drop any stale listeners from previous renders, then wire fresh ones
+            const freshBtn = confirmBtn.cloneNode(true) as any;
+            confirmBtn.replaceWith(freshBtn);
+            freshBtn.disabled = !(nameInput?.value ?? 'My Device').trim();
+            freshBtn.addEventListener('click', () => this.handleConfirm(userId, selectedIcon, nameInput));
+            nameInput?.addEventListener('sl-input', () => {
+                freshBtn.disabled = !nameInput.value?.trim();
+            });
         }
-        nameInput?.addEventListener('sl-input', () => {
-            if (confirmBtn) confirmBtn.disabled = !nameInput.value?.trim();
-        });
     }
 
     private renderError(body: HTMLElement, message: string) {
@@ -298,7 +301,7 @@ export class InitDeviceModal {
             'watch': 'Watch',
             'sd-card': 'SD Card',
             'headphones': 'Headphones',
-            'music-note-list': 'DAP',
+            'music-note-list': 'Music Player',
         };
         return labels[icon] ?? icon;
     }

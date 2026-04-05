@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-04-04  # 2-9 review
+last_updated: 2026-04-05  # 2-9 done
 project: JellyfinSync
 project_key: NOKEY
 tracking_system: file-system
@@ -57,7 +57,7 @@ development_status:
   2-6-initialize-new-device-manifest: done
   2-7-multi-device-selection-panel: done
   2-8-enhanced-multi-device-hub: done
-  2-9-device-identity-name-and-icon: review
+  2-9-device-identity-name-and-icon: done
   epic-2-retrospective: optional
 
   epic-3: in-progress

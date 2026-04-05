@@ -20,7 +20,8 @@
       "Bash(npx eslint:*)",
       "Bash(npx --version)",
       "Bash(rtk pnpm:*)",
-      "Bash(cargo check:*)"
+      "Bash(cargo check:*)",
+      "Bash(grep -E \"FAILED|error|ok$|test result\")"
     ]
   }
 }
