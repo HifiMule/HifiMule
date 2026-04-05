@@ -22,7 +22,9 @@
       "Bash(rtk git rev-parse:*)",
       "Bash(python3:*)",
       "Bash(rtk read jellyfinsync-daemon/Cargo.toml)",
-      "Bash(rtk grep \"PlaybackInfo\\\\|report_play\\\\|scrobble\\\\|UserPlayedItems\\\\|Playing\\\\|Playback\" jellyfinsync-daemon/src/api.rs)"
+      "Bash(rtk grep \"PlaybackInfo\\\\|report_play\\\\|scrobble\\\\|UserPlayedItems\\\\|Playing\\\\|Playback\" jellyfinsync-daemon/src/api.rs)",
+      "Bash(npm run:*)",
+      "Bash(cargo tauri:*)"
     ]
   }
 }
