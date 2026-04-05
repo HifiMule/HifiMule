@@ -959,15 +959,25 @@ fn get_mounts() -> Vec<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn get_mounts() -> Vec<PathBuf> {
-    let root = std::path::Path::new("/");
+    use std::os::unix::fs::MetadataExt;
     let mut mounts = Vec::new();
+    // If we cannot stat / we cannot safely filter the boot volume; return empty.
+    let Ok(root_meta) = std::fs::metadata("/") else {
+        return mounts;
+    };
+    let root_dev = root_meta.dev();
     if let Ok(entries) = std::fs::read_dir("/Volumes") {
         for entry in entries.flatten() {
             let path = entry.path();
-            // The system boot volume appears in /Volumes as a symlink or firmlink
-            // that resolves to /. Skip it so the main disk is never proposed for
-            // initialization.
-            if std::fs::canonicalize(&path).map(|p| p == root).unwrap_or(false) {
+            // Skip the system boot volume. On macOS (including Apple Silicon with
+            // APFS firmlinks) the boot volume in /Volumes shares the same device ID
+            // as the root filesystem. Device-ID comparison is firmlink-safe;
+            // canonicalize/realpath does not reliably follow APFS firmlinks.
+            // On metadata error, skip the entry (fail-safe).
+            let is_root_device = std::fs::metadata(&path)
+                .map(|m| m.dev() == root_dev)
+                .unwrap_or(true);
+            if is_root_device {
                 continue;
             }
             if is_mount_point(&path) {

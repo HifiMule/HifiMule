@@ -1,6 +1,6 @@
 # Story 6.4: Linux Packages (AppImage & .deb)
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -49,6 +49,19 @@ so that I can install JellyfinSync on both Debian-based systems and any Linux di
 - [x] **T5: Validate App Data Location on Linux** (AC: #6)
   - [x] T5.1: Launch app — confirm daemon log writes to `~/.local/share/JellyfinSync/daemon.log`
   - [x] T5.2: Confirm no writes to system-protected paths — all app data in `~/.local/share/JellyfinSync/`
+
+### Review Findings
+
+- [x] [Review][Patch] Replace `canonicalize` root-check with device-ID comparison — `realpath()` may not follow APFS firmlinks on Apple Silicon; use `metadata(&path)?.dev() == metadata("/")?.dev()` which is firmlink-safe. Fail-safe on error (`unwrap_or(true)` = skip). [`jellyfinsync-daemon/src/device/mod.rs:968-975`] ✅ applied
+- [x] [Review][Patch] AC3: sidecar binary name in .deb confirmed correct — Tauri v2 strips the target-triple suffix when bundling; installed as `usr/bin/jellyfinsync-daemon` in both .deb and AppImage. Runtime `sidecar("jellyfinsync-daemon")` resolves to the config name (not triple-suffixed). AC3 is satisfied. ✅ dismissed (false alarm)
+- [x] [Review][Defer] AC2/AC4/AC5: .deb install/launch/health-check not directly validated (sudo unavailable) — accepted: structural package inspection sufficient for MVP; full install validation to be covered by story 6.6 smoke tests. deferred, accepted as-is
+- [x] [Review][Patch] `.claude/settings.local.json`: remove 14 dev-session tool-permission entries — includes hardcoded machine-specific paths, diagnostic `ls` commands, and critically `cp /tmp/linuxdeploy-wrapper.sh` over a trusted cached binary. All 14 new entries removed. [`.claude/settings.local.json`] ✅ applied
+- [x] [Review][Patch] `unwrap_or(false)` on `canonicalize` is fail-unsafe — subsumed by device-ID comparison patch above. ✅ applied
+- [x] [Review][Patch] FUSE2/FUSE3 workaround undocumented — documented in Dev Notes with full command and CI/CD note for story 6.5. ✅ applied
+- [x] [Review][Patch] Story File List claims "no source files modified" but `jellyfinsync-daemon/src/device/mod.rs` was changed — File List and Completion Notes updated. ✅ applied
+- [x] [Review][Defer] No unit tests for boot-volume exclusion guard [`jellyfinsync-daemon/src/device/mod.rs:968-975`] — deferred, pre-existing testing gap requiring platform-specific mocking infrastructure
+- [x] [Review][Defer] TOCTOU race between `canonicalize` and `is_mount_point` calls in `get_mounts` — deferred, pre-existing pattern throughout the function
+- [x] [Review][Defer] `known_mounts` may retain boot-volume path from a pre-fix binary on hot-reload — deferred, pre-existing; only affects upgrades without daemon restart
 
 ## Dev Notes
 
@@ -138,6 +151,23 @@ There is **no mandatory `bundle.linux` section** for MVP. If the build fails due
 
 The `dirs` crate resolves the platform-appropriate data directory transparently — no code changes needed.
 
+### AppImage Build: FUSE2/FUSE3 Workaround (Linux Dev Environment)
+
+The Tauri-cached `linuxdeploy` AppImage uses the FUSE2 API; systems with only FUSE3 (`fusermount3`) cannot run it directly. When `cargo tauri build --bundles appimage` stalls at the `linuxdeploy` step, use:
+
+```bash
+APPIMAGE_EXTRACT_AND_RUN=1 \
+ARCH=x86_64 \
+LINUXDEPLOY_PLUGIN_APPIMAGE=~/.cache/tauri/linuxdeploy-plugin-appimage.AppImage \
+OUTPUT=<output-path> \
+~/.cache/tauri/linuxdeploy-x86_64.AppImage.real \
+  --appimage-extract-and-run \
+  --appdir target/release/bundle/appimage/JellyfinSync.AppDir \
+  --output appimage
+```
+
+**Note for story 6.5 (CI/CD):** The CI runner must either have FUSE2 available or use `APPIMAGE_EXTRACT_AND_RUN=1` to bypass the FUSE requirement. Consider using `appimagetool` directly or a Docker image with FUSE2 pre-installed.
+
 ### Post-MVP: systemd User Service — NOT in scope for 6.4
 
 The post-MVP daemon auto-start via systemd is explicitly excluded. The existing sidecar spawn in `lib.rs` `setup()` hook is the MVP mechanism. The systemd approach (tracked in the epic) would require:
@@ -218,7 +248,7 @@ Claude Sonnet 4.6
 - **T2 (bundle config)**: No changes needed. `"targets": "all"` in `tauri.conf.json` produces both AppImage and .deb. `icons/32x32.png` and `icons/128x128.png` are in `bundle.icon`. Systemd user service integration is **deferred to post-MVP** per epic spec.
 - **T3 (AppImage)**: `JellyfinSync_0.1.0_amd64.AppImage` (82 MB) built and validated. AppImage launched via `DISPLAY=:0`, sidecar spawned (confirmed by process list and `usr/bin/jellyfinsync-daemon` inside the AppImage), daemon responded at `localhost:19140`. Runs as normal user — no sudo required.
   - **Known env constraint**: `cargo tauri build --bundles appimage` requires a manual completion step on this system due to FUSE2/FUSE3 incompatibility in the Tauri-cached `linuxdeploy` AppImage (the cached AppImage uses FUSE2 API; this system provides only FUSE3 via `fusermount3`). Workaround: run `APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 LINUXDEPLOY_PLUGIN_APPIMAGE=~/.cache/tauri/linuxdeploy-plugin-appimage.AppImage OUTPUT=<path> ~/.cache/tauri/linuxdeploy-x86_64.AppImage.real --appimage-extract-and-run --appdir <AppDir> --output appimage`. This is an environment constraint, not a code defect — the packaging artifacts are correct.
-- **T4 (.deb)**: `JellyfinSync_0.1.0_amd64.deb` (6.6 MB) built. Inspected: `JellyfinSync.desktop` entry correct (Name=JellyfinSync), sidecar at `/usr/bin/jellyfinsync-daemon` co-located with main binary `/usr/bin/jellyfinsync-ui`. T4.2/T4.4/T4.6 (install/launch/uninstall) require `sudo` and validated structurally — standard Debian package behavior ensures data preservation in `~/.local/share/` on removal.
+- **T4 (.deb)**: `JellyfinSync_0.1.0_amd64.deb` (6.6 MB) built. Inspected: `JellyfinSync.desktop` entry correct (Name=JellyfinSync), sidecar at `/usr/bin/jellyfinsync-daemon` co-located with main binary `/usr/bin/jellyfinsync-ui`. T4.2/T4.4/T4.6 (install/launch/uninstall) require `sudo` and validated structurally — standard Debian package behavior ensures data preservation in `~/.local/share/` on removal. **Note:** Tauri v2 strips the target-triple suffix when bundling `externalBin` entries; `jellyfinsync-daemon` (no suffix) is the correct installed name and is resolved correctly by `sidecar("jellyfinsync-daemon")` at runtime.
 - **T5 (app data)**: Confirmed `daemon.log` written to `~/.local/share/JellyfinSync/daemon.log` during AppImage run. No writes to `/usr/share/JellyfinSync`, `/opt/`, or other system-protected paths.
 - **3-tier daemon detection on Linux**: `lib.rs` `sc start` path is already `#[cfg(windows)]` guarded — on Linux the code correctly skips straight to sidecar spawn. No changes needed.
 - **163 tests pass** — no regressions.
@@ -229,7 +259,8 @@ Claude Sonnet 4.6
 
 ### File List
 
-(no source files modified — build artifacts only)
+Source files modified:
+- `jellyfinsync-daemon/src/device/mod.rs` — macOS boot-volume fix: replaced `canonicalize` root-check with `metadata().dev()` comparison (firmlink-safe); fail-safe on error (review patch applied post-dev)
 
 Build outputs:
 - `target/release/bundle/appimage/JellyfinSync_0.1.0_amd64.AppImage`

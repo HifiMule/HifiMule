@@ -24,23 +24,7 @@
       "Bash(rtk read jellyfinsync-daemon/Cargo.toml)",
       "Bash(rtk grep \"PlaybackInfo\\\\|report_play\\\\|scrobble\\\\|UserPlayedItems\\\\|Playing\\\\|Playback\" jellyfinsync-daemon/src/api.rs)",
       "Bash(npm run:*)",
-      "Bash(cargo tauri:*)",
-      "Bash(cargo --version)",
-      "Bash(rustc --version)",
-      "Bash(rustc -vV)",
-      "Bash(dpkg --version)",
-      "Read(//home/alexis/.cache/tauri/**)",
-      "Read(//tmp/**)",
-      "Bash(find / -name \"linuxdeploy*\" -maxdepth 6)",
-      "Bash(ARCH=x86_64 /home/alexis/.cache/tauri/linuxdeploy-x86_64.AppImage --appdir /home/alexis/Projects/JellyfinSync/target/release/bundle/appimage/JellyfinSync.AppDir --output appimage)",
-      "Bash(ls /tmp/JellyfinSync*.AppImage)",
-      "Bash(ls /tmp/JellyfinSync*)",
-      "Bash(~/.cache/tauri/linuxdeploy-plugin-appimage.AppImage --list)",
-      "Bash(ARCH=x86_64 LINUXDEPLOY_PLUGIN_APPIMAGE=/home/alexis/.cache/tauri/linuxdeploy-plugin-appimage.AppImage /home/alexis/.cache/tauri/linuxdeploy-x86_64.AppImage --appdir /home/alexis/Projects/JellyfinSync/target/release/bundle/appimage/JellyfinSync.AppDir --output appimage)",
-      "Bash(ls /tmp/*.AppImage)",
-      "Bash(cp /home/alexis/.cache/tauri/linuxdeploy-x86_64.AppImage /home/alexis/.cache/tauri/linuxdeploy-x86_64.AppImage.bak)",
-      "Bash(chmod +x /tmp/linuxdeploy-wrapper.sh)",
-      "Bash(cp /tmp/linuxdeploy-wrapper.sh /home/alexis/.cache/tauri/linuxdeploy-x86_64.AppImage)"
+      "Bash(cargo tauri:*)"
     ]
   }
 }
