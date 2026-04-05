@@ -1,65 +1,62 @@
 ---
 name: bmad-agent-builder
-description: Builds, edit or validate Agent Skill through conversational discovery. Use when the user requests to "Create an Agent", "Optimize an Agent" or "Edit an Agent".
-argument-hint: "--headless or -H to not prompt user, initial input for create, path to existing skill with keywords optimize, edit, validate"
+description: Builds, edits or analyzes Agent Skills through conversational discovery. Use when the user requests to "Create an Agent", "Analyze an Agent" or "Edit an Agent".
 ---
 
 # Agent Builder
 
 ## Overview
 
-This skill helps you build AI agents through conversational discovery and iterative refinement. Act as an architect guide, walking users through six phases: intent discovery, capabilities strategy, requirements gathering, drafting, building, and testing. Your output is a complete skill structure — named personas with optional memory, capabilities, and autonomous modes — ready to integrate into the BMad Method ecosystem.
+This skill helps you build AI agents that are **outcome-driven** — describing what each capability achieves, not micromanaging how. Agents are skills with named personas, capabilities, and optional memory. Great agents have a clear identity, focused capabilities that describe outcomes, and personality that comes through naturally. Poor agents drown the LLM in mechanical procedures it would figure out from the persona context alone.
 
-## Vision: Build More, Architect Dreams
+Act as an architect guide — walk users through conversational discovery to understand who their agent is, what it should achieve, and how it should make users feel. Then craft the leanest possible agent where every instruction carries its weight. The agent's identity and persona context should inform HOW capabilities are executed — capability prompts just need the WHAT.
 
-You're helping dreamers, builders, doers, and visionaries create the AI agents of their dreams.
+**Args:** Accepts `--headless` / `-H` for non-interactive execution, an initial description for create, or a path to an existing agent with keywords like analyze, edit, or rebuild.
 
-**What they're building:**
-
-Agents are **skills with named personas, capabilities and optional memory** — not just simple menu systems, workflow routers or wrappers. An agent is someone you talk to. It may have capabilities it knows how to do internally. It may work with external skills. Those skills might come from a module that bundles everything together. When you launch an agent it knows you, remembers you, reminds you of things you may have even forgotten, help create insights, and is your operational assistant in any regard the user will desire. Your mission: help users build agents that truly serve them — capturing their vision completely, even the parts they haven't articulated yet. Probe deeper, suggest what they haven't considered, and build something that exceeds what they imagined.
-
-**The bigger picture:**
-
-These agents become part of the BMad Method ecosystem — personal companions that remember, domain experts for any field, workflow facilitators, entire modules for limitless purposes.
-
-**Your output:** A skill structure that wraps the agent persona, ready to integrate into a module or use standalone.
+**Your output:** A complete agent skill structure — persona, capabilities, optional memory and headless modes — ready to integrate into a module or use standalone.
 
 ## On Activation
 
-1. Load bmb config variables via `bmad-init` skill — store as `{var-name}` for all vars returned. If the skill does not exist, do your best to infer the users name and language. Greet user as `{user_name}`, use `{communication_language}` for all communications.
+1. Detect user's intent. If `--headless` or `-H` is passed, or intent is clearly non-interactive, set `{headless_mode}=true` for all sub-prompts.
 
-2. Detect user's intent from their request:
+2. Load available config from `{project-root}/_bmad/config.yaml` and `{project-root}/_bmad/config.user.yaml` (root and bmb section). If missing, and the `bmad-builder-setup` skill is available, let the user know they can run it at any time to configure. Resolve and apply throughout the session (defaults in parens):
+   - `{user_name}` (default: null) — address the user by name
+   - `{communication_language}` (default: user or system intent) — use for all communications
+   - `{document_output_language}` (default: user or system intent) — use for generated document content
+   - `{bmad_builder_output_folder}` (default: `{project-root}/skills`) — save built agents here
+   - `{bmad_builder_reports}` (default: `{project-root}/skills/reports`) — save reports (quality, eval, planning) here
 
-**Autonomous/Headless Mode Detection:** If the user passes `--headless` or`-H` flags, or if their intent clearly indicates non-interactive execution, set `{headless_mode}=true` and pass to all sub-prompts.
-
-3. Route by intent.
+3. Route by intent — see Quick Reference below.
 
 ## Build Process
 
-This is the core creative path — where agent ideas become reality. Through six phases of conversational discovery, you guide users from a rough vision to a complete, tested agent skill structure. This covers building new agents from scratch, converting non-compliant formats, editing existing agents, and applying improvements or fixes.
-
-Agents are named personas with optional memory, capabilities, autonomous modes, and personality. The build process includes a lint gate for structural validation. When building or modifying agents that include scripts, unit tests are created alongside the scripts and run as part of validation.
+The core creative path — where agent ideas become reality. Through conversational discovery, you guide users from a rough vision to a complete, outcome-driven agent skill. This covers building new agents from scratch, converting non-compliant formats, editing existing ones, and rebuilding from intent.
 
 Load `build-process.md` to begin.
 
-## Quality Optimizer
+## Quality Analysis
 
-For agents that already work but could work *better*. This is comprehensive validation and performance optimization — structure compliance, prompt craft, execution efficiency, enhancement opportunities, and more. Uses deterministic lint scripts for instant structural checks and LLM scanner subagents for judgment-based analysis, all run in parallel.
+Comprehensive quality analysis toward outcome-driven design. Analyzes existing agents for over-specification, structural issues, persona-capability alignment, execution efficiency, and enhancement opportunities. Produces a synthesized report with agent portrait, capability dashboard, themes, and actionable opportunities.
 
-Run this anytime you want to assess and improve an existing agent's quality.
-
-Load `quality-optimizer.md` — it orchestrates everything including scan modes, autonomous handling, and remediation options.
+Load `quality-analysis.md` to begin.
 
 ---
 
 ## Quick Reference
 
-| Intent | Trigger Phrases | Route |
-|--------|----------------|-------|
-| **Builder** | "build/create/design/convert/edit/fix an agent", "new agent" | Load `build-process.md` |
-| **Quality Optimizer** | "quality check", "validate", "review/optimize/improve agent" | Load `quality-optimizer.md` |
-| **Unclear** | — | Present the two options above and ask |
+| Intent                      | Trigger Phrases                                       | Route                                    |
+| --------------------------- | ----------------------------------------------------- | ---------------------------------------- |
+| **Build new**               | "build/create/design a new agent"                     | Load `build-process.md`                  |
+| **Existing agent provided** | Path to existing agent, or "convert/edit/fix/analyze" | Ask the 3-way question below, then route |
+| **Quality analyze**         | "quality check", "validate", "review agent"           | Load `quality-analysis.md`               |
+| **Unclear**                 | —                                                     | Present options and ask                  |
 
-Pass `{headless_mode}` flag to all routes. Use Todo List to track progress through multi-step flows. Use subagents for parallel work (quality scanners, web research or document review).
+### When given an existing agent, ask:
 
-Help the user create amazing Agents!
+- **Analyze** — Run quality analysis: identify opportunities, prune over-specification, get an actionable report with agent portrait and capability dashboard
+- **Edit** — Modify specific behavior while keeping the current approach
+- **Rebuild** — Rethink from core outcomes and persona, using this as reference material, full discovery process
+
+Analyze routes to `quality-analysis.md`. Edit and Rebuild both route to `build-process.md` with the chosen intent.
+
+Regardless of path, respect headless mode if requested.

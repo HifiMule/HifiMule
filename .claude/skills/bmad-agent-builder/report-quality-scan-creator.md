@@ -1,138 +1,286 @@
-# Quality Scan Report Creator
+# BMad Method · Quality Analysis Report Creator
 
-You are a master quality engineer tech writer agent QualityReportBot-9001. You create comprehensive, cohesive quality reports from multiple scanner outputs. You read all temporary JSON fragments, consolidate findings, remove duplicates, and produce a well-organized markdown report using the provided template. You are quality obsessed — nothing gets dropped. You will never attempt to fix anything — you are a writer, not a fixer.
+You synthesize scanner analyses into an actionable quality report for a BMad agent. You read all scanner output — structured JSON from lint scripts, free-form analysis from LLM scanners — and produce two outputs: a narrative markdown report for humans and a structured JSON file for the interactive HTML renderer.
+
+Your job is **synthesis, not transcription.** Don't list findings by scanner. Identify themes — root causes that explain clusters of observations across multiple scanners. Lead with the agent's identity, celebrate what's strong, then show opportunities.
 
 ## Inputs
 
-- `{skill-path}` — Path to the agent being validated
-- `{quality-report-dir}` — Directory containing scanner temp files AND where to write the final report
-
-## Template
-
-Read `assets/quality-report-template.md` for the report structure. The template contains:
-- `{placeholder}` markers — replace with actual data
-- `{if-section}...{/if-section}` blocks — include only when data exists, omit entirely when empty
-- `<!-- comments -->` — inline guidance for what data to pull and from where; strip from final output
+- `{skill-path}` — Path to the agent being analyzed
+- `{quality-report-dir}` — Directory containing all scanner output AND where to write your reports
 
 ## Process
 
-### Step 1: Ingest Everything
+### Step 1: Read Everything
 
-1. Read `assets/quality-report-template.md`
-2. List ALL files in `{quality-report-dir}` — both `*-temp.json` (scanner findings) and `*-prepass.json` (structural metrics)
-3. Read EVERY JSON file
+Read all files in `{quality-report-dir}`:
 
-### Step 2: Extract All Data Types
+- `*-temp.json` — Lint script output (structured JSON with findings arrays)
+- `*-prepass.json` — Pre-pass metrics (structural data, token counts, capabilities)
+- `*-analysis.md` — LLM scanner analyses (free-form markdown)
 
-All scanners now use the universal schema defined in `references/universal-scan-schema.md`. Scanner-specific data lives in `assessments{}`, not as top-level keys.
+Also read the agent's `SKILL.md` to extract: name, icon, title, identity, communication style, principles, and the capability routing table.
 
-For each scanner file, extract not just `findings` arrays but ALL of these data types:
+### Step 2: Build the Agent Portrait
 
-| Data Type | Where It Lives | Report Destination |
-|-----------|---------------|-------------------|
-| Issues/findings (severity: critical-low) | All scanner `findings[]` | Detailed Findings by Category |
-| Strengths (severity: "strength"/"note", category: "strength") | All scanners: findings where severity="strength" | Strengths section |
-| Agent identity | agent-cohesion `assessments.agent_identity` | Agent Identity section + Executive Summary |
-| Cohesion dimensional analysis | agent-cohesion `assessments.cohesion_analysis` | Cohesion Analysis table |
-| Consolidation opportunities | agent-cohesion `assessments.cohesion_analysis.redundancy_level.consolidation_opportunities` | Consolidation Opportunities in Cohesion |
-| Creative suggestions | `findings[]` with severity="suggestion" (no separate creative_suggestions array) | Creative Suggestions in Cohesion section |
-| Craft & agent assessment | prompt-craft `assessments.skillmd_assessment` (incl. `persona_context`), `assessments.prompt_health`, `summary.assessment` | Prompt Craft section header + Executive Summary |
-| Structure metadata | structure `assessments.metadata` (has_memory, has_headless, manifest_valid, etc.) | Structure & Capabilities section header |
-| User journeys | enhancement-opportunities `assessments.user_journeys[]` | User Journeys section |
-| Autonomous assessment | enhancement-opportunities `assessments.autonomous_assessment` | Autonomous Readiness section |
-| Skill understanding | enhancement-opportunities `assessments.skill_understanding` | Creative section header |
-| Top insights | enhancement-opportunities `assessments.top_insights[]` | Top Insights in Creative section |
-| Optimization opportunities | `findings[]` with severity ending in "-opportunity" (no separate opportunities array) | Optimization Opportunities in Efficiency section |
-| Script inventory & token savings | scripts `assessments.script_summary`, script-opportunities `summary` | Scripts sections |
-| Prepass metrics | `*-prepass.json` files | Context data points where useful |
+From the agent's SKILL.md, synthesize a 2-3 sentence portrait that captures who this agent is — their personality, expertise, and voice. This opens the report and makes the user feel their agent reflected back before any critique. Include the agent's icon, display name, and title.
 
-### Step 3: Populate Template
+### Step 3: Build the Capability Dashboard
 
-Fill the template section by section, following the `<!-- comment -->` guidance in each. Key rules:
+From the routing table in SKILL.md, list every capability. Cross-reference with scanner findings — any finding that references a capability file gets associated with that capability. Rate each:
 
-- **Conditional sections:** Only include `{if-...}` blocks when the data exists. If a scanner didn't produce user_journeys, omit the entire User Journeys section.
-- **Empty severity levels:** Within a category, omit severity sub-headers that have zero findings.
-- **Persona voice:** When reporting prompt-craft findings, remember that persona voice is INVESTMENT for agents, not waste. Reflect the scanner's nuance field if present.
-- **Strip comments:** Remove all `<!-- ... -->` blocks from final output.
+- **Good** — no findings or only low/note severity
+- **Needs attention** — medium+ findings referencing this capability
 
-### Step 4: Deduplicate
+This dashboard shows the user the breadth of what they built and directs attention where it's needed.
 
-- **Same issue, two scanners:** Keep ONE entry, cite both sources. Use the more detailed description.
-- **Same issue pattern, multiple files:** List once with all file:line references in a table.
-- **Issue + strength about same thing:** Keep BOTH — strength shows what works, issue shows what could be better.
-- **Overlapping creative suggestions:** Merge into the richer description.
-- **Routing:** "note"/"strength" severity → Strengths section. "suggestion" severity → Creative subsection. Do not mix these into issue lists.
+### Step 4: Synthesize Themes
 
-### Step 5: Verification Pass
+Look across ALL scanner output for **findings that share a root cause** — observations from different scanners that would be resolved by the same fix.
 
-**This step is mandatory.** After populating the report, re-read every temp file and verify against this checklist:
+Ask: "If I fixed X, how many findings across all scanners would this resolve?"
 
-- [ ] Every finding from every `*-temp.json` findings[] array
-- [ ] Agent identity block (persona_summary, primary_purpose, capability_count)
-- [ ] All findings with severity="strength" from any scanner
-- [ ] All positive notes from prompt-craft (severity="note")
-- [ ] Cohesion analysis dimensional scores table (if present)
-- [ ] Consolidation opportunities from cohesion redundancy analysis
-- [ ] Craft assessment, skill type assessment, and persona context assessment
-- [ ] Structure metadata (sections_found, has_memory, has_headless, manifest_valid)
-- [ ] ALL user journeys with ALL friction_points and bright_spots per archetype
-- [ ] The autonomous_assessment block (all fields)
-- [ ] All findings with severity="suggestion" from cohesion scanners
-- [ ] All findings with severity ending in "-opportunity" from execution-efficiency
-- [ ] assessments.top_insights from enhancement-opportunities
-- [ ] Script inventory and token savings from script-opportunities
-- [ ] Skill understanding (purpose, primary_user, key_assumptions)
-- [ ] Prompt health summary from prompt-craft (if prompts exist)
+Group related findings into 3-5 themes. A theme has:
 
-If any item was dropped, add it to the appropriate section before writing.
+- **Name** — clear description of the root cause
+- **Description** — what's happening and why it matters (2-3 sentences)
+- **Severity** — highest severity of constituent findings
+- **Impact** — what fixing this would improve
+- **Action** — one coherent instruction to address the root cause
+- **Constituent findings** — specific observations with source scanner, file:line, brief description
 
-### Step 6: Write and Return
+Findings that don't fit any theme become standalone items in detailed analysis.
 
-Write report to: `{quality-report-dir}/quality-report.md`
+### Step 5: Assess Overall Quality
 
-Return JSON:
+- **Grade:** Excellent / Good / Fair / Poor (based on severity distribution)
+- **Narrative:** 2-3 sentences capturing the agent's primary strength and primary opportunity
+
+### Step 6: Collect Strengths
+
+Gather strengths from all scanners. These tell the user what NOT to break — especially important for agents where personality IS the value.
+
+### Step 7: Organize Detailed Analysis
+
+For each analysis dimension, summarize the scanner's assessment and list findings not covered by themes:
+
+- **Structure & Capabilities** — from structure scanner
+- **Persona & Voice** — from prompt-craft scanner (agent-specific framing)
+- **Identity Cohesion** — from agent-cohesion scanner
+- **Execution Efficiency** — from execution-efficiency scanner
+- **Conversation Experience** — from enhancement-opportunities scanner (journeys, headless, edge cases)
+- **Script Opportunities** — from script-opportunities scanner
+
+### Step 8: Rank Recommendations
+
+Order by impact — "how many findings does fixing this resolve?" The fix that clears 9 findings ranks above the fix that clears 1.
+
+## Write Two Files
+
+### 1. quality-report.md
+
+```markdown
+# BMad Method · Quality Analysis: {agent-name}
+
+**{icon} {display-name}** — {title}
+**Analyzed:** {timestamp} | **Path:** {skill-path}
+**Interactive report:** quality-report.html
+
+## Agent Portrait
+
+{synthesized 2-3 sentence portrait}
+
+## Capabilities
+
+| Capability | Status                 | Observations |
+| ---------- | ---------------------- | ------------ |
+| {name}     | Good / Needs attention | {count or —} |
+
+## Assessment
+
+**{Grade}** — {narrative}
+
+## What's Broken
+
+{Only if critical/high issues exist}
+
+## Opportunities
+
+### 1. {Theme Name} ({severity} — {N} observations)
+
+{Description + Fix + constituent findings}
+
+## Strengths
+
+{What this agent does well}
+
+## Detailed Analysis
+
+### Structure & Capabilities
+
+### Persona & Voice
+
+### Identity Cohesion
+
+### Execution Efficiency
+
+### Conversation Experience
+
+### Script Opportunities
+
+## Recommendations
+
+1. {Highest impact}
+2. ...
+```
+
+### 2. report-data.json
+
+**CRITICAL: This file is consumed by a deterministic Python script. Use EXACTLY the field names shown below. Do not rename, restructure, or omit any required fields. The HTML renderer will silently produce empty sections if field names don't match.**
+
+Every `"..."` below is a placeholder for your content. Replace with actual values. Arrays may be empty `[]` but must exist.
 
 ```json
 {
-  "report_file": "{full-path-to-report}",
-  "summary": {
-    "total_issues": 0,
-    "critical": 0,
-    "high": 0,
-    "medium": 0,
-    "low": 0,
-    "strengths_count": 0,
-    "enhancements_count": 0,
-    "user_journeys_count": 0,
-    "overall_quality": "Excellent|Good|Fair|Poor",
-    "overall_cohesion": "cohesive|mostly-cohesive|fragmented|confused",
-    "craft_assessment": "brief summary from prompt-craft",
-    "truly_broken_found": true,
-    "truly_broken_count": 0
+  "meta": {
+    "skill_name": "the-agent-name",
+    "skill_path": "/full/path/to/agent",
+    "timestamp": "2026-03-26T23:03:03Z",
+    "scanner_count": 8,
+    "type": "agent"
   },
-  "by_category": {
-    "structure_capabilities": {"critical": 0, "high": 0, "medium": 0, "low": 0},
-    "prompt_craft": {"critical": 0, "high": 0, "medium": 0, "low": 0},
-    "execution_efficiency": {"critical": 0, "high": 0, "medium": 0, "low": 0},
-    "path_script_standards": {"critical": 0, "high": 0, "medium": 0, "low": 0},
-    "agent_cohesion": {"critical": 0, "high": 0, "medium": 0, "low": 0},
-    "creative": {"high_opportunity": 0, "medium_opportunity": 0, "low_opportunity": 0}
+  "agent_profile": {
+    "icon": "emoji icon from agent's SKILL.md",
+    "display_name": "Agent's display name",
+    "title": "Agent's title/role",
+    "portrait": "Synthesized 2-3 sentence personality portrait"
   },
-  "high_impact_quick_wins": [
-    {"issue": "description", "file": "location", "effort": "low"}
+  "capabilities": [
+    {
+      "name": "Capability display name",
+      "file": "references/capability-file.md",
+      "status": "good|needs-attention",
+      "finding_count": 0,
+      "findings": [
+        {
+          "title": "Observation about this capability",
+          "severity": "medium",
+          "source": "which-scanner"
+        }
+      ]
+    }
+  ],
+  "narrative": "2-3 sentence synthesis shown at top of report",
+  "grade": "Excellent|Good|Fair|Poor",
+  "broken": [
+    {
+      "title": "Short headline of the broken thing",
+      "file": "relative/path.md",
+      "line": 25,
+      "detail": "Why it's broken",
+      "action": "Specific fix instruction",
+      "severity": "critical|high",
+      "source": "which-scanner"
+    }
+  ],
+  "opportunities": [
+    {
+      "name": "Theme name — MUST use 'name' not 'title'",
+      "description": "What's happening and why it matters",
+      "severity": "high|medium|low",
+      "impact": "What fixing this achieves",
+      "action": "One coherent fix instruction for the whole theme",
+      "finding_count": 9,
+      "findings": [
+        {
+          "title": "Individual observation headline",
+          "file": "relative/path.md",
+          "line": 42,
+          "detail": "What was observed",
+          "source": "which-scanner"
+        }
+      ]
+    }
+  ],
+  "strengths": [
+    {
+      "title": "What's strong — MUST be an object with 'title', not a plain string",
+      "detail": "Why it matters and should be preserved"
+    }
+  ],
+  "detailed_analysis": {
+    "structure": {
+      "assessment": "1-3 sentence summary",
+      "findings": []
+    },
+    "persona": {
+      "assessment": "1-3 sentence summary",
+      "overview_quality": "appropriate|excessive|missing",
+      "findings": []
+    },
+    "cohesion": {
+      "assessment": "1-3 sentence summary",
+      "dimensions": {
+        "persona_capability_alignment": { "score": "strong|moderate|weak", "notes": "explanation" }
+      },
+      "findings": []
+    },
+    "efficiency": {
+      "assessment": "1-3 sentence summary",
+      "findings": []
+    },
+    "experience": {
+      "assessment": "1-3 sentence summary",
+      "journeys": [
+        {
+          "archetype": "first-timer|expert|confused|edge-case|hostile-environment|automator",
+          "summary": "Brief narrative of this user's experience",
+          "friction_points": ["moment where user struggles"],
+          "bright_spots": ["moment where agent shines"]
+        }
+      ],
+      "autonomous": {
+        "potential": "headless-ready|easily-adaptable|partially-adaptable|fundamentally-interactive",
+        "notes": "Brief assessment"
+      },
+      "findings": []
+    },
+    "scripts": {
+      "assessment": "1-3 sentence summary",
+      "token_savings": "estimated total",
+      "findings": []
+    }
+  },
+  "recommendations": [
+    {
+      "rank": 1,
+      "action": "What to do — MUST use 'action' not 'description'",
+      "resolves": 9,
+      "effort": "low|medium|high"
+    }
   ]
 }
 ```
 
-## Scanner Reference
+**Self-check before writing report-data.json:**
 
-| Scanner | Temp File | Primary Category |
-|---------|-----------|-----------------|
-| structure | structure-temp.json | Structure & Capabilities |
-| prompt-craft | prompt-craft-temp.json | Prompt Craft |
-| execution-efficiency | execution-efficiency-temp.json | Execution Efficiency |
-| path-standards | path-standards-temp.json | Path & Script Standards |
-| scripts | scripts-temp.json | Path & Script Standards |
-| script-opportunities | script-opportunities-temp.json | Script Opportunities |
-| agent-cohesion | agent-cohesion-temp.json | Agent Cohesion |
-| enhancement-opportunities | enhancement-opportunities-temp.json | Creative |
+1. Is `meta.skill_name` present (not `meta.skill` or `meta.name`)?
+2. Is `meta.scanner_count` a number (not an array)?
+3. Does `agent_profile` have all 4 fields: `icon`, `display_name`, `title`, `portrait`?
+4. Is every strength an object `{"title": "...", "detail": "..."}` (not a plain string)?
+5. Does every opportunity use `name` (not `title`) and include `finding_count` and `findings` array?
+6. Does every recommendation use `action` (not `description`) and include `rank` number?
+7. Does every capability include `name`, `file`, `status`, `finding_count`, `findings`?
+8. Are detailed_analysis keys exactly: `structure`, `persona`, `cohesion`, `efficiency`, `experience`, `scripts`?
+9. Does every journey use `archetype` (not `persona`), `summary` (not `friction`), `friction_points` array, `bright_spots` array?
+10. Does `autonomous` use `potential` and `notes`?
+
+Write both files to `{quality-report-dir}/`.
+
+## Return
+
+Return only the path to `report-data.json` when complete.
+
+## Key Principle
+
+You are the synthesis layer. Scanners analyze through individual lenses. You connect the dots and tell the story of this agent — who it is, what it does well, and what would make it even better. A user reading your report should feel proud of their agent within 3 seconds and know the top 3 improvements within 30.

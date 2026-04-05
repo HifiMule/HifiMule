@@ -17,16 +17,20 @@ Scripts validate structure and syntax (deterministic). Prompts evaluate semantic
 During build, walk through every capability/operation and apply these tests:
 
 ### The Determinism Test
+
 For each operation the agent performs, ask:
+
 - Given identical input, will this ALWAYS produce identical output? → Script
 - Does this require interpreting meaning, tone, context, or ambiguity? → Prompt
 - Could you write a unit test with expected output for every input? → Script
 
 ### The Judgment Boundary
+
 Scripts handle: fetch, transform, validate, count, parse, compare, extract, format, check structure
 Prompts handle: interpret, classify with ambiguity, create, decide with incomplete info, evaluate quality, synthesize meaning
 
 ### Pattern Recognition Checklist
+
 Table of signal verbs/patterns mapping to script types:
 | Signal Verb/Pattern | Script Type |
 |---------------------|-------------|
@@ -41,21 +45,26 @@ Table of signal verbs/patterns mapping to script types:
 | "graph", "map dependencies" | Dependency analysis script |
 
 ### The Outside-the-Box Test
+
 Beyond obvious validation, consider:
+
 - Could any data gathering step be a script that returns structured JSON for the LLM to interpret?
 - Could pre-processing reduce what the LLM needs to read?
 - Could post-processing validate what the LLM produced?
 - Could metric collection feed into LLM decision-making without the LLM doing the counting?
 
 ### Your Toolbox
-Scripts have access to full capabilities — think broadly:
-- **Bash**: Full shell — `jq`, `grep`, `awk`, `sed`, `find`, `diff`, `wc`, `sort`, `uniq`, `curl`, plus piping and composition
-- **Python**: Standard library (`json`, `yaml`, `pathlib`, `re`, `argparse`, `collections`, `difflib`, `ast`, `csv`, `xml`, etc.) plus PEP 723 inline-declared dependencies (`tiktoken`, `jsonschema`, `pyyaml`, etc.)
-- **System tools**: `git` commands for history/diff/blame, filesystem operations, process execution
+
+**Python is the default** for all script logic (cross-platform: macOS, Linux, Windows/WSL). See `references/script-standards.md` for full rationale and safe bash commands.
+
+- **Python:** Standard library (`json`, `pathlib`, `re`, `argparse`, `collections`, `difflib`, `ast`, `csv`, `xml`, etc.) plus PEP 723 inline-declared dependencies (`tiktoken`, `jsonschema`, `pyyaml`, etc.)
+- **Safe shell commands:** `git`, `gh`, `uv run`, `npm`/`npx`/`pnpm`, `mkdir -p`
+- **Avoid bash for logic** — no piping, `jq`, `grep`, `sed`, `awk`, `find`, `diff`, `wc` in scripts. Use Python equivalents instead.
 
 If you can express the logic as deterministic code, it's a script candidate.
 
 ### The --help Pattern
+
 All scripts use PEP 723 and `--help`. When a skill's prompt needs to invoke a script, it can say "Run `scripts/foo.py --help` to understand inputs/outputs, then invoke appropriately" instead of inlining the script's interface. This saves tokens in prompts and keeps a single source of truth for the script's API.
 
 ---
@@ -69,6 +78,7 @@ All scripts use PEP 723 and `--help`. When a skill's prompt needs to invoke a sc
 **Why:** Frontmatter is the #1 factor in skill triggering. Catch errors early.
 
 **Checks:**
+
 ```python
 # checks:
 - name exists and is kebab-case
@@ -83,19 +93,7 @@ All scripts use PEP 723 and `--help`. When a skill's prompt needs to invoke a sc
 
 ---
 
-### 2. Manifest Schema Validator
-
-**Status:** ✅ Already exists at `scripts/manifest.py` (create, add-capability, update, read, validate)
-
-**Enhancement opportunities:**
-- Add `--agent-path` flag for auto-discovery
-- Check menu code uniqueness within agent
-- Verify prompt files exist for `type: "prompt"` capabilities
-- Verify external skill names are registered (could check against skill registry)
-
----
-
-### 3. Template Artifact Scanner
+### 2. Template Artifact Scanner
 
 **What:** Scan for orphaned template substitution artifacts
 
@@ -107,19 +105,20 @@ All scripts use PEP 723 and `--help`. When a skill's prompt needs to invoke a sc
 
 ---
 
-### 4. Access Boundaries Extractor
+### 3. Access Boundaries Extractor
 
 **What:** Extract and validate access boundaries from memory-system.md
 
 **Why:** Security critical — must be defined before file operations
 
 **Checks:**
+
 ```python
 # Parse memory-system.md for:
 - ## Read Access section exists
 - ## Write Access section exists
 - ## Deny Zones section exists (can be empty)
-- Paths use placeholders correctly ({project-root} for _bmad paths, relative for skill-internal)
+- Paths use placeholders correctly ({project-root} for project-scope paths, ./ for skill-internal)
 ```
 
 **Output:** Structured JSON of read/write/deny zones
@@ -128,36 +127,18 @@ All scripts use PEP 723 and `--help`. When a skill's prompt needs to invoke a sc
 
 ---
 
-### 5. Prompt Frontmatter Comparator
-
-**What:** Compare prompt file frontmatter against bmad-manifest.json
-
-**Why:** Capability misalignment causes runtime errors
-
-**Checks:**
-```python
-# For each prompt .md file at skill root:
-- Has frontmatter (name, description, menu-code)
-- name matches manifest capability name
-- menu-code matches manifest (case-insensitive)
-- description is present
-```
-
-**Output:** JSON with mismatches, missing files
-
-**Implementation:** Python, reads bmad-manifest.json and all prompt .md files at skill root
-
 ---
 
 ## Priority 2: Analysis Scripts
 
-### 6. Token Counter
+### 4. Token Counter
 
 **What:** Count tokens in each file of an agent
 
 **Why:** Identify verbose files that need optimization
 
 **Checks:**
+
 ```python
 # For each .md file:
 - Total tokens (approximate: chars / 4)
@@ -171,16 +152,17 @@ All scripts use PEP 723 and `--help`. When a skill's prompt needs to invoke a sc
 
 ---
 
-### 7. Dependency Graph Generator
+### 5. Dependency Graph Generator
 
 **What:** Map skill → external skill dependencies
 
 **Why:** Understand agent's dependency surface
 
 **Checks:**
+
 ```python
-# Parse bmad-manifest.json for external skills
 # Parse SKILL.md for skill invocation patterns
+# Parse prompt files for external skill references
 # Build dependency graph
 ```
 
@@ -190,24 +172,15 @@ All scripts use PEP 723 and `--help`. When a skill's prompt needs to invoke a sc
 
 ---
 
-### 8. Activation Flow Analyzer
+### 6. Activation Flow Analyzer
 
 **What:** Parse SKILL.md On Activation section for sequence
 
 **Why:** Validate activation order matches best practices
 
 **Checks:**
-```python
-# Look for steps in order:
-1. Activation mode detection
-2. Config loading
-3. First-run check
-4. Access boundaries load
-5. Memory load
-6. Manifest load
-7. Greet
-8. Present menu
-```
+
+Validate that the activation sequence is logically ordered (e.g., config loads before config is used, memory loads before memory is referenced).
 
 **Output:** JSON with detected steps, missing steps, out-of-order warnings
 
@@ -215,13 +188,14 @@ All scripts use PEP 723 and `--help`. When a skill's prompt needs to invoke a sc
 
 ---
 
-### 9. Memory Structure Validator
+### 7. Memory Structure Validator
 
 **What:** Validate memory-system.md structure
 
 **Why:** Memory files have specific requirements
 
 **Checks:**
+
 ```python
 # Required sections:
 - ## Core Principle
@@ -236,13 +210,14 @@ All scripts use PEP 723 and `--help`. When a skill's prompt needs to invoke a sc
 
 ---
 
-### 10. Subagent Pattern Detector
+### 8. Subagent Pattern Detector
 
 **What:** Detect if agent uses BMAD Advanced Context Pattern
 
 **Why:** Agents processing 5+ sources MUST use subagents
 
 **Checks:**
+
 ```python
 # Pattern detection in SKILL.md:
 - "DO NOT read sources yourself"
@@ -259,7 +234,7 @@ All scripts use PEP 723 and `--help`. When a skill's prompt needs to invoke a sc
 
 ## Priority 3: Composite Scripts
 
-### 11. Agent Health Check
+### 9. Agent Health Check
 
 **What:** Run all validation scripts and aggregate results
 
@@ -273,13 +248,14 @@ All scripts use PEP 723 and `--help`. When a skill's prompt needs to invoke a sc
 
 ---
 
-### 12. Comparison Validator
+### 10. Comparison Validator
 
 **What:** Compare two versions of an agent for differences
 
 **Why:** Validate changes during iteration
 
 **Checks:**
+
 ```bash
 # Git diff with structure awareness:
 - Frontmatter changes
@@ -309,7 +285,7 @@ All scripts MUST output structured JSON for agent consumption:
     {
       "severity": "critical|high|medium|low|info",
       "category": "structure|security|performance|consistency",
-      "location": {"file": "SKILL.md", "line": 42},
+      "location": { "file": "SKILL.md", "line": 42 },
       "issue": "Clear description",
       "fix": "Specific action to resolve"
     }
@@ -342,20 +318,20 @@ When creating validation scripts:
 
 ---
 
-## Integration with Quality Optimizer
+## Integration with Quality Analysis
 
-The Quality Optimizer should:
+The Quality Analysis skill should:
 
 1. **First**: Run available scripts for fast, deterministic checks
 2. **Then**: Use sub-agents for semantic analysis (requires judgment)
 3. **Finally**: Synthesize both sources into report
 
 **Example flow:**
+
 ```bash
 # Run all validation scripts
 python scripts/validate-frontmatter.py --agent-path {path}
 bash scripts/scan-template-artifacts.sh --agent-path {path}
-python scripts/compare-prompts-manifest.py --agent-path {path}
 
 # Collect JSON outputs
 # Spawn sub-agents only for semantic checks
@@ -367,19 +343,12 @@ python scripts/compare-prompts-manifest.py --agent-path {path}
 ## Script Creation Priorities
 
 **Phase 1 (Immediate value):**
+
 1. Template Artifact Scanner (Bash + jq)
-2. Prompt Frontmatter Comparator (Python)
-3. Access Boundaries Extractor (Python)
+2. Access Boundaries Extractor (Python)
 
-**Phase 2 (Enhanced validation):**
-4. Token Counter (Python)
-5. Subagent Pattern Detector (Python)
-6. Activation Flow Analyzer (Python)
+**Phase 2 (Enhanced validation):** 4. Token Counter (Python) 5. Subagent Pattern Detector (Python) 6. Activation Flow Analyzer (Python)
 
-**Phase 3 (Advanced features):**
-7. Dependency Graph Generator (Python)
-8. Memory Structure Validator (Python)
-9. Agent Health Check orchestrator (Bash)
+**Phase 3 (Advanced features):** 7. Dependency Graph Generator (Python) 8. Memory Structure Validator (Python) 9. Agent Health Check orchestrator (Bash)
 
-**Phase 4 (Comparison tools):**
-10. Comparison Validator (Bash + Python)
+**Phase 4 (Comparison tools):** 10. Comparison Validator (Bash + Python)

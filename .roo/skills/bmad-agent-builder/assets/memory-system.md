@@ -1,6 +1,6 @@
 # Memory System for {displayName}
 
-**Memory location:** `_bmad/_memory/{skillName}-sidecar/`
+**Memory location:** `_bmad/memory/{skillName}-sidecar/`
 
 ## Core Principle
 
@@ -11,6 +11,7 @@ Tokens are expensive. Only remember what matters. Condense everything to its ess
 ### `index.md` — Primary Source
 
 **Load on activation.** Contains:
+
 - Essential context (what we're working on)
 - Active work items
 - User preferences (condensed)
@@ -21,36 +22,43 @@ Tokens are expensive. Only remember what matters. Condense everything to its ess
 ### `access-boundaries.md` — Access Control (Required for all agents)
 
 **Load on activation.** Contains:
+
 - **Read access** — Folders/patterns this agent can read from
 - **Write access** — Folders/patterns this agent can write to
 - **Deny zones** — Explicitly forbidden folders/patterns
 - **Created by** — Agent builder at creation time, confirmed/adjusted during init
 
 **Template structure:**
+
 ```markdown
 # Access Boundaries for {displayName}
 
 ## Read Access
+
 - {folder-path-or-pattern}
 - {another-folder-or-pattern}
 
 ## Write Access
+
 - {folder-path-or-pattern}
 - {another-folder-or-pattern}
 
 ## Deny Zones
+
 - {explicitly-forbidden-path}
 ```
 
 **Critical:** On every activation, load these boundaries first. Before any file operation (read/write), verify the path is within allowed boundaries. If uncertain, ask user.
 
 {if-standalone}
+
 - **User-configured paths** — Additional paths set during init (journal location, etc.) are appended here
-{/if-standalone}
+  {/if-standalone}
 
 ### `patterns.md` — Learned Patterns
 
 **Load when needed.** Contains:
+
 - User's quirks and preferences discovered over time
 - Recurring patterns or issues
 - Conventions learned
@@ -60,6 +68,7 @@ Tokens are expensive. Only remember what matters. Condense everything to its ess
 ### `chronology.md` — Timeline
 
 **Load when needed.** Contains:
+
 - Session summaries
 - Significant events
 - Progress over time
@@ -71,6 +80,7 @@ Tokens are expensive. Only remember what matters. Condense everything to its ess
 ### Write-Through (Immediate Persistence)
 
 Persist immediately when:
+
 1. **User data changes** — preferences, configurations
 2. **Work products created** — entries, documents, code, artifacts
 3. **State transitions** — tasks completed, status changes
@@ -79,6 +89,7 @@ Persist immediately when:
 ### Checkpoint (Periodic Persistence)
 
 Update periodically after:
+
 - N interactions (default: every 5-10 significant exchanges)
 - Session milestones (completing a capability/task)
 - When file grows beyond target size
@@ -86,11 +97,13 @@ Update periodically after:
 ### Save Triggers
 
 **After these events, always update memory:**
+
 - {save-trigger-1}
 - {save-trigger-2}
 - {save-trigger-3}
 
 **Memory is updated via the `[SM] - Save Memory` capability which:**
+
 1. Reads current index.md
 2. Updates with current session context
 3. Writes condensed, current version
@@ -98,31 +111,11 @@ Update periodically after:
 
 ## Write Discipline
 
-Before writing to memory, ask:
-
-1. **Is this worth remembering?**
-   - If no → skip
-   - If yes → continue
-
-2. **What's the minimum tokens that capture this?**
-   - Condense to essence
-   - No fluff, no repetition
-
-3. **Which file?**
-   - `index.md` → essential context, active work
-   - `patterns.md` → user quirks, recurring patterns, conventions
-   - `chronology.md` → session summaries, significant events
-
-4. **Does this require index update?**
-   - If yes → update `index.md` to point to it
+Persist only what matters, condensed to minimum tokens. Route to the appropriate file based on content type (see File Structure above). Update `index.md` when other files change.
 
 ## Memory Maintenance
 
-Regularly (every few sessions or when files grow large):
-1. **Condense verbose entries** — Summarize to essence
-2. **Prune outdated content** — Move old items to chronology or remove
-3. **Consolidate patterns** — Merge similar entries
-4. **Update chronology** — Archive significant past events
+Periodically condense, prune, and consolidate memory files to keep them lean.
 
 ## First Run
 

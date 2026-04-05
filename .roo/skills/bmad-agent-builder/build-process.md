@@ -7,193 +7,149 @@ description: Six-phase conversational discovery process for building BMad agents
 
 # Build Process
 
-Build AI agents through six phases of conversational discovery. Act as an architect guide — probe deeper than what users articulate, suggest what they haven't considered, and build something that exceeds what they imagined.
+Build AI agents through conversational discovery. Your north star: **outcome-driven design**. Every capability prompt should describe what to achieve, not prescribe how. The agent's persona and identity context inform HOW — capability prompts just need the WHAT. Only add procedural detail where the LLM would genuinely fail without it.
 
 ## Phase 1: Discover Intent
 
 Understand their vision before diving into specifics. Ask what they want to build and encourage detail.
 
-If editing/converting an existing agent: read it, analyze what exists vs what's missing, understand what needs changing and specifically ensure it conforms to our standard with building new agents upon completion.
+### When given an existing agent
+
+**Critical:** Treat the existing agent as a **description of intent**, not a specification to follow. Extract _who_ this agent is and _what_ it achieves. Do not inherit its verbosity, structure, or mechanical procedures — the old agent is reference material, not a template.
+
+If the SKILL.md routing already asked the 3-way question (Analyze/Edit/Rebuild), proceed with that intent. Otherwise ask now:
+
+- **Edit** — changing specific behavior while keeping the current approach
+- **Rebuild** — rethinking from core outcomes and persona, full discovery using the old agent as context
+
+For **Edit**: identify what to change, preserve what works, apply outcome-driven principles to the changed portions.
+
+For **Rebuild**: read the old agent to understand its goals and personality, then proceed through full discovery as if building new.
+
+### Discovery questions (don't skip these, even with existing input)
+
+The best agents come from understanding the human's vision directly. Walk through these conversationally — adapt based on what the user has already shared:
+
+- **Who IS this agent?** What personality should come through? What's their voice?
+- **How should they make the user feel?** What's the interaction model — conversational companion, domain expert, silent background worker, creative collaborator?
+- **What's the core outcome?** What does this agent help the user accomplish? What does success look like?
+- **What capabilities serve that core outcome?** Not "what features sound cool" — what does the user actually need?
+- **What's the one thing this agent must get right?** The non-negotiable.
+- **If memory/sidecar:** What's worth remembering across sessions? What should the agent track over time?
+
+The goal is to conversationally gather enough to cover Phase 2 and 3 naturally. Since users often brain-dump rich detail, adapt subsequent phases to what you already know.
 
 ## Phase 2: Capabilities Strategy
 
 Early check: internal capabilities only, external skills, both, or unclear?
 
-**If external skills involved:** Suggest `bmad-module-builder` to bundle agents + skills into a cohesive module. Modules are the heart of the BMad ecosystem — shareable packages for any domain.
+**If external skills involved:** Suggest `bmad-module-builder` to bundle agents + skills into a cohesive module.
 
 **Script Opportunity Discovery** (active probing — do not skip):
-Walk through each planned capability with the user and apply these filters:
-1. "Does this operation have clear pass/fail criteria?" → Script candidate
-2. "Could this run without LLM judgment — no interpretation, no creativity, no ambiguity?" → Strong script candidate
-3. "Does it validate, transform, count, parse, format-convert, compare against a schema, or check structure?" → Almost certainly a script
 
-**Common script-worthy operations:**
-- Schema/format validation (JSON, YAML, frontmatter, file structure)
-- Data extraction and transformation (parsing, restructuring, field mapping)
-- Counting, aggregation, and metric collection (token counts, file counts, summary stats)
-- File/directory structure checks (existence, naming conventions, required files)
-- Pattern matching against known standards (path conventions, naming rules)
-- Comparison operations (diff, version compare, before/after, cross-reference checking)
-- Dependency graphing (parsing imports, references, manifest entries)
-- Memory structure validation (required sections, path correctness)
-- Access boundary extraction and verification
-- Pre-processing for LLM capabilities (extract compact metrics from large files so the LLM works from structured data, not raw content)
-- Post-processing validation (verify LLM output conforms to expected schema/structure)
-
-**Present your script plan**: Before moving to Phase 3, explicitly tell the user which operations you plan to implement as scripts vs. prompts, with one-line reasoning for each. Ask if they agree or want to adjust.
-
-If scripts are planned, the `scripts/` folder will be created. Scripts are invoked from prompts when needed, not run automatically.
+Identify deterministic operations that should be scripts. Load `./references/script-opportunities-reference.md` for guidance. Confirm the script-vs-prompt plan with the user before proceeding. If any scripts require external dependencies (anything beyond Python's standard library), explicitly list each dependency and get user approval — dependencies add install-time cost and require `uv` to be available.
 
 ## Phase 3: Gather Requirements
 
-Work through these conversationally:
+Gather through conversation: identity, capabilities, activation modes, memory needs, access boundaries. Refer to `./references/standard-fields.md` for conventions.
 
-- **Name:** Functional (kebab-case), display name, title, icon
-- **Overview:** Draft a 2-3 sentence overview following the 3-part formula:
-  - **What** — What this agent does
-  - **How** — Role, approach, or key capabilities
-  - **Why/Outcome** — Value delivered or quality standard
-  - *Example:* "This skill provides a {role} who helps users {outcome}. Act as {name} — {key quality}."
-- **Identity:** Who is this agent? How do they communicate? What guides their decisions?
-- **Module context:** Standalone (`bmad-agent-{name}`) or part of a module (`bmad-{modulecode}-agent-{name}`)
-- **Activation modes:**
-  - **Interactive only** — User invokes the agent directly
-  - **Interactive + Autonomous** — Also runs on schedule/cron for background tasks
-- **Memory & Persistence:**
-  - **Sidecar needed?** — What persists across sessions?
-  - **Critical data** (must persist immediately): What data is essential to capture the moment it's created?
-  - **Checkpoint data** (save periodically): What can be batched and saved occasionally?
-  - **Save triggers:** After which interactions should memory be updated?
-- **Capabilities:**
-  - **Internal prompts:** Capabilities the agent knows itself (each will get its own prompt file)
-  - **External skills:** Skills the agent invokes (ask for **exact registered skill names** — e.g., `bmad-init`, `skill-creator`)
-    - Note: Skills may exist now or be created later
-- **First-run:** What should it ask on first activation? (standalone only; module-based gets config from module's config.yaml)
+Key structural context:
 
-**If autonomous mode is enabled, ask additional questions:**
-- **Autonomous tasks:** What should the agent do when waking on a schedule?
-  - Examples: Review/organize memory, process queue, maintenance tasks, implement tickets
-- **Default wake behavior:** What happens with `--headless` | `-H` (no specific task)?
-- **Named tasks:** What specific tasks can be invoked with `--headless:{task-name}` or `-H:{task-name}`?
+- **Naming:** Standalone: `bmad-agent-{name}`. Module: `bmad-{modulecode}-agent-{name}`
+- **Activation modes:** Interactive only, or Interactive + Headless (schedule/cron for background tasks)
+- **Memory architecture:** Sidecar at `{project-root}/_bmad/memory/{skillName}-sidecar/`
+- **Access boundaries:** Read/write/deny zones stored in memory
 
-- **Folder Dominion / Access Boundaries:**
-  - **What folders can this agent read from?** (e.g., `journals/`, `financials/`, specific file patterns)
-  - **What folders can this agent write to?** (e.g., output folders, log locations)
-  - **Are there any explicit deny zones?** (folders the agent must never touch)
-  - Store these boundaries in memory as the standard `access-boundaries` section (see memory-system template)
+**If headless mode enabled, also gather:**
 
-**Key distinction:** Folder dominion (where things live) ≠ agent memory (what persists across sessions)
+- Default wake behavior (`--headless` | `-H` with no specific task)
+- Named tasks (`--headless:{task-name}` or `-H:{task-name}`)
 
-- **Path Conventions** (CRITICAL for reliable agent behavior):
-  - **Memory location:** `{project-root}/_bmad/_memory/{skillName}-sidecar/`
-  - **Project artifacts:** `{project-root}/_bmad/...` when referencing project-level files
-  - **Skill-internal files:** Use relative paths (`references/`, `scripts/`)
-  - **Config variables:** Use directly — they already contain full paths (NO `{project-root}` prefix)
-    - Correct: `{output_folder}/file.md`
-    - Wrong: `{project-root}/{output_folder}/file.md` (double-prefix breaks resolution)
-  - **No absolute paths** (`/Users/...`) or relative prefixes (`./`, `../`)
+**Path conventions (CRITICAL):**
+
+- Memory: `{project-root}/_bmad/memory/{skillName}-sidecar/`
+- Project-scope paths: `{project-root}/...` (any path relative to project root)
+- Skill-internal: `./references/`, `./scripts/`
+- Config variables used directly — they already contain full paths (no `{project-root}` prefix)
 
 ## Phase 4: Draft & Refine
 
-Once you have a cohesive idea, think one level deeper. Once you have done this, present a draft outline. Point out vague areas. Ask what else is needed. Iterate until they say they're ready.
+Think one level deeper. Present a draft outline. Point out vague areas. Iterate until ready.
+
+**Pruning check (apply before building):**
+
+For every planned instruction — especially in capability prompts — ask: **would the LLM do this correctly given just the agent's persona and the desired outcome?** If yes, cut it.
+
+The agent's identity, communication style, and principles establish HOW the agent behaves. Capability prompts should describe WHAT to achieve. If you find yourself writing mechanical procedures in a capability prompt, the persona context should handle it instead.
+
+Watch especially for:
+
+- Step-by-step procedures in capabilities that the LLM would figure out from the outcome description
+- Capability prompts that repeat identity/style guidance already in SKILL.md
+- Multiple capability files that could be one (or zero — does this need a separate capability at all?)
+- Templates or reference files that explain things the LLM already knows
 
 ## Phase 5: Build
 
-**Always load these before building:**
-- Load `references/standard-fields.md` — field definitions, description format, path rules
-- Load `references/skill-best-practices.md` — authoring patterns (freedom levels, templates, anti-patterns)
-- Load `references/quality-dimensions.md` — quick mental checklist for build quality
+**Load these before building:**
 
-**Load based on context:**
-- **If module-based:** Load `references/metadata-reference.md` — manifest.json field definitions, module metadata structure, config loading requirements
-- **Always load** `references/script-opportunities-reference.md` — script opportunity spotting guide, catalog, and output standards. Use this to identify additional script opportunities not caught in Phase 2, even if no scripts were initially planned.
+- `./references/standard-fields.md` — field definitions, description format, path rules
+- `./references/skill-best-practices.md` — outcome-driven authoring, patterns, anti-patterns
+- `./references/quality-dimensions.md` — build quality checklist
 
-When confirmed:
+Build the agent using templates from `./assets/` and rules from `./references/template-substitution-rules.md`. Output to `{bmad_builder_output_folder}`.
 
-1. Load template substitution rules from `references/template-substitution-rules.md` and apply
+**Capability prompts are outcome-driven:** Each `./references/{capability}.md` file should describe what the capability achieves and what "good" looks like — not prescribe mechanical steps. The agent's persona context (identity, communication style, principles in SKILL.md) informs how each capability is executed. Don't repeat that context in every capability prompt.
 
-2. Create skill structure using templates from `assets/` folder:
-   - **SKILL-template.md** — skill wrapper with full persona content embedded
-   - **init-template.md** — first-run setup (if sidecar)
-   - **memory-system.md** — memory (if sidecar, saved at root level)
-   - **autonomous-wake.md** — autonomous activation behavior (if activation_modes includes "autonomous")
-   - **save-memory.md** — explicit memory save capability (if sidecar enabled)
+**Agent structure** (only create subfolders that are needed):
 
-3. **Generate bmad-manifest.json** — Use `scripts/manifest.py` (validation is automatic on every write). **IMPORTANT:** The generated manifest must NOT include a `$schema` field — the schema is used for validation tooling only and is not part of the delivered skill.
-   ```bash
-   # Create manifest with agent identity
-   python3 scripts/manifest.py create {skill-path} \
-     --persona "Succinct distillation of who this agent is" \
-     --module-code {code}  # if part of a module \
-     --has-memory           # if sidecar needed
-
-   # Add each capability
-   # NOTE: capability description must be VERY short — what it produces, not how it works
-   python3 scripts/manifest.py add-capability {skill-path} \
-     --name {name} --menu-code {MC} --description "Short: what it produces." \
-     --supports-autonomous \
-     --prompt {name}.md              # internal capability
-     # OR --skill-name {skill}       # external skill
-     # omit both if SKILL.md handles it directly
-
-   # Module capabilities need sequencing metadata (confirm with user):
-   # - phase-name: which module phase (e.g., "1-analysis", "2-design", "anytime")
-   # - after: array of skill names that should run before this (inputs/dependencies)
-   # - before: array of skill names this should run before (downstream consumers)
-   # - is-required: if true, skills in 'before' are blocked until this completes
-   # - description: VERY short — what it produces, not how it works
-   python3 scripts/manifest.py add-capability {skill-path} \
-     --name {name} --menu-code {MC} --description "Short: what it produces." \
-     --phase-name anytime \
-     --after skill-a skill-b \
-     --before skill-c \
-     --is-required
-   ```
-
-4. **Folder structure:**
 ```
 {skill-name}/
-├── SKILL.md               # Contains full persona content (agent.md embedded)
-├── bmad-manifest.json     # Capabilities, persona, memory, module integration
-├── init.md                # First-run setup (if sidecar)
-├── autonomous-wake.md     # Autonomous activation (if autonomous mode)
-├── save-memory.md         # Explicit memory save (if sidecar)
-├── {name}.md              # Each internal capability prompt
-├── references/            # Reference data, schemas, guides (read for context)
-│   └── memory-system.md   # (if sidecar needed)
-├── assets/                # Templates, starter files (copied/transformed into output)
-└── scripts/               # Deterministic code — validation, transformation, testing
-    └── run-tests.sh       # uvx-powered test runner (if python tests exist)
+├── SKILL.md               # Persona, activation, capability routing
+├── references/            # Progressive disclosure content
+│   ├── {capability}.md    # Each internal capability prompt
+│   ├── memory-system.md   # Memory discipline (if sidecar)
+│   ├── init.md            # First-run onboarding (if sidecar)
+│   ├── autonomous-wake.md # Headless activation (if headless)
+│   └── save-memory.md     # Explicit memory save (if sidecar)
+├── assets/                # Templates, starter files
+└── scripts/               # Deterministic code with tests
 ```
 
-**What goes where:**
-| Location | Contains | LLM relationship |
-|----------|----------|-----------------|
-| **Root `.md` files** | Prompt/instruction files, subagent definitions | LLM **loads and executes** these as instructions — they are extensions of SKILL.md |
-| **`references/`** | Reference data, schemas, tables, examples, guides | LLM **reads for context** — informational, not executable |
-| **`assets/`** | Templates, starter files, boilerplate | LLM **copies/transforms** these into output — not for reasoning |
-| **`scripts/`** | Python, shell scripts with tests | LLM **invokes** these — deterministic operations that don't need judgment |
+| Location            | Contains                           | LLM relationship                     |
+| ------------------- | ---------------------------------- | ------------------------------------ |
+| **SKILL.md**        | Persona, activation, routing       | LLM identity and router              |
+| **`./references/`** | Capability prompts, reference data | Loaded on demand                     |
+| **`./assets/`**     | Templates, starter files           | Copied/transformed into output       |
+| **`./scripts/`**    | Python, shell scripts with tests   | Invoked for deterministic operations |
 
-Only create subfolders that are needed — most skills won't need all four.
+**Activation guidance for built agents:**
 
-5. Output to `bmad_builder_output_folder` from config, or `{project-root}/bmad-builder-creations/`
+Activation is a single flow regardless of mode. It should:
 
-6. **Lint gate** — run deterministic validation scripts:
+- Load config and resolve values (with defaults)
+- Load sidecar `index.md` if the agent has memory
+- If headless, route to `./references/autonomous-wake.md`
+- If interactive, greet the user and continue from memory context or offer capabilities
+
+**If the built agent includes scripts**, also load `./references/script-standards.md` — ensures PEP 723 metadata, correct shebangs, and `uv run` invocation from the start.
+
+**Lint gate** — after building, validate and auto-fix:
+
+If subagents available, delegate lint-fix to a subagent. Otherwise run inline.
+
+1. Run both lint scripts in parallel:
    ```bash
-   python3 scripts/scan-path-standards.py {skill-path}
-   python3 scripts/scan-scripts.py {skill-path}
+   python3 ./scripts/scan-path-standards.py {skill-path}
+   python3 ./scripts/scan-scripts.py {skill-path}
    ```
-   - If any script returns critical issues: fix them before proceeding
-   - If only warnings/medium: note them but proceed
+2. Fix high/critical findings and re-run (up to 3 attempts per script)
+3. Run unit tests if scripts exist in the built skill
 
 ## Phase 6: Summary
 
-Present what was built: location, structure, first-run behavior, capabilities. Ask if adjustments needed.
+Present what was built: location, structure, first-run behavior, capabilities.
 
-**After the build completes, offer quality optimization:**
+Run unit tests if scripts exist. Remind user to commit before quality analysis.
 
-Ask: *"Build is done. Would you like to run a Quality Scan to optimize the agent further?"*
-
-If yes, load `quality-optimizer.md` with `{scan_mode}=full` and the agent path.
-
-Remind them: BMad module system compliant. Use `bmad-init` skill to integrate into a project.
+**Offer quality analysis:** Ask if they'd like a Quality Analysis to identify opportunities. If yes, load `quality-analysis.md` with the agent path.
