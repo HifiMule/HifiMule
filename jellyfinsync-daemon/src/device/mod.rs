@@ -959,10 +959,17 @@ fn get_mounts() -> Vec<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn get_mounts() -> Vec<PathBuf> {
+    let root = std::path::Path::new("/");
     let mut mounts = Vec::new();
     if let Ok(entries) = std::fs::read_dir("/Volumes") {
         for entry in entries.flatten() {
             let path = entry.path();
+            // The system boot volume appears in /Volumes as a symlink or firmlink
+            // that resolves to /. Skip it so the main disk is never proposed for
+            // initialization.
+            if std::fs::canonicalize(&path).map(|p| p == root).unwrap_or(false) {
+                continue;
+            }
             if is_mount_point(&path) {
                 mounts.push(path);
             }
