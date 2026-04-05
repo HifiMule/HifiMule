@@ -1,6 +1,6 @@
 # Story 6.3: macOS Installer (DMG)
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -157,6 +157,15 @@ The post-MVP daemon auto-start via launchd is explicitly excluded from this stor
 - [Source: 6-2-windows-installer-msi.md] — Previous story: confirmed build pipeline, sidecar config, daemon detection
 - [Source: 6-1-tauri-bundler-configuration-sidecar-packaging.md] — prepare-sidecar.mjs implementation details
 - [Source: jellyfinsync-ui/src-tauri/tauri.conf.json] — Current Tauri configuration (no `bundle.macos` yet)
+
+### Review Findings
+
+- [x] [Review][Defer] beforeBuildCommand CWD assumption unverified cross-platform [jellyfinsync-ui/src-tauri/tauri.conf.json] — deferred, pre-existing; `npm run build && node ../scripts/prepare-sidecar.mjs` assumes Tauri runs beforeBuildCommand from `jellyfinsync-ui/`. Verified on macOS with npm/npx tauri invocation but untested with `cargo tauri` (workspace root CWD) on Windows/Linux. Verify in stories 6.4 and 6.5 CI setup.
+- [x] [Review][Defer] minimumSystemVersion compatibility risk if future dependency requires >10.15 [jellyfinsync-ui/src-tauri/tauri.conf.json] — deferred, pre-existing; theoretical only, nothing in current deps conflicts
+- [x] [Review][Defer] prepare-sidecar.mjs mid-execution failure leaves partial state [scripts/prepare-sidecar.mjs] — deferred, pre-existing; no atomic swap or rollback on copy failure
+- [x] [Review][Defer] stale sidecar binaries from other architectures never cleaned [scripts/prepare-sidecar.mjs] — deferred, pre-existing
+- [x] [Review][Defer] execSync error propagation in prepare-sidecar.mjs unreliable [scripts/prepare-sidecar.mjs] — deferred, pre-existing
+- [x] [Review][Defer] npm dependencies not pre-checked before sidecar script runs [scripts/prepare-sidecar.mjs] — deferred, pre-existing
 
 ## Dev Agent Record
 
