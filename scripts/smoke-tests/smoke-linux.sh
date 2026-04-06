@@ -16,6 +16,15 @@ set -euo pipefail
 PLATFORM="linux"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+XVFB_PID=""
+APP_PID=""
+
+cleanup() {
+    [[ -n "$APP_PID" ]] && kill "$APP_PID" 2>/dev/null || true
+    [[ -n "$XVFB_PID" ]] && kill "$XVFB_PID" 2>/dev/null || true
+}
+trap cleanup EXIT
+
 fail() {
     local step="$1"
     local message="$2"
@@ -32,7 +41,7 @@ if [[ -z "$DEB" ]]; then
     fail "install" "No .deb file found in working directory: $(pwd)"
 fi
 echo "  Package: $DEB"
-sudo dpkg -i "$DEB" || fail "install" "dpkg -i failed with exit code $?"
+sudo dpkg -i "$DEB" || sudo apt-get install -f -y || fail "install" "dpkg -i and dependency fix both failed"
 echo "  Install OK"
 
 # --- STEP 2: Launch ---
@@ -55,6 +64,10 @@ fi
 echo "  Binary: $APP_BIN"
 "$APP_BIN" &
 APP_PID=$!
+sleep 1
+if ! kill -0 "$APP_PID" 2>/dev/null; then
+    fail "launch" "Application exited immediately after launch"
+fi
 
 # --- STEP 3: Daemon health poll ---
 echo ""
@@ -70,7 +83,10 @@ echo "  Daemon responded OK"
 # --- STEP 4: Uninstall ---
 echo ""
 echo "==> STEP 4: Uninstalling ..."
-kill "$APP_PID" "$XVFB_PID" 2>/dev/null || true
+kill "$APP_PID" 2>/dev/null || true
+kill "$XVFB_PID" 2>/dev/null || true
+APP_PID=""
+XVFB_PID=""
 # Package name from productName (lowercase)
 sudo dpkg -r jellyfinsync || fail "uninstall" "dpkg -r failed with exit code $?"
 echo "  Uninstall OK"

@@ -34,6 +34,7 @@ cleanup() {
     hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
     rm -rf "$APP_PATH" 2>/dev/null || true
 }
+trap cleanup EXIT
 
 # --- STEP 1: Mount DMG and install ---
 echo ""
@@ -65,9 +66,12 @@ echo "  Quarantine removed (or not present)"
 # --- STEP 3: Launch ---
 echo ""
 echo "==> STEP 3: Launching ${APP_NAME} ..."
-open -a "$APP_NAME"
+open -a "$APP_NAME" || fail "launch" "open -a $APP_NAME failed"
 # Give Tauri time to spawn the daemon sidecar
 sleep 3
+if ! pgrep -f "$APP_NAME" >/dev/null 2>&1; then
+    fail "launch" "Application process not found after launch — may have crashed immediately"
+fi
 echo "  Launch triggered"
 
 # --- STEP 4: Daemon health poll ---

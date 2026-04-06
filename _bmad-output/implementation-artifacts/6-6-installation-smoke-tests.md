@@ -1,6 +1,6 @@
 # Story 6.6: Installation Smoke Tests
 
-Status: review
+Status: done
 
 ## Story
 
@@ -352,6 +352,24 @@ Claude Sonnet 4.6
 - `scripts/smoke-tests/smoke-macos.sh` (created — macOS DMG smoke test)
 - `.github/workflows/smoke-test.yml` (created — manual `workflow_dispatch` smoke-test workflow)
 
+### Review Findings
+
+- [x] [Review][Patch] No .log file written by any script — artifact upload always finds nothing [.github/workflows/smoke-test.yml + all smoke scripts]
+- [x] [Review][Patch] `poll_health` grep fragile — `'"status":"ok"'` false-negatives on `"status": "ok"` (spaces) and false-positives on substring match [scripts/smoke-tests/smoke-common.sh:18]
+- [x] [Review][Patch] `smoke-macos.sh`: `cleanup()` not registered as EXIT trap — DMG/app left behind on step 1–2 failures [scripts/smoke-tests/smoke-macos.sh:31-36]
+- [x] [Review][Patch] `smoke-linux.sh`: no EXIT trap — Xvfb and app process leak if any step fails before STEP 4 [scripts/smoke-tests/smoke-linux.sh:41-57]
+- [x] [Review][Patch] Windows: app not stopped before `msiexec /x` — locked files cause uninstall failure; `Start-Process` missing `-PassThru` so no handle exists to stop it [scripts/smoke-tests/smoke-windows.ps1:57,95]
+- [x] [Review][Patch] Windows: `Write-Error` inside `Fail()` + `$ErrorActionPreference = "Stop"` — `exit 1` is unreachable; terminating error exit code is non-deterministic [scripts/smoke-tests/smoke-windows.ps1:20-22]
+- [x] [Review][Patch] No `timeout-minutes` on any CI job — hung daemon runs 6h before GitHub kills it [.github/workflows/smoke-test.yml:11,33,62]
+- [x] [Review][Patch] `smoke-macos.sh`: `open -a` exit code not checked and no post-launch process verification — app crash is indistinguishable from daemon timeout [scripts/smoke-tests/smoke-macos.sh:68]
+- [x] [Review][Patch] `smoke-linux.sh`: `dpkg -i` dependency failures not auto-recovered — no `apt-get -f install` fallback [scripts/smoke-tests/smoke-linux.sh:35]
+- [x] [Review][Patch] `smoke-linux.sh`: app exit not verified before `poll_health` — immediate crash causes slow 30s timeout with no early diagnostic [scripts/smoke-tests/smoke-linux.sh:56-57]
+- [x] [Review][Defer] Xvfb `:99` port may be occupied on shared runner — pre-existing CI environment concern [scripts/smoke-tests/smoke-linux.sh:41] — deferred, pre-existing
+- [x] [Review][Defer] Windows install dir hardcoded to `C:\Program Files\JellyfinSync` — WiX MSI default; low risk [scripts/smoke-tests/smoke-windows.ps1:44] — deferred, pre-existing
+- [x] [Review][Defer] macOS DMG `.app` name assumed to match `APP_NAME` — controlled by tauri.conf.json; low risk [scripts/smoke-tests/smoke-macos.sh:53] — deferred, pre-existing
+- [x] [Review][Defer] No automated post-release trigger for smoke workflow — intentional per spec constraints [.github/workflows/smoke-test.yml:3] — deferred, pre-existing
+
 ## Change Log
 
 - 2026-04-06: Implemented all tasks (T1–T3). Added daemon.health RPC endpoint with unit test; created platform smoke scripts (Windows/Linux/macOS + common helper); created smoke-test.yml GitHub Actions workflow with workflow_dispatch trigger.
+- 2026-04-06: All 10 review patches applied. Status set to done.

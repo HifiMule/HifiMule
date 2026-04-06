@@ -22,3 +22,10 @@
 - **TOCTOU race between `canonicalize` and `is_mount_point` in `get_mounts`** — Pre-existing pattern in the function; a volume could be remounted between the two sequential filesystem calls. Narrow window in practice but real under rapid device changes.
 - **`known_mounts` may retain boot-volume path from pre-fix binary on hot-reload** — If the daemon was running before the fix was deployed, the boot volume may already be in `known_mounts` and is never re-evaluated by the new guard. Only affects in-place upgrades without daemon restart.
 - **AC2/AC4/AC5: .deb not functionally installed or launched** — `sudo dpkg -i` install + app-menu launch + `localhost:19140` health-check not executed due to `sudo` unavailability during dev. Structural package inspection accepted for MVP. Cover in story 6.6 smoke tests.
+
+## Deferred from: code review of 6-6-installation-smoke-tests (2026-04-06)
+
+- **Xvfb `:99` port collision** — If another Xvfb is running on `:99` on a shared runner, Xvfb starts but the display is wrong. Ephemeral CI runners make this low-risk; address if flakiness observed.
+- **Windows install dir hardcoded to `C:\Program Files\JellyfinSync`** — WiX MSI default; valid for current build. If NSIS targets added or `INSTALLDIR` customized, exe search will fail.
+- **macOS DMG `.app` name assumed to match `APP_NAME`** — `cp "${MOUNT_POINT}/JellyfinSync.app"` hard-assumes the bundle name. Controlled by tauri.conf.json; revisit if productName changes.
+- **No automated post-release trigger** — workflow is `workflow_dispatch` only by spec design. Consider adding `workflow_call` once release pipeline matures.

@@ -10,6 +10,7 @@ on:
 jobs:
   smoke-windows:
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -20,18 +21,23 @@ jobs:
 
       - name: Run smoke test
         working-directory: ./installers
-        run: powershell -ExecutionPolicy Bypass -File ../scripts/smoke-tests/smoke-windows.ps1
+        shell: pwsh
+        run: |
+          & powershell -ExecutionPolicy Bypass -File ../scripts/smoke-tests/smoke-windows.ps1 2>&1 |
+            Tee-Object smoke.log
+          exit $LASTEXITCODE
 
       - name: Upload smoke test log on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: smoke-log-windows
-          path: ./installers/*.log
+          path: ./installers/smoke.log
           if-no-files-found: ignore
 
   smoke-linux:
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -47,20 +53,22 @@ jobs:
 
       - name: Run smoke test
         working-directory: ./installers
-        run: bash ../scripts/smoke-tests/smoke-linux.sh
-        # Capture stdout/stderr to a log file for the upload step
         shell: bash
+        run: |
+          set -o pipefail
+          bash ../scripts/smoke-tests/smoke-linux.sh 2>&1 | tee smoke.log
 
       - name: Upload smoke test log on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: smoke-log-linux
-          path: ./installers/*.log
+          path: ./installers/smoke.log
           if-no-files-found: ignore
 
   smoke-macos:
     runs-on: macos-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -71,12 +79,15 @@ jobs:
 
       - name: Run smoke test
         working-directory: ./installers
-        run: bash ../scripts/smoke-tests/smoke-macos.sh
+        shell: bash
+        run: |
+          set -o pipefail
+          bash ../scripts/smoke-tests/smoke-macos.sh 2>&1 | tee smoke.log
 
       - name: Upload smoke test log on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: smoke-log-macos
-          path: ./installers/*.log
+          path: ./installers/smoke.log
           if-no-files-found: ignore

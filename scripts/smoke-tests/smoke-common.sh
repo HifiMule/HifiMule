@@ -15,7 +15,7 @@ poll_health() {
         response=$(curl -sf -X POST http://127.0.0.1:19140 \
             -H "Content-Type: application/json" \
             -d "$body" 2>/dev/null || true)
-        if echo "$response" | grep -q '"status":"ok"'; then
+        if echo "$response" | jq -e '.result.data.status == "ok"' >/dev/null 2>&1; then
             return 0
         fi
         sleep 1

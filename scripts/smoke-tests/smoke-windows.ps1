@@ -17,7 +17,7 @@ function Write-Step([string]$msg) {
 }
 
 function Fail([string]$platform, [string]$step, [string]$message) {
-    Write-Error "FAIL [platform=$platform] [step=$step]: $message"
+    Write-Host "FAIL [platform=$platform] [step=$step]: $message"
     exit 1
 }
 
@@ -54,7 +54,7 @@ if (-not $exe) {
     Fail $Platform "launch" "No executable found under $installDir"
 }
 Write-Host "  Executable: $($exe.FullName)"
-Start-Process $exe.FullName -WindowStyle Hidden
+$appProc = Start-Process $exe.FullName -WindowStyle Hidden -PassThru
 
 # --- STEP 3: Daemon health poll ---
 Write-Step "STEP 3: Polling daemon health (30s timeout) ..."
@@ -92,6 +92,10 @@ Write-Host "  Daemon responded OK"
 
 # --- STEP 4: Uninstall ---
 Write-Step "STEP 4: Uninstalling ..."
+if ($appProc -and -not $appProc.HasExited) {
+    Stop-Process -Id $appProc.Id -Force -ErrorAction SilentlyContinue
+    Start-Sleep 2
+}
 $proc = Start-Process msiexec.exe `
     -ArgumentList "/x `"$($msi.FullName)`" /qn /norestart" `
     -Wait -PassThru -NoNewWindow
