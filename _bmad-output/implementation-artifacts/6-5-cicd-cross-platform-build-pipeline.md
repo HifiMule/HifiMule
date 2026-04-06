@@ -34,7 +34,7 @@ so that every release produces verified, downloadable artifacts without manual p
 
 - [x] **T3: Install Linux system dependencies** (AC: #3)
   - [x] T3.1: On `ubuntu-22.04`, install required apt packages via `apt-get`:
-    - `libgtk-3-dev`, `libwebkit2gtk-4.1-dev` (Tauri v2 WebKit), `libappindicator3-dev`, `librsvg2-dev`, `patchelf`
+    - `libgtk-3-dev`, `libwebkit2gtk-4.1-dev` (Tauri v2 WebKit), `libappindicator3-dev`, `librsvg2-dev`, `patchelf`, `libxdo-dev` (daemon transitive dep via `tray-icon` → `libxdo`)
   - [x] T3.2: Verify package names match Ubuntu 22.04 apt registry (Tauri v2 requires `webkit2gtk-4.1`, not `webkit2gtk-4.0`)
 
 - [x] **T4: Configure tauri-action for release upload** (AC: #4, #5)
@@ -253,6 +253,7 @@ Claude Sonnet 4.6
 - **pnpm installed before setup-node**: `pnpm/action-setup@v4` runs first so `pnpm` is on PATH when `setup-node` resolves it.
 - **No pnpm-lock.yaml in repo**: Cache configuration omitted from `setup-node` to avoid a missing-file error; can be added once lock file is committed.
 - **No cache for node_modules** in pnpm-lock.yaml: lock file not present in repo; removed `cache: pnpm` from setup-node to prevent failure.
+- **`libxdo-dev` required on Ubuntu**: The daemon transitively depends on the `libxdo` crate (via `tray-icon` → `libxdo`), which requires `libxdo-dev` on Ubuntu 22.04. Added to apt-get install step.
 - **Code signing deferred to post-MVP**: No `APPLE_CERTIFICATE`, `APPLE_ID`, or `WINDOWS_CERTIFICATE` secrets required. The workflow succeeds without them.
 - **`fail-fast: false`** ensures independent platform failure visibility.
 - **`permissions: contents: write`** set at job level for GitHub Release creation.
@@ -261,6 +262,7 @@ Claude Sonnet 4.6
 ### Change Log
 
 - 2026-04-06: Created `.github/workflows/release.yml` — CI/CD cross-platform release pipeline for Windows (MSI), macOS (DMG), and Linux (AppImage + .deb). T1–T5 complete; T6 pending manual tag-push validation.
+- 2026-04-06: Fixed Ubuntu build failure — added `libxdo-dev` to apt-get step (daemon transitively depends on `libxdo` crate).
 
 ### File List
 
