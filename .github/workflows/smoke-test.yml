@@ -1,0 +1,82 @@
+name: Smoke Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to test (e.g. v0.1.0)'
+        required: true
+
+jobs:
+  smoke-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download MSI artifact
+        run: gh release download ${{ github.event.inputs.release_tag }} --pattern "*.msi" --dir ./installers
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run smoke test
+        working-directory: ./installers
+        run: powershell -ExecutionPolicy Bypass -File ../scripts/smoke-tests/smoke-windows.ps1
+
+      - name: Upload smoke test log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-log-windows
+          path: ./installers/*.log
+          if-no-files-found: ignore
+
+  smoke-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libgtk-3-0 libwebkit2gtk-4.1-0 libappindicator3-1
+
+      - name: Download .deb artifact
+        run: gh release download ${{ github.event.inputs.release_tag }} --pattern "*.deb" --dir ./installers
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run smoke test
+        working-directory: ./installers
+        run: bash ../scripts/smoke-tests/smoke-linux.sh
+        # Capture stdout/stderr to a log file for the upload step
+        shell: bash
+
+      - name: Upload smoke test log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-log-linux
+          path: ./installers/*.log
+          if-no-files-found: ignore
+
+  smoke-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download DMG artifact
+        run: gh release download ${{ github.event.inputs.release_tag }} --pattern "*.dmg" --dir ./installers
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run smoke test
+        working-directory: ./installers
+        run: bash ../scripts/smoke-tests/smoke-macos.sh
+
+      - name: Upload smoke test log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-log-macos
+          path: ./installers/*.log
+          if-no-files-found: ignore

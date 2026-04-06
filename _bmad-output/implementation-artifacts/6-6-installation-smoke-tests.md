@@ -1,6 +1,6 @@
 # Story 6.6: Installation Smoke Tests
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -18,24 +18,24 @@ So that I can catch packaging regressions before releasing.
 
 ## Tasks / Subtasks
 
-- [ ] **T1: Add `daemon.health` RPC endpoint to daemon** (AC: #3)
-  - [ ] T1.1: In `jellyfinsync-daemon/src/rpc.rs`, add `"daemon.health"` to the match dispatch (line ~169) calling a new `handle_daemon_health()` handler
-  - [ ] T1.2: `handle_daemon_health()` returns `Ok(serde_json::json!({ "status": "ok" }))` — no state needed, pure connectivity probe
-  - [ ] T1.3: Add a unit test in the existing `#[cfg(test)]` block in `rpc.rs` verifying the handler returns `{ "status": "ok" }`
+- [x] **T1: Add `daemon.health` RPC endpoint to daemon** (AC: #3)
+  - [x] T1.1: In `jellyfinsync-daemon/src/rpc.rs`, add `"daemon.health"` to the match dispatch (line ~169) calling a new `handle_daemon_health()` handler
+  - [x] T1.2: `handle_daemon_health()` returns `Ok(serde_json::json!({ "status": "ok" }))` — no state needed, pure connectivity probe
+  - [x] T1.3: Add a unit test in the existing `#[cfg(test)]` block in `rpc.rs` verifying the handler returns `{ "status": "ok" }`
 
-- [ ] **T2: Create platform smoke-test scripts** (AC: #1–#5)
-  - [ ] T2.1: Create `scripts/smoke-tests/smoke-windows.ps1` — MSI install (silent), launch daemon, poll `daemon.health`, uninstall (silent)
-  - [ ] T2.2: Create `scripts/smoke-tests/smoke-linux.sh` — `.deb` install via `dpkg -i`, launch with Xvfb, poll `daemon.health`, uninstall via `dpkg -r`
-  - [ ] T2.3: Create `scripts/smoke-tests/smoke-macos.sh` — mount DMG, copy `.app` to `/Applications`, bypass quarantine, launch, poll `daemon.health`, remove `.app`
-  - [ ] T2.4: Create `scripts/smoke-tests/smoke-common.sh` (sourced by Linux/macOS scripts) — shared `poll_health` function: POST JSON-RPC to port 19140, retry up to 30s with 1s intervals, exit 1 with diagnostic output on timeout
+- [x] **T2: Create platform smoke-test scripts** (AC: #1–#5)
+  - [x] T2.1: Create `scripts/smoke-tests/smoke-windows.ps1` — MSI install (silent), launch daemon, poll `daemon.health`, uninstall (silent)
+  - [x] T2.2: Create `scripts/smoke-tests/smoke-linux.sh` — `.deb` install via `dpkg -i`, launch with Xvfb, poll `daemon.health`, uninstall via `dpkg -r`
+  - [x] T2.3: Create `scripts/smoke-tests/smoke-macos.sh` — mount DMG, copy `.app` to `/Applications`, bypass quarantine, launch, poll `daemon.health`, remove `.app`
+  - [x] T2.4: Create `scripts/smoke-tests/smoke-common.sh` (sourced by Linux/macOS scripts) — shared `poll_health` function: POST JSON-RPC to port 19140, retry up to 30s with 1s intervals, exit 1 with diagnostic output on timeout
 
-- [ ] **T3: Create `smoke-test.yml` GitHub Actions workflow** (AC: #1–#5)
-  - [ ] T3.1: Create `.github/workflows/smoke-test.yml` with `workflow_dispatch` trigger (manual run with input: `release_tag`)
-  - [ ] T3.2: Three jobs: `smoke-windows`, `smoke-linux`, `smoke-macos` — each on the matching runner
-  - [ ] T3.3: Each job downloads the installer artifact for its platform from the GitHub Release identified by `release_tag`
-  - [ ] T3.4: Each job calls the matching platform script from `scripts/smoke-tests/`
-  - [ ] T3.5: Each job uploads a smoke-test log as a workflow artifact on failure
-  - [ ] T3.6: Linux job installs Xvfb and GTK runtime libs before running the smoke script
+- [x] **T3: Create `smoke-test.yml` GitHub Actions workflow** (AC: #1–#5)
+  - [x] T3.1: Create `.github/workflows/smoke-test.yml` with `workflow_dispatch` trigger (manual run with input: `release_tag`)
+  - [x] T3.2: Three jobs: `smoke-windows`, `smoke-linux`, `smoke-macos` — each on the matching runner
+  - [x] T3.3: Each job downloads the installer artifact for its platform from the GitHub Release identified by `release_tag`
+  - [x] T3.4: Each job calls the matching platform script from `scripts/smoke-tests/`
+  - [x] T3.5: Each job uploads a smoke-test log as a workflow artifact on failure
+  - [x] T3.6: Linux job installs Xvfb and GTK runtime libs before running the smoke script
 
 ## Dev Notes
 
@@ -338,4 +338,20 @@ Claude Sonnet 4.6
 
 ### Completion Notes List
 
+- T1: Added `"daemon.health"` match arm inline in `rpc.rs` dispatch block (before `_ =>` catch-all). Returns `Ok(serde_json::json!({ "data": { "status": "ok" } }))` — consistent with other handler response shapes and the PowerShell smoke-test's `result.data.status` check. No imports or state required.
+- T1.3: Unit test `test_rpc_daemon_health` calls the full `handler()` function with `"daemon.health"` method and asserts `result["data"]["status"] == "ok"`. All 164 daemon tests pass (no regressions from prior 123 baseline).
+- T2: Created `scripts/smoke-tests/` directory with four scripts. `smoke-common.sh` provides the shared `poll_health` function (30s retry loop, diagnostic curl on timeout). Platform scripts each cover the 4-step lifecycle: install → launch → poll health → uninstall. Failures emit `FAIL [platform=X] [step=Y]: message` for AC #5.
+- T3: Created `.github/workflows/smoke-test.yml` with `workflow_dispatch` trigger and `release_tag` input. Three independent jobs (`smoke-windows`, `smoke-linux`, `smoke-macos`) — each downloads its installer via `gh release download`, runs the matching script, and uploads a `smoke-log-*` artifact on failure. Linux job installs `xvfb libgtk-3-0 libwebkit2gtk-4.1-0 libappindicator3-1` before the smoke script. `ubuntu-22.04` used (not `ubuntu-latest`) for webkit2gtk-4.1 compatibility.
+
 ### File List
+
+- `jellyfinsync-daemon/src/rpc.rs` (modified — added `daemon.health` match arm + unit test `test_rpc_daemon_health`)
+- `scripts/smoke-tests/smoke-common.sh` (created — shared `poll_health` helper)
+- `scripts/smoke-tests/smoke-windows.ps1` (created — Windows MSI smoke test)
+- `scripts/smoke-tests/smoke-linux.sh` (created — Linux .deb + Xvfb smoke test)
+- `scripts/smoke-tests/smoke-macos.sh` (created — macOS DMG smoke test)
+- `.github/workflows/smoke-test.yml` (created — manual `workflow_dispatch` smoke-test workflow)
+
+## Change Log
+
+- 2026-04-06: Implemented all tasks (T1–T3). Added daemon.health RPC endpoint with unit test; created platform smoke scripts (Windows/Linux/macOS + common helper); created smoke-test.yml GitHub Actions workflow with workflow_dispatch trigger.

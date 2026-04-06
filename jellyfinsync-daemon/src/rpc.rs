@@ -166,6 +166,7 @@ async fn handler(
         }
         "device.list" => handle_device_list(&state).await,
         "device.select" => handle_device_select(&state, payload.params).await,
+        "daemon.health" => Ok(serde_json::json!({ "data": { "status": "ok" } })),
         _ => Err(JsonRpcError {
             code: ERR_METHOD_NOT_FOUND,
             message: "Method not found".to_string(),
@@ -3176,5 +3177,37 @@ mod tests {
         let err = handle_device_select(&state, params).await.unwrap_err();
         assert_eq!(err.code, 404, "Unknown path must return 404 error");
         assert!(err.message.contains("not connected"));
+    }
+
+    #[tokio::test]
+    async fn test_rpc_daemon_health() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        let state = Arc::new(AppState {
+            jellyfin_client: JellyfinClient::new(),
+            db,
+            device_manager,
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
+            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+        });
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "daemon.health".to_string(),
+            params: None,
+            id: json!(1),
+        };
+
+        let response = handler(axum::extract::State(state), Json(request)).await;
+        assert!(response.error.is_none(), "daemon.health must not return an error");
+        assert!(response.result.is_some(), "daemon.health must return a result");
+        assert_eq!(
+            response.result.as_ref().unwrap()["data"]["status"],
+            "ok",
+            "daemon.health result must be {{ data: {{ status: ok }} }}"
+        );
     }
 }
