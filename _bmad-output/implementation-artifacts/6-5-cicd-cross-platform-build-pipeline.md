@@ -253,7 +253,7 @@ Claude Sonnet 4.6
 - **pnpm installed before setup-node**: `pnpm/action-setup@v4` runs first so `pnpm` is on PATH when `setup-node` resolves it.
 - **No pnpm-lock.yaml in repo**: Cache configuration omitted from `setup-node` to avoid a missing-file error; can be added once lock file is committed.
 - **No cache for node_modules** in pnpm-lock.yaml: lock file not present in repo; removed `cache: pnpm` from setup-node to prevent failure.
-- **macOS universal binary**: `macos-latest` is Apple Silicon — the default build only produces `aarch64-apple-darwin`. Switched matrix to `include` format with `args: --target universal-apple-darwin` for macOS and `rust-targets: aarch64-apple-darwin,x86_64-apple-darwin` passed to `dtolnay/rust-toolchain`. Added a dedicated macOS sidecar step that cross-compiles the daemon for both targets, then uses `lipo -create` to produce a single fat binary `jellyfinsync-daemon-universal-apple-darwin` — this is what Tauri expects when building with `--target universal-apple-darwin`. `prepare-sidecar.mjs` only runs on non-macOS platforms.
+- **macOS universal binary**: `macos-latest` is Apple Silicon — the default build only produces `aarch64-apple-darwin`. Switched matrix to `include` format with `args: --target universal-apple-darwin` for macOS and `rust-targets: aarch64-apple-darwin,x86_64-apple-darwin` passed to `dtolnay/rust-toolchain`. Added a dedicated macOS sidecar step that cross-compiles the daemon for both targets and stages all three sidecar variants: `aarch64-apple-darwin`, `x86_64-apple-darwin` (checked during each arch compilation slice), and `universal-apple-darwin` (lipo-merged, checked during final bundling). `prepare-sidecar.mjs` only runs on non-macOS platforms.
 - **`libxdo-dev` required on Ubuntu**: The daemon transitively depends on the `libxdo` crate (via `tray-icon` → `libxdo`), which requires `libxdo-dev` on Ubuntu 22.04. Added to apt-get install step.
 - **Code signing deferred to post-MVP**: No `APPLE_CERTIFICATE`, `APPLE_ID`, or `WINDOWS_CERTIFICATE` secrets required. The workflow succeeds without them.
 - **`fail-fast: false`** ensures independent platform failure visibility.
@@ -264,7 +264,7 @@ Claude Sonnet 4.6
 
 - 2026-04-06: Created `.github/workflows/release.yml` — CI/CD cross-platform release pipeline for Windows (MSI), macOS (DMG), and Linux (AppImage + .deb). T1–T5 complete; T6 pending manual tag-push validation.
 - 2026-04-06: Fixed Ubuntu build failure — added `libxdo-dev` to apt-get step (daemon transitively depends on `libxdo` crate).
-- 2026-04-06: Added macOS universal binary support — matrix restructured to `include` format, daemon cross-compiled for both architectures then merged with `lipo -create` into `jellyfinsync-daemon-universal-apple-darwin` (Tauri's expected sidecar name for `--target universal-apple-darwin`), `tauri-action` called with `--target universal-apple-darwin`.
+- 2026-04-06: Added macOS universal binary support — matrix restructured to `include` format, daemon cross-compiled for both architectures; all three sidecar variants staged (aarch64, x86_64 for per-slice compilation checks, plus lipo-merged universal for bundling), `tauri-action` called with `--target universal-apple-darwin`.
 
 ### File List
 

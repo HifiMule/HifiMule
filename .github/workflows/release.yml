@@ -62,12 +62,18 @@ jobs:
 
       # macOS universal build: cross-compile daemon for both architectures and stage both sidecars.
       # prepare-sidecar.mjs only handles the host target, so we do this explicitly here.
+      # Tauri's universal build checks arch-specific sidecars during each compilation slice,
+      # then expects the universal-merged binary during bundling — all three must be present.
       - name: Stage daemon sidecars (macOS universal)
         if: matrix.platform == 'macos-latest'
         run: |
           cargo build --release -p jellyfinsync-daemon --target aarch64-apple-darwin
           cargo build --release -p jellyfinsync-daemon --target x86_64-apple-darwin
           mkdir -p jellyfinsync-ui/src-tauri/sidecars
+          cp target/aarch64-apple-darwin/release/jellyfinsync-daemon \
+             jellyfinsync-ui/src-tauri/sidecars/jellyfinsync-daemon-aarch64-apple-darwin
+          cp target/x86_64-apple-darwin/release/jellyfinsync-daemon \
+             jellyfinsync-ui/src-tauri/sidecars/jellyfinsync-daemon-x86_64-apple-darwin
           lipo -create -output \
             jellyfinsync-ui/src-tauri/sidecars/jellyfinsync-daemon-universal-apple-darwin \
             target/aarch64-apple-darwin/release/jellyfinsync-daemon \
