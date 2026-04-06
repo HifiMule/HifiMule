@@ -13,7 +13,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [macos-latest, ubuntu-22.04, windows-latest]
+        include:
+          - platform: macos-latest
+            args: --target universal-apple-darwin
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - platform: ubuntu-22.04
+            args: ''
+            rust-targets: ''
+          - platform: windows-latest
+            args: ''
+            rust-targets: ''
 
     runs-on: ${{ matrix.platform }}
 
@@ -32,6 +41,8 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -49,7 +60,21 @@ jobs:
         working-directory: jellyfinsync-ui
         run: pnpm install
 
+      # macOS universal build: cross-compile daemon for both architectures and stage both sidecars.
+      # prepare-sidecar.mjs only handles the host target, so we do this explicitly here.
+      - name: Stage daemon sidecars (macOS universal)
+        if: matrix.platform == 'macos-latest'
+        run: |
+          cargo build --release -p jellyfinsync-daemon --target aarch64-apple-darwin
+          cargo build --release -p jellyfinsync-daemon --target x86_64-apple-darwin
+          mkdir -p jellyfinsync-ui/src-tauri/sidecars
+          cp target/aarch64-apple-darwin/release/jellyfinsync-daemon \
+             jellyfinsync-ui/src-tauri/sidecars/jellyfinsync-daemon-aarch64-apple-darwin
+          cp target/x86_64-apple-darwin/release/jellyfinsync-daemon \
+             jellyfinsync-ui/src-tauri/sidecars/jellyfinsync-daemon-x86_64-apple-darwin
+
       - name: Stage daemon sidecar
+        if: matrix.platform != 'macos-latest'
         run: node scripts/prepare-sidecar.mjs
 
       - name: Build and release
@@ -63,3 +88,4 @@ jobs:
           releaseDraft: true
           prerelease: false
           projectPath: jellyfinsync-ui
+          args: ${{ matrix.args }}
