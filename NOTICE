@@ -1,0 +1,15 @@
+JellyfinSync
+Copyright (C) 2024-2026 Alexis Kartmann
+
+This project is licensed under the GNU General Public License v2.0 (see LICENSE).
+
+-------------------------------------------------------------------------------
+THIRD-PARTY TOOLING (not covered by this project's license)
+-------------------------------------------------------------------------------
+
+The `_bmad/` directory contains the BMad (Build Multi-Agent Docs) framework,
+which is AI-assisted development tooling used during development. It is NOT
+part of the JellyfinSync application source code, is NOT included in release
+archives, and is NOT covered by this project's GPL-2.0 license.
+
+BMad is subject to its own terms. See https://github.com/bmad-code-org/BMAD-METHOD for details.

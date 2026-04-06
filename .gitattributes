@@ -1,0 +1,21 @@
+# Tell GitHub Linguist to ignore third-party/tooling directories
+_bmad/ linguist-vendored
+.agents/ linguist-vendored
+.agent/ linguist-vendored
+.codex/ linguist-vendored
+.cursor/ linguist-vendored
+.opencode/ linguist-vendored
+.roo/ linguist-vendored
+
+# Exclude tooling/AI directories from release source archives (git archive / GitHub releases)
+_bmad/ export-ignore
+_bmad-output/ export-ignore
+.agents/ export-ignore
+.agent/ export-ignore
+.codex/ export-ignore
+.cursor/ export-ignore
+.opencode/ export-ignore
+.roo/ export-ignore
+.claude/ export-ignore
+.github/ export-ignore
+docs/ export-ignore
