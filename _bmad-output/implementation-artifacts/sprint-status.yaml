@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-04-06  # 6-4 done
+last_updated: 2026-04-06  # 6-5 in-progress
 project: JellyfinSync
 project_key: NOKEY
 tracking_system: file-system
@@ -96,6 +96,6 @@ development_status:
   6-2-windows-installer-msi: done
   6-3-macos-installer-dmg: done
   6-4-linux-packages-appimage-deb: done
-  6-5-cicd-cross-platform-build-pipeline: ready-for-dev
+  6-5-cicd-cross-platform-build-pipeline: in-progress
   6-6-installation-smoke-tests: backlog
   epic-6-retrospective: optional
