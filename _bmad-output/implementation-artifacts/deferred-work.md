@@ -9,6 +9,13 @@
 - **execSync error propagation unreliable in prepare-sidecar.mjs** — Uncaught exceptions from `rustc -vV` or `cargo build` may not correctly fail the build chain. Pre-existing.
 - **npm dependencies not pre-checked before sidecar script runs** — Fresh clone or CI without prior `npm install` will fail at `npm run build`. Pre-existing.
 
+## Deferred from: code review of 6-5-cicd-cross-platform-build-pipeline (2026-04-06)
+
+- **`pnpm/action-setup@v4` uses `version: latest`** — Non-deterministic; a new pnpm major could silently change lockfile format or behavior. Pin to a specific version when hardening for reproducible releases. [`.github/workflows/release.yml:34`]
+- **`node-version: lts/*` is floating** — Node LTS promotions could introduce breaking changes across releases. Pin to `20` when hardening. [`.github/workflows/release.yml:40`]
+- **`tauri-apps/tauri-action@v0` is a floating major-version tag** — Supply chain risk; a force-push to `@v0` could inject code into released artifacts. Pin to a commit SHA for production hardening. [`.github/workflows/release.yml:87`]
+- **`rustc -vV` parsing in `prepare-sidecar.mjs` is fragile** — The `.split(": ")[1]?.trim()` extraction could return `undefined` if Rust output format changes. Pre-existing in `scripts/prepare-sidecar.mjs`, not introduced by this story.
+
 ## Deferred from: code review of 6-4-linux-packages-appimage-deb (2026-04-06)
 
 - **No unit tests for boot-volume exclusion guard** — `get_mounts` on macOS `/Volumes` has no test coverage for the new `canonicalize`-based root check. Requires platform-specific filesystem mocking to implement. [`jellyfinsync-daemon/src/device/mod.rs:968-975`]

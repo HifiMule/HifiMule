@@ -1,6 +1,6 @@
 # Story 6.5: CI/CD Cross-Platform Build Pipeline
 
-Status: review
+Status: done
 
 ## Story
 
@@ -269,3 +269,11 @@ Claude Sonnet 4.6
 ### File List
 
 - `.github/workflows/release.yml` (created)
+
+### Review Findings
+
+- [x] [Review][Decision] AC6 interpretation: `prepare-sidecar.mjs` not invoked on macOS — closed as done; inline shell block satisfies AC6 intent, universal binary cross-compilation requirement made script deviation necessary — AC6 requires the script to run on each runner. macOS uses an inline shell block instead because `prepare-sidecar.mjs` only handles the host target and cannot cross-compile for both architectures needed for a universal binary. The inline block is functionally equivalent and was end-to-end validated. Decision: is this a necessary implementation adaptation (close AC6 as done) or does it require back-porting cross-compilation support into the script?
+- [x] [Review][Defer] `pnpm/action-setup@v4` uses `version: latest` [.github/workflows/release.yml:34] — deferred, pre-existing convention; pin to a specific pnpm version when hardening for deterministic releases
+- [x] [Review][Defer] `node-version: lts/*` is a floating Node.js version [.github/workflows/release.yml:40] — deferred, idiomatic for Tauri workflows; pin to `20` when hardening
+- [x] [Review][Defer] `tauri-apps/tauri-action@v0` is a floating major-version tag [.github/workflows/release.yml:87] — deferred, supply chain hardening; pin to a commit SHA for production releases
+- [x] [Review][Defer] `rustc -vV` output parsing in `prepare-sidecar.mjs` is fragile to format changes — deferred, pre-existing in the script; not introduced by this story
