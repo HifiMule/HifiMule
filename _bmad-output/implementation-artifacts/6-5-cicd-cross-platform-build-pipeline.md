@@ -1,6 +1,6 @@
 # Story 6.5: CI/CD Cross-Platform Build Pipeline
 
-Status: in-progress
+Status: review
 
 ## Story
 
@@ -47,11 +47,11 @@ so that every release produces verified, downloadable artifacts without manual p
   - [x] T5.2: Ensure no `APPLE_CERTIFICATE`, `APPLE_ID`, or `WINDOWS_CERTIFICATE` secrets are set — build must succeed without them
   - [x] T5.3: Document in completion notes that code signing is post-MVP
 
-- [ ] **T6: Test the workflow end-to-end** (AC: #1–#5)
-  - [ ] T6.1: Push a test tag (e.g., `v0.0.1-test`) to trigger the workflow
-  - [ ] T6.2: Verify all three matrix jobs complete without errors
-  - [ ] T6.3: Verify a GitHub Release draft is created with MSI, DMG, AppImage, and .deb attached
-  - [ ] T6.4: Delete the test tag and draft release after verification
+- [x] **T6: Test the workflow end-to-end** (AC: #1–#5)
+  - [x] T6.1: Push a test tag (e.g., `v0.0.1-test`) to trigger the workflow
+  - [x] T6.2: Verify all three matrix jobs complete without errors
+  - [x] T6.3: Verify a GitHub Release draft is created with MSI, DMG, AppImage, and .deb attached
+  - [x] T6.4: Delete the test tag and draft release after verification
 
 ## Dev Notes
 
@@ -258,11 +258,11 @@ Claude Sonnet 4.6
 - **Code signing deferred to post-MVP**: No `APPLE_CERTIFICATE`, `APPLE_ID`, or `WINDOWS_CERTIFICATE` secrets required. The workflow succeeds without them.
 - **`fail-fast: false`** ensures independent platform failure visibility.
 - **`permissions: contents: write`** set at job level for GitHub Release creation.
-- **HALT — T6 requires user action**: End-to-end validation (T6.1–T6.4) requires pushing a real tag to GitHub to trigger the Actions runner. This cannot be simulated locally.
+- **T6 validated by Alexis**: All three matrix jobs completed successfully. GitHub Release draft confirmed with MSI (Windows), universal DMG (macOS), AppImage and .deb (Linux). Test tag and draft release cleaned up.
 
 ### Change Log
 
-- 2026-04-06: Created `.github/workflows/release.yml` — CI/CD cross-platform release pipeline for Windows (MSI), macOS (DMG), and Linux (AppImage + .deb). T1–T5 complete; T6 pending manual tag-push validation.
+- 2026-04-06: Created `.github/workflows/release.yml` — CI/CD cross-platform release pipeline for Windows (MSI), macOS universal DMG, Linux (AppImage + .deb). All tasks complete; end-to-end validated.
 - 2026-04-06: Fixed Ubuntu build failure — added `libxdo-dev` to apt-get step (daemon transitively depends on `libxdo` crate).
 - 2026-04-06: Added macOS universal binary support — matrix restructured to `include` format, daemon cross-compiled for both architectures; all three sidecar variants staged (aarch64, x86_64 for per-slice compilation checks, plus lipo-merged universal for bundling), `tauri-action` called with `--target universal-apple-darwin`.
 
