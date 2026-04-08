@@ -31,3 +31,9 @@ target/
 
 # Bmad
 _bmad/
+.agent/
+.agents/
+.claude/
+.codex/
+.opencode/
+.roo/
