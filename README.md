@@ -12,6 +12,10 @@
 
 JellyfinSync is a desktop application that bridges your [Jellyfin](https://jellyfin.org/) media server and legacy mass-storage MP3 players. Browse your library, pick what you want, and sync it to your device with delta transfers and resume support.
 
+## Disclaimer
+
+This software was developed with the assistance of AI and the BMAD Method. As an experienced software developer, I have thoroughly validated the code to ensure its quality and reliability.
+
 ## Features
 
 - **Library browsing** — Navigate views, collections, and albums directly from your Jellyfin server
@@ -134,3 +138,4 @@ Contributions are welcome! Please open an issue to discuss changes before submit
 - [Jellyfin](https://jellyfin.org/) — The free software media system
 - [Tauri](https://tauri.app/) — Build desktop apps with web tech and Rust
 - [Shoelace](https://shoelace.style/) — Web component library
+- [BMAD Method](https://github.com/bmad-code-org/BMAD-METHOD) - Breakthrough Method for Agile Ai Driven Development
