@@ -133,6 +133,7 @@ JellyfinSync/
 ## Contributing
 
 Contributions are welcome! Please open an issue to discuss changes before submitting a PR.
+As I'm mostly using Windows as the development platform for JellyfinSync, I'm looking for feedback from Linux or Mac users.
 
 ## Acknowledgements
 
