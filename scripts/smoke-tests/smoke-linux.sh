@@ -52,13 +52,13 @@ XVFB_PID=$!
 export DISPLAY=:99
 
 # The installed binary name comes from productName in tauri.conf.json (lowercase on Linux)
-APP_BIN="jellyfinsync"
+APP_BIN="jellyfinsync-ui"
 if ! command -v "$APP_BIN" &>/dev/null; then
     # Fallback search in common install locations
-    APP_BIN=$(find /usr/bin /usr/local/bin /opt -name "jellyfinsync" 2>/dev/null | head -1 || true)
+    APP_BIN=$(find /usr/bin /usr/local/bin /opt -name "jellyfinsync-ui" 2>/dev/null | head -1 || true)
     if [[ -z "$APP_BIN" ]]; then
         kill "$XVFB_PID" 2>/dev/null || true
-        fail "launch" "Installed binary 'jellyfinsync' not found — check package manifest"
+        fail "launch" "Installed binary 'jellyfinsync-ui' not found — check package manifest"
     fi
 fi
 echo "  Binary: $APP_BIN"
