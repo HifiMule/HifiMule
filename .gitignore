@@ -29,3 +29,5 @@ squashfs-root/
 # Rust
 target/
 
+# Bmad
+_bmad/
