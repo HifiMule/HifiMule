@@ -1,6 +1,6 @@
 # Story 2.6: Initialize New Device Manifest
 
-Status: done
+Status: backlog
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -40,7 +40,14 @@ so that I can bring a brand-new device into the managed sync model without manua
    - **And** the daemon transitions to the normal recognized state (`DeviceRecognized`)
    - **And** the UI transitions to the sync-ready state (banner disappears, Device Folders panel shows normally)
 
-4. **Error Handling:**
+4. **MTP Device Manifest Write (Sprint Change 2026-04-30):**
+   - **Given** the target device is an MTP device
+   - **When** the daemon writes the initial `.jellyfinsync.json`
+   - **Then** it uses `device_io.write_with_verify()` instead of calling `write_manifest` (Write-Temp-Rename) directly
+   - **And** the `device.initialize` RPC handler receives `Arc<dyn DeviceIO>` from `DeviceManager` — no direct `std::fs` calls in the handler
+   - **Note:** `write_with_verify()` delegates to Write-Temp-Rename for MSC and dirty-marker + overwrite for MTP (defined in Story 4.0)
+
+5. **Error Handling:**
    - **When** the initialization fails (e.g., device is read-only, disk full, or invalid folder name)
    - **Then** the dialog displays a clear error message
    - **And** shows a "Retry" or "Dismiss" option
@@ -88,6 +95,12 @@ so that I can bring a brand-new device into the managed sync model without manua
     - "Cancel" button (closes dialog)
   - [x] On `device_initialize` success: close dialog, call `onComplete` callback to refresh device state
   - [x] On error: show `sl-alert` with error message and Retry/Dismiss options
+
+- [ ] **MTP: Replace direct manifest write with DeviceIO (AC: #4 — Sprint Change 2026-04-30)**
+  - [ ] Replace `device::write_manifest(device_root, &manifest)` call in `initialize_device()` with `device_io.write_with_verify(path, &manifest_bytes)`
+  - [ ] Pass `Arc<dyn DeviceIO>` into `initialize_device()` from the `device.initialize` RPC handler (retrieve from `DeviceManager` by device path)
+  - [ ] Verify existing MSC behavior is unchanged (MscBackend.write_with_verify delegates to Write-Temp-Rename)
+  - **Depends on:** Story 4.0 (DeviceIO abstraction layer)
 
 - [x] **Frontend: Refresh after initialization** (AC: #3)
   - [x] Ensure `BasketSidebar.refreshDeviceData()` is called after successful initialization
@@ -244,5 +257,6 @@ claude-sonnet-4-6
 
 ### Change Log
 
+- 2026-04-30: Reopened — MTP support (Sprint Change 2026-04-30). AC #4 and MTP task added. Requires Story 4.0 (DeviceIO abstraction) to be completed first.
 - 2026-03-01: Implemented Story 2.6 — Initialize New Device Manifest. Added unrecognized device detection pipeline (DeviceEvent::Unrecognized, is_removable_drive guard, DeviceManager.handle_device_unrecognized/initialize_device), device_initialize RPC endpoint, pendingDevicePath in get_daemon_state, InitDeviceModal UI component, and Initialize Device banner in BasketSidebar.
 - 2026-03-01: Code Review (AI) — Fixed 6 issues: (H1) Added path traversal and single-level folder validation to initialize_device, (M1) handle_device_unrecognized now clears current_device fields enforcing mutual exclusivity, (M2) DeviceRecognized state uses human-readable device path name instead of UUID, (M3) Replaced create_dir_all with create_dir to prevent nested directory creation, (M4) Removed unused _profile_id parameter from DeviceManager::initialize_device, (M5) Added pendingDevicePath test for get_daemon_state, path traversal test, and mutual exclusivity test. 117 tests pass.

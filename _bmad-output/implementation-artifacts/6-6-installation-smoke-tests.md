@@ -1,6 +1,6 @@
 # Story 6.6: Installation Smoke Tests
 
-Status: done
+Status: backlog
 
 ## Story
 
@@ -15,6 +15,7 @@ So that I can catch packaging regressions before releasing.
 3. **Daemon health-check passes**: The daemon sidecar is reachable at `http://127.0.0.1:19140` and responds to a JSON-RPC `get_daemon_state` call with a valid result (not an error).
 4. **Uninstall step succeeds**: The application uninstalls cleanly, leaving no residual processes.
 5. **Failures are diagnostic**: Any step failure produces clear diagnostic output identifying which platform, which step, and the error message.
+6. **MTP hardware test scope (Sprint Change 2026-04-30):** Given the smoke test environment has no physical MTP device, when the test suite runs, MTP device IO is verified by unit tests in `device_io.rs` (mock `MtpBackend` returning fixture data — defined in Story 4.0). The smoke test workflow explicitly notes: "MTP end-to-end detection requires manual hardware verification on each platform."
 
 ## Tasks / Subtasks
 
@@ -28,6 +29,11 @@ So that I can catch packaging regressions before releasing.
   - [x] T2.2: Create `scripts/smoke-tests/smoke-linux.sh` — `.deb` install via `dpkg -i`, launch with Xvfb, poll `daemon.health`, uninstall via `dpkg -r`
   - [x] T2.3: Create `scripts/smoke-tests/smoke-macos.sh` — mount DMG, copy `.app` to `/Applications`, bypass quarantine, launch, poll `daemon.health`, remove `.app`
   - [x] T2.4: Create `scripts/smoke-tests/smoke-common.sh` (sourced by Linux/macOS scripts) — shared `poll_health` function: POST JSON-RPC to port 19140, retry up to 30s with 1s intervals, exit 1 with diagnostic output on timeout
+
+- [ ] **T4: Add MTP hardware test scope note (AC: #6 — Sprint Change 2026-04-30)**
+  - [ ] Add a comment block to `smoke-test.yml` (and/or `smoke-common.sh`) stating: "MTP end-to-end detection requires manual hardware verification on each platform. Automated MTP IO coverage is provided by unit tests in device_io.rs."
+  - [ ] Verify Story 4.0's `device_io.rs` includes a mock `MtpBackend` with fixture-data unit tests (coordinate with Story 4.0 implementor)
+  - **Depends on:** Story 4.0 (DeviceIO abstraction — provides mock MtpBackend unit tests)
 
 - [x] **T3: Create `smoke-test.yml` GitHub Actions workflow** (AC: #1–#5)
   - [x] T3.1: Create `.github/workflows/smoke-test.yml` with `workflow_dispatch` trigger (manual run with input: `release_tag`)
@@ -371,5 +377,6 @@ Claude Sonnet 4.6
 
 ## Change Log
 
+- 2026-04-30: Reopened — MTP support (Sprint Change 2026-04-30). AC #6 and T4 added. Requires Story 4.0 (DeviceIO abstraction) to provide mock MtpBackend unit tests.
 - 2026-04-06: Implemented all tasks (T1–T3). Added daemon.health RPC endpoint with unit test; created platform smoke scripts (Windows/Linux/macOS + common helper); created smoke-test.yml GitHub Actions workflow with workflow_dispatch trigger.
 - 2026-04-06: All 10 review patches applied. Status set to done.

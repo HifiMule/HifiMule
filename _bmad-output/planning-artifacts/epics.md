@@ -181,6 +181,8 @@ So that I don't have to manually hunt for folder paths.
 **Then** the daemon triggers a "Device Detected" event.
 **And** it checks for the presence of a `.jellyfinsync.json` manifest in the root directory.
 
+**Note:** This story covers MSC (Mass Storage Class) devices only — USB devices that mount as drive letters. MTP device detection is covered by Story 2.10.
+
 ### Story 2.3: Multi-Device Profile Mapping & Auto-Sync Trigger
 
 As a Convenience Seeker (Sarah),
@@ -259,7 +261,7 @@ So that I can bring a brand-new device into the managed sync model without manua
 **And** I can select the associated Jellyfin user profile for this device.
 **When** I click "Confirm"
 **Then** the UI sends a `device.initialize` JSON-RPC request to the daemon with the chosen folder path and profile ID.
-**And** the daemon writes an initial `.jellyfinsync.json` to the device using the atomic Write-Temp-Rename pattern, containing a new unique hardware ID and the selected profile.
+**And** the daemon writes an initial `.jellyfinsync.json` to the device via `device_io.write_with_verify()`, containing a new unique hardware ID and the selected profile.
 **And** the daemon broadcasts an updated device state marking the device as "Managed".
 **And** the UI transitions to the normal sync-ready state.
 
@@ -358,6 +360,46 @@ So that I can instantly recognize my devices in the hub without staring at raw I
 - `device/mod.rs initialize_device()`: accept and store name + icon into manifest.
 - `device.list` + `get_daemon_state`: add `icon` field to each device entry.
 - `InitDeviceModal.ts`: add `<sl-input>` for device name + icon picker grid (~6–8 SVG icons embedded in UI).
+- `device_io.write_with_verify()` abstracts the write strategy per backend: Write-Temp-Rename for MSC, dirty-marker + overwrite for MTP.
+- The `device.initialize` RPC handler receives the `Arc<dyn DeviceIO>` for the target device from `DeviceManager` — no direct `std::fs` calls in the handler.
+
+### Story 2.10: MTP Device Detection (Cross-Platform)
+
+As a Convenience Seeker (Sarah),
+I want the daemon to detect my Garmin watch (or any MTP device) the moment I plug it in,
+So that it appears in the device hub without requiring manual steps.
+
+**Acceptance Criteria:**
+
+**Given** the daemon is running on Windows
+**When** an MTP device is connected
+**Then** the daemon receives a `WM_DEVICECHANGE` event with `GUID_DEVINTERFACE_WPD`.
+**And** it enumerates the device via `IPortableDeviceManager` to retrieve its device ID and friendly name.
+**And** it checks for a `.jellyfinsync.json` object in the device root storage.
+**And** it fires a `on_device_detected` or `on_device_unrecognized` event (identical behavior to MSC Story 2.2).
+
+**Given** the daemon is running on Linux
+**When** an MTP device is connected
+**Then** the daemon receives a `udev` USB event.
+**And** `libmtp` enumerates the device and retrieves its serial/device ID.
+**And** it checks for `.jellyfinsync.json` and fires the appropriate event.
+
+**Given** the daemon is running on macOS
+**When** an MTP device is connected
+**Then** the daemon receives an `IOKit` USB match notification.
+**And** `libmtp` enumerates the device and fires the appropriate event.
+
+**Given** an MTP device is detected (any platform)
+**When** the daemon creates the device IO backend
+**Then** it instantiates `MtpBackend` with the device handle.
+**And** passes `Arc<dyn DeviceIO>` to all downstream device operations.
+
+**Technical Notes:**
+- Windows: `windows-rs` with WPD COM API (`IPortableDeviceManager`, `IPortableDevice`)
+- Linux/macOS: `libmtp-rs` crate or direct FFI to `libmtp`
+- `DeviceManager` gains `device_class: DeviceClass { Msc, Mtp }` per connected device entry
+- MTP device `path` in `device.list` RPC: use synthetic identifier `mtp://<device_id>` — no real filesystem path exists
+- Device enumeration runs in `tokio::task::spawn_blocking` (libmtp is synchronous)
 
 ## Epic 3: The Curation Hub (Basket & Library)
 
@@ -583,6 +625,50 @@ So that any new albums or tracks added to that artist in Jellyfin are automatica
 
 Build the performant, atomic sync logic with built-in core resume capabilities.
 
+### Story 4.0: Device IO Abstraction Layer
+
+As a System Admin (Alexis),
+I want all device file operations to go through a single abstract interface,
+So that the sync engine works identically for both MSC and MTP devices without duplicated IO logic.
+
+**Acceptance Criteria:**
+
+**Given** the `DeviceIO` trait is defined in `jellyfinsync-daemon`
+**When** any sync, manifest, or scrobble operation targets a device
+**Then** it calls methods on `Arc<dyn DeviceIO>` exclusively — no direct `std::fs` calls with a device path anywhere outside `MscBackend`.
+
+**Given** a connected MSC device
+**When** `DeviceManager` instantiates the backend
+**Then** it creates `MscBackend { root: PathBuf }`.
+**And** `MscBackend::write_with_verify()` uses the Write-Temp-Rename pattern + `sync_all()` (existing behavior, unchanged).
+
+**Given** a connected MTP device
+**When** `DeviceManager` instantiates the backend
+**Then** it creates `MtpBackend { handle: Arc<MtpHandle> }`.
+**And** `MtpBackend::write_file()` transfers data via WPD object creation (Windows) or `libmtp_send_file_from_memory` (Linux/macOS).
+**And** `MtpBackend::write_with_verify()` writes a `".dirty"` marker object first, overwrites the target object, then deletes the marker.
+**And** `MtpBackend::read_file()` retrieves object data by path lookup.
+**And** `MtpBackend::list_files()` enumerates storage objects.
+**And** `MtpBackend::delete_file()` removes an object by handle.
+**And** `MtpBackend::free_space()` queries device storage capacity.
+
+**Given** the daemon reconnects to a device with a `".dirty"` marker present
+**When** device detection completes
+**Then** the daemon fires `on_device_dirty` (same as the existing MSC dirty-manifest path).
+
+**Given** all existing callers in `sync.rs`, `rpc.rs`, `device/mod.rs`, and `scrobble.rs`
+**When** Story 4.0 is complete
+**Then** every direct `std::fs` call targeting a device path has been replaced with the corresponding `DeviceIO` method.
+**And** all existing unit tests pass without modification (MSC behavior is unchanged).
+
+**Technical Notes:**
+- `device_io.rs`: new file defining `DeviceIO` trait, `FileEntry` struct, `MscBackend`, `MtpBackend`
+- Platform gating: `MtpBackend` compiled with `#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]`
+- Windows MTP: `windows-rs` crate, `IPortableDevice`, `IPortableDeviceContent`, `IPortableDeviceDataStream`
+- Linux/macOS MTP: `libmtp-rs` crate (wraps `libmtp` C library); build script links `libmtp` via `pkg-config`
+- `DeviceManager` stores `Arc<dyn DeviceIO>` per connected device, keyed by device path/ID; passed to all downstream callers at construction time
+- Existing `execute_sync()` signature gains `device_io: Arc<dyn DeviceIO>` param; both callers (`rpc.rs` `sync.start` and `main.rs` `run_auto_sync`) retrieve it from `DeviceManager`
+
 ### Story 4.1: Differential Sync Algorithm (Manifest Comparison)
 
 As a System Admin (Alexis),
@@ -795,6 +881,11 @@ So that my on-the-go listening is reflected on my Jellyfin server.
 **Then** the engine parses the log file.
 **And** it submits the play counts to Jellyfin using the `/PlaybackInfo/Progress` API.
 
+**Given** the connected device is an MTP device
+**When** the daemon scans for a `.scrobbler.log`
+**Then** it uses `device_io.read_file(".scrobbler.log")` to retrieve the log contents.
+**And** parsing and submission logic is identical to the MSC path.
+
 ### Story 5.2: Scrobble Submission Tracking (Deduplication)
 
 As a System Admin (Alexis),
@@ -938,6 +1029,13 @@ So that every release produces verified, downloadable artifacts without manual p
 **And** all artifacts are uploaded to a GitHub Release draft.
 **And** the workflow fails clearly if any platform build fails.
 
+**Given** the Linux and macOS build runners
+**When** the workflow runs
+**Then** `libmtp` and its development headers are installed before `cargo build`
+  (e.g. `sudo apt-get install -y libmtp-dev` on Ubuntu; `brew install libmtp` on macOS).
+**And** `pkg-config` can resolve `libmtp` for the build script.
+**And** the Windows runner requires no additional system libraries (`windows-rs` WPD bindings are pure Rust).
+
 ### Story 6.6: Installation Smoke Tests
 
 As a System Admin (Alexis),
@@ -951,3 +1049,8 @@ So that I can catch packaging regressions before releasing.
 **Then** each step completes successfully.
 **And** the test verifies the daemon sidecar is reachable and responds to a health-check RPC call.
 **And** failures produce clear diagnostic output identifying which step failed.
+
+**Given** the smoke test environment has no physical MTP device
+**When** the test suite runs
+**Then** MTP device IO is verified by unit tests in `device_io.rs` (mock `MtpBackend` returning fixture data).
+**And** the smoke test explicitly notes: "MTP end-to-end detection requires manual hardware verification on each platform."

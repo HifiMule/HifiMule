@@ -1,6 +1,6 @@
 # Story 5.1: Rockbox Scrobbler Bridge
 
-Status: done
+Status: backlog
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -24,7 +24,14 @@ so that **my on-the-go listening is reflected on my Jellyfin server**.
 
 6. **RPC Exposure**: A new `scrobbler_get_last_result` RPC method returns the result of the most recent scrobble processing run, including: total entries, submitted count, skipped (not "L") count, unmatched count, failed count, and any error messages. (AC: #6)
 
-7. **Error Resilience**: A failure to submit one track (network error, API error, no match) does NOT abort processing of remaining entries. All errors are collected and included in the result. (AC: #7)
+7. **MTP Scrobbler Log Read (Sprint Change 2026-04-30):**
+   - **Given** the connected device is an MTP device
+   - **When** the daemon scans for a `.scrobbler.log`
+   - **Then** it uses `device_io.read_file(".scrobbler.log")` to retrieve the log contents
+   - **And** all parsing and submission logic is identical to the MSC path
+   - **Note:** Replaces direct `std::fs::read` / `read_to_string` targeting the device path. `device_io` passed to the scrobble handler from `DeviceManager` (same pattern as sync engine — established by Story 4.0)
+
+8. **Error Resilience**: A failure to submit one track (network error, API error, no match) does NOT abort processing of remaining entries. All errors are collected and included in the result. (AC: #7)
 
 ## Tasks / Subtasks
 
@@ -151,6 +158,13 @@ so that **my on-the-go listening is reflected on my Jellyfin server**.
     - Read `state.last_scrobbler_result`
     - Return `null` if no result yet (no device connected or scrobbler not yet run)
     - Return the `ScrobblerResult` serialized to JSON
+
+- [ ] **T7: MTP scrobbler log read via DeviceIO (AC: #7 — Sprint Change 2026-04-30)**
+  - [ ] In `process_device_scrobbles()`, replace `std::fs::read_to_string(device_path.join(".scrobbler.log"))` with `device_io.read_file(".scrobbler.log")`
+  - [ ] Update `process_device_scrobbles()` signature to accept `device_io: Arc<dyn DeviceIO>` param (alongside or replacing `device_path`)
+  - [ ] Update call site in `main.rs` device event loop to pass `device_io` from `DeviceManager`
+  - [ ] Verify existing unit tests pass (MSC path unchanged via MscBackend)
+  - **Depends on:** Story 4.0 (DeviceIO abstraction layer)
 
 - [x] **T6: Verification** (AC: all)
   - [x] T6.1: `cargo test` in `jellyfinsync-daemon/` — all existing tests pass + new scrobbler unit tests pass (88 tests total, up from 82)
@@ -363,4 +377,5 @@ Review found and fixed the following issues:
 
 ## Change Log
 
+- 2026-04-30: Reopened — MTP support (Sprint Change 2026-04-30). AC #7 and T7 added. Requires Story 4.0 (DeviceIO abstraction) to be completed first.
 - 2026-02-28: Implemented Story 5.1 Rockbox Scrobbler Bridge — scrobble_history DB table, Jellyfin search/played APIs, scrobbler.rs parser/processor module, device detection hook, and scrobbler_get_last_result RPC method.

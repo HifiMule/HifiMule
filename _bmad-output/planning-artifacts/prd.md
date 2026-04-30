@@ -141,8 +141,8 @@ As a cross-platform desktop application, JellyfinSync consists of a performance-
 ## Functional Requirements
 
 ### 1. Device Connection & Discovery
-- **FR1:** The system can automatically detect Mass Storage devices (USB) on Windows, Linux, and macOS.
-- **FR2:** Users can manually select a target device folder if automatic detection fails.
+- **FR1:** The system can automatically detect Mass Storage (USB MSC) and MTP (Media Transfer Protocol) devices on Windows, Linux, and macOS.
+- **FR2:** Users can manually select a target device folder if automatic detection fails. Manual fallback applies to Mass Storage devices only; MTP devices must be detected automatically via the OS device manager.
 - **FR3:** The system can identify the presence of a `.jellyfinsync.json` manifest on discovery.
 - **FR4:** The system can read persistent hardware identifiers to link devices across different sessions. When multiple managed devices are connected simultaneously, the system tracks all of them and allows the user to select the active device context.
 - **FR33:** The system presents a persistent device hub showing all connected managed devices, each identified by its name and icon. The user can switch the active device context at any time. When no device is selected, the basket is empty and adding items is disabled.
@@ -165,7 +165,7 @@ As a cross-platform desktop application, JellyfinSync consists of a performance-
 ### 4. Synchronization Engine
 - **FR12:** The system can perform a differential sync based on the local manifest.
 - **FR13:** The system can protect unmanaged user files from deletion or modification.
-- **FR14:** The system can stream media files directly from the Jellyfin server to the device via memory-to-disk buffering.
+- **FR14:** The system can stream media files directly from the Jellyfin server to the device via memory-to-disk buffering, using the appropriate device IO backend (filesystem writes for MSC devices, WPD/libmtp object transfers for MTP devices).
 - **FR15:** The system can validate hardware-specific constraints (path length, character sets) before writing files.
 - **FR16:** The system can resume an interrupted sync session without restarting from scratch.
 - **FR31:** The system can negotiate a transcoded stream URL from the Jellyfin server using a device-specific DeviceProfile payload, falling back to direct download when direct play is supported or transcoding fails.

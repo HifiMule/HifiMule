@@ -1,6 +1,6 @@
 # Story 6.5: CI/CD Cross-Platform Build Pipeline
 
-Status: done
+Status: backlog
 
 ## Story
 
@@ -16,6 +16,7 @@ so that every release produces verified, downloadable artifacts without manual p
 4. **Artifacts uploaded to GitHub Release**: All artifacts are uploaded to a GitHub Release draft tied to the tag.
 5. **Failure is clear**: If any platform build fails, the workflow fails clearly with actionable output identifying which platform and step failed.
 6. **Sidecar staged before build**: The `prepare-sidecar.mjs` pre-build script runs before `cargo tauri build` on each runner, correctly staging the daemon sidecar for the target platform.
+7. **MTP build dependency (Sprint Change 2026-04-30):** Given the Linux and macOS build runners, when the workflow runs, `libmtp` and its development headers are installed before `cargo build` (`sudo apt-get install -y libmtp-dev` on Ubuntu; `brew install libmtp` on macOS). `pkg-config` can resolve `libmtp` for the daemon build script. The Windows runner requires no additional system libraries (`windows-rs` WPD bindings are pure Rust).
 
 ## Tasks / Subtasks
 
@@ -46,6 +47,13 @@ so that every release produces verified, downloadable artifacts without manual p
   - [x] T5.1: Confirm architecture.md: code signing (Windows Authenticode, macOS notarization) is deferred to post-MVP
   - [x] T5.2: Ensure no `APPLE_CERTIFICATE`, `APPLE_ID`, or `WINDOWS_CERTIFICATE` secrets are set — build must succeed without them
   - [x] T5.3: Document in completion notes that code signing is post-MVP
+
+- [ ] **T7: Add libmtp dependency to Linux and macOS build steps (AC: #7 — Sprint Change 2026-04-30)**
+  - [ ] In `.github/workflows/release.yml`, add `libmtp-dev` to the Ubuntu apt-get install step (alongside existing Tauri deps)
+  - [ ] Add a macOS-only step: `brew install libmtp` before `cargo tauri build`
+  - [ ] Verify `pkg-config --libs libmtp` succeeds on both runners after install
+  - [ ] Confirm Windows matrix job needs no changes (windows-rs WPD is pure Rust)
+  - **Depends on:** Story 4.0 (DeviceIO abstraction — introduces libmtp dependency in Cargo.toml)
 
 - [x] **T6: Test the workflow end-to-end** (AC: #1–#5)
   - [x] T6.1: Push a test tag (e.g., `v0.0.1-test`) to trigger the workflow
@@ -262,6 +270,7 @@ Claude Sonnet 4.6
 
 ### Change Log
 
+- 2026-04-30: Reopened — MTP support (Sprint Change 2026-04-30). AC #7 and T7 added. Requires Story 4.0 (DeviceIO abstraction) to be completed first so libmtp dependency exists in Cargo.toml.
 - 2026-04-06: Created `.github/workflows/release.yml` — CI/CD cross-platform release pipeline for Windows (MSI), macOS universal DMG, Linux (AppImage + .deb). All tasks complete; end-to-end validated.
 - 2026-04-06: Fixed Ubuntu build failure — added `libxdo-dev` to apt-get step (daemon transitively depends on `libxdo` crate).
 - 2026-04-06: Added macOS universal binary support — matrix restructured to `include` format, daemon cross-compiled for both architectures; all three sidecar variants staged (aarch64, x86_64 for per-slice compilation checks, plus lipo-merged universal for bundling), `tauri-action` called with `--target universal-apple-darwin`.

@@ -23,7 +23,10 @@ Architecture is driven by extreme efficiency (< 10MB RAM) and high stability (At
 
 ### Technical Constraints & Dependencies
 - **No Heavy Runtimes:** The core engine cannot depend on Electron or Python runtimes if it is to meet the 10MB memory goal.
-- **OS Native IO:** Dependence on `udev` (Linux), `WM_DEVICECHANGE` (Windows), and `DiskArbitration` (macOS) for event-driven discovery.
+- **OS Native IO:** Dual-mode event-driven discovery per platform:
+  - **Windows:** `WM_DEVICECHANGE` + `DBT_DEVICEARRIVAL` for MSC (drive letters) and `GUID_DEVINTERFACE_WPD` registration for MTP portable devices, both via `windows-rs`.
+  - **Linux:** `udev` for MSC block devices; `udev` USB subsystem + `libmtp` device enumeration for MTP.
+  - **macOS:** `DiskArbitration` for MSC; `IOKit` USB matching + `libmtp` notification callbacks for MTP.
 - **Manifest-Only Truth:** The `.jellyfinsync.json` file on the target device is the definitive record of "Managed State".
 
 ## Starter Template Evaluation
@@ -179,9 +182,34 @@ unrecognized_device_path: Option<PathBuf>            // device awaiting initiali
   - UI log: `ui.log`
 - **Debug Mode:** Standard `println!`/`eprintln!` output to the terminal as usual.
 
+### Device IO Abstraction
+
+All device file operations MUST go through the `DeviceIO` trait. Direct `std::fs` calls targeting device paths are forbidden outside the `MscBackend` implementation.
+
+```rust
+trait DeviceIO: Send + Sync {
+    fn read_file(&self, path: &str) -> Result<Vec<u8>>;
+    fn write_file(&self, path: &str, data: &[u8]) -> Result<()>;
+    fn list_files(&self, path: &str) -> Result<Vec<FileEntry>>;
+    fn delete_file(&self, path: &str) -> Result<()>;
+    fn free_space(&self) -> Result<u64>;
+    fn write_with_verify(&self, path: &str, data: &[u8]) -> Result<()>;
+}
+
+struct MscBackend { root: PathBuf }        // std::fs — MSC drive path
+struct MtpBackend { device: MtpHandle }    // WPD (Win) / libmtp (Linux, macOS)
+```
+
+**Atomic writes over MTP:** MTP has no native rename operation. The Write-Temp-Rename pattern is MSC-only. For MTP, `write_with_verify()` writes a `".dirty"` marker object first, overwrites the target in-place, then removes the marker. This provides crash detection (dirty marker present on reconnect) without native atomicity.
+
+**Backend selection:** `DeviceManager` instantiates the correct backend at detection time based on device class (MSC vs MTP) and passes it as `Arc<dyn DeviceIO>` to all downstream callers (sync engine, manifest handler, scrobble reader).
+
+**Enforcement:** All AI agents MUST use `DeviceIO` methods for any read/write targeting the device. Never call `std::fs` with a device path directly.
+
 ### Enforcement Guidelines
 
 **All AI Agents MUST:**
 - Use the provided `ts-rs` macros to ensure the IPC contract is strictly adhered to.
 - Validate filesystem path lengths before attempting write operations on legacy hardware.
 - Commit manifest changes ONLY after `sync_all` has returned successfully.
+- Use `DeviceIO` trait methods for all device file operations — never `std::fs` directly with a device path.
