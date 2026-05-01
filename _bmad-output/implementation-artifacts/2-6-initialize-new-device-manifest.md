@@ -1,6 +1,6 @@
 # Story 2.6: Initialize New Device Manifest
 
-Status: backlog
+Status: ready-for-dev
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -108,14 +108,29 @@ so that I can bring a brand-new device into the managed sync model without manua
 
 ## Dev Notes
 
+### Current Implementation State (as of 2026-05-01)
+
+**All original tasks (ACs #1–3, #5–6) are DONE.** The only remaining work is the MTP manifest write task (AC #4), which depends on Story 4.0.
+
+Key current code locations (updated line numbers):
+- `DeviceEvent` enum: `device/mod.rs:154–163`
+- `DeviceManager` struct + fields: `device/mod.rs:181–188`
+- `handle_device_unrecognized`: `device/mod.rs:242–255`
+- `initialize_device()` (current signature): `device/mod.rs:361–440`
+  - Calls `write_manifest(&device_root, &manifest).await?` at line 420 — **this is the line to replace for AC #4**
+- `run_observer`: `device/mod.rs:884–930`
+- `is_removable_drive`: `device/mod.rs:867–882`
+- `handle_device_initialize` RPC: `rpc.rs:1387–1468`
+  - Calls `device_manager.initialize_device(folder_path, transcoding_profile_id, device_name, device_icon).await` — **this caller must pass `Arc<dyn DeviceIO>` once Story 4.0 adds it**
+- `BasketSidebar` banner: `BasketSidebar.ts:480–495`
+- `InitDeviceModal`: `jellyfinsync-ui/src/components/InitDeviceModal.ts` (fully implemented)
+
 ### Architecture & Pattern Compliance
 
-- **Atomic Manifest Write:** MUST use the existing `device::write_manifest(device_root, &manifest)` function — it already implements the Write-Temp-Rename pattern with `sync_all`. Do NOT write the manifest any other way.
-- **UUID Generation:** `uuid` crate with `v4` feature is already in `jellyfinsync-daemon/Cargo.toml`. Use `uuid::Uuid::new_v4().to_string()` for `device_id`.
-- **RPC Pattern:** Follow the exact pattern in `rpc.rs` — `handle_device_initialize` is an `async fn(state: &AppState, params: Option<Value>) -> Result<Value, JsonRpcError>`. Return `Ok(serde_json::json!({"status": "success", "data": {...}}))` on success.
-- **State Updates from RPC:** `state.state_tx.send(DaemonState::...)` is the approved channel — the field exists in `AppState` (see `rpc.rs:90`).
-- **UI Modal Pattern:** Follow `RepairModal.ts` exactly — create an `sl-dialog` element, append to container, call `.show()`. Use `sl-spinner` for loading and `sl-alert` for errors.
-- **camelCase IPC:** All JSON-RPC fields MUST be `camelCase` (e.g., `folderPath`, `profileId`, `pendingDevicePath`) per architecture mandate. Rust structs must use `#[serde(rename_all = "camelCase")]`.
+- **Atomic Manifest Write (MSC):** Current code uses `device::write_manifest()` — Write-Temp-Rename with `sync_all`. Story 4.0 will make `MscBackend::write_with_verify()` wrap this exact pattern. MSC behavior must be preserved unchanged.
+- **MTP Write (post-Story 4.0):** `MtpBackend::write_with_verify()` uses dirty-marker + overwrite (no rename op available over MTP).
+- **UUID Generation:** `uuid` crate with `v4` feature already in `Cargo.toml`. `uuid::Uuid::new_v4().to_string()` — already used in current `initialize_device()`.
+- **camelCase IPC:** All JSON-RPC fields MUST be `camelCase` per architecture mandate.
 
 ### Critical Windows Guardrail
 
@@ -203,24 +218,52 @@ The RepairModal.ts pattern (Shoelace `sl-dialog`, class-based, `open()` method, 
 - `jellyfinsync-ui/src/components/InitDeviceModal.ts` — New component (follow RepairModal.ts pattern)
 - `jellyfinsync-ui/src/components/BasketSidebar.ts` — Add `has_manifest: false` banner rendering and InitDeviceModal integration
 
+### MTP Task: Exact Changes Required (post-Story 4.0)
+
+Once Story 4.0 defines `DeviceIO` trait and `DeviceManager` stores `Arc<dyn DeviceIO>` per device:
+
+**1. `DeviceManager` — store IO backend for pending unrecognized device:**
+`DeviceManager` will need `unrecognized_device_io: Arc<RwLock<Option<Arc<dyn DeviceIO>>>>` alongside `unrecognized_device_path`. `handle_device_unrecognized` must receive and store the backend created by the detection layer (MSC or MTP).
+
+**2. `initialize_device()` signature change:**
+```rust
+// Before (current):
+pub async fn initialize_device(&self, folder_path: &str, transcoding_profile_id: Option<String>, name: String, icon: Option<String>) -> Result<DeviceManifest>
+
+// After (post-4.0):
+pub async fn initialize_device(&self, folder_path: &str, transcoding_profile_id: Option<String>, name: String, icon: Option<String>, device_io: Arc<dyn DeviceIO>) -> Result<DeviceManifest>
+```
+
+**3. Replace `write_manifest` with `device_io.write_with_verify()` at `device/mod.rs:420`:**
+```rust
+// Before:
+write_manifest(&device_root, &manifest).await?;
+
+// After:
+let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
+device_io.write_with_verify(".jellyfinsync.json", &manifest_bytes)?;
+```
+
+**4. `handle_device_initialize` in `rpc.rs:1387`:**
+Retrieve `device_io` from `DeviceManager` for the unrecognized device path and pass it to `initialize_device()`.
+
+**Note:** MSC behavior is preserved — `MscBackend::write_with_verify()` calls the same Write-Temp-Rename + `sync_all` that `write_manifest()` does today.
+
 ### References
 
-- Architecture: [Source: _bmad-output/planning-artifacts/architecture.md#Safety & Atomicity Patterns]
-- Write-Temp-Rename: `device/mod.rs:write_manifest` (lines 41-56)
-- DeviceEvent enum: `device/mod.rs:108-115`
-- run_observer: `device/mod.rs:623-656`
-- get_mounts Windows: `device/mod.rs:674-685`
-- DeviceManager.handle_device_detected: `device/mod.rs:147-178`
-- DeviceManager.handle_device_removed: `device/mod.rs:181-187`
-- DeviceManager.list_root_folders: `device/mod.rs:217-287`
-- AppState / run_server: `rpc.rs:75-117`
-- handler dispatch: `rpc.rs:119-172`
-- handle_get_daemon_state: `rpc.rs:341-361`
-- RepairModal pattern: `jellyfinsync-ui/src/components/RepairModal.ts`
-- BasketSidebar device rendering: `jellyfinsync-ui/src/components/BasketSidebar.ts:203-265`
-- DB upsert: `db.rs:153-173` — `upsert_device_mapping(id, name, user_id, rules)`
-- uuid v4: `jellyfinsync-daemon/Cargo.toml:30` — already available
-- windows_sys GetDriveTypeW: already imported in `device/mod.rs` via `GetLogicalDrives` (same module)
+- Architecture — Device IO Abstraction: `_bmad-output/planning-artifacts/architecture.md` (Device IO Abstraction section)
+- Architecture — Safety & Atomicity: `_bmad-output/planning-artifacts/architecture.md` (Safety & Atomicity Patterns section)
+- `write_manifest()`: `device/mod.rs:87–102`
+- `DeviceEvent` enum: `device/mod.rs:154–163`
+- `DeviceManager` struct: `device/mod.rs:181–188`
+- `initialize_device()`: `device/mod.rs:361–440` — line 420 is the `write_manifest` call to replace
+- `run_observer`: `device/mod.rs:884–930`
+- `is_removable_drive`: `device/mod.rs:867–882`
+- `handle_device_initialize` RPC: `rpc.rs:1387–1468`
+- `handle_get_daemon_state`: `rpc.rs:374–428`
+- `BasketSidebar` banner render: `BasketSidebar.ts:480–495`
+- `InitDeviceModal`: `jellyfinsync-ui/src/components/InitDeviceModal.ts`
+- Story 4.0 (DeviceIO definition): `_bmad-output/implementation-artifacts/4-0-device-io-abstraction-layer.md`
 
 ## Dev Agent Record
 
