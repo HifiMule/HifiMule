@@ -325,6 +325,16 @@ impl DeviceManager {
         devices.get(&path).map(|d| std::sync::Arc::clone(&d.device_io))
     }
 
+    /// Atomically returns the manifest and IO backend for the currently selected device.
+    /// Prefer this over separate `get_current_device` + `get_device_io` calls to avoid
+    /// TOCTOU races when the device disconnects between the two reads.
+    pub async fn get_manifest_and_io(&self) -> Option<(DeviceManifest, std::sync::Arc<dyn crate::device_io::DeviceIO>)> {
+        let sel = self.selected_device_path.read().await.clone();
+        let path = sel?;
+        let devices = self.connected_devices.read().await;
+        devices.get(&path).map(|d| (d.manifest.clone(), std::sync::Arc::clone(&d.device_io)))
+    }
+
     pub async fn get_current_device_path(&self) -> Option<PathBuf> {
         self.selected_device_path.read().await.clone()
     }
@@ -427,18 +437,15 @@ impl DeviceManager {
 
         let device_id = uuid::Uuid::new_v4().to_string();
 
+        // Device not yet in the map; create a local backend for the initial manifest write
+        // and subfolder creation.
+        let device_io: std::sync::Arc<dyn crate::device_io::DeviceIO> =
+            std::sync::Arc::new(crate::device_io::MscBackend::new(device_root.clone()));
+
         let managed_paths = if folder_path.is_empty() {
             vec![]
         } else {
-            // Create the subfolder on the device if it doesn't exist
-            let target_folder = device_root.join(folder_path);
-            tokio::fs::create_dir(&target_folder).await.or_else(|e| {
-                if e.kind() == std::io::ErrorKind::AlreadyExists {
-                    Ok(())
-                } else {
-                    Err(e)
-                }
-            })?;
+            device_io.ensure_dir(folder_path).await?;
             vec![folder_path.to_string()]
         };
 
@@ -457,10 +464,6 @@ impl DeviceManager {
             transcoding_profile_id,   // NEW — stored in .jellyfinsync.json on the device
             playlists: vec![],
         };
-
-        // Device not yet in the map; create a local backend for the initial manifest write.
-        let device_io: std::sync::Arc<dyn crate::device_io::DeviceIO> =
-            std::sync::Arc::new(crate::device_io::MscBackend::new(device_root.clone()));
         write_manifest(std::sync::Arc::clone(&device_io), &manifest).await?;
 
         {

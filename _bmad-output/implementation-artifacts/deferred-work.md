@@ -1,5 +1,15 @@
 # Deferred Work
 
+## Deferred from: code review of 4-0-device-io-abstraction-layer (2026-05-01)
+
+- **`update_manifest` TOCTOU** — `selected_device_path` and `connected_devices` are acquired under separate locks; device disconnect between the two reads causes `get_mut` to return `None` and partial manifest updates to be silently dropped. Pre-existing lock ordering; fix in a future DeviceManager refactor.
+- **MTP scrobbler `not-found` detection broken** — `downcast_ref::<std::io::Error>()` fails for plain `anyhow` errors returned by `MtpHandle::read_file`; MTP "no scrobbler log" is treated as a read error. No production impact until Story 2.10 wires up MTP detection.
+- **Potential deadlock via lock-order inversion** — `get_multi_device_snapshot` acquires `connected_devices.read` then `selected_device_path.read`; `update_manifest` acquires them in reverse order; a concurrent `select_device` waiting for `selected_device_path.write` can create a 3-thread circular wait. Pre-existing pattern; needs a single combined lock or a consistent acquisition order.
+- **`handle_device_removed` does not auto-reselect when 2+ devices remain** — after removing the selected device, `selected_device_path` is set to `None` even when other devices are still connected. Pre-existing UX issue; users must manually re-select.
+- **`MtpBackend` concurrent `spawn_blocking` ordering not guaranteed** — MTP is stateful; concurrent IO operations dispatched as independent `spawn_blocking` tasks can interleave. No production impact until Story 2.10; add a per-device serialization mechanism then.
+- **`cleanup_tmp_files` skips root-level `.tmp` cleanup when `managed_paths` is empty** — pre-existing behavior; any `.tmp` files written outside `managed_paths` (e.g., a failed manifest write at the device root) are never cleaned up.
+- **`initialize_device` uses `create_dir` (not `create_dir_all`)** — safe today because path validation rejects nested paths; becomes a latent bug if validation is ever relaxed to allow multi-level managed paths.
+
 ## Deferred from: code review of 6-3-macos-installer-dmg (2026-04-05)
 
 - **beforeBuildCommand CWD assumption unverified cross-platform** — `npm run build && node ../scripts/prepare-sidecar.mjs` verified on macOS with npm/npx tauri invocation; untested with `cargo tauri` (which may use workspace root as CWD) on Windows/Linux. Verify in stories 6.4 and 6.5 CI setup.

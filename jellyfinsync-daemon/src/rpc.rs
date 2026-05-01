@@ -1072,32 +1072,12 @@ async fn handle_sync_execute(
     let _ = state_tx.send(crate::DaemonState::Syncing);
 
     tokio::spawn(async move {
-        // Load transcoding profile from device manifest
-        let transcoding_profile = {
-            let device = device_manager.get_current_device().await;
-            if let Some(ref manifest) = device {
-                if let Some(ref profile_id) = manifest.transcoding_profile_id {
-                    match crate::paths::get_device_profiles_path()
-                        .and_then(|p| crate::transcoding::find_device_profile(&p, profile_id))
-                    {
-                        Ok(profile) => profile,
-                        Err(e) => {
-                            eprintln!("[Sync] Failed to load transcoding profile '{}': {}", profile_id, e);
-                            None
-                        }
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
-
-        let device_io = match device_manager.get_device_io().await {
-            Some(io) => io,
+        // Atomically fetch manifest + IO backend to avoid TOCTOU if device disconnects
+        // between reading the manifest (for transcoding profile) and getting the IO handle.
+        let (sync_manifest, device_io) = match device_manager.get_manifest_and_io().await {
+            Some(pair) => pair,
             None => {
-                eprintln!("[Sync] No device IO backend available — cannot execute sync");
+                eprintln!("[Sync] No device available — cannot execute sync");
                 if let Some(mut operation) = op_manager.get_operation(&op_id).await {
                     operation.status = crate::sync::SyncStatus::Failed;
                     op_manager.update_operation(&op_id, operation).await;
@@ -1105,6 +1085,21 @@ async fn handle_sync_execute(
                 let _ = state_tx.send(crate::DaemonState::Error);
                 return;
             }
+        };
+
+        // Load transcoding profile from the atomically fetched manifest
+        let transcoding_profile = if let Some(ref profile_id) = sync_manifest.transcoding_profile_id {
+            match crate::paths::get_device_profiles_path()
+                .and_then(|p| crate::transcoding::find_device_profile(&p, profile_id))
+            {
+                Ok(profile) => profile,
+                Err(e) => {
+                    eprintln!("[Sync] Failed to load transcoding profile '{}': {}", profile_id, e);
+                    None
+                }
+            }
+        } else {
+            None
         };
 
         let result = crate::sync::execute_sync(
@@ -1219,6 +1214,12 @@ async fn handle_sync_get_resume_state(state: &AppState) -> Result<Value, JsonRpc
 
             let cleaned_tmp_files = if is_dirty {
                 if let Some(device_io) = state.device_manager.get_device_io().await {
+                    // Delete any leftover .dirty markers (from interrupted MTP write_with_verify)
+                    if let Ok(files) = device_io.list_files("").await {
+                        for f in files.iter().filter(|f| f.name.ends_with(".dirty")) {
+                            let _ = device_io.delete_file(&f.path).await;
+                        }
+                    }
                     crate::device::cleanup_tmp_files(device_io, &manifest.managed_paths)
                         .await
                         .unwrap_or(0)

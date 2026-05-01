@@ -1,6 +1,6 @@
 # Story 4.0: Device IO Abstraction Layer
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -261,6 +261,26 @@ claude-sonnet-4-6
 - `jellyfinsync-daemon/src/rpc.rs` — `handle_sync_execute` and `handle_sync_get_resume_state` retrieve and pass `device_io`
 - `jellyfinsync-daemon/src/scrobbler.rs` — `process_device_scrobbles` signature updated; direct fs read replaced with `device_io.read_file`
 - `jellyfinsync-daemon/src/device/tests.rs` — all `write_manifest` and `cleanup_tmp_files` call sites updated to use `MscBackend`
+
+### Review Findings
+
+- [x] [Review][Decision] AC#5: `initialize_device` calls `tokio::fs::create_dir` directly on device path — resolved: added `ensure_dir(&str)` to `DeviceIO` trait; `MscBackend` uses `create_dir_all`, `MtpBackend` is a no-op; `initialize_device` updated [`device/mod.rs:435`, `device_io.rs`]
+- [x] [Review][Patch] `buffer_stream` loads entire file into memory — added 2 GB hard cap; returns error if stream exceeds limit [`sync.rs`, `buffer_stream` helper]
+- [x] [Review][Patch] `MscBackend::write_with_verify` does not clean up `.tmp` file on failure — fixed: tmp deleted on write/sync error before returning [`device_io.rs`]
+- [x] [Review][Patch] `MscBackend` operations lack path-traversal bounds check — added `check_relative()` guard to all path-taking methods [`device_io.rs`]
+- [x] [Review][Patch] AC#5 violation: `cleanup_empty_dirs` uses direct `tokio::fs` — added `cleanup_empty_subdirs(&str)` to `DeviceIO` trait; MSC impl recursively prunes, MTP is no-op; call site in `execute_sync` updated [`device_io.rs`, `sync.rs`]
+- [x] [Review][Patch] TOCTOU: `get_device_io()` and `get_current_device()` are separate lock acquisitions — added `get_manifest_and_io()` atomic accessor; used in `handle_sync_execute` and `run_auto_sync` [`device/mod.rs`, `rpc.rs`, `main.rs`]
+- [x] [Review][Patch] MTP dirty-resume flow never deletes `.dirty` markers — `handle_sync_get_resume_state` now deletes all `.dirty` files via `device_io.delete_file` before running `cleanup_tmp_files` [`rpc.rs`]
+- [x] [Review][Patch] AC#5 violation: `write_file_streamed` dead code not removed — function and its two tests removed [`sync.rs`]
+- [x] [Review][Patch] "No such file" detection in `generate_m3u_files` uses fragile string matching — replaced with `downcast_ref::<std::io::Error>().kind() == NotFound` [`sync.rs`]
+- [x] [Review][Patch] Scrobble silently skipped with no log — added `daemon_log!` warning in the `None` branch [`main.rs`]
+- [x] [Review][Defer] `update_manifest` TOCTOU between `selected_device_path` and `connected_devices` lock acquisitions [`device/mod.rs:378-393`] — deferred, pre-existing
+- [x] [Review][Defer] MTP scrobbler `not-found` detection broken — `downcast_ref::<std::io::Error>()` fails for plain `anyhow` errors from `MtpHandle`; affects MTP devices only [`scrobbler.rs:93-97`] — deferred, MTP not in production (Story 2.10)
+- [x] [Review][Defer] Potential deadlock via lock-order inversion when `get_multi_device_snapshot` and `update_manifest` run concurrently with a `select_device` call [`device/mod.rs`] — deferred, pre-existing
+- [x] [Review][Defer] `handle_device_removed` does not auto-reselect when 2+ devices remain after removing the selected device [`device/mod.rs`] — deferred, pre-existing
+- [x] [Review][Defer] `MtpBackend` concurrent `spawn_blocking` calls have no ordering guarantee across concurrent operations — MTP is stateful [`device_io.rs`] — deferred, MTP not in production (Story 2.10)
+- [x] [Review][Defer] `cleanup_tmp_files` with empty `managed_paths` silently skips root-level `.tmp` cleanup [`device/mod.rs`, `cleanup_tmp_files`] — deferred, pre-existing
+- [x] [Review][Defer] `initialize_device` uses `create_dir` (not `create_dir_all`) — protected by path validation today, but latent bug if validation is relaxed [`device/mod.rs:435`] — deferred, pre-existing
 
 ## Change Log
 

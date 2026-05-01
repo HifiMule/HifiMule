@@ -219,26 +219,31 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                             if let Ok((url, token, Some(user_id))) =
                                 api::CredentialManager::get_credentials()
                             {
-                                if let Some(scrobble_device_io) = device_manager.get_device_io().await {
-                                    let db_scrobble = Arc::clone(&db);
-                                    let client_scrobble = Arc::clone(&jellyfin_client);
-                                    let scrobbler_result_clone = Arc::clone(&last_scrobbler_result);
-                                    let scrobble_device_id = manifest_device_id.clone();
-                                    tokio::spawn(async move {
-                                        let result = scrobbler::process_device_scrobbles(
-                                            scrobble_device_io,
-                                            scrobble_device_id,
-                                            db_scrobble,
-                                            client_scrobble,
-                                            &url,
-                                            &token,
-                                            &user_id,
-                                        )
-                                        .await;
-                                        daemon_log!("[Scrobbler] Result: {:?}", result);
-                                        let mut guard = scrobbler_result_clone.write().await;
-                                        *guard = Some(result);
-                                    });
+                                match device_manager.get_device_io().await {
+                                    Some(scrobble_device_io) => {
+                                        let db_scrobble = Arc::clone(&db);
+                                        let client_scrobble = Arc::clone(&jellyfin_client);
+                                        let scrobbler_result_clone = Arc::clone(&last_scrobbler_result);
+                                        let scrobble_device_id = manifest_device_id.clone();
+                                        tokio::spawn(async move {
+                                            let result = scrobbler::process_device_scrobbles(
+                                                scrobble_device_io,
+                                                scrobble_device_id,
+                                                db_scrobble,
+                                                client_scrobble,
+                                                &url,
+                                                &token,
+                                                &user_id,
+                                            )
+                                            .await;
+                                            daemon_log!("[Scrobbler] Result: {:?}", result);
+                                            let mut guard = scrobbler_result_clone.write().await;
+                                            *guard = Some(result);
+                                        });
+                                    }
+                                    None => {
+                                        daemon_log!("[Scrobbler] Skipped — device IO unavailable (device may have disconnected)");
+                                    }
                                 }
                             }
 
@@ -653,8 +658,18 @@ async fn run_auto_sync(
         })
         .await?;
 
-    // Load transcoding profile if set on the device manifest
-    let transcoding_profile = if let Some(ref profile_id) = manifest.transcoding_profile_id {
+    // Atomically fetch manifest + IO backend after marking dirty to avoid TOCTOU
+    // if the device disconnects between the dirty write and acquiring the IO handle.
+    let (current_manifest, device_io) = match device_manager.get_manifest_and_io().await {
+        Some(pair) => pair,
+        None => {
+            daemon_log!("[AutoSync] Device disconnected before sync started — aborting");
+            let _ = state_tx.send(DaemonState::Error);
+            return Ok(());
+        }
+    };
+    // Refresh transcoding profile from the atomically fetched manifest
+    let transcoding_profile = if let Some(ref profile_id) = current_manifest.transcoding_profile_id {
         match crate::paths::get_device_profiles_path()
             .and_then(|p| crate::transcoding::find_device_profile(&p, profile_id))
         {
@@ -666,15 +681,6 @@ async fn run_auto_sync(
         }
     } else {
         None
-    };
-
-    let device_io = match device_manager.get_device_io().await {
-        Some(io) => io,
-        None => {
-            daemon_log!("[AutoSync] No device IO backend — aborting sync");
-            let _ = state_tx.send(DaemonState::Error);
-            return Ok(());
-        }
     };
 
     let result = sync::execute_sync(

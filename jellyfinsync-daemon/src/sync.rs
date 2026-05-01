@@ -4,8 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
-use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 
 use crate::device::DeviceManifest;
@@ -720,9 +718,12 @@ pub async fn execute_sync(
         }
     }
 
-    // After all deletions (files), prune any resulting empty directories
-    // We pass the managed_path (Music root) to recursively clean up subfolders
-    if let Err(e) = Box::pin(cleanup_empty_dirs(&managed_path)).await {
+    // After all deletions (files), prune any resulting empty directories via DeviceIO
+    let managed_subfolder = managed_path
+        .strip_prefix(device_path)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    if let Err(e) = device_io.cleanup_empty_subdirs(&managed_subfolder).await {
         eprintln!("[Sync] Warning: directory cleanup failed: {}", e);
     }
 
@@ -815,92 +816,32 @@ async fn buffer_stream<S>(
 where
     S: futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Unpin,
 {
-    let mut buffer = Vec::with_capacity(total_size as usize);
+    const MAX_FILE_BUFFER_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GB hard cap
+    if total_size > MAX_FILE_BUFFER_BYTES {
+        return Err(anyhow::anyhow!(
+            "File too large to buffer ({} bytes > {} byte limit)",
+            total_size,
+            MAX_FILE_BUFFER_BYTES
+        ));
+    }
+    let capacity = total_size.min(MAX_FILE_BUFFER_BYTES) as usize;
+    let mut buffer = Vec::with_capacity(capacity);
     let mut bytes_written = 0u64;
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result.context("Failed to read chunk from stream")?;
         buffer.extend_from_slice(&chunk);
         bytes_written += chunk.len() as u64;
+        if buffer.len() as u64 > MAX_FILE_BUFFER_BYTES {
+            return Err(anyhow::anyhow!(
+                "File stream exceeded {} byte buffer limit",
+                MAX_FILE_BUFFER_BYTES
+            ));
+        }
         on_progress(bytes_written, total_size);
     }
     Ok(buffer)
 }
 
-/// Streams a file from a byte stream to disk using the atomic Write-Temp-Rename pattern.
-///
-/// This function:
-/// 1. Creates parent directories if needed
-/// 2. Writes to a `.tmp` file first
-/// 3. Calls progress callback after each chunk
-/// 4. Calls `sync_all()` to flush to disk
-/// 5. Atomically renames to final path
-/// 6. Deletes `.tmp` on error
-///
-/// This pattern prevents corruption on unexpected disconnection.
-pub async fn write_file_streamed<S>(
-    mut stream: S,
-    target_path: &Path,
-    total_size: u64,
-    on_progress: ProgressCallback,
-) -> Result<()>
-where
-    S: futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Unpin,
-{
-    // Create parent directories if they don't exist
-    if let Some(parent) = target_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .context("Failed to create parent directories")?;
-    }
-
-    // Determine temp file path — append .tmp to preserve original extension
-    // e.g., "track.flac" → "track.flac.tmp" (NOT "track.tmp")
-    let file_name = target_path
-        .file_name()
-        .context("Invalid target path: no filename")?;
-    let tmp_path = target_path.with_file_name(format!("{}.tmp", file_name.to_string_lossy()));
-
-    // Write to temp file with error cleanup
-    let write_result: Result<()> = async {
-        let mut file = File::create(&tmp_path)
-            .await
-            .with_context(|| format!("Failed to create temp file: {}", tmp_path.display()))?;
-
-        let mut bytes_written = 0u64;
-
-        // Stream chunks to file
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result.context("Failed to read chunk from stream")?;
-            file.write_all(&chunk)
-                .await
-                .context("Failed to write chunk to file")?;
-
-            bytes_written += chunk.len() as u64;
-            on_progress(bytes_written, total_size);
-        }
-
-        // Flush all data to disk before rename (CRITICAL for atomicity)
-        file.sync_all()
-            .await
-            .context("Failed to sync file to disk")?;
-
-        Ok(())
-    }
-    .await;
-
-    // Handle errors: delete temp file if write failed
-    if let Err(e) = write_result {
-        let _ = tokio::fs::remove_file(&tmp_path).await; // Best effort cleanup
-        return Err(e);
-    }
-
-    // Atomically rename temp to final path
-    tokio::fs::rename(&tmp_path, target_path)
-        .await
-        .context("Failed to rename temp file to final path")?;
-
-    Ok(())
-}
 
 /// Extracts the filename stem from a relative path for use as an EXTINF display label.
 ///
@@ -964,7 +905,7 @@ async fn generate_m3u_files(
             Ok(()) => {
                 println!("[M3U] Deleted removed playlist: {}", entry.filename);
             }
-            Err(e) if e.to_string().contains("No such file") || e.to_string().contains("os error 2") => {
+            Err(e) if e.downcast_ref::<std::io::Error>().map(|io| io.kind() == std::io::ErrorKind::NotFound).unwrap_or(false) => {
                 // Already gone — still remove manifest entry
             }
             Err(e) => {
@@ -1544,66 +1485,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_write_file_streamed_success() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let file_path = tmp_dir
-            .path()
-            .join("artist")
-            .join("album")
-            .join("01 - track.flac");
-
-        let data: Vec<std::result::Result<bytes::Bytes, reqwest::Error>> = vec![
-            Ok(bytes::Bytes::from("chunk1")),
-            Ok(bytes::Bytes::from("chunk2")),
-            Ok(bytes::Bytes::from("chunk3")),
-        ];
-        let stream = futures::stream::iter(data);
-
-        let progress_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let pc = progress_count.clone();
-        let callback: ProgressCallback = Arc::new(move |_bytes, _total| {
-            pc.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        });
-
-        let result = write_file_streamed(stream, &file_path, 18, callback).await;
-        assert!(result.is_ok(), "write_file_streamed failed: {:?}", result);
-        assert!(file_path.exists(), "Final file should exist");
-
-        let content = tokio::fs::read_to_string(&file_path).await.unwrap();
-        assert_eq!(content, "chunk1chunk2chunk3");
-
-        // Verify .tmp file was cleaned up (renamed to final)
-        let tmp_path = file_path.with_file_name("01 - track.flac.tmp");
-        assert!(
-            !tmp_path.exists(),
-            ".tmp file should not remain after success"
-        );
-
-        // Verify progress was called for each chunk
-        assert_eq!(progress_count.load(std::sync::atomic::Ordering::Relaxed), 3);
-    }
-
-    #[tokio::test]
-    async fn test_write_file_streamed_creates_parent_dirs() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let deep_path = tmp_dir
-            .path()
-            .join("a")
-            .join("b")
-            .join("c")
-            .join("file.mp3");
-
-        let data: Vec<std::result::Result<bytes::Bytes, reqwest::Error>> =
-            vec![Ok(bytes::Bytes::from("data"))];
-        let stream = futures::stream::iter(data);
-        let callback: ProgressCallback = Arc::new(|_, _| {});
-
-        let result = write_file_streamed(stream, &deep_path, 4, callback).await;
-        assert!(result.is_ok());
-        assert!(deep_path.exists());
-    }
-
-    #[tokio::test]
     async fn test_sync_operation_manager_lifecycle() {
         let manager = SyncOperationManager::new();
 
@@ -2160,32 +2041,3 @@ mod tests {
     }
 }
 
-/// Recursively removes empty directories within `path`.
-/// The `path` itself (the root of the search) is NOT removed, only its empty children.
-async fn cleanup_empty_dirs(path: &Path) -> Result<()> {
-    if !path.is_dir() {
-        return Ok(());
-    }
-
-    let mut entries = tokio::fs::read_dir(path).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let entry_path = entry.path();
-        if entry.file_type().await?.is_dir() {
-            // Recurse first to clean up subdirectories (post-order traversal)
-            Box::pin(cleanup_empty_dirs(&entry_path)).await?;
-
-            // After recursion, check if this directory is now empty and remove it if so
-            let mut sub_entries = tokio::fs::read_dir(&entry_path).await?;
-            if sub_entries.next_entry().await?.is_none() {
-                if let Err(e) = tokio::fs::remove_dir(&entry_path).await {
-                    eprintln!(
-                        "[Sync] Failed to remove empty directory {}: {}",
-                        entry_path.display(),
-                        e
-                    );
-                }
-            }
-        }
-    }
-    Ok(())
-}

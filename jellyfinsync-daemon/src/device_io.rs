@@ -20,9 +20,46 @@ pub trait DeviceIO: Send + Sync {
     async fn delete_file(&self, path: &str) -> Result<()>;
     async fn list_files(&self, path: &str) -> Result<Vec<FileEntry>>;
     async fn free_space(&self) -> Result<u64>;
+    async fn ensure_dir(&self, path: &str) -> Result<()>;
+    async fn cleanup_empty_subdirs(&self, path: &str) -> Result<()>;
 }
 
 // ─── MSC Backend ────────────────────────────────────────────────────────────
+
+/// Validates that a DeviceIO path is relative and contains no parent-directory traversal.
+fn check_relative(path: &str) -> Result<()> {
+    let p = std::path::Path::new(path);
+    if p.is_absolute() {
+        return Err(anyhow::anyhow!("DeviceIO path must be relative: {}", path));
+    }
+    for component in p.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return Err(anyhow::anyhow!("DeviceIO path must not traverse parent directories: {}", path));
+        }
+    }
+    Ok(())
+}
+
+/// Recursively removes empty subdirectories under `path`. The `path` root itself is not removed.
+async fn msc_cleanup_empty_dirs(path: &std::path::Path) -> Result<()> {
+    if !path.is_dir() {
+        return Ok(());
+    }
+    let mut entries = tokio::fs::read_dir(path).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let entry_path = entry.path();
+        if entry.file_type().await?.is_dir() {
+            Box::pin(msc_cleanup_empty_dirs(&entry_path)).await?;
+            let mut sub_entries = tokio::fs::read_dir(&entry_path).await?;
+            if sub_entries.next_entry().await?.is_none() {
+                if let Err(e) = tokio::fs::remove_dir(&entry_path).await {
+                    eprintln!("[Sync] Warning: failed to remove empty directory {}: {}", entry_path.display(), e);
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 pub struct MscBackend {
     pub root: PathBuf,
@@ -37,11 +74,13 @@ impl MscBackend {
 #[async_trait]
 impl DeviceIO for MscBackend {
     async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
+        check_relative(path)?;
         let full = self.root.join(path);
         Ok(tokio::fs::read(&full).await?)
     }
 
     async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
+        check_relative(path)?;
         let full = self.root.join(path);
         if let Some(parent) = full.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -53,6 +92,7 @@ impl DeviceIO for MscBackend {
     async fn write_with_verify(&self, path: &str, data: &[u8]) -> Result<()> {
         use tokio::io::AsyncWriteExt;
 
+        check_relative(path)?;
         let full = self.root.join(path);
         if let Some(parent) = full.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -62,10 +102,17 @@ impl DeviceIO for MscBackend {
             full.file_name().unwrap_or_default().to_string_lossy()
         ));
 
-        {
+        let write_result: Result<()> = async {
             let mut file = tokio::fs::File::create(&tmp_path).await?;
             file.write_all(data).await?;
             file.sync_all().await?;
+            Ok(())
+        }
+        .await;
+
+        if write_result.is_err() {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return write_result;
         }
 
         tokio::fs::rename(&tmp_path, &full).await?;
@@ -73,12 +120,16 @@ impl DeviceIO for MscBackend {
     }
 
     async fn delete_file(&self, path: &str) -> Result<()> {
+        check_relative(path)?;
         let full = self.root.join(path);
         tokio::fs::remove_file(&full).await?;
         Ok(())
     }
 
     async fn list_files(&self, path: &str) -> Result<Vec<FileEntry>> {
+        if !path.is_empty() {
+            check_relative(path)?;
+        }
         let base = if path.is_empty() {
             self.root.clone()
         } else {
@@ -130,6 +181,20 @@ impl DeviceIO for MscBackend {
 
     async fn free_space(&self) -> Result<u64> {
         crate::device::get_storage_info_free_bytes(&self.root)
+    }
+
+    async fn ensure_dir(&self, path: &str) -> Result<()> {
+        let full = self.root.join(path);
+        tokio::fs::create_dir_all(&full).await?;
+        Ok(())
+    }
+
+    async fn cleanup_empty_subdirs(&self, path: &str) -> Result<()> {
+        if !path.is_empty() {
+            check_relative(path)?;
+        }
+        let base = if path.is_empty() { self.root.clone() } else { self.root.join(path) };
+        msc_cleanup_empty_dirs(&base).await
     }
 }
 
@@ -202,6 +267,16 @@ impl DeviceIO for MtpBackend {
             .await
             .map_err(|e| anyhow::anyhow!("MTP free_space task panicked: {}", e))?
     }
+
+    // MTP creates parent directories automatically when objects are created.
+    async fn ensure_dir(&self, _path: &str) -> Result<()> {
+        Ok(())
+    }
+
+    // MTP manages directory objects automatically; empty directory pruning is not needed.
+    async fn cleanup_empty_subdirs(&self, _path: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -254,6 +329,22 @@ pub mod tests {
         backend.write_file("a.txt", b"x").await.unwrap();
         backend.delete_file("a.txt").await.unwrap();
         assert!(!dir.path().join("a.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn msc_ensure_dir_creates_path() {
+        let dir = tempdir().unwrap();
+        let backend = MscBackend::new(dir.path().to_path_buf());
+        backend.ensure_dir("Music/JellyfinSync").await.unwrap();
+        assert!(dir.path().join("Music/JellyfinSync").is_dir());
+    }
+
+    #[tokio::test]
+    async fn msc_ensure_dir_idempotent() {
+        let dir = tempdir().unwrap();
+        let backend = MscBackend::new(dir.path().to_path_buf());
+        backend.ensure_dir("Music").await.unwrap();
+        backend.ensure_dir("Music").await.unwrap(); // already exists — should not error
     }
 
     #[tokio::test]

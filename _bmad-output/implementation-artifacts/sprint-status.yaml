@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-05-01  # 4-0 device-io-abstraction-layer story complete (review)
+last_updated: 2026-05-01  # 4-0 device-io-abstraction-layer code review complete (done)
 project: JellyfinSync
 project_key: NOKEY
 tracking_system: file-system
@@ -74,7 +74,7 @@ development_status:
   epic-3-retrospective: optional
 
   epic-4: in-progress
-  4-0-device-io-abstraction-layer: review
+  4-0-device-io-abstraction-layer: done
   4-1-differential-sync-algorithm-manifest-comparison: done
   4-2-atomic-buffered-io-streaming: done
   4-3-legacy-hardware-constraints-path-char-validation: done
