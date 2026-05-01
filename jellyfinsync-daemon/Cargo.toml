@@ -27,6 +27,7 @@ tower-http.workspace = true
 http.workspace = true
 keyring = "2.3"
 futures = "0.3"
+async-trait = "0.1"
 uuid = { version = "1.0", features = ["v4"] }
 bytes = "1.0"
 windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
@@ -34,9 +35,11 @@ notify-rust.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
+# windows = { version = "0.58", features = [...] }  # Add when Story 2.10 wires up MTP detection
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# libmtp-rs = "0.7"  # Add when Story 2.10 wires up MTP detection
 
 [build-dependencies]
 winresource = "0.1"

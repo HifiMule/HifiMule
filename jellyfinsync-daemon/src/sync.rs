@@ -422,6 +422,7 @@ pub async fn execute_sync(
     operation_id: String,
     device_manager: Arc<crate::device::DeviceManager>,
     transcoding_profile: Option<serde_json::Value>,
+    device_io: Arc<dyn crate::device_io::DeviceIO>,
 ) -> Result<(Vec<crate::device::SyncedItem>, Vec<SyncFileError>)> {
     let mut synced_items = Vec::new();
     let mut errors = Vec::new();
@@ -574,9 +575,29 @@ pub async fn execute_sync(
             });
         }) as ProgressCallback;
 
-        // Write file to disk using atomic pattern
-        let write_result =
-            write_file_streamed(stream, &target_path, total_size, progress_callback).await;
+        // Compute relative path for DeviceIO (relative to device root)
+        let rel_path = target_path
+            .strip_prefix(device_path)
+            .unwrap_or(&target_path)
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        // Buffer the stream into memory, reporting progress during download
+        let buffer_result = buffer_stream(stream, total_size, progress_callback).await;
+        let buffer = match buffer_result {
+            Ok(b) => b,
+            Err(e) => {
+                errors.push(SyncFileError {
+                    jellyfin_id: add_item.jellyfin_id.clone(),
+                    filename: add_item.name.clone(),
+                    error_message: format!("Failed to buffer stream: {}", e),
+                });
+                continue;
+            }
+        };
+
+        // Write file via device IO abstraction
+        let write_result = device_io.write_with_verify(&rel_path, &buffer).await;
 
         match write_result {
             Ok(_) => {
@@ -588,11 +609,7 @@ pub async fn execute_sync(
                     name: add_item.name.clone(),
                     album: add_item.album.clone(),
                     artist: add_item.artist.clone(),
-                    local_path: target_path
-                        .strip_prefix(device_path)
-                        .unwrap_or(&target_path)
-                        .to_string_lossy()
-                        .to_string(),
+                    local_path: rel_path.clone(),
                     size_bytes: add_item.size_bytes,
                     synced_at,
                     original_name: construction.original_name,
@@ -671,8 +688,8 @@ pub async fn execute_sync(
             continue;
         }
 
-        // Delete file using the canonicalized path
-        match tokio::fs::remove_file(&absolute_file_path).await {
+        // Delete file via device IO abstraction (relative path, backend handles resolution)
+        match device_io.delete_file(&delete_item.local_path).await {
             Ok(_) => {
                 // Successfully deleted
                 if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
@@ -764,6 +781,7 @@ pub async fn execute_sync(
                 &managed_path,
                 &manifest_snapshot.synced_items.clone(),
                 &mut manifest_snapshot,
+                Arc::clone(&device_io),
             )
             .await;
 
@@ -785,6 +803,27 @@ pub async fn execute_sync(
     }
 
     Ok((synced_items, errors))
+}
+
+/// Buffers a byte stream into memory while reporting progress.
+/// Used by `execute_sync` to download a file before writing via `DeviceIO`.
+async fn buffer_stream<S>(
+    mut stream: S,
+    total_size: u64,
+    on_progress: ProgressCallback,
+) -> Result<Vec<u8>>
+where
+    S: futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Unpin,
+{
+    let mut buffer = Vec::with_capacity(total_size as usize);
+    let mut bytes_written = 0u64;
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result.context("Failed to read chunk from stream")?;
+        buffer.extend_from_slice(&chunk);
+        bytes_written += chunk.len() as u64;
+        on_progress(bytes_written, total_size);
+    }
+    Ok(buffer)
 }
 
 /// Streams a file from a byte stream to disk using the atomic Write-Temp-Rename pattern.
@@ -873,26 +912,6 @@ fn extract_display_name(rel_path: &str) -> &str {
         .unwrap_or(rel_path)
 }
 
-/// Atomically writes content to `final_path` via a Write-Temp-Rename pattern.
-/// Deletes the tmp file if any step fails, preventing stale .tmp accumulation.
-async fn write_m3u_atomic(tmp_path: &Path, final_path: &Path, content: &[u8]) -> Result<()> {
-    if let Some(parent) = tmp_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let write_result = async {
-        let mut file = tokio::fs::File::create(tmp_path).await?;
-        file.write_all(content).await?;
-        file.sync_all().await?;
-        drop(file);
-        tokio::fs::rename(tmp_path, final_path).await
-    }
-    .await;
-    if write_result.is_err() {
-        let _ = tokio::fs::remove_file(tmp_path).await;
-    }
-    Ok(write_result?)
-}
-
 /// Generates, regenerates, or cleans up .m3u files for playlists in the sync basket.
 ///
 /// Called once per sync run, after all file transfers complete.
@@ -907,7 +926,13 @@ async fn generate_m3u_files(
     managed_path: &Path,
     all_synced_items: &[crate::device::SyncedItem],
     manifest: &mut crate::device::DeviceManifest,
+    device_io: Arc<dyn crate::device_io::DeviceIO>,
 ) -> Vec<String> {
+    // Subfolder prefix for computing device-relative paths (e.g. "Music")
+    let managed_subfolder = managed_path
+        .strip_prefix(device_path)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
     let mut warnings: Vec<String> = Vec::new();
 
     // Build a lookup: jellyfin_id → local_path (relative to device_path)
@@ -930,19 +955,21 @@ async fn generate_m3u_files(
         .cloned()
         .collect();
     for entry in &to_remove {
-        let m3u_path = managed_path.join(&entry.filename);
-        match tokio::fs::try_exists(&m3u_path).await {
-            Ok(true) => {
-                if let Err(e) = tokio::fs::remove_file(&m3u_path).await {
-                    warnings.push(format!("[M3U] Failed to delete {}: {}", entry.filename, e));
-                    continue; // Don't remove from manifest if file deletion failed
-                }
+        let rel_path = if managed_subfolder.is_empty() {
+            entry.filename.clone()
+        } else {
+            format!("{}/{}", managed_subfolder, entry.filename)
+        };
+        match device_io.delete_file(&rel_path).await {
+            Ok(()) => {
                 println!("[M3U] Deleted removed playlist: {}", entry.filename);
             }
-            Ok(false) => {} // Already gone; still remove the manifest entry
+            Err(e) if e.to_string().contains("No such file") || e.to_string().contains("os error 2") => {
+                // Already gone — still remove manifest entry
+            }
             Err(e) => {
-                warnings.push(format!("[M3U] Failed to check {}: {}", entry.filename, e));
-                continue; // Don't remove from manifest if existence check failed
+                warnings.push(format!("[M3U] Failed to delete {}: {}", entry.filename, e));
+                continue; // Don't remove from manifest if file deletion failed
             }
         }
         manifest
@@ -979,7 +1006,6 @@ async fn generate_m3u_files(
             }
         };
         used_filenames.insert(m3u_filename.clone());
-        let m3u_path = managed_path.join(&m3u_filename);
 
         // Resolve which tracks are available; emit warnings for missing ones.
         // Only resolved tracks are written to the M3U and stored in track_ids — this ensures
@@ -1048,17 +1074,25 @@ async fn generate_m3u_files(
 
         let content = lines.join("\n") + "\n";
 
-        // Write-Temp-Rename (atomic)
-        let tmp_path = managed_path.join(format!("{}.tmp", m3u_filename));
-        match write_m3u_atomic(&tmp_path, &m3u_path, content.as_bytes()).await {
+        // Write via device IO abstraction (handles Write-Temp-Rename internally)
+        let rel_m3u = if managed_subfolder.is_empty() {
+            m3u_filename.clone()
+        } else {
+            format!("{}/{}", managed_subfolder, m3u_filename)
+        };
+        match device_io.write_with_verify(&rel_m3u, content.as_bytes()).await {
             Ok(()) => {
                 println!("[M3U] Wrote {}: {} tracks", m3u_filename, resolved_tracks.len());
 
                 // Delete old file if the playlist was renamed
                 if let Some(old_fn) = &old_filename_opt {
                     if *old_fn != m3u_filename {
-                        let old_path = managed_path.join(old_fn);
-                        if let Err(e) = tokio::fs::remove_file(&old_path).await {
+                        let rel_old = if managed_subfolder.is_empty() {
+                            old_fn.clone()
+                        } else {
+                            format!("{}/{}", managed_subfolder, old_fn)
+                        };
+                        if let Err(e) = device_io.delete_file(&rel_old).await {
                             warnings.push(format!(
                                 "[M3U] Failed to delete old file {}: {}",
                                 old_fn, e
@@ -1930,12 +1964,14 @@ mod tests {
         ];
 
         let mut manifest = empty_manifest();
+        let device_io = std::sync::Arc::new(crate::device_io::MscBackend::new(device_path.to_path_buf()));
         let warnings = generate_m3u_files(
             &playlist_items,
             device_path,
             &managed_path,
             &all_synced,
             &mut manifest,
+            device_io,
         )
         .await;
 
@@ -1983,6 +2019,7 @@ mod tests {
         let all_synced = vec![make_playlist_synced_item("t1", "Music/A/B/01 - Song.flac")];
 
         let mut manifest = empty_manifest();
+        let device_io: std::sync::Arc<dyn crate::device_io::DeviceIO> = std::sync::Arc::new(crate::device_io::MscBackend::new(device_path.to_path_buf()));
 
         // First call — writes file
         generate_m3u_files(
@@ -1991,6 +2028,7 @@ mod tests {
             &managed_path,
             &all_synced,
             &mut manifest,
+            std::sync::Arc::clone(&device_io),
         )
         .await;
         let m3u_path = managed_path.join("Stable Playlist.m3u");
@@ -2012,6 +2050,7 @@ mod tests {
             &managed_path,
             &all_synced,
             &mut manifest,
+            std::sync::Arc::clone(&device_io),
         )
         .await;
 
@@ -2045,8 +2084,9 @@ mod tests {
         });
 
         // Call with empty playlist_items (playlist removed from basket)
+        let device_io = std::sync::Arc::new(crate::device_io::MscBackend::new(device_path.to_path_buf()));
         let warnings =
-            generate_m3u_files(&[], device_path, &managed_path, &[], &mut manifest).await;
+            generate_m3u_files(&[], device_path, &managed_path, &[], &mut manifest, device_io).await;
 
         assert!(warnings.is_empty(), "No warnings expected: {:?}", warnings);
         assert!(!m3u_path.exists(), "Old .m3u file should have been deleted from Music/");
@@ -2092,12 +2132,14 @@ mod tests {
         ];
 
         let mut manifest = empty_manifest();
+        let device_io = std::sync::Arc::new(crate::device_io::MscBackend::new(device_path.to_path_buf()));
         let warnings = generate_m3u_files(
             &playlist_items,
             device_path,
             &managed_path,
             &all_synced,
             &mut manifest,
+            device_io,
         )
         .await;
 

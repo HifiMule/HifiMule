@@ -1,7 +1,6 @@
 use crate::api::JellyfinClient;
 use crate::db::Database;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -79,33 +78,35 @@ pub fn parse_scrobbler_log(content: &str) -> Vec<ScrobblerEntry> {
 }
 
 pub async fn process_device_scrobbles(
-    device_path: &Path,
+    device_io: Arc<dyn crate::device_io::DeviceIO>,
+    device_id: String,
     db: Arc<Database>,
     client: Arc<JellyfinClient>,
     url: &str,
     token: &str,
     user_id: &str,
 ) -> ScrobblerResult {
-    let device_id = device_path.to_string_lossy().to_string();
 
-    let log_path = device_path.join(".scrobbler.log");
-    if !log_path.exists() {
-        return ScrobblerResult {
-            total_entries: 0,
-            submitted: 0,
-            skipped_rating: 0,
-            skipped_duplicate: 0,
-            unmatched: 0,
-            failed: 0,
-            errors: Vec::new(),
-            device_id,
-            total_scrobbled: 0,
-        };
-    }
-
-    let content = match std::fs::read_to_string(&log_path) {
-        Ok(c) => c,
+    let content = match device_io.read_file(".scrobbler.log").await {
         Err(e) => {
+            // Distinguish "file not present" from genuine read errors.
+            let is_not_found = e
+                .downcast_ref::<std::io::Error>()
+                .map(|io| io.kind() == std::io::ErrorKind::NotFound)
+                .unwrap_or(false);
+            if is_not_found {
+                return ScrobblerResult {
+                    total_entries: 0,
+                    submitted: 0,
+                    skipped_rating: 0,
+                    skipped_duplicate: 0,
+                    unmatched: 0,
+                    failed: 0,
+                    errors: Vec::new(),
+                    device_id,
+                    total_scrobbled: 0,
+                };
+            }
             return ScrobblerResult {
                 total_entries: 0,
                 submitted: 0,
@@ -118,6 +119,22 @@ pub async fn process_device_scrobbles(
                 total_scrobbled: 0,
             };
         }
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                return ScrobblerResult {
+                    total_entries: 0,
+                    submitted: 0,
+                    skipped_rating: 0,
+                    skipped_duplicate: 0,
+                    unmatched: 0,
+                    failed: 0,
+                    errors: vec![format!("Failed to read .scrobbler.log: {}", e)],
+                    device_id,
+                    total_scrobbled: 0,
+                };
+            }
+        },
     };
 
     let entries = parse_scrobbler_log(&content);
@@ -302,14 +319,20 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
         assert!(entries.is_empty());
     }
 
+    fn make_msc_backend(dir: &std::path::Path) -> Arc<dyn crate::device_io::DeviceIO> {
+        Arc::new(crate::device_io::MscBackend::new(dir.to_path_buf()))
+    }
+
     #[tokio::test]
     async fn test_process_device_no_log_file() {
         let temp_dir = tempfile::tempdir().unwrap();
+        let device_io = make_msc_backend(temp_dir.path());
         let db = Arc::new(crate::db::Database::memory().unwrap());
         let client = Arc::new(crate::api::JellyfinClient::new());
 
         let result = process_device_scrobbles(
-            temp_dir.path(),
+            device_io,
+            "test-device-id".to_string(),
             db,
             client,
             "http://localhost:8096",
@@ -327,16 +350,18 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
 
     #[tokio::test]
     async fn test_process_device_unreadable_log() {
-        // Test with a directory named .scrobbler.log — read_to_string will fail on a directory
+        // Test with a directory named .scrobbler.log — read will fail on a directory
         let bad_dir = tempfile::tempdir().unwrap();
         let fake_log = bad_dir.path().join(".scrobbler.log");
-        std::fs::create_dir(&fake_log).unwrap(); // directory, not a file — read_to_string will fail
+        std::fs::create_dir(&fake_log).unwrap(); // directory, not a file — read will fail
 
+        let device_io = make_msc_backend(bad_dir.path());
         let db = Arc::new(crate::db::Database::memory().unwrap());
         let client = Arc::new(crate::api::JellyfinClient::new());
 
         let result = process_device_scrobbles(
-            bad_dir.path(),
+            device_io,
+            "test-device-id".to_string(),
             db,
             client,
             "http://localhost:8096",
@@ -358,7 +383,7 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
         std::fs::write(&log_path, SAMPLE_LOG.as_bytes()).unwrap();
 
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        let device_id = temp_dir.path().to_string_lossy().to_string();
+        let device_id = "test-device-uuid".to_string();
 
         // Pre-populate scrobble_history with both "L" entries from SAMPLE_LOG
         db.record_scrobble(&device_id, "Pink Floyd", "The Dark Side of the Moon", "Money", 1706745600)
@@ -366,9 +391,11 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
         db.record_scrobble(&device_id, "Led Zeppelin", "Led Zeppelin IV", "Stairway to Heaven", 1706752800)
             .unwrap();
 
+        let device_io = make_msc_backend(temp_dir.path());
         let client = Arc::new(crate::api::JellyfinClient::new());
         let result = process_device_scrobbles(
-            temp_dir.path(),
+            device_io,
+            device_id,
             db,
             client,
             "http://localhost:8096",
@@ -398,9 +425,11 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
         let db = Arc::new(crate::db::Database::memory().unwrap());
         db.drop_scrobble_table_for_test(); // is_scrobble_recorded() will now return Err("no such table")
 
+        let device_io = make_msc_backend(temp_dir.path());
         let client = Arc::new(crate::api::JellyfinClient::new());
         let result = process_device_scrobbles(
-            temp_dir.path(),
+            device_io,
+            "test-device-id".to_string(),
             db,
             client,
             "http://localhost:8096",

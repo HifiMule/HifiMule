@@ -82,68 +82,40 @@ pub struct AutoFillPrefs {
     pub max_bytes: Option<u64>,
 }
 
-/// Atomically writes a DeviceManifest to disk using Write-Temp-Rename pattern.
-/// Writes to `.jellyfinsync.json.tmp`, calls `sync_all`, then renames to `.jellyfinsync.json`.
-pub async fn write_manifest(device_root: &Path, manifest: &DeviceManifest) -> Result<()> {
-    let manifest_path = device_root.join(".jellyfinsync.json");
-    let tmp_path = device_root.join(".jellyfinsync.json.tmp");
-
+/// Atomically writes a DeviceManifest via the device's IO backend.
+pub async fn write_manifest(
+    device_io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
+    manifest: &DeviceManifest,
+) -> Result<()> {
     let json = serde_json::to_string_pretty(manifest)?;
+    device_io
+        .write_with_verify(".jellyfinsync.json", json.as_bytes())
+        .await
+}
 
-    {
-        use tokio::io::AsyncWriteExt;
-        let mut file = tokio::fs::File::create(&tmp_path).await?;
-        file.write_all(json.as_bytes()).await?;
-        file.sync_all().await?;
-    }
-
-    tokio::fs::rename(&tmp_path, &manifest_path).await?;
-    Ok(())
+/// Bundles the in-memory manifest with its IO backend for a connected device.
+pub struct ConnectedDevice {
+    pub manifest: DeviceManifest,
+    pub device_io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
 }
 
 /// Scans the specified managed paths recursively for leftover `.tmp`
 /// files from interrupted writes and deletes them. Returns the count of deleted files.
 /// Non-fatal: individual deletion failures are silently skipped.
-pub async fn cleanup_tmp_files(device_root: &Path, managed_paths: &[String]) -> Result<usize> {
+pub async fn cleanup_tmp_files(
+    device_io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
+    managed_paths: &[String],
+) -> Result<usize> {
     let mut count = 0;
     for path_str in managed_paths {
-        let managed_path = device_root.join(path_str);
-
-        // Ensure the path is a directory and not a symlink to prevent traversal
-        if let Ok(meta) = tokio::fs::symlink_metadata(&managed_path).await {
-            if !meta.is_dir() {
-                continue;
-            }
-        } else {
-            continue; // Doesn't exist or access error
-        }
-
-        let mut dirs_to_visit = vec![managed_path];
-        while let Some(dir) = dirs_to_visit.pop() {
-            let mut entries = match tokio::fs::read_dir(&dir).await {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            while let Some(entry) = entries.next_entry().await.unwrap_or(None) {
-                let path = entry.path();
-                let file_type = match entry.file_type().await {
-                    Ok(ft) => ft,
-                    Err(_) => continue,
-                };
-
-                if file_type.is_symlink() {
-                    // Prevent symlink traversal out of managed zone
-                    continue;
-                } else if file_type.is_dir() {
-                    dirs_to_visit.push(path);
-                } else if file_type.is_file() {
-                    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
-                    // Match files ending in .tmp
-                    if file_name.ends_with(".tmp") {
-                        if tokio::fs::remove_file(&path).await.is_ok() {
-                            count += 1;
-                        }
-                    }
+        let entries = match device_io.list_files(path_str).await {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries {
+            if entry.name.ends_with(".tmp") {
+                if device_io.delete_file(&entry.path).await.is_ok() {
+                    count += 1;
                 }
             }
         }
@@ -181,7 +153,7 @@ impl DeviceProber {
 pub struct DeviceManager {
     db: std::sync::Arc<crate::db::Database>,
     /// All currently connected managed devices, keyed by mount path.
-    connected_devices: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<PathBuf, DeviceManifest>>>,
+    connected_devices: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<PathBuf, ConnectedDevice>>>,
     /// The device path targeted by all UI operations. None when no device is selected.
     selected_device_path: std::sync::Arc<tokio::sync::RwLock<Option<PathBuf>>>,
     unrecognized_device_path: std::sync::Arc<tokio::sync::RwLock<Option<PathBuf>>>,
@@ -202,9 +174,61 @@ impl DeviceManager {
         path: PathBuf,
         manifest: DeviceManifest,
     ) -> Result<crate::DaemonState> {
+        let device_io: std::sync::Arc<dyn crate::device_io::DeviceIO> =
+            std::sync::Arc::new(crate::device_io::MscBackend::new(path.clone()));
+
+        // T5.9: Scan for MTP-style dirty markers on reconnect.
+        // For MSC devices, leftover `.dirty` markers indicate an interrupted MtpBackend write
+        // from a previous session (e.g., the device was used with MTP before).
+        if let Ok(files) = device_io.list_files("").await {
+            if files.iter().any(|f| f.name.ends_with(".dirty")) {
+                daemon_log!("[Device] Dirty marker detected on reconnect at {:?} — firing on_device_dirty", path);
+                // The dirty flag in the manifest is the on_device_dirty signal path (same as MSC).
+                // We surface it via the manifest.dirty field; the RPC dirty-resume handler handles cleanup.
+                let mut dirty_manifest = manifest.clone();
+                dirty_manifest.dirty = true;
+                let connected = ConnectedDevice {
+                    manifest: dirty_manifest.clone(),
+                    device_io: std::sync::Arc::clone(&device_io),
+                };
+                {
+                    let mut devices = self.connected_devices.write().await;
+                    devices.insert(path.clone(), connected);
+                }
+                {
+                    let mut sel = self.selected_device_path.write().await;
+                    if sel.is_none() {
+                        *sel = Some(path.clone());
+                    }
+                }
+                {
+                    let mut unrecognized_path = self.unrecognized_device_path.write().await;
+                    *unrecognized_path = None;
+                }
+                let name = dirty_manifest
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| dirty_manifest.device_id.clone());
+                let mapping = self.db.get_device_mapping(&dirty_manifest.device_id).unwrap_or(None);
+                return if let Some(m) = mapping {
+                    if let Some(profile_id) = m.jellyfin_user_id {
+                        Ok(crate::DaemonState::DeviceRecognized { name, profile_id })
+                    } else {
+                        Ok(crate::DaemonState::DeviceFound(name))
+                    }
+                } else {
+                    Ok(crate::DaemonState::DeviceFound(name))
+                };
+            }
+        }
+
+        let connected = ConnectedDevice {
+            manifest: manifest.clone(),
+            device_io,
+        };
         {
             let mut devices = self.connected_devices.write().await;
-            devices.insert(path.clone(), manifest.clone());
+            devices.insert(path.clone(), connected);
         }
         {
             let mut sel = self.selected_device_path.write().await;
@@ -290,7 +314,15 @@ impl DeviceManager {
         let sel = self.selected_device_path.read().await.clone();
         let path = sel?;
         let devices = self.connected_devices.read().await;
-        devices.get(&path).cloned()
+        devices.get(&path).map(|d| d.manifest.clone())
+    }
+
+    /// Returns the IO backend for the currently selected device.
+    pub async fn get_device_io(&self) -> Option<std::sync::Arc<dyn crate::device_io::DeviceIO>> {
+        let sel = self.selected_device_path.read().await.clone();
+        let path = sel?;
+        let devices = self.connected_devices.read().await;
+        devices.get(&path).map(|d| std::sync::Arc::clone(&d.device_io))
     }
 
     pub async fn get_current_device_path(&self) -> Option<PathBuf> {
@@ -303,7 +335,7 @@ impl DeviceManager {
             .read()
             .await
             .iter()
-            .map(|(p, m)| (p.clone(), m.clone()))
+            .map(|(p, d)| (p.clone(), d.manifest.clone()))
             .collect()
     }
 
@@ -314,7 +346,10 @@ impl DeviceManager {
     ) -> (Vec<(PathBuf, DeviceManifest)>, Option<PathBuf>) {
         let devices = self.connected_devices.read().await;
         let sel = self.selected_device_path.read().await.clone();
-        let device_list = devices.iter().map(|(p, m)| (p.clone(), m.clone())).collect();
+        let device_list = devices
+            .iter()
+            .map(|(p, d)| (p.clone(), d.manifest.clone()))
+            .collect();
         (device_list, sel)
     }
 
@@ -343,11 +378,17 @@ impl DeviceManager {
         let selected_path = self.selected_device_path.read().await.clone();
         let path = selected_path.ok_or_else(|| anyhow::anyhow!("No device connected"))?;
         let mut devices = self.connected_devices.write().await;
-        let manifest = devices
+        let connected = devices
             .get_mut(&path)
             .ok_or_else(|| anyhow::anyhow!("Selected device not in connected map"))?;
-        mutation(manifest);
-        crate::device::write_manifest(&path, manifest).await?;
+        mutation(&mut connected.manifest);
+        // Clone Arc and manifest so we can drop the write guard before the async I/O.
+        // Serialization is still guaranteed: the in-memory state is mutated under the lock;
+        // the snapshot written to disk is always consistent with the in-memory state.
+        let device_io = std::sync::Arc::clone(&connected.device_io);
+        let manifest_snapshot = connected.manifest.clone();
+        drop(devices);
+        crate::device::write_manifest(device_io, &manifest_snapshot).await?;
         Ok(())
     }
 
@@ -417,11 +458,17 @@ impl DeviceManager {
             playlists: vec![],
         };
 
-        write_manifest(&device_root, &manifest).await?;
+        // Device not yet in the map; create a local backend for the initial manifest write.
+        let device_io: std::sync::Arc<dyn crate::device_io::DeviceIO> =
+            std::sync::Arc::new(crate::device_io::MscBackend::new(device_root.clone()));
+        write_manifest(std::sync::Arc::clone(&device_io), &manifest).await?;
 
         {
             let mut devices = self.connected_devices.write().await;
-            devices.insert(device_root.clone(), manifest.clone());
+            devices.insert(device_root.clone(), ConnectedDevice {
+                manifest: manifest.clone(),
+                device_io,
+            });
         }
         {
             let mut sel = self.selected_device_path.write().await;
@@ -862,6 +909,13 @@ fn get_storage_info(path: &Path) -> Option<StorageInfo> {
     } else {
         None
     }
+}
+
+/// Public helper used by `MscBackend::free_space()`.
+pub fn get_storage_info_free_bytes(path: &std::path::Path) -> anyhow::Result<u64> {
+    get_storage_info(path)
+        .map(|s| s.free_bytes)
+        .ok_or_else(|| anyhow::anyhow!("Failed to query storage info for {}", path.display()))
 }
 
 #[cfg(target_os = "windows")]

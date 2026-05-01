@@ -4,6 +4,10 @@ use std::fs;
 use std::sync::Arc;
 use tempfile::tempdir;
 
+fn msc(dir: &std::path::Path) -> Arc<dyn crate::device_io::DeviceIO> {
+    Arc::new(crate::device_io::MscBackend::new(dir.to_path_buf()))
+}
+
 // ===== Story 4.4 Tests =====
 
 #[test]
@@ -35,7 +39,7 @@ async fn test_dirty_manifest_roundtrip() {
         transcoding_profile_id: None,
         playlists: vec![],
     };
-    write_manifest(dir.path(), &manifest).await.unwrap();
+    write_manifest(msc(dir.path()), &manifest).await.unwrap();
     let content = tokio::fs::read_to_string(dir.path().join(".jellyfinsync.json"))
         .await
         .unwrap();
@@ -47,7 +51,7 @@ async fn test_dirty_manifest_roundtrip() {
 #[tokio::test]
 async fn test_cleanup_tmp_files_no_music_dir() {
     let dir = tempdir().unwrap();
-    let count = cleanup_tmp_files(dir.path(), &["Music".to_string()])
+    let count = cleanup_tmp_files(msc(dir.path()), &["Music".to_string()])
         .await
         .unwrap();
     assert_eq!(count, 0);
@@ -59,7 +63,7 @@ async fn test_cleanup_tmp_files_empty_music_dir() {
     tokio::fs::create_dir(dir.path().join("Music"))
         .await
         .unwrap();
-    let count = cleanup_tmp_files(dir.path(), &["Music".to_string()])
+    let count = cleanup_tmp_files(msc(dir.path()), &["Music".to_string()])
         .await
         .unwrap();
     assert_eq!(count, 0);
@@ -74,7 +78,7 @@ async fn test_cleanup_tmp_files_finds_and_deletes() {
     tokio::fs::write(&tmp_file, b"partial").await.unwrap();
     assert!(tmp_file.exists());
 
-    let count = cleanup_tmp_files(dir.path(), &["Music".to_string()])
+    let count = cleanup_tmp_files(msc(dir.path()), &["Music".to_string()])
         .await
         .unwrap();
     assert_eq!(count, 1);
@@ -111,7 +115,7 @@ async fn test_cleanup_tmp_files_nested_multiple() {
         .await
         .unwrap();
 
-    let count = cleanup_tmp_files(dir.path(), &["Music".to_string()])
+    let count = cleanup_tmp_files(msc(dir.path()), &["Music".to_string()])
         .await
         .unwrap();
     assert_eq!(count, 3);
@@ -131,7 +135,7 @@ async fn test_cleanup_tmp_files_non_tmp_preserved() {
     tokio::fs::write(&mp3_file, b"real mp3").await.unwrap();
     tokio::fs::write(&tmp_file, b"partial").await.unwrap();
 
-    let count = cleanup_tmp_files(dir.path(), &["Music".to_string()])
+    let count = cleanup_tmp_files(msc(dir.path()), &["Music".to_string()])
         .await
         .unwrap();
     assert_eq!(count, 1, "Only .tmp file should be deleted");
@@ -355,7 +359,7 @@ async fn test_write_manifest_creates_files() {
         playlists: vec![],
     };
 
-    write_manifest(root, &manifest).await.unwrap();
+    write_manifest(msc(root), &manifest).await.unwrap();
 
     // Verify the manifest file exists (not the temp file)
     let manifest_path = root.join(".jellyfinsync.json");
@@ -392,7 +396,7 @@ async fn test_write_manifest_overwrites_existing() {
         transcoding_profile_id: None,
         playlists: vec![],
     };
-    write_manifest(root, &manifest1).await.unwrap();
+    write_manifest(msc(root), &manifest1).await.unwrap();
 
     // Overwrite with updated manifest
     let manifest2 = DeviceManifest {
@@ -420,7 +424,7 @@ async fn test_write_manifest_overwrites_existing() {
         transcoding_profile_id: None,
         playlists: vec![],
     };
-    write_manifest(root, &manifest2).await.unwrap();
+    write_manifest(msc(root), &manifest2).await.unwrap();
 
     let content = fs::read_to_string(root.join(".jellyfinsync.json")).unwrap();
     let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
@@ -465,7 +469,7 @@ async fn test_get_discrepancies_missing_file() {
         transcoding_profile_id: None,
         playlists: vec![],
     };
-    write_manifest(root, &manifest).await.unwrap();
+    write_manifest(msc(root), &manifest).await.unwrap();
 
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
@@ -510,7 +514,7 @@ async fn test_get_discrepancies_orphaned_file() {
         transcoding_profile_id: None,
         playlists: vec![],
     };
-    write_manifest(root, &manifest).await.unwrap();
+    write_manifest(msc(root), &manifest).await.unwrap();
 
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
@@ -567,7 +571,7 @@ async fn test_get_discrepancies_no_issues() {
         transcoding_profile_id: None,
         playlists: vec![],
     };
-    write_manifest(root, &manifest).await.unwrap();
+    write_manifest(msc(root), &manifest).await.unwrap();
 
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
@@ -625,7 +629,7 @@ async fn test_prune_items() {
         transcoding_profile_id: None,
         playlists: vec![],
     };
-    write_manifest(root, &manifest).await.unwrap();
+    write_manifest(msc(root), &manifest).await.unwrap();
 
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
@@ -678,7 +682,7 @@ async fn test_relink_item() {
         transcoding_profile_id: None,
         playlists: vec![],
     };
-    write_manifest(root, &manifest).await.unwrap();
+    write_manifest(msc(root), &manifest).await.unwrap();
 
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
@@ -724,7 +728,7 @@ async fn test_relink_item_path_traversal() {
         transcoding_profile_id: None,
         playlists: vec![],
     };
-    write_manifest(root, &manifest).await.unwrap();
+    write_manifest(msc(root), &manifest).await.unwrap();
 
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
@@ -758,7 +762,7 @@ async fn test_clear_dirty_flag() {
         transcoding_profile_id: None,
         playlists: vec![],
     };
-    write_manifest(root, &manifest).await.unwrap();
+    write_manifest(msc(root), &manifest).await.unwrap();
 
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
@@ -1054,7 +1058,7 @@ async fn test_save_basket_roundtrip() {
         transcoding_profile_id: None,
         playlists: vec![],
     };
-    write_manifest(dir.path(), &manifest).await.unwrap();
+    write_manifest(msc(dir.path()), &manifest).await.unwrap();
 
     manager
         .handle_device_detected(dir.path().to_path_buf(), manifest)
@@ -1115,7 +1119,7 @@ async fn test_auto_sync_on_connect_roundtrip() {
         transcoding_profile_id: None,
         playlists: vec![],
     };
-    write_manifest(dir.path(), &manifest).await.unwrap();
+    write_manifest(msc(dir.path()), &manifest).await.unwrap();
 
     let content = tokio::fs::read_to_string(dir.path().join(".jellyfinsync.json"))
         .await
@@ -1176,8 +1180,8 @@ async fn test_handle_device_detected_two_sequential_devices() {
     let manifest2 = make_manifest("device-2", "Walkman");
 
     // Write manifests so handle_device_detected can store them
-    write_manifest(&path1, &manifest1).await.unwrap();
-    write_manifest(&path2, &manifest2).await.unwrap();
+    write_manifest(msc(&path1), &manifest1).await.unwrap();
+    write_manifest(msc(&path2), &manifest2).await.unwrap();
 
     manager.handle_device_detected(path1.clone(), manifest1).await.unwrap();
     manager.handle_device_detected(path2.clone(), manifest2).await.unwrap();
@@ -1208,8 +1212,8 @@ async fn test_handle_device_removed_selected_with_remaining_autoselects() {
     let manifest1 = make_manifest("device-1", "iPod");
     let manifest2 = make_manifest("device-2", "Walkman");
 
-    write_manifest(&path1, &manifest1).await.unwrap();
-    write_manifest(&path2, &manifest2).await.unwrap();
+    write_manifest(msc(&path1), &manifest1).await.unwrap();
+    write_manifest(msc(&path2), &manifest2).await.unwrap();
 
     manager.handle_device_detected(path1.clone(), manifest1).await.unwrap();
     manager.handle_device_detected(path2.clone(), manifest2).await.unwrap();
@@ -1238,8 +1242,8 @@ async fn test_handle_device_removed_non_selected_selection_unchanged() {
     let manifest1 = make_manifest("device-1", "iPod");
     let manifest2 = make_manifest("device-2", "Walkman");
 
-    write_manifest(&path1, &manifest1).await.unwrap();
-    write_manifest(&path2, &manifest2).await.unwrap();
+    write_manifest(msc(&path1), &manifest1).await.unwrap();
+    write_manifest(msc(&path2), &manifest2).await.unwrap();
 
     manager.handle_device_detected(path1.clone(), manifest1).await.unwrap();
     manager.handle_device_detected(path2.clone(), manifest2).await.unwrap();
@@ -1268,8 +1272,8 @@ async fn test_select_device_valid_path() {
     let manifest1 = make_manifest("device-1", "iPod");
     let manifest2 = make_manifest("device-2", "Walkman");
 
-    write_manifest(&path1, &manifest1).await.unwrap();
-    write_manifest(&path2, &manifest2).await.unwrap();
+    write_manifest(msc(&path1), &manifest1).await.unwrap();
+    write_manifest(msc(&path2), &manifest2).await.unwrap();
 
     manager.handle_device_detected(path1.clone(), manifest1).await.unwrap();
     manager.handle_device_detected(path2.clone(), manifest2).await.unwrap();

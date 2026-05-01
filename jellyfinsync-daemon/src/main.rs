@@ -56,6 +56,7 @@ mod api;
 mod auto_fill;
 mod db;
 mod device;
+pub mod device_io;
 mod paths;
 mod rpc;
 mod scrobbler;
@@ -203,6 +204,7 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                             let auto_sync_enabled = manifest.auto_sync_on_connect;
                             let has_basket = !manifest.basket_items.is_empty();
                             let auto_fill_enabled = manifest.auto_fill.enabled;
+                            let manifest_device_id = manifest.device_id.clone();
                             match device_manager.handle_device_detected(path.clone(), manifest).await {
                                 Ok(new_state) => {
                                     let _ = state_tx_clone.send(new_state);
@@ -217,24 +219,27 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                             if let Ok((url, token, Some(user_id))) =
                                 api::CredentialManager::get_credentials()
                             {
-                                let db_scrobble = Arc::clone(&db);
-                                let client_scrobble = Arc::clone(&jellyfin_client);
-                                let device_path_clone = path.clone();
-                                let scrobbler_result_clone = Arc::clone(&last_scrobbler_result);
-                                tokio::spawn(async move {
-                                    let result = scrobbler::process_device_scrobbles(
-                                        &device_path_clone,
-                                        db_scrobble,
-                                        client_scrobble,
-                                        &url,
-                                        &token,
-                                        &user_id,
-                                    )
-                                    .await;
-                                    daemon_log!("[Scrobbler] Result: {:?}", result);
-                                    let mut guard = scrobbler_result_clone.write().await;
-                                    *guard = Some(result);
-                                });
+                                if let Some(scrobble_device_io) = device_manager.get_device_io().await {
+                                    let db_scrobble = Arc::clone(&db);
+                                    let client_scrobble = Arc::clone(&jellyfin_client);
+                                    let scrobbler_result_clone = Arc::clone(&last_scrobbler_result);
+                                    let scrobble_device_id = manifest_device_id.clone();
+                                    tokio::spawn(async move {
+                                        let result = scrobbler::process_device_scrobbles(
+                                            scrobble_device_io,
+                                            scrobble_device_id,
+                                            db_scrobble,
+                                            client_scrobble,
+                                            &url,
+                                            &token,
+                                            &user_id,
+                                        )
+                                        .await;
+                                        daemon_log!("[Scrobbler] Result: {:?}", result);
+                                        let mut guard = scrobbler_result_clone.write().await;
+                                        *guard = Some(result);
+                                    });
+                                }
                             }
 
                             // Auto-sync trigger: check if device has auto_sync_on_connect enabled
@@ -663,6 +668,15 @@ async fn run_auto_sync(
         None
     };
 
+    let device_io = match device_manager.get_device_io().await {
+        Some(io) => io,
+        None => {
+            daemon_log!("[AutoSync] No device IO backend — aborting sync");
+            let _ = state_tx.send(DaemonState::Error);
+            return Ok(());
+        }
+    };
+
     let result = sync::execute_sync(
         &delta,
         &device_path,
@@ -674,6 +688,7 @@ async fn run_auto_sync(
         operation_id.clone(),
         device_manager.clone(),
         transcoding_profile,
+        device_io,
     )
     .await;
 

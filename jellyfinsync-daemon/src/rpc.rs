@@ -1094,6 +1094,19 @@ async fn handle_sync_execute(
             }
         };
 
+        let device_io = match device_manager.get_device_io().await {
+            Some(io) => io,
+            None => {
+                eprintln!("[Sync] No device IO backend available — cannot execute sync");
+                if let Some(mut operation) = op_manager.get_operation(&op_id).await {
+                    operation.status = crate::sync::SyncStatus::Failed;
+                    op_manager.update_operation(&op_id, operation).await;
+                }
+                let _ = state_tx.send(crate::DaemonState::Error);
+                return;
+            }
+        };
+
         let result = crate::sync::execute_sync(
             &delta,
             &device_path,
@@ -1105,6 +1118,7 @@ async fn handle_sync_execute(
             op_id.clone(),
             device_manager.clone(),
             transcoding_profile,
+            device_io,
         )
         .await;
 
@@ -1199,14 +1213,18 @@ async fn handle_sync_get_resume_state(state: &AppState) -> Result<Value, JsonRpc
     let device_path = state.device_manager.get_current_device_path().await;
 
     match (device, device_path) {
-        (Some(manifest), Some(path)) => {
+        (Some(manifest), Some(_path)) => {
             let is_dirty = manifest.dirty;
             let pending_ids = manifest.pending_item_ids.clone();
 
             let cleaned_tmp_files = if is_dirty {
-                crate::device::cleanup_tmp_files(&path, &manifest.managed_paths)
-                    .await
-                    .unwrap_or(0)
+                if let Some(device_io) = state.device_manager.get_device_io().await {
+                    crate::device::cleanup_tmp_files(device_io, &manifest.managed_paths)
+                        .await
+                        .unwrap_or(0)
+                } else {
+                    0
+                }
             } else {
                 0
             };
@@ -2906,9 +2924,12 @@ mod tests {
             transcoding_profile_id: None,
                 playlists: vec![],
         };
-        crate::device::write_manifest(dir.path(), &manifest)
-            .await
-            .unwrap();
+        crate::device::write_manifest(
+            std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())),
+            &manifest,
+        )
+        .await
+        .unwrap();
         device_manager
             .handle_device_detected(dir.path().to_path_buf(), manifest)
             .await
