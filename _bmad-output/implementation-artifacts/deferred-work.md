@@ -1,5 +1,11 @@
 # Deferred Work
 
+## Deferred from: code review of 2-6-initialize-new-device-manifest (2026-05-01)
+
+- **Partial failure / task cancellation between cleanup steps** — `initialize_device` clears `unrecognized_device_path` and `unrecognized_device_io` in separate lock scopes; a panic or cancellation between them leaves `unrecognized_device_io` stale until the next device event. Theoretical; no production impact in practice.
+- **Path-aliasing window during backend construction** — `MscBackend::new(path)` is created before `connected_devices.remove(&path)` runs in `handle_device_unrecognized`; a re-probed path could briefly have two live IO backends. Negligible window; mention if race hardening is done.
+- **No concurrent stress tests for path/IO invariant** — `unrecognized_device_path` and `unrecognized_device_io` must always be set/cleared together; only sequential tests cover this. Add concurrent event tests if a multi-device race bug surfaces.
+
 ## Deferred from: code review of 4-0-device-io-abstraction-layer (2026-05-01)
 
 - **`update_manifest` TOCTOU** — `selected_device_path` and `connected_devices` are acquired under separate locks; device disconnect between the two reads causes `get_mut` to return `None` and partial manifest updates to be silently dropped. Pre-existing lock ordering; fix in a future DeviceManager refactor.

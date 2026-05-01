@@ -1,6 +1,6 @@
 # Story 2.6: Initialize New Device Manifest
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -105,6 +105,18 @@ so that I can bring a brand-new device into the managed sync model without manua
 - [x] **Frontend: Refresh after initialization** (AC: #3)
   - [x] Ensure `BasketSidebar.refreshDeviceData()` is called after successful initialization
   - [x] The "Initialize Device" banner must disappear once `hasManifest` becomes `true`
+
+### Review Findings
+
+- [x] [Review][Decision] Spec-mandated call chain implemented: `DeviceEvent::Unrecognized` now carries `Arc<dyn DeviceIO>` from detection layer; `handle_device_unrecognized` accepts backend as parameter; `initialize_device` accepts `device_io` as parameter (RPC handler retrieves via `get_unrecognized_device_io` and passes it); manifest written via `device_io.write_with_verify()` directly.
+- [x] [Review][Patch] MscBackend hardcoded in `handle_device_unrecognized` — fixed: detection layer creates backend in `run_observer` and passes via event [device/mod.rs]
+- [x] [Review][Patch] TOCTOU — path/IO now updated atomically under combined lock scope in `handle_device_unrecognized` and `handle_device_removed` [device/mod.rs]
+- [x] [Review][Patch] `handle_device_detected` now clears `unrecognized_device_io` alongside path in both branches [device/mod.rs]
+- [x] [Review][Patch] `handle_device_unrecognized` called twice now logs a warning before overwriting [device/mod.rs]
+- [x] [Review][Patch] Comment on `transcoding_profile_id` restored [device/mod.rs]
+- [x] [Review][Defer] Partial failure / task cancellation between cleanup steps in `initialize_device` leaves `unrecognized_device_io` stale — deferred, pre-existing
+- [x] [Review][Defer] Brief path-aliasing window: `MscBackend` constructed before `connected_devices.remove` runs [device/mod.rs:~273] — deferred, pre-existing
+- [x] [Review][Defer] No concurrent stress tests for path/IO invariant under rapid device events — deferred, pre-existing
 
 ## Dev Notes
 

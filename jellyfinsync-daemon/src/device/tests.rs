@@ -797,7 +797,7 @@ async fn test_handle_device_unrecognized_stores_path() {
     assert!(manager.get_current_device().await.is_none());
 
     let state = manager
-        .handle_device_unrecognized(dir.path().to_path_buf())
+        .handle_device_unrecognized(dir.path().to_path_buf(), msc(dir.path()))
         .await;
 
     // Path should now be set
@@ -822,7 +822,7 @@ async fn test_handle_device_removed_clears_unrecognized_path() {
 
     let path = dir.path().to_path_buf();
     manager
-        .handle_device_unrecognized(path.clone())
+        .handle_device_unrecognized(path.clone(), msc(dir.path()))
         .await;
     assert!(manager.get_unrecognized_device_path().await.is_some());
 
@@ -845,7 +845,7 @@ async fn test_handle_device_detected_clears_unrecognized_path() {
 
     // Set unrecognized path first
     manager
-        .handle_device_unrecognized(dir.path().to_path_buf())
+        .handle_device_unrecognized(dir.path().to_path_buf(), msc(dir.path()))
         .await;
     assert!(manager.get_unrecognized_device_path().await.is_some());
 
@@ -872,7 +872,7 @@ async fn test_list_root_folders_unrecognized_device() {
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
 
-    manager.handle_device_unrecognized(root.to_path_buf()).await;
+    manager.handle_device_unrecognized(root.to_path_buf(), msc(root)).await;
 
     let res = manager.list_root_folders().await.unwrap().unwrap();
 
@@ -888,11 +888,11 @@ async fn test_initialize_device_root() {
     let manager = DeviceManager::new(db);
 
     manager
-        .handle_device_unrecognized(dir.path().to_path_buf())
+        .handle_device_unrecognized(dir.path().to_path_buf(), msc(dir.path()))
         .await;
 
     // Initialize with root (empty folder_path)
-    let manifest = manager.initialize_device("", None, "My Device".to_string(), None).await.unwrap();
+    let manifest = manager.initialize_device("", None, "My Device".to_string(), None, msc(dir.path())).await.unwrap();
 
     assert!(manifest.managed_paths.is_empty());
     assert_eq!(manifest.version, "1.0");
@@ -916,11 +916,11 @@ async fn test_initialize_device_subfolder() {
     let manager = DeviceManager::new(db);
 
     manager
-        .handle_device_unrecognized(dir.path().to_path_buf())
+        .handle_device_unrecognized(dir.path().to_path_buf(), msc(dir.path()))
         .await;
 
     // Initialize with a subfolder
-    let manifest = manager.initialize_device("Music", None, "My Device".to_string(), None).await.unwrap();
+    let manifest = manager.initialize_device("Music", None, "My Device".to_string(), None, msc(dir.path())).await.unwrap();
 
     assert_eq!(manifest.managed_paths, vec!["Music".to_string()]);
 
@@ -938,11 +938,12 @@ async fn test_initialize_device_subfolder() {
 
 #[tokio::test]
 async fn test_initialize_device_requires_unrecognized_path() {
+    let dir = tempdir().unwrap();
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
 
-    // No unrecognized path set → should fail
-    let res = manager.initialize_device("", None, "My Device".to_string(), None).await;
+    // No unrecognized path set → should fail even when a backend is provided
+    let res = manager.initialize_device("", None, "My Device".to_string(), None, msc(dir.path())).await;
     assert!(res.is_err());
     assert!(res
         .unwrap_err()
@@ -957,25 +958,25 @@ async fn test_initialize_device_rejects_path_traversal() {
     let manager = DeviceManager::new(db);
 
     manager
-        .handle_device_unrecognized(dir.path().to_path_buf())
+        .handle_device_unrecognized(dir.path().to_path_buf(), msc(dir.path()))
         .await;
 
     // Path traversal with ".."
-    let res = manager.initialize_device("../escape", None, "My Device".to_string(), None).await;
+    let res = manager.initialize_device("../escape", None, "My Device".to_string(), None, msc(dir.path())).await;
     assert!(res.is_err());
     assert!(res.unwrap_err().to_string().contains("Invalid folder path"));
 
     // Absolute path
-    let res = manager.initialize_device("/etc/hacked", None, "My Device".to_string(), None).await;
+    let res = manager.initialize_device("/etc/hacked", None, "My Device".to_string(), None, msc(dir.path())).await;
     assert!(res.is_err());
 
     // Nested path with separator
-    let res = manager.initialize_device("Music/SubFolder", None, "My Device".to_string(), None).await;
+    let res = manager.initialize_device("Music/SubFolder", None, "My Device".to_string(), None, msc(dir.path())).await;
     assert!(res.is_err());
     assert!(res.unwrap_err().to_string().contains("single folder name"));
 
     // Backslash separator
-    let res = manager.initialize_device("Music\\SubFolder", None, "My Device".to_string(), None).await;
+    let res = manager.initialize_device("Music\\SubFolder", None, "My Device".to_string(), None, msc(dir.path())).await;
     assert!(res.is_err());
 }
 
@@ -1002,7 +1003,7 @@ async fn test_handle_device_unrecognized_preserves_recognized_device() {
     // Now handle an unrecognized device at a DIFFERENT path — recognized device must remain
     let dir2 = tempdir().unwrap();
     manager
-        .handle_device_unrecognized(dir2.path().to_path_buf())
+        .handle_device_unrecognized(dir2.path().to_path_buf(), msc(dir2.path()))
         .await;
 
     assert!(
@@ -1037,7 +1038,7 @@ async fn test_handle_device_unrecognized_stores_device_io() {
     assert!(manager.get_unrecognized_device_io().await.is_none());
 
     manager
-        .handle_device_unrecognized(dir.path().to_path_buf())
+        .handle_device_unrecognized(dir.path().to_path_buf(), msc(dir.path()))
         .await;
 
     assert!(
@@ -1048,19 +1049,20 @@ async fn test_handle_device_unrecognized_stores_device_io() {
 
 #[tokio::test]
 async fn test_initialize_device_uses_stored_io_and_clears_it() {
-    // Verify that initialize_device uses the stored IO backend and clears it on success.
+    // Verify that initialize_device (spec form: device_io as parameter) clears stored IO on success.
     let dir = tempdir().unwrap();
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
 
     manager
-        .handle_device_unrecognized(dir.path().to_path_buf())
+        .handle_device_unrecognized(dir.path().to_path_buf(), msc(dir.path()))
         .await;
 
     assert!(manager.get_unrecognized_device_io().await.is_some());
 
+    let device_io = manager.get_unrecognized_device_io().await.unwrap();
     manager
-        .initialize_device("", None, "My Device".to_string(), None)
+        .initialize_device("", None, "My Device".to_string(), None, device_io)
         .await
         .unwrap();
 
@@ -1087,7 +1089,7 @@ async fn test_handle_device_removed_clears_unrecognized_io() {
     let manager = DeviceManager::new(db);
 
     let path = dir.path().to_path_buf();
-    manager.handle_device_unrecognized(path.clone()).await;
+    manager.handle_device_unrecognized(path.clone(), msc(dir.path())).await;
 
     assert!(manager.get_unrecognized_device_path().await.is_some());
     assert!(manager.get_unrecognized_device_io().await.is_some());

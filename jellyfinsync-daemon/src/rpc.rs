@@ -1484,9 +1484,16 @@ async fn handle_device_initialize(
         }
     }
 
+    let device_io = state.device_manager.get_unrecognized_device_io().await
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "No unrecognized device pending initialization".to_string(),
+            data: None,
+        })?;
+
     let manifest = state
         .device_manager
-        .initialize_device(folder_path, transcoding_profile_id.clone(), device_name, device_icon)
+        .initialize_device(folder_path, transcoding_profile_id.clone(), device_name, device_icon, device_io)
         .await
         .map_err(|e| JsonRpcError {
             code: ERR_STORAGE_ERROR,
@@ -2535,7 +2542,7 @@ mod tests {
 
         // Set an unrecognized device → pendingDevicePath should be present
         device_manager
-            .handle_device_unrecognized(dir.path().to_path_buf())
+            .handle_device_unrecognized(dir.path().to_path_buf(), std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())))
             .await;
 
         let result2 = handle_get_daemon_state(&state).await.unwrap();
@@ -2789,11 +2796,11 @@ mod tests {
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
         };
 
-        // No unrecognized device registered → ERR_STORAGE_ERROR
+        // No unrecognized device registered → ERR_INVALID_PARAMS (caught before reaching storage)
         let params = json!({ "folderPath": "", "profileId": "user-1", "name": "My Device" });
         let res = handle_device_initialize(&state, Some(params)).await;
         assert!(res.is_err());
-        assert_eq!(res.unwrap_err().code, ERR_STORAGE_ERROR);
+        assert_eq!(res.unwrap_err().code, ERR_INVALID_PARAMS);
     }
 
     #[tokio::test]
@@ -2804,7 +2811,7 @@ mod tests {
 
         // Simulate an unrecognized device
         device_manager
-            .handle_device_unrecognized(dir.path().to_path_buf())
+            .handle_device_unrecognized(dir.path().to_path_buf(), std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())))
             .await;
 
         let state = AppState {
@@ -2860,7 +2867,7 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
 
         device_manager
-            .handle_device_unrecognized(dir.path().to_path_buf())
+            .handle_device_unrecognized(dir.path().to_path_buf(), std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())))
             .await;
 
         let state = AppState {

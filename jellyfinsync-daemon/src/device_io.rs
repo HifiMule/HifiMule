@@ -13,7 +13,7 @@ pub struct FileEntry {
 }
 
 #[async_trait]
-pub trait DeviceIO: Send + Sync {
+pub trait DeviceIO: Send + Sync + std::fmt::Debug {
     async fn read_file(&self, path: &str) -> Result<Vec<u8>>;
     async fn write_file(&self, path: &str, data: &[u8]) -> Result<()>;
     async fn write_with_verify(&self, path: &str, data: &[u8]) -> Result<()>;
@@ -61,6 +61,7 @@ async fn msc_cleanup_empty_dirs(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug)]
 pub struct MscBackend {
     pub root: PathBuf,
 }
@@ -206,6 +207,12 @@ impl DeviceIO for MscBackend {
 
 pub struct MtpBackend {
     pub handle: Arc<dyn MtpHandle>,
+}
+
+impl std::fmt::Debug for MtpBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MtpBackend").finish_non_exhaustive()
+    }
 }
 
 /// Platform-independent MTP handle trait, enabling mock injection for tests.

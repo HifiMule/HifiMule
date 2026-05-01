@@ -290,9 +290,9 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                                 daemon_log!("[AutoSync] Skipped: auto-sync enabled but no basket items configured");
                             }
                         }
-                        device::DeviceEvent::Unrecognized { path } => {
+                        device::DeviceEvent::Unrecognized { path, device_io } => {
                             println!("Unrecognized device at {:?}", path);
-                            let new_state = device_manager.handle_device_unrecognized(path).await;
+                            let new_state = device_manager.handle_device_unrecognized(path, device_io).await;
                             let _ = state_tx_clone.send(new_state);
                         }
                         device::DeviceEvent::Removed(path) => {
