@@ -157,6 +157,8 @@ pub struct DeviceManager {
     /// The device path targeted by all UI operations. None when no device is selected.
     selected_device_path: std::sync::Arc<tokio::sync::RwLock<Option<PathBuf>>>,
     unrecognized_device_path: std::sync::Arc<tokio::sync::RwLock<Option<PathBuf>>>,
+    /// IO backend for the pending unrecognized device. Always set alongside unrecognized_device_path.
+    unrecognized_device_io: std::sync::Arc<tokio::sync::RwLock<Option<std::sync::Arc<dyn crate::device_io::DeviceIO>>>>,
 }
 
 impl DeviceManager {
@@ -166,6 +168,7 @@ impl DeviceManager {
             connected_devices: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             selected_device_path: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             unrecognized_device_path: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            unrecognized_device_io: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
@@ -267,6 +270,8 @@ impl DeviceManager {
         let path_str = path.to_string_lossy().to_string();
         // Unrecognized devices have no manifest — ensure they are not in connected_devices.
         // Do NOT change selected_device_path since other recognized devices may still be connected.
+        let device_io: std::sync::Arc<dyn crate::device_io::DeviceIO> =
+            std::sync::Arc::new(crate::device_io::MscBackend::new(path.clone()));
         {
             let mut devices = self.connected_devices.write().await;
             devices.remove(&path);
@@ -275,11 +280,19 @@ impl DeviceManager {
             let mut unrecognized_path = self.unrecognized_device_path.write().await;
             *unrecognized_path = Some(path);
         }
+        {
+            let mut unrecognized_io = self.unrecognized_device_io.write().await;
+            *unrecognized_io = Some(device_io);
+        }
         crate::DaemonState::DeviceFound(path_str)
     }
 
     pub async fn get_unrecognized_device_path(&self) -> Option<PathBuf> {
         self.unrecognized_device_path.read().await.clone()
+    }
+
+    pub async fn get_unrecognized_device_io(&self) -> Option<std::sync::Arc<dyn crate::device_io::DeviceIO>> {
+        self.unrecognized_device_io.read().await.clone()
     }
 
     pub async fn handle_device_removed(&self, removed_path: &PathBuf) {
@@ -300,13 +313,19 @@ impl DeviceManager {
                 };
             }
         }
+        let unrecognized_path_cleared;
         {
             let mut unrecognized_path = self.unrecognized_device_path.write().await;
             // Only clear unrecognized_device_path if it matches the removed path; an
             // unrelated managed device removing should not erase a pending initialization.
-            if unrecognized_path.as_ref() == Some(removed_path) {
+            unrecognized_path_cleared = unrecognized_path.as_ref() == Some(removed_path);
+            if unrecognized_path_cleared {
                 *unrecognized_path = None;
             }
+        }
+        if unrecognized_path_cleared {
+            let mut unrecognized_io = self.unrecognized_device_io.write().await;
+            *unrecognized_io = None;
         }
     }
 
@@ -435,12 +454,12 @@ impl DeviceManager {
             .await
             .ok_or_else(|| anyhow::anyhow!("No unrecognized device connected"))?;
 
-        let device_id = uuid::Uuid::new_v4().to_string();
+        let device_io = self
+            .get_unrecognized_device_io()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("No unrecognized device IO backend available"))?;
 
-        // Device not yet in the map; create a local backend for the initial manifest write
-        // and subfolder creation.
-        let device_io: std::sync::Arc<dyn crate::device_io::DeviceIO> =
-            std::sync::Arc::new(crate::device_io::MscBackend::new(device_root.clone()));
+        let device_id = uuid::Uuid::new_v4().to_string();
 
         let managed_paths = if folder_path.is_empty() {
             vec![]
@@ -461,7 +480,7 @@ impl DeviceManager {
             basket_items: vec![],
             auto_sync_on_connect: false,
             auto_fill: AutoFillPrefs::default(),
-            transcoding_profile_id,   // NEW — stored in .jellyfinsync.json on the device
+            transcoding_profile_id,
             playlists: vec![],
         };
         write_manifest(std::sync::Arc::clone(&device_io), &manifest).await?;
@@ -484,6 +503,10 @@ impl DeviceManager {
         {
             let mut unrecognized_path = self.unrecognized_device_path.write().await;
             *unrecognized_path = None;
+        }
+        {
+            let mut unrecognized_io = self.unrecognized_device_io.write().await;
+            *unrecognized_io = None;
         }
 
         Ok(manifest)

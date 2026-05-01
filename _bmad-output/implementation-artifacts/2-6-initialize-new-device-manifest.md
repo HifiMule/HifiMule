@@ -1,6 +1,6 @@
 # Story 2.6: Initialize New Device Manifest
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -96,10 +96,10 @@ so that I can bring a brand-new device into the managed sync model without manua
   - [x] On `device_initialize` success: close dialog, call `onComplete` callback to refresh device state
   - [x] On error: show `sl-alert` with error message and Retry/Dismiss options
 
-- [ ] **MTP: Replace direct manifest write with DeviceIO (AC: #4 — Sprint Change 2026-04-30)**
-  - [ ] Replace `device::write_manifest(device_root, &manifest)` call in `initialize_device()` with `device_io.write_with_verify(path, &manifest_bytes)`
-  - [ ] Pass `Arc<dyn DeviceIO>` into `initialize_device()` from the `device.initialize` RPC handler (retrieve from `DeviceManager` by device path)
-  - [ ] Verify existing MSC behavior is unchanged (MscBackend.write_with_verify delegates to Write-Temp-Rename)
+- [x] **MTP: Replace direct manifest write with DeviceIO (AC: #4 — Sprint Change 2026-04-30)**
+  - [x] Replace `device::write_manifest(device_root, &manifest)` call in `initialize_device()` with `device_io.write_with_verify(path, &manifest_bytes)`
+  - [x] Pass `Arc<dyn DeviceIO>` into `initialize_device()` from the `device.initialize` RPC handler (retrieve from `DeviceManager` by device path)
+  - [x] Verify existing MSC behavior is unchanged (MscBackend.write_with_verify delegates to Write-Temp-Rename)
   - **Depends on:** Story 4.0 (DeviceIO abstraction layer)
 
 - [x] **Frontend: Refresh after initialization** (AC: #3)
@@ -286,6 +286,7 @@ claude-sonnet-4-6
 - `InitDeviceModal.ts` follows `RepairModal.ts` pattern: `sl-dialog`, `open()` method, loads credentials via `get_credentials` RPC, shows `sl-input` for folder name and read-only userId display, sends `device_initialize` RPC on Confirm, calls `onComplete` on success, shows error with Retry/Dismiss on failure.
 - Daemon state polling in `BasketSidebar.startDaemonStatePolling()` updated to also detect `pendingDevicePath` changes and trigger `refreshAndRender()`.
 - All 114 tests pass (107 pre-existing + 7 new: 3 device/mod.rs + 4 rpc.rs). TypeScript compiles cleanly.
+- **MTP Task (2026-05-01):** Added `unrecognized_device_io: Arc<RwLock<Option<Arc<dyn DeviceIO>>>>` field to `DeviceManager`. `handle_device_unrecognized` now creates and stores an `MscBackend` alongside the path. `initialize_device` retrieves the stored IO backend (removing the hardcoded `MscBackend::new()`) and clears both path and IO on success. `handle_device_removed` clears the IO backend when the unrecognized path matches. `get_unrecognized_device_io()` getter added. 3 new tests. 174 tests pass.
 
 ### File List
 
@@ -298,8 +299,11 @@ claude-sonnet-4-6
 - `_bmad-output/implementation-artifacts/2-6-initialize-new-device-manifest.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
 
+*(MTP task 2026-05-01: only `device/mod.rs` and `device/tests.rs` modified)*
+
 ### Change Log
 
+- 2026-05-01: MTP task complete. `DeviceManager` stores IO backend (`unrecognized_device_io`) for pending unrecognized device. `initialize_device` uses stored backend instead of hardcoded `MscBackend`. 3 new tests (IO storage, IO cleared after init, IO cleared on removal). 174 tests pass.
 - 2026-04-30: Reopened — MTP support (Sprint Change 2026-04-30). AC #4 and MTP task added. Requires Story 4.0 (DeviceIO abstraction) to be completed first.
 - 2026-03-01: Implemented Story 2.6 — Initialize New Device Manifest. Added unrecognized device detection pipeline (DeviceEvent::Unrecognized, is_removable_drive guard, DeviceManager.handle_device_unrecognized/initialize_device), device_initialize RPC endpoint, pendingDevicePath in get_daemon_state, InitDeviceModal UI component, and Initialize Device banner in BasketSidebar.
 - 2026-03-01: Code Review (AI) — Fixed 6 issues: (H1) Added path traversal and single-level folder validation to initialize_device, (M1) handle_device_unrecognized now clears current_device fields enforcing mutual exclusivity, (M2) DeviceRecognized state uses human-readable device path name instead of UUID, (M3) Replaced create_dir_all with create_dir to prevent nested directory creation, (M4) Removed unused _profile_id parameter from DeviceManager::initialize_device, (M5) Added pendingDevicePath test for get_daemon_state, path traversal test, and mutual exclusivity test. 117 tests pass.

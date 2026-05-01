@@ -1025,6 +1025,85 @@ async fn test_handle_device_unrecognized_preserves_recognized_device() {
     );
 }
 
+// ===== Story 2.6 MTP Task Tests =====
+
+#[tokio::test]
+async fn test_handle_device_unrecognized_stores_device_io() {
+    // Verify that handle_device_unrecognized stores a DeviceIO backend alongside the path.
+    let dir = tempdir().unwrap();
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+
+    assert!(manager.get_unrecognized_device_io().await.is_none());
+
+    manager
+        .handle_device_unrecognized(dir.path().to_path_buf())
+        .await;
+
+    assert!(
+        manager.get_unrecognized_device_io().await.is_some(),
+        "IO backend must be stored alongside unrecognized device path"
+    );
+}
+
+#[tokio::test]
+async fn test_initialize_device_uses_stored_io_and_clears_it() {
+    // Verify that initialize_device uses the stored IO backend and clears it on success.
+    let dir = tempdir().unwrap();
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+
+    manager
+        .handle_device_unrecognized(dir.path().to_path_buf())
+        .await;
+
+    assert!(manager.get_unrecognized_device_io().await.is_some());
+
+    manager
+        .initialize_device("", None, "My Device".to_string(), None)
+        .await
+        .unwrap();
+
+    assert!(
+        manager.get_unrecognized_device_io().await.is_none(),
+        "IO backend must be cleared after successful initialization"
+    );
+    assert!(
+        manager.get_unrecognized_device_path().await.is_none(),
+        "Unrecognized path must be cleared after successful initialization"
+    );
+    // Manifest must have been written via the stored IO backend
+    assert!(
+        dir.path().join(".jellyfinsync.json").exists(),
+        "Manifest must be written to the device root"
+    );
+}
+
+#[tokio::test]
+async fn test_handle_device_removed_clears_unrecognized_io() {
+    // Verify that removing the unrecognized device also clears the stored IO backend.
+    let dir = tempdir().unwrap();
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+
+    let path = dir.path().to_path_buf();
+    manager.handle_device_unrecognized(path.clone()).await;
+
+    assert!(manager.get_unrecognized_device_path().await.is_some());
+    assert!(manager.get_unrecognized_device_io().await.is_some());
+
+    manager.handle_device_removed(&path).await;
+
+    assert!(
+        manager.get_unrecognized_device_path().await.is_none(),
+        "Unrecognized path must be cleared on device removal"
+    );
+    assert!(
+        manager.get_unrecognized_device_io().await.is_none(),
+        "IO backend must be cleared when unrecognized device is removed"
+    );
+}
+
 // ===== Basket Selection Tests =====
 
 #[test]
