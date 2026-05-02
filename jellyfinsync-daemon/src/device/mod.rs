@@ -197,6 +197,12 @@ impl DeviceManager {
         manifest: DeviceManifest,
         device_io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
     ) -> Result<crate::DaemonState> {
+        {
+            let devices = self.connected_devices.read().await;
+            if devices.contains_key(&path) {
+                return Ok(crate::DaemonState::Idle);
+            }
+        }
         let device_class = device_class_from_path(&path);
 
         // T5.9: Scan for MTP-style dirty markers on reconnect.
@@ -1049,11 +1055,11 @@ pub async fn run_mtp_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
 
         for dev in &devices {
             if !known_ids.contains(&dev.device_id) {
-                known_ids.insert(dev.device_id.clone());
                 let synthetic_path = PathBuf::from(format!("mtp://{}", dev.device_id));
 
                 match mtp::create_mtp_backend(dev) {
                     Ok(backend) => {
+                        known_ids.insert(dev.device_id.clone());
                         let backend_arc: std::sync::Arc<dyn crate::device_io::DeviceIO> =
                             std::sync::Arc::new(backend);
                         match backend_arc.read_file(".jellyfinsync.json").await {
@@ -1088,16 +1094,16 @@ pub async fn run_mtp_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
             }
         }
 
-        known_ids.retain(|id| {
-            let still_connected = devices.iter().any(|d| &d.device_id == id);
-            if !still_connected {
-                let synthetic_path = PathBuf::from(format!("mtp://{}", id));
-                let _ = tx.try_send(DeviceEvent::Removed(synthetic_path));
-                false
-            } else {
-                true
-            }
-        });
+        let disconnected: Vec<String> = known_ids
+            .iter()
+            .filter(|id| !devices.iter().any(|d| &d.device_id == *id))
+            .cloned()
+            .collect();
+        for id in &disconnected {
+            let synthetic_path = PathBuf::from(format!("mtp://{}", id));
+            let _ = tx.send(DeviceEvent::Removed(synthetic_path)).await;
+            known_ids.remove(id);
+        }
 
         sleep(Duration::from_secs(2)).await;
     }

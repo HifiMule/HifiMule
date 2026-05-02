@@ -1,6 +1,6 @@
 # Story 2.10: MTP Device Detection (Cross-Platform)
 
-Status: review
+Status: done
 
 ## Story
 
@@ -695,3 +695,28 @@ claude-sonnet-4-6
 
 - 2026-05-01: Story created — MTP device detection, platform-specific WpdHandle/LibmtpHandle implementations, run_mtp_observer() observer loop, DeviceClass tracking, deviceClass in RPC responses.
 - 2026-05-02: Implementation complete — all tasks done, 179 tests passing. Windows WPD enumeration + open implemented; Unix libmtp FFI fallback fully implemented; DeviceClass/deviceClass field added to RPC responses.
+- 2026-05-02: Code review — 2 decision-needed, 13 patch, 5 deferred, 3 dismissed.
+- 2026-05-02: All patches applied — DN-1 (WpdHandle I/O implemented), DN-2 (dedup early-return), P-1 through P-9 + P-11 + P-13 applied; P-10 and P-12 dismissed as false positives. Build clean, 180 tests passing.
+
+### Review Findings
+
+- [x] [Review][Decision] WpdHandle file I/O fully stubbed — every Windows MTP device emits Unrecognized, violating AC #1 — Dev notes acknowledge WPD PROPERTYKEY constants unavailable; decide: accept as deferred-to-next-story or implement `path_to_object_id` + resource I/O now [device/mtp.rs, windows_wpd::WpdHandle]
+- [x] [Review][Decision] Dual-mode USB race — MSC observer (`run_observer`) and MTP observer (`run_mtp_observer`) both run concurrently; a device that presents as both MSC and MTP (e.g., Android) fires two Detected events that race into `handle_device_detected`, silently overwriting the first backend — decide: add dedup guard, prefer one protocol, or document supported topology [main.rs:169-178]
+- [x] [Review][Patch] COM init: `CoInitializeEx` result discarded, no `CoUninitialize` — COM apartment state leaks on every poll thread; `WpdHandle`'s `Send+Sync` impl is unsound if init failed [mtp.rs, windows_wpd::WpdHandle::open / enumerate]
+- [x] [Review][Patch] `devnum` u8/u32 mismatch — `LIBMTP_RawDevice_t.devnum` is `u8`; `MtpDeviceInner::Libmtp.dev_num` is `u32`; `LibmtpHandle::open` casts `dev_num as u8` silently truncating values >255 [mtp.rs:488]
+- [x] [Review][Patch] Memory leak: `raw_devs` from `LIBMTP_Detect_Raw_Devices` never freed — both `enumerate()` and `LibmtpHandle::open` allocate this buffer and never call `free()` [mtp.rs, libmtp::enumerate / LibmtpHandle::open]
+- [x] [Review][Patch] Memory leak: WPD `PWSTR` device ID strings never freed via `CoTaskMemFree` — `GetDevices` fills the `ids` vec with COM-allocated strings that must be freed after use [mtp.rs, windows_wpd::enumerate]
+- [x] [Review][Patch] Mutex released before FFI calls — `let dev = *self.device.lock().unwrap()` copies the raw pointer and drops the guard; all subsequent libmtp FFI calls run without holding the lock, violating the stated thread-safety invariant and risking deadlock on concurrent `Drop` [mtp.rs, LibmtpHandle all MtpHandle methods]
+- [x] [Review][Patch] `known_ids` not cleared on `create_mtp_backend` failure — device ID is inserted before the call, so a transient open error permanently hides the device until physical reconnect [device/mod.rs, run_mtp_observer]
+- [x] [Review][Patch] `try_send` for `DeviceEvent::Removed` silently drops when channel full; `retain` still removes the ID — `DeviceManager` never receives `handle_device_removed`, device stays live in connected_devices indefinitely [device/mod.rs, run_mtp_observer]
+- [x] [Review][Patch] `temp_path()` uses PID only — two `LibmtpHandle` instances (or concurrent ops on different devices) share the same temp file path, causing data corruption or TOCTOU races; temp file not cleaned up on error path [mtp.rs, libmtp::temp_path]
+- [x] [Review][Patch] `LIBMTP_Init()` called on every enumeration poll (every 2 s) and every `LibmtpHandle::open` — libmtp treats this as a one-time global init; repeated calls may leak resources or reset internal state [mtp.rs, libmtp::enumerate / LibmtpHandle::open]
+- [x] [Review][Patch] `MtpDeviceInner` match non-exhaustive on non-Windows/non-Unix targets — `create_mtp_backend` `match &info.inner` has no fallback arm; fails to compile on WASM/embedded targets [mtp.rs, create_mtp_backend]
+- [x] [Review][Patch] Unix libmtp build: bare `cargo:rustc-link-lib=mtp` without `pkg_config::probe_library` — will silently fail to link when libmtp is not in default library search path; spec fallback explicitly requires `pkg_config::probe_library("libmtp")`; no `Cargo.toml` `[target.'cfg(unix)'.dependencies]` entry added [build.rs, Cargo.toml]
+- [x] [Review][Patch] `mtp_backend_manifest_probe` test uses wrong JSON field key — mock data uses `"device_id"` and asserts `manifest["device_id"]`; spec requires `"deviceId"` (camelCase); mismatch could mask a real serde rename issue [device_io.rs]
+- [x] [Review][Patch] `split_path_components` does not filter `..` — path traversal via `..` components passes unblocked into `path_to_object_id`; non-conforming device firmware could resolve parent object IDs [mtp.rs, split_path_components]
+- [x] [Review][Defer] `broadcast_device_state` re-triggers `handle_device_detected` on already-connected device — can cause duplicate insertion logic and spurious dirty-state transitions; pre-existing, only signature changed in this diff [rpc.rs, broadcast_device_state] — deferred, pre-existing
+- [x] [Review][Defer] `storage_id=0` in `LIBMTP_Get_Files_And_Folders` — may fail on devices with non-default storage IDs; needs libmtp API verification of the `0` semantics [mtp.rs, libmtp] — deferred, pre-existing
+- [x] [Review][Defer] No unit test for `path_to_object_id` traversal logic with fixture data — FFI-dependent; requires mocking the device handle to be testable; `split_path_components` tests cover the extractable logic [mtp.rs] — deferred, pre-existing
+- [x] [Review][Defer] `get_device_storage` returns `None` for MTP devices — synthetic `mtp://` path fails all platform `statvfs`/`GetDiskFreeSpaceExW` calls; `free_space()` also stubbed on all MTP handles; storage silently absent in UI [device/mod.rs, get_device_storage] — deferred, pre-existing
+- [x] [Review][Defer] Stale IO handle in `initialize_device` after device reconnect — the `Arc<dyn DeviceIO>` stored from the `Unrecognized` event may refer to a disconnected handle if the device was removed between detection and user completing initialization [device/mod.rs, initialize_device] — deferred, pre-existing

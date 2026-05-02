@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-05-02  # 2-10-mtp-device-detection implementation complete
+last_updated: 2026-05-02  # 2-10-mtp-device-detection code review complete
 project: JellyfinSync
 project_key: NOKEY
 tracking_system: file-system
@@ -58,7 +58,7 @@ development_status:
   2-7-multi-device-selection-panel: done
   2-8-enhanced-multi-device-hub: done
   2-9-device-identity-name-and-icon: done
-  2-10-mtp-device-detection: review
+  2-10-mtp-device-detection: done
   epic-2-retrospective: optional
 
   epic-3: in-progress

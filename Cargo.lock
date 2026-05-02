@@ -2232,6 +2232,7 @@ dependencies = [
  "libc",
  "mockito",
  "notify-rust",
+ "pkg-config",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",

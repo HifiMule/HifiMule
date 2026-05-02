@@ -1,5 +1,13 @@
 # Deferred Work
 
+## Deferred from: code review of 2-10-mtp-device-detection (2026-05-02)
+
+- **`broadcast_device_state` re-triggers `handle_device_detected` on already-connected device** — can cause duplicate insertion logic and spurious dirty-state transitions; signature changed in this diff but behavior is pre-existing. [`rpc.rs`, `broadcast_device_state`]
+- **`storage_id=0` in `LIBMTP_Get_Files_And_Folders`** — may fail on devices with non-default storage IDs; needs libmtp API verification of the `0` "all storages" semantics. [`mtp.rs`, libmtp module]
+- **No unit test for `path_to_object_id` traversal logic with fixture data** — FFI-dependent traversal logic is untestable without a mock device handle; `split_path_components` tests cover the extractable path-parsing logic only. [`mtp.rs`]
+- **`get_device_storage` returns `None` for MTP devices** — synthetic `mtp://` path fails all platform filesystem space queries; `free_space()` is also stubbed on all MTP handles; storage capacity silently absent in UI for MTP devices. [`device/mod.rs`, `get_device_storage`]
+- **Stale IO handle in `initialize_device` after device reconnect** — `Arc<dyn DeviceIO>` stored from the original `Unrecognized` event may refer to a disconnected handle if the physical device was removed and reinserted between detection and the user completing initialization. [`device/mod.rs`, `initialize_device`]
+
 ## Deferred from: code review of 2-6-initialize-new-device-manifest (2026-05-01)
 
 - **Partial failure / task cancellation between cleanup steps** — `initialize_device` clears `unrecognized_device_path` and `unrecognized_device_io` in separate lock scopes; a panic or cancellation between them leaves `unrecognized_device_io` stale until the next device event. Theoretical; no production impact in practice.
