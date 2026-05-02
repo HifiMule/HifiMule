@@ -406,12 +406,16 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
     let selected_device_path = selected_path_buf.map(|p| p.to_string_lossy().to_string());
     let connected_devices_json: Vec<_> = connected_devices_snapshot
         .iter()
-        .map(|(p, m)| {
+        .map(|(p, m, class)| {
             serde_json::json!({
                 "path": p.to_string_lossy(),
                 "deviceId": m.device_id,
                 "name": m.name.clone().unwrap_or_else(|| m.device_id.clone()),
                 "icon": m.icon.clone(),
+                "deviceClass": match class {
+                    crate::device::DeviceClass::Msc => "msc",
+                    crate::device::DeviceClass::Mtp => "mtp",
+                },
             })
         })
         .collect();
@@ -1287,11 +1291,11 @@ async fn handle_scrobbler_get_last_result(state: &AppState) -> Result<Value, Jso
 }
 
 async fn broadcast_device_state(state: &AppState) {
-    if let Some(device) = state.device_manager.get_current_device().await {
+    if let Some((device, device_io)) = state.device_manager.get_manifest_and_io().await {
         if let Some(path) = state.device_manager.get_current_device_path().await {
             if let Ok(daemon_state) = state
                 .device_manager
-                .handle_device_detected(path, device)
+                .handle_device_detected(path, device, device_io)
                 .await
             {
                 let _ = state.state_tx.send(daemon_state);
@@ -1914,12 +1918,16 @@ async fn handle_device_list(state: &AppState) -> Result<Value, JsonRpcError> {
     let devices = state.device_manager.get_connected_devices().await;
     let data: Vec<_> = devices
         .iter()
-        .map(|(p, m)| {
+        .map(|(p, m, class)| {
             serde_json::json!({
                 "path": p.to_string_lossy(),
                 "deviceId": m.device_id,
                 "name": m.name.clone().unwrap_or_else(|| m.device_id.clone()),
                 "icon": m.icon.clone(),
+                "deviceClass": match class {
+                    crate::device::DeviceClass::Msc => "msc",
+                    crate::device::DeviceClass::Mtp => "mtp",
+                },
             })
         })
         .collect();
@@ -2322,7 +2330,7 @@ mod tests {
         };
 
         device_manager
-            .handle_device_detected(std::path::PathBuf::from("/tmp/test"), manifest)
+            .handle_device_detected(std::path::PathBuf::from("/tmp/test"), manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from("/tmp/test"))))
             .await
             .unwrap();
 
@@ -2388,7 +2396,7 @@ mod tests {
                 playlists: vec![],
         };
         device_manager
-            .handle_device_detected(dir.path().to_path_buf(), manifest)
+            .handle_device_detected(dir.path().to_path_buf(), manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())))
             .await
             .unwrap();
 
@@ -2435,7 +2443,7 @@ mod tests {
                 playlists: vec![],
         };
         device_manager
-            .handle_device_detected(dir.path().to_path_buf(), manifest)
+            .handle_device_detected(dir.path().to_path_buf(), manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())))
             .await
             .unwrap();
 
@@ -2496,7 +2504,7 @@ mod tests {
                 playlists: vec![],
         };
         device_manager
-            .handle_device_detected(std::path::PathBuf::from("/tmp/dirty"), dirty_manifest)
+            .handle_device_detected(std::path::PathBuf::from("/tmp/dirty"), dirty_manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from("/tmp/dirty"))))
             .await
             .unwrap();
 
@@ -2619,6 +2627,7 @@ mod tests {
                     transcoding_profile_id: None,
                 playlists: vec![],
                 },
+                std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from("/tmp/dev"))),
             )
             .await
             .unwrap();
@@ -2704,7 +2713,7 @@ mod tests {
                 playlists: vec![],
         };
         device_manager
-            .handle_device_detected(std::path::PathBuf::from("/tmp/dev"), manifest)
+            .handle_device_detected(std::path::PathBuf::from("/tmp/dev"), manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from("/tmp/dev"))))
             .await
             .unwrap();
 
@@ -2939,7 +2948,7 @@ mod tests {
         .await
         .unwrap();
         device_manager
-            .handle_device_detected(dir.path().to_path_buf(), manifest)
+            .handle_device_detected(dir.path().to_path_buf(), manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())))
             .await
             .unwrap();
 
@@ -3021,7 +3030,7 @@ mod tests {
                 playlists: vec![],
         };
         device_manager
-            .handle_device_detected(std::path::PathBuf::from("/tmp/auto-state"), manifest)
+            .handle_device_detected(std::path::PathBuf::from("/tmp/auto-state"), manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from("/tmp/auto-state"))))
             .await
             .unwrap();
 
@@ -3147,8 +3156,8 @@ mod tests {
             playlists: vec![],
         };
 
-        state.device_manager.handle_device_detected(path1, manifest1).await.unwrap();
-        state.device_manager.handle_device_detected(path2, manifest2).await.unwrap();
+        state.device_manager.handle_device_detected(path1.clone(), manifest1, std::sync::Arc::new(crate::device_io::MscBackend::new(path1))).await.unwrap();
+        state.device_manager.handle_device_detected(path2.clone(), manifest2, std::sync::Arc::new(crate::device_io::MscBackend::new(path2))).await.unwrap();
 
         let result = handle_device_list(&state).await.unwrap();
         let data = result["data"].as_array().unwrap();
@@ -3185,8 +3194,8 @@ mod tests {
             playlists: vec![],
         };
 
-        state.device_manager.handle_device_detected(path1.clone(), make_manifest("sel-dev-1")).await.unwrap();
-        state.device_manager.handle_device_detected(path2.clone(), make_manifest("sel-dev-2")).await.unwrap();
+        state.device_manager.handle_device_detected(path1.clone(), make_manifest("sel-dev-1"), std::sync::Arc::new(crate::device_io::MscBackend::new(path1.clone()))).await.unwrap();
+        state.device_manager.handle_device_detected(path2.clone(), make_manifest("sel-dev-2"), std::sync::Arc::new(crate::device_io::MscBackend::new(path2.clone()))).await.unwrap();
 
         // Switch to path2
         let params = Some(json!({ "path": path2.to_string_lossy() }));

@@ -461,6 +461,21 @@ pub mod tests {
     }
 
     #[tokio::test]
+    async fn mtp_backend_manifest_probe() {
+        let mock = Arc::new(MockMtpHandle::new());
+        mock.files.lock().unwrap().insert(
+            ".jellyfinsync.json".to_string(),
+            br#"{"device_id":"test-id","version":"1.0","managedPaths":[],"syncedItems":[]}"#.to_vec(),
+        );
+        let backend = MtpBackend {
+            handle: Arc::clone(&mock) as Arc<dyn MtpHandle>,
+        };
+        let data = backend.read_file(".jellyfinsync.json").await.unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(&data).unwrap();
+        assert_eq!(manifest["device_id"], "test-id");
+    }
+
+    #[tokio::test]
     async fn mtp_dirty_marker_detected_on_reconnect() {
         let mock = Arc::new(MockMtpHandle::new());
         // Pre-populate: target file + dirty marker (simulates interrupted write)

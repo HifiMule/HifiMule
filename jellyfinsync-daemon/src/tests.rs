@@ -70,7 +70,7 @@ async fn test_device_recognition_integration() {
     };
 
     let state = manager
-        .handle_device_detected(std::path::PathBuf::from("/tmp/test-device"), manifest)
+        .handle_device_detected(std::path::PathBuf::from("/tmp/test-device"), manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from("/tmp/test-device"))))
         .await
         .expect("Failed to handle detection");
 
@@ -148,7 +148,7 @@ async fn test_device_detection_auto_sync_enabled() {
 
     // Simulate detection
     let state = manager
-        .handle_device_detected(std::path::PathBuf::from("/tmp/auto-device"), manifest)
+        .handle_device_detected(std::path::PathBuf::from("/tmp/auto-device"), manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from("/tmp/auto-device"))))
         .await
         .expect("Failed to handle detection");
 
@@ -206,7 +206,7 @@ async fn test_device_detection_auto_sync_disabled() {
 
     // Device detection should proceed normally without triggering sync
     let state = manager
-        .handle_device_detected(std::path::PathBuf::from("/tmp/manual-device"), manifest)
+        .handle_device_detected(std::path::PathBuf::from("/tmp/manual-device"), manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from("/tmp/manual-device"))))
         .await
         .expect("Failed to handle detection");
 

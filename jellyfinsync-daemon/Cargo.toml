@@ -35,7 +35,14 @@ notify-rust.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
-# windows = { version = "0.58", features = [...] }  # Add when Story 2.10 wires up MTP detection
+windows = { version = "0.58", features = [
+    "Win32_Devices_PortableDevices",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Ole",
+    "implement",
+] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

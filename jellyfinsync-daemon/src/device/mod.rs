@@ -1,3 +1,5 @@
+pub mod mtp;
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -93,10 +95,25 @@ pub async fn write_manifest(
         .await
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeviceClass {
+    Msc,
+    Mtp,
+}
+
+fn device_class_from_path(path: &Path) -> DeviceClass {
+    if path.to_string_lossy().starts_with("mtp://") {
+        DeviceClass::Mtp
+    } else {
+        DeviceClass::Msc
+    }
+}
+
 /// Bundles the in-memory manifest with its IO backend for a connected device.
 pub struct ConnectedDevice {
     pub manifest: DeviceManifest,
     pub device_io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
+    pub device_class: DeviceClass,
 }
 
 /// Scans the specified managed paths recursively for leftover `.tmp`
@@ -128,6 +145,7 @@ pub enum DeviceEvent {
     Detected {
         path: PathBuf,
         manifest: DeviceManifest,
+        device_io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
     },
     Removed(PathBuf),
     Unrecognized {
@@ -177,9 +195,9 @@ impl DeviceManager {
         &self,
         path: PathBuf,
         manifest: DeviceManifest,
+        device_io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
     ) -> Result<crate::DaemonState> {
-        let device_io: std::sync::Arc<dyn crate::device_io::DeviceIO> =
-            std::sync::Arc::new(crate::device_io::MscBackend::new(path.clone()));
+        let device_class = device_class_from_path(&path);
 
         // T5.9: Scan for MTP-style dirty markers on reconnect.
         // For MSC devices, leftover `.dirty` markers indicate an interrupted MtpBackend write
@@ -194,6 +212,7 @@ impl DeviceManager {
                 let connected = ConnectedDevice {
                     manifest: dirty_manifest.clone(),
                     device_io: std::sync::Arc::clone(&device_io),
+                    device_class: device_class.clone(),
                 };
                 {
                     let mut devices = self.connected_devices.write().await;
@@ -231,6 +250,7 @@ impl DeviceManager {
         let connected = ConnectedDevice {
             manifest: manifest.clone(),
             device_io,
+            device_class,
         };
         {
             let mut devices = self.connected_devices.write().await;
@@ -365,12 +385,12 @@ impl DeviceManager {
     }
 
     /// Returns a snapshot of all currently connected managed devices.
-    pub async fn get_connected_devices(&self) -> Vec<(PathBuf, DeviceManifest)> {
+    pub async fn get_connected_devices(&self) -> Vec<(PathBuf, DeviceManifest, DeviceClass)> {
         self.connected_devices
             .read()
             .await
             .iter()
-            .map(|(p, d)| (p.clone(), d.manifest.clone()))
+            .map(|(p, d)| (p.clone(), d.manifest.clone(), d.device_class.clone()))
             .collect()
     }
 
@@ -378,12 +398,12 @@ impl DeviceManager {
     /// atomic read, preventing torn reads in get_daemon_state.
     pub async fn get_multi_device_snapshot(
         &self,
-    ) -> (Vec<(PathBuf, DeviceManifest)>, Option<PathBuf>) {
+    ) -> (Vec<(PathBuf, DeviceManifest, DeviceClass)>, Option<PathBuf>) {
         let devices = self.connected_devices.read().await;
         let sel = self.selected_device_path.read().await.clone();
         let device_list = devices
             .iter()
-            .map(|(p, d)| (p.clone(), d.manifest.clone()))
+            .map(|(p, d)| (p.clone(), d.manifest.clone(), d.device_class.clone()))
             .collect();
         (device_list, sel)
     }
@@ -492,6 +512,7 @@ impl DeviceManager {
             let mut devices = self.connected_devices.write().await;
             devices.insert(device_root.clone(), ConnectedDevice {
                 manifest: manifest.clone(),
+                device_class: device_class_from_path(&device_root),
                 device_io,
             });
         }
@@ -975,10 +996,13 @@ pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
                 known_mounts.insert(mount.clone());
                 match DeviceProber::probe(mount).await {
                     Ok(Some(manifest)) => {
+                        let device_io: std::sync::Arc<dyn crate::device_io::DeviceIO> =
+                            std::sync::Arc::new(crate::device_io::MscBackend::new(mount.clone()));
                         let _ = tx
                             .send(DeviceEvent::Detected {
                                 path: mount.clone(),
                                 manifest,
+                                device_io,
                             })
                             .await;
                     }
@@ -1005,6 +1029,70 @@ pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
         known_mounts.retain(|mount| {
             if !current_mounts.contains(mount) {
                 let _ = tx.try_send(DeviceEvent::Removed(mount.clone()));
+                false
+            } else {
+                true
+            }
+        });
+
+        sleep(Duration::from_secs(2)).await;
+    }
+}
+
+pub async fn run_mtp_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
+    let mut known_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    loop {
+        let devices = tokio::task::spawn_blocking(mtp::enumerate_mtp_devices)
+            .await
+            .unwrap_or_default();
+
+        for dev in &devices {
+            if !known_ids.contains(&dev.device_id) {
+                known_ids.insert(dev.device_id.clone());
+                let synthetic_path = PathBuf::from(format!("mtp://{}", dev.device_id));
+
+                match mtp::create_mtp_backend(dev) {
+                    Ok(backend) => {
+                        let backend_arc: std::sync::Arc<dyn crate::device_io::DeviceIO> =
+                            std::sync::Arc::new(backend);
+                        match backend_arc.read_file(".jellyfinsync.json").await {
+                            Ok(data) => match serde_json::from_slice::<DeviceManifest>(&data) {
+                                Ok(manifest) => {
+                                    let _ = tx.send(DeviceEvent::Detected {
+                                        path: synthetic_path,
+                                        manifest,
+                                        device_io: backend_arc,
+                                    }).await;
+                                }
+                                Err(e) => {
+                                    daemon_log!("[MTP] Manifest parse error on {}: {}", dev.device_id, e);
+                                    let _ = tx.send(DeviceEvent::Unrecognized {
+                                        path: synthetic_path,
+                                        device_io: backend_arc,
+                                    }).await;
+                                }
+                            },
+                            Err(_) => {
+                                let _ = tx.send(DeviceEvent::Unrecognized {
+                                    path: synthetic_path,
+                                    device_io: backend_arc,
+                                }).await;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        daemon_log!("[MTP] Failed to open device {}: {}", dev.device_id, e);
+                    }
+                }
+            }
+        }
+
+        known_ids.retain(|id| {
+            let still_connected = devices.iter().any(|d| &d.device_id == id);
+            if !still_connected {
+                let synthetic_path = PathBuf::from(format!("mtp://{}", id));
+                let _ = tx.try_send(DeviceEvent::Removed(synthetic_path));
                 false
             } else {
                 true

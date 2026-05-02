@@ -218,7 +218,7 @@ async fn test_list_root_folders_mixed() {
     // Simulate detection
     let manifest: DeviceManifest = serde_json::from_str(manifest_json).unwrap();
     manager
-        .handle_device_detected(root.to_path_buf(), manifest)
+        .handle_device_detected(root.to_path_buf(), manifest, msc(root))
         .await
         .unwrap();
 
@@ -258,7 +258,7 @@ async fn test_list_root_folders_empty_device() {
 
     let manifest: DeviceManifest = serde_json::from_str(manifest_json).unwrap();
     manager
-        .handle_device_detected(root.to_path_buf(), manifest)
+        .handle_device_detected(root.to_path_buf(), manifest, msc(root))
         .await
         .unwrap();
 
@@ -474,7 +474,7 @@ async fn test_get_discrepancies_missing_file() {
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
     manager
-        .handle_device_detected(root.to_path_buf(), manifest)
+        .handle_device_detected(root.to_path_buf(), manifest, msc(root))
         .await
         .unwrap();
 
@@ -519,7 +519,7 @@ async fn test_get_discrepancies_orphaned_file() {
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
     manager
-        .handle_device_detected(root.to_path_buf(), manifest)
+        .handle_device_detected(root.to_path_buf(), manifest, msc(root))
         .await
         .unwrap();
 
@@ -576,7 +576,7 @@ async fn test_get_discrepancies_no_issues() {
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
     manager
-        .handle_device_detected(root.to_path_buf(), manifest)
+        .handle_device_detected(root.to_path_buf(), manifest, msc(root))
         .await
         .unwrap();
 
@@ -634,7 +634,7 @@ async fn test_prune_items() {
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
     manager
-        .handle_device_detected(root.to_path_buf(), manifest)
+        .handle_device_detected(root.to_path_buf(), manifest, msc(root))
         .await
         .unwrap();
 
@@ -687,7 +687,7 @@ async fn test_relink_item() {
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
     manager
-        .handle_device_detected(root.to_path_buf(), manifest)
+        .handle_device_detected(root.to_path_buf(), manifest, msc(root))
         .await
         .unwrap();
 
@@ -733,7 +733,7 @@ async fn test_relink_item_path_traversal() {
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
     manager
-        .handle_device_detected(root.to_path_buf(), manifest)
+        .handle_device_detected(root.to_path_buf(), manifest, msc(root))
         .await
         .unwrap();
 
@@ -767,7 +767,7 @@ async fn test_clear_dirty_flag() {
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
     manager
-        .handle_device_detected(root.to_path_buf(), manifest)
+        .handle_device_detected(root.to_path_buf(), manifest, msc(root))
         .await
         .unwrap();
 
@@ -851,7 +851,7 @@ async fn test_handle_device_detected_clears_unrecognized_path() {
 
     // Detect device (recognized)
     manager
-        .handle_device_detected(dir.path().to_path_buf(), manifest)
+        .handle_device_detected(dir.path().to_path_buf(), manifest, msc(dir.path()))
         .await
         .unwrap();
 
@@ -994,7 +994,7 @@ async fn test_handle_device_unrecognized_preserves_recognized_device() {
 
     // First detect a recognized device
     manager
-        .handle_device_detected(dir.path().to_path_buf(), manifest)
+        .handle_device_detected(dir.path().to_path_buf(), manifest, msc(dir.path()))
         .await
         .unwrap();
     assert!(manager.get_current_device().await.is_some());
@@ -1021,7 +1021,7 @@ async fn test_handle_device_unrecognized_preserves_recognized_device() {
     // The unrecognized path must NOT appear in connected_devices
     let devices = manager.get_connected_devices().await;
     assert!(
-        devices.iter().all(|(p, _)| p != dir2.path()),
+        devices.iter().all(|(p, _, _)| p != dir2.path()),
         "Unrecognized device path must not be in connected_devices"
     );
 }
@@ -1142,7 +1142,7 @@ async fn test_save_basket_roundtrip() {
     write_manifest(msc(dir.path()), &manifest).await.unwrap();
 
     manager
-        .handle_device_detected(dir.path().to_path_buf(), manifest)
+        .handle_device_detected(dir.path().to_path_buf(), manifest, msc(dir.path()))
         .await
         .unwrap();
 
@@ -1264,8 +1264,8 @@ async fn test_handle_device_detected_two_sequential_devices() {
     write_manifest(msc(&path1), &manifest1).await.unwrap();
     write_manifest(msc(&path2), &manifest2).await.unwrap();
 
-    manager.handle_device_detected(path1.clone(), manifest1).await.unwrap();
-    manager.handle_device_detected(path2.clone(), manifest2).await.unwrap();
+    manager.handle_device_detected(path1.clone(), manifest1, msc(&path1)).await.unwrap();
+    manager.handle_device_detected(path2.clone(), manifest2, msc(&path2)).await.unwrap();
 
     let devices = manager.get_connected_devices().await;
     assert_eq!(devices.len(), 2, "Both devices must be in connected_devices");
@@ -1296,8 +1296,8 @@ async fn test_handle_device_removed_selected_with_remaining_autoselects() {
     write_manifest(msc(&path1), &manifest1).await.unwrap();
     write_manifest(msc(&path2), &manifest2).await.unwrap();
 
-    manager.handle_device_detected(path1.clone(), manifest1).await.unwrap();
-    manager.handle_device_detected(path2.clone(), manifest2).await.unwrap();
+    manager.handle_device_detected(path1.clone(), manifest1, msc(&path1)).await.unwrap();
+    manager.handle_device_detected(path2.clone(), manifest2, msc(&path2)).await.unwrap();
 
     // Selected is path1 — remove it
     manager.handle_device_removed(&path1).await;
@@ -1326,8 +1326,8 @@ async fn test_handle_device_removed_non_selected_selection_unchanged() {
     write_manifest(msc(&path1), &manifest1).await.unwrap();
     write_manifest(msc(&path2), &manifest2).await.unwrap();
 
-    manager.handle_device_detected(path1.clone(), manifest1).await.unwrap();
-    manager.handle_device_detected(path2.clone(), manifest2).await.unwrap();
+    manager.handle_device_detected(path1.clone(), manifest1, msc(&path1)).await.unwrap();
+    manager.handle_device_detected(path2.clone(), manifest2, msc(&path2)).await.unwrap();
 
     // Selected is path1 — remove path2 (non-selected)
     manager.handle_device_removed(&path2).await;
@@ -1356,8 +1356,8 @@ async fn test_select_device_valid_path() {
     write_manifest(msc(&path1), &manifest1).await.unwrap();
     write_manifest(msc(&path2), &manifest2).await.unwrap();
 
-    manager.handle_device_detected(path1.clone(), manifest1).await.unwrap();
-    manager.handle_device_detected(path2.clone(), manifest2).await.unwrap();
+    manager.handle_device_detected(path1.clone(), manifest1, msc(&path1)).await.unwrap();
+    manager.handle_device_detected(path2.clone(), manifest2, msc(&path2)).await.unwrap();
 
     // Switch to path2
     let ok = manager.select_device(path2.clone()).await;

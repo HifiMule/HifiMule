@@ -166,8 +166,15 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
 
             // Start Device Observer
             let (device_tx, mut device_rx) = tokio::sync::mpsc::channel(10);
+            let device_tx_msc = device_tx.clone();
             tokio::spawn(async move {
-                device::run_observer(device_tx).await;
+                device::run_observer(device_tx_msc).await;
+            });
+
+            // Start MTP Observer
+            let device_tx_mtp = device_tx.clone();
+            tokio::spawn(async move {
+                device::run_mtp_observer(device_tx_mtp).await;
             });
 
             // Initialize Device Manager
@@ -199,13 +206,13 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
             tokio::spawn(async move {
                 while let Some(event) = device_rx.recv().await {
                     match event {
-                        device::DeviceEvent::Detected { path, manifest } => {
+                        device::DeviceEvent::Detected { path, manifest, device_io } => {
                             daemon_log!("Device detected at {:?}: {:?}", path, manifest);
                             let auto_sync_enabled = manifest.auto_sync_on_connect;
                             let has_basket = !manifest.basket_items.is_empty();
                             let auto_fill_enabled = manifest.auto_fill.enabled;
                             let manifest_device_id = manifest.device_id.clone();
-                            match device_manager.handle_device_detected(path.clone(), manifest).await {
+                            match device_manager.handle_device_detected(path.clone(), manifest, device_io).await {
                                 Ok(new_state) => {
                                     let _ = state_tx_clone.send(new_state);
                                 }
