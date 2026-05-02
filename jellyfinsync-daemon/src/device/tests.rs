@@ -797,7 +797,7 @@ async fn test_handle_device_unrecognized_stores_path() {
     assert!(manager.get_current_device().await.is_none());
 
     let state = manager
-        .handle_device_unrecognized(dir.path().to_path_buf(), msc(dir.path()))
+        .handle_device_unrecognized(dir.path().to_path_buf(), msc(dir.path()), None)
         .await;
 
     // Path should now be set
@@ -822,7 +822,7 @@ async fn test_handle_device_removed_clears_unrecognized_path() {
 
     let path = dir.path().to_path_buf();
     manager
-        .handle_device_unrecognized(path.clone(), msc(dir.path()))
+        .handle_device_unrecognized(path.clone(), msc(dir.path()), None)
         .await;
     assert!(manager.get_unrecognized_device_path().await.is_some());
 
@@ -845,7 +845,7 @@ async fn test_handle_device_detected_clears_unrecognized_path() {
 
     // Set unrecognized path first
     manager
-        .handle_device_unrecognized(dir.path().to_path_buf(), msc(dir.path()))
+        .handle_device_unrecognized(dir.path().to_path_buf(), msc(dir.path()), None)
         .await;
     assert!(manager.get_unrecognized_device_path().await.is_some());
 
@@ -872,7 +872,7 @@ async fn test_list_root_folders_unrecognized_device() {
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
 
-    manager.handle_device_unrecognized(root.to_path_buf(), msc(root)).await;
+    manager.handle_device_unrecognized(root.to_path_buf(), msc(root), None).await;
 
     let res = manager.list_root_folders().await.unwrap().unwrap();
 
@@ -882,13 +882,48 @@ async fn test_list_root_folders_unrecognized_device() {
 }
 
 #[tokio::test]
+async fn test_list_root_folders_unrecognized_mtp_device() {
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+
+    let mtp_path = PathBuf::from("mtp://fake-device-id");
+    manager
+        .handle_device_unrecognized(mtp_path, msc(std::path::Path::new(".")), Some("Garmin Watch".to_string()))
+        .await;
+
+    let res = manager.list_root_folders().await.unwrap().unwrap();
+
+    assert!(!res.has_manifest, "Unrecognized MTP device has no manifest");
+    assert!(res.folders.is_empty(), "Unrecognized MTP device has no known folders");
+    assert_eq!(res.managed_count, 0);
+    assert_eq!(res.unmanaged_count, 0);
+    assert_eq!(res.device_name, "Garmin Watch", "friendly_name should be used as device_name");
+}
+
+#[tokio::test]
+async fn test_list_root_folders_unrecognized_mtp_device_no_friendly_name() {
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+
+    let mtp_path = PathBuf::from("mtp://fake-device-id");
+    manager
+        .handle_device_unrecognized(mtp_path, msc(std::path::Path::new(".")), None)
+        .await;
+
+    let res = manager.list_root_folders().await.unwrap().unwrap();
+
+    assert!(!res.has_manifest);
+    assert_eq!(res.device_name, "MTP Device", "Should fall back to 'MTP Device' when no friendly_name");
+}
+
+#[tokio::test]
 async fn test_initialize_device_root() {
     let dir = tempdir().unwrap();
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
 
     manager
-        .handle_device_unrecognized(dir.path().to_path_buf(), msc(dir.path()))
+        .handle_device_unrecognized(dir.path().to_path_buf(), msc(dir.path()), None)
         .await;
 
     // Initialize with root (empty folder_path)
@@ -916,7 +951,7 @@ async fn test_initialize_device_subfolder() {
     let manager = DeviceManager::new(db);
 
     manager
-        .handle_device_unrecognized(dir.path().to_path_buf(), msc(dir.path()))
+        .handle_device_unrecognized(dir.path().to_path_buf(), msc(dir.path()), None)
         .await;
 
     // Initialize with a subfolder
@@ -958,7 +993,7 @@ async fn test_initialize_device_rejects_path_traversal() {
     let manager = DeviceManager::new(db);
 
     manager
-        .handle_device_unrecognized(dir.path().to_path_buf(), msc(dir.path()))
+        .handle_device_unrecognized(dir.path().to_path_buf(), msc(dir.path()), None)
         .await;
 
     // Path traversal with ".."
@@ -1003,7 +1038,7 @@ async fn test_handle_device_unrecognized_preserves_recognized_device() {
     // Now handle an unrecognized device at a DIFFERENT path — recognized device must remain
     let dir2 = tempdir().unwrap();
     manager
-        .handle_device_unrecognized(dir2.path().to_path_buf(), msc(dir2.path()))
+        .handle_device_unrecognized(dir2.path().to_path_buf(), msc(dir2.path()), None)
         .await;
 
     assert!(
@@ -1038,7 +1073,7 @@ async fn test_handle_device_unrecognized_stores_device_io() {
     assert!(manager.get_unrecognized_device_io().await.is_none());
 
     manager
-        .handle_device_unrecognized(dir.path().to_path_buf(), msc(dir.path()))
+        .handle_device_unrecognized(dir.path().to_path_buf(), msc(dir.path()), None)
         .await;
 
     assert!(
@@ -1055,7 +1090,7 @@ async fn test_initialize_device_uses_stored_io_and_clears_it() {
     let manager = DeviceManager::new(db);
 
     manager
-        .handle_device_unrecognized(dir.path().to_path_buf(), msc(dir.path()))
+        .handle_device_unrecognized(dir.path().to_path_buf(), msc(dir.path()), None)
         .await;
 
     assert!(manager.get_unrecognized_device_io().await.is_some());
@@ -1089,7 +1124,7 @@ async fn test_handle_device_removed_clears_unrecognized_io() {
     let manager = DeviceManager::new(db);
 
     let path = dir.path().to_path_buf();
-    manager.handle_device_unrecognized(path.clone(), msc(dir.path())).await;
+    manager.handle_device_unrecognized(path.clone(), msc(dir.path()), None).await;
 
     assert!(manager.get_unrecognized_device_path().await.is_some());
     assert!(manager.get_unrecognized_device_io().await.is_some());
