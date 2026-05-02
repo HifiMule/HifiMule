@@ -40,9 +40,14 @@ pub mod windows_wpd {
     use super::{MtpDeviceInfo, MtpDeviceInner};
     use crate::device_io::{FileEntry, MtpHandle};
     use anyhow::Result;
-    use windows::core::{HSTRING, PCWSTR, PWSTR};
-    use windows::Win32::Devices::PortableDevices::*;
+    use std::mem::ManuallyDrop;
+    use windows::Win32::Devices::PortableDevices::{
+        IPortableDeviceDataStream, IPortableDevicePropVariantCollection,
+        PortableDevicePropVariantCollection, *,
+    };
     use windows::Win32::System::Com::*;
+    use windows::Win32::System::Variant::VT_LPWSTR;
+    use windows::core::{Interface, HSTRING, PCWSTR, PWSTR};
     use windows::Win32::UI::Shell::PropertiesSystem::PROPERTYKEY;
 
     // WPD_OBJECT_ORIGINAL_FILE_NAME = {EF6B490D-5CD8-437A-AFFC-DA8B60EE4A3C}, pid=12
@@ -66,6 +71,96 @@ pub mod windows_wpd {
         ),
         pid: 0,
     };
+
+    // ── Additional WPD PROPERTYKEY constants ──────────────────────────────────
+    // All share GUID {EF6B490D-5CD8-437A-AFFC-DA8B60EE4A3C}
+
+    const WPD_OBJECT_PARENT_ID: PROPERTYKEY = PROPERTYKEY {
+        fmtid: windows::core::GUID::from_values(
+            0xEF6B490D,
+            0x5CD8,
+            0x437A,
+            [0xAF, 0xFC, 0xDA, 0x8B, 0x60, 0xEE, 0x4A, 0x3C],
+        ),
+        pid: 3,
+    };
+
+    const WPD_OBJECT_NAME: PROPERTYKEY = PROPERTYKEY {
+        fmtid: windows::core::GUID::from_values(
+            0xEF6B490D,
+            0x5CD8,
+            0x437A,
+            [0xAF, 0xFC, 0xDA, 0x8B, 0x60, 0xEE, 0x4A, 0x3C],
+        ),
+        pid: 4,
+    };
+
+    const WPD_OBJECT_FORMAT: PROPERTYKEY = PROPERTYKEY {
+        fmtid: windows::core::GUID::from_values(
+            0xEF6B490D,
+            0x5CD8,
+            0x437A,
+            [0xAF, 0xFC, 0xDA, 0x8B, 0x60, 0xEE, 0x4A, 0x3C],
+        ),
+        pid: 6,
+    };
+
+    const WPD_OBJECT_CONTENT_TYPE: PROPERTYKEY = PROPERTYKEY {
+        fmtid: windows::core::GUID::from_values(
+            0xEF6B490D,
+            0x5CD8,
+            0x437A,
+            [0xAF, 0xFC, 0xDA, 0x8B, 0x60, 0xEE, 0x4A, 0x3C],
+        ),
+        pid: 7,
+    };
+
+    const WPD_OBJECT_SIZE: PROPERTYKEY = PROPERTYKEY {
+        fmtid: windows::core::GUID::from_values(
+            0xEF6B490D,
+            0x5CD8,
+            0x437A,
+            [0xAF, 0xFC, 0xDA, 0x8B, 0x60, 0xEE, 0x4A, 0x3C],
+        ),
+        pid: 11,
+    };
+
+    // WPD_STORAGE_FREE_SPACE_IN_BYTES = {01A3057A-74D6-4E80-BEA7-DC4C212CE50A}, pid=5
+    const WPD_STORAGE_FREE_SPACE_IN_BYTES: PROPERTYKEY = PROPERTYKEY {
+        fmtid: windows::core::GUID::from_values(
+            0x01A3057A,
+            0x74D6,
+            0x4E80,
+            [0xBE, 0xA7, 0xDC, 0x4C, 0x21, 0x2C, 0xE5, 0x0A],
+        ),
+        pid: 5,
+    };
+
+    // ── WPD content-type and format GUIDs ─────────────────────────────────────
+
+    const WPD_CONTENT_TYPE_GENERIC_FILE: windows::core::GUID =
+        windows::core::GUID::from_values(
+            0x0EBC0471,
+            0xA718,
+            0x4C0F,
+            [0xBC, 0x31, 0x18, 0xCE, 0x37, 0xF4, 0xF2, 0x84],
+        );
+
+    const WPD_CONTENT_TYPE_FOLDER: windows::core::GUID =
+        windows::core::GUID::from_values(
+            0x27E2E392,
+            0xA111,
+            0x48E0,
+            [0xAB, 0x0C, 0xE1, 0x77, 0x05, 0xA0, 0x5F, 0x85],
+        );
+
+    const WPD_OBJECT_FORMAT_UNDEFINED: windows::core::GUID =
+        windows::core::GUID::from_values(
+            0x30010000,
+            0xAE6C,
+            0x4804,
+            [0x98, 0xBA, 0xC5, 0x7B, 0x46, 0x96, 0x5F, 0xE7],
+        );
 
     // RAII guard: initialises COM on construction, uninitialises on drop.
     struct CoInitGuard;
@@ -202,6 +297,248 @@ pub mod windows_wpd {
                 Ok(HSTRING::from(&current_id))
             }
         }
+
+        // Returns the first child object ID under `parent_id` whose
+        // WPD_OBJECT_ORIGINAL_FILE_NAME matches `name` (case-insensitive), or None.
+        fn find_child_object_id(
+            &self,
+            parent_id: &str,
+            name: &str,
+        ) -> Result<Option<String>> {
+            unsafe {
+                let content = self.device.Content()?;
+                let props = content.Properties()?;
+                let parent_hstr = HSTRING::from(parent_id);
+                let child_enum =
+                    content.EnumObjects(0, PCWSTR(parent_hstr.as_ptr()), None)?;
+                let mut batch: Vec<PWSTR> = vec![PWSTR::null(); 64];
+                let mut found: Option<String> = None;
+                'outer: loop {
+                    let mut fetched = 0u32;
+                    let _ = child_enum.Next(batch.as_mut_slice(), &mut fetched);
+                    if fetched == 0 {
+                        break;
+                    }
+                    for i in 0..fetched as usize {
+                        if batch[i].is_null() {
+                            continue;
+                        }
+                        let obj_id = match batch[i].to_string() {
+                            Ok(s) => s,
+                            Err(_) => {
+                                CoTaskMemFree(Some(batch[i].0 as *const _));
+                                batch[i] = PWSTR::null();
+                                continue;
+                            }
+                        };
+                        CoTaskMemFree(Some(batch[i].0 as *const _));
+                        batch[i] = PWSTR::null();
+
+                        let obj_hstr = HSTRING::from(&obj_id);
+                        if let Ok(values) = props.GetValues(PCWSTR(obj_hstr.as_ptr()), None) {
+                            if let Ok(name_pwstr) =
+                                values.GetStringValue(&WPD_OBJECT_ORIGINAL_FILE_NAME)
+                            {
+                                if !name_pwstr.is_null() {
+                                    let child_name = name_pwstr.to_string().unwrap_or_default();
+                                    CoTaskMemFree(Some(name_pwstr.0 as *const _));
+                                    if child_name.eq_ignore_ascii_case(name) {
+                                        found = Some(obj_id);
+                                        break 'outer;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(found)
+            }
+        }
+
+        // Creates an IPortableDevicePropVariantCollection containing a single
+        // VT_LPWSTR PROPVARIANT holding the given object ID string.
+        fn make_object_id_collection(
+            &self,
+            obj_id: &str,
+        ) -> Result<IPortableDevicePropVariantCollection> {
+            unsafe {
+                let collection: IPortableDevicePropVariantCollection =
+                    CoCreateInstance(&PortableDevicePropVariantCollection, None, CLSCTX_INPROC_SERVER)?;
+
+                // Allocate a UTF-16 buffer for the object ID via CoTaskMemAlloc.
+                let utf16: Vec<u16> =
+                    obj_id.encode_utf16().chain(std::iter::once(0u16)).collect();
+                let byte_len = utf16.len() * 2;
+                let ptr = CoTaskMemAlloc(byte_len) as *mut u16;
+                if ptr.is_null() {
+                    return Err(anyhow::anyhow!("CoTaskMemAlloc failed for PROPVARIANT"));
+                }
+                std::ptr::copy_nonoverlapping(utf16.as_ptr(), ptr, utf16.len());
+
+                // Build a raw imp::PROPVARIANT with vt=VT_LPWSTR and pwszVal=ptr.
+                // Use ManuallyDrop so that the windows::core::PROPVARIANT wrapper's
+                // Drop (PropVariantClear) is never called on our CoTaskMem pointer.
+                let mut raw: windows::core::imp::PROPVARIANT = std::mem::zeroed();
+                raw.Anonymous.Anonymous.vt = VT_LPWSTR.0;
+                raw.Anonymous.Anonymous.Anonymous.pwszVal = ptr;
+                // Transmute to the public wrapper type (repr(transparent)).
+                let pv: ManuallyDrop<windows::core::PROPVARIANT> =
+                    ManuallyDrop::new(std::mem::transmute(raw));
+
+                collection.Add(&*pv as *const _)?;
+                // The collection has copied the string; free our CoTaskMem buffer now.
+                CoTaskMemFree(Some(ptr as *const _));
+
+                Ok(collection)
+            }
+        }
+
+        // Walks `components` from the storage root, creating any missing folder objects.
+        // Returns the HSTRING object ID of the final component (or the storage root if
+        // `components` is empty).
+        fn ensure_dir_chain(&self, components: &[&str]) -> Result<HSTRING> {
+            unsafe {
+                let content = self.device.Content()?;
+
+                // Locate storage root (first child of "DEVICE").
+                let device_hstr = HSTRING::from("DEVICE");
+                let root_enum =
+                    content.EnumObjects(0, PCWSTR(device_hstr.as_ptr()), None)?;
+                let mut storage_buf = [PWSTR::null()];
+                let mut fetched = 0u32;
+                let _ = root_enum.Next(&mut storage_buf, &mut fetched);
+                if fetched == 0 || storage_buf[0].is_null() {
+                    return Err(anyhow::anyhow!("WPD: no storage objects found under DEVICE"));
+                }
+                let storage_id = storage_buf[0].to_string()?;
+                CoTaskMemFree(Some(storage_buf[0].0 as *const _));
+
+                if components.is_empty() {
+                    return Ok(HSTRING::from(&storage_id));
+                }
+
+                let mut current_id = storage_id;
+
+                for &component in components {
+                    // Check whether this component already exists.
+                    match self.find_child_object_id(&current_id, component)? {
+                        Some(child_id) => {
+                            current_id = child_id;
+                        }
+                        None => {
+                            // Create a new folder object.
+                            let props: IPortableDeviceValues =
+                                CoCreateInstance(&PortableDeviceValues, None, CLSCTX_INPROC_SERVER)?;
+                            let parent_hstr = HSTRING::from(&current_id);
+                            props.SetStringValue(
+                                &WPD_OBJECT_PARENT_ID,
+                                PCWSTR(parent_hstr.as_ptr()),
+                            )?;
+                            let comp_hstr = HSTRING::from(component);
+                            props.SetStringValue(
+                                &WPD_OBJECT_NAME,
+                                PCWSTR(comp_hstr.as_ptr()),
+                            )?;
+                            props.SetGuidValue(
+                                &WPD_OBJECT_CONTENT_TYPE,
+                                &WPD_CONTENT_TYPE_FOLDER,
+                            )?;
+                            let mut new_id_pwstr = PWSTR::null();
+                            content.CreateObjectWithPropertiesOnly(&props, &mut new_id_pwstr)?;
+                            let new_id = new_id_pwstr.to_string()?;
+                            CoTaskMemFree(Some(new_id_pwstr.0 as *const _));
+                            current_id = new_id;
+                        }
+                    }
+                }
+
+                Ok(HSTRING::from(&current_id))
+            }
+        }
+    }
+
+    // Recursive helper for list_files: collects all non-folder entries under `parent_id`.
+    // `prefix` is the path accumulated so far (empty string at the root).
+    fn collect_files_recursive(
+        content: &IPortableDeviceContent,
+        props: &IPortableDeviceProperties,
+        parent_id: &str,
+        prefix: &str,
+        acc: &mut Vec<FileEntry>,
+    ) -> Result<()> {
+        unsafe {
+            let parent_hstr = HSTRING::from(parent_id);
+            let child_enum =
+                content.EnumObjects(0, PCWSTR(parent_hstr.as_ptr()), None)?;
+            let mut batch: Vec<PWSTR> = vec![PWSTR::null(); 64];
+            loop {
+                let mut fetched = 0u32;
+                let _ = child_enum.Next(batch.as_mut_slice(), &mut fetched);
+                if fetched == 0 {
+                    break;
+                }
+                for i in 0..fetched as usize {
+                    if batch[i].is_null() {
+                        continue;
+                    }
+                    let obj_id = match batch[i].to_string() {
+                        Ok(s) => s,
+                        Err(_) => {
+                            CoTaskMemFree(Some(batch[i].0 as *const _));
+                            batch[i] = PWSTR::null();
+                            continue;
+                        }
+                    };
+                    CoTaskMemFree(Some(batch[i].0 as *const _));
+                    batch[i] = PWSTR::null();
+
+                    let obj_hstr = HSTRING::from(&obj_id);
+                    let values = match props.GetValues(PCWSTR(obj_hstr.as_ptr()), None) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+
+                    // Read filename — skip entry if missing.
+                    let name_pwstr = match values.GetStringValue(&WPD_OBJECT_ORIGINAL_FILE_NAME) {
+                        Ok(p) if !p.is_null() => p,
+                        _ => continue,
+                    };
+                    let name = name_pwstr.to_string().unwrap_or_default();
+                    CoTaskMemFree(Some(name_pwstr.0 as *const _));
+                    if name.is_empty() {
+                        continue;
+                    }
+
+                    // Read content type.
+                    let content_type = values
+                        .GetGuidValue(&WPD_OBJECT_CONTENT_TYPE)
+                        .unwrap_or(windows::core::GUID::zeroed());
+
+                    if content_type == WPD_CONTENT_TYPE_FOLDER {
+                        // Recurse into folder.
+                        let new_prefix = if prefix.is_empty() {
+                            name.clone()
+                        } else {
+                            format!("{}/{}", prefix, name)
+                        };
+                        // Ignore errors from recursion — continue with other entries.
+                        let _ = collect_files_recursive(content, props, &obj_id, &new_prefix, acc);
+                    } else {
+                        // File: read size and push entry.
+                        let size = values
+                            .GetUnsignedLargeIntegerValue(&WPD_OBJECT_SIZE)
+                            .unwrap_or(0);
+                        let entry_path = if prefix.is_empty() {
+                            name.clone()
+                        } else {
+                            format!("{}/{}", prefix, name)
+                        };
+                        acc.push(FileEntry { path: entry_path, name, size });
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     impl MtpHandle for WpdHandle {
@@ -240,20 +577,127 @@ pub mod windows_wpd {
             }
         }
 
-        fn write_file(&self, _path: &str, _data: &[u8]) -> Result<()> {
-            Err(anyhow::anyhow!("WPD write_file: not yet implemented"))
+        fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
+            let components = super::split_path_components(path);
+            if components.is_empty() {
+                return Err(anyhow::anyhow!("WPD write_file: empty path"));
+            }
+            let filename = components[components.len() - 1];
+            let parent_components = &components[..components.len() - 1];
+
+            // Ensure all parent directories exist, get parent object ID.
+            let parent_id_hstr = self.ensure_dir_chain(parent_components)?;
+            let parent_id_str = parent_id_hstr.to_string();
+
+            unsafe {
+                let content = self.device.Content()?;
+
+                // If a file with this name already exists, delete it first.
+                if let Some(existing_id) =
+                    self.find_child_object_id(&parent_id_str, filename)?
+                {
+                    let col = self.make_object_id_collection(&existing_id)?;
+                    let mut pp_results: Option<IPortableDevicePropVariantCollection> = None;
+                    content.Delete(0, &col, &mut pp_results)?;
+                }
+
+                // Build object properties.
+                let props: IPortableDeviceValues =
+                    CoCreateInstance(&PortableDeviceValues, None, CLSCTX_INPROC_SERVER)?;
+                props.SetStringValue(&WPD_OBJECT_PARENT_ID, PCWSTR(parent_id_hstr.as_ptr()))?;
+                let fname_hstr = HSTRING::from(filename);
+                props.SetStringValue(
+                    &WPD_OBJECT_ORIGINAL_FILE_NAME,
+                    PCWSTR(fname_hstr.as_ptr()),
+                )?;
+                props.SetStringValue(&WPD_OBJECT_NAME, PCWSTR(fname_hstr.as_ptr()))?;
+                props.SetGuidValue(&WPD_OBJECT_CONTENT_TYPE, &WPD_CONTENT_TYPE_GENERIC_FILE)?;
+                props.SetGuidValue(&WPD_OBJECT_FORMAT, &WPD_OBJECT_FORMAT_UNDEFINED)?;
+                props.SetUnsignedLargeIntegerValue(&WPD_OBJECT_SIZE, data.len() as u64)?;
+
+                // Create the object and get a write stream.
+                let mut stream_opt: Option<IStream> = None;
+                let mut optimal_buf = 0u32;
+                content.CreateObjectWithPropertiesAndData(
+                    &props,
+                    &mut stream_opt,
+                    &mut optimal_buf,
+                    std::ptr::null_mut(),
+                )?;
+                let stream = stream_opt.ok_or_else(|| {
+                    anyhow::anyhow!("WPD write_file: CreateObjectWithPropertiesAndData returned no stream")
+                })?;
+
+                // Write data in chunks.
+                let chunk = (optimal_buf as usize).max(4096);
+                let mut offset = 0usize;
+                while offset < data.len() {
+                    let end = (offset + chunk).min(data.len());
+                    let slice = &data[offset..end];
+                    let mut written = 0u32;
+                    stream
+                        .Write(slice.as_ptr() as *const _, slice.len() as u32, Some(&mut written))
+                        .ok()?;
+                    offset += written as usize;
+                    if written == 0 {
+                        return Err(anyhow::anyhow!("WPD write_file: stream stalled (zero bytes written for non-empty slice)"));
+                    }
+                }
+
+                // Commit via IPortableDeviceDataStream.
+                let data_stream: IPortableDeviceDataStream = stream.cast()?;
+                data_stream.Commit(STGC_DEFAULT)?;
+
+                Ok(())
+            }
         }
 
-        fn delete_file(&self, _path: &str) -> Result<()> {
-            Err(anyhow::anyhow!("WPD delete_file: not yet implemented"))
+        fn delete_file(&self, path: &str) -> Result<()> {
+            let obj_id_hstr = self.path_to_object_id(path)?;
+            let obj_id_str = obj_id_hstr.to_string();
+            unsafe {
+                let content = self.device.Content()?;
+                let collection = self.make_object_id_collection(&obj_id_str)?;
+                let mut pp_results: Option<IPortableDevicePropVariantCollection> = None;
+                content.Delete(0, &collection, &mut pp_results)?;
+                Ok(())
+            }
         }
 
-        fn list_files(&self, _path: &str) -> Result<Vec<FileEntry>> {
-            Err(anyhow::anyhow!("WPD list_files: not yet implemented"))
+        fn list_files(&self, path: &str) -> Result<Vec<FileEntry>> {
+            let root_id_hstr = self.path_to_object_id(path)?;
+            let root_id_str = root_id_hstr.to_string();
+            unsafe {
+                let content = self.device.Content()?;
+                let props = content.Properties()?;
+                let mut acc = Vec::new();
+                collect_files_recursive(&content, &props, &root_id_str, "", &mut acc)?;
+                Ok(acc)
+            }
         }
 
         fn free_space(&self) -> Result<u64> {
-            Err(anyhow::anyhow!("WPD free_space: not yet implemented"))
+            unsafe {
+                let content = self.device.Content()?;
+                let props = content.Properties()?;
+
+                // Get storage object ID (first child of "DEVICE").
+                let device_hstr = HSTRING::from("DEVICE");
+                let root_enum =
+                    content.EnumObjects(0, PCWSTR(device_hstr.as_ptr()), None)?;
+                let mut storage_buf = [PWSTR::null()];
+                let mut fetched = 0u32;
+                let _ = root_enum.Next(&mut storage_buf, &mut fetched);
+                if fetched == 0 || storage_buf[0].is_null() {
+                    return Err(anyhow::anyhow!("WPD: no storage objects found under DEVICE"));
+                }
+                let storage_id = storage_buf[0].to_string()?;
+                CoTaskMemFree(Some(storage_buf[0].0 as *const _));
+
+                let storage_hstr = HSTRING::from(&storage_id);
+                let values = props.GetValues(PCWSTR(storage_hstr.as_ptr()), None)?;
+                Ok(values.GetUnsignedLargeIntegerValue(&WPD_STORAGE_FREE_SPACE_IN_BYTES)?)
+            }
         }
     }
 
