@@ -7,6 +7,13 @@
 - **MTP `friendly_name` not pre-filled in `InitDeviceModal`** — The Garmin's friendly name (e.g., "Garmin Forerunner 945") is stored in `unrecognized_device_friendly_name` but the init modal always defaults to "My Device". Wire `pendingDeviceFriendlyName` through `get_daemon_state` RPC to pre-fill the device name input. [`rpc.rs`, `get_daemon_state`; `BasketSidebar.ts`, `openInitDeviceModal`]
 - **Empty-string `manifest.name` bypasses `friendly_name` fallback** — `manifest.as_ref().and_then(|m| m.name.clone())` returns `Some("")` for blank manifest names, using the empty string as `device_name`. Add `.filter(|n| !n.is_empty())` before the fallback chain.
 
+## Deferred from: code review of fix-wpd-mtp-io-operations (2026-05-02)
+
+- **Multi-storage device: `ensure_dir_chain` and `free_space` always use first storage child** — devices with both internal and SD-card storage will always resolve paths and free space against whichever storage object is enumerated first. Requires a storage-selection mechanism or explicit storage-ID tracking. [`mtp.rs`, `ensure_dir_chain`, `free_space`]
+- **`write_file` delete-then-create is not atomic** — if `CreateObjectWithPropertiesAndData` or write fails after delete, the old file is destroyed with no rollback. Pre-existing design pattern; mitigation is the dirty-marker strategy in `write_with_verify`. [`mtp.rs`, `write_file`]
+- **TOCTOU in `ensure_dir_chain` folder creation** — `find_child_object_id → None → CreateObjectWithPropertiesOnly` race with another process; creates a hard error instead of tolerating the duplicate. Low risk in practice. [`mtp.rs`, `ensure_dir_chain`]
+- **`collect_files_recursive` swallows subdirectory enumeration errors** — a directory that fails to enumerate is silently skipped, producing an incomplete file list. Pre-existing tolerance decision; surfacing these errors would require a structured warning mechanism. [`mtp.rs`, `collect_files_recursive`]
+
 ## Deferred from: code review of 2-10-mtp-device-detection (2026-05-02)
 
 - **`broadcast_device_state` re-triggers `handle_device_detected` on already-connected device** — can cause duplicate insertion logic and spurious dirty-state transitions; signature changed in this diff but behavior is pre-existing. [`rpc.rs`, `broadcast_device_state`]
