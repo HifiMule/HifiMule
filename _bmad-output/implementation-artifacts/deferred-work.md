@@ -1,5 +1,12 @@
 # Deferred Work
 
+## Deferred from: code review of fix-mtp-device-init-ui (2026-05-02)
+
+- **Three separate `RwLock`s for `unrecognized_device_{path,io,friendly_name}` are not truly atomic** — sequential `.write().await` acquisitions leave a window where a reader sees partially-written state. Consolidate into a single `RwLock<Option<UnrecognizedDeviceState>>` struct in a future `DeviceManager` refactor. [`device/mod.rs`, `handle_device_unrecognized`]
+- **`unmanaged_count` is always 0 for MTP devices** — MTP cannot enumerate real device folders; the constraint is intentional but means the UI can never surface unmanaged MTP folders or prompt to add new managed paths. Needs a richer folder-enumeration strategy (e.g., `list_files` with directory detection) when MTP folder management is desired.
+- **MTP `friendly_name` not pre-filled in `InitDeviceModal`** — The Garmin's friendly name (e.g., "Garmin Forerunner 945") is stored in `unrecognized_device_friendly_name` but the init modal always defaults to "My Device". Wire `pendingDeviceFriendlyName` through `get_daemon_state` RPC to pre-fill the device name input. [`rpc.rs`, `get_daemon_state`; `BasketSidebar.ts`, `openInitDeviceModal`]
+- **Empty-string `manifest.name` bypasses `friendly_name` fallback** — `manifest.as_ref().and_then(|m| m.name.clone())` returns `Some("")` for blank manifest names, using the empty string as `device_name`. Add `.filter(|n| !n.is_empty())` before the fallback chain.
+
 ## Deferred from: code review of 2-10-mtp-device-detection (2026-05-02)
 
 - **`broadcast_device_state` re-triggers `handle_device_detected` on already-connected device** — can cause duplicate insertion logic and spurious dirty-state transitions; signature changed in this diff but behavior is pre-existing. [`rpc.rs`, `broadcast_device_state`]

@@ -2550,7 +2550,7 @@ mod tests {
 
         // Set an unrecognized device → pendingDevicePath should be present
         device_manager
-            .handle_device_unrecognized(dir.path().to_path_buf(), std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())))
+            .handle_device_unrecognized(dir.path().to_path_buf(), std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())), None)
             .await;
 
         let result2 = handle_get_daemon_state(&state).await.unwrap();
@@ -2820,7 +2820,7 @@ mod tests {
 
         // Simulate an unrecognized device
         device_manager
-            .handle_device_unrecognized(dir.path().to_path_buf(), std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())))
+            .handle_device_unrecognized(dir.path().to_path_buf(), std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())), None)
             .await;
 
         let state = AppState {
@@ -2876,7 +2876,7 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
 
         device_manager
-            .handle_device_unrecognized(dir.path().to_path_buf(), std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())))
+            .handle_device_unrecognized(dir.path().to_path_buf(), std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())), None)
             .await;
 
         let state = AppState {

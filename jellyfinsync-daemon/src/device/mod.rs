@@ -151,6 +151,7 @@ pub enum DeviceEvent {
     Unrecognized {
         path: PathBuf,
         device_io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
+        friendly_name: Option<String>,
     },
 }
 
@@ -178,6 +179,8 @@ pub struct DeviceManager {
     unrecognized_device_path: std::sync::Arc<tokio::sync::RwLock<Option<PathBuf>>>,
     /// IO backend for the pending unrecognized device. Always set alongside unrecognized_device_path.
     unrecognized_device_io: std::sync::Arc<tokio::sync::RwLock<Option<std::sync::Arc<dyn crate::device_io::DeviceIO>>>>,
+    /// Human-readable name for the pending unrecognized device (MTP only; None for MSC).
+    unrecognized_device_friendly_name: std::sync::Arc<tokio::sync::RwLock<Option<String>>>,
 }
 
 impl DeviceManager {
@@ -188,6 +191,7 @@ impl DeviceManager {
             selected_device_path: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             unrecognized_device_path: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             unrecognized_device_io: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            unrecognized_device_friendly_name: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
@@ -301,6 +305,7 @@ impl DeviceManager {
         &self,
         path: PathBuf,
         device_io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
+        friendly_name: Option<String>,
     ) -> crate::DaemonState {
         let path_str = path.to_string_lossy().to_string();
         // Unrecognized devices have no manifest — ensure they are not in connected_devices.
@@ -310,14 +315,16 @@ impl DeviceManager {
             devices.remove(&path);
         }
         {
-            // Acquire both locks together so path and IO are always updated atomically.
+            // Acquire all three locks together so path, IO, and friendly_name are always updated atomically.
             let mut unrecognized_path = self.unrecognized_device_path.write().await;
             let mut unrecognized_io = self.unrecognized_device_io.write().await;
+            let mut unrecognized_name = self.unrecognized_device_friendly_name.write().await;
             if unrecognized_path.is_some() {
                 daemon_log!("[Device] Warning: overwriting pending unrecognized device {:?} with {:?}", *unrecognized_path, path);
             }
             *unrecognized_path = Some(path);
             *unrecognized_io = Some(device_io);
+            *unrecognized_name = friendly_name;
         }
         crate::DaemonState::DeviceFound(path_str)
     }
@@ -349,14 +356,16 @@ impl DeviceManager {
             }
         }
         {
-            // Acquire both locks together so path and IO are always cleared atomically.
+            // Acquire all three locks together so path, IO, and friendly_name are always cleared atomically.
             let mut unrecognized_path = self.unrecognized_device_path.write().await;
             let mut unrecognized_io = self.unrecognized_device_io.write().await;
+            let mut unrecognized_name = self.unrecognized_device_friendly_name.write().await;
             // Only clear if the removed path matches; an unrelated managed device disconnecting
             // must not erase a pending initialization for a different unrecognized device.
             if unrecognized_path.as_ref() == Some(removed_path) {
                 *unrecognized_path = None;
                 *unrecognized_io = None;
+                *unrecognized_name = None;
             }
         }
     }
@@ -556,6 +565,44 @@ impl DeviceManager {
             .as_ref()
             .map(|m| m.managed_paths.clone())
             .unwrap_or_default();
+
+        // MTP devices use a synthetic path that cannot be traversed via std::fs.
+        // Return a response built from the manifest (or empty for unrecognized) so the UI
+        // can show the managed folder list or the "Initialize" banner without filesystem access.
+        // unmanaged_count is always 0: MTP cannot enumerate real device folders.
+        if device_path.to_string_lossy().to_lowercase().starts_with("mtp://") {
+            // Read the stored friendly name before composing device_name.
+            // Only use it for unrecognized devices; recognized devices have their name in the manifest.
+            let stored_friendly = if manifest.is_none() {
+                self.unrecognized_device_friendly_name.read().await.clone()
+            } else {
+                None
+            };
+            let device_name = manifest
+                .as_ref()
+                .and_then(|m| m.name.clone())
+                .or(stored_friendly)
+                .unwrap_or_else(|| "MTP Device".to_string());
+            // For MTP, name == relative_path because managed_paths stores relative folder names
+            // directly (no filesystem enumeration is possible to derive a display name separately).
+            let folders: Vec<DeviceFolderInfo> = managed_paths
+                .iter()
+                .map(|p| DeviceFolderInfo {
+                    name: p.clone(),
+                    relative_path: p.clone(),
+                    is_managed: true,
+                })
+                .collect();
+            let managed_count = folders.len();
+            return Ok(Some(DeviceRootFoldersResponse {
+                device_name,
+                device_path: device_path.to_string_lossy().to_string(),
+                has_manifest,
+                folders,
+                managed_count,
+                unmanaged_count: 0,
+            }));
+        }
 
         let mut folders = Vec::new();
         let mut managed_count = 0;
@@ -1022,6 +1069,7 @@ pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
                                 .send(DeviceEvent::Unrecognized {
                                     path: mount.clone(),
                                     device_io,
+                                    friendly_name: None,
                                 })
                                 .await;
                         }
@@ -1076,6 +1124,7 @@ pub async fn run_mtp_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
                                     let _ = tx.send(DeviceEvent::Unrecognized {
                                         path: synthetic_path,
                                         device_io: backend_arc,
+                                        friendly_name: Some(dev.friendly_name.clone()),
                                     }).await;
                                 }
                             },
@@ -1083,6 +1132,7 @@ pub async fn run_mtp_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
                                 let _ = tx.send(DeviceEvent::Unrecognized {
                                     path: synthetic_path,
                                     device_io: backend_arc,
+                                    friendly_name: Some(dev.friendly_name.clone()),
                                 }).await;
                             }
                         }
