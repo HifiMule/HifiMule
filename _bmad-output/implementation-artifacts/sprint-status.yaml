@@ -47,7 +47,7 @@ development_status:
   1-3-detachable-tauri-ui-skeleton: done
   epic-1-retrospective: done
 
-  epic-2: in-progress
+  epic-2: done
   2-1-secure-jellyfin-server-link: done
   2-2-mass-storage-heartbeat-autodetection: done
   2-3-multi-device-profile-mapping: done
@@ -59,9 +59,9 @@ development_status:
   2-8-enhanced-multi-device-hub: done
   2-9-device-identity-name-and-icon: done
   2-10-mtp-device-detection: done
-  epic-2-retrospective: optional
+  epic-2-retrospective: done
 
-  epic-3: in-progress
+  epic-3: done
   3-1-immersive-media-browser-jellyfin-integration: done
   3-2-the-live-selection-basket: done
   3-3-high-confidence-storage-projection: done
@@ -71,9 +71,9 @@ development_status:
   3-7-artist-view-cache-scroll-state-quick-navigation: done
   3-8-lazy-auto-fill-virtual-slot: done
   3-9-artist-entity-basket-item: done
-  epic-3-retrospective: optional
+  epic-3-retrospective: done
 
-  epic-4: in-progress
+  epic-4: done
   4-0-device-io-abstraction-layer: done
   4-1-differential-sync-algorithm-manifest-comparison: done
   4-2-atomic-buffered-io-streaming: done
@@ -84,14 +84,14 @@ development_status:
   4-6-sync-progress-eta: done
   4-7-playlist-m3u-file-generation: done
   4-8-transcoding-handshake-via-device-profiles: done
-  epic-4-retrospective: optional
+  epic-4-retrospective: done
 
   epic-5: in-progress
   5-1-rockbox-scrobbler-bridge: backlog
   5-2-scrobble-submission-tracking-deduplication: done
   5-3-os-native-safe-to-eject-handshake: done
   5-4-visual-manifest-repair-utility: done
-  epic-5-retrospective: optional
+  epic-5-retrospective: done
 
   epic-6: in-progress
   6-1-tauri-bundler-configuration-sidecar-packaging: done
@@ -100,4 +100,4 @@ development_status:
   6-4-linux-packages-appimage-deb: done
   6-5-cicd-cross-platform-build-pipeline: backlog
   6-6-installation-smoke-tests: backlog
-  epic-6-retrospective: optional
+  epic-6-retrospective: done
