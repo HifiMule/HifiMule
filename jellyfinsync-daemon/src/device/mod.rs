@@ -1036,6 +1036,58 @@ fn is_removable_drive(_path: &Path) -> bool {
     true // macOS/Linux already filtered by mount detection
 }
 
+/// Returns true if a removable drive exists whose volume label exactly matches
+/// `friendly_name`. Used by `run_mtp_observer` to skip WPD re-registration of
+/// USB drives that are already handled by the MSC observer.
+#[cfg(target_os = "windows")]
+fn has_msc_drive_for_device(friendly_name: &str) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{GetLogicalDrives, GetVolumeInformationW};
+    let drives = unsafe { GetLogicalDrives() };
+    for i in 0..26u32 {
+        if (drives >> i) & 1 == 0 {
+            continue;
+        }
+        let letter = (b'A' + i as u8) as char;
+        let path_str = format!("{}:\\", letter);
+        let path = PathBuf::from(&path_str);
+        if !is_removable_drive(&path) {
+            continue;
+        }
+        let wide: Vec<u16> = std::ffi::OsStr::new(&path_str)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut label_buf = [0u16; 256];
+        let ok = unsafe {
+            GetVolumeInformationW(
+                wide.as_ptr(),
+                label_buf.as_mut_ptr(),
+                label_buf.len() as u32,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+            ) != 0
+        };
+        if !ok {
+            continue;
+        }
+        let len = label_buf.iter().position(|&c| c == 0).unwrap_or(label_buf.len());
+        let label = String::from_utf16_lossy(&label_buf[..len]);
+        if label.eq_ignore_ascii_case(friendly_name) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(not(target_os = "windows"))]
+fn has_msc_drive_for_device(_friendly_name: &str) -> bool {
+    false
+}
+
 pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
     println!("[Device] Observer thread started");
     let mut known_mounts = std::collections::HashSet::new();
@@ -1103,11 +1155,23 @@ pub async fn run_mtp_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
 
         for dev in &devices {
             if !known_ids.contains(&dev.device_id) {
+                // Prefer MSC over MTP: if the device is also mounted as a drive
+                // letter, skip it here and let run_observer handle it.
+                if has_msc_drive_for_device(&dev.friendly_name) {
+                    continue;
+                }
                 let synthetic_path = PathBuf::from(format!("mtp://{}", dev.device_id));
+                let dev_clone = dev.clone();
+                let dev_id = dev.device_id.clone();
+                let friendly_name = dev.friendly_name.clone();
 
-                match mtp::create_mtp_backend(dev) {
+                let backend = tokio::task::spawn_blocking(move || mtp::create_mtp_backend(&dev_clone))
+                    .await
+                    .unwrap_or_else(|e| Err(anyhow::anyhow!("spawn_blocking panicked: {}", e)));
+
+                match backend {
                     Ok(backend) => {
-                        known_ids.insert(dev.device_id.clone());
+                        known_ids.insert(dev_id.clone());
                         let backend_arc: std::sync::Arc<dyn crate::device_io::DeviceIO> =
                             std::sync::Arc::new(backend);
                         match backend_arc.read_file(".jellyfinsync.json").await {
@@ -1120,11 +1184,11 @@ pub async fn run_mtp_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
                                     }).await;
                                 }
                                 Err(e) => {
-                                    daemon_log!("[MTP] Manifest parse error on {}: {}", dev.device_id, e);
+                                    daemon_log!("[MTP] Manifest parse error on {}: {}", dev_id, e);
                                     let _ = tx.send(DeviceEvent::Unrecognized {
                                         path: synthetic_path,
                                         device_io: backend_arc,
-                                        friendly_name: Some(dev.friendly_name.clone()),
+                                        friendly_name: Some(friendly_name),
                                     }).await;
                                 }
                             },
@@ -1132,13 +1196,13 @@ pub async fn run_mtp_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
                                 let _ = tx.send(DeviceEvent::Unrecognized {
                                     path: synthetic_path,
                                     device_io: backend_arc,
-                                    friendly_name: Some(dev.friendly_name.clone()),
+                                    friendly_name: Some(friendly_name),
                                 }).await;
                             }
                         }
                     }
                     Err(e) => {
-                        daemon_log!("[MTP] Failed to open device {}: {}", dev.device_id, e);
+                        daemon_log!("[MTP] Failed to open device {}: {}", dev_id, e);
                     }
                 }
             }
