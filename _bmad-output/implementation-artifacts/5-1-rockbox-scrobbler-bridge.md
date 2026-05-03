@@ -1,6 +1,6 @@
 # Story 5.1: Rockbox Scrobbler Bridge
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -37,13 +37,17 @@ so that **my on-the-go listening is reflected on my Jellyfin server**.
 
 ### Active Ready-for-Dev Scope (2026-05-03 Refresh)
 
-- [ ] **T7: MTP scrobbler log read hardening via DeviceIO** (AC: #7)
+- [x] **T7: MTP scrobbler log read hardening via DeviceIO** (AC: #7)
   - [x] T7.1: `process_device_scrobbles()` accepts `Arc<dyn DeviceIO>` and reads `.scrobbler.log` via `device_io.read_file(".scrobbler.log")`.
   - [x] T7.2: `main.rs` passes the detected device backend and stable `manifest.device_id` into the scrobbler task.
   - [x] T7.3: MSC unit tests were updated to use `MscBackend`; existing MSC behavior is preserved.
-  - [ ] T7.4: Fix the MTP missing-log case: MTP backends return plain `anyhow` messages such as `"WPD: path component '.scrobbler.log' not found"` or `"libmtp: path component '.scrobbler.log' not found"`, which do not downcast to `std::io::ErrorKind::NotFound`. A missing `.scrobbler.log` on MTP must return an empty successful `ScrobblerResult`, not an error.
-  - [ ] T7.5: Add a unit test with a mock `DeviceIO` that returns an MTP-style not-found error for `.scrobbler.log`; assert `total_entries == 0`, all counters are `0`, and `errors.is_empty()`.
-  - [ ] T7.6: Run `cargo test` in `jellyfinsync-daemon/` and confirm scrobbler, DeviceIO, and existing daemon tests pass.
+  - [x] T7.4: Fix the MTP missing-log case: MTP backends return plain `anyhow` messages such as `"WPD: path component '.scrobbler.log' not found"` or `"libmtp: path component '.scrobbler.log' not found"`, which do not downcast to `std::io::ErrorKind::NotFound`. A missing `.scrobbler.log` on MTP must return an empty successful `ScrobblerResult`, not an error.
+  - [x] T7.5: Add a unit test with a mock `DeviceIO` that returns an MTP-style not-found error for `.scrobbler.log`; assert `total_entries == 0`, all counters are `0`, and `errors.is_empty()`.
+  - [x] T7.6: Run `cargo test` in `jellyfinsync-daemon/` and confirm scrobbler, DeviceIO, and existing daemon tests pass.
+
+### Review Findings
+
+- [x] [Review][Patch] Regression test does not use a WPD/libmtp-style not-found error [jellyfinsync-daemon/src/scrobbler.rs:410]
 
 ### Historical Completed Scope
 
@@ -367,6 +371,8 @@ None — implementation was straightforward with no runtime debugging required.
 
 ### Completion Notes List
 
+- **T7 (scrobbler.rs, 2026-05-03)**: Added `is_missing_scrobbler_log_error()` to normalize `.scrobbler.log` not-found responses from both MSC `std::io::ErrorKind::NotFound` and MTP-style `anyhow` messages containing `.scrobbler.log` + `not found`. Genuine read and UTF-8 failures still populate `errors`.
+- **T7 verification (2026-05-03)**: Added `test_process_device_mtp_style_missing_log_is_empty_success()` using a test `DeviceIO` that returns a WPD-style `"path component '.scrobbler.log' not found"` error; confirmed the missing MTP log returns `total_entries == 0`, all counters `0`, `total_scrobbled == 0`, and `errors.is_empty()`. Ran `cargo test` in `jellyfinsync-daemon/` — 184 tests passed. Ran `rustfmt --edition 2021 --check jellyfinsync-daemon/src/scrobbler.rs`.
 - **T1 (db.rs)**: Added `scrobble_history` table with `submitted_at` timestamp and `idx_scrobble_unique` index. Added `record_scrobble()` using `INSERT OR IGNORE` for Story 5.2 dedup foundation. Added `get_scrobble_count()`. 2 new unit tests added.
 - **T2 (api.rs)**: Added `search_audio_items()` with URL encoding via private `url_encode()` helper (no extra crate needed). Added `report_item_played()` for `POST /UserPlayedItems/{itemId}?userId={userId}`. Added `artists: Option<Vec<String>>` field to `JellyfinItem`.
 - **T3 (scrobbler.rs)**: New module with `ScrobblerEntry`, `ScrobblerResult` (camelCase serde), `parse_scrobbler_log()`, and `process_device_scrobbles()`. Non-fatal per-entry error collection pattern used throughout. Added `total_scrobbled: i64` to `ScrobblerResult` (calls `get_scrobble_count()` after processing). 6 unit tests: 3 parser + 3 process_device paths.
@@ -400,9 +406,12 @@ Review found and fixed the following issues:
 - `jellyfinsync-daemon/src/api.rs` (modified)
 - `jellyfinsync-daemon/src/main.rs` (modified)
 - `jellyfinsync-daemon/src/rpc.rs` (modified)
+- `_bmad-output/implementation-artifacts/5-1-rockbox-scrobbler-bridge.md` (modified)
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` (modified)
 
 ## Change Log
 
+- 2026-05-03: Implemented active T7 refresh — MTP-style missing `.scrobbler.log` errors now return an empty successful `ScrobblerResult`; added mock MTP unit coverage; daemon tests pass (184 tests).
 - 2026-05-03: Create-story refresh — status set to ready-for-dev. Active scope narrowed to MTP missing-log hardening after Story 4.0 already completed the DeviceIO scrobbler refactor.
 - 2026-04-30: Reopened — MTP support (Sprint Change 2026-04-30). AC #7 and T7 added. Requires Story 4.0 (DeviceIO abstraction) to be completed first.
 - 2026-02-28: Implemented Story 5.1 Rockbox Scrobbler Bridge — scrobble_history DB table, Jellyfin search/played APIs, scrobbler.rs parser/processor module, device detection hook, and scrobbler_get_last_result RPC method.

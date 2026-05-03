@@ -77,6 +77,21 @@ pub fn parse_scrobbler_log(content: &str) -> Vec<ScrobblerEntry> {
     entries
 }
 
+fn is_missing_scrobbler_log_error(error: &anyhow::Error) -> bool {
+    if error
+        .downcast_ref::<std::io::Error>()
+        .map(|io| io.kind() == std::io::ErrorKind::NotFound)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    error.chain().any(|cause| {
+        let message = cause.to_string().to_lowercase();
+        message.contains(".scrobbler.log") && message.contains("not found")
+    })
+}
+
 pub async fn process_device_scrobbles(
     device_io: Arc<dyn crate::device_io::DeviceIO>,
     device_id: String,
@@ -86,15 +101,10 @@ pub async fn process_device_scrobbles(
     token: &str,
     user_id: &str,
 ) -> ScrobblerResult {
-
     let content = match device_io.read_file(".scrobbler.log").await {
         Err(e) => {
             // Distinguish "file not present" from genuine read errors.
-            let is_not_found = e
-                .downcast_ref::<std::io::Error>()
-                .map(|io| io.kind() == std::io::ErrorKind::NotFound)
-                .unwrap_or(false);
-            if is_not_found {
+            if is_missing_scrobbler_log_error(&e) {
                 return ScrobblerResult {
                     total_entries: 0,
                     submitted: 0,
@@ -153,9 +163,18 @@ pub async fn process_device_scrobbles(
         }
 
         // Dedup check — skip if already submitted (Story 5.2)
-        match db.is_scrobble_recorded(&device_id, &entry.artist, &entry.album, &entry.title, entry.timestamp_unix) {
+        match db.is_scrobble_recorded(
+            &device_id,
+            &entry.artist,
+            &entry.album,
+            &entry.title,
+            entry.timestamp_unix,
+        ) {
             Ok(true) => {
-                println!("[Scrobbler] Skipping duplicate: '{}' by '{}'", entry.title, entry.artist);
+                println!(
+                    "[Scrobbler] Skipping duplicate: '{}' by '{}'",
+                    entry.title, entry.artist
+                );
                 skipped_duplicate += 1;
                 continue;
             }
@@ -264,6 +283,7 @@ pub async fn process_device_scrobbles(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
 
     const SAMPLE_LOG: &str = "\
 #AUDIOSCROBBLER/1.1
@@ -323,6 +343,47 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
         Arc::new(crate::device_io::MscBackend::new(dir.to_path_buf()))
     }
 
+    #[derive(Debug)]
+    struct MtpStyleMissingScrobblerLog;
+
+    #[async_trait]
+    impl crate::device_io::DeviceIO for MtpStyleMissingScrobblerLog {
+        async fn read_file(&self, path: &str) -> anyhow::Result<Vec<u8>> {
+            Err(anyhow::anyhow!("WPD: path component '{}' not found", path))
+        }
+
+        async fn write_file(&self, _path: &str, _data: &[u8]) -> anyhow::Result<()> {
+            unimplemented!("not needed for scrobbler missing-log test")
+        }
+
+        async fn write_with_verify(&self, _path: &str, _data: &[u8]) -> anyhow::Result<()> {
+            unimplemented!("not needed for scrobbler missing-log test")
+        }
+
+        async fn delete_file(&self, _path: &str) -> anyhow::Result<()> {
+            unimplemented!("not needed for scrobbler missing-log test")
+        }
+
+        async fn list_files(
+            &self,
+            _path: &str,
+        ) -> anyhow::Result<Vec<crate::device_io::FileEntry>> {
+            unimplemented!("not needed for scrobbler missing-log test")
+        }
+
+        async fn free_space(&self) -> anyhow::Result<u64> {
+            unimplemented!("not needed for scrobbler missing-log test")
+        }
+
+        async fn ensure_dir(&self, _path: &str) -> anyhow::Result<()> {
+            unimplemented!("not needed for scrobbler missing-log test")
+        }
+
+        async fn cleanup_empty_subdirs(&self, _path: &str) -> anyhow::Result<()> {
+            unimplemented!("not needed for scrobbler missing-log test")
+        }
+    }
+
     #[tokio::test]
     async fn test_process_device_no_log_file() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -346,6 +407,33 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
         assert_eq!(result.failed, 0);
         assert!(result.errors.is_empty());
         assert_eq!(result.total_scrobbled, 0);
+    }
+
+    #[tokio::test]
+    async fn test_process_device_mtp_style_missing_log_is_empty_success() {
+        let device_io = Arc::new(MtpStyleMissingScrobblerLog);
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let client = Arc::new(crate::api::JellyfinClient::new());
+
+        let result = process_device_scrobbles(
+            device_io,
+            "test-mtp-device-id".to_string(),
+            db,
+            client,
+            "http://localhost:8096",
+            "token-placeholder",
+            "user-placeholder",
+        )
+        .await;
+
+        assert_eq!(result.total_entries, 0);
+        assert_eq!(result.submitted, 0);
+        assert_eq!(result.skipped_rating, 0);
+        assert_eq!(result.skipped_duplicate, 0);
+        assert_eq!(result.unmatched, 0);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.total_scrobbled, 0);
+        assert!(result.errors.is_empty());
     }
 
     #[tokio::test]
@@ -386,10 +474,22 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
         let device_id = "test-device-uuid".to_string();
 
         // Pre-populate scrobble_history with both "L" entries from SAMPLE_LOG
-        db.record_scrobble(&device_id, "Pink Floyd", "The Dark Side of the Moon", "Money", 1706745600)
-            .unwrap();
-        db.record_scrobble(&device_id, "Led Zeppelin", "Led Zeppelin IV", "Stairway to Heaven", 1706752800)
-            .unwrap();
+        db.record_scrobble(
+            &device_id,
+            "Pink Floyd",
+            "The Dark Side of the Moon",
+            "Money",
+            1706745600,
+        )
+        .unwrap();
+        db.record_scrobble(
+            &device_id,
+            "Led Zeppelin",
+            "Led Zeppelin IV",
+            "Stairway to Heaven",
+            1706752800,
+        )
+        .unwrap();
 
         let device_io = make_msc_backend(temp_dir.path());
         let client = Arc::new(crate::api::JellyfinClient::new());
@@ -465,7 +565,11 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
         };
         // submitted + skipped_rating + skipped_duplicate + unmatched + failed == total_entries
         assert_eq!(
-            result.submitted + result.skipped_rating + result.skipped_duplicate + result.unmatched + result.failed,
+            result.submitted
+                + result.skipped_rating
+                + result.skipped_duplicate
+                + result.unmatched
+                + result.failed,
             result.total_entries
         );
     }
