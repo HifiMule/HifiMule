@@ -1014,7 +1014,11 @@ export class BasketSidebar {
         this.showSyncComplete = false;
         this.etaText = 'Calculating\u2026';
         this.syncErrorMessages = operation.errors.length > 0
-            ? operation.errors.map(e => `${e.filename || e.jellyfinId}: ${e.errorMessage}`)
+            ? operation.errors.map(e => {
+                const target = e.filename || e.jellyfinId || 'Unknown file';
+                const message = e.errorMessage || 'Unknown file error';
+                return `${target}: ${message}`;
+            })
             : ['Sync failed - check device connection and try again.'];
         this.renderSyncError(this.syncErrorMessages);
     }

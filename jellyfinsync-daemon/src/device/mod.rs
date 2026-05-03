@@ -464,7 +464,24 @@ impl DeviceManager {
 
     pub async fn get_device_storage(&self) -> Option<StorageInfo> {
         let path = self.get_current_device_path().await?;
-        get_storage_info(&path)
+        if let Some(info) = get_storage_info(&path) {
+            return Some(info);
+        }
+
+        let device_io = {
+            let devices = self.connected_devices.read().await;
+            devices
+                .get(&path)
+                .map(|d| std::sync::Arc::clone(&d.device_io))
+        }?;
+
+        let free_bytes = device_io.free_space().await.ok()?;
+        Some(StorageInfo {
+            total_bytes: free_bytes,
+            free_bytes,
+            used_bytes: 0,
+            device_path: path.to_string_lossy().to_string(),
+        })
     }
 
     /// Initializes a new device by generating a UUID, writing the initial manifest,
