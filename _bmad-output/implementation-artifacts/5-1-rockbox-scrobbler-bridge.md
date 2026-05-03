@@ -1,6 +1,6 @@
 # Story 5.1: Rockbox Scrobbler Bridge
 
-Status: backlog
+Status: ready-for-dev
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -34,6 +34,18 @@ so that **my on-the-go listening is reflected on my Jellyfin server**.
 8. **Error Resilience**: A failure to submit one track (network error, API error, no match) does NOT abort processing of remaining entries. All errors are collected and included in the result. (AC: #7)
 
 ## Tasks / Subtasks
+
+### Active Ready-for-Dev Scope (2026-05-03 Refresh)
+
+- [ ] **T7: MTP scrobbler log read hardening via DeviceIO** (AC: #7)
+  - [x] T7.1: `process_device_scrobbles()` accepts `Arc<dyn DeviceIO>` and reads `.scrobbler.log` via `device_io.read_file(".scrobbler.log")`.
+  - [x] T7.2: `main.rs` passes the detected device backend and stable `manifest.device_id` into the scrobbler task.
+  - [x] T7.3: MSC unit tests were updated to use `MscBackend`; existing MSC behavior is preserved.
+  - [ ] T7.4: Fix the MTP missing-log case: MTP backends return plain `anyhow` messages such as `"WPD: path component '.scrobbler.log' not found"` or `"libmtp: path component '.scrobbler.log' not found"`, which do not downcast to `std::io::ErrorKind::NotFound`. A missing `.scrobbler.log` on MTP must return an empty successful `ScrobblerResult`, not an error.
+  - [ ] T7.5: Add a unit test with a mock `DeviceIO` that returns an MTP-style not-found error for `.scrobbler.log`; assert `total_entries == 0`, all counters are `0`, and `errors.is_empty()`.
+  - [ ] T7.6: Run `cargo test` in `jellyfinsync-daemon/` and confirm scrobbler, DeviceIO, and existing daemon tests pass.
+
+### Historical Completed Scope
 
 - [x] **T1: Extend `db.rs` with scrobble_history table** (AC: #5)
   - [x] T1.1: Add `scrobble_history` table in `Database::init()`:
@@ -159,13 +171,6 @@ so that **my on-the-go listening is reflected on my Jellyfin server**.
     - Return `null` if no result yet (no device connected or scrobbler not yet run)
     - Return the `ScrobblerResult` serialized to JSON
 
-- [ ] **T7: MTP scrobbler log read via DeviceIO (AC: #7 — Sprint Change 2026-04-30)**
-  - [ ] In `process_device_scrobbles()`, replace `std::fs::read_to_string(device_path.join(".scrobbler.log"))` with `device_io.read_file(".scrobbler.log")`
-  - [ ] Update `process_device_scrobbles()` signature to accept `device_io: Arc<dyn DeviceIO>` param (alongside or replacing `device_path`)
-  - [ ] Update call site in `main.rs` device event loop to pass `device_io` from `DeviceManager`
-  - [ ] Verify existing unit tests pass (MSC path unchanged via MscBackend)
-  - **Depends on:** Story 4.0 (DeviceIO abstraction layer)
-
 - [x] **T6: Verification** (AC: all)
   - [x] T6.1: `cargo test` in `jellyfinsync-daemon/` — all existing tests pass + new scrobbler unit tests pass (88 tests total, up from 82)
   - [ ] T6.2: Manual — Connect device WITH `.scrobbler.log` → logs show "[Scrobbler]" output with result stats
@@ -177,6 +182,22 @@ so that **my on-the-go listening is reflected on my Jellyfin server**.
 ### Architecture Compliance
 
 **CRITICAL PATTERNS — MANDATORY:**
+
+- **Current scrobbler signature (post-Story 4.0)**:
+  ```rust
+  pub async fn process_device_scrobbles(
+      device_io: Arc<dyn crate::device_io::DeviceIO>,
+      device_id: String,
+      db: Arc<Database>,
+      client: Arc<JellyfinClient>,
+      url: &str,
+      token: &str,
+      user_id: &str,
+  ) -> ScrobblerResult
+  ```
+  Do not reintroduce `device_path`-based file reads. All device IO goes through the backend supplied by `DeviceManager`.
+
+- **MTP missing log must be a no-op**: A device without `.scrobbler.log` is not an error. MSC currently detects this through `std::io::ErrorKind::NotFound`; MTP returns backend-specific `anyhow` messages such as `"WPD: path component ... not found"`, `"libmtp: path component ... not found"`, or mock `"file not found: ..."`. Normalize these for `.scrobbler.log` only, and keep genuine read/UTF-8 errors in `errors`.
 
 - **`anyhow` vs `thiserror`**: Use `anyhow::Result` in the `scrobbler.rs` binary-facing functions. Do NOT add a `thiserror` error type for this module — `anyhow` is the correct choice for the daemon binary per architecture doc.
 
@@ -256,14 +277,14 @@ Field order: artist, album, title, track_number, duration_seconds, rating, unix_
 
 ### Source Tree Components to Touch
 
-**Files to CREATE:**
-1. [jellyfinsync-daemon/src/scrobbler.rs](jellyfinsync-daemon/src/scrobbler.rs) — New module: parser, submission logic, result types, unit tests
+**Active files to MODIFY for this ready-for-dev refresh:**
+1. [jellyfinsync-daemon/src/scrobbler.rs](jellyfinsync-daemon/src/scrobbler.rs) — Normalize MTP-style not-found errors for `.scrobbler.log`; add a unit test with mock `DeviceIO`.
 
-**Files to MODIFY:**
-2. [jellyfinsync-daemon/src/db.rs](jellyfinsync-daemon/src/db.rs) — Add `scrobble_history` table + `record_scrobble()` + `get_scrobble_count()` methods
-3. [jellyfinsync-daemon/src/api.rs](jellyfinsync-daemon/src/api.rs) — Add `search_audio_items()` + `report_item_played()` methods
-4. [jellyfinsync-daemon/src/main.rs](jellyfinsync-daemon/src/main.rs) — Declare `mod scrobbler`, add `last_scrobbler_result` Arc, hook device detection event
-5. [jellyfinsync-daemon/src/rpc.rs](jellyfinsync-daemon/src/rpc.rs) — Add `last_scrobbler_result` to `AppState`, add `scrobbler_get_last_result` handler
+**Files already modified by the historical 5.1 implementation:**
+2. [jellyfinsync-daemon/src/db.rs](jellyfinsync-daemon/src/db.rs) — `scrobble_history` table + `record_scrobble()` + `get_scrobble_count()`.
+3. [jellyfinsync-daemon/src/api.rs](jellyfinsync-daemon/src/api.rs) — `search_audio_items()` + `report_item_played()`.
+4. [jellyfinsync-daemon/src/main.rs](jellyfinsync-daemon/src/main.rs) — `mod scrobbler`, shared scrobbler result state, device detection hook passing `DeviceIO`.
+5. [jellyfinsync-daemon/src/rpc.rs](jellyfinsync-daemon/src/rpc.rs) — `scrobbler_get_last_result`.
 
 **Files NOT to create or modify:**
 - Do NOT modify `device/mod.rs` — keep device detection clean; hooks go in `main.rs` event loop
@@ -292,6 +313,11 @@ Field order: artist, album, title, track_number, duration_seconds, rating, unix_
 - Device detection auto-trigger requires reading credentials in `main.rs` device loop — this needs the `CredentialManager` (from `api.rs`) to be accessible outside of RPC handlers. This is a minor arch addition but is clean since `CredentialManager` is already public.
 
 ### Previous Story Intelligence (Story 4.5 → 5.1)
+
+From Story 4.0 (`DeviceIO Abstraction Layer`) review:
+- `scrobbler.rs` was already refactored away from direct filesystem reads and now uses `DeviceIO::read_file(".scrobbler.log")`.
+- The deferred issue is specifically MTP-style "not found" classification: `downcast_ref::<std::io::Error>()` does not catch `anyhow` errors from `MtpHandle`. Fix that without weakening genuine error reporting.
+- DeviceIO path arguments must stay relative. `.scrobbler.log` is correct; do not pass an absolute mount path or synthetic `mtp://...` path into `read_file`.
 
 From Story 4.5 dev notes and implementation:
 - **No test framework in UI**: N/A for this story (pure daemon work)
@@ -377,5 +403,6 @@ Review found and fixed the following issues:
 
 ## Change Log
 
+- 2026-05-03: Create-story refresh — status set to ready-for-dev. Active scope narrowed to MTP missing-log hardening after Story 4.0 already completed the DeviceIO scrobbler refactor.
 - 2026-04-30: Reopened — MTP support (Sprint Change 2026-04-30). AC #7 and T7 added. Requires Story 4.0 (DeviceIO abstraction) to be completed first.
 - 2026-02-28: Implemented Story 5.1 Rockbox Scrobbler Bridge — scrobble_history DB table, Jellyfin search/played APIs, scrobbler.rs parser/processor module, device detection hook, and scrobbler_get_last_result RPC method.
