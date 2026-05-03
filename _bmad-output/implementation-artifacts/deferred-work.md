@@ -1,11 +1,23 @@
 # Deferred Work
 
+## Deferred from: code review of fix-mtp-write-shell-copy (2026-05-03)
+
+- **`IShellFolder::EnumObjects` may fail from MTA on non-free-threaded Shell namespace extensions** — `portabl.dll` is likely free-threaded (it wraps WPD which is MTA), but this is untested on non-Garmin MTP devices. If MTA threading causes issues, replace `CoInitGuard::init()` (COINIT_MULTITHREADED) in `shell_copy_to_device` with a dedicated `std::thread::spawn` STA thread. [`mtp.rs`, `shell_copy_to_device`]
+- **Shell copy performance for bulk music sync** — `write_file` now opens a WPD session, drops it, then opens a new Shell session per file; for syncing many files, this two-phase teardown+reconnect adds overhead. Consider batching Shell operations or combining dir-creation and file-copy into a single Shell pass when sync performance is measured. [`mtp.rs`, `write_file`, `shell_copy_to_device`]
+- **Temp file name collision on concurrent writes** — `jellyfinsync_{nanos}.tmp` uses SystemTime nanoseconds; theoretically non-unique if two write_file calls start in the same nanosecond on the same `spawn_blocking` thread. Low risk in practice (writes are sequential per device); replace with `uuid` or `tempfile` crate if concurrent writes are added. [`mtp.rs`, `write_file`]
+- **`has_msc_drive_for_device` uses volume label exact match (case-insensitive)** — if two devices share a volume label (e.g., both named "BACKUP"), the first MSC match suppresses MTP registration for all. Low risk in practice; a more robust check would compare WPD device hardware IDs to drive GUIDs via `SetupDi` or `DeviceIoControl`. [`device/mod.rs`, `has_msc_drive_for_device`]
+- **MTP-only fallback still writes via Shell even for non-Garmin devices** — WPD failure on any device (transient error, device busy) silently triggers the Shell copy path. If a non-Garmin device consistently fails WPD writes and Shell copy also fails, the error message shows the Shell error, not the root WPD cause. Consider logging the WPD error before the fallback even when Shell succeeds. [`mtp.rs`, `write_file`]
+
 ## Deferred from: code review of fix-mtp-device-init-ui (2026-05-02)
 
 - **Three separate `RwLock`s for `unrecognized_device_{path,io,friendly_name}` are not truly atomic** — sequential `.write().await` acquisitions leave a window where a reader sees partially-written state. Consolidate into a single `RwLock<Option<UnrecognizedDeviceState>>` struct in a future `DeviceManager` refactor. [`device/mod.rs`, `handle_device_unrecognized`]
 - **`unmanaged_count` is always 0 for MTP devices** — MTP cannot enumerate real device folders; the constraint is intentional but means the UI can never surface unmanaged MTP folders or prompt to add new managed paths. Needs a richer folder-enumeration strategy (e.g., `list_files` with directory detection) when MTP folder management is desired.
 - **MTP `friendly_name` not pre-filled in `InitDeviceModal`** — The Garmin's friendly name (e.g., "Garmin Forerunner 945") is stored in `unrecognized_device_friendly_name` but the init modal always defaults to "My Device". Wire `pendingDeviceFriendlyName` through `get_daemon_state` RPC to pre-fill the device name input. [`rpc.rs`, `get_daemon_state`; `BasketSidebar.ts`, `openInitDeviceModal`]
 - **Empty-string `manifest.name` bypasses `friendly_name` fallback** — `manifest.as_ref().and_then(|m| m.name.clone())` returns `Some("")` for blank manifest names, using the empty string as `device_name`. Add `.filter(|n| !n.is_empty())` before the fallback chain.
+
+## Deferred from: code review of fix-mtp-wpd-com-threading (2026-05-02)
+
+- **`known_ids` inserted before async manifest probe completes** — in `run_mtp_observer`, `known_ids.insert(dev_id.clone())` at line 1117 runs before the `read_file` probe and `DeviceEvent` send; a transient probe failure permanently suppresses re-detection for that device ID until physical reconnect. Pre-existing design: the guard against duplicate-detection loops requires early insertion. [`device/mod.rs`, `run_mtp_observer:1117,1120`]
 
 ## Deferred from: code review of fix-wpd-mtp-io-operations (2026-05-02)
 
@@ -27,6 +39,13 @@
 - **Partial failure / task cancellation between cleanup steps** — `initialize_device` clears `unrecognized_device_path` and `unrecognized_device_io` in separate lock scopes; a panic or cancellation between them leaves `unrecognized_device_io` stale until the next device event. Theoretical; no production impact in practice.
 - **Path-aliasing window during backend construction** — `MscBackend::new(path)` is created before `connected_devices.remove(&path)` runs in `handle_device_unrecognized`; a re-probed path could briefly have two live IO backends. Negligible window; mention if race hardening is done.
 - **No concurrent stress tests for path/IO invariant** — `unrecognized_device_path` and `unrecognized_device_io` must always be set/cleared together; only sequential tests cover this. Add concurrent event tests if a multi-device race bug surfaces.
+
+## Deferred from: code review of fix-mtp-write-not-ready (2026-05-03)
+
+- **Double `Content()` acquisition in `read_file`, `delete_file`, `list_files`** — `path_to_object_id` calls `device.Content()` internally, then each method body calls `device.Content()` again; two `IPortableDeviceContent` references coexist within one session. `write_file` was fixed to use a single handle; the remaining three methods were not in scope. Refactor `path_to_object_id` to accept `&IPortableDeviceContent` to eliminate the pattern. [`mtp.rs`, `path_to_object_id`, `read_file`, `delete_file`, `list_files`]
+- **`IStream::Write` with `.ok()?` silently discards S_FALSE partial-write warnings** — `S_FALSE` is a success HRESULT but signals fewer bytes written; `HRESULT::ok()` returns `Ok(())` for it, so the stall guard (written == 0) is the only check. On a slow driver this could mask degraded throughput indefinitely. Replace with explicit HRESULT comparison or use a wrapper that maps `S_FALSE` to `Err`. [`mtp.rs`, `write_file` stream write loop]
+- **`ensure_dir_chain` leaks `new_id_pwstr` when `PWSTR::to_string()` fails** — after `CreateObjectWithPropertiesOnly` populates `new_id_pwstr`, a `?`-propagated error from `to_string()` skips `CoTaskMemFree`. Pre-existing; fix with a `scopeguard` or inline free before the `?`. [`mtp.rs`, `ensure_dir_chain`]
+- **Dirty-marker unit test does not assert 1-byte sentinel content** — `mtp_write_with_verify_dirty_marker_sequence` checks call order and path but not that the sentinel data is `b"\x00"`. A regression back to `b""` would not be caught. Add a data-content assertion in the mock test. [`device_io.rs`, `mtp_write_with_verify_dirty_marker_sequence`]
 
 ## Deferred from: code review of 4-0-device-io-abstraction-layer (2026-05-01)
 

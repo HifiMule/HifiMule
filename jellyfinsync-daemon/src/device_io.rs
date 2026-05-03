@@ -246,7 +246,8 @@ impl DeviceIO for MtpBackend {
     async fn write_with_verify(&self, path: &str, data: &[u8]) -> Result<()> {
         // Dirty-marker strategy: write .dirty sentinel → write target → delete sentinel
         let dirty_marker = format!("{}.dirty", path);
-        self.write_file(&dirty_marker, b"").await?;
+        // Use 1-byte sentinel: WPD drivers (including Garmin) reject CreateObjectWithPropertiesAndData with WPD_OBJECT_SIZE=0.
+        self.write_file(&dirty_marker, b"\x00").await?;
         self.write_file(path, data).await?;
         self.delete_file(&dirty_marker).await?;
         Ok(())

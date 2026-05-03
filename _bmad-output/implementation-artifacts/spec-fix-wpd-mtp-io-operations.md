@@ -8,7 +8,7 @@ context: []
 ---
 
 <frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
-
+ Jellyfin
 ## Intent
 
 **Problem:** On Windows MTP devices, all four `WpdHandle` I/O methods (`write_file`, `delete_file`, `list_files`, `free_space`) return `Err("… not yet implemented")`. Device initialization fails immediately at `write_with_verify`, which calls `write_file` to lay down a `.dirty` sentinel before writing the manifest.
