@@ -1,5 +1,9 @@
 # Deferred Work
 
+## Deferred from: code review of 6-5-cicd-cross-platform-build-pipeline (2026-05-03)
+
+- **Unix release artifacts may depend on CI-only `libmtp` runtime libraries** - The reopened story only added build-time `libmtp` availability in GitHub Actions. Follow-up packaging hardening should declare Linux package runtime dependencies or verify AppImage inclusion, and decide how macOS ships `libmtp` dylibs for machines without Homebrew.
+
 ## Deferred from: code review of fix-mtp-write-shell-copy (2026-05-03)
 
 - **`IShellFolder::EnumObjects` may fail from MTA on non-free-threaded Shell namespace extensions** — `portabl.dll` is likely free-threaded (it wraps WPD which is MTA), but this is untested on non-Garmin MTP devices. If MTA threading causes issues, replace `CoInitGuard::init()` (COINIT_MULTITHREADED) in `shell_copy_to_device` with a dedicated `std::thread::spawn` STA thread. [`mtp.rs`, `shell_copy_to_device`]

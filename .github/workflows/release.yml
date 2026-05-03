@@ -57,7 +57,25 @@ jobs:
             libappindicator3-dev \
             librsvg2-dev \
             patchelf \
-            libxdo-dev
+            pkgconf \
+            libxdo-dev \
+            libmtp-dev
+          pkg-config --libs libmtp
+
+      - name: Install macOS dependencies
+        if: matrix.platform == 'macos-latest'
+        run: |
+          brew install pkg-config libmtp
+          LIBMTP_PREFIX="$(brew --prefix libmtp)"
+          LIBMTP_PC_DIR="$LIBMTP_PREFIX/lib/pkgconfig"
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH_aarch64_apple_darwin=$LIBMTP_PC_DIR" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH_x86_64_apple_darwin=$LIBMTP_PC_DIR" >> "$GITHUB_ENV"
+          pkg-config --libs libmtp
+          LIBMTP_DYLIB="$(find "$LIBMTP_PREFIX/lib" -name 'libmtp*.dylib' -print -quit)"
+          test -n "$LIBMTP_DYLIB"
+          lipo -verify_arch arm64 "$LIBMTP_DYLIB"
+          lipo -verify_arch x86_64 "$LIBMTP_DYLIB"
 
       - name: Install frontend dependencies
         working-directory: jellyfinsync-ui
