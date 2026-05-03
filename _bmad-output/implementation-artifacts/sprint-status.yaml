@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-05-02  # 2-10-mtp-device-detection code review complete
+last_updated: 2026-05-03  # 5-1 story context refreshed for MTP scrobbler hardening
 project: JellyfinSync
 project_key: NOKEY
 tracking_system: file-system
@@ -87,7 +87,7 @@ development_status:
   epic-4-retrospective: done
 
   epic-5: in-progress
-  5-1-rockbox-scrobbler-bridge: backlog
+  5-1-rockbox-scrobbler-bridge: ready-for-dev
   5-2-scrobble-submission-tracking-deduplication: done
   5-3-os-native-safe-to-eject-handshake: done
   5-4-visual-manifest-repair-utility: done
