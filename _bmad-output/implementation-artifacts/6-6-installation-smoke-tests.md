@@ -1,6 +1,6 @@
 # Story 6.6: Installation Smoke Tests
 
-Status: ready-for-dev
+Status: review
 
 Completion Note: Ultimate context engine analysis completed - comprehensive developer guide created for the reopened MTP smoke-test scope.
 
@@ -32,8 +32,8 @@ So that I can catch packaging regressions before releasing.
   - [x] T2.3: Create `scripts/smoke-tests/smoke-macos.sh` — mount DMG, copy `.app` to `/Applications`, bypass quarantine, launch, poll `daemon.health`, remove `.app`
   - [x] T2.4: Create `scripts/smoke-tests/smoke-common.sh` (sourced by Linux/macOS scripts) — shared `poll_health` function: POST JSON-RPC to port 19140, retry up to 30s with 1s intervals, exit 1 with diagnostic output on timeout
 
-- [ ] **T4: Add MTP hardware test scope note (AC: #6 — Sprint Change 2026-04-30)**
-  - [ ] Add a comment block to `smoke-test.yml` (and/or `smoke-common.sh`) stating: "MTP end-to-end detection requires manual hardware verification on each platform. Automated MTP IO coverage is provided by unit tests in device_io.rs."
+- [x] **T4: Add MTP hardware test scope note (AC: #6 — Sprint Change 2026-04-30)**
+  - [x] Add a comment block to `smoke-test.yml` (and/or `smoke-common.sh`) stating: "MTP end-to-end detection requires manual hardware verification on each platform. Automated MTP IO coverage is provided by unit tests in device_io.rs."
   - [x] Verify Story 4.0's `device_io.rs` includes a mock `MtpBackend` with fixture-data unit tests (verified during story creation; see Story-Creation Verification below)
   - **Depends on:** Story 4.0 (DeviceIO abstraction — provides mock MtpBackend unit tests)
 
@@ -373,21 +373,30 @@ Claude Sonnet 4.6
 
 ### Debug Log References
 
+- 2026-05-03: Confirmed exact MTP scope note was absent before T4 change via `rtk grep`.
+- 2026-05-03: Confirmed exact MTP scope note is present in `.github/workflows/smoke-test.yml` and `scripts/smoke-tests/smoke-common.sh` via `rtk grep`.
+- 2026-05-03: Ran `rtk cargo test` — 184 tests passed.
+- 2026-05-03: Ran `rtk cargo clippy` — passed with 32 existing warnings.
+- 2026-05-03: Ran `rtk cargo clippy --all-targets --all-features -- -D warnings` — failed on pre-existing unrelated warnings in Rust files such as `device/tests.rs`, `api.rs`, `auto_fill.rs`, `device/mtp.rs`, `main.rs`, `rpc.rs`, `sync.rs`, and `device/mod.rs`; no T4 code was changed.
+
 ### Completion Notes List
 
 - T1: Added `"daemon.health"` match arm inline in `rpc.rs` dispatch block (before `_ =>` catch-all). Returns `Ok(serde_json::json!({ "data": { "status": "ok" } }))` — consistent with other handler response shapes and the PowerShell smoke-test's `result.data.status` check. No imports or state required.
 - T1.3: Unit test `test_rpc_daemon_health` calls the full `handler()` function with `"daemon.health"` method and asserts `result["data"]["status"] == "ok"`. All 164 daemon tests pass (no regressions from prior 123 baseline).
 - T2: Created `scripts/smoke-tests/` directory with four scripts. `smoke-common.sh` provides the shared `poll_health` function (30s retry loop, diagnostic curl on timeout). Platform scripts each cover the 4-step lifecycle: install → launch → poll health → uninstall. Failures emit `FAIL [platform=X] [step=Y]: message` for AC #5.
 - T3: Created `.github/workflows/smoke-test.yml` with `workflow_dispatch` trigger and `release_tag` input. Three independent jobs (`smoke-windows`, `smoke-linux`, `smoke-macos`) — each downloads its installer via `gh release download`, runs the matching script, and uploads a `smoke-log-*` artifact on failure. Linux job installs `xvfb libgtk-3-0 libwebkit2gtk-4.1-0 libappindicator3-1` before the smoke script. `ubuntu-22.04` used (not `ubuntu-latest`) for webkit2gtk-4.1 compatibility.
+- T4: Added the exact MTP hardware-test boundary note to `.github/workflows/smoke-test.yml` and `scripts/smoke-tests/smoke-common.sh`, preserving install, launch, daemon health, uninstall, timeout, and failure-log behavior. Verified `device_io.rs` contains `MockMtpHandle`, `MtpBackend`, and fixture-data MTP unit tests named in the story.
 
 ### File List
 
 - `jellyfinsync-daemon/src/rpc.rs` (modified — added `daemon.health` match arm + unit test `test_rpc_daemon_health`)
-- `scripts/smoke-tests/smoke-common.sh` (created — shared `poll_health` helper)
+- `scripts/smoke-tests/smoke-common.sh` (created — shared `poll_health` helper; modified in T4 with MTP manual hardware verification scope note)
 - `scripts/smoke-tests/smoke-windows.ps1` (created — Windows MSI smoke test)
 - `scripts/smoke-tests/smoke-linux.sh` (created — Linux .deb + Xvfb smoke test)
 - `scripts/smoke-tests/smoke-macos.sh` (created — macOS DMG smoke test)
-- `.github/workflows/smoke-test.yml` (created — manual `workflow_dispatch` smoke-test workflow)
+- `.github/workflows/smoke-test.yml` (created — manual `workflow_dispatch` smoke-test workflow; modified in T4 with MTP manual hardware verification scope note)
+- `_bmad-output/implementation-artifacts/6-6-installation-smoke-tests.md` (modified — story status, T4 checkbox, validation notes, file list, and change log)
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` (modified — story status tracking)
 
 ### Review Findings
 
@@ -408,6 +417,7 @@ Claude Sonnet 4.6
 
 ## Change Log
 
+- 2026-05-03: Completed reopened T4 scope. Added exact MTP manual hardware verification note to smoke workflow and shared smoke helper; verified exact wording and full Rust test suite.
 - 2026-04-30: Reopened — MTP support (Sprint Change 2026-04-30). AC #6 and T4 added. Requires Story 4.0 (DeviceIO abstraction) to provide mock MtpBackend unit tests.
 - 2026-04-06: Implemented all tasks (T1–T3). Added daemon.health RPC endpoint with unit test; created platform smoke scripts (Windows/Linux/macOS + common helper); created smoke-test.yml GitHub Actions workflow with workflow_dispatch trigger.
 - 2026-04-06: All 10 review patches applied. Status set to done.
