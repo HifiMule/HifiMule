@@ -206,6 +206,16 @@ pub mod windows_wpd {
             // S_OK (first init) or S_FALSE (already initialized) — both need a CoUninitialize.
             Ok(CoInitGuard)
         }
+
+        fn init_sta() -> Result<Self> {
+            let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            if hr == windows::Win32::Foundation::RPC_E_CHANGED_MODE {
+                return Err(anyhow::anyhow!(
+                    "COM: thread already initialized with incompatible apartment model"
+                ));
+            }
+            Ok(CoInitGuard)
+        }
     }
 
     impl Drop for CoInitGuard {
@@ -253,6 +263,12 @@ pub mod windows_wpd {
                 crate::daemon_log!("[WPD] session(): device.Open() succeeded");
                 Ok((com, device))
             }
+        }
+
+        fn prefers_shell_copy(&self) -> bool {
+            let device_id = self.device_id.to_ascii_lowercase();
+            let friendly_name = self.friendly_name.to_ascii_lowercase();
+            device_id.contains("vid_091e") || friendly_name.contains("garmin")
         }
     }
 
@@ -503,6 +519,27 @@ pub mod windows_wpd {
         Ok(current)
     }
 
+    fn delete_shell_child_if_exists(parent: &IShellItem, name: &str) -> Result<()> {
+        let Ok(existing) = find_shell_child_by_name(parent, name) else {
+            return Ok(());
+        };
+
+        unsafe {
+            let file_op: IFileOperation =
+                CoCreateInstance(&FileOperation, None, CLSCTX_INPROC_SERVER)?;
+            file_op.SetOperationFlags(FILEOPERATION_FLAGS(0x0414))?;
+            file_op.DeleteItem(&existing, None)?;
+            file_op.PerformOperations()?;
+            if file_op.GetAnyOperationsAborted()?.as_bool() {
+                return Err(anyhow::anyhow!(
+                    "WPD shell delete aborted for existing '{}'",
+                    name
+                ));
+            }
+            Ok(())
+        }
+    }
+
     // Copies `temp_path` to `parent_components/filename` on the device named `friendly_name`
     // using Shell IFileOperation (the path that works on Garmin devices).
     fn shell_copy_to_device(
@@ -511,13 +548,14 @@ pub mod windows_wpd {
         filename: &str,
         temp_path: &std::path::Path,
     ) -> Result<()> {
-        let _com = CoInitGuard::init()?;
+        let _com = CoInitGuard::init_sta()?;
         unsafe {
             let computer_item: IShellItem =
                 SHGetKnownFolderItem(&FOLDERID_ComputerFolder, KF_FLAG_DEFAULT, None)?;
             let device_item = find_shell_child_by_name(&computer_item, friendly_name)?;
             let storage_item = first_shell_folder_child(&device_item)?;
             let dest_folder = navigate_shell_path(storage_item, parent_components)?;
+            delete_shell_child_if_exists(&dest_folder, filename)?;
 
             let temp_hstr = HSTRING::from(temp_path.to_string_lossy().as_ref());
             let source_item: IShellItem =
@@ -532,8 +570,7 @@ pub mod windows_wpd {
                 CoCreateInstance(&FileOperation, None, CLSCTX_INPROC_SERVER)?;
             // FOF_SILENT(0x0004) | FOF_NOCONFIRMATION(0x0010) | FOF_NOERRORUI(0x0400)
             file_op.SetOperationFlags(FILEOPERATION_FLAGS(0x0414))?;
-            let fname_hstr = HSTRING::from(filename);
-            file_op.CopyItem(&source_item, &dest_folder, PCWSTR(fname_hstr.as_ptr()), None)?;
+            file_op.CopyItem(&source_item, &dest_folder, PCWSTR::null(), None)?;
             file_op.PerformOperations()?;
             crate::daemon_log!("[WPD] shell_copy_to_device: PerformOperations OK");
 
@@ -543,7 +580,22 @@ pub mod windows_wpd {
                     filename
                 ));
             }
-            Ok(())
+
+            for attempt in 1..=10 {
+                if find_shell_child_by_name(&dest_folder, filename).is_ok() {
+                    crate::daemon_log!(
+                        "[WPD] shell_copy_to_device: verified destination after {} attempt(s)",
+                        attempt
+                    );
+                    return Ok(());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+
+            Err(anyhow::anyhow!(
+                "WPD shell copy reported success but '{}' was not visible on device",
+                filename
+            ))
         }
     }
 
@@ -762,6 +814,36 @@ pub mod windows_wpd {
             let filename = components[components.len() - 1];
             let parent_components = &components[..components.len() - 1];
 
+            if self.prefers_shell_copy() {
+                {
+                    let (_com, device) = self.session()?;
+                    unsafe {
+                        let content = device.Content()?;
+                        ensure_dir_chain(&content, parent_components)?;
+                    }
+                }
+
+                crate::daemon_log!(
+                    "[WPD] write_file: using Shell copy first for Garmin-style WPD device path={}",
+                    path
+                );
+                let temp_dir = std::env::temp_dir().join(format!(
+                    "jellyfinsync_{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0),
+                ));
+                std::fs::create_dir_all(&temp_dir)?;
+                let temp_path = temp_dir.join(filename);
+                std::fs::write(&temp_path, data)?;
+                let copy_result =
+                    shell_copy_to_device(&self.friendly_name, parent_components, filename, &temp_path);
+                let _ = std::fs::remove_file(&temp_path);
+                let _ = std::fs::remove_dir(&temp_dir);
+                return copy_result;
+            }
+
             // Primary path (WPD): ensure dirs, delete existing, attempt
             // CreateObjectWithPropertiesAndData. Works correctly on standard WPD devices
             // (USB drives, most MTP devices). Falls back to Shell copy if the WPD write
@@ -878,17 +960,20 @@ pub mod windows_wpd {
             // Shell copy fallback: write to a local temp file then IFileOperation::CopyItem.
             // Used for devices like Garmin where CreateObjectWithPropertiesAndData creates
             // folder objects; Shell copy uses the MTP SendObject path that works correctly.
-            let temp_path = std::env::temp_dir().join(format!(
-                "jellyfinsync_{}.tmp",
+            let temp_dir = std::env::temp_dir().join(format!(
+                "jellyfinsync_{}",
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_nanos())
                     .unwrap_or(0),
             ));
+            std::fs::create_dir_all(&temp_dir)?;
+            let temp_path = temp_dir.join(filename);
             std::fs::write(&temp_path, data)?;
             let copy_result =
                 shell_copy_to_device(&self.friendly_name, parent_components, filename, &temp_path);
             let _ = std::fs::remove_file(&temp_path);
+            let _ = std::fs::remove_dir(&temp_dir);
             copy_result
         }
 
@@ -941,6 +1026,10 @@ pub mod windows_wpd {
                 let values = props.GetValues(PCWSTR(storage_hstr.as_ptr()), None)?;
                 Ok(values.GetUnsignedLargeIntegerValue(&WPD_STORAGE_FREE_SPACE_IN_BYTES)?)
             }
+        }
+
+        fn preferred_audio_container(&self) -> Option<&'static str> {
+            self.prefers_shell_copy().then_some("mp3")
         }
     }
 

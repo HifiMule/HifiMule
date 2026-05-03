@@ -22,6 +22,9 @@ pub trait DeviceIO: Send + Sync + std::fmt::Debug {
     async fn free_space(&self) -> Result<u64>;
     async fn ensure_dir(&self, path: &str) -> Result<()>;
     async fn cleanup_empty_subdirs(&self, path: &str) -> Result<()>;
+    fn preferred_audio_container(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 // ─── MSC Backend ────────────────────────────────────────────────────────────
@@ -222,6 +225,9 @@ pub trait MtpHandle: Send + Sync {
     fn delete_file(&self, path: &str) -> Result<()>;
     fn list_files(&self, path: &str) -> Result<Vec<FileEntry>>;
     fn free_space(&self) -> Result<u64>;
+    fn preferred_audio_container(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 #[async_trait]
@@ -244,13 +250,10 @@ impl DeviceIO for MtpBackend {
     }
 
     async fn write_with_verify(&self, path: &str, data: &[u8]) -> Result<()> {
-        // Dirty-marker strategy: write .dirty sentinel → write target → delete sentinel
-        let dirty_marker = format!("{}.dirty", path);
-        // Use 1-byte sentinel: WPD drivers (including Garmin) reject CreateObjectWithPropertiesAndData with WPD_OBJECT_SIZE=0.
-        self.write_file(&dirty_marker, b"\x00").await?;
-        self.write_file(path, data).await?;
-        self.delete_file(&dirty_marker).await?;
-        Ok(())
+        // MTP providers can reject or silently drop synthetic marker files.
+        // The manifest-level dirty flag already tracks interrupted syncs; keep
+        // the device write path focused on the real destination object.
+        self.write_file(path, data).await
     }
 
     async fn delete_file(&self, path: &str) -> Result<()> {
@@ -284,6 +287,10 @@ impl DeviceIO for MtpBackend {
     // MTP manages directory objects automatically; empty directory pruning is not needed.
     async fn cleanup_empty_subdirs(&self, _path: &str) -> Result<()> {
         Ok(())
+    }
+
+    fn preferred_audio_container(&self) -> Option<&'static str> {
+        self.handle.preferred_audio_container()
     }
 }
 
@@ -436,7 +443,7 @@ pub mod tests {
     // ── MtpBackend tests ───────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn mtp_write_with_verify_dirty_marker_sequence() {
+    async fn mtp_write_with_verify_writes_target_only() {
         let mock = Arc::new(MockMtpHandle::new());
         let backend = MtpBackend {
             handle: Arc::clone(&mock) as Arc<dyn MtpHandle>,
@@ -448,11 +455,8 @@ pub mod tests {
             .unwrap();
 
         let log = mock.call_log.lock().unwrap().clone();
-        assert_eq!(log[0], "write:Music/track.mp3.dirty");
-        assert_eq!(log[1], "write:Music/track.mp3");
-        assert_eq!(log[2], "delete:Music/track.mp3.dirty");
+        assert_eq!(log, vec!["write:Music/track.mp3"]);
 
-        // Final file exists, dirty marker gone
         assert!(mock.files.lock().unwrap().contains_key("Music/track.mp3"));
         assert!(!mock
             .files

@@ -254,9 +254,18 @@ pub struct PathConstructionResult {
 ///
 /// Sanitizes path components to remove invalid filesystem characters and enforces
 /// legacy hardware path length limits (255 characters per component).
+#[allow(dead_code)]
 pub fn construct_file_path(
     managed_path: &Path,
     item: &crate::api::JellyfinItem,
+) -> Result<PathConstructionResult> {
+    construct_file_path_with_extension(managed_path, item, None)
+}
+
+fn construct_file_path_with_extension(
+    managed_path: &Path,
+    item: &crate::api::JellyfinItem,
+    extension_override: Option<&str>,
 ) -> Result<PathConstructionResult> {
     // Extract and sanitize components
     let artist = item.album_artist.as_deref().unwrap_or("Unknown Artist");
@@ -270,12 +279,7 @@ pub fn construct_file_path(
         .unwrap_or_else(|| String::from("00"));
 
     // Determine file extension from Container field
-    let extension = item
-        .media_sources
-        .as_ref()
-        .and_then(|sources| sources.first())
-        .and_then(|s| s.container.as_deref())
-        .unwrap_or(item.container.as_deref().unwrap_or("mp3"));
+    let extension = extension_override.unwrap_or_else(|| source_container(item).unwrap_or("mp3"));
 
     // Step 1: Sanitize path components (remove invalid chars)
     let artist_clean = sanitize_path_component(artist);
@@ -338,6 +342,40 @@ pub fn construct_file_path(
             original_name,
         });
     }
+}
+
+fn source_container(item: &crate::api::JellyfinItem) -> Option<&str> {
+    item.media_sources
+        .as_ref()
+        .and_then(|sources| sources.first())
+        .and_then(|s| s.container.as_deref())
+        .or(item.container.as_deref())
+}
+
+fn forced_audio_profile(container: &str) -> serde_json::Value {
+    let bitrate = if container.eq_ignore_ascii_case("mp3") {
+        320000
+    } else {
+        256000
+    };
+
+    serde_json::json!({
+        "Name": format!("JellyfinSync-Forced-{}", container),
+        "MaxStreamingBitrate": bitrate,
+        "MusicStreamingTranscodingBitrate": bitrate,
+        "DirectPlayProfiles": [],
+        "TranscodingProfiles": [
+            {
+                "Container": container,
+                "Type": "Audio",
+                "AudioCodec": container,
+                "Protocol": "http",
+                "EstimateContentLength": true,
+                "EnableMpegtsM2TsMode": false
+            }
+        ],
+        "CodecProfiles": []
+    })
 }
 
 /// Sanitizes a path component by removing/replacing invalid filesystem characters.
@@ -502,8 +540,21 @@ pub async fn execute_sync(
             }
         };
 
+        let preferred_audio_container = device_io.preferred_audio_container();
+        let effective_transcoding_profile;
+        let stream_profile = if let Some(container) = preferred_audio_container {
+            effective_transcoding_profile = forced_audio_profile(container);
+            Some(&effective_transcoding_profile)
+        } else {
+            transcoding_profile.as_ref()
+        };
+
         // Construct target path (includes legacy hardware path length validation)
-        let construction = match construct_file_path(&managed_path, &item) {
+        let construction = match construct_file_path_with_extension(
+            &managed_path,
+            &item,
+            preferred_audio_container,
+        ) {
             Ok(result) => result,
             Err(e) => {
                 errors.push(SyncFileError {
@@ -523,7 +574,7 @@ pub async fn execute_sync(
                 jellyfin_token,
                 jellyfin_user_id,
                 &add_item.jellyfin_id,
-                transcoding_profile.as_ref(),
+                stream_profile,
             )
             .await;
 
@@ -1621,6 +1672,23 @@ mod tests {
             "original_name must be set when truncated"
         );
         assert_eq!(result.original_name.unwrap(), long_track_name);
+    }
+
+    #[test]
+    fn test_construct_file_path_extension_override() {
+        let managed = std::path::PathBuf::from("Music");
+        let item = make_test_item(
+            "K.",
+            Some("Cigarettes After Sex"),
+            Some("Cigarettes After Sex"),
+            Some(1),
+            Some("flac"),
+        );
+
+        let result = construct_file_path_with_extension(&managed, &item, Some("mp3")).unwrap();
+        let filename = result.path.file_name().unwrap().to_string_lossy();
+
+        assert_eq!(filename, "01 - K.mp3");
     }
 
     #[test]
