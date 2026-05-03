@@ -1,6 +1,8 @@
 # Story 6.6: Installation Smoke Tests
 
-Status: backlog
+Status: ready-for-dev
+
+Completion Note: Ultimate context engine analysis completed - comprehensive developer guide created for the reopened MTP smoke-test scope.
 
 ## Story
 
@@ -12,7 +14,7 @@ So that I can catch packaging regressions before releasing.
 
 1. **Install step succeeds**: Given a freshly built installer for any platform, the installer runs to completion without errors.
 2. **Launch step succeeds**: The installed application launches (daemon process starts) after installation.
-3. **Daemon health-check passes**: The daemon sidecar is reachable at `http://127.0.0.1:19140` and responds to a JSON-RPC `get_daemon_state` call with a valid result (not an error).
+3. **Daemon health-check passes**: The daemon sidecar is reachable at `http://127.0.0.1:19140` and responds to a JSON-RPC `daemon.health` call with `{ "status": "ok" }`.
 4. **Uninstall step succeeds**: The application uninstalls cleanly, leaving no residual processes.
 5. **Failures are diagnostic**: Any step failure produces clear diagnostic output identifying which platform, which step, and the error message.
 6. **MTP hardware test scope (Sprint Change 2026-04-30):** Given the smoke test environment has no physical MTP device, when the test suite runs, MTP device IO is verified by unit tests in `device_io.rs` (mock `MtpBackend` returning fixture data — defined in Story 4.0). The smoke test workflow explicitly notes: "MTP end-to-end detection requires manual hardware verification on each platform."
@@ -32,7 +34,7 @@ So that I can catch packaging regressions before releasing.
 
 - [ ] **T4: Add MTP hardware test scope note (AC: #6 — Sprint Change 2026-04-30)**
   - [ ] Add a comment block to `smoke-test.yml` (and/or `smoke-common.sh`) stating: "MTP end-to-end detection requires manual hardware verification on each platform. Automated MTP IO coverage is provided by unit tests in device_io.rs."
-  - [ ] Verify Story 4.0's `device_io.rs` includes a mock `MtpBackend` with fixture-data unit tests (coordinate with Story 4.0 implementor)
+  - [x] Verify Story 4.0's `device_io.rs` includes a mock `MtpBackend` with fixture-data unit tests (verified during story creation; see Story-Creation Verification below)
   - **Depends on:** Story 4.0 (DeviceIO abstraction — provides mock MtpBackend unit tests)
 
 - [x] **T3: Create `smoke-test.yml` GitHub Actions workflow** (AC: #1–#5)
@@ -43,9 +45,17 @@ So that I can catch packaging regressions before releasing.
   - [x] T3.5: Each job uploads a smoke-test log as a workflow artifact on failure
   - [x] T3.6: Linux job installs Xvfb and GTK runtime libs before running the smoke script
 
+### Story-Creation Verification for Active Reopen Scope
+
+- T4 is the only remaining development scope. T1-T3 are already implemented and reviewed.
+- Add the MTP scope note to `.github/workflows/smoke-test.yml` and/or `scripts/smoke-tests/smoke-common.sh` with this exact wording: "MTP end-to-end detection requires manual hardware verification on each platform. Automated MTP IO coverage is provided by unit tests in device_io.rs."
+- `jellyfinsync-daemon/src/device_io.rs` has already been verified during story creation: it includes `MockMtpHandle` and `MtpBackend` tests for target-only write-with-verify behavior, manifest probing from fixture JSON, and dirty-marker listing.
+
 ## Dev Notes
 
 ### What to Build (Scope)
+
+- **Active reopened scope only:** T1-T3 are already implemented and reviewed. The remaining development work is T4: document the MTP hardware-test boundary in the smoke-test workflow/helper and keep the automated verification pointed at `device_io.rs` unit tests.
 
 - **T1** adds a dedicated `daemon.health` RPC method to the daemon — this is the canonical health-check call referenced by the AC. It must be a real RPC method, not a curl to an existing method, so it is stable and explicit.
 - **T2+T3** are scripts + a new GitHub Actions workflow. The workflow runs *after* release artifacts exist (triggered manually, not from the release pipeline directly).
@@ -81,6 +91,21 @@ The result is wrapped by the `Ok(res)` branch in `match result` (line 176), so t
 ```
 
 No imports needed. No state needed. No async needed — but the match arm expects `Result<Value, JsonRpcError>` matching the other handlers' return type.
+
+### Current File State to Preserve
+
+- `.github/workflows/smoke-test.yml` already has three independent jobs (`smoke-windows`, `smoke-linux`, `smoke-macos`), `timeout-minutes: 15`, failure log upload via `actions/upload-artifact@v4`, and runner labels `windows-latest`, `ubuntu-22.04`, and `macos-latest`. Do not rebuild this workflow; add only the MTP scope note unless verification exposes a defect.
+- `scripts/smoke-tests/smoke-common.sh` already provides `poll_health()` using JSON-RPC `daemon.health` and parses `.result.data.status == "ok"` with `jq`. If the note is added here, keep it near the helper header so it is visible in every platform smoke path.
+- `scripts/smoke-tests/smoke-linux.sh`, `smoke-macos.sh`, and `smoke-windows.ps1` already implement install -> launch -> daemon health -> uninstall with diagnostics. Do not add physical MTP probing to these scripts; CI runners have no reliable attached MTP hardware.
+- `jellyfinsync-daemon/src/device_io.rs` already proves the automated MTP IO boundary with `MockMtpHandle` and tests named `mtp_write_with_verify_writes_target_only`, `mtp_backend_manifest_probe`, and `mtp_dirty_marker_detected_on_reconnect`.
+
+### Implementation Guardrails for T4
+
+- Prefer a YAML comment in `.github/workflows/smoke-test.yml` near the workflow name or job definitions so anyone running the manual smoke workflow sees the limitation before interpreting results.
+- Optionally mirror the same note in `scripts/smoke-tests/smoke-common.sh` if you want the message to travel with local script usage. Avoid duplicating it in every platform script.
+- The note must not weaken the smoke test itself: keep install, launch, `daemon.health`, uninstall, timeouts, and failure-log upload behavior unchanged.
+- Do not mark AC #6 as physical hardware automation. The requirement is explicit: automated smoke tests acknowledge the hardware gap, while MTP IO behavior remains covered by unit tests.
+- Do not introduce new dependencies, GitHub Actions, release triggers, or physical-device mocks in CI for this story.
 
 ### Platform-Specific Smoke Test Design
 
@@ -324,6 +349,12 @@ c:\Workspaces\JellyfinSync\
 - The daemon starts as a Tauri sidecar — the UI must be launched first (not just the daemon binary) for the smoke test to mirror real user flow
 - `fail-fast: false` convention from 6.5: apply the same to `smoke-test.yml` matrix so all platform results are visible even on partial failure
 - **123 Rust unit tests pass** as of 6.5 completion — do not regress; adding `daemon.health` handler and test must not break existing tests
+
+### Latest Technical Information (checked 2026-05-03)
+
+- GitHub-hosted runner labels are moving targets. Current GitHub docs and runner-image metadata map `windows-latest` to Windows Server 2025, `ubuntu-22.04` to Ubuntu 22.04 x64, and `macos-latest` to macOS 15 arm64. Keep the existing labels unless a runner-specific smoke failure proves a pin is needed.
+- GitHub-hosted Linux/macOS runners have passwordless `sudo`, and Windows runners run as administrators with UAC disabled. The existing install/uninstall scripts can continue to use `sudo dpkg`, `/Applications`, and `msiexec` without adding privilege workarounds.
+- `actions/upload-artifact@v4` remains the correct artifact action generation for this workflow, and `if-no-files-found: ignore` is a supported option. Keep the unique artifact names per job.
 
 ### References
 
