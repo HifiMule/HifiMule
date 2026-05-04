@@ -82,6 +82,7 @@ jobs:
           test -n "$X86_DYLIB" || { echo "x86_64 dylib not found in bottle"; exit 1; }
           MERGED_DYLIB="$(mktemp)"
           lipo -create -output "$MERGED_DYLIB" "$ARM64_DYLIB" "$X86_DYLIB"
+          chmod u+w "$ARM64_DYLIB"
           cp "$MERGED_DYLIB" "$ARM64_DYLIB"
 
           echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
