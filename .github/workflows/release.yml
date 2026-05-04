@@ -68,14 +68,30 @@ jobs:
           brew install pkg-config libmtp
           LIBMTP_PREFIX="$(brew --prefix libmtp)"
           LIBMTP_PC_DIR="$LIBMTP_PREFIX/lib/pkgconfig"
+
+          # The arm64 runner only provides arm64 bottles; the universal build also needs x86_64.
+          # Fetch the x86_64 (sonoma) bottle and merge it with the installed arm64 dylib.
+          brew fetch --force --bottle-tag=sonoma libmtp
+          X86_BOTTLE="$(find "$(brew --cache)/downloads" -name '*libmtp*sonoma.bottle.tar.gz' | tail -1)"
+          test -n "$X86_BOTTLE" || { echo "x86_64 sonoma bottle not found"; exit 1; }
+          X86_DIR="$(mktemp -d)"
+          tar -xzf "$X86_BOTTLE" -C "$X86_DIR"
+          ARM64_DYLIB="$(find "$LIBMTP_PREFIX/lib" -name 'libmtp.*.dylib' ! -type l | head -1)"
+          X86_DYLIB="$(find "$X86_DIR" -name 'libmtp.*.dylib' ! -type l | head -1)"
+          test -n "$ARM64_DYLIB" || { echo "arm64 dylib not found"; exit 1; }
+          test -n "$X86_DYLIB" || { echo "x86_64 dylib not found in bottle"; exit 1; }
+          MERGED_DYLIB="$(mktemp)"
+          lipo -create -output "$MERGED_DYLIB" "$ARM64_DYLIB" "$X86_DYLIB"
+          cp "$MERGED_DYLIB" "$ARM64_DYLIB"
+
           echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_PATH_aarch64_apple_darwin=$LIBMTP_PC_DIR" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_PATH_x86_64_apple_darwin=$LIBMTP_PC_DIR" >> "$GITHUB_ENV"
           pkg-config --libs libmtp
           LIBMTP_DYLIB="$(find "$LIBMTP_PREFIX/lib" -name 'libmtp*.dylib' -print -quit)"
           test -n "$LIBMTP_DYLIB"
-          lipo -verify_arch arm64 "$LIBMTP_DYLIB"
-          lipo -verify_arch x86_64 "$LIBMTP_DYLIB"
+          lipo "$LIBMTP_DYLIB" -verify_arch arm64
+          lipo "$LIBMTP_DYLIB" -verify_arch x86_64
 
       - name: Install frontend dependencies
         working-directory: jellyfinsync-ui
