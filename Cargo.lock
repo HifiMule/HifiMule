@@ -2219,7 +2219,7 @@ dependencies = [
 
 [[package]]
 name = "jellyfinsync-daemon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2252,7 +2252,7 @@ dependencies = [
 
 [[package]]
 name = "jellyfinsync-ui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "reqwest 0.12.28",
