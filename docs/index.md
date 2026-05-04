@@ -50,6 +50,7 @@ _Generated: 2026-03-08 | Scan Level: Quick | Workflow Version: 1.2.0_
 ### Development
 
 - [Development Guide](./development-guide.md)
+- [Release Guide](./release-guide.md)
 
 ### Metadata
 
