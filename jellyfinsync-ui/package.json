@@ -10,7 +10,7 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.10",
+    "@tauri-apps/api": "~2.10",
     "@tauri-apps/plugin-opener": "^2",
     "@shoelace-style/shoelace": "^2.19.1"
   },
