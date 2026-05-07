@@ -314,11 +314,12 @@ impl DeviceManager {
         let path_str = path.to_string_lossy().to_string();
         // Unrecognized devices have no manifest — ensure they are not in connected_devices.
         // Do NOT change selected_device_path since other recognized devices may still be connected.
+        // Both operations are performed under state.write() so no concurrent handle_device_detected
+        // can re-insert the path between the removal and the pending-state set (which would leave
+        // two live IO backends for the same physical device).
         {
             let mut state = self.state.write().await;
             state.connected_devices.remove(&path);
-        }
-        {
             let mut unrecognized = self.unrecognized_device.write().await;
             if unrecognized.is_some() {
                 daemon_log!(
@@ -583,11 +584,18 @@ impl DeviceManager {
             // Only auto-select if no device is currently selected; don't steal selection
             // from a device the user has already chosen in a multi-device session.
             if state.selected_device_path.is_none() {
-                state.selected_device_path = Some(device_root);
+                state.selected_device_path = Some(device_root.clone());
             }
         }
         {
-            *self.unrecognized_device.write().await = None;
+            // Only clear the pending slot if it still holds this device's path.
+            // A concurrent remove + new unrecognized probe may have replaced it with a
+            // different device between the snapshot and here; clearing unconditionally
+            // would silently lose that device's pending state.
+            let mut unrecognized = self.unrecognized_device.write().await;
+            if unrecognized.as_ref().is_some_and(|s| s.path == device_root) {
+                *unrecognized = None;
+            }
         }
 
         Ok(manifest)
