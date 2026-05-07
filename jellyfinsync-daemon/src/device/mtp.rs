@@ -1492,6 +1492,8 @@ pub mod libmtp {
             }
             let mut parent_id = LIBMTP_FILES_AND_FOLDERS_ROOT;
             for component in &components {
+                // libmtp documents storage 0 as searching the parent across all available storages.
+                // Debian mtp_files(3) and libmtp source map 0 to PTP_GOH_ALL_STORAGE.
                 let files = LIBMTP_Get_Files_And_Folders(dev, 0, parent_id);
                 if files.is_null() {
                     return Err(anyhow::anyhow!(
@@ -1602,6 +1604,8 @@ pub mod libmtp {
             let parent_id = unsafe { Self::path_to_object_id_raw(dev, path)? };
             let mut entries = Vec::new();
             unsafe {
+                // libmtp documents storage 0 as searching the parent across all available storages.
+                // Debian mtp_files(3) and libmtp source map 0 to PTP_GOH_ALL_STORAGE.
                 let files = LIBMTP_Get_Files_And_Folders(dev, 0, parent_id);
                 let mut cur = files;
                 while !cur.is_null() {
@@ -1701,7 +1705,7 @@ pub fn create_mtp_backend(info: &MtpDeviceInfo, storage_id: Option<String>) -> R
             Arc::new(libmtp::LibmtpHandle::open(*bus_location, *dev_num)?)
         }
     };
-    Ok(MtpBackend { handle })
+    Ok(MtpBackend::new(handle))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

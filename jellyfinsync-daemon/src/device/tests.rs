@@ -3,6 +3,7 @@ use serde_json;
 use std::fs;
 use std::sync::Arc;
 use tempfile::tempdir;
+use tokio::time::{timeout, Duration};
 
 fn msc(dir: &std::path::Path) -> Arc<dyn crate::device_io::DeviceIO> {
     Arc::new(crate::device_io::MscBackend::new(dir.to_path_buf()))
@@ -1189,6 +1190,42 @@ async fn test_initialize_device_uses_stored_io_and_clears_it() {
 }
 
 #[tokio::test]
+async fn test_initialize_device_uses_coherent_pending_snapshot_not_stale_caller_io() {
+    let pending_dir = tempdir().unwrap();
+    let stale_dir = tempdir().unwrap();
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+
+    manager
+        .handle_device_unrecognized(
+            pending_dir.path().to_path_buf(),
+            msc(pending_dir.path()),
+            None,
+        )
+        .await;
+
+    manager
+        .initialize_device(
+            "",
+            None,
+            "My Device".to_string(),
+            None,
+            msc(stale_dir.path()),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        pending_dir.path().join(".jellyfinsync.json").exists(),
+        "manifest must be written through the pending snapshot IO"
+    );
+    assert!(
+        !stale_dir.path().join(".jellyfinsync.json").exists(),
+        "stale caller IO must not be paired with the pending path"
+    );
+}
+
+#[tokio::test]
 async fn test_handle_device_removed_clears_unrecognized_io() {
     // Verify that removing the unrecognized device also clears the stored IO backend.
     let dir = tempdir().unwrap();
@@ -1538,4 +1575,211 @@ async fn test_select_device_unknown_path_returns_false() {
     );
 
     assert!(manager.get_current_device_path().await.is_none());
+}
+
+#[tokio::test]
+async fn test_handle_device_removed_selected_with_multiple_remaining_autoselects() {
+    let dir1 = tempdir().unwrap();
+    let dir2 = tempdir().unwrap();
+    let dir3 = tempdir().unwrap();
+    let path1 = dir1.path().to_path_buf();
+    let path2 = dir2.path().to_path_buf();
+    let path3 = dir3.path().to_path_buf();
+
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+
+    let manifest1 = make_manifest("device-1", "iPod");
+    let manifest2 = make_manifest("device-2", "Walkman");
+    let manifest3 = make_manifest("device-3", "Zune");
+
+    write_manifest(msc(&path1), &manifest1).await.unwrap();
+    write_manifest(msc(&path2), &manifest2).await.unwrap();
+    write_manifest(msc(&path3), &manifest3).await.unwrap();
+
+    manager
+        .handle_device_detected(path1.clone(), manifest1, msc(&path1))
+        .await
+        .unwrap();
+    manager
+        .handle_device_detected(path2.clone(), manifest2, msc(&path2))
+        .await
+        .unwrap();
+    manager
+        .handle_device_detected(path3.clone(), manifest3, msc(&path3))
+        .await
+        .unwrap();
+
+    manager.handle_device_removed(&path1).await;
+
+    let selected = manager.get_current_device_path().await;
+    assert!(
+        selected.as_ref() == Some(&path2) || selected.as_ref() == Some(&path3),
+        "one remaining device must be selected after selected removal"
+    );
+}
+
+#[tokio::test]
+async fn test_select_device_and_update_manifest_do_not_deadlock() {
+    let dir1 = tempdir().unwrap();
+    let dir2 = tempdir().unwrap();
+    let path1 = dir1.path().to_path_buf();
+    let path2 = dir2.path().to_path_buf();
+
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = Arc::new(DeviceManager::new(db));
+
+    let manifest1 = make_manifest("device-1", "iPod");
+    let manifest2 = make_manifest("device-2", "Walkman");
+    write_manifest(msc(&path1), &manifest1).await.unwrap();
+    write_manifest(msc(&path2), &manifest2).await.unwrap();
+
+    manager
+        .handle_device_detected(path1.clone(), manifest1, msc(&path1))
+        .await
+        .unwrap();
+    manager
+        .handle_device_detected(path2.clone(), manifest2, msc(&path2))
+        .await
+        .unwrap();
+
+    let selecting = {
+        let manager = Arc::clone(&manager);
+        let path2 = path2.clone();
+        tokio::spawn(async move { manager.select_device(path2).await })
+    };
+    let updating = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move {
+            manager
+                .update_manifest(|manifest| manifest.name = Some("Updated".to_string()))
+                .await
+        })
+    };
+
+    timeout(Duration::from_secs(2), async {
+        let _ = tokio::join!(selecting, updating);
+    })
+    .await
+    .expect("select_device and update_manifest must not deadlock");
+}
+
+#[tokio::test]
+async fn test_unrecognized_state_concurrent_set_and_remove_is_coherent() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = Arc::new(DeviceManager::new(db));
+
+    let setter = {
+        let manager = Arc::clone(&manager);
+        let path = path.clone();
+        tokio::spawn(async move {
+            for _ in 0..100 {
+                manager
+                    .handle_device_unrecognized(path.clone(), msc(&path), Some("Pending".into()))
+                    .await;
+            }
+        })
+    };
+    let remover = {
+        let manager = Arc::clone(&manager);
+        let path = path.clone();
+        tokio::spawn(async move {
+            for _ in 0..100 {
+                manager.handle_device_removed(&path).await;
+            }
+        })
+    };
+
+    timeout(Duration::from_secs(2), async {
+        let _ = tokio::join!(setter, remover);
+    })
+    .await
+    .expect("concurrent unrecognized set/remove must complete");
+
+    if let Some(snapshot) = manager.get_unrecognized_device_snapshot().await {
+        assert_eq!(snapshot.path, path);
+        assert!(snapshot.io.free_space().await.is_ok());
+        assert_eq!(snapshot.friendly_name.as_deref(), Some("Pending"));
+    }
+}
+
+#[tokio::test]
+async fn test_handle_device_unrecognized_removes_connected_entry_for_same_path() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+    let manifest = make_manifest("device-1", "iPod");
+
+    write_manifest(msc(&path), &manifest).await.unwrap();
+    manager
+        .handle_device_detected(path.clone(), manifest, msc(&path))
+        .await
+        .unwrap();
+    assert_eq!(manager.get_connected_devices().await.len(), 1);
+
+    manager
+        .handle_device_unrecognized(path.clone(), msc(&path), None)
+        .await;
+
+    assert!(
+        manager.get_connected_devices().await.is_empty(),
+        "same-path unrecognized probe must remove the connected entry"
+    );
+    assert_eq!(manager.get_unrecognized_device_path().await, Some(path));
+}
+
+#[tokio::test]
+async fn test_mtp_probe_read_failure_does_not_mark_known() {
+    let dir = tempdir().unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let backend = msc(dir.path());
+
+    let inserted = emit_mtp_probe_event(
+        &tx,
+        PathBuf::from("mtp://retry-me"),
+        "retry-me",
+        "Retry Device".to_string(),
+        backend,
+    )
+    .await;
+
+    assert!(
+        !inserted,
+        "manifest read failure must leave device retryable"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "no event should be emitted on read failure"
+    );
+}
+
+#[tokio::test]
+async fn test_mtp_probe_parse_failure_emits_unrecognized_and_marks_known() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join(".jellyfinsync.json"), b"not-json").unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let backend = msc(dir.path());
+
+    let inserted = emit_mtp_probe_event(
+        &tx,
+        PathBuf::from("mtp://unrecognized"),
+        "unrecognized",
+        "Unrecognized Device".to_string(),
+        backend,
+    )
+    .await;
+
+    assert!(
+        inserted,
+        "parse failure emits Unrecognized and can be marked known"
+    );
+    match rx.recv().await.unwrap() {
+        DeviceEvent::Unrecognized { friendly_name, .. } => {
+            assert_eq!(friendly_name.as_deref(), Some("Unrecognized Device"));
+        }
+        _ => panic!("expected unrecognized event"),
+    }
 }

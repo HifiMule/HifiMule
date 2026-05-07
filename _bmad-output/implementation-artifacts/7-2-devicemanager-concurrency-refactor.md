@@ -1,6 +1,6 @@
 # Story 7.2: DeviceManager Concurrency Refactor
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -23,54 +23,54 @@ so that multi-device scenarios are reliable and concurrent operations never dead
 
 ## Tasks / Subtasks
 
-- [ ] **T1: Replace split unrecognized fields with `UnrecognizedDeviceState`** (AC: #1, #7, #8)
-  - [ ] Add `pub struct UnrecognizedDeviceState { pub path: PathBuf, pub io: Arc<dyn DeviceIO>, pub friendly_name: Option<String> }` near `ConnectedDevice` in `jellyfinsync-daemon/src/device/mod.rs`.
-  - [ ] Replace `unrecognized_device_path`, `unrecognized_device_io`, and `unrecognized_device_friendly_name` fields with `unrecognized_device: Arc<RwLock<Option<UnrecognizedDeviceState>>>`.
-  - [ ] Update `new()`, `handle_device_unrecognized`, `get_unrecognized_device_path`, `get_unrecognized_device_io`, `handle_device_removed`, `initialize_device`, and `list_root_folders`.
-  - [ ] Keep current public helper names where callers already use them; add `get_unrecognized_device_friendly_name()` only if it reduces duplicate lock reads.
-  - [ ] Do not expose a path/IO/friendly-name combination from multiple locks. A single read must provide a coherent snapshot.
+- [x] **T1: Replace split unrecognized fields with `UnrecognizedDeviceState`** (AC: #1, #7, #8)
+  - [x] Add `pub struct UnrecognizedDeviceState { pub path: PathBuf, pub io: Arc<dyn DeviceIO>, pub friendly_name: Option<String> }` near `ConnectedDevice` in `jellyfinsync-daemon/src/device/mod.rs`.
+  - [x] Replace `unrecognized_device_path`, `unrecognized_device_io`, and `unrecognized_device_friendly_name` fields with `unrecognized_device: Arc<RwLock<Option<UnrecognizedDeviceState>>>`.
+  - [x] Update `new()`, `handle_device_unrecognized`, `get_unrecognized_device_path`, `get_unrecognized_device_io`, `handle_device_removed`, `initialize_device`, and `list_root_folders`.
+  - [x] Keep current public helper names where callers already use them; add `get_unrecognized_device_friendly_name()` only if it reduces duplicate lock reads.
+  - [x] Do not expose a path/IO/friendly-name combination from multiple locks. A single read must provide a coherent snapshot.
 
-- [ ] **T2: Normalize DeviceManager lock ordering or introduce a combined state lock** (AC: #2, #3)
-  - [ ] Audit all methods that touch `connected_devices` and `selected_device_path`: `handle_device_detected`, `handle_device_removed`, `get_current_device`, `get_device_io`, `get_manifest_and_io`, `get_connected_devices`, `get_multi_device_snapshot`, `select_device`, `update_manifest`, `get_device_storage`, `initialize_device`.
-  - [ ] Preferred implementation: introduce `DeviceManagerState { connected_devices: HashMap<PathBuf, ConnectedDevice>, selected_device_path: Option<PathBuf> }` behind one `Arc<RwLock<DeviceManagerState>>`.
-  - [ ] If keeping separate locks, use the same order everywhere: `connected_devices` first, then `selected_device_path`. Never acquire `selected_device_path` and then `connected_devices`.
-  - [ ] Do not hold any DeviceManager state lock across `device_io.list_files`, `write_manifest`, DB calls, or any other async IO. Clone the required manifest/backend/path snapshot, drop locks, then await.
-  - [ ] Preserve `get_manifest_and_io()` as the preferred caller API for atomic manifest/backend snapshots.
+- [x] **T2: Normalize DeviceManager lock ordering or introduce a combined state lock** (AC: #2, #3)
+  - [x] Audit all methods that touch `connected_devices` and `selected_device_path`: `handle_device_detected`, `handle_device_removed`, `get_current_device`, `get_device_io`, `get_manifest_and_io`, `get_connected_devices`, `get_multi_device_snapshot`, `select_device`, `update_manifest`, `get_device_storage`, `initialize_device`.
+  - [x] Preferred implementation: introduce `DeviceManagerState { connected_devices: HashMap<PathBuf, ConnectedDevice>, selected_device_path: Option<PathBuf> }` behind one `Arc<RwLock<DeviceManagerState>>`.
+  - [x] If keeping separate locks, use the same order everywhere: `connected_devices` first, then `selected_device_path`. Never acquire `selected_device_path` and then `connected_devices`.
+  - [x] Do not hold any DeviceManager state lock across `device_io.list_files`, `write_manifest`, DB calls, or any other async IO. Clone the required manifest/backend/path snapshot, drop locks, then await.
+  - [x] Preserve `get_manifest_and_io()` as the preferred caller API for atomic manifest/backend snapshots.
 
-- [ ] **T3: Preserve multi-device selection semantics** (AC: #3)
-  - [ ] In `handle_device_removed`, after removing the path, if it was selected and `connected_devices` is non-empty, select the first remaining key.
-  - [ ] Current code only auto-selects when exactly one device remains; change this to any non-empty remainder.
-  - [ ] Keep non-selected removal behavior unchanged: selection must remain the existing selected path.
+- [x] **T3: Preserve multi-device selection semantics** (AC: #3)
+  - [x] In `handle_device_removed`, after removing the path, if it was selected and `connected_devices` is non-empty, select the first remaining key.
+  - [x] Current code only auto-selects when exactly one device remains; change this to any non-empty remainder.
+  - [x] Keep non-selected removal behavior unchanged: selection must remain the existing selected path.
 
-- [ ] **T4: Fix MTP observer retry suppression** (AC: #4)
-  - [ ] In `run_mtp_observer`, do not insert `dev_id` into `known_ids` immediately after `create_mtp_backend` succeeds.
-  - [ ] Insert only after successfully sending either `DeviceEvent::Detected` or `DeviceEvent::Unrecognized`.
-  - [ ] If backend creation, `.jellyfinsync.json` read, JSON parsing before event creation, or channel send fails, leave the ID absent so the next physical reconnect can retry.
-  - [ ] Preserve MSC preference: if `has_msc_drive_for_device` matches, continue without inserting into `known_ids`.
+- [x] **T4: Fix MTP observer retry suppression** (AC: #4)
+  - [x] In `run_mtp_observer`, do not insert `dev_id` into `known_ids` immediately after `create_mtp_backend` succeeds.
+  - [x] Insert only after successfully sending either `DeviceEvent::Detected` or `DeviceEvent::Unrecognized`.
+  - [x] If backend creation, `.jellyfinsync.json` read, JSON parsing before event creation, or channel send fails, leave the ID absent so the next physical reconnect can retry.
+  - [x] Preserve MSC preference: if `has_msc_drive_for_device` matches, continue without inserting into `known_ids`.
 
-- [ ] **T5: Verify libmtp storage behavior and document/code accordingly** (AC: #5)
-  - [ ] Keep `LIBMTP_Get_Files_And_Folders(dev, 0, parent)` only with a nearby comment citing the libmtp/Debian manpage: storage `0` searches the given parent across all available storages.
-  - [ ] If explicit storage iteration is chosen instead, thread storage IDs through the libmtp handle carefully; do not disturb Windows WPD `storage_id` behavior from Story 7.1.
-  - [ ] Do not add a new dependency for this check.
+- [x] **T5: Verify libmtp storage behavior and document/code accordingly** (AC: #5)
+  - [x] Keep `LIBMTP_Get_Files_And_Folders(dev, 0, parent)` only with a nearby comment citing the libmtp/Debian manpage: storage `0` searches the given parent across all available storages.
+  - [x] If explicit storage iteration is chosen instead, thread storage IDs through the libmtp handle carefully; do not disturb Windows WPD `storage_id` behavior from Story 7.1.
+  - [x] Do not add a new dependency for this check.
 
-- [ ] **T6: Serialize per-device MTP operations in `MtpBackend`** (AC: #6)
-  - [ ] Add an async serialization primitive to `MtpBackend`, e.g. `operation_lock: Arc<tokio::sync::Mutex<()>>`.
-  - [ ] Acquire it in every `DeviceIO for MtpBackend` method that calls the handle: `begin_sync_job`, `read_file`, `write_file`, `delete_file`, `list_files`, `free_space`, `take_warnings`, `end_sync_job`.
-  - [ ] Hold the guard across the `spawn_blocking(...).await` so operations for the same backend cannot overlap.
-  - [ ] Avoid a global lock; serialization is per backend/device only.
-  - [ ] Keep existing libmtp internal `Mutex` in `LibmtpHandle`; the new lock is still needed because Windows WPD handle methods currently open sessions in independent blocking tasks.
+- [x] **T6: Serialize per-device MTP operations in `MtpBackend`** (AC: #6)
+  - [x] Add an async serialization primitive to `MtpBackend`, e.g. `operation_lock: Arc<tokio::sync::Mutex<()>>`.
+  - [x] Acquire it in every `DeviceIO for MtpBackend` method that calls the handle: `begin_sync_job`, `read_file`, `write_file`, `delete_file`, `list_files`, `free_space`, `take_warnings`, `end_sync_job`.
+  - [x] Hold the guard across the `spawn_blocking(...).await` so operations for the same backend cannot overlap.
+  - [x] Avoid a global lock; serialization is per backend/device only.
+  - [x] Keep existing libmtp internal `Mutex` in `LibmtpHandle`; the new lock is still needed because Windows WPD handle methods currently open sessions in independent blocking tasks.
 
-- [ ] **T7: Harden mount scanning and observer state** (AC: #9, #10)
-  - [ ] Update Linux/macOS `get_mounts` to skip entries on metadata/read errors; do not log noisy errors for removable media races.
-  - [ ] Ensure any system/boot volume filter is also applied to existing `known_mounts` each scan cycle, so stale unsafe entries are evicted even if they were captured by an older binary.
-  - [ ] Preserve Windows drive-letter enumeration behavior unless a regression is clearly tied to this story.
+- [x] **T7: Harden mount scanning and observer state** (AC: #9, #10)
+  - [x] Update Linux/macOS `get_mounts` to skip entries on metadata/read errors; do not log noisy errors for removable media races.
+  - [x] Ensure any system/boot volume filter is also applied to existing `known_mounts` each scan cycle, so stale unsafe entries are evicted even if they were captured by an older binary.
+  - [x] Preserve Windows drive-letter enumeration behavior unless a regression is clearly tied to this story.
 
-- [ ] **T8: Tests** (AC: #2, #3, #4, #6, #7, #8)
-  - [ ] Add or update tests in `jellyfinsync-daemon/src/device/tests.rs` for consolidated unrecognized state, concurrent set/remove, auto-reselect with more than one remaining device, and no duplicate connected entry for an unrecognized path.
-  - [ ] Add a DeviceManager concurrency test that uses `tokio::time::timeout` around concurrent `select_device` and `update_manifest` calls; the test must fail on deadlock.
-  - [ ] Add an MTP backend serialization test in `device_io.rs` using a mock `MtpHandle` with an atomic in-flight counter; assert max in-flight operations for one backend is 1.
-  - [ ] If `run_mtp_observer` is hard to test directly because it loops forever, extract a small pure/helper function for one observed device and test `known_ids` insertion rules there.
-  - [ ] Run `rtk cargo test` from the repository root.
+- [x] **T8: Tests** (AC: #2, #3, #4, #6, #7, #8)
+  - [x] Add or update tests in `jellyfinsync-daemon/src/device/tests.rs` for consolidated unrecognized state, concurrent set/remove, auto-reselect with more than one remaining device, and no duplicate connected entry for an unrecognized path.
+  - [x] Add a DeviceManager concurrency test that uses `tokio::time::timeout` around concurrent `select_device` and `update_manifest` calls; the test must fail on deadlock.
+  - [x] Add an MTP backend serialization test in `device_io.rs` using a mock `MtpHandle` with an atomic in-flight counter; assert max in-flight operations for one backend is 1.
+  - [x] If `run_mtp_observer` is hard to test directly because it loops forever, extract a small pure/helper function for one observed device and test `known_ids` insertion rules there.
+  - [x] Run `rtk cargo test` from the repository root.
 
 ## Dev Notes
 
@@ -163,12 +163,33 @@ The libmtp source implements `storage == 0` by mapping it to `PTP_GOH_ALL_STORAG
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+GPT-5 Codex
 
 ### Debug Log References
+
+- `rtk cargo test` - 195 passed (4 suites, 5.00s)
 
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
+- Replaced split pending unrecognized-device locks with a single coherent `UnrecognizedDeviceState` snapshot.
+- Made initialization use the pending snapshot backend internally so stale caller IO cannot pair with a newer pending path.
+- Introduced combined `DeviceManagerState` for connected devices and selection; removed selected/connected lock-order inversion.
+- Fixed selected-device removal to auto-select any remaining managed device and preserve non-selected removal semantics.
+- Moved MTP observer `known_ids` insertion behind successful event emission and kept failed manifest reads retryable.
+- Added per-backend MTP operation serialization and storage-0 libmtp documentation comments.
+- Hardened mount observer stale-state eviction before each detection pass.
+- Added regression tests for DeviceManager concurrency, pending state coherence, duplicate same-path backends, MTP retry insertion, and MTP operation serialization.
 
 ### File List
+
+- `_bmad-output/implementation-artifacts/7-2-devicemanager-concurrency-refactor.md`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `jellyfinsync-daemon/src/device/mod.rs`
+- `jellyfinsync-daemon/src/device/mtp.rs`
+- `jellyfinsync-daemon/src/device/tests.rs`
+- `jellyfinsync-daemon/src/device_io.rs`
+
+### Change Log
+
+- 2026-05-07: Implemented Story 7.2 DeviceManager concurrency refactor and MTP serialization hardening.

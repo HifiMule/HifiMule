@@ -234,6 +234,16 @@ impl DeviceIO for MscBackend {
 
 pub struct MtpBackend {
     pub handle: Arc<dyn MtpHandle>,
+    operation_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl MtpBackend {
+    pub fn new(handle: Arc<dyn MtpHandle>) -> Self {
+        Self {
+            handle,
+            operation_lock: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
 }
 
 impl std::fmt::Debug for MtpBackend {
@@ -266,6 +276,7 @@ pub trait MtpHandle: Send + Sync {
 #[async_trait]
 impl DeviceIO for MtpBackend {
     async fn begin_sync_job(&self) -> Result<()> {
+        let _guard = self.operation_lock.lock().await;
         let handle = Arc::clone(&self.handle);
         tokio::task::spawn_blocking(move || handle.begin_sync_job())
             .await
@@ -273,6 +284,7 @@ impl DeviceIO for MtpBackend {
     }
 
     async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
+        let _guard = self.operation_lock.lock().await;
         let handle = Arc::clone(&self.handle);
         let path = path.to_string();
         tokio::task::spawn_blocking(move || handle.read_file(&path))
@@ -281,6 +293,7 @@ impl DeviceIO for MtpBackend {
     }
 
     async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
+        let _guard = self.operation_lock.lock().await;
         let handle = Arc::clone(&self.handle);
         let path = path.to_string();
         let data = data.to_vec();
@@ -297,6 +310,7 @@ impl DeviceIO for MtpBackend {
     }
 
     async fn delete_file(&self, path: &str) -> Result<()> {
+        let _guard = self.operation_lock.lock().await;
         let handle = Arc::clone(&self.handle);
         let path = path.to_string();
         tokio::task::spawn_blocking(move || handle.delete_file(&path))
@@ -305,6 +319,7 @@ impl DeviceIO for MtpBackend {
     }
 
     async fn list_files(&self, path: &str) -> Result<Vec<FileEntry>> {
+        let _guard = self.operation_lock.lock().await;
         let handle = Arc::clone(&self.handle);
         let path = path.to_string();
         tokio::task::spawn_blocking(move || handle.list_files(&path))
@@ -313,6 +328,7 @@ impl DeviceIO for MtpBackend {
     }
 
     async fn free_space(&self) -> Result<u64> {
+        let _guard = self.operation_lock.lock().await;
         let handle = Arc::clone(&self.handle);
         tokio::task::spawn_blocking(move || handle.free_space())
             .await
@@ -330,6 +346,7 @@ impl DeviceIO for MtpBackend {
     }
 
     async fn take_warnings(&self) -> Vec<String> {
+        let _guard = self.operation_lock.lock().await;
         let handle = Arc::clone(&self.handle);
         tokio::task::spawn_blocking(move || handle.take_warnings())
             .await
@@ -337,6 +354,7 @@ impl DeviceIO for MtpBackend {
     }
 
     async fn end_sync_job(&self) -> Result<()> {
+        let _guard = self.operation_lock.lock().await;
         let handle = Arc::clone(&self.handle);
         tokio::task::spawn_blocking(move || handle.end_sync_job())
             .await
@@ -354,7 +372,9 @@ impl DeviceIO for MtpBackend {
 pub mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     // ── MscBackend tests ───────────────────────────────────────────────────
@@ -494,14 +514,60 @@ pub mod tests {
         }
     }
 
+    pub struct ConcurrentMtpHandle {
+        in_flight: AtomicUsize,
+        max_in_flight: AtomicUsize,
+    }
+
+    impl ConcurrentMtpHandle {
+        pub fn new() -> Self {
+            Self {
+                in_flight: AtomicUsize::new(0),
+                max_in_flight: AtomicUsize::new(0),
+            }
+        }
+
+        fn enter(&self) {
+            let current = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_in_flight.fetch_max(current, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(25));
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    impl MtpHandle for ConcurrentMtpHandle {
+        fn read_file(&self, _path: &str) -> Result<Vec<u8>> {
+            self.enter();
+            Ok(Vec::new())
+        }
+
+        fn write_file(&self, _path: &str, _data: &[u8]) -> Result<()> {
+            self.enter();
+            Ok(())
+        }
+
+        fn delete_file(&self, _path: &str) -> Result<()> {
+            self.enter();
+            Ok(())
+        }
+
+        fn list_files(&self, _path: &str) -> Result<Vec<FileEntry>> {
+            self.enter();
+            Ok(Vec::new())
+        }
+
+        fn free_space(&self) -> Result<u64> {
+            self.enter();
+            Ok(1)
+        }
+    }
+
     // ── MtpBackend tests ───────────────────────────────────────────────────
 
     #[tokio::test]
     async fn mtp_write_with_verify_writes_target_only() {
         let mock = Arc::new(MockMtpHandle::new());
-        let backend = MtpBackend {
-            handle: Arc::clone(&mock) as Arc<dyn MtpHandle>,
-        };
+        let backend = MtpBackend::new(Arc::clone(&mock) as Arc<dyn MtpHandle>);
 
         backend
             .write_with_verify("Music/track.mp3", b"audio")
@@ -527,9 +593,7 @@ pub mod tests {
             br#"{"device_id":"test-id","version":"1.0","managedPaths":[],"syncedItems":[]}"#
                 .to_vec(),
         );
-        let backend = MtpBackend {
-            handle: Arc::clone(&mock) as Arc<dyn MtpHandle>,
-        };
+        let backend = MtpBackend::new(Arc::clone(&mock) as Arc<dyn MtpHandle>);
         let data = backend.read_file(".jellyfinsync.json").await.unwrap();
         let manifest: serde_json::Value = serde_json::from_slice(&data).unwrap();
         assert_eq!(manifest["device_id"], "test-id");
@@ -548,9 +612,7 @@ pub mod tests {
             .unwrap()
             .insert("Music/track.mp3.dirty".to_string(), b"\x00".to_vec());
 
-        let backend = MtpBackend {
-            handle: Arc::clone(&mock) as Arc<dyn MtpHandle>,
-        };
+        let backend = MtpBackend::new(Arc::clone(&mock) as Arc<dyn MtpHandle>);
 
         let files = backend.list_files("").await.unwrap();
         let has_dirty = files.iter().any(|f| f.path.ends_with(".dirty"));
@@ -561,6 +623,37 @@ pub mod tests {
         assert_eq!(
             marker_content, b"\x00",
             "dirty marker must contain sentinel byte \\x00"
+        );
+    }
+
+    #[tokio::test]
+    async fn mtp_backend_serializes_operations_per_backend() {
+        let mock = Arc::new(ConcurrentMtpHandle::new());
+        let backend = Arc::new(MtpBackend::new(Arc::clone(&mock) as Arc<dyn MtpHandle>));
+
+        let read = {
+            let backend = Arc::clone(&backend);
+            tokio::spawn(async move { backend.read_file("a").await })
+        };
+        let write = {
+            let backend = Arc::clone(&backend);
+            tokio::spawn(async move { backend.write_file("b", b"data").await })
+        };
+        let list = {
+            let backend = Arc::clone(&backend);
+            tokio::spawn(async move { backend.list_files("").await })
+        };
+        let free = {
+            let backend = Arc::clone(&backend);
+            tokio::spawn(async move { backend.free_space().await })
+        };
+
+        let _ = tokio::join!(read, write, list, free);
+
+        assert_eq!(
+            mock.max_in_flight.load(Ordering::SeqCst),
+            1,
+            "operations for one MtpBackend must not overlap"
         );
     }
 }
