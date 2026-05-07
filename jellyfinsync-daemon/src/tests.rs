@@ -67,6 +67,7 @@ async fn test_device_recognition_integration() {
         auto_fill: crate::device::AutoFillPrefs::default(),
         transcoding_profile_id: None,
             playlists: vec![],
+            storage_id: None,
     };
 
     let state = manager
@@ -136,6 +137,7 @@ async fn test_device_detection_auto_sync_enabled() {
         auto_fill: crate::device::AutoFillPrefs::default(),
         transcoding_profile_id: None,
             playlists: vec![],
+            storage_id: None,
     };
 
     // Verify manifest has auto_sync enabled
@@ -195,6 +197,7 @@ async fn test_device_detection_auto_sync_disabled() {
         auto_fill: crate::device::AutoFillPrefs::default(),
         transcoding_profile_id: None,
             playlists: vec![],
+            storage_id: None,
     };
 
     // Verify auto_sync is disabled

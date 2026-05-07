@@ -103,7 +103,7 @@ development_status:
   epic-6-retrospective: done
 
   epic-7: in-progress
-  7-1-mtp-io-and-wpd-hardening: ready-for-dev
+  7-1-mtp-io-and-wpd-hardening: review
   7-2-devicemanager-concurrency-refactor: backlog
   7-3-device-ui-and-identity-polish: backlog
   7-4-packaging-and-cicd-hardening: backlog

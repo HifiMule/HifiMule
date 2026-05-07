@@ -2327,6 +2327,7 @@ mod tests {
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
                 playlists: vec![],
+            storage_id: None,
         };
 
         device_manager
@@ -2394,6 +2395,7 @@ mod tests {
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
                 playlists: vec![],
+            storage_id: None,
         };
         device_manager
             .handle_device_detected(dir.path().to_path_buf(), manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())))
@@ -2441,6 +2443,7 @@ mod tests {
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
                 playlists: vec![],
+            storage_id: None,
         };
         device_manager
             .handle_device_detected(dir.path().to_path_buf(), manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())))
@@ -2502,6 +2505,7 @@ mod tests {
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
                 playlists: vec![],
+            storage_id: None,
         };
         device_manager
             .handle_device_detected(std::path::PathBuf::from("/tmp/dirty"), dirty_manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from("/tmp/dirty"))))
@@ -2626,6 +2630,7 @@ mod tests {
                     auto_fill: crate::device::AutoFillPrefs::default(),
                     transcoding_profile_id: None,
                 playlists: vec![],
+            storage_id: None,
                 },
                 std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from("/tmp/dev"))),
             )
@@ -2711,6 +2716,7 @@ mod tests {
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
                 playlists: vec![],
+            storage_id: None,
         };
         device_manager
             .handle_device_detected(std::path::PathBuf::from("/tmp/dev"), manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from("/tmp/dev"))))
@@ -2940,6 +2946,7 @@ mod tests {
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
                 playlists: vec![],
+            storage_id: None,
         };
         crate::device::write_manifest(
             std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())),
@@ -3028,6 +3035,7 @@ mod tests {
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
                 playlists: vec![],
+            storage_id: None,
         };
         device_manager
             .handle_device_detected(std::path::PathBuf::from("/tmp/auto-state"), manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from("/tmp/auto-state"))))
@@ -3139,6 +3147,7 @@ mod tests {
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
             playlists: vec![],
+            storage_id: None,
         };
         let manifest2 = crate::device::DeviceManifest {
             device_id: "dev-list-2".to_string(),
@@ -3154,6 +3163,7 @@ mod tests {
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
             playlists: vec![],
+            storage_id: None,
         };
 
         state.device_manager.handle_device_detected(path1.clone(), manifest1, std::sync::Arc::new(crate::device_io::MscBackend::new(path1))).await.unwrap();
@@ -3192,6 +3202,7 @@ mod tests {
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
             playlists: vec![],
+            storage_id: None,
         };
 
         state.device_manager.handle_device_detected(path1.clone(), make_manifest("sel-dev-1"), std::sync::Arc::new(crate::device_io::MscBackend::new(path1.clone()))).await.unwrap();

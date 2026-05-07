@@ -1269,6 +1269,7 @@ mod tests {
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
             playlists: vec![],
+            storage_id: None,
         }
     }
 
