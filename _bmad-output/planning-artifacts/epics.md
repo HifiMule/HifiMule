@@ -1054,3 +1054,262 @@ So that I can catch packaging regressions before releasing.
 **When** the test suite runs
 **Then** MTP device IO is verified by unit tests in `device_io.rs` (mock `MtpBackend` returning fixture data).
 **And** the smoke test explicitly notes: "MTP end-to-end detection requires manual hardware verification on each platform."
+
+## Epic 7: Technical Hardening & Deferred Fixes
+
+Address the accumulated technical debt and deferred code-review findings from Epics 2–6. Items are grouped by impact area; stories can be worked in parallel where team capacity allows.
+
+### Story 7.1: MTP IO & WPD Hardening
+
+As a System Admin (Alexis),
+I want the MTP IO layer to be reliable and efficient across all device types,
+So that bulk syncs to MTP devices are fast, atomic, and free of latent data-loss risks.
+
+**Acceptance Criteria:**
+
+**Given** `read_file`, `delete_file`, and `list_files` in `mtp.rs`
+**When** Story 7.1 is complete
+**Then** `path_to_object_id` accepts `&IPortableDeviceContent` and all three callers pass a single handle — no double `Content()` acquisition exists anywhere in the module.
+
+**Given** the `write_file` stream write loop
+**When** `IStream::Write` returns `S_FALSE`
+**Then** the loop treats it as a partial write and retries or returns an explicit error (not silently `Ok(())`).
+
+**Given** `ensure_dir_chain` creates a new directory via `CreateObjectWithPropertiesOnly`
+**When** `PWSTR::to_string()` fails after the COM call
+**Then** `CoTaskMemFree` is called before the `?` propagation (scopeguard or inline free).
+
+**Given** a device with multiple storage objects (e.g., internal + SD card)
+**When** `ensure_dir_chain` or `free_space` is called
+**Then** the target storage object is selected by the device manifest's `storage_id` rather than always using the first enumerated child.
+
+**Given** `shell_copy_to_device` is invoked
+**When** the call is made from a multi-threaded async runtime
+**Then** it is executed on a dedicated STA thread (not the MTA `spawn_blocking` pool), resolving the `IShellFolder::EnumObjects` threading constraint.
+
+**Given** a sync operation for many files
+**When** `write_file` runs
+**Then** directory creation and file copy share a single Shell session per sync job (not one open/close per file), reducing teardown/reconnect overhead.
+
+**Given** a temp file is created during `write_file`
+**When** the filename is generated
+**Then** it uses a UUID or `tempfile` crate rather than nanosecond timestamps to guarantee uniqueness under concurrent writes.
+
+**Given** the dirty-marker unit test `mtp_dirty_marker_detected_on_reconnect`
+**When** the test runs
+**Then** it asserts the sentinel content is `b"\x00"` (not just presence and call order).
+
+**Given** a WPD write fails and the Shell fallback is attempted
+**When** Shell copy succeeds
+**Then** the original WPD error is logged at `warn` level before the fallback succeeds.
+
+**Given** `collect_files_recursive` encounters a directory that fails to enumerate
+**When** the error occurs
+**Then** the failure is surfaced as a structured warning in the sync result rather than silently skipped.
+
+**Given** `has_msc_drive_for_device` matches a volume label
+**When** two connected drives share the same label (e.g., both named "BACKUP")
+**Then** the match uses hardware-level GUIDs (`SetupDi` or `DeviceIoControl`) rather than a case-insensitive volume label comparison, so MTP registration is not incorrectly suppressed. [`device/mod.rs`, `has_msc_drive_for_device`]
+
+**Given** `write_file` deletes the existing object before creating the replacement
+**When** `CreateObjectWithPropertiesAndData` or the write stream fails after the delete
+**Then** the dirty-marker written by `write_with_verify` is present on the device, allowing the repair utility (Story 5.4) to detect and recover the lost file on next connect.
+**And** the error path logs the deleted object ID so the incomplete state is diagnosable. [`mtp.rs`, `write_file`]
+
+**Given** `ensure_dir_chain` checks for an existing child object and finds none
+**When** a concurrent process creates the same directory between the check and the `CreateObjectWithPropertiesOnly` call
+**Then** the resulting COM error is caught and treated as "directory already exists" (tolerated), not a hard failure. [`mtp.rs`, `ensure_dir_chain`]
+
+**Given** `path_to_object_id` is refactored to accept `&IPortableDeviceContent`
+**When** unit tests run
+**Then** at least one test exercises the traversal logic using a mock `IPortableDeviceContent` fixture, covering the path-component splitting and recursive child lookup without a physical device. [`mtp.rs`, `path_to_object_id`]
+
+**Technical Notes:**
+- Scope limited to `mtp.rs` and `device_io.rs`; no new RPC methods
+- `storage_id` storage selection requires `DeviceManifest` to carry an optional `storage_id: Option<String>` (set during MTP device init)
+- Shell session batching can be introduced as a `ShellSession` RAII guard passed through `execute_sync`
+- `has_msc_drive_for_device` hardware-ID comparison: use `CM_Get_Device_ID` or `SetupDiGetDeviceInstanceId` to obtain a stable identifier per drive letter
+
+### Story 7.2: DeviceManager Concurrency Refactor
+
+As a System Admin (Alexis),
+I want the DeviceManager to be free of lock-order inversion, partial-state windows, and silent retry-suppression bugs,
+So that multi-device scenarios are reliable and concurrent operations never deadlock.
+
+**Acceptance Criteria:**
+
+**Given** `unrecognized_device_path`, `unrecognized_device_io`, and `unrecognized_device_friendly_name`
+**When** Story 7.2 is complete
+**Then** these three fields are consolidated into a single `RwLock<Option<UnrecognizedDeviceState>>` struct, eliminating the partial-write window between sequential lock acquisitions.
+
+**Given** `update_manifest` (acquires `selected_device_path` → `connected_devices`) and `select_device` (acquires in reverse order)
+**When** both run concurrently
+**Then** they use a consistent lock acquisition order (or a single combined lock) that makes a 3-thread circular wait impossible.
+
+**Given** `handle_device_removed` removes the currently selected device
+**When** at least one other managed device remains connected
+**Then** `selected_device_path` is automatically set to one of the remaining devices (rather than `None`).
+
+**Given** `run_mtp_observer` detects a device
+**When** the async manifest probe fails transiently
+**Then** `known_ids` is NOT inserted until the probe succeeds, allowing the device to be re-detected on the next physical reconnect without requiring a manual intervention.
+
+**Given** `libmtp` is used on Linux/macOS
+**When** `LIBMTP_Get_Files_And_Folders` is called with `storage_id=0`
+**Then** behavior is verified against the libmtp API docs and either confirmed as "enumerate all storages" or replaced with explicit storage ID iteration.
+
+**Given** concurrent `MtpBackend` IO operations
+**When** dispatched as independent `spawn_blocking` tasks
+**Then** a per-device serialization mechanism (channel or mutex) ensures MTP operations execute sequentially for each device.
+
+**Given** concurrent event tests for `unrecognized_device_*`
+**When** tests run
+**Then** at least one test exercises simultaneous set/clear events to verify the consolidated lock holds invariants under concurrency.
+
+**Given** `MscBackend::new(path)` is constructed in `handle_device_unrecognized`
+**When** a re-probe arrives before `connected_devices.remove(&path)` completes
+**Then** the `DeviceManager` ensures only one live `Arc<dyn DeviceIO>` exists per path at any point (e.g., by removing the old entry before constructing the new backend). [`device/mod.rs`, `handle_device_unrecognized`]
+
+**Given** `get_mounts` calls `canonicalize` then `is_mount_point` sequentially for a volume
+**When** the volume is remounted between the two calls
+**Then** the stale entry is skipped or re-evaluated on the next hotplug event rather than producing a hard error. [`device/mod.rs`, `get_mounts`]
+
+**Given** a daemon upgrade is performed without restarting the daemon
+**When** the new boot-volume exclusion guard in `get_mounts` runs
+**Then** any boot-volume path already present in `known_mounts` from the pre-fix binary is evicted on the next mount-scan cycle (e.g., by clearing `known_mounts` on config reload or daemon restart detection). [`device/mod.rs`, `get_mounts`]
+
+**Technical Notes:**
+- `UnrecognizedDeviceState` struct: `{ path: PathBuf, io: Arc<dyn DeviceIO>, friendly_name: Option<String> }`
+- Lock consolidation is a breaking internal refactor; keep the public RPC interface unchanged
+- Auto-reselect in `handle_device_removed`: select the first entry remaining in `connected_devices`
+- `known_mounts` eviction: clearing on daemon version mismatch is acceptable given daemon restarts are fast
+
+### Story 7.3: Device UI & Identity Polish
+
+As a Convenience Seeker (Sarah) and System Admin (Alexis),
+I want the device initialization flow and device hub to reflect real device identity and surface MTP constraints clearly,
+So that the UI never shows stale defaults, silent gaps, or confusing state for MTP devices.
+
+**Acceptance Criteria:**
+
+**Given** an MTP device is detected and its `friendly_name` is stored in `unrecognized_device_friendly_name`
+**When** the "Initialize Device" dialog opens
+**Then** the device name input is pre-filled with the MTP `friendly_name` (e.g., "Garmin Forerunner 945") instead of "My Device".
+
+**Given** a device manifest where `name` is an empty string (`""`)
+**When** the device hub resolves the display name
+**Then** the empty string is filtered out (`.filter(|n| !n.is_empty())`) and the `friendly_name` fallback chain is applied correctly.
+
+**Given** an MTP device is connected
+**When** the Device State panel renders `unmanaged_count`
+**Then** the panel displays "MTP — folder enumeration not available" instead of a silent `0`, so the user understands the limitation.
+
+**Given** `broadcast_device_state` runs for a device already present in `connected_devices`
+**When** the device was previously detected
+**Then** `handle_device_detected` is NOT re-triggered (duplicate insertion and spurious dirty-state transitions are prevented).
+
+**Given** an MTP device is connected
+**When** the Storage Projection bar calculates available capacity
+**Then** `free_space()` returns a real value from the MTP device's storage object (not `None`), so capacity is visible in the UI.
+
+**Given** `initialize_device` is called
+**When** the physical device was disconnected and reconnected between the `Unrecognized` event and the user completing initialization
+**Then** the RPC handler detects the stale `Arc<dyn DeviceIO>` (e.g., via a liveness check) and returns a clear error instead of writing to a dead handle.
+
+**Given** `cleanup_tmp_files` runs
+**When** a `.tmp` file exists at the device root (outside `managed_paths`)
+**Then** it is included in the cleanup sweep.
+
+**Given** `initialize_device` creates a managed path
+**When** the path has multiple levels
+**Then** `create_dir_all` is used instead of `create_dir`, avoiding a latent failure for nested paths.
+
+**Given** the MTP scrobbler detection path in `scrobble.rs`
+**When** `read_file` returns a plain `anyhow` error because no `.scrobbler.log` exists
+**Then** the "not found" case is detected correctly (not treated as a read error), matching the MSC path behavior.
+
+**Technical Notes:**
+- `get_daemon_state` RPC gains `pendingDeviceFriendlyName: Option<String>` for the UI pre-fill
+- `BasketSidebar.ts` `openInitDeviceModal`: read `pendingDeviceFriendlyName` and set as default value
+- MTP `free_space`: wire `DeviceManager`'s `storage_id` (from Story 7.1) into `get_device_storage`
+
+### Story 7.4: Packaging & CI/CD Hardening
+
+As a System Admin (Alexis),
+I want the CI/CD pipeline and installers to be reproducible, supply-chain-safe, and properly declare runtime dependencies,
+So that every release artifact is verifiable, installable on clean machines, and not broken by upstream floating versions.
+
+**Acceptance Criteria:**
+
+**Given** the Linux `.deb` package
+**When** installed on a machine without `libmtp` pre-installed
+**Then** the package declares `libmtp9` (or the appropriate soname) as a runtime `Depends` entry, so `apt` installs it automatically.
+
+**Given** the Linux AppImage
+**When** built
+**Then** the `libmtp.so` shared library is bundled inside the AppImage (linuxdeploy or `--appimage-extract-and-run`), so it runs on distros without `libmtp` in the system library path.
+
+**Given** the macOS DMG
+**When** distributed to a machine without Homebrew or `libmtp`
+**Then** the `.app` bundle includes the `libmtp.dylib` (and its transitive deps) via `@rpath` or `otool -L` fixup, so the app launches on a clean macOS install.
+
+**Given** `.github/workflows/release.yml`
+**When** reviewed
+**Then** `pnpm/action-setup` is pinned to a specific version (e.g., `v4.1.0`), `node-version` is pinned to `"20"`, and `tauri-apps/tauri-action` is pinned to a commit SHA.
+
+**Given** `scripts/prepare-sidecar.mjs`
+**When** `copyFileSync` fails mid-execution
+**Then** any partially-written sidecar is removed before the script exits with a non-zero code (atomic swap or cleanup-on-failure).
+
+**Given** `scripts/prepare-sidecar.mjs`
+**When** a build for a new architecture runs
+**Then** stale sidecar binaries from previous architectures in `sidecars/` are removed before the new copy is written.
+
+**Given** `scripts/prepare-sidecar.mjs`
+**When** `rustc -vV` output format changes
+**Then** the parsing logic degrades gracefully (returns an error) rather than silently producing an `undefined` triple.
+
+**Given** a CI runner or fresh clone
+**When** `prepare-sidecar.mjs` executes
+**Then** it verifies `node_modules` is populated (or runs `npm install`) before invoking `npm run build`.
+
+**Given** `beforeBuildCommand` in `tauri.conf.json`
+**When** triggered by `cargo tauri build` on Windows and Linux
+**Then** the command resolves relative paths correctly regardless of whether the CWD is the workspace root or the `jellyfinsync-ui` directory.
+
+**Given** the boot-volume exclusion guard in `get_mounts` (`device/mod.rs:968-975`)
+**When** unit tests run
+**Then** at least one test covers the `canonicalize`-based root check with a mocked filesystem path.
+
+**Given** the installation smoke tests
+**When** run in CI
+**Then** the macOS step uses `find "${MOUNT_POINT}" -name "*.app" -maxdepth 1` rather than hardcoding `JellyfinSync.app`, so a `productName` change in `tauri.conf.json` does not silently break the test.
+
+**Given** the smoke test workflow
+**When** a release is published
+**Then** the workflow also has a `workflow_call` trigger so it can be invoked programmatically from the release pipeline.
+
+**Given** `tauri.conf.json` sets `minimumSystemVersion`
+**When** a new macOS-specific dependency is added that raises the minimum OS floor
+**Then** `minimumSystemVersion` is updated in the same PR so it never silently advertises false compatibility.
+**And** a CI lint step (or PR checklist item) reminds contributors to verify the value when adding macOS deps.
+
+**Given** the Linux `.deb` package built by Story 6.4
+**When** installed via `sudo dpkg -i` on a clean VM and launched from the application menu
+**Then** the daemon starts and responds to a health-check RPC at `localhost:19140` (the functional test deferred from Story 6.4 AC2/AC4/AC5 is now verified in this story's acceptance run).
+
+**Given** the Xvfb display server is started on `:99` in the Linux smoke test
+**When** another process already occupies `:99` on the shared runner
+**Then** the smoke test script auto-selects the next available display number (e.g., `Xvfb -displayfd 1` or iterating `:99`→`:100`) rather than failing silently with a wrong display. [`.github/workflows/smoke-tests.yml`]
+
+**Given** the Windows smoke test searches for the installed executable
+**When** the MSI `INSTALLDIR` is customized or a NSIS target is added
+**Then** the smoke test resolves the install path via the registry (`HKLM\SOFTWARE\JellyfinSync\InstallDir`) rather than the hardcoded `C:\Program Files\JellyfinSync`. [`.github/workflows/smoke-tests.yml`]
+
+**Technical Notes:**
+- `.deb` runtime deps: add `"deb": { "depends": ["libmtp9"] }` in `tauri.conf.json` bundle config
+- AppImage bundling: add `linuxdeploy-plugin-qt` or equivalent `--library` flags in the Linux CI step
+- macOS dylib: use `otool`/`install_name_tool` or `dylibbundler` post-build step in `prepare-sidecar.mjs`
+- CI version pins: use `actions/gh-actions-toolset` digests for `tauri-action`
+- Xvfb display: `Xvfb -displayfd fd` writes the chosen display number to a file descriptor — avoids hardcoded `:99`
+- Windows install path registry key: written by the WiX installer via `<RegistryValue>` in the product `.wxs`
