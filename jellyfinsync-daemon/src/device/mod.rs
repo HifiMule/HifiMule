@@ -120,6 +120,17 @@ pub struct ConnectedDevice {
     pub device_class: DeviceClass,
 }
 
+pub struct UnrecognizedDeviceState {
+    pub path: PathBuf,
+    pub io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
+    pub friendly_name: Option<String>,
+}
+
+struct DeviceManagerState {
+    connected_devices: std::collections::HashMap<PathBuf, ConnectedDevice>,
+    selected_device_path: Option<PathBuf>,
+}
+
 /// Scans the specified managed paths recursively for leftover `.tmp`
 /// files from interrupted writes and deletes them. Returns the count of deleted files.
 /// Non-fatal: individual deletion failures are silently skipped.
@@ -176,30 +187,21 @@ impl DeviceProber {
 
 pub struct DeviceManager {
     db: std::sync::Arc<crate::db::Database>,
-    /// All currently connected managed devices, keyed by mount path.
-    connected_devices:
-        std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<PathBuf, ConnectedDevice>>>,
-    /// The device path targeted by all UI operations. None when no device is selected.
-    selected_device_path: std::sync::Arc<tokio::sync::RwLock<Option<PathBuf>>>,
-    unrecognized_device_path: std::sync::Arc<tokio::sync::RwLock<Option<PathBuf>>>,
-    /// IO backend for the pending unrecognized device. Always set alongside unrecognized_device_path.
-    unrecognized_device_io:
-        std::sync::Arc<tokio::sync::RwLock<Option<std::sync::Arc<dyn crate::device_io::DeviceIO>>>>,
-    /// Human-readable name for the pending unrecognized device (MTP only; None for MSC).
-    unrecognized_device_friendly_name: std::sync::Arc<tokio::sync::RwLock<Option<String>>>,
+    /// Connected-device map and selection are guarded together to avoid torn reads and lock inversion.
+    state: std::sync::Arc<tokio::sync::RwLock<DeviceManagerState>>,
+    /// Pending initialization state is stored as one coherent snapshot.
+    unrecognized_device: std::sync::Arc<tokio::sync::RwLock<Option<UnrecognizedDeviceState>>>,
 }
 
 impl DeviceManager {
     pub fn new(db: std::sync::Arc<crate::db::Database>) -> Self {
         Self {
             db,
-            connected_devices: std::sync::Arc::new(tokio::sync::RwLock::new(
-                std::collections::HashMap::new(),
-            )),
-            selected_device_path: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-            unrecognized_device_path: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-            unrecognized_device_io: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-            unrecognized_device_friendly_name: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            state: std::sync::Arc::new(tokio::sync::RwLock::new(DeviceManagerState {
+                connected_devices: std::collections::HashMap::new(),
+                selected_device_path: None,
+            })),
+            unrecognized_device: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
@@ -210,8 +212,8 @@ impl DeviceManager {
         device_io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
     ) -> Result<crate::DaemonState> {
         {
-            let devices = self.connected_devices.read().await;
-            if devices.contains_key(&path) {
+            let state = self.state.read().await;
+            if state.connected_devices.contains_key(&path) {
                 return Ok(crate::DaemonState::Idle);
             }
         }
@@ -236,20 +238,14 @@ impl DeviceManager {
                     device_class: device_class.clone(),
                 };
                 {
-                    let mut devices = self.connected_devices.write().await;
-                    devices.insert(path.clone(), connected);
-                }
-                {
-                    let mut sel = self.selected_device_path.write().await;
-                    if sel.is_none() {
-                        *sel = Some(path.clone());
+                    let mut state = self.state.write().await;
+                    state.connected_devices.insert(path.clone(), connected);
+                    if state.selected_device_path.is_none() {
+                        state.selected_device_path = Some(path.clone());
                     }
                 }
                 {
-                    let mut unrecognized_path = self.unrecognized_device_path.write().await;
-                    let mut unrecognized_io = self.unrecognized_device_io.write().await;
-                    *unrecognized_path = None;
-                    *unrecognized_io = None;
+                    *self.unrecognized_device.write().await = None;
                 }
                 let name = dirty_manifest
                     .name
@@ -277,22 +273,16 @@ impl DeviceManager {
             device_class,
         };
         {
-            let mut devices = self.connected_devices.write().await;
-            devices.insert(path.clone(), connected);
-        }
-        {
-            let mut sel = self.selected_device_path.write().await;
-            if sel.is_none() {
+            let mut state = self.state.write().await;
+            state.connected_devices.insert(path.clone(), connected);
+            if state.selected_device_path.is_none() {
                 // Auto-select first/only device
-                *sel = Some(path.clone());
+                state.selected_device_path = Some(path.clone());
             }
             // If another device is already selected, don't change selection
         }
         {
-            let mut unrecognized_path = self.unrecognized_device_path.write().await;
-            let mut unrecognized_io = self.unrecognized_device_io.write().await;
-            *unrecognized_path = None;
-            *unrecognized_io = None;
+            *self.unrecognized_device.write().await = None;
         }
 
         let name = manifest
@@ -325,85 +315,90 @@ impl DeviceManager {
         // Unrecognized devices have no manifest — ensure they are not in connected_devices.
         // Do NOT change selected_device_path since other recognized devices may still be connected.
         {
-            let mut devices = self.connected_devices.write().await;
-            devices.remove(&path);
+            let mut state = self.state.write().await;
+            state.connected_devices.remove(&path);
         }
         {
-            // Acquire all three locks together so path, IO, and friendly_name are always updated atomically.
-            let mut unrecognized_path = self.unrecognized_device_path.write().await;
-            let mut unrecognized_io = self.unrecognized_device_io.write().await;
-            let mut unrecognized_name = self.unrecognized_device_friendly_name.write().await;
-            if unrecognized_path.is_some() {
+            let mut unrecognized = self.unrecognized_device.write().await;
+            if unrecognized.is_some() {
                 daemon_log!(
                     "[Device] Warning: overwriting pending unrecognized device {:?} with {:?}",
-                    *unrecognized_path,
+                    unrecognized.as_ref().map(|state| &state.path),
                     path
                 );
             }
-            *unrecognized_path = Some(path);
-            *unrecognized_io = Some(device_io);
-            *unrecognized_name = friendly_name;
+            *unrecognized = Some(UnrecognizedDeviceState {
+                path,
+                io: device_io,
+                friendly_name,
+            });
         }
         crate::DaemonState::DeviceFound(path_str)
     }
 
+    pub async fn get_unrecognized_device_snapshot(&self) -> Option<UnrecognizedDeviceState> {
+        self.unrecognized_device
+            .read()
+            .await
+            .as_ref()
+            .map(|state| UnrecognizedDeviceState {
+                path: state.path.clone(),
+                io: std::sync::Arc::clone(&state.io),
+                friendly_name: state.friendly_name.clone(),
+            })
+    }
+
     pub async fn get_unrecognized_device_path(&self) -> Option<PathBuf> {
-        self.unrecognized_device_path.read().await.clone()
+        self.get_unrecognized_device_snapshot()
+            .await
+            .map(|state| state.path)
     }
 
     pub async fn get_unrecognized_device_io(
         &self,
     ) -> Option<std::sync::Arc<dyn crate::device_io::DeviceIO>> {
-        self.unrecognized_device_io.read().await.clone()
+        self.get_unrecognized_device_snapshot()
+            .await
+            .map(|state| state.io)
     }
 
     pub async fn handle_device_removed(&self, removed_path: &PathBuf) {
-        // Capture remaining keys inside the write block to avoid holding connected_devices
-        // read lock while acquiring selected_device_path write lock (would violate locking order).
-        let remaining_keys: Vec<PathBuf> = {
-            let mut devices = self.connected_devices.write().await;
-            devices.remove(removed_path);
-            devices.keys().cloned().collect()
-        };
         {
-            let mut sel = self.selected_device_path.write().await;
-            if sel.as_ref() == Some(removed_path) {
-                *sel = if remaining_keys.len() == 1 {
-                    Some(remaining_keys[0].clone())
-                } else {
-                    None
-                };
+            let mut state = self.state.write().await;
+            state.connected_devices.remove(removed_path);
+            if state.selected_device_path.as_ref() == Some(removed_path) {
+                state.selected_device_path = state.connected_devices.keys().next().cloned();
             }
         }
         {
-            // Acquire all three locks together so path, IO, and friendly_name are always cleared atomically.
-            let mut unrecognized_path = self.unrecognized_device_path.write().await;
-            let mut unrecognized_io = self.unrecognized_device_io.write().await;
-            let mut unrecognized_name = self.unrecognized_device_friendly_name.write().await;
+            let mut unrecognized = self.unrecognized_device.write().await;
             // Only clear if the removed path matches; an unrelated managed device disconnecting
             // must not erase a pending initialization for a different unrecognized device.
-            if unrecognized_path.as_ref() == Some(removed_path) {
-                *unrecognized_path = None;
-                *unrecognized_io = None;
-                *unrecognized_name = None;
+            if unrecognized
+                .as_ref()
+                .is_some_and(|state| &state.path == removed_path)
+            {
+                *unrecognized = None;
             }
         }
     }
 
     pub async fn get_current_device(&self) -> Option<DeviceManifest> {
-        let sel = self.selected_device_path.read().await.clone();
-        let path = sel?;
-        let devices = self.connected_devices.read().await;
-        devices.get(&path).map(|d| d.manifest.clone())
+        let state = self.state.read().await;
+        let path = state.selected_device_path.as_ref()?;
+        state
+            .connected_devices
+            .get(path)
+            .map(|d| d.manifest.clone())
     }
 
     /// Returns the IO backend for the currently selected device.
     pub async fn get_device_io(&self) -> Option<std::sync::Arc<dyn crate::device_io::DeviceIO>> {
-        let sel = self.selected_device_path.read().await.clone();
-        let path = sel?;
-        let devices = self.connected_devices.read().await;
-        devices
-            .get(&path)
+        let state = self.state.read().await;
+        let path = state.selected_device_path.as_ref()?;
+        state
+            .connected_devices
+            .get(path)
             .map(|d| std::sync::Arc::clone(&d.device_io))
     }
 
@@ -416,23 +411,24 @@ impl DeviceManager {
         DeviceManifest,
         std::sync::Arc<dyn crate::device_io::DeviceIO>,
     )> {
-        let sel = self.selected_device_path.read().await.clone();
-        let path = sel?;
-        let devices = self.connected_devices.read().await;
-        devices
-            .get(&path)
+        let state = self.state.read().await;
+        let path = state.selected_device_path.as_ref()?;
+        state
+            .connected_devices
+            .get(path)
             .map(|d| (d.manifest.clone(), std::sync::Arc::clone(&d.device_io)))
     }
 
     pub async fn get_current_device_path(&self) -> Option<PathBuf> {
-        self.selected_device_path.read().await.clone()
+        self.state.read().await.selected_device_path.clone()
     }
 
     /// Returns a snapshot of all currently connected managed devices.
     pub async fn get_connected_devices(&self) -> Vec<(PathBuf, DeviceManifest, DeviceClass)> {
-        self.connected_devices
+        self.state
             .read()
             .await
+            .connected_devices
             .iter()
             .map(|(p, d)| (p.clone(), d.manifest.clone(), d.device_class.clone()))
             .collect()
@@ -443,26 +439,22 @@ impl DeviceManager {
     pub async fn get_multi_device_snapshot(
         &self,
     ) -> (Vec<(PathBuf, DeviceManifest, DeviceClass)>, Option<PathBuf>) {
-        let devices = self.connected_devices.read().await;
-        let sel = self.selected_device_path.read().await.clone();
-        let device_list = devices
+        let state = self.state.read().await;
+        let device_list = state
+            .connected_devices
             .iter()
             .map(|(p, d)| (p.clone(), d.manifest.clone(), d.device_class.clone()))
             .collect();
-        (device_list, sel)
+        (device_list, state.selected_device_path.clone())
     }
 
     /// Sets the selected device path. Returns false if path is not in connected_devices.
     pub async fn select_device(&self, path: PathBuf) -> bool {
-        // Hold the write lock through both the existence check and the selection write so
-        // a concurrent handle_device_removed cannot remove the device in between (TOCTOU).
-        // Locking order: connected_devices (1) → selected_device_path (2).
-        let devices = self.connected_devices.write().await;
-        if !devices.contains_key(&path) {
+        let mut state = self.state.write().await;
+        if !state.connected_devices.contains_key(&path) {
             return false;
         }
-        let mut sel = self.selected_device_path.write().await;
-        *sel = Some(path);
+        state.selected_device_path = Some(path);
         true
     }
 
@@ -474,10 +466,13 @@ impl DeviceManager {
     where
         F: FnOnce(&mut DeviceManifest),
     {
-        let selected_path = self.selected_device_path.read().await.clone();
-        let path = selected_path.ok_or_else(|| anyhow::anyhow!("No device connected"))?;
-        let mut devices = self.connected_devices.write().await;
-        let connected = devices
+        let mut state = self.state.write().await;
+        let path = state
+            .selected_device_path
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No device connected"))?;
+        let connected = state
+            .connected_devices
             .get_mut(&path)
             .ok_or_else(|| anyhow::anyhow!("Selected device not in connected map"))?;
         mutation(&mut connected.manifest);
@@ -486,23 +481,24 @@ impl DeviceManager {
         // the snapshot written to disk is always consistent with the in-memory state.
         let device_io = std::sync::Arc::clone(&connected.device_io);
         let manifest_snapshot = connected.manifest.clone();
-        drop(devices);
+        drop(state);
         crate::device::write_manifest(device_io, &manifest_snapshot).await?;
         Ok(())
     }
 
     pub async fn get_device_storage(&self) -> Option<StorageInfo> {
-        let path = self.get_current_device_path().await?;
+        let (path, device_io) = {
+            let state = self.state.read().await;
+            let path = state.selected_device_path.clone()?;
+            let device_io = state
+                .connected_devices
+                .get(&path)
+                .map(|d| std::sync::Arc::clone(&d.device_io))?;
+            (path, device_io)
+        };
         if let Some(info) = get_storage_info(&path) {
             return Some(info);
         }
-
-        let device_io = {
-            let devices = self.connected_devices.read().await;
-            devices
-                .get(&path)
-                .map(|d| std::sync::Arc::clone(&d.device_io))
-        }?;
 
         let free_bytes = device_io.free_space().await.ok()?;
         Some(StorageInfo {
@@ -521,7 +517,7 @@ impl DeviceManager {
         transcoding_profile_id: Option<String>,
         name: String,
         icon: Option<String>,
-        device_io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
+        _device_io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
     ) -> Result<DeviceManifest> {
         // Validate folder_path: no traversal, no absolute paths, single-level only
         if !folder_path.is_empty() {
@@ -537,10 +533,12 @@ impl DeviceManager {
             }
         }
 
-        let device_root = self
-            .get_unrecognized_device_path()
+        let pending = self
+            .get_unrecognized_device_snapshot()
             .await
             .ok_or_else(|| anyhow::anyhow!("No unrecognized device connected"))?;
+        let device_root = pending.path;
+        let device_io = pending.io;
 
         let device_id = uuid::Uuid::new_v4().to_string();
 
@@ -573,8 +571,8 @@ impl DeviceManager {
             .await?;
 
         {
-            let mut devices = self.connected_devices.write().await;
-            devices.insert(
+            let mut state = self.state.write().await;
+            state.connected_devices.insert(
                 device_root.clone(),
                 ConnectedDevice {
                     manifest: manifest.clone(),
@@ -582,35 +580,38 @@ impl DeviceManager {
                     device_io,
                 },
             );
-        }
-        {
-            let mut sel = self.selected_device_path.write().await;
             // Only auto-select if no device is currently selected; don't steal selection
             // from a device the user has already chosen in a multi-device session.
-            if sel.is_none() {
-                *sel = Some(device_root);
+            if state.selected_device_path.is_none() {
+                state.selected_device_path = Some(device_root);
             }
         }
         {
-            let mut unrecognized_path = self.unrecognized_device_path.write().await;
-            let mut unrecognized_io = self.unrecognized_device_io.write().await;
-            *unrecognized_path = None;
-            *unrecognized_io = None;
+            *self.unrecognized_device.write().await = None;
         }
 
         Ok(manifest)
     }
 
     pub async fn list_root_folders(&self) -> Result<Option<DeviceRootFoldersResponse>> {
-        let device_path = match self.get_current_device_path().await {
-            Some(p) => p,
-            None => match self.get_unrecognized_device_path().await {
-                Some(p) => p,
-                None => return Ok(None),
-            },
+        let selected_snapshot = {
+            let state = self.state.read().await;
+            state.selected_device_path.clone().map(|path| {
+                let manifest = state
+                    .connected_devices
+                    .get(&path)
+                    .map(|device| device.manifest.clone());
+                (path, manifest)
+            })
         };
-
-        let manifest = self.get_current_device().await;
+        let (device_path, manifest, pending_friendly_name) =
+            if let Some((path, manifest)) = selected_snapshot {
+                (path, manifest, None)
+            } else if let Some(pending) = self.get_unrecognized_device_snapshot().await {
+                (pending.path, None, pending.friendly_name)
+            } else {
+                return Ok(None);
+            };
         let has_manifest = manifest.is_some();
         // If manifest doesn't exist, we treat no folders as managed (empty vec)
         let managed_paths = manifest
@@ -629,15 +630,10 @@ impl DeviceManager {
         {
             // Read the stored friendly name before composing device_name.
             // Only use it for unrecognized devices; recognized devices have their name in the manifest.
-            let stored_friendly = if manifest.is_none() {
-                self.unrecognized_device_friendly_name.read().await.clone()
-            } else {
-                None
-            };
             let device_name = manifest
                 .as_ref()
                 .and_then(|m| m.name.clone())
-                .or(stored_friendly)
+                .or(pending_friendly_name)
                 .unwrap_or_else(|| "MTP Device".to_string());
             // For MTP, name == relative_path because managed_paths stores relative folder names
             // directly (no filesystem enumeration is possible to derive a display name separately).
@@ -1265,6 +1261,17 @@ pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
     loop {
         let current_mounts = get_mounts();
 
+        // Filter stale observer state through the current safe mount list each cycle.
+        // This evicts boot/system volumes captured by older binaries before new detection.
+        known_mounts.retain(|mount| {
+            if !current_mounts.contains(mount) {
+                let _ = tx.try_send(DeviceEvent::Removed(mount.clone()));
+                false
+            } else {
+                true
+            }
+        });
+
         // Detect new mounts
         for mount in &current_mounts {
             if !known_mounts.contains(mount) {
@@ -1303,16 +1310,6 @@ pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
             }
         }
 
-        // Detect removed mounts
-        known_mounts.retain(|mount| {
-            if !current_mounts.contains(mount) {
-                let _ = tx.try_send(DeviceEvent::Removed(mount.clone()));
-                false
-            } else {
-                true
-            }
-        });
-
         sleep(Duration::from_secs(2)).await;
     }
 }
@@ -1344,40 +1341,18 @@ pub async fn run_mtp_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
 
                 match backend {
                     Ok(backend) => {
-                        known_ids.insert(dev_id.clone());
                         let backend_arc: std::sync::Arc<dyn crate::device_io::DeviceIO> =
                             std::sync::Arc::new(backend);
-                        match backend_arc.read_file(".jellyfinsync.json").await {
-                            Ok(data) => match serde_json::from_slice::<DeviceManifest>(&data) {
-                                Ok(manifest) => {
-                                    let _ = tx
-                                        .send(DeviceEvent::Detected {
-                                            path: synthetic_path,
-                                            manifest,
-                                            device_io: backend_arc,
-                                        })
-                                        .await;
-                                }
-                                Err(e) => {
-                                    daemon_log!("[MTP] Manifest parse error on {}: {}", dev_id, e);
-                                    let _ = tx
-                                        .send(DeviceEvent::Unrecognized {
-                                            path: synthetic_path,
-                                            device_io: backend_arc,
-                                            friendly_name: Some(friendly_name),
-                                        })
-                                        .await;
-                                }
-                            },
-                            Err(_) => {
-                                let _ = tx
-                                    .send(DeviceEvent::Unrecognized {
-                                        path: synthetic_path,
-                                        device_io: backend_arc,
-                                        friendly_name: Some(friendly_name),
-                                    })
-                                    .await;
-                            }
+                        if emit_mtp_probe_event(
+                            &tx,
+                            synthetic_path,
+                            &dev_id,
+                            friendly_name,
+                            backend_arc,
+                        )
+                        .await
+                        {
+                            known_ids.insert(dev_id.clone());
                         }
                     }
                     Err(e) => {
@@ -1399,6 +1374,41 @@ pub async fn run_mtp_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
         }
 
         sleep(Duration::from_secs(2)).await;
+    }
+}
+
+async fn emit_mtp_probe_event(
+    tx: &tokio::sync::mpsc::Sender<DeviceEvent>,
+    synthetic_path: PathBuf,
+    dev_id: &str,
+    friendly_name: String,
+    backend_arc: std::sync::Arc<dyn crate::device_io::DeviceIO>,
+) -> bool {
+    match backend_arc.read_file(".jellyfinsync.json").await {
+        Ok(data) => match serde_json::from_slice::<DeviceManifest>(&data) {
+            Ok(manifest) => tx
+                .send(DeviceEvent::Detected {
+                    path: synthetic_path,
+                    manifest,
+                    device_io: backend_arc,
+                })
+                .await
+                .is_ok(),
+            Err(e) => {
+                daemon_log!("[MTP] Manifest parse error on {}: {}", dev_id, e);
+                tx.send(DeviceEvent::Unrecognized {
+                    path: synthetic_path,
+                    device_io: backend_arc,
+                    friendly_name: Some(friendly_name),
+                })
+                .await
+                .is_ok()
+            }
+        },
+        Err(e) => {
+            daemon_log!("[MTP] Manifest read failed on {}: {}", dev_id, e);
+            false
+        }
     }
 }
 
