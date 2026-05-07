@@ -1,71 +1,122 @@
 # JellyfinSync — Project Overview
 
-_Generated: 2026-03-08 | Scan Level: Quick_
+**Version:** 0.2.0 | **Generated:** 2026-05-07 | **Scan depth:** Exhaustive
 
-## What is JellyfinSync?
+---
 
-JellyfinSync is a desktop application for synchronizing media from a Jellyfin media server to a local device. It consists of a background daemon service and a Tauri-based desktop UI, enabling users to browse their Jellyfin library, select media to sync, and manage offline copies on their device.
+## Purpose
 
-## Key Features
+JellyfinSync is a cross-platform desktop application that synchronizes music from a Jellyfin media server to legacy mass-storage audio players — primarily iPods running Rockbox firmware, but also any USB MSC device or MTP device.
 
-- **Jellyfin Library Browsing** — Browse views, collections, and media items from a Jellyfin server
-- **Selective Media Sync** — Add items to a sync basket and download them to a local device
-- **Delta Sync** — Calculate differences between local and remote, only transfer what's needed
-- **Resumable Transfers** — Sync operations can be resumed after interruption
-- **Playback Scrobbling** — Track media playback history
-- **Device Management** — Initialize devices, manage storage, configure sync profiles
-- **Manifest Repair** — Detect and fix discrepancies between local files and sync manifest
-- **System Tray** — Daemon runs in the background with tray icon status indicators
+The core problem it solves: Jellyfin manages your music library with rich metadata, but portable players like Rockbox iPods cannot connect to Jellyfin directly. JellyfinSync bridges this gap by letting users curate a "basket" of albums/playlists/artists and then copying the files to the device with correct paths, M3U playlists, and a manifest that tracks sync state. It also reads the Rockbox `.scrobbler.log` and reports back played tracks to Jellyfin.
 
-## Tech Stack Summary
+---
+
+## Core Principles
+
+1. **Managed Sync Mode** — The device has a designated "managed" folder. JellyfinSync owns this folder completely; it adds and removes files autonomously to match the basket. Unmanaged folders are untouched.
+2. **Jellyfin-First** — All library metadata (titles, album art, playlists) comes from Jellyfin. The app never maintains its own library database.
+3. **Speed is King** — Delta sync: only copy what changed. Skipping files that are already present and byte-identical (via Jellyfin etag matching and metadata comparison) keeps syncs fast.
+4. **Scrobble Bridge** — After each sync, parse the Rockbox `.scrobbler.log` and submit plays back to Jellyfin so listening history stays in sync.
+
+---
+
+## Architecture Overview
+
+JellyfinSync is a **monorepo** containing two cooperating processes:
+
+```
+jellyfinsync/
+├── jellyfinsync-daemon/     Rust backend — Axum JSON-RPC server, device I/O, sync engine
+└── jellyfinsync-ui/         Tauri 2 desktop shell — TypeScript + Vite + Shoelace
+```
+
+The UI is a thin shell. All business logic lives in the daemon. The UI communicates exclusively with the daemon via **JSON-RPC 2.0 over HTTP on `localhost:19140`**.
+
+The Tauri shell is responsible for:
+- Launching the daemon (as sidecar, Windows Service, or detecting a running instance)
+- Proxying JSON-RPC calls from the WebView (to bypass browser mixed-content restrictions)
+- Proxying Jellyfin image requests (to base64 data URLs)
+
+---
+
+## Technology Stack
 
 | Component | Technology |
 |-----------|-----------|
-| Daemon | Rust (Tokio, Axum, rusqlite, reqwest) |
-| UI Frontend | TypeScript, Vite, Shoelace web components |
-| UI Framework | Tauri 2 |
-| Database | SQLite (embedded) |
-| Credentials | OS keyring |
-| Communication | JSON-RPC 2.0 over HTTP (localhost) |
+| Daemon language | Rust 1.93+ (MSRV 1.93.0) |
+| Async runtime | Tokio (multi-thread) |
+| HTTP server | Axum 0.8 |
+| Database | SQLite via rusqlite (bundled) |
+| Keyring | `keyring` crate (OS credential store) |
+| System tray | `tray-icon` + `tao` |
+| MTP (Windows) | WPD COM API via `windows-sys` |
+| MTP (Unix) | libmtp FFI via `libc` |
+| UI framework | Tauri 2 |
+| Frontend language | TypeScript 5.6 |
+| Build tool | Vite 6 |
+| UI component library | Shoelace 2.19.1 |
+| Packaging | Tauri bundler (DMG, .deb, .exe WiX/NSIS) |
 
-## Architecture
+---
 
-- **Repository Type:** Monorepo (Rust Cargo workspace)
-- **Architecture Style:** Two-process desktop app (daemon + UI)
-- **Communication:** JSON-RPC 2.0 over local HTTP (`127.0.0.1:19140`)
+## Key Features
 
-### Parts
+### Sync
+- **Delta sync**: computes adds, deletes, and ID-changes against the DeviceManifest before copying anything
+- **Dirty-flag recovery**: if sync is interrupted, the manifest is marked dirty; on next connect the UI shows a Repair workflow to reconcile missing/orphaned files
+- **Write-temp-rename atomicity**: MSC backend writes to a `.tmp` file then renames, preventing partial writes
+- **FAT32/Rockbox path constraints**: paths are sanitized to ≤255 chars/component, ≤250 total (Windows MAX_PATH), with illegal characters replaced
 
-| Part | Type | Path | Description |
-|------|------|------|-------------|
-| jellyfinsync-daemon | Backend service | `jellyfinsync-daemon/` | Background daemon with system tray, local API, Jellyfin client, SQLite storage |
-| jellyfinsync-ui | Desktop app | `jellyfinsync-ui/` | Tauri 2 desktop UI with TypeScript frontend |
+### Multi-device
+- Multiple devices can be connected simultaneously (stored in a `HashMap` keyed by mount path)
+- The UI shows a "Device Hub" panel to switch between devices
+- Each device has its own `DeviceManifest` (`.jellyfinsync.json` at device root), basket, and sync settings
 
-## Quick Start
+### Auto-fill
+- Fills remaining device capacity with highest-priority tracks: favorites → most-played → newest
+- Server-side sort and pagination stops as soon as capacity budget is exhausted
+- Exclude list prevents manually-selected items from being double-counted
 
-### Prerequisites
-- Rust (Edition 2021, MSRV 1.93.0)
-- Node.js with npm
-- Tauri 2 CLI
+### Auto-sync on connect
+- If enabled per device, the daemon triggers a full sync automatically when the device is plugged in (no UI required)
 
-### Build
-```bash
-npm run build          # Build entire project (UI + daemon)
-npm run build:ui       # Build UI only
-npm run build:daemon   # Build daemon only
-```
+### Scrobbling
+- Parses Rockbox `.scrobbler.log` (AudioScrobbler 1.1, tab-separated)
+- Matches tracks to Jellyfin items by artist+title+duration
+- Submits plays via `POST /Users/{userId}/PlayedItems/{itemId}`
+- Deduplicates against `scrobble_history` SQLite table
 
-### Development
-```bash
-# Terminal 1: Run daemon
-cargo run -p jellyfinsync-daemon
+### Transcoding
+- Optional per-device transcoding profiles stored in `device-profiles.json`
+- Uses Jellyfin `PlaybackInfo` API to negotiate the best stream URL with the server's transcoder
+- Passthrough (no transcoding) is the default
 
-# Terminal 2: Run UI in dev mode
-cd jellyfinsync-ui && npm run dev
-```
+---
 
-### Test
-```bash
-cargo test -p jellyfinsync-daemon    # Daemon tests
-cargo test                           # All workspace tests
-```
+## Persistent State
+
+| Store | Location | Contents |
+|-------|----------|----------|
+| `DeviceManifest` | `<device-root>/.jellyfinsync.json` | Sync state, basket, auto-fill settings, dirty flag |
+| `config.json` | `%APPDATA%/JellyfinSync/` (Win) / `~/Library/Application Support/JellyfinSync/` (macOS) / `~/.local/share/JellyfinSync/` (Linux) | Jellyfin server URL, user ID |
+| OS keyring | System credential store | Jellyfin access token |
+| SQLite DB | Same app data dir as `config.json` | `devices` table (profile, auto-sync), `scrobble_history` |
+| `device-profiles.json` | Same app data dir | Available transcoding profiles (seeded from embedded asset) |
+| Browser `localStorage` | Tauri WebView | Basket state (session persistence) |
+
+---
+
+## Supported Platforms
+
+| Platform | Support |
+|----------|---------|
+| macOS (10.15+) | Full — universal binary (x86_64 + arm64) |
+| Windows 10/11 | Full — MSC + WPD MTP, Windows Service mode |
+| Linux (Ubuntu 22.04+) | Full — MSC + libmtp, requires `libmtp-dev` |
+
+---
+
+## Project Status
+
+Active development (v0.2.0). Core sync, multi-device, auto-fill, scrobbling, and manifest repair are all implemented and shipped.

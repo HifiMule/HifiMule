@@ -1,114 +1,241 @@
-# Architecture — JellyfinSync UI
+# JellyfinSync UI — Architecture
 
-_Generated: 2026-03-08 | Scan Level: Quick | Part: jellyfinsync-ui | Type: desktop_
+**Part:** `jellyfinsync-ui` | **Generated:** 2026-05-07 | **Scan depth:** Exhaustive
 
-## Executive Summary
+---
 
-The JellyfinSync UI is a Tauri 2 desktop application providing a graphical interface for managing media synchronization with Jellyfin servers. It features a TypeScript/Vite frontend using Shoelace web components, communicating with the companion daemon service via JSON-RPC over HTTP.
+## Overview
 
-## Technology Stack
+The UI is a **Tauri 2** desktop application that provides a thin shell around the daemon. All business logic lives in the daemon; the UI's responsibility is:
+1. Launching and monitoring the daemon process
+2. Rendering the library browser and basket using data from the daemon
+3. Proxying RPC calls and image requests to the daemon
 
-| Category | Technology | Version |
-|----------|-----------|---------|
-| Framework | Tauri | 2.x |
-| Language (Frontend) | TypeScript | ~5.6.2 |
-| Build Tool | Vite | ^6.0.3 |
-| UI Library | Shoelace | ^2.19.1 |
-| Tauri API | @tauri-apps/api | ^2 |
-| Language (Backend) | Rust | Edition 2021 (MSRV 1.93.0) |
-| Target | ES2020 / Chrome 105 (Windows) / Safari 13 |
+---
 
-## Architecture Pattern
-
-**Tauri 2 desktop application** with:
-- Vanilla TypeScript SPA (no framework — direct DOM manipulation)
-- Shoelace web components for UI elements
-- JSON-RPC client communicating with external daemon process
-- Tauri Rust backend for native OS integration
-- EventTarget-based state management
-
-## Module Structure
-
-### Frontend (TypeScript)
+## Process Structure
 
 ```
-src/
-├── main.ts              # App initialization, page routing, toast system
-├── login.ts             # Login page — Jellyfin server authentication
-├── library.ts           # Library browsing — views, items, device status
-├── rpc.ts               # JSON-RPC 2.0 client (HTTP POST to daemon)
-├── styles.css           # Global stylesheet
-├── assets/              # Static assets (logos, SVGs)
-├── components/
-│   ├── MediaCard.ts     # Media item display card with details
-│   ├── BasketSidebar.ts # Sync basket panel + sync execution + progress
-│   ├── InitDeviceModal.ts   # Device initialization wizard
-│   └── RepairModal.ts   # Manifest discrepancy detection and repair
-└── state/
-    └── basket.ts        # BasketStore — sync basket state management
+Tauri 2 Shell (Rust)
+  ├─ Window: splashscreen (400×500, transparent, no decorations, always-on-top)
+  │   └─ splashscreen.html → main.ts → initSplashScreen()
+  └─ Window: main (1024×768, initially hidden)
+      └─ index.html → main.ts → init()
+           ├─ rpcCall('get_daemon_state') → serverConnected?
+           │   ├─ true  → initLibraryView()
+           │   └─ false → initLoginView()
+           └─ renderMainLayout()
+                ├─ sl-split-panel (70/30)
+                │   ├─ left: library-view → library.ts
+                │   └─ right: basket-view → BasketSidebar.ts
+                └─ statusbar-container → StatusBar.ts (not wired in current index.html)
 ```
 
-### Tauri Backend (Rust)
+---
 
+## Tauri Shell (`src-tauri/src/lib.rs`)
+
+### Exposed Tauri Commands
+
+| Command | Params | Returns | Description |
+|---------|--------|---------|-------------|
+| `rpc_proxy` | `method: String, params: Value` | `Value` or `String` (error) | Forwards JSON-RPC to daemon; extracts `result` or surfaces `error.message` |
+| `image_proxy` | `id: String, maxHeight?, quality?` | `String` (data URL) | Fetches image from daemon → base64 data URL |
+| `get_sidecar_status` | — | `String` | Returns daemon launch status for splashscreen |
+
+### Daemon Launch Strategy
+
+Executed in a background thread on startup:
+
+1. **Health check** — POST `get_daemon_state` to `http://127.0.0.1:19140`; if OK, daemon is running → status `"startup"`
+2. **Windows Service** (Windows only) — `sc start jellyfinsync-daemon`; health check after 2s → status `"service"`
+3. **Sidecar spawn** — `app.shell().sidecar("jellyfinsync-daemon").spawn()` → status `"running (pid=N)"`; monitors stdout/stderr/terminated events; kills child on `RunEvent::Exit`
+
+Status strings exposed via `get_sidecar_status`:
+- `"starting"` — initial state
+- `"startup"` — existing running instance detected
+- `"service"` — Windows Service started successfully
+- `"running (pid=N)"` — sidecar spawned
+- `"spawn_failed: ..."` — sidecar spawn error
+- `"command_failed: ..."` — sidecar command creation error
+- `"terminated (code=N)"` — sidecar exited unexpectedly
+
+### Logging
+
+`ui_log(msg)` writes to `<AppData>/JellyfinSync/ui.log` (1 MB cap, truncated on overflow) in addition to `println!`. Windows only (uses `APPDATA` env var).
+
+---
+
+## RPC Layer (`src/rpc.ts`)
+
+```typescript
+export const RPC_PORT = '19140';
+export const RPC_URL = `http://localhost:${RPC_PORT}`;
+
+export async function rpcCall(method: string, params: any = {}): Promise<any> {
+    return await invoke('rpc_proxy', { method, params });
+}
+
+export async function getImageUrl(id: string, maxHeight?: number, quality?: number): Promise<string> {
+    return await invoke('image_proxy', { id, maxHeight, quality });
+}
 ```
-src-tauri/
-├── src/
-│   ├── main.rs          # Tauri process entry point
-│   └── lib.rs           # App setup, plugin registration, window management
-├── tauri.conf.json      # App config (windows, bundle, security)
-├── capabilities/
-│   └── default.json     # Tauri permission capabilities
-└── icons/               # App icons (multiple sizes/formats)
-```
 
-## UI Components
+`rpcCall` passes through `invoke`'s error as an `Error` with `getErrorMessage()` normalization (handles plain strings, Error objects, and JSON serialized objects).
 
-| Component | File | Description |
-|-----------|------|-------------|
-| `MediaCard` | `components/MediaCard.ts` | Displays media items with artwork, metadata, counts and sizes |
-| `BasketSidebar` | `components/BasketSidebar.ts` | Sync basket panel — add/remove items, view storage, execute sync with progress tracking |
-| `InitDeviceModal` | `components/InitDeviceModal.ts` | Device initialization wizard — configure sync folder and device profile |
-| `RepairModal` | `components/RepairModal.ts` | Detects and repairs manifest discrepancies (prune orphans, relink moved files) |
+---
 
 ## State Management
 
-**Pattern:** EventTarget-based store (custom implementation)
-
 ### BasketStore (`state/basket.ts`)
-- Extends `EventTarget` for event-driven updates
-- Manages sync basket items (add, remove, toggle)
-- Dual persistence: `localStorage` (immediate) + daemon manifest (via RPC)
-- Hydrates item sizes from daemon API on load
-- Dirty flag tracking for unsaved changes
 
-## Application Windows
+Singleton `BasketStore extends EventTarget`. Holds items selected for the next sync.
 
-| Window | Size | Purpose |
-|--------|------|---------|
-| `main` | 1024x768 | Primary application window (starts hidden) |
-| `splashscreen` | 400x500 | Transparent splash screen during startup |
+```typescript
+class BasketStore {
+    private items: Map<string, BasketItem>;
+    private _dirty: boolean;          // true after any add/remove since last sync
+    private _syncingFromDaemon: bool; // prevents re-entrancy during hydration
+}
+```
 
-## Pages / Views
+**Persistence strategy:**
+- `localStorage` for session persistence between page reloads
+- Daemon `manifest_save_basket` as the authoritative store (debounced 1s write)
+- On device connect: `manifest_get_basket` hydrates the local Map
 
-| Page | File | Route Trigger |
-|------|------|---------------|
-| Login | `login.ts` | Shown when no credentials stored |
-| Library | `library.ts` | Main view after authentication |
+**Auto-fill slot:**  
+A virtual item with `id = "__auto_fill_slot__"` is inserted into the basket when auto-fill is enabled. It carries `sizeBytes` = the available capacity budget. This slot is never persisted to the daemon manifest; it is stripped on load.
 
-## Communication
+**Events:** emits `CustomEvent('update', { detail: items[] })` on every mutation.
 
-All data fetching goes through `rpc.ts` which sends JSON-RPC 2.0 requests to the daemon at `http://127.0.0.1:19140/`. The UI does not communicate directly with the Jellyfin server — all Jellyfin API calls are proxied through the daemon.
+### Component-Level State
 
-## Build & Development
+The `BasketSidebar` component holds most UI state as instance fields:
 
-| Command | Description |
-|---------|-------------|
-| `npm run dev` | Vite dev server (port 1420) |
-| `npm run build` | TypeScript compile + Vite build |
-| `npm run tauri` | Tauri CLI (dev/build) |
+| Field | Description |
+|-------|-------------|
+| `storageInfo` | Latest device storage from `device_get_storage_info` |
+| `folderInfo` | Latest folders from `device_list_root_folders` |
+| `isDirtyManifest` | From `get_daemon_state.dirtyManifest` |
+| `connectedDevices` | Multi-device list from `get_daemon_state.connectedDevices` |
+| `selectedDevicePath` | From `get_daemon_state.selectedDevicePath` |
+| `autoFillEnabled` / `autoFillMaxBytes` | Auto-fill settings (synced to daemon manifest) |
+| `autoSyncOnConnect` | Per-device setting (synced to daemon via `device_set_auto_sync_on_connect`) |
+| `isSyncing` / `currentOperationId` / `currentOperation` | Active sync tracking |
+| `lastHydratedDeviceId` | Tracks which device's basket is currently loaded |
 
-### Tauri Configuration
-- `withGlobalTauri: true` — Tauri API available globally
-- `CSP: null` — No Content Security Policy restrictions
-- Bundle targets: all platforms
-- Frontend dist: `../dist` (Vite output)
+---
+
+## Component Architecture
+
+### `BasketSidebar` (orchestrator)
+
+The main sidebar component owns the UI's sync lifecycle. It runs two polling loops:
+
+- **`daemonStateInterval`** — every 2s: polls `get_daemon_state` to detect device connect/disconnect, dirty manifest, new active operation, and multi-device changes
+- **`pollingInterval`** — every 500ms during sync: polls `sync_get_operation_status` to update progress bar
+
+**Render states (mutually exclusive):**
+1. Locked (no device selected) → placeholder
+2. Empty basket → auto-fill controls + device folder info
+3. Basket items → item list + capacity bar + sync button
+4. Syncing (starting) → spinner
+5. Syncing (in progress) → progress bar + ETA
+6. Sync complete → success panel
+7. Sync error → error panel
+
+**ETA calculation:** `(totalBytes - bytesTransferred) / (bytesTransferred / elapsedSeconds)` — shown after first byte transferred.
+
+### `MediaCard`
+
+`sl-card`-based grid item. Loaded via `document.createElement('sl-card')`. Features:
+- Cover art loaded asynchronously via `getImageUrl(id, 300, 90)` as CSS `background-image`
+- `is-selected` CSS class when item is in basket
+- `synced` CSS class when item is in `syncedItemIds` from `sync_get_device_status_map`
+- Navigation click (on card body) vs. basket toggle click (on `basket-toggle-btn`) are distinguished via `composedPath()`
+- When adding to basket: fetches metadata via `jellyfin_get_item_counts` + `jellyfin_get_item_sizes` concurrently
+
+### `StatusBar`
+
+Shows daemon health at the bottom of the window. Polls `get_daemon_state` every 3s via direct `fetch()` (Note: this uses fetch rather than invoke — works in dev mode but may be unreliable in release builds due to mixed content). Listens for `rpc:call`, `rpc:success`, `rpc:error`, `rpc:disconnect` custom window events.
+
+### `InitDeviceModal`
+
+`sl-dialog`-based wizard for initializing a new unrecognized device:
+- Loads profiles from `device_profiles.list` and credentials from `get_credentials`
+- Fields: device name (max 40 chars), icon picker (6 icons), sync folder path (optional), transcoding profile
+- Calls `device_initialize(folderPath, profileId, transcodingProfileId?, name, icon?)` on confirm
+
+### `RepairModal`
+
+`sl-dialog`-based manifest repair tool:
+- Loads `manifest_get_discrepancies` → shows two columns: missing (in manifest, not on device) and orphaned (on device, not in manifest)
+- Per-item: **Prune** removes from manifest (`manifest_prune`), **Re-link** associates orphan with missing item (`manifest_relink`)
+- Bulk: **Prune All Missing** removes all missing items at once
+- **Finish & Clear Dirty** calls `manifest_clear_dirty` and closes dialog
+
+---
+
+## Navigation Flow (Library)
+
+```
+initLibraryView()
+  └─ renderLibrarySelection()
+       └─ fetchViews() → filter music + playlists collections
+            └─ renderGrid(views, 'libraries')
+                 └─ MediaCard.create() per view
+                      └─ click → navigateToLibrary(view)
+                           └─ loadItems(true) → fetchItems(parentId, MUSIC_ITEM_TYPES, 0, 50)
+                                └─ renderGrid(items, 'items', deviceStatus)
+                                     ├─ breadcrumbs
+                                     ├─ quick-nav bar (A-Z+# for MusicArtist views with ≥20 total)
+                                     └─ MediaCard.create() per item
+                                          ├─ container click → navigateToItem(item) → push to breadcrumbStack
+                                          └─ basket-toggle click → basketStore.add/remove
+```
+
+**Page/scroll cache:** `pageCache: Map<parentId, {items, total}>` enables instant back-navigation. `scrollCache: Map<parentId, scrollTop>` restores scroll position after cache hit or fresh load.
+
+**Quick-nav bar:** visible for `MusicArtist` views with `artistViewTotal >= 20`. Letter buttons call `loadItemsByLetter(letter)` which uses `nameStartsWith`/`nameLessThan` parameters to filter. `#` maps to `nameLessThan: 'A'`.
+
+---
+
+## Tauri Configuration (`tauri.conf.json`)
+
+```json
+{
+  "productName": "JellyfinSync",
+  "version": "0.2.0",
+  "identifier": "com.alexi.jellyfinsync",
+  "bundle": {
+    "externalBin": ["sidecars/jellyfinsync-daemon"],
+    "windows": {
+      "wix": { "fragmentPaths": ["wix/startup-fragment.wxs"] },
+      "nsis": { "installerHooks": "nsis/hooks.nsh" }
+    }
+  }
+}
+```
+
+- **`externalBin`**: the compiled daemon is bundled as a sidecar in `src-tauri/sidecars/` (copied by `scripts/prepare-sidecar.mjs` during build)
+- **WiX startup fragment**: registers the daemon (or UI) to run at Windows startup via a registry key
+- **NSIS hooks**: custom installer behavior on Windows
+- **`security.csp: null`**: CSP disabled (acceptable given daemon runs locally; no remote content)
+
+---
+
+## Build Process
+
+```bash
+# Development
+cd jellyfinsync-ui
+npm run dev          # Starts Vite dev server on :1420 + Tauri in dev mode
+
+# Production
+npm run build        # tsc + vite build → dist/
+node ../scripts/prepare-sidecar.mjs   # copies daemon binary to src-tauri/sidecars/
+npm run tauri build  # Tauri bundles: .dmg / .deb / .exe
+```
+
+`prepare-sidecar.mjs` finds the compiled daemon binary for the current platform and copies it to `jellyfinsync-ui/src-tauri/sidecars/jellyfinsync-daemon-<triple>` (Tauri sidecar naming convention).
