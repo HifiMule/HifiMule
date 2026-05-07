@@ -156,6 +156,8 @@ pub struct SyncOperation {
     pub files_completed: usize,
     pub files_total: usize,
     pub errors: Vec<SyncFileError>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 // Note: Push-based SyncProgress events deferred to future story.
@@ -195,6 +197,7 @@ impl SyncOperationManager {
             files_completed: 0,
             files_total,
             errors: vec![],
+            warnings: vec![],
         };
 
         let mut ops = self.operations.write().await;
@@ -462,6 +465,13 @@ pub async fn execute_sync(
 ) -> Result<(Vec<crate::device::SyncedItem>, Vec<SyncFileError>)> {
     let mut synced_items = Vec::new();
     let mut errors = Vec::new();
+    if let Err(e) = device_io.begin_sync_job().await {
+        errors.push(SyncFileError {
+            jellyfin_id: String::new(),
+            filename: String::new(),
+            error_message: format!("Failed to begin device sync job: {}", e),
+        });
+    }
 
     if delta.adds.is_empty() && delta.deletes.is_empty() && delta.id_changes.is_empty() {
         println!("[Sync] Executing empty sync to clear device managed paths");
@@ -851,6 +861,17 @@ pub async fn execute_sync(
             {
                 eprintln!("[M3U] Failed to persist manifest after M3U update: {}", e);
             }
+        }
+    }
+
+    let mut device_warnings = device_io.take_warnings().await;
+    if let Err(e) = device_io.end_sync_job().await {
+        device_warnings.push(format!("[DeviceIO] Failed to end device sync job cleanly: {}", e));
+    }
+    if !device_warnings.is_empty() {
+        if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
+            operation.warnings.append(&mut device_warnings);
+            operation_manager.update_operation(&operation_id, operation).await;
         }
     }
 

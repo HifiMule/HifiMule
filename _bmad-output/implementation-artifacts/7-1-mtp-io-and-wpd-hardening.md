@@ -1,6 +1,6 @@
 # Story 7.1: MTP IO & WPD Hardening
 
-Status: review
+Status: done
 
 ## Story
 
@@ -108,6 +108,12 @@ So that bulk syncs to MTP devices are fast, atomic, and free of latent data-loss
 - [x] **T14: `path_to_object_id` unit test with mock** (AC: #14)
   - [x] T14.1: Added `#[test]` functions in `mtp.rs` covering two-level path splitting using `split_path_components`
   - [x] T14.2: Tests cover: (a) empty-path root return, (b) single-component path, (c) two-level path, (d) path-not-found error simulation — all using pure-Rust `split_path_components`
+
+### Review Findings
+
+- [x] [Review][Patch] Shell session batching is only dead-code scaffolding, not per-job reuse [`jellyfinsync-daemon/src/device/mtp.rs:642`]
+- [x] [Review][Patch] MTP recursive enumeration warnings are logged but never surfaced in the sync result [`jellyfinsync-daemon/src/device/mtp.rs:840`]
+- [x] [Review][Patch] `path_to_object_id` tests do not use a mock `IPortableDeviceContent` fixture or exercise traversal [`jellyfinsync-daemon/src/device/mtp.rs:1638`]
 
 ## Dev Notes
 

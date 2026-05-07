@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-05-07  # Epic 7 added — deferred work scheduled
+last_updated: 2026-05-07  # Story 7.1 completed after code review
 project: JellyfinSync
 project_key: NOKEY
 tracking_system: file-system
@@ -103,7 +103,7 @@ development_status:
   epic-6-retrospective: done
 
   epic-7: in-progress
-  7-1-mtp-io-and-wpd-hardening: review
+  7-1-mtp-io-and-wpd-hardening: done
   7-2-devicemanager-concurrency-refactor: backlog
   7-3-device-ui-and-identity-polish: backlog
   7-4-packaging-and-cicd-hardening: backlog
