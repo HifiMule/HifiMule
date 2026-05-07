@@ -1,14 +1,14 @@
 {
   "workflow_version": "1.2.0",
   "timestamps": {
-    "started": "2026-03-08T19:00:00Z",
-    "last_updated": "2026-03-08T19:30:00Z",
-    "completed": "2026-03-08T19:30:00Z"
+    "started": "2026-05-07T00:00:00Z",
+    "last_updated": "2026-05-07T01:00:00Z",
+    "completed": "2026-05-07T01:00:00Z"
   },
-  "mode": "initial_scan",
-  "scan_level": "quick",
-  "project_root": "c:/Workspaces/JellyfinSync",
-  "project_knowledge": "c:/Workspaces/JellyfinSync/docs",
+  "mode": "full_rescan",
+  "scan_level": "exhaustive",
+  "project_root": "/Users/akartmann/Documents/Projects/JellyfinSync",
+  "project_knowledge": "/Users/akartmann/Documents/Projects/JellyfinSync/docs",
   "repository_type": "monorepo",
   "project_types": [
     {
@@ -19,7 +19,7 @@
     {
       "part_id": "jellyfinsync-ui",
       "project_type_id": "desktop",
-      "display_name": "JellyfinSync UI (Tauri Desktop)"
+      "display_name": "JellyfinSync UI (Tauri 2 Desktop)"
     }
   ],
   "project_parts": [
@@ -27,36 +27,37 @@
       "part_id": "jellyfinsync-daemon",
       "root_path": "jellyfinsync-daemon/",
       "project_type_id": "backend",
-      "primary_tech": "Rust (axum, rusqlite, reqwest)"
+      "primary_tech": "Rust (Axum 0.8, Tokio, rusqlite, reqwest, keyring, tray-icon, windows-sys/libmtp)"
     },
     {
       "part_id": "jellyfinsync-ui",
       "root_path": "jellyfinsync-ui/",
       "project_type_id": "desktop",
-      "primary_tech": "Tauri 2 + TypeScript + Vite (Shoelace)"
+      "primary_tech": "Tauri 2 + TypeScript 5.6 + Vite 6 + Shoelace 2.19.1"
     }
   ],
   "completed_steps": [
-    {"step": "step_1", "status": "completed", "timestamp": "2026-03-08T19:00:00Z", "summary": "Classified as monorepo with 2 parts: daemon (backend) and ui (desktop)"},
-    {"step": "step_2", "status": "completed", "timestamp": "2026-03-08T19:02:00Z", "summary": "Found 2 existing docs (DEBUGGING.md, UI README.md)"},
-    {"step": "step_3", "status": "completed", "timestamp": "2026-03-08T19:05:00Z", "summary": "Tech stack: Rust (Tokio/Axum/rusqlite) + TypeScript (Tauri 2/Vite/Shoelace)"},
-    {"step": "step_4", "status": "completed", "timestamp": "2026-03-08T19:10:00Z", "summary": "Conditional analysis: 24 API methods, 2 DB tables, 4 UI components, 1 state store"},
-    {"step": "step_5", "status": "completed", "timestamp": "2026-03-08T19:12:00Z", "summary": "Source tree documented with 6 critical folders"},
-    {"step": "step_6", "status": "completed", "timestamp": "2026-03-08T19:15:00Z", "summary": "Dev setup and deployment documented"},
-    {"step": "step_7", "status": "completed", "timestamp": "2026-03-08T19:17:00Z", "summary": "3 integration points documented (JSON-RPC, image proxy, external API)"},
-    {"step": "step_8", "status": "completed", "timestamp": "2026-03-08T19:20:00Z", "summary": "Architecture docs written for 2 parts"},
-    {"step": "step_9", "status": "completed", "timestamp": "2026-03-08T19:25:00Z", "summary": "6 supporting docs generated"},
-    {"step": "step_10", "status": "completed", "timestamp": "2026-03-08T19:27:00Z", "summary": "Master index generated"},
-    {"step": "step_11", "status": "completed", "timestamp": "2026-03-08T19:28:00Z", "summary": "Validation complete, no incomplete markers"},
-    {"step": "step_12", "status": "completed", "timestamp": "2026-03-08T19:30:00Z", "summary": "Workflow complete"}
+    {"step": "step_0.5", "status": "completed", "timestamp": "2026-05-07T00:00:00Z", "summary": "Initialized state file; archived stale March 2026 state to .archive/"},
+    {"step": "step_1", "status": "completed", "timestamp": "2026-05-07T00:05:00Z", "summary": "Classified as monorepo with 2 parts: daemon (backend) and ui (desktop)"},
+    {"step": "step_2", "status": "completed", "timestamp": "2026-05-07T00:06:00Z", "summary": "Existing docs from 2026-03-08 found; full rescan confirmed by user"},
+    {"step": "step_3", "status": "completed", "timestamp": "2026-05-07T00:07:00Z", "summary": "Tech stack: Rust (Tokio/Axum/rusqlite/keyring/WPD/libmtp) + TypeScript (Tauri 2/Vite/Shoelace)"},
+    {"step": "step_4", "status": "completed", "timestamp": "2026-05-07T00:55:00Z", "summary": "Exhaustive scan: all daemon modules (main, rpc, api, db, sync, auto_fill, scrobbler, transcoding, paths, service, device/mod, device/mtp, device_io) + all UI files (main.ts, library.ts, login.ts, rpc.ts, state/basket.ts, components/*.ts, src-tauri/lib.rs) + tauri.conf.json + package.json + CI workflows"},
+    {"step": "step_5", "status": "completed", "timestamp": "2026-05-07T00:57:00Z", "summary": "source-tree-analysis.md written with full file tree, module LOC, responsibilities, dependencies"},
+    {"step": "step_6", "status": "completed", "timestamp": "2026-05-07T00:58:00Z", "summary": "development-guide.md written with prerequisites, build commands, test commands, debugging"},
+    {"step": "step_7", "status": "completed", "timestamp": "2026-05-07T00:59:00Z", "summary": "integration-architecture.md written: IPC (rpc_proxy/image_proxy), JSON-RPC protocol, sync flow, auto-sync flow"},
+    {"step": "step_8", "status": "completed", "timestamp": "2026-05-07T01:00:00Z", "summary": "Architecture docs written for daemon (AppState, DeviceManager, sync engine, MTP, service) and UI (Tauri shell, BasketSidebar, library navigation)"},
+    {"step": "step_9", "status": "completed", "timestamp": "2026-05-07T01:00:00Z", "summary": "API contracts (34 RPC methods), data models (DeviceManifest, SyncedItem, BasketItem, SyncDelta, etc.), component inventory (all 5 components + state/views)"},
+    {"step": "step_10", "status": "completed", "timestamp": "2026-05-07T01:00:00Z", "summary": "Master index with quick reference, key architectural decisions table"},
+    {"step": "step_11", "status": "completed", "timestamp": "2026-05-07T01:00:00Z", "summary": "Validation: all 9 doc files regenerated from exhaustive scan; no placeholder markers"},
+    {"step": "step_12", "status": "completed", "timestamp": "2026-05-07T01:00:00Z", "summary": "State file updated; workflow complete"}
   ],
   "current_step": "completed",
   "findings": {
-    "project_classification": "Monorepo (Cargo workspace), 2 parts, Rust + TypeScript/Tauri",
-    "technology_stack": "Rust (Tokio/Axum/rusqlite) + TypeScript (Tauri 2/Vite/Shoelace)",
-    "api_summary": "24 JSON-RPC methods on localhost:19140",
-    "data_summary": "2 SQLite tables + OS keyring credentials",
-    "ui_summary": "4 components + 2 pages + 1 state store"
+    "project_classification": "Monorepo (Cargo workspace), 2 parts: Rust backend + Tauri 2 desktop",
+    "technology_stack": "Rust (Tokio/Axum 0.8/rusqlite/keyring/WPD/libmtp) + TypeScript (Tauri 2/Vite 6/Shoelace 2.19.1)",
+    "api_summary": "34 JSON-RPC methods on localhost:19140 + image proxy endpoint",
+    "data_summary": "DeviceManifest (.jellyfinsync.json on device) + SQLite (devices, scrobble_history) + OS keyring (token) + localStorage (basket session)",
+    "ui_summary": "5 components (BasketSidebar, MediaCard, StatusBar, InitDeviceModal, RepairModal) + 3 views (library, login, splash) + 1 state store (BasketStore)"
   },
   "outputs_generated": [
     "project-scan-report.json",
@@ -69,8 +70,7 @@
     "api-contracts-jellyfinsync-daemon.md",
     "data-models-jellyfinsync-daemon.md",
     "component-inventory-jellyfinsync-ui.md",
-    "development-guide.md",
-    "project-parts.json"
+    "development-guide.md"
   ],
-  "resume_instructions": "Workflow completed successfully"
+  "resume_instructions": "Workflow completed successfully (exhaustive full_rescan, 2026-05-07)"
 }
