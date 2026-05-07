@@ -14,6 +14,9 @@ pub struct FileEntry {
 
 #[async_trait]
 pub trait DeviceIO: Send + Sync + std::fmt::Debug {
+    async fn begin_sync_job(&self) -> Result<()> {
+        Ok(())
+    }
     async fn read_file(&self, path: &str) -> Result<Vec<u8>>;
     async fn write_file(&self, path: &str, data: &[u8]) -> Result<()>;
     async fn write_with_verify(&self, path: &str, data: &[u8]) -> Result<()>;
@@ -22,6 +25,12 @@ pub trait DeviceIO: Send + Sync + std::fmt::Debug {
     async fn free_space(&self) -> Result<u64>;
     async fn ensure_dir(&self, path: &str) -> Result<()>;
     async fn cleanup_empty_subdirs(&self, path: &str) -> Result<()>;
+    async fn take_warnings(&self) -> Vec<String> {
+        Vec::new()
+    }
+    async fn end_sync_job(&self) -> Result<()> {
+        Ok(())
+    }
     fn preferred_audio_container(&self) -> Option<&'static str> {
         None
     }
@@ -37,7 +46,10 @@ fn check_relative(path: &str) -> Result<()> {
     }
     for component in p.components() {
         if matches!(component, std::path::Component::ParentDir) {
-            return Err(anyhow::anyhow!("DeviceIO path must not traverse parent directories: {}", path));
+            return Err(anyhow::anyhow!(
+                "DeviceIO path must not traverse parent directories: {}",
+                path
+            ));
         }
     }
     Ok(())
@@ -56,7 +68,11 @@ async fn msc_cleanup_empty_dirs(path: &std::path::Path) -> Result<()> {
             let mut sub_entries = tokio::fs::read_dir(&entry_path).await?;
             if sub_entries.next_entry().await?.is_none() {
                 if let Err(e) = tokio::fs::remove_dir(&entry_path).await {
-                    eprintln!("[Sync] Warning: failed to remove empty directory {}: {}", entry_path.display(), e);
+                    eprintln!(
+                        "[Sync] Warning: failed to remove empty directory {}: {}",
+                        entry_path.display(),
+                        e
+                    );
                 }
             }
         }
@@ -175,7 +191,11 @@ impl DeviceIO for MscBackend {
                         .unwrap_or(&entry_path)
                         .to_string_lossy()
                         .replace('\\', "/");
-                    entries.push(FileEntry { path: rel, name, size });
+                    entries.push(FileEntry {
+                        path: rel,
+                        name,
+                        size,
+                    });
                 }
             }
         }
@@ -197,7 +217,11 @@ impl DeviceIO for MscBackend {
         if !path.is_empty() {
             check_relative(path)?;
         }
-        let base = if path.is_empty() { self.root.clone() } else { self.root.join(path) };
+        let base = if path.is_empty() {
+            self.root.clone()
+        } else {
+            self.root.join(path)
+        };
         msc_cleanup_empty_dirs(&base).await
     }
 }
@@ -220,11 +244,20 @@ impl std::fmt::Debug for MtpBackend {
 
 /// Platform-independent MTP handle trait, enabling mock injection for tests.
 pub trait MtpHandle: Send + Sync {
+    fn begin_sync_job(&self) -> Result<()> {
+        Ok(())
+    }
     fn read_file(&self, path: &str) -> Result<Vec<u8>>;
     fn write_file(&self, path: &str, data: &[u8]) -> Result<()>;
     fn delete_file(&self, path: &str) -> Result<()>;
     fn list_files(&self, path: &str) -> Result<Vec<FileEntry>>;
     fn free_space(&self) -> Result<u64>;
+    fn take_warnings(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn end_sync_job(&self) -> Result<()> {
+        Ok(())
+    }
     fn preferred_audio_container(&self) -> Option<&'static str> {
         None
     }
@@ -232,6 +265,13 @@ pub trait MtpHandle: Send + Sync {
 
 #[async_trait]
 impl DeviceIO for MtpBackend {
+    async fn begin_sync_job(&self) -> Result<()> {
+        let handle = Arc::clone(&self.handle);
+        tokio::task::spawn_blocking(move || handle.begin_sync_job())
+            .await
+            .map_err(|e| anyhow::anyhow!("MTP begin_sync_job task panicked: {}", e))?
+    }
+
     async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
         let handle = Arc::clone(&self.handle);
         let path = path.to_string();
@@ -287,6 +327,20 @@ impl DeviceIO for MtpBackend {
     // MTP manages directory objects automatically; empty directory pruning is not needed.
     async fn cleanup_empty_subdirs(&self, _path: &str) -> Result<()> {
         Ok(())
+    }
+
+    async fn take_warnings(&self) -> Vec<String> {
+        let handle = Arc::clone(&self.handle);
+        tokio::task::spawn_blocking(move || handle.take_warnings())
+            .await
+            .unwrap_or_default()
+    }
+
+    async fn end_sync_job(&self) -> Result<()> {
+        let handle = Arc::clone(&self.handle);
+        tokio::task::spawn_blocking(move || handle.end_sync_job())
+            .await
+            .map_err(|e| anyhow::anyhow!("MTP end_sync_job task panicked: {}", e))?
     }
 
     fn preferred_audio_container(&self) -> Option<&'static str> {
@@ -470,7 +524,8 @@ pub mod tests {
         let mock = Arc::new(MockMtpHandle::new());
         mock.files.lock().unwrap().insert(
             ".jellyfinsync.json".to_string(),
-            br#"{"device_id":"test-id","version":"1.0","managedPaths":[],"syncedItems":[]}"#.to_vec(),
+            br#"{"device_id":"test-id","version":"1.0","managedPaths":[],"syncedItems":[]}"#
+                .to_vec(),
         );
         let backend = MtpBackend {
             handle: Arc::clone(&mock) as Arc<dyn MtpHandle>,
@@ -503,6 +558,9 @@ pub mod tests {
 
         // T8: assert sentinel content is exactly b"\x00", not merely present.
         let marker_content = backend.read_file("Music/track.mp3.dirty").await.unwrap();
-        assert_eq!(marker_content, b"\x00", "dirty marker must contain sentinel byte \\x00");
+        assert_eq!(
+            marker_content, b"\x00",
+            "dirty marker must contain sentinel byte \\x00"
+        );
     }
 }
