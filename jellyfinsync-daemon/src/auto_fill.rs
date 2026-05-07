@@ -5,7 +5,9 @@
 ///   2. PlayCount DESC (most-played next)
 ///   3. DateCreated DESC (newest last)
 /// Stops paginating as soon as the device capacity budget is filled.
-use crate::api::{url_encode, CredentialManager, JellyfinClient, JellyfinItem, JellyfinItemsResponse};
+use crate::api::{
+    url_encode, CredentialManager, JellyfinClient, JellyfinItem, JellyfinItemsResponse,
+};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
@@ -40,9 +42,11 @@ pub async fn run_auto_fill(
 ) -> Result<Vec<AutoFillItem>> {
     let (url, token, user_id) =
         CredentialManager::get_credentials().map_err(|e| anyhow::anyhow!("{}", e))?;
-    let user_id = user_id.ok_or_else(|| anyhow::anyhow!(
-        "No user ID in stored credentials; auto-fill requires an authenticated Jellyfin user"
-    ))?;
+    let user_id = user_id.ok_or_else(|| {
+        anyhow::anyhow!(
+            "No user ID in stored credentials; auto-fill requires an authenticated Jellyfin user"
+        )
+    })?;
     CredentialManager::validate_url(&url)?;
     CredentialManager::validate_token(&token)?;
 
@@ -56,7 +60,11 @@ pub async fn run_auto_fill(
     let exclude_param = if params.exclude_item_ids.is_empty() {
         String::new()
     } else {
-        let encoded_ids: Vec<String> = params.exclude_item_ids.iter().map(|id| url_encode(id)).collect();
+        let encoded_ids: Vec<String> = params
+            .exclude_item_ids
+            .iter()
+            .map(|id| url_encode(id))
+            .collect();
         format!("&ExcludeItemIds={}", encoded_ids.join(","))
     };
 
@@ -94,7 +102,11 @@ pub async fn run_auto_fill(
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await?;
-            return Err(anyhow::anyhow!("Server returned status: {} - {}", status, text));
+            return Err(anyhow::anyhow!(
+                "Server returned status: {} - {}",
+                status,
+                text
+            ));
         }
         let text = response.text().await?;
         let page: JellyfinItemsResponse = serde_json::from_str(&text)?;
@@ -120,7 +132,11 @@ pub async fn run_auto_fill(
                 break;
             }
 
-            let is_favorite = track.user_data.as_ref().map(|u| u.is_favorite).unwrap_or(false);
+            let is_favorite = track
+                .user_data
+                .as_ref()
+                .map(|u| u.is_favorite)
+                .unwrap_or(false);
             let play_count = track.user_data.as_ref().map(|u| u.play_count).unwrap_or(0);
             let priority_reason = if is_favorite {
                 "favorite".to_string()
@@ -135,9 +151,9 @@ pub async fn run_auto_fill(
                 id: track.id,
                 name: track.name,
                 album: track.album,
-                artist: track.album_artist.or_else(|| {
-                    track.artists.and_then(|a| a.into_iter().next())
-                }),
+                artist: track
+                    .album_artist
+                    .or_else(|| track.artists.and_then(|a| a.into_iter().next())),
                 size_bytes,
                 priority_reason,
             });
@@ -193,11 +209,7 @@ pub fn rank_and_truncate(tracks: Vec<JellyfinItem>, max_fill_bytes: u64) -> Vec<
             .as_ref()
             .map(|u| u.is_favorite)
             .unwrap_or(false);
-        let play_count = track
-            .user_data
-            .as_ref()
-            .map(|u| u.play_count)
-            .unwrap_or(0);
+        let play_count = track.user_data.as_ref().map(|u| u.play_count).unwrap_or(0);
 
         let priority_reason = if is_favorite {
             "favorite".to_string()
@@ -212,11 +224,9 @@ pub fn rank_and_truncate(tracks: Vec<JellyfinItem>, max_fill_bytes: u64) -> Vec<
             id: track.id,
             name: track.name,
             album: track.album,
-            artist: track.album_artist.or_else(|| {
-                track
-                    .artists
-                    .and_then(|a| a.into_iter().next())
-            }),
+            artist: track
+                .album_artist
+                .or_else(|| track.artists.and_then(|a| a.into_iter().next())),
             size_bytes,
             priority_reason,
         });
@@ -287,9 +297,15 @@ mod tests {
         // Jellyfin can return size = -1 for tracks whose size is unknown.
         // Such tracks must be skipped, not added with a u64::MAX budget cost.
         let mut track = make_track("a", true, 0, "2024-01-01", 1000);
-        track.media_sources = Some(vec![MediaSource { size: Some(-1), container: None }]);
+        track.media_sources = Some(vec![MediaSource {
+            size: Some(-1),
+            container: None,
+        }]);
         let result = rank_and_truncate(vec![track], 10_000);
-        assert!(result.is_empty(), "tracks with negative size should be skipped");
+        assert!(
+            result.is_empty(),
+            "tracks with negative size should be skipped"
+        );
     }
 
     #[test]
@@ -298,7 +314,10 @@ mod tests {
         let mut track = make_track("a", true, 0, "2024-01-01", 0);
         track.media_sources = None;
         let result = rank_and_truncate(vec![track], 10_000);
-        assert!(result.is_empty(), "tracks with zero/unknown size should be skipped");
+        assert!(
+            result.is_empty(),
+            "tracks with zero/unknown size should be skipped"
+        );
     }
 
     #[test]
@@ -318,7 +337,11 @@ mod tests {
             make_track("c", false, 0, "2024-01-01", 500_000),   // 0.5MB — never reached
         ];
         let result = rank_and_truncate(tracks, 3_000_000);
-        assert_eq!(result.len(), 1, "only 'a' fits; break stops at 'b', 'c' never considered");
+        assert_eq!(
+            result.len(),
+            1,
+            "only 'a' fits; break stops at 'b', 'c' never considered"
+        );
         assert_eq!(result[0].id, "a");
     }
 }

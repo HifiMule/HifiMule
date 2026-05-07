@@ -482,7 +482,9 @@ pub async fn execute_sync(
         + delta.id_changes.iter().map(|c| c.size_bytes).sum::<u64>();
     if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
         operation.total_bytes = total_job_bytes;
-        operation_manager.update_operation(&operation_id, operation).await;
+        operation_manager
+            .update_operation(&operation_id, operation)
+            .await;
     }
 
     // Shared counter for cumulative bytes written across all files (for ETA)
@@ -805,8 +807,7 @@ pub async fn execute_sync(
         });
 
         // Update operation progress and cumulative bytes (an ID change is instantly completed)
-        completed_bytes_arc
-            .fetch_add(id_change.size_bytes, std::sync::atomic::Ordering::Relaxed);
+        completed_bytes_arc.fetch_add(id_change.size_bytes, std::sync::atomic::Ordering::Relaxed);
         let cumulative = completed_bytes_arc.load(std::sync::atomic::Ordering::Relaxed);
         if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
             operation.files_completed += 1;
@@ -866,12 +867,17 @@ pub async fn execute_sync(
 
     let mut device_warnings = device_io.take_warnings().await;
     if let Err(e) = device_io.end_sync_job().await {
-        device_warnings.push(format!("[DeviceIO] Failed to end device sync job cleanly: {}", e));
+        device_warnings.push(format!(
+            "[DeviceIO] Failed to end device sync job cleanly: {}",
+            e
+        ));
     }
     if !device_warnings.is_empty() {
         if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
             operation.warnings.append(&mut device_warnings);
-            operation_manager.update_operation(&operation_id, operation).await;
+            operation_manager
+                .update_operation(&operation_id, operation)
+                .await;
         }
     }
 
@@ -913,7 +919,6 @@ where
     }
     Ok(buffer)
 }
-
 
 /// Extracts the filename stem from a relative path for use as an EXTINF display label.
 ///
@@ -977,7 +982,11 @@ async fn generate_m3u_files(
             Ok(()) => {
                 println!("[M3U] Deleted removed playlist: {}", entry.filename);
             }
-            Err(e) if e.downcast_ref::<std::io::Error>().map(|io| io.kind() == std::io::ErrorKind::NotFound).unwrap_or(false) => {
+            Err(e)
+                if e.downcast_ref::<std::io::Error>()
+                    .map(|io| io.kind() == std::io::ErrorKind::NotFound)
+                    .unwrap_or(false) =>
+            {
                 // Already gone — still remove manifest entry
             }
             Err(e) => {
@@ -1047,18 +1056,23 @@ async fn generate_m3u_files(
             continue;
         }
 
-        let resolved_track_ids: Vec<String> =
-            resolved_tracks.iter().map(|(t, _)| t.jellyfin_id.clone()).collect();
+        let resolved_track_ids: Vec<String> = resolved_tracks
+            .iter()
+            .map(|(t, _)| t.jellyfin_id.clone())
+            .collect();
 
         // Determine if regeneration is needed (filename or resolved track list changed)
-        let (needs_write, old_filename_opt) =
-            match manifest.playlists.iter().find(|e| e.jellyfin_id == playlist.jellyfin_id) {
-                None => (true, None),
-                Some(e) => {
-                    let changed = e.filename != m3u_filename || e.track_ids != resolved_track_ids;
-                    (changed, Some(e.filename.clone()))
-                }
-            };
+        let (needs_write, old_filename_opt) = match manifest
+            .playlists
+            .iter()
+            .find(|e| e.jellyfin_id == playlist.jellyfin_id)
+        {
+            None => (true, None),
+            Some(e) => {
+                let changed = e.filename != m3u_filename || e.track_ids != resolved_track_ids;
+                (changed, Some(e.filename.clone()))
+            }
+        };
 
         if !needs_write {
             println!("[M3U] Playlist unchanged, skipping: {}", m3u_filename);
@@ -1093,9 +1107,16 @@ async fn generate_m3u_files(
         } else {
             format!("{}/{}", managed_subfolder, m3u_filename)
         };
-        match device_io.write_with_verify(&rel_m3u, content.as_bytes()).await {
+        match device_io
+            .write_with_verify(&rel_m3u, content.as_bytes())
+            .await
+        {
             Ok(()) => {
-                println!("[M3U] Wrote {}: {} tracks", m3u_filename, resolved_tracks.len());
+                println!(
+                    "[M3U] Wrote {}: {} tracks",
+                    m3u_filename,
+                    resolved_tracks.len()
+                );
 
                 // Delete old file if the playlist was renamed
                 if let Some(old_fn) = &old_filename_opt {
@@ -1106,10 +1127,8 @@ async fn generate_m3u_files(
                             format!("{}/{}", managed_subfolder, old_fn)
                         };
                         if let Err(e) = device_io.delete_file(&rel_old).await {
-                            warnings.push(format!(
-                                "[M3U] Failed to delete old file {}: {}",
-                                old_fn, e
-                            ));
+                            warnings
+                                .push(format!("[M3U] Failed to delete old file {}: {}", old_fn, e));
                         }
                     }
                 }
@@ -1118,13 +1137,15 @@ async fn generate_m3u_files(
                 manifest
                     .playlists
                     .retain(|e| e.jellyfin_id != playlist.jellyfin_id);
-                manifest.playlists.push(crate::device::PlaylistManifestEntry {
-                    jellyfin_id: playlist.jellyfin_id.clone(),
-                    filename: m3u_filename,
-                    track_count: resolved_tracks.len() as u32,
-                    track_ids: resolved_track_ids,
-                    last_modified: now,
-                });
+                manifest
+                    .playlists
+                    .push(crate::device::PlaylistManifestEntry {
+                        jellyfin_id: playlist.jellyfin_id.clone(),
+                        filename: m3u_filename,
+                        track_count: resolved_tracks.len() as u32,
+                        track_ids: resolved_track_ids,
+                        last_modified: now,
+                    });
             }
             Err(e) => {
                 warnings.push(format!("[M3U] Failed to write {}: {}", m3u_filename, e));
@@ -1935,7 +1956,8 @@ mod tests {
         ];
 
         let mut manifest = empty_manifest();
-        let device_io = std::sync::Arc::new(crate::device_io::MscBackend::new(device_path.to_path_buf()));
+        let device_io =
+            std::sync::Arc::new(crate::device_io::MscBackend::new(device_path.to_path_buf()));
         let warnings = generate_m3u_files(
             &playlist_items,
             device_path,
@@ -1947,26 +1969,43 @@ mod tests {
         .await;
 
         // No warnings expected (all tracks resolved)
-        assert!(warnings.is_empty(), "Expected no warnings, got: {:?}", warnings);
+        assert!(
+            warnings.is_empty(),
+            "Expected no warnings, got: {:?}",
+            warnings
+        );
 
         // .m3u files should be in the Music folder, not the device root
         let m3u1 = managed_path.join("My Playlist.m3u");
         let m3u2 = managed_path.join("Second Playlist.m3u");
         assert!(m3u1.exists(), "My Playlist.m3u should exist in Music/");
         assert!(m3u2.exists(), "Second Playlist.m3u should exist in Music/");
-        assert!(!device_path.join("My Playlist.m3u").exists(), ".m3u must NOT be at device root");
+        assert!(
+            !device_path.join("My Playlist.m3u").exists(),
+            ".m3u must NOT be at device root"
+        );
 
         // Check content — paths are relative to Music/, so no "Music/" prefix
         let content1 = tokio::fs::read_to_string(&m3u1).await.unwrap();
         assert!(content1.starts_with("#EXTM3U\n"), "Must start with #EXTM3U");
         assert!(content1.contains("#EXTINF:210,Pink Floyd - 01 - In the Flesh"));
         assert!(content1.contains("Pink Floyd/The Wall/01 - In the Flesh.flac"));
-        assert!(!content1.contains("Music/Pink Floyd"), "Path must NOT include Music/ prefix");
-        assert!(content1.contains("#EXTINF:-1,03 - Unknown"), "No-artist track uses filename only");
+        assert!(
+            !content1.contains("Music/Pink Floyd"),
+            "Path must NOT include Music/ prefix"
+        );
+        assert!(
+            content1.contains("#EXTINF:-1,03 - Unknown"),
+            "No-artist track uses filename only"
+        );
 
         // manifest.playlists should have two entries
         assert_eq!(manifest.playlists.len(), 2);
-        let entry1 = manifest.playlists.iter().find(|e| e.jellyfin_id == "pl1").unwrap();
+        let entry1 = manifest
+            .playlists
+            .iter()
+            .find(|e| e.jellyfin_id == "pl1")
+            .unwrap();
         assert_eq!(entry1.track_count, 3);
         assert_eq!(entry1.track_ids, vec!["t1", "t2", "t3"]);
     }
@@ -1990,7 +2029,8 @@ mod tests {
         let all_synced = vec![make_playlist_synced_item("t1", "Music/A/B/01 - Song.flac")];
 
         let mut manifest = empty_manifest();
-        let device_io: std::sync::Arc<dyn crate::device_io::DeviceIO> = std::sync::Arc::new(crate::device_io::MscBackend::new(device_path.to_path_buf()));
+        let device_io: std::sync::Arc<dyn crate::device_io::DeviceIO> =
+            std::sync::Arc::new(crate::device_io::MscBackend::new(device_path.to_path_buf()));
 
         // First call — writes file
         generate_m3u_files(
@@ -2031,7 +2071,10 @@ mod tests {
             .modified()
             .unwrap();
 
-        assert_eq!(mtime1, mtime2, "File must not be rewritten if track list unchanged");
+        assert_eq!(
+            mtime1, mtime2,
+            "File must not be rewritten if track list unchanged"
+        );
     }
 
     #[tokio::test]
@@ -2046,21 +2089,34 @@ mod tests {
         tokio::fs::write(&m3u_path, b"#EXTM3U\n").await.unwrap();
 
         let mut manifest = empty_manifest();
-        manifest.playlists.push(crate::device::PlaylistManifestEntry {
-            jellyfin_id: "old-pl".to_string(),
-            filename: "Old Playlist.m3u".to_string(),
-            track_count: 1,
-            track_ids: vec!["t1".to_string()],
-            last_modified: "2026-01-01T00:00:00Z".to_string(),
-        });
+        manifest
+            .playlists
+            .push(crate::device::PlaylistManifestEntry {
+                jellyfin_id: "old-pl".to_string(),
+                filename: "Old Playlist.m3u".to_string(),
+                track_count: 1,
+                track_ids: vec!["t1".to_string()],
+                last_modified: "2026-01-01T00:00:00Z".to_string(),
+            });
 
         // Call with empty playlist_items (playlist removed from basket)
-        let device_io = std::sync::Arc::new(crate::device_io::MscBackend::new(device_path.to_path_buf()));
-        let warnings =
-            generate_m3u_files(&[], device_path, &managed_path, &[], &mut manifest, device_io).await;
+        let device_io =
+            std::sync::Arc::new(crate::device_io::MscBackend::new(device_path.to_path_buf()));
+        let warnings = generate_m3u_files(
+            &[],
+            device_path,
+            &managed_path,
+            &[],
+            &mut manifest,
+            device_io,
+        )
+        .await;
 
         assert!(warnings.is_empty(), "No warnings expected: {:?}", warnings);
-        assert!(!m3u_path.exists(), "Old .m3u file should have been deleted from Music/");
+        assert!(
+            !m3u_path.exists(),
+            "Old .m3u file should have been deleted from Music/"
+        );
         assert!(
             manifest.playlists.is_empty(),
             "Manifest playlists entry should have been removed"
@@ -2103,7 +2159,8 @@ mod tests {
         ];
 
         let mut manifest = empty_manifest();
-        let device_io = std::sync::Arc::new(crate::device_io::MscBackend::new(device_path.to_path_buf()));
+        let device_io =
+            std::sync::Arc::new(crate::device_io::MscBackend::new(device_path.to_path_buf()));
         let warnings = generate_m3u_files(
             &playlist_items,
             device_path,
@@ -2116,7 +2173,10 @@ mod tests {
 
         // One warning for the missing track
         assert_eq!(warnings.len(), 1, "Expected 1 warning for missing track");
-        assert!(warnings[0].contains("t2-missing"), "Warning should name the missing track");
+        assert!(
+            warnings[0].contains("t2-missing"),
+            "Warning should name the missing track"
+        );
 
         // .m3u should exist in Music/ with 2 tracks (t1 and t3)
         let m3u_path = managed_path.join("Partial Playlist.m3u");
@@ -2126,8 +2186,14 @@ mod tests {
         let extinf_count = content.lines().filter(|l| l.starts_with("#EXTINF")).count();
         assert_eq!(extinf_count, 2, "M3U should contain exactly 2 tracks");
 
-        let manifest_entry = manifest.playlists.iter().find(|e| e.jellyfin_id == "pl1").unwrap();
-        assert_eq!(manifest_entry.track_count, 2, "track_count should be 2 (only resolved tracks)");
+        let manifest_entry = manifest
+            .playlists
+            .iter()
+            .find(|e| e.jellyfin_id == "pl1")
+            .unwrap();
+        assert_eq!(
+            manifest_entry.track_count, 2,
+            "track_count should be 2 (only resolved tracks)"
+        );
     }
 }
-

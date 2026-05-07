@@ -883,7 +883,9 @@ async fn test_list_root_folders_unrecognized_device() {
     let db = Arc::new(crate::db::Database::memory().unwrap());
     let manager = DeviceManager::new(db);
 
-    manager.handle_device_unrecognized(root.to_path_buf(), msc(root), None).await;
+    manager
+        .handle_device_unrecognized(root.to_path_buf(), msc(root), None)
+        .await;
 
     let res = manager.list_root_folders().await.unwrap().unwrap();
 
@@ -899,16 +901,26 @@ async fn test_list_root_folders_unrecognized_mtp_device() {
 
     let mtp_path = PathBuf::from("mtp://fake-device-id");
     manager
-        .handle_device_unrecognized(mtp_path, msc(std::path::Path::new(".")), Some("Garmin Watch".to_string()))
+        .handle_device_unrecognized(
+            mtp_path,
+            msc(std::path::Path::new(".")),
+            Some("Garmin Watch".to_string()),
+        )
         .await;
 
     let res = manager.list_root_folders().await.unwrap().unwrap();
 
     assert!(!res.has_manifest, "Unrecognized MTP device has no manifest");
-    assert!(res.folders.is_empty(), "Unrecognized MTP device has no known folders");
+    assert!(
+        res.folders.is_empty(),
+        "Unrecognized MTP device has no known folders"
+    );
     assert_eq!(res.managed_count, 0);
     assert_eq!(res.unmanaged_count, 0);
-    assert_eq!(res.device_name, "Garmin Watch", "friendly_name should be used as device_name");
+    assert_eq!(
+        res.device_name, "Garmin Watch",
+        "friendly_name should be used as device_name"
+    );
 }
 
 #[tokio::test]
@@ -924,7 +936,10 @@ async fn test_list_root_folders_unrecognized_mtp_device_no_friendly_name() {
     let res = manager.list_root_folders().await.unwrap().unwrap();
 
     assert!(!res.has_manifest);
-    assert_eq!(res.device_name, "MTP Device", "Should fall back to 'MTP Device' when no friendly_name");
+    assert_eq!(
+        res.device_name, "MTP Device",
+        "Should fall back to 'MTP Device' when no friendly_name"
+    );
 }
 
 #[tokio::test]
@@ -938,7 +953,10 @@ async fn test_initialize_device_root() {
         .await;
 
     // Initialize with root (empty folder_path)
-    let manifest = manager.initialize_device("", None, "My Device".to_string(), None, msc(dir.path())).await.unwrap();
+    let manifest = manager
+        .initialize_device("", None, "My Device".to_string(), None, msc(dir.path()))
+        .await
+        .unwrap();
 
     assert!(manifest.managed_paths.is_empty());
     assert_eq!(manifest.version, "1.0");
@@ -966,7 +984,16 @@ async fn test_initialize_device_subfolder() {
         .await;
 
     // Initialize with a subfolder
-    let manifest = manager.initialize_device("Music", None, "My Device".to_string(), None, msc(dir.path())).await.unwrap();
+    let manifest = manager
+        .initialize_device(
+            "Music",
+            None,
+            "My Device".to_string(),
+            None,
+            msc(dir.path()),
+        )
+        .await
+        .unwrap();
 
     assert_eq!(manifest.managed_paths, vec!["Music".to_string()]);
 
@@ -989,7 +1016,9 @@ async fn test_initialize_device_requires_unrecognized_path() {
     let manager = DeviceManager::new(db);
 
     // No unrecognized path set → should fail even when a backend is provided
-    let res = manager.initialize_device("", None, "My Device".to_string(), None, msc(dir.path())).await;
+    let res = manager
+        .initialize_device("", None, "My Device".to_string(), None, msc(dir.path()))
+        .await;
     assert!(res.is_err());
     assert!(res
         .unwrap_err()
@@ -1008,21 +1037,53 @@ async fn test_initialize_device_rejects_path_traversal() {
         .await;
 
     // Path traversal with ".."
-    let res = manager.initialize_device("../escape", None, "My Device".to_string(), None, msc(dir.path())).await;
+    let res = manager
+        .initialize_device(
+            "../escape",
+            None,
+            "My Device".to_string(),
+            None,
+            msc(dir.path()),
+        )
+        .await;
     assert!(res.is_err());
     assert!(res.unwrap_err().to_string().contains("Invalid folder path"));
 
     // Absolute path
-    let res = manager.initialize_device("/etc/hacked", None, "My Device".to_string(), None, msc(dir.path())).await;
+    let res = manager
+        .initialize_device(
+            "/etc/hacked",
+            None,
+            "My Device".to_string(),
+            None,
+            msc(dir.path()),
+        )
+        .await;
     assert!(res.is_err());
 
     // Nested path with separator
-    let res = manager.initialize_device("Music/SubFolder", None, "My Device".to_string(), None, msc(dir.path())).await;
+    let res = manager
+        .initialize_device(
+            "Music/SubFolder",
+            None,
+            "My Device".to_string(),
+            None,
+            msc(dir.path()),
+        )
+        .await;
     assert!(res.is_err());
     assert!(res.unwrap_err().to_string().contains("single folder name"));
 
     // Backslash separator
-    let res = manager.initialize_device("Music\\SubFolder", None, "My Device".to_string(), None, msc(dir.path())).await;
+    let res = manager
+        .initialize_device(
+            "Music\\SubFolder",
+            None,
+            "My Device".to_string(),
+            None,
+            msc(dir.path()),
+        )
+        .await;
     assert!(res.is_err());
 }
 
@@ -1135,7 +1196,9 @@ async fn test_handle_device_removed_clears_unrecognized_io() {
     let manager = DeviceManager::new(db);
 
     let path = dir.path().to_path_buf();
-    manager.handle_device_unrecognized(path.clone(), msc(dir.path()), None).await;
+    manager
+        .handle_device_unrecognized(path.clone(), msc(dir.path()), None)
+        .await;
 
     assert!(manager.get_unrecognized_device_path().await.is_some());
     assert!(manager.get_unrecognized_device_io().await.is_some());
@@ -1313,15 +1376,29 @@ async fn test_handle_device_detected_two_sequential_devices() {
     write_manifest(msc(&path1), &manifest1).await.unwrap();
     write_manifest(msc(&path2), &manifest2).await.unwrap();
 
-    manager.handle_device_detected(path1.clone(), manifest1, msc(&path1)).await.unwrap();
-    manager.handle_device_detected(path2.clone(), manifest2, msc(&path2)).await.unwrap();
+    manager
+        .handle_device_detected(path1.clone(), manifest1, msc(&path1))
+        .await
+        .unwrap();
+    manager
+        .handle_device_detected(path2.clone(), manifest2, msc(&path2))
+        .await
+        .unwrap();
 
     let devices = manager.get_connected_devices().await;
-    assert_eq!(devices.len(), 2, "Both devices must be in connected_devices");
+    assert_eq!(
+        devices.len(),
+        2,
+        "Both devices must be in connected_devices"
+    );
 
     // First device should be auto-selected (second doesn't override)
     let selected = manager.get_current_device_path().await;
-    assert_eq!(selected, Some(path1.clone()), "First device must remain selected");
+    assert_eq!(
+        selected,
+        Some(path1.clone()),
+        "First device must remain selected"
+    );
 
     // get_current_device returns the manifest for the selected path
     let current = manager.get_current_device().await;
@@ -1345,8 +1422,14 @@ async fn test_handle_device_removed_selected_with_remaining_autoselects() {
     write_manifest(msc(&path1), &manifest1).await.unwrap();
     write_manifest(msc(&path2), &manifest2).await.unwrap();
 
-    manager.handle_device_detected(path1.clone(), manifest1, msc(&path1)).await.unwrap();
-    manager.handle_device_detected(path2.clone(), manifest2, msc(&path2)).await.unwrap();
+    manager
+        .handle_device_detected(path1.clone(), manifest1, msc(&path1))
+        .await
+        .unwrap();
+    manager
+        .handle_device_detected(path2.clone(), manifest2, msc(&path2))
+        .await
+        .unwrap();
 
     // Selected is path1 — remove it
     manager.handle_device_removed(&path1).await;
@@ -1356,7 +1439,11 @@ async fn test_handle_device_removed_selected_with_remaining_autoselects() {
 
     // Remaining device (path2) must be auto-selected
     let selected = manager.get_current_device_path().await;
-    assert_eq!(selected, Some(path2.clone()), "Remaining device must be auto-selected");
+    assert_eq!(
+        selected,
+        Some(path2.clone()),
+        "Remaining device must be auto-selected"
+    );
 }
 
 #[tokio::test]
@@ -1375,8 +1462,14 @@ async fn test_handle_device_removed_non_selected_selection_unchanged() {
     write_manifest(msc(&path1), &manifest1).await.unwrap();
     write_manifest(msc(&path2), &manifest2).await.unwrap();
 
-    manager.handle_device_detected(path1.clone(), manifest1, msc(&path1)).await.unwrap();
-    manager.handle_device_detected(path2.clone(), manifest2, msc(&path2)).await.unwrap();
+    manager
+        .handle_device_detected(path1.clone(), manifest1, msc(&path1))
+        .await
+        .unwrap();
+    manager
+        .handle_device_detected(path2.clone(), manifest2, msc(&path2))
+        .await
+        .unwrap();
 
     // Selected is path1 — remove path2 (non-selected)
     manager.handle_device_removed(&path2).await;
@@ -1386,7 +1479,11 @@ async fn test_handle_device_removed_non_selected_selection_unchanged() {
 
     // path1 must still be selected
     let selected = manager.get_current_device_path().await;
-    assert_eq!(selected, Some(path1.clone()), "Selection must remain unchanged");
+    assert_eq!(
+        selected,
+        Some(path1.clone()),
+        "Selection must remain unchanged"
+    );
 }
 
 #[tokio::test]
@@ -1405,8 +1502,14 @@ async fn test_select_device_valid_path() {
     write_manifest(msc(&path1), &manifest1).await.unwrap();
     write_manifest(msc(&path2), &manifest2).await.unwrap();
 
-    manager.handle_device_detected(path1.clone(), manifest1, msc(&path1)).await.unwrap();
-    manager.handle_device_detected(path2.clone(), manifest2, msc(&path2)).await.unwrap();
+    manager
+        .handle_device_detected(path1.clone(), manifest1, msc(&path1))
+        .await
+        .unwrap();
+    manager
+        .handle_device_detected(path2.clone(), manifest2, msc(&path2))
+        .await
+        .unwrap();
 
     // Switch to path2
     let ok = manager.select_device(path2.clone()).await;
@@ -1429,7 +1532,10 @@ async fn test_select_device_unknown_path_returns_false() {
 
     // No devices connected — selecting an unknown path must fail
     let ok = manager.select_device(path).await;
-    assert!(!ok, "select_device must return false for an unconnected path");
+    assert!(
+        !ok,
+        "select_device must return false for an unconnected path"
+    );
 
     assert!(manager.get_current_device_path().await.is_none());
 }

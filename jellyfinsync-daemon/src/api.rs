@@ -625,12 +625,7 @@ impl JellyfinClient {
             user_id
         );
 
-        let response = self
-            .client
-            .post(&endpoint)
-            .headers(headers)
-            .send()
-            .await?;
+        let response = self.client.post(&endpoint).headers(headers).send().await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -683,7 +678,8 @@ impl JellyfinClient {
         user_id: &str,
         item_id: &str,
         transcoding_profile: Option<&serde_json::Value>,
-    ) -> Result<impl futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>>> {
+    ) -> Result<impl futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>>>
+    {
         CredentialManager::validate_url(base_url)?;
         CredentialManager::validate_token(token)?;
 
@@ -698,15 +694,14 @@ impl JellyfinClient {
             self.resolve_stream_url(base_url, token, user_id, item_id, profile)
                 .await?
         } else {
-            format!("{}/Items/{}/Download", base_url.trim_end_matches('/'), item_id)
+            format!(
+                "{}/Items/{}/Download",
+                base_url.trim_end_matches('/'),
+                item_id
+            )
         };
 
-        let response = self
-            .client
-            .get(&stream_url)
-            .headers(headers)
-            .send()
-            .await?;
+        let response = self.client.get(&stream_url).headers(headers).send().await?;
 
         if !response.status().is_success() {
             return Err(anyhow!("Stream returned status: {}", response.status()));
@@ -756,7 +751,10 @@ impl JellyfinClient {
             .await?;
 
         if !response.status().is_success() {
-            return Err(anyhow!("PlaybackInfo returned status: {}", response.status()));
+            return Err(anyhow!(
+                "PlaybackInfo returned status: {}",
+                response.status()
+            ));
         }
 
         let json: serde_json::Value = response.json().await?;

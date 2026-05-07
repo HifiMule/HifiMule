@@ -5,6 +5,7 @@ fn main() {
         res.compile().expect("Failed to compile Windows resources");
     }
     if std::env::var("CARGO_CFG_UNIX").is_ok() {
-        pkg_config::probe_library("libmtp").expect("libmtp not found — install libmtp-dev / libmtp");
+        pkg_config::probe_library("libmtp")
+            .expect("libmtp not found — install libmtp-dev / libmtp");
     }
 }

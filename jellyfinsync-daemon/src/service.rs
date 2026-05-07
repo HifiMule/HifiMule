@@ -28,14 +28,12 @@ pub fn install() -> anyhow::Result<()> {
     let exe_path = std::env::current_exe()?;
     crate::daemon_log!("--install-service: exe_path={}", exe_path.display());
 
-    let manager = ServiceManager::local_computer(
-        None::<&str>,
-        ServiceManagerAccess::CREATE_SERVICE,
-    )
-    .map_err(|e| {
-        crate::daemon_log!("--install-service: failed to open SCM: {}", e);
-        e
-    })?;
+    let manager =
+        ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CREATE_SERVICE)
+            .map_err(|e| {
+                crate::daemon_log!("--install-service: failed to open SCM: {}", e);
+                e
+            })?;
 
     crate::daemon_log!("--install-service: SCM opened, creating service");
 
@@ -55,7 +53,10 @@ pub fn install() -> anyhow::Result<()> {
     // Try to open existing service first (upgrade path), fall back to create
     let service = match manager.open_service(
         SERVICE_NAME,
-        ServiceAccess::START | ServiceAccess::CHANGE_CONFIG | ServiceAccess::STOP | ServiceAccess::QUERY_STATUS,
+        ServiceAccess::START
+            | ServiceAccess::CHANGE_CONFIG
+            | ServiceAccess::STOP
+            | ServiceAccess::QUERY_STATUS,
     ) {
         Ok(existing) => {
             crate::daemon_log!("--install-service: service already exists, updating config");
@@ -75,19 +76,21 @@ pub fn install() -> anyhow::Result<()> {
             })?;
             existing
         }
-        Err(_) => {
-            manager
-                .create_service(&service_info, ServiceAccess::START | ServiceAccess::CHANGE_CONFIG)
-                .map_err(|e| {
-                    crate::daemon_log!("--install-service: create_service failed: {}", e);
-                    e
-                })?
-        }
+        Err(_) => manager
+            .create_service(
+                &service_info,
+                ServiceAccess::START | ServiceAccess::CHANGE_CONFIG,
+            )
+            .map_err(|e| {
+                crate::daemon_log!("--install-service: create_service failed: {}", e);
+                e
+            })?,
     };
 
     crate::daemon_log!("--install-service: setting description");
 
-    let _ = service.set_description("Background sync service for JellyfinSync media synchronization");
+    let _ =
+        service.set_description("Background sync service for JellyfinSync media synchronization");
 
     crate::daemon_log!("--install-service: starting service");
 
@@ -103,14 +106,11 @@ pub fn install() -> anyhow::Result<()> {
 pub fn uninstall() -> anyhow::Result<()> {
     crate::daemon_log!("--uninstall-service: opening SCM");
 
-    let manager = ServiceManager::local_computer(
-        None::<&str>,
-        ServiceManagerAccess::CONNECT,
-    )
-    .map_err(|e| {
-        crate::daemon_log!("--uninstall-service: failed to open SCM: {}", e);
-        e
-    })?;
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .map_err(|e| {
+            crate::daemon_log!("--uninstall-service: failed to open SCM: {}", e);
+            e
+        })?;
 
     let service = manager
         .open_service(
@@ -158,17 +158,15 @@ fn run_service() -> anyhow::Result<()> {
     let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let shutdown_for_handler = shutdown.clone();
 
-    let status_handle = service_control_handler::register(
-        SERVICE_NAME,
-        move |control| match control {
+    let status_handle =
+        service_control_handler::register(SERVICE_NAME, move |control| match control {
             ServiceControl::Stop => {
                 shutdown_for_handler.store(true, Ordering::Relaxed);
                 ServiceControlHandlerResult::NoError
             }
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
             _ => ServiceControlHandlerResult::NotImplemented,
-        },
-    )?;
+        })?;
 
     // Report StartPending while we initialize
     status_handle.set_service_status(ServiceStatus {
