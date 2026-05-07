@@ -102,8 +102,8 @@ development_status:
   6-6-installation-smoke-tests: done
   epic-6-retrospective: done
 
-  epic-7: backlog
-  7-1-mtp-io-and-wpd-hardening: backlog
+  epic-7: in-progress
+  7-1-mtp-io-and-wpd-hardening: ready-for-dev
   7-2-devicemanager-concurrency-refactor: backlog
   7-3-device-ui-and-identity-polish: backlog
   7-4-packaging-and-cicd-hardening: backlog
