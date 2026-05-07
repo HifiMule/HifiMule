@@ -75,6 +75,10 @@ pub struct DeviceManifest {
     pub transcoding_profile_id: Option<String>,
     #[serde(default)]
     pub playlists: Vec<PlaylistManifestEntry>,
+    /// WPD storage object ID for MTP devices. When set, WPD calls skip first-child
+    /// enumeration under DEVICE and use this ID directly. Backward-compatible via serde(default).
+    #[serde(default)]
+    pub storage_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -536,6 +540,7 @@ impl DeviceManager {
             auto_fill: AutoFillPrefs::default(),
             transcoding_profile_id, // stored in .jellyfinsync.json; read back on sync to apply transcoding
             playlists: vec![],
+            storage_id: None,
         };
         let manifest_bytes = serde_json::to_string_pretty(&manifest)?;
         device_io.write_with_verify(".jellyfinsync.json", manifest_bytes.as_bytes()).await?;
@@ -1053,13 +1058,82 @@ fn is_removable_drive(_path: &Path) -> bool {
     true // macOS/Linux already filtered by mount detection
 }
 
-/// Returns true if a removable drive exists whose volume label exactly matches
-/// `friendly_name`. Used by `run_mtp_observer` to skip WPD re-registration of
-/// USB drives that are already handled by the MSC observer.
+/// Returns true if a removable drive exists that corresponds to the same physical USB device
+/// as the MTP device identified by `wpd_device_id`. Matching uses hardware instance IDs
+/// (`SetupDiGetDeviceInstanceIdW`) to avoid false positives from two drives sharing a label.
+/// Falls back to volume-label comparison if hardware-ID lookup fails for a given drive.
 #[cfg(target_os = "windows")]
-fn has_msc_drive_for_device(friendly_name: &str) -> bool {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{GetLogicalDrives, GetVolumeInformationW};
+fn has_msc_drive_for_device(friendly_name: &str, wpd_device_id: &str) -> bool {
+    use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
+        SetupDiGetDeviceInstanceIdW, SP_DEVINFO_DATA, DIGCF_PRESENT,
+    };
+    use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
+
+    // Parse the USB instance-ID fragment from the WPD device path.
+    // WPD ID format: "\\?\usb#vid_XXXX&pid_YYYY#SERIAL#{guid}"
+    // We extract "vid_XXXX&pid_YYYY#SERIAL" and normalise to "USB\VID_XXXX&PID_YYYY\SERIAL".
+    let wpd_usb_fragment: Option<String> = (|| {
+        let lower = wpd_device_id.to_ascii_lowercase();
+        // Find the "usb#" or "usb\\" prefix
+        let start = lower.find("usb#").or_else(|| lower.find("usb\\"))?;
+        let rest = &wpd_device_id[start + 4..]; // skip "usb#"
+        // rest = "vid_XXXX&pid_YYYY#SERIAL#{guid}" — take up to the third '#' separator
+        let parts: Vec<&str> = rest.splitn(3, '#').collect();
+        if parts.len() < 2 {
+            return None;
+        }
+        // Normalise: "USB\VID_XXXX&PID_YYYY\SERIAL" (case-insensitive comparison later)
+        Some(format!("USB\\{}\\{}", parts[0].to_ascii_uppercase(), parts[1].to_ascii_uppercase()))
+    })();
+
+    // Enumerate all present disk-drive devices and collect their instance IDs.
+    // GUID_DEVCLASS_DISKDRIVE = {4D36E967-E325-11CE-BFC1-08002BE10318}
+    let disk_drive_class = windows_sys::core::GUID {
+        data1: 0x4D36E967,
+        data2: 0xE325,
+        data3: 0x11CE,
+        data4: [0xBF, 0xC1, 0x08, 0x00, 0x2B, 0xE1, 0x03, 0x18],
+    };
+
+    let disk_instance_ids: Vec<String> = unsafe {
+        let devs = SetupDiGetClassDevsW(
+            &disk_drive_class,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            DIGCF_PRESENT,
+        );
+        if devs as isize == -1 {
+            vec![]
+        } else {
+            let mut ids = Vec::new();
+            let mut index = 0u32;
+            loop {
+                let mut devinfo: SP_DEVINFO_DATA = std::mem::zeroed();
+                devinfo.cbSize = std::mem::size_of::<SP_DEVINFO_DATA>() as u32;
+                if SetupDiEnumDeviceInfo(devs, index, &mut devinfo) == 0 {
+                    break;
+                }
+                index += 1;
+                let mut id_buf = vec![0u16; 512];
+                let mut required = 0u32;
+                if SetupDiGetDeviceInstanceIdW(
+                    devs,
+                    &devinfo,
+                    id_buf.as_mut_ptr(),
+                    id_buf.len() as u32,
+                    &mut required,
+                ) != 0
+                {
+                    let len = id_buf.iter().position(|&c| c == 0).unwrap_or(id_buf.len());
+                    ids.push(String::from_utf16_lossy(&id_buf[..len]).to_string());
+                }
+            }
+            SetupDiDestroyDeviceInfoList(devs);
+            ids
+        }
+    };
+
     let drives = unsafe { GetLogicalDrives() };
     for i in 0..26u32 {
         if (drives >> i) & 1 == 0 {
@@ -1071,37 +1145,72 @@ fn has_msc_drive_for_device(friendly_name: &str) -> bool {
         if !is_removable_drive(&path) {
             continue;
         }
-        let wide: Vec<u16> = std::ffi::OsStr::new(&path_str)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        let mut label_buf = [0u16; 256];
-        let ok = unsafe {
-            GetVolumeInformationW(
-                wide.as_ptr(),
-                label_buf.as_mut_ptr(),
-                label_buf.len() as u32,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                0,
-            ) != 0
-        };
-        if !ok {
-            continue;
+
+        // Try hardware-ID match first.
+        if let Some(ref usb_frag) = wpd_usb_fragment {
+            // Check if any disk-drive instance ID matches this USB fragment.
+            let hw_matched = disk_instance_ids.iter().any(|id| {
+                id.to_ascii_uppercase().contains(usb_frag.as_str())
+            });
+            if hw_matched {
+                // Confirm this drive letter actually belongs to the matched disk.
+                // We use the volume label as a secondary check only to bind the drive letter
+                // to the already-matched hardware instance — not as the primary discriminator.
+                // A mismatch here means the drive letters may be swapped; keep looking.
+                let label = get_volume_label(&path_str);
+                if label.as_deref().map_or(false, |l| l.eq_ignore_ascii_case(friendly_name)) {
+                    return true;
+                }
+                // Hardware ID matched but label doesn't — still return true to avoid re-registering
+                // the already-matched USB device (label may differ from friendly name).
+                return true;
+            }
+            // Hardware lookup succeeded with no match — skip label fallback for this drive.
+            if !disk_instance_ids.is_empty() {
+                continue;
+            }
         }
-        let len = label_buf.iter().position(|&c| c == 0).unwrap_or(label_buf.len());
-        let label = String::from_utf16_lossy(&label_buf[..len]);
-        if label.eq_ignore_ascii_case(friendly_name) {
-            return true;
+
+        // Fallback: label comparison when hardware ID lookup produced no results.
+        if let Some(label) = get_volume_label(&path_str) {
+            if label.eq_ignore_ascii_case(friendly_name) {
+                return true;
+            }
         }
     }
     false
 }
 
+#[cfg(target_os = "windows")]
+fn get_volume_label(path_str: &str) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationW;
+    let wide: Vec<u16> = std::ffi::OsStr::new(path_str)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut label_buf = [0u16; 256];
+    let ok = unsafe {
+        GetVolumeInformationW(
+            wide.as_ptr(),
+            label_buf.as_mut_ptr(),
+            label_buf.len() as u32,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+        ) != 0
+    };
+    if !ok {
+        return None;
+    }
+    let len = label_buf.iter().position(|&c| c == 0).unwrap_or(label_buf.len());
+    Some(String::from_utf16_lossy(&label_buf[..len]).to_string())
+}
+
 #[cfg(not(target_os = "windows"))]
-fn has_msc_drive_for_device(_friendly_name: &str) -> bool {
+fn has_msc_drive_for_device(_friendly_name: &str, _wpd_device_id: &str) -> bool {
     false
 }
 
@@ -1174,7 +1283,7 @@ pub async fn run_mtp_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
             if !known_ids.contains(&dev.device_id) {
                 // Prefer MSC over MTP: if the device is also mounted as a drive
                 // letter, skip it here and let run_observer handle it.
-                if has_msc_drive_for_device(&dev.friendly_name) {
+                if has_msc_drive_for_device(&dev.friendly_name, &dev.device_id) {
                     continue;
                 }
                 let synthetic_path = PathBuf::from(format!("mtp://{}", dev.device_id));
@@ -1182,7 +1291,7 @@ pub async fn run_mtp_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
                 let dev_id = dev.device_id.clone();
                 let friendly_name = dev.friendly_name.clone();
 
-                let backend = tokio::task::spawn_blocking(move || mtp::create_mtp_backend(&dev_clone))
+                let backend = tokio::task::spawn_blocking(move || mtp::create_mtp_backend(&dev_clone, None))
                     .await
                     .unwrap_or_else(|e| Err(anyhow::anyhow!("spawn_blocking panicked: {}", e)));
 

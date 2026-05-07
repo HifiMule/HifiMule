@@ -483,7 +483,7 @@ pub mod tests {
     #[tokio::test]
     async fn mtp_dirty_marker_detected_on_reconnect() {
         let mock = Arc::new(MockMtpHandle::new());
-        // Pre-populate: target file + dirty marker (simulates interrupted write)
+        // Pre-populate: target file + dirty marker with sentinel content b"\x00"
         mock.files
             .lock()
             .unwrap()
@@ -491,7 +491,7 @@ pub mod tests {
         mock.files
             .lock()
             .unwrap()
-            .insert("Music/track.mp3.dirty".to_string(), vec![]);
+            .insert("Music/track.mp3.dirty".to_string(), b"\x00".to_vec());
 
         let backend = MtpBackend {
             handle: Arc::clone(&mock) as Arc<dyn MtpHandle>,
@@ -500,5 +500,9 @@ pub mod tests {
         let files = backend.list_files("").await.unwrap();
         let has_dirty = files.iter().any(|f| f.path.ends_with(".dirty"));
         assert!(has_dirty, "dirty marker must be visible in listing");
+
+        // T8: assert sentinel content is exactly b"\x00", not merely present.
+        let marker_content = backend.read_file("Music/track.mp3.dirty").await.unwrap();
+        assert_eq!(marker_content, b"\x00", "dirty marker must contain sentinel byte \\x00");
     }
 }
