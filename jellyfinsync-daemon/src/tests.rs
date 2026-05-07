@@ -66,12 +66,18 @@ async fn test_device_recognition_integration() {
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
         transcoding_profile_id: None,
-            playlists: vec![],
-            storage_id: None,
+        playlists: vec![],
+        storage_id: None,
     };
 
     let state = manager
-        .handle_device_detected(std::path::PathBuf::from("/tmp/test-device"), manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from("/tmp/test-device"))))
+        .handle_device_detected(
+            std::path::PathBuf::from("/tmp/test-device"),
+            manifest,
+            std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from(
+                "/tmp/test-device",
+            ))),
+        )
         .await
         .expect("Failed to handle detection");
 
@@ -136,8 +142,8 @@ async fn test_device_detection_auto_sync_enabled() {
         auto_sync_on_connect: true,
         auto_fill: crate::device::AutoFillPrefs::default(),
         transcoding_profile_id: None,
-            playlists: vec![],
-            storage_id: None,
+        playlists: vec![],
+        storage_id: None,
     };
 
     // Verify manifest has auto_sync enabled
@@ -150,7 +156,13 @@ async fn test_device_detection_auto_sync_enabled() {
 
     // Simulate detection
     let state = manager
-        .handle_device_detected(std::path::PathBuf::from("/tmp/auto-device"), manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from("/tmp/auto-device"))))
+        .handle_device_detected(
+            std::path::PathBuf::from("/tmp/auto-device"),
+            manifest,
+            std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from(
+                "/tmp/auto-device",
+            ))),
+        )
         .await
         .expect("Failed to handle detection");
 
@@ -196,8 +208,8 @@ async fn test_device_detection_auto_sync_disabled() {
         auto_sync_on_connect: false,
         auto_fill: crate::device::AutoFillPrefs::default(),
         transcoding_profile_id: None,
-            playlists: vec![],
-            storage_id: None,
+        playlists: vec![],
+        storage_id: None,
     };
 
     // Verify auto_sync is disabled
@@ -209,7 +221,13 @@ async fn test_device_detection_auto_sync_disabled() {
 
     // Device detection should proceed normally without triggering sync
     let state = manager
-        .handle_device_detected(std::path::PathBuf::from("/tmp/manual-device"), manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from("/tmp/manual-device"))))
+        .handle_device_detected(
+            std::path::PathBuf::from("/tmp/manual-device"),
+            manifest,
+            std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from(
+                "/tmp/manual-device",
+            ))),
+        )
         .await
         .expect("Failed to handle detection");
 

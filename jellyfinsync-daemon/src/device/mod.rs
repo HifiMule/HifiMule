@@ -43,8 +43,8 @@ pub struct PlaylistManifestEntry {
     pub jellyfin_id: String,
     pub filename: String,
     pub track_count: u32,
-    pub track_ids: Vec<String>,  // ordered Jellyfin IDs — used for change detection
-    pub last_modified: String,   // ISO 8601 timestamp
+    pub track_ids: Vec<String>, // ordered Jellyfin IDs — used for change detection
+    pub last_modified: String,  // ISO 8601 timestamp
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -177,12 +177,14 @@ impl DeviceProber {
 pub struct DeviceManager {
     db: std::sync::Arc<crate::db::Database>,
     /// All currently connected managed devices, keyed by mount path.
-    connected_devices: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<PathBuf, ConnectedDevice>>>,
+    connected_devices:
+        std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<PathBuf, ConnectedDevice>>>,
     /// The device path targeted by all UI operations. None when no device is selected.
     selected_device_path: std::sync::Arc<tokio::sync::RwLock<Option<PathBuf>>>,
     unrecognized_device_path: std::sync::Arc<tokio::sync::RwLock<Option<PathBuf>>>,
     /// IO backend for the pending unrecognized device. Always set alongside unrecognized_device_path.
-    unrecognized_device_io: std::sync::Arc<tokio::sync::RwLock<Option<std::sync::Arc<dyn crate::device_io::DeviceIO>>>>,
+    unrecognized_device_io:
+        std::sync::Arc<tokio::sync::RwLock<Option<std::sync::Arc<dyn crate::device_io::DeviceIO>>>>,
     /// Human-readable name for the pending unrecognized device (MTP only; None for MSC).
     unrecognized_device_friendly_name: std::sync::Arc<tokio::sync::RwLock<Option<String>>>,
 }
@@ -191,7 +193,9 @@ impl DeviceManager {
     pub fn new(db: std::sync::Arc<crate::db::Database>) -> Self {
         Self {
             db,
-            connected_devices: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            connected_devices: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
             selected_device_path: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             unrecognized_device_path: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             unrecognized_device_io: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
@@ -218,7 +222,10 @@ impl DeviceManager {
         // from a previous session (e.g., the device was used with MTP before).
         if let Ok(files) = device_io.list_files("").await {
             if files.iter().any(|f| f.name.ends_with(".dirty")) {
-                daemon_log!("[Device] Dirty marker detected on reconnect at {:?} — firing on_device_dirty", path);
+                daemon_log!(
+                    "[Device] Dirty marker detected on reconnect at {:?} — firing on_device_dirty",
+                    path
+                );
                 // The dirty flag in the manifest is the on_device_dirty signal path (same as MSC).
                 // We surface it via the manifest.dirty field; the RPC dirty-resume handler handles cleanup.
                 let mut dirty_manifest = manifest.clone();
@@ -248,7 +255,10 @@ impl DeviceManager {
                     .name
                     .clone()
                     .unwrap_or_else(|| dirty_manifest.device_id.clone());
-                let mapping = self.db.get_device_mapping(&dirty_manifest.device_id).unwrap_or(None);
+                let mapping = self
+                    .db
+                    .get_device_mapping(&dirty_manifest.device_id)
+                    .unwrap_or(None);
                 return if let Some(m) = mapping {
                     if let Some(profile_id) = m.jellyfin_user_id {
                         Ok(crate::DaemonState::DeviceRecognized { name, profile_id })
@@ -324,7 +334,11 @@ impl DeviceManager {
             let mut unrecognized_io = self.unrecognized_device_io.write().await;
             let mut unrecognized_name = self.unrecognized_device_friendly_name.write().await;
             if unrecognized_path.is_some() {
-                daemon_log!("[Device] Warning: overwriting pending unrecognized device {:?} with {:?}", *unrecognized_path, path);
+                daemon_log!(
+                    "[Device] Warning: overwriting pending unrecognized device {:?} with {:?}",
+                    *unrecognized_path,
+                    path
+                );
             }
             *unrecognized_path = Some(path);
             *unrecognized_io = Some(device_io);
@@ -337,7 +351,9 @@ impl DeviceManager {
         self.unrecognized_device_path.read().await.clone()
     }
 
-    pub async fn get_unrecognized_device_io(&self) -> Option<std::sync::Arc<dyn crate::device_io::DeviceIO>> {
+    pub async fn get_unrecognized_device_io(
+        &self,
+    ) -> Option<std::sync::Arc<dyn crate::device_io::DeviceIO>> {
         self.unrecognized_device_io.read().await.clone()
     }
 
@@ -386,17 +402,26 @@ impl DeviceManager {
         let sel = self.selected_device_path.read().await.clone();
         let path = sel?;
         let devices = self.connected_devices.read().await;
-        devices.get(&path).map(|d| std::sync::Arc::clone(&d.device_io))
+        devices
+            .get(&path)
+            .map(|d| std::sync::Arc::clone(&d.device_io))
     }
 
     /// Atomically returns the manifest and IO backend for the currently selected device.
     /// Prefer this over separate `get_current_device` + `get_device_io` calls to avoid
     /// TOCTOU races when the device disconnects between the two reads.
-    pub async fn get_manifest_and_io(&self) -> Option<(DeviceManifest, std::sync::Arc<dyn crate::device_io::DeviceIO>)> {
+    pub async fn get_manifest_and_io(
+        &self,
+    ) -> Option<(
+        DeviceManifest,
+        std::sync::Arc<dyn crate::device_io::DeviceIO>,
+    )> {
         let sel = self.selected_device_path.read().await.clone();
         let path = sel?;
         let devices = self.connected_devices.read().await;
-        devices.get(&path).map(|d| (d.manifest.clone(), std::sync::Arc::clone(&d.device_io)))
+        devices
+            .get(&path)
+            .map(|d| (d.manifest.clone(), std::sync::Arc::clone(&d.device_io)))
     }
 
     pub async fn get_current_device_path(&self) -> Option<PathBuf> {
@@ -543,15 +568,20 @@ impl DeviceManager {
             storage_id: None,
         };
         let manifest_bytes = serde_json::to_string_pretty(&manifest)?;
-        device_io.write_with_verify(".jellyfinsync.json", manifest_bytes.as_bytes()).await?;
+        device_io
+            .write_with_verify(".jellyfinsync.json", manifest_bytes.as_bytes())
+            .await?;
 
         {
             let mut devices = self.connected_devices.write().await;
-            devices.insert(device_root.clone(), ConnectedDevice {
-                manifest: manifest.clone(),
-                device_class: device_class_from_path(&device_root),
-                device_io,
-            });
+            devices.insert(
+                device_root.clone(),
+                ConnectedDevice {
+                    manifest: manifest.clone(),
+                    device_class: device_class_from_path(&device_root),
+                    device_io,
+                },
+            );
         }
         {
             let mut sel = self.selected_device_path.write().await;
@@ -592,7 +622,11 @@ impl DeviceManager {
         // Return a response built from the manifest (or empty for unrecognized) so the UI
         // can show the managed folder list or the "Initialize" banner without filesystem access.
         // unmanaged_count is always 0: MTP cannot enumerate real device folders.
-        if device_path.to_string_lossy().to_lowercase().starts_with("mtp://") {
+        if device_path
+            .to_string_lossy()
+            .to_lowercase()
+            .starts_with("mtp://")
+        {
             // Read the stored friendly name before composing device_name.
             // Only use it for unrecognized devices; recognized devices have their name in the manifest.
             let stored_friendly = if manifest.is_none() {
@@ -1066,7 +1100,7 @@ fn is_removable_drive(_path: &Path) -> bool {
 fn has_msc_drive_for_device(friendly_name: &str, wpd_device_id: &str) -> bool {
     use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
         SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
-        SetupDiGetDeviceInstanceIdW, SP_DEVINFO_DATA, DIGCF_PRESENT,
+        SetupDiGetDeviceInstanceIdW, DIGCF_PRESENT, SP_DEVINFO_DATA,
     };
     use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
 
@@ -1078,13 +1112,17 @@ fn has_msc_drive_for_device(friendly_name: &str, wpd_device_id: &str) -> bool {
         // Find the "usb#" or "usb\\" prefix
         let start = lower.find("usb#").or_else(|| lower.find("usb\\"))?;
         let rest = &wpd_device_id[start + 4..]; // skip "usb#"
-        // rest = "vid_XXXX&pid_YYYY#SERIAL#{guid}" — take up to the third '#' separator
+                                                // rest = "vid_XXXX&pid_YYYY#SERIAL#{guid}" — take up to the third '#' separator
         let parts: Vec<&str> = rest.splitn(3, '#').collect();
         if parts.len() < 2 {
             return None;
         }
         // Normalise: "USB\VID_XXXX&PID_YYYY\SERIAL" (case-insensitive comparison later)
-        Some(format!("USB\\{}\\{}", parts[0].to_ascii_uppercase(), parts[1].to_ascii_uppercase()))
+        Some(format!(
+            "USB\\{}\\{}",
+            parts[0].to_ascii_uppercase(),
+            parts[1].to_ascii_uppercase()
+        ))
     })();
 
     // Enumerate all present disk-drive devices and collect their instance IDs.
@@ -1149,16 +1187,19 @@ fn has_msc_drive_for_device(friendly_name: &str, wpd_device_id: &str) -> bool {
         // Try hardware-ID match first.
         if let Some(ref usb_frag) = wpd_usb_fragment {
             // Check if any disk-drive instance ID matches this USB fragment.
-            let hw_matched = disk_instance_ids.iter().any(|id| {
-                id.to_ascii_uppercase().contains(usb_frag.as_str())
-            });
+            let hw_matched = disk_instance_ids
+                .iter()
+                .any(|id| id.to_ascii_uppercase().contains(usb_frag.as_str()));
             if hw_matched {
                 // Confirm this drive letter actually belongs to the matched disk.
                 // We use the volume label as a secondary check only to bind the drive letter
                 // to the already-matched hardware instance — not as the primary discriminator.
                 // A mismatch here means the drive letters may be swapped; keep looking.
                 let label = get_volume_label(&path_str);
-                if label.as_deref().map_or(false, |l| l.eq_ignore_ascii_case(friendly_name)) {
+                if label
+                    .as_deref()
+                    .map_or(false, |l| l.eq_ignore_ascii_case(friendly_name))
+                {
                     return true;
                 }
                 // Hardware ID matched but label doesn't — still return true to avoid re-registering
@@ -1205,7 +1246,10 @@ fn get_volume_label(path_str: &str) -> Option<String> {
     if !ok {
         return None;
     }
-    let len = label_buf.iter().position(|&c| c == 0).unwrap_or(label_buf.len());
+    let len = label_buf
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(label_buf.len());
     Some(String::from_utf16_lossy(&label_buf[..len]).to_string())
 }
 
@@ -1242,7 +1286,9 @@ pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
                             // Detection layer creates the IO backend so the type (MSC/MTP)
                             // is determined here once, not re-derived downstream.
                             let device_io: std::sync::Arc<dyn crate::device_io::DeviceIO> =
-                                std::sync::Arc::new(crate::device_io::MscBackend::new(mount.clone()));
+                                std::sync::Arc::new(crate::device_io::MscBackend::new(
+                                    mount.clone(),
+                                ));
                             let _ = tx
                                 .send(DeviceEvent::Unrecognized {
                                     path: mount.clone(),
@@ -1291,9 +1337,10 @@ pub async fn run_mtp_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
                 let dev_id = dev.device_id.clone();
                 let friendly_name = dev.friendly_name.clone();
 
-                let backend = tokio::task::spawn_blocking(move || mtp::create_mtp_backend(&dev_clone, None))
-                    .await
-                    .unwrap_or_else(|e| Err(anyhow::anyhow!("spawn_blocking panicked: {}", e)));
+                let backend =
+                    tokio::task::spawn_blocking(move || mtp::create_mtp_backend(&dev_clone, None))
+                        .await
+                        .unwrap_or_else(|e| Err(anyhow::anyhow!("spawn_blocking panicked: {}", e)));
 
                 match backend {
                     Ok(backend) => {
@@ -1303,27 +1350,33 @@ pub async fn run_mtp_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
                         match backend_arc.read_file(".jellyfinsync.json").await {
                             Ok(data) => match serde_json::from_slice::<DeviceManifest>(&data) {
                                 Ok(manifest) => {
-                                    let _ = tx.send(DeviceEvent::Detected {
-                                        path: synthetic_path,
-                                        manifest,
-                                        device_io: backend_arc,
-                                    }).await;
+                                    let _ = tx
+                                        .send(DeviceEvent::Detected {
+                                            path: synthetic_path,
+                                            manifest,
+                                            device_io: backend_arc,
+                                        })
+                                        .await;
                                 }
                                 Err(e) => {
                                     daemon_log!("[MTP] Manifest parse error on {}: {}", dev_id, e);
-                                    let _ = tx.send(DeviceEvent::Unrecognized {
-                                        path: synthetic_path,
-                                        device_io: backend_arc,
-                                        friendly_name: Some(friendly_name),
-                                    }).await;
+                                    let _ = tx
+                                        .send(DeviceEvent::Unrecognized {
+                                            path: synthetic_path,
+                                            device_io: backend_arc,
+                                            friendly_name: Some(friendly_name),
+                                        })
+                                        .await;
                                 }
                             },
                             Err(_) => {
-                                let _ = tx.send(DeviceEvent::Unrecognized {
-                                    path: synthetic_path,
-                                    device_io: backend_arc,
-                                    friendly_name: Some(friendly_name),
-                                }).await;
+                                let _ = tx
+                                    .send(DeviceEvent::Unrecognized {
+                                        path: synthetic_path,
+                                        device_io: backend_arc,
+                                        friendly_name: Some(friendly_name),
+                                    })
+                                    .await;
                             }
                         }
                     }

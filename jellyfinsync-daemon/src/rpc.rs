@@ -394,10 +394,12 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         .map(|m| m.auto_sync_on_connect)
         .unwrap_or(false);
 
-    let auto_fill = device.as_ref().map(|d| serde_json::json!({
-        "enabled": d.auto_fill.enabled,
-        "maxBytes": d.auto_fill.max_bytes,
-    }));
+    let auto_fill = device.as_ref().map(|d| {
+        serde_json::json!({
+            "enabled": d.auto_fill.enabled,
+            "maxBytes": d.auto_fill.max_bytes,
+        })
+    });
 
     let active_operation_id = state.sync_operation_manager.get_active_operation_id().await;
 
@@ -555,9 +557,11 @@ async fn handle_jellyfin_get_items(
     let include_item_types = params["includeItemTypes"].as_str();
     let start_index = params["startIndex"].as_u64().map(|v| v as u32);
     let limit = params["limit"].as_u64().map(|v| v as u32);
-    let name_starts_with = params["nameStartsWith"].as_str()
+    let name_starts_with = params["nameStartsWith"]
+        .as_str()
         .filter(|s| s.len() == 1 && s.chars().all(|c| c.is_ascii_alphabetic()));
-    let name_less_than = params["nameLessThan"].as_str()
+    let name_less_than = params["nameLessThan"]
+        .as_str()
         .filter(|s| s.len() == 1 && s.chars().all(|c| c.is_ascii_alphabetic()));
 
     match state
@@ -947,16 +951,22 @@ async fn handle_sync_calculate_delta(
             } else {
                 match state.device_manager.get_device_storage().await {
                     Some(info) => info.free_bytes,
-                    None => return Err(JsonRpcError {
-                        code: ERR_CONNECTION_FAILED,
-                        message: "Auto-fill: could not determine device free space".to_string(),
-                        data: None,
-                    }),
+                    None => {
+                        return Err(JsonRpcError {
+                            code: ERR_CONNECTION_FAILED,
+                            message: "Auto-fill: could not determine device free space".to_string(),
+                            data: None,
+                        })
+                    }
                 }
             };
             let exclude_ids: Vec<String> = af["excludeItemIds"]
                 .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             let expanded_excludes = expand_exclude_ids(&state.jellyfin_client, exclude_ids).await;
             let fill_params = crate::auto_fill::AutoFillParams {
@@ -1092,13 +1102,17 @@ async fn handle_sync_execute(
         };
 
         // Load transcoding profile from the atomically fetched manifest
-        let transcoding_profile = if let Some(ref profile_id) = sync_manifest.transcoding_profile_id {
+        let transcoding_profile = if let Some(ref profile_id) = sync_manifest.transcoding_profile_id
+        {
             match crate::paths::get_device_profiles_path()
                 .and_then(|p| crate::transcoding::find_device_profile(&p, profile_id))
             {
                 Ok(profile) => profile,
                 Err(e) => {
-                    eprintln!("[Sync] Failed to load transcoding profile '{}': {}", profile_id, e);
+                    eprintln!(
+                        "[Sync] Failed to load transcoding profile '{}': {}",
+                        profile_id, e
+                    );
                     None
                 }
             }
@@ -1430,13 +1444,18 @@ async fn handle_device_initialize(
     })?;
 
     // Optional — if not provided, device uses passthrough (no transcoding)
-    let transcoding_profile_id = params["transcodingProfileId"].as_str().map(|s| s.to_string());
+    let transcoding_profile_id = params["transcodingProfileId"]
+        .as_str()
+        .map(|s| s.to_string());
 
-    let device_name = params["name"].as_str().ok_or(JsonRpcError {
-        code: ERR_INVALID_PARAMS,
-        message: "Missing name".to_string(),
-        data: None,
-    })?.to_string();
+    let device_name = params["name"]
+        .as_str()
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing name".to_string(),
+            data: None,
+        })?
+        .to_string();
     if device_name.trim().is_empty() {
         return Err(JsonRpcError {
             code: ERR_INVALID_PARAMS,
@@ -1452,9 +1471,15 @@ async fn handle_device_initialize(
         });
     }
     const VALID_ICONS: &[&str] = &[
-        "usb-drive", "phone-fill", "watch", "sd-card", "headphones", "music-note-list",
+        "usb-drive",
+        "phone-fill",
+        "watch",
+        "sd-card",
+        "headphones",
+        "music-note-list",
     ];
-    let device_icon = params["icon"].as_str()
+    let device_icon = params["icon"]
+        .as_str()
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
     if let Some(ref ic) = device_icon {
@@ -1474,21 +1499,28 @@ async fn handle_device_initialize(
             message: e.to_string(),
             data: None,
         })?;
-        let profiles = crate::transcoding::load_profiles(&profiles_path).map_err(|e| JsonRpcError {
-            code: ERR_STORAGE_ERROR,
-            message: format!("Failed to load device profiles: {}", e),
-            data: None,
-        })?;
+        let profiles =
+            crate::transcoding::load_profiles(&profiles_path).map_err(|e| JsonRpcError {
+                code: ERR_STORAGE_ERROR,
+                message: format!("Failed to load device profiles: {}", e),
+                data: None,
+            })?;
         if !profiles.iter().any(|p| p.id == *tpid) {
             return Err(JsonRpcError {
                 code: ERR_INVALID_PARAMS,
-                message: format!("Transcoding profile '{}' not found in device-profiles.json", tpid),
+                message: format!(
+                    "Transcoding profile '{}' not found in device-profiles.json",
+                    tpid
+                ),
                 data: None,
             });
         }
     }
 
-    let device_io = state.device_manager.get_unrecognized_device_io().await
+    let device_io = state
+        .device_manager
+        .get_unrecognized_device_io()
+        .await
         .ok_or(JsonRpcError {
             code: ERR_INVALID_PARAMS,
             message: "No unrecognized device pending initialization".to_string(),
@@ -1497,7 +1529,13 @@ async fn handle_device_initialize(
 
     let manifest = state
         .device_manager
-        .initialize_device(folder_path, transcoding_profile_id.clone(), device_name, device_icon, device_io)
+        .initialize_device(
+            folder_path,
+            transcoding_profile_id.clone(),
+            device_name,
+            device_icon,
+            device_io,
+        )
         .await
         .map_err(|e| JsonRpcError {
             code: ERR_STORAGE_ERROR,
@@ -1816,13 +1854,13 @@ async fn handle_device_profiles_list() -> Result<Value, JsonRpcError> {
     // seeding code was added (Windows Service / startup app from an older build).
     if !path.exists() {
         let profiles_default = include_bytes!("../assets/device-profiles.json");
-        crate::transcoding::ensure_profiles_file_exists(&path, profiles_default).map_err(
-            |e| JsonRpcError {
+        crate::transcoding::ensure_profiles_file_exists(&path, profiles_default).map_err(|e| {
+            JsonRpcError {
                 code: ERR_STORAGE_ERROR,
                 message: format!("Failed to seed device profiles: {}", e),
                 data: None,
-            },
-        )?;
+            }
+        })?;
     }
 
     let profiles = crate::transcoding::load_profiles(&path).map_err(|e| JsonRpcError {
@@ -2326,12 +2364,18 @@ mod tests {
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
-                playlists: vec![],
+            playlists: vec![],
             storage_id: None,
         };
 
         device_manager
-            .handle_device_detected(std::path::PathBuf::from("/tmp/test"), manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from("/tmp/test"))))
+            .handle_device_detected(
+                std::path::PathBuf::from("/tmp/test"),
+                manifest,
+                std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from(
+                    "/tmp/test",
+                ))),
+            )
             .await
             .unwrap();
 
@@ -2394,11 +2438,15 @@ mod tests {
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
-                playlists: vec![],
+            playlists: vec![],
             storage_id: None,
         };
         device_manager
-            .handle_device_detected(dir.path().to_path_buf(), manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())))
+            .handle_device_detected(
+                dir.path().to_path_buf(),
+                manifest,
+                std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())),
+            )
             .await
             .unwrap();
 
@@ -2442,11 +2490,15 @@ mod tests {
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
-                playlists: vec![],
+            playlists: vec![],
             storage_id: None,
         };
         device_manager
-            .handle_device_detected(dir.path().to_path_buf(), manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())))
+            .handle_device_detected(
+                dir.path().to_path_buf(),
+                manifest,
+                std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())),
+            )
             .await
             .unwrap();
 
@@ -2504,11 +2556,17 @@ mod tests {
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
-                playlists: vec![],
+            playlists: vec![],
             storage_id: None,
         };
         device_manager
-            .handle_device_detected(std::path::PathBuf::from("/tmp/dirty"), dirty_manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from("/tmp/dirty"))))
+            .handle_device_detected(
+                std::path::PathBuf::from("/tmp/dirty"),
+                dirty_manifest,
+                std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from(
+                    "/tmp/dirty",
+                ))),
+            )
             .await
             .unwrap();
 
@@ -2554,7 +2612,11 @@ mod tests {
 
         // Set an unrecognized device → pendingDevicePath should be present
         device_manager
-            .handle_device_unrecognized(dir.path().to_path_buf(), std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())), None)
+            .handle_device_unrecognized(
+                dir.path().to_path_buf(),
+                std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())),
+                None,
+            )
             .await;
 
         let result2 = handle_get_daemon_state(&state).await.unwrap();
@@ -2629,10 +2691,12 @@ mod tests {
                     auto_sync_on_connect: false,
                     auto_fill: crate::device::AutoFillPrefs::default(),
                     transcoding_profile_id: None,
-                playlists: vec![],
-            storage_id: None,
+                    playlists: vec![],
+                    storage_id: None,
                 },
-                std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from("/tmp/dev"))),
+                std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from(
+                    "/tmp/dev",
+                ))),
             )
             .await
             .unwrap();
@@ -2715,11 +2779,17 @@ mod tests {
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
-                playlists: vec![],
+            playlists: vec![],
             storage_id: None,
         };
         device_manager
-            .handle_device_detected(std::path::PathBuf::from("/tmp/dev"), manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from("/tmp/dev"))))
+            .handle_device_detected(
+                std::path::PathBuf::from("/tmp/dev"),
+                manifest,
+                std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from(
+                    "/tmp/dev",
+                ))),
+            )
             .await
             .unwrap();
 
@@ -2826,7 +2896,11 @@ mod tests {
 
         // Simulate an unrecognized device
         device_manager
-            .handle_device_unrecognized(dir.path().to_path_buf(), std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())), None)
+            .handle_device_unrecognized(
+                dir.path().to_path_buf(),
+                std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())),
+                None,
+            )
             .await;
 
         let state = AppState {
@@ -2882,7 +2956,11 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
 
         device_manager
-            .handle_device_unrecognized(dir.path().to_path_buf(), std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())), None)
+            .handle_device_unrecognized(
+                dir.path().to_path_buf(),
+                std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())),
+                None,
+            )
             .await;
 
         let state = AppState {
@@ -2945,7 +3023,7 @@ mod tests {
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
-                playlists: vec![],
+            playlists: vec![],
             storage_id: None,
         };
         crate::device::write_manifest(
@@ -2955,7 +3033,11 @@ mod tests {
         .await
         .unwrap();
         device_manager
-            .handle_device_detected(dir.path().to_path_buf(), manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())))
+            .handle_device_detected(
+                dir.path().to_path_buf(),
+                manifest,
+                std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())),
+            )
             .await
             .unwrap();
 
@@ -3034,11 +3116,17 @@ mod tests {
             auto_sync_on_connect: true,
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,
-                playlists: vec![],
+            playlists: vec![],
             storage_id: None,
         };
         device_manager
-            .handle_device_detected(std::path::PathBuf::from("/tmp/auto-state"), manifest, std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from("/tmp/auto-state"))))
+            .handle_device_detected(
+                std::path::PathBuf::from("/tmp/auto-state"),
+                manifest,
+                std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from(
+                    "/tmp/auto-state",
+                ))),
+            )
             .await
             .unwrap();
 
@@ -3166,14 +3254,37 @@ mod tests {
             storage_id: None,
         };
 
-        state.device_manager.handle_device_detected(path1.clone(), manifest1, std::sync::Arc::new(crate::device_io::MscBackend::new(path1))).await.unwrap();
-        state.device_manager.handle_device_detected(path2.clone(), manifest2, std::sync::Arc::new(crate::device_io::MscBackend::new(path2))).await.unwrap();
+        state
+            .device_manager
+            .handle_device_detected(
+                path1.clone(),
+                manifest1,
+                std::sync::Arc::new(crate::device_io::MscBackend::new(path1)),
+            )
+            .await
+            .unwrap();
+        state
+            .device_manager
+            .handle_device_detected(
+                path2.clone(),
+                manifest2,
+                std::sync::Arc::new(crate::device_io::MscBackend::new(path2)),
+            )
+            .await
+            .unwrap();
 
         let result = handle_device_list(&state).await.unwrap();
         let data = result["data"].as_array().unwrap();
-        assert_eq!(data.len(), 2, "device.list must return all connected devices");
+        assert_eq!(
+            data.len(),
+            2,
+            "device.list must return all connected devices"
+        );
 
-        let ids: Vec<&str> = data.iter().map(|d| d["deviceId"].as_str().unwrap()).collect();
+        let ids: Vec<&str> = data
+            .iter()
+            .map(|d| d["deviceId"].as_str().unwrap())
+            .collect();
         assert!(ids.contains(&"dev-list-1"));
         assert!(ids.contains(&"dev-list-2"));
     }
@@ -3205,8 +3316,24 @@ mod tests {
             storage_id: None,
         };
 
-        state.device_manager.handle_device_detected(path1.clone(), make_manifest("sel-dev-1"), std::sync::Arc::new(crate::device_io::MscBackend::new(path1.clone()))).await.unwrap();
-        state.device_manager.handle_device_detected(path2.clone(), make_manifest("sel-dev-2"), std::sync::Arc::new(crate::device_io::MscBackend::new(path2.clone()))).await.unwrap();
+        state
+            .device_manager
+            .handle_device_detected(
+                path1.clone(),
+                make_manifest("sel-dev-1"),
+                std::sync::Arc::new(crate::device_io::MscBackend::new(path1.clone())),
+            )
+            .await
+            .unwrap();
+        state
+            .device_manager
+            .handle_device_detected(
+                path2.clone(),
+                make_manifest("sel-dev-2"),
+                std::sync::Arc::new(crate::device_io::MscBackend::new(path2.clone())),
+            )
+            .await
+            .unwrap();
 
         // Switch to path2
         let params = Some(json!({ "path": path2.to_string_lossy() }));
@@ -3251,8 +3378,14 @@ mod tests {
         };
 
         let response = handler(axum::extract::State(state), Json(request)).await;
-        assert!(response.error.is_none(), "daemon.health must not return an error");
-        assert!(response.result.is_some(), "daemon.health must return a result");
+        assert!(
+            response.error.is_none(),
+            "daemon.health must not return an error"
+        );
+        assert!(
+            response.result.is_some(),
+            "daemon.health must return a result"
+        );
         assert_eq!(
             response.result.as_ref().unwrap()["data"]["status"],
             "ok",

@@ -243,10 +243,22 @@ mod tests {
         let device_id = "ipod-001";
 
         // Insert two scrobbles
-        db.record_scrobble(device_id, "Pink Floyd", "The Dark Side of the Moon", "Money", 1706745600)
-            .unwrap();
-        db.record_scrobble(device_id, "Led Zeppelin", "Led Zeppelin IV", "Stairway to Heaven", 1706752800)
-            .unwrap();
+        db.record_scrobble(
+            device_id,
+            "Pink Floyd",
+            "The Dark Side of the Moon",
+            "Money",
+            1706745600,
+        )
+        .unwrap();
+        db.record_scrobble(
+            device_id,
+            "Led Zeppelin",
+            "Led Zeppelin IV",
+            "Stairway to Heaven",
+            1706752800,
+        )
+        .unwrap();
 
         let count = db.get_scrobble_count(device_id).unwrap();
         assert_eq!(count, 2);
@@ -258,10 +270,22 @@ mod tests {
         let device_id = "ipod-001";
 
         // Insert same scrobble twice — second should be ignored
-        db.record_scrobble(device_id, "Pink Floyd", "The Dark Side of the Moon", "Money", 1706745600)
-            .unwrap();
-        db.record_scrobble(device_id, "Pink Floyd", "The Dark Side of the Moon", "Money", 1706745600)
-            .unwrap();
+        db.record_scrobble(
+            device_id,
+            "Pink Floyd",
+            "The Dark Side of the Moon",
+            "Money",
+            1706745600,
+        )
+        .unwrap();
+        db.record_scrobble(
+            device_id,
+            "Pink Floyd",
+            "The Dark Side of the Moon",
+            "Money",
+            1706745600,
+        )
+        .unwrap();
 
         let count = db.get_scrobble_count(device_id).unwrap();
         assert_eq!(count, 1);
@@ -271,7 +295,13 @@ mod tests {
     fn test_is_scrobble_recorded_false() {
         let db = Database::memory().unwrap();
         let result = db
-            .is_scrobble_recorded("ipod-001", "Pink Floyd", "The Dark Side of the Moon", "Money", 1706745600)
+            .is_scrobble_recorded(
+                "ipod-001",
+                "Pink Floyd",
+                "The Dark Side of the Moon",
+                "Money",
+                1706745600,
+            )
             .unwrap();
         assert!(!result);
     }
@@ -279,10 +309,22 @@ mod tests {
     #[test]
     fn test_is_scrobble_recorded_true() {
         let db = Database::memory().unwrap();
-        db.record_scrobble("ipod-001", "Pink Floyd", "The Dark Side of the Moon", "Money", 1706745600)
-            .unwrap();
+        db.record_scrobble(
+            "ipod-001",
+            "Pink Floyd",
+            "The Dark Side of the Moon",
+            "Money",
+            1706745600,
+        )
+        .unwrap();
         let result = db
-            .is_scrobble_recorded("ipod-001", "Pink Floyd", "The Dark Side of the Moon", "Money", 1706745600)
+            .is_scrobble_recorded(
+                "ipod-001",
+                "Pink Floyd",
+                "The Dark Side of the Moon",
+                "Money",
+                1706745600,
+            )
             .unwrap();
         assert!(result);
     }
@@ -290,10 +332,22 @@ mod tests {
     #[test]
     fn test_is_scrobble_recorded_different_timestamp() {
         let db = Database::memory().unwrap();
-        db.record_scrobble("ipod-001", "Pink Floyd", "The Dark Side of the Moon", "Money", 1706745600)
-            .unwrap();
+        db.record_scrobble(
+            "ipod-001",
+            "Pink Floyd",
+            "The Dark Side of the Moon",
+            "Money",
+            1706745600,
+        )
+        .unwrap();
         let result = db
-            .is_scrobble_recorded("ipod-001", "Pink Floyd", "The Dark Side of the Moon", "Money", 9999999999)
+            .is_scrobble_recorded(
+                "ipod-001",
+                "Pink Floyd",
+                "The Dark Side of the Moon",
+                "Money",
+                9999999999,
+            )
             .unwrap();
         assert!(!result);
     }

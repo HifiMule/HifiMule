@@ -72,7 +72,11 @@ fn try_start_service() -> bool {
 /// Images loaded via CSS `background-image: url(...)` can't use invoke, so the frontend
 /// must call this and set the result as inline style.
 #[tauri::command]
-async fn image_proxy(id: String, max_height: Option<u32>, quality: Option<u32>) -> Result<String, String> {
+async fn image_proxy(
+    id: String,
+    max_height: Option<u32>,
+    quality: Option<u32>,
+) -> Result<String, String> {
     let client = reqwest::Client::new();
     let mut url = format!("http://127.0.0.1:{}/jellyfin/image/{}", RPC_PORT, id);
     let mut query_parts = Vec::new();
@@ -139,10 +143,16 @@ async fn rpc_proxy(method: String, params: serde_json::Value) -> Result<serde_js
         .map_err(|e| format!("RPC response parse failed: {}", e))?;
 
     if let Some(error) = data.get("error").filter(|e| !e.is_null()) {
-        return Err(error["message"].as_str().unwrap_or("Unknown RPC error").to_string());
+        return Err(error["message"]
+            .as_str()
+            .unwrap_or("Unknown RPC error")
+            .to_string());
     }
 
-    Ok(data.get("result").cloned().unwrap_or(serde_json::Value::Null))
+    Ok(data
+        .get("result")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null))
 }
 
 const LOG_MAX_BYTES: u64 = 1_048_576; // 1 MB

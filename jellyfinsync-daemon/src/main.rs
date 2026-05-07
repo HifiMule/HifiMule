@@ -571,58 +571,63 @@ async fn run_auto_sync(
             return Ok(());
         }
     } else {
-    // Manual basket: resolve basket items to desired items via Jellyfin API
-    let item_ids: Vec<String> = manifest.basket_items.iter().map(|b| b.id.clone()).collect();
-    let is_downloadable = |t: &str| matches!(t, "Audio" | "MusicVideo");
+        // Manual basket: resolve basket items to desired items via Jellyfin API
+        let item_ids: Vec<String> = manifest.basket_items.iter().map(|b| b.id.clone()).collect();
+        let is_downloadable = |t: &str| matches!(t, "Audio" | "MusicVideo");
 
-    const API_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(30);
+        const API_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(30);
 
-    for chunk in item_ids.chunks(100) {
-        let chunk_strs: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
-        let fetch_result = tokio::time::timeout(
-            API_TIMEOUT,
-            jellyfin_client.get_items_by_ids(&url, &token, &user_id, &chunk_strs),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("Timeout fetching items from Jellyfin"))?;
+        for chunk in item_ids.chunks(100) {
+            let chunk_strs: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
+            let fetch_result = tokio::time::timeout(
+                API_TIMEOUT,
+                jellyfin_client.get_items_by_ids(&url, &token, &user_id, &chunk_strs),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("Timeout fetching items from Jellyfin"))?;
 
-        match fetch_result {
-            Ok(items) => {
-                for item in items {
-                    if is_downloadable(&item.item_type) {
-                        desired_items.push(to_desired_item(item));
-                    } else {
-                        // Expand container item (album/playlist)
-                        let expand_result = tokio::time::timeout(
-                            API_TIMEOUT,
-                            jellyfin_client.get_child_items_with_sizes(&url, &token, &user_id, &item.id),
-                        )
-                        .await;
+            match fetch_result {
+                Ok(items) => {
+                    for item in items {
+                        if is_downloadable(&item.item_type) {
+                            desired_items.push(to_desired_item(item));
+                        } else {
+                            // Expand container item (album/playlist)
+                            let expand_result = tokio::time::timeout(
+                                API_TIMEOUT,
+                                jellyfin_client
+                                    .get_child_items_with_sizes(&url, &token, &user_id, &item.id),
+                            )
+                            .await;
 
-                        match expand_result {
-                            Ok(Ok(children)) => {
-                                for child in children {
-                                    if is_downloadable(&child.item_type) {
-                                        desired_items.push(to_desired_item(child));
+                            match expand_result {
+                                Ok(Ok(children)) => {
+                                    for child in children {
+                                        if is_downloadable(&child.item_type) {
+                                            desired_items.push(to_desired_item(child));
+                                        }
                                     }
                                 }
-                            }
-                            Ok(Err(e)) => {
-                                daemon_log!("[AutoSync] Failed to expand item {}: {}", item.id, e);
-                            }
-                            Err(_) => {
-                                daemon_log!("[AutoSync] Timeout expanding item {}", item.id);
+                                Ok(Err(e)) => {
+                                    daemon_log!(
+                                        "[AutoSync] Failed to expand item {}: {}",
+                                        item.id,
+                                        e
+                                    );
+                                }
+                                Err(_) => {
+                                    daemon_log!("[AutoSync] Timeout expanding item {}", item.id);
+                                }
                             }
                         }
                     }
                 }
-            }
-            Err(e) => {
-                daemon_log!("[AutoSync] Failed to fetch items from Jellyfin: {}", e);
-                return Err(e.into());
+                Err(e) => {
+                    daemon_log!("[AutoSync] Failed to fetch items from Jellyfin: {}", e);
+                    return Err(e.into());
+                }
             }
         }
-    }
     } // end else (basket_items non-empty)
 
     if desired_items.is_empty() {
@@ -676,13 +681,18 @@ async fn run_auto_sync(
         }
     };
     // Refresh transcoding profile from the atomically fetched manifest
-    let transcoding_profile = if let Some(ref profile_id) = current_manifest.transcoding_profile_id {
+    let transcoding_profile = if let Some(ref profile_id) = current_manifest.transcoding_profile_id
+    {
         match crate::paths::get_device_profiles_path()
             .and_then(|p| crate::transcoding::find_device_profile(&p, profile_id))
         {
             Ok(profile) => profile,
             Err(e) => {
-                daemon_log!("[AutoSync] Failed to load transcoding profile '{}': {}", profile_id, e);
+                daemon_log!(
+                    "[AutoSync] Failed to load transcoding profile '{}': {}",
+                    profile_id,
+                    e
+                );
                 None
             }
         }
@@ -744,10 +754,7 @@ async fn run_auto_sync(
                 let _ = state_tx.send(DaemonState::Idle);
             } else {
                 daemon_log!("[AutoSync] Sync completed with {} errors", errors.len());
-                let error_msg = format!(
-                    "Sync completed with {} error(s)",
-                    errors.len()
-                );
+                let error_msg = format!("Sync completed with {} error(s)", errors.len());
                 let _ = tokio::task::spawn_blocking(move || {
                     if let Err(e) = notify_rust::Notification::new()
                         .summary("JellyfinSync")
