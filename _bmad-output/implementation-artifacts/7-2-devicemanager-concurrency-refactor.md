@@ -1,6 +1,6 @@
 # Story 7.2: DeviceManager Concurrency Refactor
 
-Status: review
+Status: done
 
 ## Story
 
@@ -71,6 +71,16 @@ so that multi-device scenarios are reliable and concurrent operations never dead
   - [x] Add an MTP backend serialization test in `device_io.rs` using a mock `MtpHandle` with an atomic in-flight counter; assert max in-flight operations for one backend is 1.
   - [x] If `run_mtp_observer` is hard to test directly because it loops forever, extract a small pure/helper function for one observed device and test `known_ids` insertion rules there.
   - [x] Run `rtk cargo test` from the repository root.
+
+### Review Findings
+
+- [x] [Review][Patch] `handle_device_unrecognized` acquires `state.write()` and `unrecognized_device.write()` in separate async blocks — a concurrent `handle_device_detected` can re-insert the same path between the two blocks, leaving both `connected_devices` and `unrecognized_device` populated for the same path (two live IO backends). Fix: hold `state.write()` while setting `unrecognized_device` by merging both lock blocks into a single sequential acquisition. [`device/mod.rs:handle_device_unrecognized`]
+- [x] [Review][Patch] `initialize_device` unconditionally clears `unrecognized_device` after the async manifest write, without checking whether the pending slot still holds the same path. If the original device was removed and a different device arrived as pending between the snapshot and the clear, the new device's pending state is silently erased. Fix: only clear `unrecognized_device` if it still contains `pending.path`. [`device/mod.rs:initialize_device`]
+- [x] [Review][Defer] TOCTOU in `handle_device_detected` — read-lock check then write-lock insert is a pre-existing pattern, not introduced by this diff. [`device/mod.rs:handle_device_detected`] — deferred, pre-existing
+- [x] [Review][Defer] `emit_mtp_probe_event` returns `false` on manifest-read failure, causing the MTP observer to re-probe on every 2-second cycle with no backoff — intentional per AC4 but no cooldown mechanism exists. [`device/mod.rs:emit_mtp_probe_event`] — deferred, pre-existing observer loop design
+- [x] [Review][Defer] `list_root_folders` TOCTOU — selected path can be removed between lock release and `read_dir`; error propagates via `?`. Pre-existing in the old two-lock version. [`device/mod.rs:list_root_folders`] — deferred, pre-existing
+- [x] [Review][Defer] `run_observer` uses `tx.try_send` for `Removed` events (both stale eviction and detection removal); if the channel is full the event is silently dropped and the device entry is removed from `known_mounts` without `DeviceManager` being notified. Pre-existing mechanism, not introduced by this diff. [`device/mod.rs:run_observer`] — deferred, pre-existing
+- [x] [Review][Defer] `get_mounts` skips disappearing volumes accidentally (metadata error → `is_mount_point` returns `false`) rather than explicitly; AC9 is met behaviourally but not by deliberate code. [`device/mod.rs:get_mounts`] — deferred, pre-existing accidental-but-correct behaviour
 
 ## Dev Notes
 
