@@ -924,7 +924,6 @@ impl DeviceManager {
         })
         .await
     }
-
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1399,6 +1398,19 @@ pub async fn run_mtp_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
     }
 }
 
+fn is_missing_manifest_error(error: &anyhow::Error) -> bool {
+    if error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+    {
+        return true;
+    }
+
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains(".hifimule.json")
+        && (message.contains("not found") || message.contains("no such file"))
+}
+
 async fn emit_mtp_probe_event(
     tx: &tokio::sync::mpsc::Sender<DeviceEvent>,
     synthetic_path: PathBuf,
@@ -1447,7 +1459,17 @@ async fn emit_mtp_probe_event(
         },
         Err(e) => {
             daemon_log!("[MTP] Manifest read failed on {}: {}", dev_id, e);
-            false
+            if is_missing_manifest_error(&e) {
+                tx.send(DeviceEvent::Unrecognized {
+                    path: synthetic_path,
+                    device_io: backend_arc,
+                    friendly_name: Some(friendly_name),
+                })
+                .await
+                .is_ok()
+            } else {
+                false
+            }
         }
     }
 }

@@ -1176,8 +1176,7 @@ pub mod windows_wpd {
             // Used for devices like Garmin where CreateObjectWithPropertiesAndData creates
             // folder objects; Shell copy uses the MTP SendObject path that works correctly.
             // T7: UUID temp naming.
-            let temp_dir =
-                std::env::temp_dir().join(format!("hifimule_{}", uuid::Uuid::new_v4()));
+            let temp_dir = std::env::temp_dir().join(format!("hifimule_{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&temp_dir)?;
             let temp_path = temp_dir.join(filename);
             std::fs::write(&temp_path, data)?;

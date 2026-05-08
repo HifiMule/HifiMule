@@ -39,6 +39,54 @@ struct StorageIdDeviceIo {
     storage_id: Option<String>,
 }
 
+#[derive(Debug)]
+struct FailingReadDeviceIo {
+    inner: crate::device_io::MscBackend,
+}
+
+impl FailingReadDeviceIo {
+    fn new(root: &std::path::Path) -> Arc<dyn crate::device_io::DeviceIO> {
+        Arc::new(Self {
+            inner: crate::device_io::MscBackend::new(root.to_path_buf()),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::device_io::DeviceIO for FailingReadDeviceIo {
+    async fn read_file(&self, _path: &str) -> Result<Vec<u8>> {
+        Err(anyhow::anyhow!("MTP transport temporarily unavailable"))
+    }
+
+    async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
+        self.inner.write_file(path, data).await
+    }
+
+    async fn write_with_verify(&self, path: &str, data: &[u8]) -> Result<()> {
+        self.inner.write_with_verify(path, data).await
+    }
+
+    async fn delete_file(&self, path: &str) -> Result<()> {
+        self.inner.delete_file(path).await
+    }
+
+    async fn list_files(&self, path: &str) -> Result<Vec<crate::device_io::FileEntry>> {
+        self.inner.list_files(path).await
+    }
+
+    async fn free_space(&self) -> Result<u64> {
+        self.inner.free_space().await
+    }
+
+    async fn ensure_dir(&self, path: &str) -> Result<()> {
+        self.inner.ensure_dir(path).await
+    }
+
+    async fn cleanup_empty_subdirs(&self, path: &str) -> Result<()> {
+        self.inner.cleanup_empty_subdirs(path).await
+    }
+}
+
 impl StorageIdDeviceIo {
     fn new(
         root: &std::path::Path,
@@ -1830,10 +1878,43 @@ async fn test_handle_device_unrecognized_removes_connected_entry_for_same_path()
 }
 
 #[tokio::test]
-async fn test_mtp_probe_read_failure_does_not_mark_known() {
+async fn test_mtp_probe_missing_manifest_emits_unrecognized_and_marks_known() {
     let dir = tempdir().unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     let backend = msc(dir.path());
+
+    let inserted = emit_mtp_probe_event(
+        &tx,
+        PathBuf::from("mtp://missing-manifest"),
+        "missing-manifest",
+        dummy_mtp_device_info("missing-manifest"),
+        "Fresh Device".to_string(),
+        backend,
+    )
+    .await;
+
+    assert!(
+        inserted,
+        "missing manifest emits Unrecognized and can be marked known"
+    );
+    match rx.recv().await.unwrap() {
+        DeviceEvent::Unrecognized {
+            path,
+            friendly_name,
+            ..
+        } => {
+            assert_eq!(path, PathBuf::from("mtp://missing-manifest"));
+            assert_eq!(friendly_name.as_deref(), Some("Fresh Device"));
+        }
+        _ => panic!("expected unrecognized event"),
+    }
+}
+
+#[tokio::test]
+async fn test_mtp_probe_read_failure_does_not_mark_known() {
+    let dir = tempdir().unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let backend = FailingReadDeviceIo::new(dir.path());
 
     let inserted = emit_mtp_probe_event(
         &tx,
