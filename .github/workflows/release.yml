@@ -240,6 +240,8 @@ jobs:
 
   smoke-test:
     needs: release
+    permissions:
+      contents: write
     uses: ./.github/workflows/smoke-test.yml
     with:
       release_tag: ${{ github.ref_name }}
