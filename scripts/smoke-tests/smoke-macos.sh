@@ -73,10 +73,10 @@ echo "  Quarantine removed (or not present)"
 # --- STEP 3: Launch ---
 echo ""
 echo "==> STEP 3: Launching ${APP_NAME} ..."
-open -a "$APP_NAME" || fail "launch" "open -a $APP_NAME failed"
+open "$APP_PATH" || fail "launch" "open $APP_PATH failed"
 # Give Tauri time to spawn the daemon sidecar
 sleep 3
-if ! pgrep -f "$APP_NAME" >/dev/null 2>&1; then
+if ! pgrep -f "$APP_PATH" >/dev/null 2>&1 && ! pgrep -f "$APP_NAME" >/dev/null 2>&1; then
     fail "launch" "Application process not found after launch — may have crashed immediately"
 fi
 echo "  Launch triggered"
