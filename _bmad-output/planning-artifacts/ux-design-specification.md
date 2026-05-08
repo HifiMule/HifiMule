@@ -28,7 +28,7 @@ To create an "Invisible Sync" experience that automates the synchronization betw
 The core interaction is the moment a legacy device is connected. The system immediately performs a differential scan and presents a "Live Delta" in the Selection Basket, allowing for a one-click commitment to synchronize.
 
 ### 2.2 User Mental Model
-Users perceive their legacy hardware as a **physical extension of their Jellyfin library**. They expect server-level metadata (playlists, album art) to be "pushed" to the device without manually managing folder hierarchies.
+Users perceive their legacy hardware as a **physical extension of their media server library** (Jellyfin, Navidrome, or any Subsonic-compatible server). They expect server-level metadata (playlists, album art) to be "pushed" to the device without manually managing folder hierarchies.
 
 ### 2.3 Success Criteria
 *   **Predictive Syncing:** Automatic rule-matching for known devices.
@@ -47,7 +47,7 @@ Users perceive their legacy hardware as a **physical extension of their Jellyfin
 We utilize **Shoelace (Web Components)** for its extreme performance in Tauri v2 and its framework-agnostic stability.
 
 ### 3.2 Visual Theme: "Vibrant Hub"
-*   **Primary Palette:** `#52348B` (Jellyfin Purple), `#EBB334` (Amber Gold), `#1A1A2E` (Midnight Surface).
+*   **Primary Palette:** `#52348B` (Brand Purple), `#EBB334` (Amber Gold), `#1A1A2E` (Midnight Surface).
 *   **Aesthetic:** Glassmorphism overlays with rich album art grids.
 *   **Typography:** **Outfit** (Brand/Headers) and **Inter** (Data/Paths).
 
@@ -78,6 +78,14 @@ graph TD
 
 ### 5.2 Custom Components
 *   **The Sync Basket:** A real-time "Staging Area" component that calculates literal disk bytes based on transcoding rules.
+*   **Server Type Badge (Login Screen):** A small, auto-updating badge next to the server URL field that shows the detected server type as the user types:
+    - "Detecting..." (brief debounce while user types)
+    - "Jellyfin" (on successful Jellyfin `/System/Info` ping)
+    - "Navidrome" (on successful Subsonic ping with `openSubsonic: true`)
+    - "Subsonic" (on successful Subsonic ping without OpenSubsonic flag)
+    - "Unknown" (if ping fails or URL is invalid)
+    
+    This live affordance removes the need for a manual server type dropdown while giving users immediate confidence that their URL is understood. Auto-detection is the primary flow; a manual override option is available in advanced settings.
 *   **The Media Delta Overlay:** A visual overlay for album covers showing `(+) Add`, `(-) Remove`, or `(=) Synced` status.
 
 ### 5.3 Auto-Fill Components

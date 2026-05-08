@@ -102,6 +102,7 @@ FR32: Epic 4 - Transcoding Profile RPC (Story 4.8)
 FR26: Epic 2 - Device Identity (Story 2.9)
 FR33: Epic 2 - Enhanced Multi-Device Hub (Story 2.8)
 FR34: Epic 3 - Artist Entity Basket Item (Story 3.9)
+FR35: Epic 8 - Multi-Provider Server Support (Stories 8.1–8.6)
 
 ## Epic List
 
@@ -155,18 +156,20 @@ So that I can browse my library while the background sync remains active.
 
 Implement secure Jellyfin authentication and automated hardware identification.
 
-### Story 2.1: Secure Jellyfin Server Link
+### Story 2.1: Secure Media Server Link
 
 As a System Admin (Alexis),
-I want to securely store my Jellyfin URL and credentials in the OS-native keyring,
-So that I don't have to re-enter them and my tokens are safe from other users.
+I want to securely store my media server URL and credentials in the OS-native keyring,
+So that I don't have to re-enter them and my credentials are safe from other users.
 
 **Acceptance Criteria:**
 
 **Given** the UI is open in "Settings"
-**When** I enter a valid Jellyfin URL and User Token
-**Then** the daemon validates the connection via the `/System/Info` API.
-**And** the token is encrypted and stored in the system Keyring (Windows Credential Manager / macOS Keychain).
+**When** I enter a server URL
+**Then** the daemon auto-detects the server type (Story 8.4 factory: Subsonic ping → Jellyfin `/System/Info` fallback).
+**And** for Jellyfin: I enter a Username and Password → daemon authenticates and stores the access token in the system Keyring.
+**And** for Subsonic/Navidrome: I enter a Username and Password → daemon stores the password (encrypted) in the system Keyring for per-request MD5 signing.
+**And** the connection is validated by a successful ping/library query.
 
 ### Story 2.2: Mass Storage Heartbeat (Autodetection)
 
@@ -233,14 +236,22 @@ So that I can easily connect to my library without manually copying API tokens.
 
 **Given** the application is unconfigured or a connection error occurs
 **When** the Login View is displayed
-**Then** I can enter a Jellyfin URL (with optional "Auto-detect" for local servers).
+**Then** I can enter a server URL.
+**And** the UI shows a live type badge (detecting: "Jellyfin" / "Navidrome / Subsonic" / "Unknown") as I type or after I confirm the URL.
 **And** I can enter my Username and Password.
 **When** I click "Connect"
-**Then** the daemon attempts to authenticate and retrieve a session token.
-**And** the token is securely stored in the system Keyring (replacing any existing token).
+**Then** the daemon calls the factory (Story 8.4) to auto-detect server type and authenticate.
+**And** for Jellyfin: retrieves and stores an access token via `POST /Users/AuthenticateByName`.
+**And** for Subsonic: verifies credentials via `GET /rest/ping.view` (no token — stateless auth).
+**And** the token or password is securely stored in the system Keyring (replacing any existing credential).
 **And** the UI transitions to the main Library Browser on success.
 **When** authentication fails
-**Then** a clear error message is shown (e.g., "Invalid Credentials" or "Server Unreachable").
+**Then** a clear error message is shown (e.g., "Invalid Credentials", "Server Unreachable", or "Unknown server type at this URL").
+
+**Technical Notes:**
+- The Login screen shows a subtle server type badge that updates live (debounced) as the URL is typed
+- Auto-detection is primary; a manual server type override is available as an advanced option
+- No separate "server type" dropdown in the primary flow
 
 ### Story 2.6: Initialize New Device Manifest
 
@@ -405,7 +416,7 @@ So that it appears in the device hub without requiring manual steps.
 
 Develop the high-confidence Library Browser and Selection Basket with storage projection.
 
-### Story 3.1: Immersive Media Browser (Jellyfin Integration)
+### Story 3.1: Immersive Media Browser (Multi-Server Integration)
 
 As a Ritualist (Arthur),
 I want to browse my Jellyfin playlists and albums with high-quality artwork,
@@ -413,10 +424,20 @@ So that I can enjoy the curation process as I do on the server.
 
 **Acceptance Criteria:**
 
-**Given** a successful server link
+**Given** a successful server link (Jellyfin or Subsonic/Navidrome)
 **When** I open the main UI
 **Then** I see the "Vibrant Hub" layout with paginated album art grids.
 **And** items already on the device are marked with a "Synced" badge.
+
+**Given** a Subsonic/Navidrome server is connected
+**When** the Library Browser loads
+**Then** artists are fetched via `provider.list_artists()` and albums via `provider.get_artist()`.
+**And** the browse hierarchy (Library → Artist → Album → Tracks) works identically regardless of server type.
+**And** cover art is fetched via `provider.cover_art_url()` — for Subsonic, uses the song's `coverArt` field (not the song ID directly).
+
+**Technical Notes:**
+- UI never calls server APIs directly — all data goes through daemon RPC → `MediaProvider`
+- Domain `Song` type carries `cover_art_id: Option<String>` — populated from Subsonic's `coverArt` field
 
 ### Story 3.2: The Live Selection Basket
 
@@ -845,7 +866,19 @@ So that tracks play correctly on DAPs that don't support FLAC, Opus, or AAC (e.g
 
 **Given** a device manifest with `transcoding_profile_id` = null or `"passthrough"`
 **When** `execute_sync` runs
-**Then** the engine uses the existing `/Items/{id}/Download` path unchanged.
+**Then** the engine uses the existing `/Items/{id}/Download` path unchanged (Jellyfin) or `/rest/download.view` (Subsonic).
+
+**Given** a Subsonic/OpenSubsonic device profile is selected
+**When** `execute_sync` runs for a file
+**Then** the engine calls `provider.download_url(track_id, profile)` which returns:
+  - Passthrough: `/rest/download.view?id=...&[auth params]`
+  - Transcoding: `/rest/stream.view?id=...&format=mp3&maxBitRate=192&[auth params]` where `maxBitRate` is in **kbps** (not bps)
+**And** auth params in the URL are sanitized before logging (Story 8.5).
+
+**Technical Notes (Subsonic transcoding):**
+- Subsonic uses direct stream URL params — no PlaybackInfo API exists
+- Bitrate unit: Jellyfin uses bps (`audioBitRate=192000`), Subsonic uses kbps (`maxBitRate=192`) — conversion inside `SubsonicProvider`
+- `execute_sync()` calls `provider.download_url(id, profile)` — provider encapsulates which approach to use
 
 **Given** no `device-profiles.json` in the app data dir
 **When** the daemon starts
@@ -885,6 +918,20 @@ So that my on-the-go listening is reflected on my Jellyfin server.
 **When** the daemon scans for a `.scrobbler.log`
 **Then** it uses `device_io.read_file(".scrobbler.log")` to retrieve the log contents.
 **And** parsing and submission logic is identical to the MSC path.
+
+**Given** a `.scrobbler.log` is found and the connected server is Subsonic/Navidrome
+**When** the daemon processes scrobble submissions
+**Then** for each completed track: calls `POST /rest/scrobble.view?id={id}&submission=true&time={epoch_ms}`.
+**And** this is provider-specific: Navidrome only increments play count via explicit scrobble calls, NOT from streaming.
+
+**Given** the connected server is Jellyfin
+**When** scrobble submissions are processed
+**Then** existing behavior is unchanged (Progressive Sync API / `/PlaybackInfo/Progress`).
+
+**Technical Notes (multi-provider scrobble):**
+- `ScrobbleSubmitter` becomes provider-aware: Jellyfin path unchanged; Subsonic path uses `SubsonicProvider`
+- IDs for Subsonic scrobble must be server-side track IDs (from manifest's `server_id`-keyed record)
+- Navidrome streaming does NOT increment play count — only explicit `scrobble?submission=true` does
 
 ### Story 5.2: Scrobble Submission Tracking (Deduplication)
 
@@ -1313,3 +1360,166 @@ So that every release artifact is verifiable, installable on clean machines, and
 - CI version pins: use `actions/gh-actions-toolset` digests for `tauri-action`
 - Xvfb display: `Xvfb -displayfd fd` writes the chosen display number to a file descriptor — avoids hardcoded `:99`
 - Windows install path registry key: written by the WiX installer via `<RegistryValue>` in the product `.wxs`
+
+## Epic 8: Multi-Provider Media Server Support
+
+> **Prerequisite for modified Stories 2.1, 2.5, 3.1, 4.8, 5.1.**
+> Stories 8.1–8.4 must be completed before implementing the modified versions of those stories.
+> Epic 8 introduces zero user-visible behavior change for existing Jellyfin users — it is a pure refactor + addition at the provider layer.
+>
+> **Recommended sequencing:**
+> - Phase A: 8.1 → 8.2 → 8.3 → 8.4 → 8.5 (8.6 can run parallel to 8.3)
+> - Phase B: Modified existing stories 2.1, 2.5, 3.1, 4.8, 5.1 (in their original epic order)
+
+Introduce a provider abstraction layer enabling HifiMule to connect to Jellyfin, Navidrome, Subsonic, and any OpenSubsonic-compatible media server.
+
+### Story 8.1: MediaProvider Trait & Domain Models
+
+As a System Admin (Alexis),
+I want all server communication routed through a shared `MediaProvider` trait,
+So that the sync engine, auto-fill, and scrobble bridge never depend on server-specific API details.
+
+**Acceptance Criteria:**
+
+**Given** `hifimule-daemon` is built
+**When** any module needs to browse, download, or query the media server
+**Then** it calls methods on `Arc<dyn MediaProvider>` — no direct HTTP calls outside the `providers/` module.
+
+**Given** the `domain/models.rs` module is defined
+**When** a provider returns library data
+**Then** it returns domain types (`Song`, `Album`, `Artist`, `Playlist`) with all fields normalized:
+- IDs: always `String` (never `i64`/`u64`)
+- Duration: `u32` seconds
+- Bitrate: `u32` kbps
+- Cover art ref: `Option<String>` (separate from item ID for Subsonic)
+
+**Technical Notes:**
+- `providers/mod.rs`: `MediaProvider` trait (async-trait), `ProviderError`, `ServerType`, `Capabilities`
+- `domain/models.rs`: `Song`, `Album`, `Artist`, `Playlist`, `SearchResult`, `ChangeEvent`
+- Add `async-trait = "0.1"` to `hifimule-daemon` dependencies
+- Newtype wrappers at DTO boundaries to prevent unit conversion bugs reaching the domain layer
+
+### Story 8.2: JellyfinProvider Adapter
+
+As a System Admin (Alexis),
+I want the existing Jellyfin API client wrapped as a `JellyfinProvider` implementing `MediaProvider`,
+So that no existing functionality regresses and all callers use the unified interface.
+
+**Acceptance Criteria:**
+
+**Given** `JellyfinProvider` wraps the existing `api.rs` logic
+**When** any caller accesses the library, downloads a track, or fetches cover art
+**Then** it uses `provider.get_album()`, `provider.download_url()`, `provider.cover_art_url()` etc.
+**And** all Jellyfin-specific DTO→domain conversions happen at the adapter boundary (`RunTimeTicks ÷ 10_000_000 → seconds`, bps → kbps).
+
+**Given** `provider.changes_since(timestamp)` is called on `JellyfinProvider`
+**Then** it queries `GET /Items?minDateLastSaved={ISO}` for item-level incremental sync.
+
+**Technical Notes:**
+- Rename/move `api.rs` → `providers/jellyfin.rs`; `JellyfinProvider` struct wraps existing `JellyfinClient`
+- All existing callers (`sync.rs`, `rpc.rs`, `scrobble.rs`) updated to use `Arc<dyn MediaProvider>`
+- `jellyfin-sdk = "=0.x.y"` pinned exact version (pre-1.0)
+- Unit tests: 100% coverage for `JellyfinItem → Song`, `RunTimeTicks` conversion, UUID ID passthrough
+
+### Story 8.3: SubsonicProvider Adapter
+
+As a Ritualist (Arthur) and Convenience Seeker (Sarah),
+I want HifiMule to connect to Navidrome and any Subsonic/OpenSubsonic-compatible server,
+So that users who prefer Navidrome can use HifiMule without switching media servers.
+
+**Acceptance Criteria:**
+
+**Given** `SubsonicProvider` implements `MediaProvider`
+**When** connected to a Navidrome or Subsonic server
+**Then** `list_artists()` calls `GET /rest/getArtists.view`, `get_album()` calls `GET /rest/getAlbum.view`, `list_playlists()` calls `GET /rest/getPlaylists.view`.
+**And** all `SubsonicSong → Song` conversions are correct: `duration` (seconds, no conversion), `bitRate` → kbps, `id` → `String`.
+
+**Given** the server supports OpenSubsonic (`openSubsonic: true` in ping response)
+**When** `provider.capabilities()` is called
+**Then** the `Capabilities` struct reflects detected extension support (cached via `std::sync::Once`).
+
+**Given** `provider.changes_since(timestamp)` is called on `SubsonicProvider`
+**Then** it calls `GET /rest/getIndexes.view?ifModifiedSince={epoch_ms}`.
+**And** if the artist list changed, re-fetches affected albums via `getAlbum` to detect song-level changes.
+
+**Given** `provider.download_url()` is called with a `TranscodeProfile`
+**Then** for passthrough: returns `/rest/download.view?id={id}&...auth_params`
+**Then** for transcoding: returns `/rest/stream.view?id={id}&format=mp3&maxBitRate=192&...auth_params`
+**And** `maxBitRate` is in **kbps** (not bps).
+
+**Technical Notes:**
+- `opensubsonic = "latest"` crate (full v1.16.1, OpenSubsonic extensions, async, JSON)
+- Auth: per-request MD5 token+salt signing (`t=md5(password+salt)`, `s=salt`) — stateless
+- All Subsonic URLs MUST be sanitized via `sanitize_subsonic_url()` before logging
+- Unit tests: `SubsonicSong → Song` (duration passthrough, kbps passthrough, string ID), cover art ID ≠ song ID
+- HTTP mock tests with `wiremock`; snapshot tests with `insta` for Navidrome + classic Subsonic fixtures
+
+### Story 8.4: Runtime Server-Type Detection Factory
+
+As a System Admin (Alexis),
+I want the daemon to auto-detect the server type when I enter a URL,
+So that I don't need to manually specify "Jellyfin" or "Navidrome" during setup.
+
+**Acceptance Criteria:**
+
+**Given** a user enters a server URL in setup
+**When** `server.connect` RPC is called with `serverType: 'auto'`
+**Then** the daemon pings the URL in order:
+1. Subsonic `GET /rest/ping.view` — if response contains `openSubsonic: true` → `ServerType::Subsonic` with OpenSubsonic capabilities
+2. Subsonic ping without OpenSubsonic flag → `ServerType::Subsonic` (classic)
+3. Jellyfin `GET /System/Info` → `ServerType::Jellyfin`
+4. All fail → returns error "Unknown server type at this URL"
+**And** the detected `ServerType` is persisted in the daemon config.
+**And** the correct `MediaProvider` implementation is instantiated and held as `Arc<dyn MediaProvider>`.
+
+**Given** `server.connect` is called with `serverType: 'jellyfin'` or `serverType: 'subsonic'`
+**Then** the detection step is skipped and the specified provider type is used directly.
+
+**Technical Notes:**
+- Factory function: `async fn connect(url: &str, creds: &Credentials, hint: ServerTypeHint) -> Result<Box<dyn MediaProvider>>`
+- `ServerTypeHint::Auto | ServerTypeHint::Jellyfin | ServerTypeHint::Subsonic`
+- IPC: `server.connect` params gain `serverType: 'jellyfin' | 'subsonic' | 'auto'`
+- `get_daemon_state` response gains `serverType: string | null`
+
+### Story 8.5: Subsonic URL Credential Sanitization
+
+As a System Admin (Alexis),
+I want Subsonic auth credentials to never appear in log files,
+So that my server password is not exposed in application logs.
+
+**Acceptance Criteria:**
+
+**Given** any Subsonic request URL is logged
+**When** the URL contains `u=`, `p=`, `t=`, or `s=` query parameters
+**Then** those parameters are replaced with `[REDACTED]` before the log line is written.
+**And** this sanitization applies to ALL log outputs: `daemon.log`, `ui.log`, `tracing` spans, and debug output.
+
+**Given** `download_url()` or `cover_art_url()` on `SubsonicProvider` returns a URL
+**When** the sync engine logs progress (file name, URL)
+**Then** the logged URL has auth params stripped.
+
+**Technical Notes:**
+- `sanitize_subsonic_url(url: &Url) -> String` utility in `providers/subsonic.rs`
+- All `tracing::debug!` / `tracing::info!` calls in sync path that log URLs must use `sanitize_subsonic_url()`
+- Unit test: verify sanitization removes `u`, `p`, `t`, `s` params and leaves other params intact
+
+### Story 8.6: Incremental Sync — Subsonic Album-Level Fallback
+
+As a Ritualist (Arthur),
+I want incremental sync to correctly detect new songs added to existing albums on Navidrome,
+So that a new track added to an album I have synced is picked up on the next incremental sync.
+
+**Acceptance Criteria:**
+
+**Given** Navidrome reports via `getIndexes?ifModifiedSince` that the artist list has NOT changed
+**When** a new song was added to an existing album since the last sync
+**Then** the sync engine still detects the new song by re-fetching affected albums (fallback strategy).
+
+**Given** the full library dump is requested (initial sync)
+**When** `changes_since(EPOCH)` is called on `SubsonicProvider`
+**Then** it uses `search3?query=&songCount=500&songOffset={n}` with pagination to enumerate all tracks.
+
+**Technical Notes:**
+- `SubsonicProvider.changes_since()`: when `getIndexes` returns "not modified", re-fetch all albums in the current manifest and compare song lists (by count + track IDs)
+- No ETag equivalent in Subsonic — compare `size` + `contentType` + `suffix` as a change signal
+- This story can be implemented in parallel with Story 8.3

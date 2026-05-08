@@ -11,7 +11,7 @@
 
 ## Core Principles (from Product Brief)
 1. **Managed Sync Mode:** Sync only what the tool "owns" using a `.hifimule.json` manifest.
-2. **Jellyfin-First:** Connect to the server before hardware.
+2. **Media Server Multi-Provider:** Connect to the media server (Jellyfin, Navidrome, Subsonic, or any OpenSubsonic-compatible server) before hardware. The sync engine uses a provider abstraction layer (`MediaProvider` trait) — never calls server APIs directly.
 3. **Speed is King:** Focus on buffered streaming and server-side transcoding handshakes.
 4. **Scrobble Bridge:** Future-proofing for playback history sync via Rockbox logs.
 

@@ -108,3 +108,11 @@ development_status:
   7-3-device-ui-and-identity-polish: done
   7-4-packaging-and-cicd-hardening: done
   epic-7-retrospective: done
+
+  epic-8: backlog
+  8-1-mediaprovider-trait-and-domain-models: backlog
+  8-2-jellyfinprovider-adapter: backlog
+  8-3-subsonicprovider-adapter: backlog
+  8-4-runtime-server-type-detection-factory: backlog
+  8-5-subsonic-url-credential-sanitization: backlog
+  8-6-incremental-sync-subsonic-album-level-fallback: backlog
