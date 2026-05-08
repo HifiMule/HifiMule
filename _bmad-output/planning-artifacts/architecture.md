@@ -71,16 +71,65 @@ npx create-tauri-app@latest hifimule-ui --template vanilla-ts
 - **Async Runtime:** `tokio` for handling concurrent IO and mount events.
 
 ### Daemon Responsibilities
-- **Auto-Fill Algorithm:** Priority-based music selection engine (favorites → play count → creation date) querying Jellyfin API (IsFavorite, PlayCount, DateCreated fields).
+- **Media Provider Layer:** All server communication is mediated through a `MediaProvider` trait (`providers/jellyfin.rs` + `providers/subsonic.rs`). The daemon never calls server APIs directly — it holds an `Arc<dyn MediaProvider>` resolved at connect time based on server type detection.
+- **Auto-Fill Algorithm:** Priority-based music selection engine (favorites → play count → creation date) querying the active `MediaProvider` via `get_favorites()`, `get_most_played()`, `get_recently_added()`.
 - **Auto-Sync Controller:** Monitors device detection events and triggers sync automatically for configured devices without UI interaction.
-- **Transcoding Negotiator:** When a device has a `transcoding_profile_id` set, calls `POST /Items/{id}/PlaybackInfo` with the associated `DeviceProfile` payload to negotiate a server-side transcoded stream URL before each file transfer.
+- **Transcoding Negotiator:** Provider-specific. Jellyfin: `POST /Items/{id}/PlaybackInfo` with `DeviceProfile` payload. Subsonic: `stream?format=mp3&maxBitRate=192` — delegated to provider's `download_url()`.
 - **Multi-Device Tracker:** Maintains a map of all currently connected managed devices; exposes selection API so the UI can switch the active device context at any time. `selectedDevicePath` may be null; when null, the UI enters a locked state (basket empty, add buttons disabled). The device hub is always visible when at least one device is connected.
+
+### Media Provider Layer
+
+All server communication is routed through the `MediaProvider` trait:
+
+```rust
+#[async_trait]
+pub trait MediaProvider: Send + Sync {
+    async fn list_libraries(&self) -> Result<Vec<Library>, ProviderError>;
+    async fn list_artists(&self, library_id: Option<&str>) -> Result<Vec<Artist>, ProviderError>;
+    async fn get_artist(&self, id: &str) -> Result<ArtistWithAlbums, ProviderError>;
+    async fn get_album(&self, id: &str) -> Result<AlbumWithTracks, ProviderError>;
+    async fn search(&self, query: &str) -> Result<SearchResult, ProviderError>;
+    fn download_url(&self, track_id: &str, profile: &TranscodeProfile) -> Result<Url, ProviderError>;
+    fn cover_art_url(&self, item_id: &str, size: u32) -> Result<Url, ProviderError>;
+    async fn list_playlists(&self) -> Result<Vec<Playlist>, ProviderError>;
+    async fn get_playlist(&self, id: &str) -> Result<PlaylistWithTracks, ProviderError>;
+    async fn changes_since(&self, since: SystemTime) -> Result<Vec<ChangeEvent>, ProviderError>;
+    fn server_type(&self) -> ServerType;
+    fn capabilities(&self) -> &Capabilities;
+}
+
+pub enum ServerType { Jellyfin, Subsonic }
+```
+
+Domain types (`Song`, `Album`, `Artist`, `Playlist`) live in `domain/models.rs` — independent of API DTOs. DTOs map to domain types via `From` conversions at the adapter boundary.
+
+**Key normalization rules:**
+- All IDs: `String` (Navidrome uses MD5 hashes — never `i64`/`u64`)
+- Duration: `u32` seconds (`runTimeTicks ÷ 10_000_000` for Jellyfin, direct for Subsonic)
+- Bitrate: `u32` kbps (convert Jellyfin bps fields at DTO boundary)
+- Cover art ref: `Option<String>` (Subsonic `coverArt` field ≠ song ID)
+
+**Project structure additions:**
+```
+hifimule-daemon/src/
+├── providers/
+│   ├── mod.rs      (MediaProvider trait, ProviderError, ServerType)
+│   ├── jellyfin.rs (JellyfinProvider — wraps existing api.rs)
+│   └── subsonic.rs (SubsonicProvider — opensubsonic crate)
+├── domain/
+│   └── models.rs   (Song, Album, Artist, Playlist — API-agnostic)
+```
+
+**Crate additions:**
+- `jellyfin-sdk = "=0.x.y"` (pin exact pre-1.0 version)
+- `opensubsonic = "latest"`
+- `async-trait = "0.1"`
 
 ### Data Architecture
 - **Daemon State:** Managed via a local SQLite database to ensure atomic scrobble commits and robust history tracking.
 - **UI Preferences:** Stored in standard JSON configuration files for ease of access from the Tauri frontend.
 - **Device Profile Fields:** `auto_fill_enabled BOOLEAN DEFAULT false`, `max_fill_bytes INTEGER NULL` (null = fill to capacity), `auto_sync_on_connect BOOLEAN DEFAULT false`, `transcoding_profile_id TEXT NULL` (references id in `device-profiles.json`; null = passthrough).
-- **Manifest Extension:** `.hifimule.json` includes `auto_sync_on_connect` (boolean), `auto_fill` block (`{ "enabled": bool, "maxBytes": number | null }`), `transcoding_profile_id` (string | null), `name` (string | null), and `icon` (string | null). Both `name` and `icon` use `#[serde(default)]` for backward compatibility with manifests written before Story 2.9.
+- **Manifest Extension:** `.hifimule.json` includes `auto_sync_on_connect` (boolean), `auto_fill` block (`{ "enabled": bool, "maxBytes": number | null }`), `transcoding_profile_id` (string | null), `name` (string | null), `icon` (string | null), and `server_id` (string | null — normalized server URL for multi-server manifests). All new fields use `#[serde(default)]` for backward compatibility.
 - **device-profiles.json:** Seeded to `{app_data_dir}/device-profiles.json` on first daemon startup from an embedded binary asset (`include_bytes!`). User-editable post-install. Contains named `DeviceProfile` payloads for Jellyfin PlaybackInfo negotiation. A `passthrough` profile (`deviceProfile: null`) explicitly disables transcoding.
 
 ### DeviceManager Struct
@@ -92,7 +141,9 @@ unrecognized_device_path: Option<PathBuf>            // device awaiting initiali
 `get_current_device()` returns the manifest for `selected_device_path`. All existing callers (basket, sync, manifest, storage) are unchanged. When only one device is connected it is auto-selected.
 
 ### Authentication & Security
-- **Credential Management:** All Jellyfin tokens are stored in the OS-native secure vault (Windows Credential Manager, macOS Keychain, Linux Secret Service) using the `keyring` crate.
+- **Credential Management:** Server credentials are stored in the OS-native secure vault (Windows Credential Manager, macOS Keychain, Linux Secret Service) using the `keyring` crate.
+  - **Jellyfin:** Stores a rotatable access token. Re-authenticates on 401.
+  - **Subsonic/OpenSubsonic:** Stores the user password (encrypted). Auth is stateless — credentials are sent on every request as `t=md5(password+salt)` + `s=salt`. The password is used only to compute per-request tokens; it is never stored in plaintext.
 - **Process Isolation:** The UI and Daemon communicate over a restricted local loopback, minimizing system exposure.
 
 ### API & Communication Patterns
@@ -103,6 +154,9 @@ unrecognized_device_path: Option<PathBuf>            // device awaiting initiali
 - **Auto-Fill Settings IPC:** `sync.setAutoFill` — Persist auto-fill settings per device profile. Params: `{ deviceId, autoFillEnabled, maxFillBytes?, autoSyncOnConnect }`.
 - **`sync.start` params (extended):** `{ devicePath: string, itemIds: string[], autoFill?: { enabled: boolean, maxBytes?: number, excludeItemIds: string[] } }` — if `autoFill.enabled`, the daemon calls `run_auto_fill()` and merges the resulting IDs with `itemIds` before executing sync. Mirrors the daemon-initiated auto-sync path (`main.rs:503`).
 - **Virtual basket slots:** Two UI-only marker types stored in the basket that represent deferred expansion. `AutoFillSlot` (`id: '__auto_fill_slot__'`) is passed to `sync.start` as the `autoFill` param, not as an `itemId`. `MusicArtist` items are passed as regular `itemIds`; the existing container-expansion logic at `rpc.rs:807–866` resolves them to tracks at sync time.
+- **Server Connect IPC:**
+  - `server.connect(params: { url: string, serverType: 'jellyfin' | 'subsonic' | 'auto', username: string, password: string })` → `{ ok: true, serverType: string, serverVersion: string }` — when `serverType: 'auto'`, daemon pings the URL: checks `openSubsonic` flag in Subsonic ping response, falls back to Jellyfin `/System/Info` detection. Returns detected type.
+  - `get_daemon_state` response gains: `serverType: 'jellyfin' | 'subsonic' | null` and `serverVersion: string | null`.
 - **Multi-Device IPC:**
   - `device.list` → `Array<{ path: string, deviceId: string, name: string | null, icon: string | null }>` — all connected managed devices.
   - `device.select(params: { path: string })` → `{ ok: true }` — sets the active device context for all operations.
@@ -206,6 +260,14 @@ struct MtpBackend { device: MtpHandle }    // WPD (Win) / libmtp (Linux, macOS)
 
 **Enforcement:** All AI agents MUST use `DeviceIO` methods for any read/write targeting the device. Never call `std::fs` with a device path directly.
 
+### Subsonic URL Sanitization (Security Requirement)
+
+Subsonic embeds auth credentials (`u`, `p`, `t`, `s`) as query parameters in every URL, including stream/download URLs. This is a security requirement, not an optimization:
+
+- All Subsonic URLs **MUST** be sanitized via `sanitize_subsonic_url()` before logging.
+- The function strips `u`, `p`, `t`, `s` params and replaces with `[REDACTED]`.
+- Stream and download URLs must **NEVER** appear in log files with credentials intact.
+
 ### Enforcement Guidelines
 
 **All AI Agents MUST:**
@@ -213,3 +275,6 @@ struct MtpBackend { device: MtpHandle }    // WPD (Win) / libmtp (Linux, macOS)
 - Validate filesystem path lengths before attempting write operations on legacy hardware.
 - Commit manifest changes ONLY after `sync_all` has returned successfully.
 - Use `DeviceIO` trait methods for all device file operations — never `std::fs` directly with a device path.
+- Route all media server API calls through `Arc<dyn MediaProvider>` — never call Jellyfin or Subsonic HTTP APIs directly outside of `providers/` module.
+- Call `sanitize_subsonic_url()` on any Subsonic URL before passing to `tracing::` macros or file-based logging.
+- Use `String` for all item/track/album/artist IDs — never `i64` or `u64`.

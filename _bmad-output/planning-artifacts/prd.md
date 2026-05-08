@@ -21,10 +21,11 @@ workflowType: 'prd'
 - **Friction-Free Bridge:** Users connect hardware and sync with zero confusion or manual file management.
 - **Hardware Safety:** Users feel confident that legacy hardware constraints (path-length limits, character sets) are automatically handled.
 - **Data Integrity:** Users trust that the "Managed Sync" model will never touch or delete their personal unmanaged files.
-- **Ecosystem Continuity:** Listen history from the device is reflected on the Jellyfin server, making the DAP feel part of the modern library.
+- **Ecosystem Continuity:** Listen history from the device is reflected on the media server, making the DAP feel part of the modern library.
+- **Server Flexibility:** Users are not locked into a single media server. HifiMule works seamlessly with Jellyfin, Navidrome, Subsonic, and any OpenSubsonic-compatible server.
 
 ### Business Success
-- **Legacy Ecosystem Essential:** HifiMule becomes the top recommendation for the Rockbox/DAP community.
+- **Legacy Ecosystem Essential:** HifiMule becomes the top recommendation for the Rockbox/DAP community regardless of media server choice (Jellyfin, Navidrome, or Subsonic-compatible servers).
 - **Cross-Platform Parity:** Identical user experience across Windows, Linux, and macOS with zero feature loss.
 
 ### Technical Success
@@ -68,7 +69,7 @@ workflowType: 'prd'
 *   **Success Moment:** She unplugs and leaves. Zero clicks. The auto-fill prioritized her favorite running tracks and the tool handled everything silently in the background.
 
 ### The "Silent Engine" (Admin Setup)
-*   **Narrative:** Alexis sets up HifiMule on a new Mac Mini. He runs a simple wizard to connect to his Jellyfin server and selects his primary User Profile.
+*   **Narrative:** Alexis sets up HifiMule on a new Mac Mini. He runs a simple wizard to connect to his media server (Jellyfin or Navidrome), which is auto-detected by type, and selects his primary User Profile.
 *   **Success Moment:** The Rust engine sits in the system tray, consuming negligible memory (< 10MB) while waiting for the next USB hardware connection.
 
 ### The Mid-Sync Eject (Edge Case Recovery)
@@ -149,12 +150,12 @@ As a cross-platform desktop application, HifiMule consists of a performance-crit
 - **FR26:** The system can initialize a new `.hifimule.json` manifest on a connected device that has not previously been managed, capturing a hardware identifier, a designated sync folder path, an associated Jellyfin user profile, a user-provided display name, and an optional icon identifier selected from a built-in library.
 
 ### 2. Server & Profile Management
-- **FR5:** Users can configure Jellyfin server credentials (URL, username, token).
-- **FR6:** Users can select a specific Jellyfin user profile for syncing.
-- **FR7:** The system can maintain a persistent, encrypted connection state to the Jellyfin server.
+- **FR5:** Users can configure media server credentials (URL, server type, username, and either an API token for Jellyfin or username+password for Subsonic/OpenSubsonic servers). The system auto-detects the server type by pinging the URL when the user enters it.
+- **FR6:** Users can select a specific user profile from the connected media server for syncing.
+- **FR7:** The system can maintain a persistent, encrypted connection state to the configured media server. For Jellyfin, the access token is stored. For Subsonic/OpenSubsonic, the user password is stored (encrypted) and used to sign each request stateless-style.
 
 ### 3. Content Selection & Browsing
-- **FR8:** Users can browse Jellyfin Playlists, Genres, and Artists within the UI.
+- **FR8:** Users can browse server Playlists, Artists, and Albums from the connected media server, regardless of server type. The provider abstraction normalizes the library tree across Jellyfin (unified `/Items` query) and Subsonic (method-per-level: `getArtists` → `getArtist` → `getAlbum`).
 - **FR9:** Users can select specific playlists or entities for synchronization.
 - **FR10:** The system can report real-time storage availability on the target device.
 - **FR11:** Users can see a preview of "Proposed Changes" (files to add, remove, or update) before starting a sync.
@@ -181,7 +182,8 @@ As a cross-platform desktop application, HifiMule consists of a performance-crit
 - **FR21:** Users can toggle "Launch on Startup" behavior. Post-MVP: Fulfilled natively by platform-specific mechanisms (Windows Registry Run key, systemd user unit enable/disable, launchd agent load/unload).
 - **FR22:** The system can provide tray-icon status updates for sync progress and hardware state.
 - **FR23:** The system can send OS-native notifications for sync completion or errors.
-- **FR25:** The system retrieves and displays only music-centric content (Playlists, Albums, Artists, Tracks), automatically filtering out movies, series, and books from Jellyfin views.
+- **FR25:** The system retrieves and displays only music-centric content (Playlists, Albums, Artists, Tracks). For Jellyfin: applies `IncludeItemTypes` filter to exclude movies, series, and books. For Subsonic/Navidrome: uses music-specific endpoints (`getArtists`, `getAlbum`, `getPlaylists`) which are inherently music-only.
+- **FR35:** The system supports Jellyfin, Navidrome, Subsonic, and any OpenSubsonic-compatible media server. Server type is auto-detected at connection time by pinging the server URL. Detected capability extensions (OpenSubsonic) are cached and used to enable per-server features.
 
 ### 7. Packaging & Distribution
 - **FR27:** The system can be packaged into platform-native installers (MSI for Windows, DMG for macOS, AppImage/.deb for Linux) using the Tauri v2 bundler.
