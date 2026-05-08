@@ -356,6 +356,24 @@ pub mod windows_wpd {
         }
     }
 
+    fn first_storage_id(content: &IPortableDeviceContent) -> Result<String> {
+        unsafe {
+            let device_hstr = HSTRING::from("DEVICE");
+            let root_enum = content.EnumObjects(0, PCWSTR(device_hstr.as_ptr()), None)?;
+            let mut storage_buf = [PWSTR::null()];
+            let mut fetched = 0u32;
+            let _ = root_enum.Next(&mut storage_buf, &mut fetched);
+            if fetched == 0 || storage_buf[0].is_null() {
+                return Err(anyhow::anyhow!(
+                    "WPD: no storage objects found under DEVICE"
+                ));
+            }
+            let storage_id = storage_buf[0].to_string()?;
+            CoTaskMemFree(Some(storage_buf[0].0 as *const _));
+            Ok(storage_id)
+        }
+    }
+
     // Returns the first child object ID under `parent_id` whose
     // WPD_OBJECT_ORIGINAL_FILE_NAME matches `name` (case-insensitive), or None.
     fn find_child_object_id(
@@ -1218,24 +1236,23 @@ pub mod windows_wpd {
                 let storage_id_str = if let Some(ref id) = self.storage_id {
                     id.clone()
                 } else {
-                    let device_hstr = HSTRING::from("DEVICE");
-                    let root_enum = content.EnumObjects(0, PCWSTR(device_hstr.as_ptr()), None)?;
-                    let mut storage_buf = [PWSTR::null()];
-                    let mut fetched = 0u32;
-                    let _ = root_enum.Next(&mut storage_buf, &mut fetched);
-                    if fetched == 0 || storage_buf[0].is_null() {
-                        return Err(anyhow::anyhow!(
-                            "WPD: no storage objects found under DEVICE"
-                        ));
-                    }
-                    let s = storage_buf[0].to_string()?;
-                    CoTaskMemFree(Some(storage_buf[0].0 as *const _));
-                    s
+                    first_storage_id(&content)?
                 };
 
                 let storage_hstr = HSTRING::from(&storage_id_str);
                 let values = props.GetValues(PCWSTR(storage_hstr.as_ptr()), None)?;
                 Ok(values.GetUnsignedLargeIntegerValue(&WPD_STORAGE_FREE_SPACE_IN_BYTES)?)
+            }
+        }
+
+        fn storage_id(&self) -> Result<Option<String>> {
+            if let Some(id) = self.storage_id.clone() {
+                return Ok(Some(id));
+            }
+            let (_com, device) = self.session()?;
+            unsafe {
+                let content = device.Content()?;
+                first_storage_id(&content).map(Some)
             }
         }
 
