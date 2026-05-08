@@ -817,11 +817,12 @@ fn to_desired_item(item: api::JellyfinItem) -> sync::DesiredItem {
     }
 }
 
-// Helper to load icon with proper error handling
-// Extracted from main for testability
 fn load_icon(bytes: &[u8], name: &str) -> anyhow::Result<Icon> {
+    // Resize to 32x32 with Lanczos3 before handing off to the OS.
+    // Windows tray slots are 16–32 px; letting the OS scale from 1024 px produces blurry results.
     let image = image::load_from_memory(bytes)
         .map_err(|e| anyhow::anyhow!("Failed to load {} icon: {}", name, e))?
+        .resize_exact(32, 32, image::imageops::FilterType::Lanczos3)
         .to_rgba8();
     let (width, height) = image.dimensions();
     Icon::from_rgba(image.into_raw(), width, height)
