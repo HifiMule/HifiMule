@@ -26,7 +26,10 @@ $releases = $releasesJson | ConvertFrom-Json
 $release = $releases | Where-Object { $_.tag_name -eq $Tag } | Select-Object -First 1
 
 if (-not $release) {
-  throw "Release with tag '$Tag' was not found, including draft releases"
+  $visibleTags = ($releases | Select-Object -First 20 | ForEach-Object {
+    "$($_.tag_name) (draft=$($_.draft), prerelease=$($_.prerelease))"
+  }) -join ", "
+  throw "Release with tag '$Tag' was not found. Visible releases: $visibleTags"
 }
 
 $asset = $release.assets |
