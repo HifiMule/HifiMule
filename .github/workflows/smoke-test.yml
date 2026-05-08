@@ -18,6 +18,9 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+permissions:
+  contents: read
+
 jobs:
   smoke-windows:
     runs-on: windows-latest
@@ -26,7 +29,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download MSI artifact
-        run: gh release download ${{ inputs.release_tag }} --pattern "*.msi" --dir ./installers
+        shell: pwsh
+        run: ./scripts/download-release-asset.ps1 -Tag '${{ inputs.release_tag }}' -Pattern '*.msi' -Directory './installers'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -58,7 +62,8 @@ jobs:
           sudo apt-get install -y xvfb jq libgtk-3-0 libwebkit2gtk-4.1-0 libappindicator3-1
 
       - name: Download .deb artifact
-        run: gh release download ${{ inputs.release_tag }} --pattern "*.deb" --dir ./installers
+        shell: pwsh
+        run: ./scripts/download-release-asset.ps1 -Tag '${{ inputs.release_tag }}' -Pattern '*.deb' -Directory './installers'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -84,7 +89,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download DMG artifact
-        run: gh release download ${{ inputs.release_tag }} --pattern "*.dmg" --dir ./installers
+        shell: pwsh
+        run: ./scripts/download-release-asset.ps1 -Tag '${{ inputs.release_tag }}' -Pattern '*.dmg' -Directory './installers'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
