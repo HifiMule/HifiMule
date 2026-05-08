@@ -1,7 +1,7 @@
 ---
 stepsCompleted: [1, 2]
 inputDocuments: []
-session_topic: 'Finding a new product name for HifiMule'
+session_topic: 'Finding a new product name for JellyfinSync'
 session_goals: 'A memorable, server-agnostic name that evokes music + sync + portability, does not tie to any specific server or device brand, and has strong branding potential'
 selected_approach: 'ai-recommended'
 techniques_used: ['First Principles Thinking', 'Analogical Thinking', 'Concept Blending']
@@ -16,12 +16,12 @@ context_file: ''
 
 ## Session Overview
 
-**Topic:** Finding a new product name for HifiMule
+**Topic:** Finding a new product name for JellyfinSync
 **Goals:** A memorable, server-agnostic name that evokes music + sync + portability, does not tie to any specific server or device brand, and has strong branding potential
 
 ### Session Setup
 
-HifiMule is a Tauri-based desktop app that syncs music from self-hosted media servers (Jellyfin, expanding to Navidrome and Subsonic) to portable devices (USB mass storage, MTP devices, iPod). The current name is too server-specific and won't scale to the broader multi-server, multi-device vision. A new name is needed.
+JellyfinSync is a Tauri-based desktop app that syncs music from self-hosted media servers (Jellyfin, expanding to Navidrome and Subsonic) to portable devices (USB mass storage, MTP devices, iPod). The current name is too server-specific and won't scale to the broader multi-server, multi-device vision. A new name is needed.
 
 ## Technique Selection
 
