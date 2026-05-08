@@ -35,12 +35,12 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: latest
+          version: 10.24.0
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: lts/*
+          node-version: "20"
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -61,6 +61,7 @@ jobs:
             libxdo-dev \
             libmtp-dev
           pkg-config --libs libmtp
+          test -e /usr/lib/x86_64-linux-gnu/libmtp.so.9
 
       - name: Install macOS dependencies
         if: matrix.platform == 'macos-latest'
@@ -121,8 +122,59 @@ jobs:
         if: matrix.platform != 'macos-latest'
         run: node scripts/prepare-sidecar.mjs
 
+      - name: Bundle macOS libmtp dylibs
+        if: matrix.platform == 'macos-latest'
+        run: |
+          set -euo pipefail
+          LIB_DIR="jellyfinsync-ui/src-tauri/bundled-libs"
+          mkdir -p "$LIB_DIR"
+          LIBMTP_PREFIX="$(brew --prefix libmtp)"
+          LIBMTP_DYLIB="$(find "$LIBMTP_PREFIX/lib" -name 'libmtp*.dylib' ! -type l -print -quit)"
+          test -n "$LIBMTP_DYLIB" || { echo "libmtp dylib not found"; exit 1; }
+
+          copy_brew_dylib() {
+            local dylib="$1"
+            local target="$LIB_DIR/$(basename "$dylib")"
+            cp "$dylib" "$target"
+            chmod u+w "$target"
+            install_name_tool -id "@executable_path/../Resources/bundled-libs/$(basename "$target")" "$target" || true
+            otool -L "$target" | awk '/\/opt\/homebrew|\/usr\/local/ { print $1 }' | while read -r dep; do
+              if [[ -f "$dep" && ! -f "$LIB_DIR/$(basename "$dep")" ]]; then
+                copy_brew_dylib "$dep"
+              fi
+            done
+          }
+
+          copy_brew_dylib "$LIBMTP_DYLIB"
+
+          find "$LIB_DIR" -name '*.dylib' -print0 | while IFS= read -r -d '' dylib; do
+            otool -L "$dylib" | awk '/\/opt\/homebrew|\/usr\/local/ { print $1 }' | while read -r dep; do
+              dep_name="$(basename "$dep")"
+              if [[ -f "$LIB_DIR/$dep_name" ]]; then
+                install_name_tool -change "$dep" "@executable_path/../Resources/bundled-libs/$dep_name" "$dylib"
+              fi
+            done
+          done
+
+          find jellyfinsync-ui/src-tauri/sidecars -type f -name 'jellyfinsync-daemon-*apple-darwin' -print0 | while IFS= read -r -d '' sidecar; do
+            otool -L "$sidecar" | awk '/libmtp.*\.dylib/ { print $1 }' | while read -r dep; do
+              install_name_tool -change "$dep" "@executable_path/../Resources/bundled-libs/$(basename "$LIBMTP_DYLIB")" "$sidecar"
+            done
+            if otool -L "$sidecar" | grep -E '/opt/homebrew|/usr/local' | grep -q 'libmtp'; then
+              echo "Homebrew libmtp path still present in $sidecar"
+              otool -L "$sidecar"
+              exit 1
+            fi
+          done
+
+      - name: Check macOS minimum system version reminder
+        if: matrix.platform == 'macos-latest'
+        run: node scripts/check-macos-minimum-system-version.mjs
+
       - name: Build and release
-        uses: tauri-apps/tauri-action@v0
+        id: build_and_release
+        # action-v0.6.2 (latest reviewed for this hardening pass)
+        uses: tauri-apps/tauri-action@84b9d35
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -133,3 +185,43 @@ jobs:
           prerelease: false
           projectPath: jellyfinsync-ui
           args: ${{ matrix.args }}
+
+      - name: Verify Linux AppImage bundles libmtp
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          set -euo pipefail
+          APPIMAGE="$(find jellyfinsync-ui/src-tauri/target/release/bundle -name '*.AppImage' -print -quit)"
+          test -n "$APPIMAGE" || { echo "AppImage artifact not found"; exit 1; }
+          chmod +x "$APPIMAGE"
+          rm -rf squashfs-root
+          "$APPIMAGE" --appimage-extract >/dev/null
+          test -e squashfs-root/usr/lib/libmtp.so.9 || {
+            echo "Bundled libmtp.so.9 not found in extracted AppImage"
+            find squashfs-root -name 'libmtp*' -print
+            exit 1
+          }
+
+      - name: Verify macOS bundle uses bundled libmtp
+        if: matrix.platform == 'macos-latest'
+        run: |
+          set -euo pipefail
+          APP_DIR="$(find jellyfinsync-ui/src-tauri/target -path '*.app' -type d -print -quit)"
+          test -n "$APP_DIR" || { echo ".app bundle not found"; exit 1; }
+          test -n "$(find "$APP_DIR/Contents/Resources/bundled-libs" -name 'libmtp*.dylib' -print -quit)" || {
+            echo "Bundled libmtp dylib not found in app resources"
+            exit 1
+          }
+          find "$APP_DIR/Contents/MacOS" -type f -name 'jellyfinsync-daemon*' -print0 | while IFS= read -r -d '' sidecar; do
+            if otool -L "$sidecar" | grep -E '/opt/homebrew|/usr/local' | grep -q 'libmtp'; then
+              echo "Homebrew libmtp path still present in bundled sidecar: $sidecar"
+              otool -L "$sidecar"
+              exit 1
+            fi
+          done
+
+  smoke-test:
+    needs: release
+    uses: ./.github/workflows/smoke-test.yml
+    with:
+      release_tag: ${{ github.ref_name }}
+    secrets: inherit

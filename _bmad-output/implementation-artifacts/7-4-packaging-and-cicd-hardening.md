@@ -1,6 +1,6 @@
 # Story 7.4: Packaging & CI/CD Hardening
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -44,56 +44,56 @@ so that every release artifact is verifiable, installable on clean machines, and
 
 ## Tasks / Subtasks
 
-- [ ] **T1: Declare and verify Linux runtime dependencies** (AC: #1, #14)
-  - [ ] In `jellyfinsync-ui/src-tauri/tauri.conf.json`, add Linux bundle config for `.deb` runtime deps: `"linux": { "deb": { "depends": ["libmtp9"] } }` under `bundle`.
-  - [ ] Keep build-time deps in `.github/workflows/release.yml` (`libmtp-dev`, `pkgconf`) separate from runtime deps (`libmtp9`).
-  - [ ] Update `scripts/smoke-tests/smoke-linux.sh` so the clean install path uses `sudo dpkg -i "$DEB"` followed by `sudo apt-get install -f -y` only for dependency resolution, then launches the installed desktop binary and polls `daemon.health`.
-  - [ ] Add a CI check or smoke-test assertion that `dpkg-deb -f "$DEB" Depends` contains a `libmtp` runtime package.
+- [x] **T1: Declare and verify Linux runtime dependencies** (AC: #1, #14)
+  - [x] In `jellyfinsync-ui/src-tauri/tauri.conf.json`, add Linux bundle config for `.deb` runtime deps: `"linux": { "deb": { "depends": ["libmtp9"] } }` under `bundle`.
+  - [x] Keep build-time deps in `.github/workflows/release.yml` (`libmtp-dev`, `pkgconf`) separate from runtime deps (`libmtp9`).
+  - [x] Update `scripts/smoke-tests/smoke-linux.sh` so the clean install path uses `sudo dpkg -i "$DEB"` followed by `sudo apt-get install -f -y` only for dependency resolution, then launches the installed desktop binary and polls `daemon.health`.
+  - [x] Add a CI check or smoke-test assertion that `dpkg-deb -f "$DEB" Depends` contains a `libmtp` runtime package.
 
-- [ ] **T2: Bundle `libmtp` into Linux AppImage** (AC: #2)
-  - [ ] Extend the Linux release step in `.github/workflows/release.yml` to locate `libmtp.so*` after installing `libmtp-dev`.
-  - [ ] Pass the library to the AppImage packaging path using `linuxdeploy --library` or an equivalent AppDir fixup supported by the Tauri build output.
-  - [ ] Verify with `ldd` / AppImage extraction that the packaged app resolves `libmtp` from inside the AppImage, not only from `/usr/lib`.
+- [x] **T2: Bundle `libmtp` into Linux AppImage** (AC: #2)
+  - [x] Extend the Linux release step in `.github/workflows/release.yml` to locate `libmtp.so*` after installing `libmtp-dev`.
+  - [x] Pass the library to the AppImage packaging path using `linuxdeploy --library` or an equivalent AppDir fixup supported by the Tauri build output.
+  - [x] Verify with `ldd` / AppImage extraction that the packaged app resolves `libmtp` from inside the AppImage, not only from `/usr/lib`.
 
-- [ ] **T3: Bundle `libmtp.dylib` into macOS `.app`** (AC: #3, #13)
-  - [ ] Add a macOS post-build fixup step in `.github/workflows/release.yml` or a dedicated script that copies Homebrew `libmtp*.dylib` and transitive dylibs into the `.app` bundle.
-  - [ ] Use `otool -L` to inspect daemon/UI sidecar linkage and `install_name_tool` or `dylibbundler` to rewrite references to `@rpath` / bundled paths.
-  - [ ] Preserve the existing universal-build behavior that merges arm64 and x86_64 `libmtp` before packaging.
-  - [ ] Add a release-step check that fails if `otool -L` still points at a Homebrew path for `libmtp`.
-  - [ ] Add a CI lint or checklist file reminding maintainers to update `bundle.macOS.minimumSystemVersion` when macOS dependencies raise the floor.
+- [x] **T3: Bundle `libmtp.dylib` into macOS `.app`** (AC: #3, #13)
+  - [x] Add a macOS post-build fixup step in `.github/workflows/release.yml` or a dedicated script that copies Homebrew `libmtp*.dylib` and transitive dylibs into the `.app` bundle.
+  - [x] Use `otool -L` to inspect daemon/UI sidecar linkage and `install_name_tool` or `dylibbundler` to rewrite references to `@rpath` / bundled paths.
+  - [x] Preserve the existing universal-build behavior that merges arm64 and x86_64 `libmtp` before packaging.
+  - [x] Add a release-step check that fails if `otool -L` still points at a Homebrew path for `libmtp`.
+  - [x] Add a CI lint or checklist file reminding maintainers to update `bundle.macOS.minimumSystemVersion` when macOS dependencies raise the floor.
 
-- [ ] **T4: Pin release workflow supply-chain inputs** (AC: #4)
-  - [ ] In `.github/workflows/release.yml`, change `pnpm/action-setup@v4` plus `version: latest` to a specific action version and pnpm version.
-  - [ ] Change `actions/setup-node` `node-version: lts/*` to `node-version: "20"`.
-  - [ ] Pin `tauri-apps/tauri-action` to a commit SHA, with a comment naming the upstream version/tag the SHA came from.
-  - [ ] Do not broaden `GITHUB_TOKEN` permissions beyond `contents: write`.
+- [x] **T4: Pin release workflow supply-chain inputs** (AC: #4)
+  - [x] In `.github/workflows/release.yml`, change `pnpm/action-setup@v4` plus `version: latest` to a specific action version and pnpm version.
+  - [x] Change `actions/setup-node` `node-version: lts/*` to `node-version: "20"`.
+  - [x] Pin `tauri-apps/tauri-action` to a commit SHA, with a comment naming the upstream version/tag the SHA came from.
+  - [x] Do not broaden `GITHUB_TOKEN` permissions beyond `contents: write`.
 
-- [ ] **T5: Harden `prepare-sidecar.mjs`** (AC: #5, #6, #7, #8, #9)
-  - [ ] Replace direct `copyFileSync(sourceBinary, destBinary)` with copy-to-temp plus `renameSync` into the final sidecar path; delete the temp/final partial on failure.
-  - [ ] Before copying, remove stale `jellyfinsync-daemon-*` sidecars from `jellyfinsync-ui/src-tauri/sidecars`, preserving unrelated files if any are added later.
-  - [ ] Parse `rustc -vV` with a strict `^host: (\\S+)$` regex; fail with stderr containing the captured `rustc -vV` output when absent.
-  - [ ] Detect missing `jellyfinsync-ui/node_modules`; run `npm install` in `jellyfinsync-ui` or fail with a clear instruction if package-manager choice is ambiguous.
-  - [ ] Resolve all paths from `import.meta.url` / repository root so the script works when invoked from either the workspace root or `jellyfinsync-ui`.
-  - [ ] Update `tauri.conf.json` `build.beforeBuildCommand` to call the script via a path that is valid from `jellyfinsync-ui` (current command is `npm run build && node ../scripts/prepare-sidecar.mjs`).
+- [x] **T5: Harden `prepare-sidecar.mjs`** (AC: #5, #6, #7, #8, #9)
+  - [x] Replace direct `copyFileSync(sourceBinary, destBinary)` with copy-to-temp plus `renameSync` into the final sidecar path; delete the temp/final partial on failure.
+  - [x] Before copying, remove stale `jellyfinsync-daemon-*` sidecars from `jellyfinsync-ui/src-tauri/sidecars`, preserving unrelated files if any are added later.
+  - [x] Parse `rustc -vV` with a strict `^host: (\\S+)$` regex; fail with stderr containing the captured `rustc -vV` output when absent.
+  - [x] Detect missing `jellyfinsync-ui/node_modules`; run `npm install` in `jellyfinsync-ui` or fail with a clear instruction if package-manager choice is ambiguous.
+  - [x] Resolve all paths from `import.meta.url` / repository root so the script works when invoked from either the workspace root or `jellyfinsync-ui`.
+  - [x] Update `tauri.conf.json` `build.beforeBuildCommand` to call the script via a path that is valid from `jellyfinsync-ui` (current command is `npm run build && node ../scripts/prepare-sidecar.mjs`).
 
-- [ ] **T6: Factor and test macOS boot-volume exclusion** (AC: #10)
-  - [ ] In `jellyfinsync-daemon/src/device/mod.rs`, factor the macOS root-device decision into a small pure helper that accepts candidate/root device IDs or metadata results.
-  - [ ] Add tests in `jellyfinsync-daemon/src/device/tests.rs` covering same-device skip, different-device include, and metadata-error fail-safe skip.
-  - [ ] Preserve current behavior: APFS firmlink-safe device-ID comparison, no direct `canonicalize` dependency.
+- [x] **T6: Factor and test macOS boot-volume exclusion** (AC: #10)
+  - [x] In `jellyfinsync-daemon/src/device/mod.rs`, factor the macOS root-device decision into a small pure helper that accepts candidate/root device IDs or metadata results.
+  - [x] Add tests in `jellyfinsync-daemon/src/device/tests.rs` covering same-device skip, different-device include, and metadata-error fail-safe skip.
+  - [x] Preserve current behavior: APFS firmlink-safe device-ID comparison, no direct `canonicalize` dependency.
 
-- [ ] **T7: Make smoke tests release-pipeline callable and less brittle** (AC: #11, #12, #15, #16)
-  - [ ] Add `workflow_call` to `.github/workflows/smoke-test.yml` with `release_tag` as a required string input, while preserving manual `workflow_dispatch`.
-  - [ ] Update all references from `github.event.inputs.release_tag` to an expression that works for both triggers.
-  - [ ] Optionally add a release workflow job that calls `./.github/workflows/smoke-test.yml` after artifacts are published to the draft release, passing `${{ github.ref_name }}`.
-  - [ ] In `scripts/smoke-tests/smoke-macos.sh`, discover the `.app` under the mount point using `find` and derive `APP_NAME` / `APP_PATH` from the result.
-  - [ ] In `scripts/smoke-tests/smoke-linux.sh`, replace hardcoded `Xvfb :99` with `Xvfb -displayfd` or a deterministic `:99` to `:100` fallback loop.
-  - [ ] In `scripts/smoke-tests/smoke-windows.ps1`, read install location from registry first, then fall back to common locations. Add/update WiX config to write `HKLM\SOFTWARE\JellyfinSync\InstallDir`.
+- [x] **T7: Make smoke tests release-pipeline callable and less brittle** (AC: #11, #12, #15, #16)
+  - [x] Add `workflow_call` to `.github/workflows/smoke-test.yml` with `release_tag` as a required string input, while preserving manual `workflow_dispatch`.
+  - [x] Update all references from `github.event.inputs.release_tag` to an expression that works for both triggers.
+  - [x] Optionally add a release workflow job that calls `./.github/workflows/smoke-test.yml` after artifacts are published to the draft release, passing `${{ github.ref_name }}`.
+  - [x] In `scripts/smoke-tests/smoke-macos.sh`, discover the `.app` under the mount point using `find` and derive `APP_NAME` / `APP_PATH` from the result.
+  - [x] In `scripts/smoke-tests/smoke-linux.sh`, replace hardcoded `Xvfb :99` with `Xvfb -displayfd` or a deterministic `:99` to `:100` fallback loop.
+  - [x] In `scripts/smoke-tests/smoke-windows.ps1`, read install location from registry first, then fall back to common locations. Add/update WiX config to write `HKLM\SOFTWARE\JellyfinSync\InstallDir`.
 
-- [ ] **T8: Validate the hardening work** (AC: all)
-  - [ ] Run `rtk cargo test -p jellyfinsync-daemon`.
-  - [ ] Run `rtk tsc` or `npm run build` in `jellyfinsync-ui` after script/config edits.
-  - [ ] Run `node scripts/prepare-sidecar.mjs` from the workspace root and from `jellyfinsync-ui` to prove path handling.
-  - [ ] If local platform limits prevent full installer verification, document which checks were deferred to GitHub Actions and why.
+- [x] **T8: Validate the hardening work** (AC: all)
+  - [x] Run `rtk cargo test -p jellyfinsync-daemon`.
+  - [x] Run `rtk tsc` or `npm run build` in `jellyfinsync-ui` after script/config edits.
+  - [x] Run `node scripts/prepare-sidecar.mjs` from the workspace root and from `jellyfinsync-ui` to prove path handling.
+  - [x] If local platform limits prevent full installer verification, document which checks were deferred to GitHub Actions and why.
 
 ## Dev Notes
 
@@ -161,14 +161,47 @@ so that every release artifact is verifiable, installable on clean machines, and
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+GPT-5
 
 ### Debug Log References
 
+- `rtk cargo test -p jellyfinsync-daemon test_boot_volume_device` — 3 boot-volume helper tests passed.
+- `rtk cargo test -p jellyfinsync-daemon` — 202 daemon tests passed.
+- `rtk cmd /c "set PATH=... && npm.cmd run build"` from `jellyfinsync-ui` — TypeScript and Vite production build passed.
+- `rtk cmd /c "set PATH=... && node scripts/prepare-sidecar.mjs"` from repo root — sidecar preparation passed.
+- `rtk cmd /c "set PATH=... && node ..\scripts\prepare-sidecar.mjs"` from `jellyfinsync-ui` — sidecar preparation passed outside sandbox after sandboxed cargo hit `.cargo-lock` access denied.
+- PowerShell JSON/XML parse checks passed for `tauri.conf.json` and `startup-fragment.wxs`.
+
 ### Completion Notes List
 
+- Added Linux `.deb` `libmtp9` runtime dependency and AppImage file bundling config for `libmtp.so.9`.
+- Hardened release workflow: pinned Node to `20`, pinned pnpm package-manager version, pinned `tauri-action` to a reviewed commit SHA, kept `GITHUB_TOKEN` scoped to `contents: write`, and added release-to-smoke workflow chaining.
+- Added Linux AppImage extraction verification and macOS app-bundle verification so CI fails if `libmtp` is not bundled.
+- Added macOS dylib staging/fixup logic that copies Homebrew `libmtp` and transitive Homebrew dylibs, rewrites install names, and verifies no Homebrew `libmtp` path remains in sidecars.
+- Hardened `prepare-sidecar.mjs` with strict target-triple parsing, `node_modules` recovery, stale sidecar cleanup, atomic temp-copy/rename, and cwd-independent path resolution.
+- Made smoke tests less brittle: Linux verifies `.deb` Depends and auto-selects Xvfb display; macOS discovers the `.app`; Windows resolves install dir from registry with common-location fallback.
+- Added WiX registry value for `HKLM\SOFTWARE\JellyfinSync\InstallDir`.
+- Factored macOS boot-volume exclusion into a pure helper and added tests for same-device skip, different-device allow, and metadata-error fail-safe skip.
+- Local platform limits: full Linux AppImage extraction, macOS dylib `otool` verification, installer smoke tests, and GitHub workflow execution are validated by CI steps added in this story rather than runnable on this Windows workspace.
+
 ### File List
+
+- `.github/workflows/release.yml`
+- `.github/workflows/smoke-test.yml`
+- `jellyfinsync-daemon/src/device/mod.rs`
+- `jellyfinsync-daemon/src/device/tests.rs`
+- `jellyfinsync-ui/src-tauri/bundled-libs/.gitkeep`
+- `jellyfinsync-ui/src-tauri/tauri.conf.json`
+- `jellyfinsync-ui/src-tauri/wix/startup-fragment.wxs`
+- `scripts/check-macos-minimum-system-version.mjs`
+- `scripts/prepare-sidecar.mjs`
+- `scripts/smoke-tests/smoke-linux.sh`
+- `scripts/smoke-tests/smoke-macos.sh`
+- `scripts/smoke-tests/smoke-windows.ps1`
+- `_bmad-output/implementation-artifacts/7-4-packaging-and-cicd-hardening.md`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
 
 ## Change Log
 
 - 2026-05-08: Story context created. Comprehensive packaging, CI/CD, sidecar, smoke-test, and mount-filter test guidance added for dev implementation.
+- 2026-05-08: Implemented packaging and CI/CD hardening; story moved to review.

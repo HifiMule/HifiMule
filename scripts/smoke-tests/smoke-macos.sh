@@ -17,8 +17,8 @@ set -euo pipefail
 PLATFORM="macos"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MOUNT_POINT="/Volumes/JellyfinSync"
-APP_NAME="JellyfinSync"
-APP_PATH="/Applications/${APP_NAME}.app"
+APP_NAME=""
+APP_PATH=""
 
 fail() {
     local step="$1"
@@ -30,9 +30,9 @@ fail() {
 
 cleanup() {
     echo "  Cleaning up ..."
-    pkill -f "$APP_NAME" 2>/dev/null || true
+    [[ -n "$APP_NAME" ]] && pkill -f "$APP_NAME" 2>/dev/null || true
     hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
-    rm -rf "$APP_PATH" 2>/dev/null || true
+    [[ -n "$APP_PATH" ]] && rm -rf "$APP_PATH" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -51,7 +51,14 @@ hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
 hdiutil attach "$DMG" -mountpoint "$MOUNT_POINT" -nobrowse -quiet ||
     fail "install" "hdiutil attach failed"
 
-cp -R "${MOUNT_POINT}/${APP_NAME}.app" /Applications/ ||
+APP_IN_DMG=$(find "$MOUNT_POINT" -maxdepth 1 -name "*.app" -print -quit)
+if [[ -z "$APP_IN_DMG" ]]; then
+    fail "install" "No .app found at DMG mount point: $MOUNT_POINT"
+fi
+APP_NAME="$(basename "$APP_IN_DMG" .app)"
+APP_PATH="/Applications/${APP_NAME}.app"
+
+cp -R "$APP_IN_DMG" /Applications/ ||
     fail "install" "Failed to copy .app to /Applications"
 
 hdiutil detach "$MOUNT_POINT" -quiet || true

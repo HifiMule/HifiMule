@@ -25,6 +25,39 @@ cleanup() {
 }
 trap cleanup EXIT
 
+start_xvfb() {
+    if Xvfb -help 2>&1 | grep -q -- "-displayfd"; then
+        local display_file
+        display_file=$(mktemp)
+        Xvfb -displayfd 1 -screen 0 1024x768x24 >"$display_file" 2>/tmp/jellyfinsync-xvfb.log &
+        XVFB_PID=$!
+        for _ in {1..50}; do
+            if [[ -s "$display_file" ]]; then
+                DISPLAY=":$(cat "$display_file")"
+                export DISPLAY
+                rm -f "$display_file"
+                return 0
+            fi
+            sleep 0.1
+        done
+        rm -f "$display_file"
+        return 1
+    fi
+
+    for display_number in 99 100; do
+        if Xvfb ":${display_number}" -screen 0 1024x768x24 >/tmp/jellyfinsync-xvfb.log 2>&1 & then
+            XVFB_PID=$!
+            sleep 1
+            if kill -0 "$XVFB_PID" 2>/dev/null; then
+                DISPLAY=":${display_number}"
+                export DISPLAY
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
 fail() {
     local step="$1"
     local message="$2"
@@ -41,15 +74,21 @@ if [[ -z "$DEB" ]]; then
     fail "install" "No .deb file found in working directory: $(pwd)"
 fi
 echo "  Package: $DEB"
-sudo dpkg -i "$DEB" || sudo apt-get install -f -y || fail "install" "dpkg -i and dependency fix both failed"
+DEB_DEPENDS=$(dpkg-deb -f "$DEB" Depends || true)
+echo "  Depends: $DEB_DEPENDS"
+if [[ "$DEB_DEPENDS" != *libmtp* ]]; then
+    fail "install" "Package Depends does not include libmtp runtime dependency"
+fi
+if ! sudo dpkg -i "$DEB"; then
+    sudo apt-get install -f -y || fail "install" "dpkg -i and dependency fix both failed"
+fi
 echo "  Install OK"
 
 # --- STEP 2: Launch ---
 echo ""
 echo "==> STEP 2: Launching JellyfinSync via Xvfb ..."
-Xvfb :99 -screen 0 1024x768x24 &
-XVFB_PID=$!
-export DISPLAY=:99
+start_xvfb || fail "launch" "Unable to start Xvfb on an available display"
+echo "  DISPLAY: $DISPLAY"
 
 # The installed binary name comes from productName in tauri.conf.json (lowercase on Linux)
 APP_BIN="jellyfinsync-ui"
