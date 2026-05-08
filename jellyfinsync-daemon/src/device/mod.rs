@@ -354,6 +354,7 @@ impl DeviceManager {
             })
     }
 
+    #[cfg(test)]
     pub async fn get_unrecognized_device_path(&self) -> Option<PathBuf> {
         self.get_unrecognized_device_snapshot()
             .await
@@ -924,13 +925,6 @@ impl DeviceManager {
         .await
     }
 
-    /// Persists auto-fill preferences to the device manifest
-    pub async fn save_auto_fill_prefs(&self, prefs: AutoFillPrefs) -> Result<()> {
-        self.update_manifest(|manifest| {
-            manifest.auto_fill = prefs;
-        })
-        .await
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
