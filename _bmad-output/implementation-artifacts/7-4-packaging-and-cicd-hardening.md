@@ -1,6 +1,6 @@
 # Story 7.4: Packaging & CI/CD Hardening
 
-Status: review
+Status: done
 
 ## Story
 
@@ -201,7 +201,23 @@ GPT-5
 - `_bmad-output/implementation-artifacts/7-4-packaging-and-cicd-hardening.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
 
+### Review Findings
+
+- [x] [Review][Patch] AC4: Pin `pnpm/action-setup` to a specific immutable version tag or commit SHA — currently `@v4` is a mutable major-version tag [.github/workflows/release.yml]
+- [x] [Review][Patch] Move WiX `InstallDir` registry value to `HKCU\SOFTWARE\JellyfinSync` — `HKLM` write requires elevation and silently fails on non-elevated installs; `HKCU` is already checked first by `Get-InstallDir` [jellyfinsync-ui/src-tauri/wix/startup-fragment.wxs]
+- [x] [Review][Patch] AC8: `npm install` used instead of `pnpm install` in node_modules recovery — project uses pnpm workspace; `npm install` may produce incorrect node_modules [scripts/prepare-sidecar.mjs:37]
+- [x] [Review][Patch] AC16 (NSIS gap): NSIS `hooks.nsh` does not write `HKCU\Software\JellyfinSync\InstallDir` — WiX does, but NSIS installs leave `Get-InstallDir` with no registry entry, falling back to hardcoded paths [jellyfinsync-ui/src-tauri/nsis/hooks.nsh]
+- [x] [Review][Patch] `install_name_tool -id ... || true` silently swallows dylib identity rewrite errors in macOS bundling step — should at minimum log a warning on failure [.github/workflows/release.yml — Bundle macOS libmtp dylibs]
+- [x] [Review][Patch] `squashfs-root` directory not cleaned up after AppImage extraction verification — no trap/cleanup, left behind on CI runner if step fails mid-way [.github/workflows/release.yml — Verify Linux AppImage]
+- [x] [Review][Patch] Stale sidecar cleanup runs before atomic copy — if `renameSync` fails on a re-run, the previously valid sidecar was already deleted by the top-level loop, leaving sidecars/ empty with no recovery [scripts/prepare-sidecar.mjs:59-73]
+- [x] [Review][Defer] `copy_brew_dylib` basename collision — two dylibs from different Homebrew prefix paths with the same basename would collide; unlikely for libmtp's transitive deps in practice [.github/workflows/release.yml] — deferred, pre-existing limitation of basename-keyed dedup
+- [x] [Review][Defer] AppImage files mapping hardcodes x86_64 source path — only breaks if CI runner changes to arm64; currently ubuntu-22.04 is x86_64 only [jellyfinsync-ui/src-tauri/tauri.conf.json] — deferred, not a current issue
+- [x] [Review][Defer] macOS DMG smoke test MOUNT_POINT conflict — `/Volumes/JellyfinSync` could collide with an existing mount; pre-existing issue [scripts/smoke-tests/smoke-macos.sh] — deferred, pre-existing, out of scope
+- [x] [Review][Defer] `-displayfd` display file polling may time out on very slow CI runners (50 × 0.1s = 5s max) — practical tradeoff [scripts/smoke-tests/smoke-linux.sh] — deferred, tuning concern
+- [x] [Review][Defer] `is_boot_volume_device` fail-safe skip on metadata error is a documented design decision — silently skips drives that fail `metadata()` during the observer poll [jellyfinsync-daemon/src/device/mod.rs] — deferred, intentional design
+
 ## Change Log
 
 - 2026-05-08: Story context created. Comprehensive packaging, CI/CD, sidecar, smoke-test, and mount-filter test guidance added for dev implementation.
 - 2026-05-08: Implemented packaging and CI/CD hardening; story moved to review.
+- 2026-05-08: Code review complete. 2 decision-needed, 5 patch, 5 deferred, 6 dismissed.

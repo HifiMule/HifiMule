@@ -18,8 +18,8 @@
           Value="[INSTALLDIR]jellyfinsync-daemon.exe"
           KeyPath="yes" />
         <RegistryValue
-          Root="HKLM"
-          Key="SOFTWARE\JellyfinSync"
+          Root="HKCU"
+          Key="Software\JellyfinSync"
           Name="InstallDir"
           Type="string"
           Value="[INSTALLDIR]" />
