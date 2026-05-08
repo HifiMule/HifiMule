@@ -76,7 +76,7 @@ so that I don't wait for a slow basket population and always get the freshest tr
   - [x] 4.7 If `run_auto_fill` errors, return `Err(JsonRpcError { code: ERR_CONNECTION_FAILED, message: format!("Auto-fill expansion failed: {}", e), data: None })`
 
 - [x] Task 5: CSS — AutoFillSlot card styling (AC: #1, #2)
-  - [x] 5.1 Add `.basket-item-auto-fill-slot` class styles in `jellyfinsync-ui/src/styles.css`:
+  - [x] 5.1 Add `.basket-item-auto-fill-slot` class styles in `hifimule-ui/src/styles.css`:
     - Dashed border (e.g. `border: 1.5px dashed var(--sl-color-primary-500)`)
     - Subtle background tint (e.g. `background: color-mix(in srgb, var(--sl-color-primary-100) 20%, transparent)`)
     - No thumbnail/image area (slot card has no artwork)
@@ -100,10 +100,10 @@ This story replaces the **eager auto-fill model** (Story 3.6, marked superseded)
 
 | File | Change |
 |------|--------|
-| `jellyfinsync-ui/src/state/basket.ts` | Remove `replaceAutoFilled()`, update `getManualItemIds()`, add `AUTO_FILL_SLOT_ID` export |
-| `jellyfinsync-ui/src/components/BasketSidebar.ts` | Remove eager trigger, add slot insert/remove, update `renderItem()`, update `handleStartSync()` |
-| `jellyfinsync-ui/src/styles.css` | Add `.basket-item-auto-fill-slot` styles |
-| `jellyfinsync-daemon/src/rpc.rs` | Extend `handle_sync_calculate_delta` to accept and process `autoFill` param |
+| `hifimule-ui/src/state/basket.ts` | Remove `replaceAutoFilled()`, update `getManualItemIds()`, add `AUTO_FILL_SLOT_ID` export |
+| `hifimule-ui/src/components/BasketSidebar.ts` | Remove eager trigger, add slot insert/remove, update `renderItem()`, update `handleStartSync()` |
+| `hifimule-ui/src/styles.css` | Add `.basket-item-auto-fill-slot` styles |
+| `hifimule-daemon/src/rpc.rs` | Extend `handle_sync_calculate_delta` to accept and process `autoFill` param |
 
 **No changes needed:** `main.rs` (daemon-initiated auto-sync path unchanged), `auto_fill.rs` (untouched), `device/mod.rs` (untouched), `BasketItem.autoFilled` field (keep for backwards compat).
 
@@ -235,18 +235,18 @@ Wait — looking at the actual code: the current loop at line ~917 uses `seen_id
 
 ### Project Structure Notes
 
-- UI files: `jellyfinsync-ui/src/state/basket.ts`, `jellyfinsync-ui/src/components/BasketSidebar.ts`, `jellyfinsync-ui/src/styles.css`
-- Daemon file: `jellyfinsync-daemon/src/rpc.rs`
+- UI files: `hifimule-ui/src/state/basket.ts`, `hifimule-ui/src/components/BasketSidebar.ts`, `hifimule-ui/src/styles.css`
+- Daemon file: `hifimule-daemon/src/rpc.rs`
 - No new files needed
 
 ### References
 
 - [Source: _bmad-output/planning-artifacts/epics.md#Story 3.8 — full tech notes and acceptance criteria]
-- [Source: jellyfinsync-ui/src/components/BasketSidebar.ts — autoFill fields at lines 149–158, triggerAutoFill at 267, scheduleAutoFill at 334, renderAutoFillControls at 418, handleStartSync at 784]
-- [Source: jellyfinsync-ui/src/state/basket.ts — replaceAutoFilled at 186, getManualItemIds at 212]
-- [Source: jellyfinsync-daemon/src/rpc.rs — handle_basket_auto_fill at 1490, expand_exclude_ids at 1555, handle_sync_calculate_delta at 776]
-- [Source: jellyfinsync-daemon/src/auto_fill.rs — AutoFillParams/AutoFillItem structs at lines 14–31, run_auto_fill at 37]
-- [Source: jellyfinsync-daemon/src/main.rs:503 — daemon-initiated auto-fill path that must remain functional]
+- [Source: hifimule-ui/src/components/BasketSidebar.ts — autoFill fields at lines 149–158, triggerAutoFill at 267, scheduleAutoFill at 334, renderAutoFillControls at 418, handleStartSync at 784]
+- [Source: hifimule-ui/src/state/basket.ts — replaceAutoFilled at 186, getManualItemIds at 212]
+- [Source: hifimule-daemon/src/rpc.rs — handle_basket_auto_fill at 1490, expand_exclude_ids at 1555, handle_sync_calculate_delta at 776]
+- [Source: hifimule-daemon/src/auto_fill.rs — AutoFillParams/AutoFillItem structs at lines 14–31, run_auto_fill at 37]
+- [Source: hifimule-daemon/src/main.rs:503 — daemon-initiated auto-fill path that must remain functional]
 
 ## Dev Agent Record
 
@@ -269,10 +269,10 @@ claude-sonnet-4-6
 
 ### File List
 
-- jellyfinsync-ui/src/state/basket.ts
-- jellyfinsync-ui/src/components/BasketSidebar.ts
-- jellyfinsync-ui/src/styles.css
-- jellyfinsync-daemon/src/rpc.rs
+- hifimule-ui/src/state/basket.ts
+- hifimule-ui/src/components/BasketSidebar.ts
+- hifimule-ui/src/styles.css
+- hifimule-daemon/src/rpc.rs
 
 ## Change Log
 

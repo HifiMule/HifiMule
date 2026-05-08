@@ -1,7 +1,7 @@
 # Implementation Readiness Assessment Report
 
 **Date:** 2026-01-27
-**Project:** JellyfinSync
+**Project:** HifiMule
 
 ## Document Inventory
 
@@ -16,7 +16,7 @@
 
 FR1: The system can automatically detect Mass Storage devices (USB) on Windows, Linux, and macOS.
 FR2: Users can manually select a target device folder if automatic detection fails.
-FR3: The system can identify the presence of a `.jellyfinsync.json` manifest on discovery.
+FR3: The system can identify the presence of a `.hifimule.json` manifest on discovery.
 FR4: The system can read persistent hardware identifiers to link devices across different sessions.
 FR5: Users can configure Jellyfin server credentials (URL, username, token).
 FR6: Users can select a specific Jellyfin user profile for syncing.
@@ -46,7 +46,7 @@ NFR1: The headless Rust engine must consume < 10MB of RAM during idle states.
 NFR2: The system must complete a manifest audit and be "ready to sync" in < 5 seconds.
 NFR3: Sync operations should be limited only by the target hardware's write speed or the network bandwidth to the Jellyfin server.
 NFR4: The system must utilize OS-level file sync primitives (e.g., `sync_all`) to ensure the directory structure and data are physically flushed to the device before marking a sync as complete in the manifest.
-NFR5: The `.jellyfinsync.json` manifest must be updated atomically to prevent corruption during unexpected power loss or disconnection.
+NFR5: The `.hifimule.json` manifest must be updated atomically to prevent corruption during unexpected power loss or disconnection.
 NFR6: The system must handle network interruptions during buffered streaming, attempting to resume for at least 3 retry cycles.
 NFR7: Mid-sync ejections must not result in unbootable or unmountable media; the system must gracefully mark the session as "Interrupted" and trigger the Repair Utility on reconnection.
 NFR8: 100% feature parity between Windows, Linux, and macOS distributions.
@@ -104,7 +104,7 @@ Total FRs in epics: 23
 | --------- | --------------- | -------------- | --------- |
 | FR1 | The system can automatically detect Mass Storage devices (USB) on Windows, Linux, and macOS. | Epic 2 - Hardware Autodetection | ✓ Covered |
 | FR2 | Users can manually select a target device folder if automatic detection fails. | Epic 2 - Manual Folder Fallback | ✓ Covered |
-| FR3 | The system can identify the presence of a `.jellyfinsync.json` manifest on discovery. | Epic 2 - Manifest Presence Check | ✓ Covered |
+| FR3 | The system can identify the presence of a `.hifimule.json` manifest on discovery. | Epic 2 - Manifest Presence Check | ✓ Covered |
 | FR4 | The system can read persistent hardware identifiers to link devices across different sessions. | Epic 2 - Persistent Hardware ID | ✓ Covered |
 | FR5 | Users can configure Jellyfin server credentials (URL, username, token). | Epic 2 - Server Credential Entry | ✓ Covered |
 | FR6 | Users can select a specific Jellyfin user profile for syncing. | Epic 2 - User Profile Select | ✓ Covered |

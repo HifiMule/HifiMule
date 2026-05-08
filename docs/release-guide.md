@@ -1,4 +1,4 @@
-# JellyfinSync — Release Guide
+# HifiMule — Release Guide
 
 This guide walks through publishing a new GitHub release from a clean `main` branch.
 
@@ -6,7 +6,7 @@ This guide walks through publishing a new GitHub release from a clean `main` bra
 
 - [ ] All stories for the milestone are merged to `main`
 - [ ] `cargo test` passes locally
-- [ ] Bump the version in [`jellyfinsync-ui/src-tauri/tauri.conf.json`](../jellyfinsync-ui/src-tauri/tauri.conf.json) — the `"version"` field at the top
+- [ ] Bump the version in [`hifimule-ui/src-tauri/tauri.conf.json`](../hifimule-ui/src-tauri/tauri.conf.json) — the `"version"` field at the top
 - [ ] Bump the version in [`Cargo.toml`](../Cargo.toml) — the `version` field under `[workspace.package]` (must match `tauri.conf.json`)
 - [ ] Commit the version bump: `git commit -m "chore: bump version to X.Y.Z"`
 - [ ] Push the commit: `git push origin main`
@@ -28,9 +28,9 @@ Open **Actions → Release** on GitHub. Three parallel jobs build the installers
 
 | Job | Platform | Artifacts |
 |-----|----------|-----------|
-| `release (windows-latest)` | Windows | `JellyfinSync_X.Y.Z_x64.msi` |
-| `release (ubuntu-22.04)` | Ubuntu 22.04 | `jellyfinsync_X.Y.Z_amd64.deb`, `jellyfinsync_X.Y.Z_amd64.AppImage` |
-| `release (macos-latest)` | macOS (universal) | `JellyfinSync_X.Y.Z.dmg` |
+| `release (windows-latest)` | Windows | `HifiMule_X.Y.Z_x64.msi` |
+| `release (ubuntu-22.04)` | Ubuntu 22.04 | `hifimule_X.Y.Z_amd64.deb`, `hifimule_X.Y.Z_amd64.AppImage` |
+| `release (macos-latest)` | macOS (universal) | `HifiMule_X.Y.Z.dmg` |
 
 Jobs are independent (`fail-fast: false`), so a single platform failure doesn't cancel the others.
 

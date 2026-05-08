@@ -5,11 +5,11 @@ date: 2026-01-26
 author: Alexis
 ---
 
-# Product Brief: JellyfinSync
+# Product Brief: HifiMule
 
 ## Executive Summary
 
-The Jellyfin Sync Tool is a desktop application designed to bridge the gap between modern self-hosted media servers and legacy portable music hardware. It provides an "iTunes-like" synchronization experience for Jellyfin users, allowing them to manage their music collections on dedicated MP3 players and Digital Audio Players (DAPs) that mount as mass storage devices. By leveraging Jellyfin's rich metadata and transcoding engine, the tool automates the tedious process of selecting, re-encoding, and transferring music to mobile hardware, specifically targeting "Managed Sync" for legacy devices like iPods running Rockbox.
+The Hifi Mule Tool is a desktop application designed to bridge the gap between modern self-hosted media servers and legacy portable music hardware. It provides an "iTunes-like" synchronization experience for Jellyfin users, allowing them to manage their music collections on dedicated MP3 players and Digital Audio Players (DAPs) that mount as mass storage devices. By leveraging Jellyfin's rich metadata and transcoding engine, the tool automates the tedious process of selecting, re-encoding, and transferring music to mobile hardware, specifically targeting "Managed Sync" for legacy devices like iPods running Rockbox.
 
 ---
 
@@ -29,7 +29,7 @@ Modern music management solutions almost exclusively focus on mobile app streami
 
 ### Proposed Solution
 
-A desktop-based synchronization client that connects to a Jellyfin server and local mass storage devices. It features a "Split View" UI (Jellyfin Selection vs. Device Capacity) and implements a **Conflict-Free Managed Sync** model. The tool only manages files it "owns" (tracked via a hidden `.jellyfinsync.json` manifest), ensuring that manually added legacy files in the same folder are never accidentally deleted. The tool initiates a "Transcoding Handshake" with Jellyfin to deliver optimized streams (e.g., 256kbps MP3) directly to the device using **Buffered Streaming** to ensure stability on slow legacy hardware.
+A desktop-based synchronization client that connects to a Jellyfin server and local mass storage devices. It features a "Split View" UI (Jellyfin Selection vs. Device Capacity) and implements a **Conflict-Free Managed Sync** model. The tool only manages files it "owns" (tracked via a hidden `.hifimule.json` manifest), ensuring that manually added legacy files in the same folder are never accidentally deleted. The tool initiates a "Transcoding Handshake" with Jellyfin to deliver optimized streams (e.g., 256kbps MP3) directly to the device using **Buffered Streaming** to ensure stability on slow legacy hardware.
 
 ### Key Differentiators
 
@@ -75,7 +75,7 @@ The user clicks "Sync." Jellyfin transcodes the stream on-the-fly, and the tool 
 
 ## Success Metrics
 
-Success for JellyfinSync is defined by the speed and reliability of the data transfer. A "win" occurs when the tool significantly reduces the friction of moving music between the server and hardware compared to manual file management.
+Success for HifiMule is defined by the speed and reliability of the data transfer. A "win" occurs when the tool significantly reduces the friction of moving music between the server and hardware compared to manual file management.
 
 ### Business Objectives
 - **High Retention:** Users sync their devices weekly (or more frequently) due to the low-friction process.
@@ -96,7 +96,7 @@ Success for JellyfinSync is defined by the speed and reliability of the data tra
 - **Profile Selection:** Multi-user support to sync against correct Jellyfin accounts.
 - **Metadata Browsing:** Split-view browser for Jellyfin Playlists, Genres, and Artists.
 - **Mass Storage Detection:** Automated detection of mounted USB/removable drives.
-- **Conflict-Free Managed Sync:** Implementation of the `.jellyfinsync.json` manifest with **Repair Utility** for corrupted states.
+- **Conflict-Free Managed Sync:** Implementation of the `.hifimule.json` manifest with **Repair Utility** for corrupted states.
 - **Direct Buffered Transfer:** Streaming files from server to device storage via memory buffer to mitigate slow USB/HDD speeds.
 - **Playback Log Discovery:** Foundational logic to detect Rockbox playback logs during sync to support future scrobbling/smart playlists.
 

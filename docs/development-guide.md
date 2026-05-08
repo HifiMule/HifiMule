@@ -1,4 +1,4 @@
-# JellyfinSync — Development Guide
+# HifiMule — Development Guide
 
 **Generated:** 2026-05-07 | **Scan depth:** Exhaustive
 
@@ -33,13 +33,13 @@ sudo apt-get install -y \
 ## Repository Layout
 
 ```
-jellyfinsync/
+hifimule/
 ├── Cargo.toml                 Cargo workspace root
-├── jellyfinsync-daemon/       Rust backend
-└── jellyfinsync-ui/           Tauri 2 + TypeScript frontend
+├── hifimule-daemon/       Rust backend
+└── hifimule-ui/           Tauri 2 + TypeScript frontend
 ```
 
-All `cargo` commands should be run from the repo root (workspace). All `pnpm`/`npm` commands from `jellyfinsync-ui/`.
+All `cargo` commands should be run from the repo root (workspace). All `pnpm`/`npm` commands from `hifimule-ui/`.
 
 ---
 
@@ -47,31 +47,31 @@ All `cargo` commands should be run from the repo root (workspace). All `pnpm`/`n
 
 ```bash
 # Debug build
-cargo build -p jellyfinsync-daemon
+cargo build -p hifimule-daemon
 
 # Release build
-cargo build -p jellyfinsync-daemon --release
+cargo build -p hifimule-daemon --release
 
 # Check only (fast type-check, no binary)
-cargo check -p jellyfinsync-daemon
+cargo check -p hifimule-daemon
 
 # Clippy
-cargo clippy -p jellyfinsync-daemon
+cargo clippy -p hifimule-daemon
 ```
 
-Binary output: `target/debug/jellyfinsync-daemon` or `target/release/jellyfinsync-daemon`.
+Binary output: `target/debug/hifimule-daemon` or `target/release/hifimule-daemon`.
 
 ### Windows Service Flags
 
 ```bash
 # Install as Windows Service (requires admin)
-jellyfinsync-daemon.exe --install-service
+hifimule-daemon.exe --install-service
 
 # Uninstall
-jellyfinsync-daemon.exe --uninstall-service
+hifimule-daemon.exe --uninstall-service
 
 # Run as service (called by SCM, not directly)
-jellyfinsync-daemon.exe --service
+hifimule-daemon.exe --service
 ```
 
 ---
@@ -79,7 +79,7 @@ jellyfinsync-daemon.exe --service
 ## Build the UI
 
 ```bash
-cd jellyfinsync-ui
+cd hifimule-ui
 
 # Install dependencies
 pnpm install
@@ -103,14 +103,14 @@ Before running `pnpm tauri build`, the daemon binary must exist in `src-tauri/si
 
 ```bash
 # All daemon tests (unit + integration)
-cargo test -p jellyfinsync-daemon
+cargo test -p hifimule-daemon
 
 # Specific test module
-cargo test -p jellyfinsync-daemon --lib db::tests
-cargo test -p jellyfinsync-daemon --lib auto_fill::tests
+cargo test -p hifimule-daemon --lib db::tests
+cargo test -p hifimule-daemon --lib auto_fill::tests
 
 # With output (for debugging)
-cargo test -p jellyfinsync-daemon -- --nocapture
+cargo test -p hifimule-daemon -- --nocapture
 ```
 
 Tests in `api.rs` use `mockito` (HTTP mock server). Tests in `db.rs` use in-memory SQLite. No external services required.
@@ -123,7 +123,7 @@ The daemon can run standalone without the UI:
 
 ```bash
 # Start daemon (interactive mode with system tray)
-./target/debug/jellyfinsync-daemon
+./target/debug/hifimule-daemon
 
 # The daemon listens on localhost:19140
 # Test it with:
@@ -137,7 +137,7 @@ curl -X POST http://localhost:19140 \
 ## Running UI in Dev Mode
 
 ```bash
-cd jellyfinsync-ui
+cd hifimule-ui
 pnpm tauri dev
 ```
 
@@ -149,10 +149,10 @@ This starts:
 For faster UI iteration, you can run the daemon separately and start just Vite:
 ```bash
 # Terminal 1: start daemon
-./target/debug/jellyfinsync-daemon
+./target/debug/hifimule-daemon
 
 # Terminal 2: start Vite + Tauri
-cd jellyfinsync-ui && pnpm tauri dev
+cd hifimule-ui && pnpm tauri dev
 ```
 
 ---
@@ -165,28 +165,28 @@ Platform-specific app data directory (`get_app_data_dir()` in `paths.rs`):
 
 | Platform | Path |
 |----------|------|
-| Windows | `%APPDATA%\JellyfinSync\` |
-| macOS | `~/Library/Application Support/JellyfinSync/` |
-| Linux | `$XDG_DATA_HOME/JellyfinSync/` or `~/.local/share/JellyfinSync/` |
+| Windows | `%APPDATA%\HifiMule\` |
+| macOS | `~/Library/Application Support/HifiMule/` |
+| Linux | `$XDG_DATA_HOME/HifiMule/` or `~/.local/share/HifiMule/` |
 
 Contents:
 - `config.json` — `{ "url": "...", "user_id": "..." }`
-- `jellyfinsync.db` — SQLite database
+- `hifimule.db` — SQLite database
 - `device-profiles.json` — transcoding profiles (auto-created from embedded asset on first run)
 - `daemon.log` — daemon log (release builds only)
 - `ui.log` — UI log (release builds, Windows only)
 
 ### UI Vite Config
 
-`jellyfinsync-ui/vite.config.ts` — standard Vite config. RPC port can be overridden via `VITE_RPC_PORT` environment variable.
+`hifimule-ui/vite.config.ts` — standard Vite config. RPC port can be overridden via `VITE_RPC_PORT` environment variable.
 
 ---
 
 ## Transcoding Profiles
 
-`device-profiles.json` is seeded from `jellyfinsync-daemon/assets/device-profiles.json` on first run. To add a new profile:
+`device-profiles.json` is seeded from `hifimule-daemon/assets/device-profiles.json` on first run. To add a new profile:
 
-1. Edit `jellyfinsync-daemon/assets/device-profiles.json`
+1. Edit `hifimule-daemon/assets/device-profiles.json`
 2. Or edit the live file in the app data directory
 
 Format:
@@ -235,13 +235,13 @@ In debug builds, all `daemon_log!` and `eprintln!` output goes to stdout/stderr.
 ### Inspect the Manifest
 
 ```bash
-cat /Volumes/YourDevice/.jellyfinsync.json | python3 -m json.tool
+cat /Volumes/YourDevice/.hifimule.json | python3 -m json.tool
 ```
 
 ### Inspect the Database
 
 ```bash
-sqlite3 ~/Library/Application\ Support/JellyfinSync/jellyfinsync.db
+sqlite3 ~/Library/Application\ Support/HifiMule/hifimule.db
 .tables
 SELECT * FROM devices;
 SELECT COUNT(*) FROM scrobble_history;
@@ -299,7 +299,7 @@ brew install libmtp
 Another instance of the daemon is running. Kill it:
 ```bash
 # macOS/Linux
-pkill jellyfinsync-daemon
+pkill hifimule-daemon
 # or
 lsof -i :19140
 kill <pid>
@@ -313,7 +313,7 @@ kill <pid>
 
 ### Manifest Dirty Flag
 
-If the daemon crashed during sync, `.jellyfinsync.json` will have `"dirty": true`. Use the UI's Repair Modal (shown automatically when dirty is detected), or manually clear it:
+If the daemon crashed during sync, `.hifimule.json` will have `"dirty": true`. Use the UI's Repair Modal (shown automatically when dirty is detected), or manually clear it:
 ```bash
-# Edit .jellyfinsync.json on the device, set "dirty": false, remove "pending_item_ids": []
+# Edit .hifimule.json on the device, set "dirty": false, remove "pending_item_ids": []
 ```

@@ -31,44 +31,44 @@ so that the UI never shows stale defaults, silent gaps, or confusing state for M
 ## Tasks / Subtasks
 
 - [x] **T1: Surface `pendingDeviceFriendlyName` from daemon RPC** (AC: #1)
-  - [x] In `jellyfinsync-daemon/src/rpc.rs` `handle_get_daemon_state` (line 386-436): add `pending_device_friendly_name` variable via `state.device_manager.get_unrecognized_device_snapshot().await.and_then(|s| s.friendly_name)`.
+  - [x] In `hifimule-daemon/src/rpc.rs` `handle_get_daemon_state` (line 386-436): add `pending_device_friendly_name` variable via `state.device_manager.get_unrecognized_device_snapshot().await.and_then(|s| s.friendly_name)`.
   - [x] Add `"pendingDeviceFriendlyName": pending_device_friendly_name` to the final `serde_json::json!({...})` response alongside the existing `"pendingDevicePath"` field.
 
 - [x] **T2: Pre-fill InitDeviceModal name from daemon state** (AC: #1)
-  - [x] In `jellyfinsync-ui/src/components/BasketSidebar.ts`: add `pendingDeviceFriendlyName?: string` to the `RootFoldersResponse` interface (it comes from `daemonStateResult`, not `foldersResult`; capture it from `daemonStateResult?.pendingDeviceFriendlyName ?? undefined`).
+  - [x] In `hifimule-ui/src/components/BasketSidebar.ts`: add `pendingDeviceFriendlyName?: string` to the `RootFoldersResponse` interface (it comes from `daemonStateResult`, not `foldersResult`; capture it from `daemonStateResult?.pendingDeviceFriendlyName ?? undefined`).
   - [x] Store as a class field `private pendingDeviceFriendlyName: string | undefined = undefined` alongside `pendingDevicePath`.
   - [x] Update `openInitDeviceModal()` to pass `this.pendingDeviceFriendlyName` to `InitDeviceModal`.
-  - [x] In `jellyfinsync-ui/src/components/InitDeviceModal.ts`: change `open()` signature to `async open(defaultName?: string)`. Thread it through to `renderContent()` so the `sl-input#init-device-name-input` uses `value="${this.escapeHtml(defaultName ?? 'My Device')}"` instead of the hardcoded `"My Device"`.
+  - [x] In `hifimule-ui/src/components/InitDeviceModal.ts`: change `open()` signature to `async open(defaultName?: string)`. Thread it through to `renderContent()` so the `sl-input#init-device-name-input` uses `value="${this.escapeHtml(defaultName ?? 'My Device')}"` instead of the hardcoded `"My Device"`.
   - [x] Confirm the `confirmBtn.disabled` logic still uses the actual input value (not the default), so an empty override keeps the button disabled.
 
 - [x] **T3: Filter empty-string device names in connected_devices_json** (AC: #2)
-  - [x] In `jellyfinsync-daemon/src/rpc.rs` `handle_get_daemon_state` (line ~415): change `m.name.clone().unwrap_or_else(|| m.device_id.clone())` to `m.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| m.device_id.clone())`.
+  - [x] In `hifimule-daemon/src/rpc.rs` `handle_get_daemon_state` (line ~415): change `m.name.clone().unwrap_or_else(|| m.device_id.clone())` to `m.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| m.device_id.clone())`.
   - [x] Add a unit test verifying that a manifest with `name: Some("")` falls back to `device_id`.
 
 - [x] **T4: Show MTP constraint label instead of unmanaged_count** (AC: #3)
-  - [x] In `jellyfinsync-ui/src/components/BasketSidebar.ts` `renderDeviceFolders()` (line ~503): check `this.folderInfo.devicePath.toLowerCase().startsWith('mtp://')` and, if so, replace `${unmanagedCount} protected` with `MTP — folder enumeration not available` in the summary `<span>`.
+  - [x] In `hifimule-ui/src/components/BasketSidebar.ts` `renderDeviceFolders()` (line ~503): check `this.folderInfo.devicePath.toLowerCase().startsWith('mtp://')` and, if so, replace `${unmanagedCount} protected` with `MTP — folder enumeration not available` in the summary `<span>`.
   - [x] Ensure the managed folder list still renders (managed paths are returned from daemon for MTP devices).
 
 - [x] **T5: Fix `broadcast_device_state` to not re-trigger device detection** (AC: #4)
-  - [x] In `jellyfinsync-daemon/src/rpc.rs`, replace the implementation of `broadcast_device_state` (lines 1307-1319). The current body calls `get_manifest_and_io` + `get_current_device_path` + `handle_device_detected` — this re-runs the detection flow (dirty-marker scan, state writes) even for already-connected devices.
+  - [x] In `hifimule-daemon/src/rpc.rs`, replace the implementation of `broadcast_device_state` (lines 1307-1319). The current body calls `get_manifest_and_io` + `get_current_device_path` + `handle_device_detected` — this re-runs the detection flow (dirty-marker scan, state writes) even for already-connected devices.
   - [x] New body: call `get_current_device()` (read-only) and build the appropriate `DaemonState` without re-triggering detection.
   - [x] Preserve the existing call sites at lines 1360, 1399, 1413.
   - [x] Add a note (or test) verifying that calling `broadcast_device_state` while a device is already connected does not insert it a second time in `connected_devices`.
 
 - [x] **T6: Wire `storage_id` into MTP backend for `free_space`** (AC: #5)
-  - [x] In `jellyfinsync-daemon/src/device/mod.rs` `emit_mtp_probe_event`: accept `dev_info: mtp::MtpDeviceInfo`. After parsing manifest, if `manifest.storage_id.is_some()`, create a second backend via `spawn_blocking` with the storage ID and use it for `DeviceEvent::Detected`. Fall back to the original backend on failure.
+  - [x] In `hifimule-daemon/src/device/mod.rs` `emit_mtp_probe_event`: accept `dev_info: mtp::MtpDeviceInfo`. After parsing manifest, if `manifest.storage_id.is_some()`, create a second backend via `spawn_blocking` with the storage ID and use it for `DeviceEvent::Detected`. Fall back to the original backend on failure.
   - [x] Caller in `run_mtp_observer` passes `dev.clone()` as `dev_for_probe`.
   - [x] Existing `emit_mtp_probe_event` tests updated to pass the new `dev_info` parameter.
 
 - [x] **T7: Liveness check in `initialize_device`** (AC: #6)
-  - [x] In `jellyfinsync-daemon/src/device/mod.rs` `initialize_device`, after obtaining `pending = get_unrecognized_device_snapshot()`: call `device_io.list_files("").await` as a lightweight connectivity probe. Return clear error if it fails.
+  - [x] In `hifimule-daemon/src/device/mod.rs` `initialize_device`, after obtaining `pending = get_unrecognized_device_snapshot()`: call `device_io.list_files("").await` as a lightweight connectivity probe. Return clear error if it fails.
 
 - [x] **T8: Include device root in `cleanup_tmp_files` sweep** (AC: #7)
-  - [x] In `jellyfinsync-daemon/src/device/mod.rs` `cleanup_tmp_files`: prepend `""` (device root) using `std::iter::once("").chain(managed_paths.iter().map(|s| s.as_str()))`.
+  - [x] In `hifimule-daemon/src/device/mod.rs` `cleanup_tmp_files`: prepend `""` (device root) using `std::iter::once("").chain(managed_paths.iter().map(|s| s.as_str()))`.
   - [x] Added two unit tests: root-level .tmp deletion with empty managed_paths, and combined root + managed sweep.
 
 - [x] **T9: Allow multi-level folder paths in `initialize_device`** (AC: #8)
-  - [x] In `jellyfinsync-daemon/src/device/mod.rs` `initialize_device`: relaxed path validation to allow `/` and `\` as internal separators, keeping blocks for `..` traversal and absolute paths.
+  - [x] In `hifimule-daemon/src/device/mod.rs` `initialize_device`: relaxed path validation to allow `/` and `\` as internal separators, keeping blocks for `..` traversal and absolute paths.
   - [x] Updated existing `test_initialize_device_rejects_path_traversal` test to reflect that multi-level paths now succeed.
 
 - [x] **T10: Verify MTP scrobbler not-found detection** (AC: #9)
@@ -77,14 +77,14 @@ so that the UI never shows stale defaults, silent gaps, or confusing state for M
   - [x] No code change needed.
 
 - [x] **T11: Run full test suite and validate** (AC: all)
-  - [x] Run `rtk cargo test -p jellyfinsync-daemon` — 198 tests pass.
-  - [x] Run `rtk cargo clippy -p jellyfinsync-daemon -- -D warnings` — no new warnings (32 pre-existing).
-  - [x] Run `rtk tsc` in `jellyfinsync-ui/` — no TypeScript errors.
+  - [x] Run `rtk cargo test -p hifimule-daemon` — 198 tests pass.
+  - [x] Run `rtk cargo clippy -p hifimule-daemon -- -D warnings` — no new warnings (32 pre-existing).
+  - [x] Run `rtk tsc` in `hifimule-ui/` — no TypeScript errors.
   - [x] Update story File List.
 
 ### Review Findings
 
-- [x] [Review][Patch] Freshly initialized MTP manifests never get a storage ID [jellyfinsync-daemon/src/device/mod.rs:583]
+- [x] [Review][Patch] Freshly initialized MTP manifests never get a storage ID [hifimule-daemon/src/device/mod.rs:583]
 
 ## Dev Notes
 
@@ -243,11 +243,11 @@ This reads current state without re-triggering detection. No `write` locks, no d
 
 The issue: `run_mtp_observer` always calls `mtp::create_mtp_backend(&dev_clone, None)` (line 1346). The backend's `WpdHandle` has `storage_id: None`, so `free_space()` must enumerate storage objects on every call instead of using the cached ID.
 
-The fix: after reading `.jellyfinsync.json` from the initial backend (in `emit_mtp_probe_event`), if `manifest.storage_id.is_some()`, create a second backend with the `storage_id`:
+The fix: after reading `.hifimule.json` from the initial backend (in `emit_mtp_probe_event`), if `manifest.storage_id.is_some()`, create a second backend with the `storage_id`:
 
 Restructure `run_mtp_observer` loop body:
 1. Create initial backend with `storage_id: None` (probe backend)
-2. Read `.jellyfinsync.json` from it
+2. Read `.hifimule.json` from it
 3. Parse the manifest
 4. If `manifest.storage_id.is_some()`, create a second backend with `mtp::create_mtp_backend(&dev, manifest.storage_id.clone())` via `spawn_blocking`
 5. Use the second backend (or fall back to the first if second creation fails) for `DeviceEvent::Detected`
@@ -343,23 +343,23 @@ if !folder_path.is_empty() {
 
 Test `test_process_device_mtp_style_missing_log_is_empty_success` (line ~413) exercises branch 2 with a mock returning `anyhow::anyhow!("WPD: path component '{}' not found", path)`.
 
-Dev task: run `cargo test -p jellyfinsync-daemon test_process_device_mtp_style_missing_log_is_empty_success` and confirm it passes. No code change expected. If the real WPD `path_to_object_id` (in `device/mtp.rs`) generates a different message format for missing files, update the message pattern in `is_missing_scrobbler_log_error`.
+Dev task: run `cargo test -p hifimule-daemon test_process_device_mtp_style_missing_log_is_empty_success` and confirm it passes. No code change expected. If the real WPD `path_to_object_id` (in `device/mtp.rs`) generates a different message format for missing files, update the message pattern in `is_missing_scrobbler_log_error`.
 
 ### Project Structure Notes
 
 All daemon changes are in:
-- `jellyfinsync-daemon/src/rpc.rs` — `handle_get_daemon_state`, `broadcast_device_state`
-- `jellyfinsync-daemon/src/device/mod.rs` — `cleanup_tmp_files`, `initialize_device`, `run_mtp_observer`
-- `jellyfinsync-daemon/src/scrobbler.rs` — verify only, no expected changes
+- `hifimule-daemon/src/rpc.rs` — `handle_get_daemon_state`, `broadcast_device_state`
+- `hifimule-daemon/src/device/mod.rs` — `cleanup_tmp_files`, `initialize_device`, `run_mtp_observer`
+- `hifimule-daemon/src/scrobbler.rs` — verify only, no expected changes
 
 All UI changes are in:
-- `jellyfinsync-ui/src/components/BasketSidebar.ts` — `renderDeviceFolders`, `openInitDeviceModal`, field capture
-- `jellyfinsync-ui/src/components/InitDeviceModal.ts` — `open()` signature, `renderContent()`
+- `hifimule-ui/src/components/BasketSidebar.ts` — `renderDeviceFolders`, `openInitDeviceModal`, field capture
+- `hifimule-ui/src/components/InitDeviceModal.ts` — `open()` signature, `renderContent()`
 
 Existing test files that may need new test cases:
-- `jellyfinsync-daemon/src/device/tests.rs`
-- `jellyfinsync-daemon/src/device_io.rs` (has existing `msc_ensure_dir_creates_path` test)
-- `jellyfinsync-daemon/src/scrobbler.rs` (has existing MTP missing-log test)
+- `hifimule-daemon/src/device/tests.rs`
+- `hifimule-daemon/src/device_io.rs` (has existing `msc_ensure_dir_creates_path` test)
+- `hifimule-daemon/src/scrobbler.rs` (has existing MTP missing-log test)
 
 ### References
 
@@ -405,11 +405,11 @@ claude-sonnet-4-6
 
 ### File List
 
-- `jellyfinsync-daemon/src/rpc.rs`
-- `jellyfinsync-daemon/src/device/mod.rs`
-- `jellyfinsync-daemon/src/device/tests.rs`
-- `jellyfinsync-ui/src/components/BasketSidebar.ts`
-- `jellyfinsync-ui/src/components/InitDeviceModal.ts`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-daemon/src/device/mod.rs`
+- `hifimule-daemon/src/device/tests.rs`
+- `hifimule-ui/src/components/BasketSidebar.ts`
+- `hifimule-ui/src/components/InitDeviceModal.ts`
 - `_bmad-output/implementation-artifacts/7-3-device-ui-and-identity-polish.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
 

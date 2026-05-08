@@ -1,4 +1,4 @@
-# Data Models — JellyfinSync Daemon
+# Data Models — HifiMule Daemon
 
 **Generated:** 2026-05-07 | **Scan depth:** Exhaustive
 
@@ -6,7 +6,7 @@
 
 ## DeviceManifest
 
-Stored at `<device-root>/.jellyfinsync.json`. Source of truth for all sync state.
+Stored at `<device-root>/.hifimule.json`. Source of truth for all sync state.
 
 ```rust
 pub struct DeviceManifest {
@@ -16,7 +16,7 @@ pub struct DeviceManifest {
     pub icon: Option<String>,                      // icon key for UI display
     pub synced_items: Vec<SyncedItem>,             // files confirmed present on device
     pub basket_items: Vec<BasketItem>,             // user's curation for next sync
-    pub managed_paths: Vec<String>,                // relative paths owned by JellyfinSync
+    pub managed_paths: Vec<String>,                // relative paths owned by HifiMule
     pub dirty: bool,                               // true if sync was interrupted mid-operation
     pub pending_item_ids: Vec<String>,             // Jellyfin IDs being processed when dirty was set
     pub auto_fill: AutoFillPrefs,
@@ -331,5 +331,5 @@ Credentials are split across two locations:
 
 | Data | Location |
 |------|----------|
-| Server URL + User ID | `<AppData>/JellyfinSync/config.json` as `{ "url": "...", "user_id": "..." }` |
-| Access Token | OS keyring, service name `"jellyfinsync"`, username `"token"` |
+| Server URL + User ID | `<AppData>/HifiMule/config.json` as `{ "url": "...", "user_id": "..." }` |
+| Access Token | OS keyring, service name `"hifimule"`, username `"token"` |

@@ -97,7 +97,7 @@ so that reconnecting the same device multiple times never creates duplicate play
     - This test is **network-free** because the dedup check short-circuits all Jellyfin API calls.
 
 - [x] **T5: Verification** (AC: all)
-  - [x] T5.1: `cargo test` in `jellyfinsync-daemon/` — all existing 91 tests pass + 4 new tests pass (T1.2 ×3, T4.1 ×1). Result: 95 tests passed.
+  - [x] T5.1: `cargo test` in `hifimule-daemon/` — all existing 91 tests pass + 4 new tests pass (T1.2 ×3, T4.1 ×1). Result: 95 tests passed.
   - [ ] T5.2: Manual — reconnect the same iPod twice. Second connection: `scrobbler_get_last_result` returns `skippedDuplicate > 0` and `submitted == 0`. No new play-count entries added on Jellyfin server.
 
 ## Dev Notes
@@ -162,8 +162,8 @@ This is an additive, non-breaking change. Any existing client that calls `scrobb
 ### Source Tree Components to Touch
 
 **Files to MODIFY:**
-1. [jellyfinsync-daemon/src/db.rs](jellyfinsync-daemon/src/db.rs) — Add `is_scrobble_recorded()` method + 3 unit tests
-2. [jellyfinsync-daemon/src/scrobbler.rs](jellyfinsync-daemon/src/scrobbler.rs) — Add `skipped_duplicate` field to `ScrobblerResult`, add dedup check in `process_device_scrobbles()`, update invariant test, add dedup scenario test
+1. [hifimule-daemon/src/db.rs](hifimule-daemon/src/db.rs) — Add `is_scrobble_recorded()` method + 3 unit tests
+2. [hifimule-daemon/src/scrobbler.rs](hifimule-daemon/src/scrobbler.rs) — Add `skipped_duplicate` field to `ScrobblerResult`, add dedup check in `process_device_scrobbles()`, update invariant test, add dedup scenario test
 
 **Files NOT to modify:**
 - `main.rs`, `rpc.rs`, `api.rs`, `sync.rs`, `paths.rs` — no changes needed
@@ -174,7 +174,7 @@ This is an additive, non-breaking change. Any existing client that calls `scrobb
 
 - **All new db tests**: Synchronous `#[test]` (not `#[tokio::test]`) — `is_scrobble_recorded()` is sync. Use `Database::memory()`.
 - **New scrobbler test** (`test_process_device_skips_already_scrobbled`): Async `#[tokio::test]`. Uses `Database::memory()` + `JellyfinClient::new()`. Network-safe: all "L" entries pre-populated → zero API calls made.
-- **Cargo test target**: `cargo test` in `jellyfinsync-daemon/` — all 91 existing tests + 4 new = 95 total.
+- **Cargo test target**: `cargo test` in `hifimule-daemon/` — all 91 existing tests + 4 new = 95 total.
 - **No mockito required**: The dedup test verifies the short-circuit behavior; it never reaches network code.
 
 ### Project Structure Notes
@@ -182,7 +182,7 @@ This is an additive, non-breaking change. Any existing client that calls `scrobb
 **Alignment with Unified Structure:**
 - `is_scrobble_recorded()` follows the established `db.rs` pattern: `pub fn method_name(&self, ...) -> Result<T>`, lock `conn`, query, return.
 - `skipped_duplicate` field follows the `ScrobblerResult` pattern: snake_case Rust field, camelCase JSON via serde derive.
-- The dedup check fits naturally in the existing processing loop at [jellyfinsync-daemon/src/scrobbler.rs:128](jellyfinsync-daemon/src/scrobbler.rs#L128).
+- The dedup check fits naturally in the existing processing loop at [hifimule-daemon/src/scrobbler.rs:128](hifimule-daemon/src/scrobbler.rs#L128).
 
 **Detected Conflicts/Variances:**
 - None. Story 5.2 is a clean extension of Story 5.1 with no architectural conflicts. The `idx_scrobble_unique` index and `INSERT OR IGNORE` pattern were designed specifically to support this story.
@@ -194,7 +194,7 @@ From Story 5.1 dev notes and completion record:
 - **Test count baseline**: 91 tests pass as of Story 5.1 review completion (e6ffb91 "Review 5.1"). Story 5.2 adds 4, targeting 95 total.
 - **`ScrobblerResult` camelCase serde**: `skipped_duplicate` (Rust) → `skippedDuplicate` (JSON). Matches the established pattern (`total_entries` → `totalEntries`, `skipped_rating` → `skippedRating`).
 - **Non-fatal error design from Story 5.1**: The existing pattern is: collect errors into `Vec<String>`, never abort on individual entry failures. Story 5.2 adds a non-fatal DB warning path (proceed on check error) that is consistent with this philosophy.
-- **Existing invariant test will break**: `test_scrobbler_result_submitted_excludes_db_failures` at [jellyfinsync-daemon/src/scrobbler.rs:339](jellyfinsync-daemon/src/scrobbler.rs#L339) constructs `ScrobblerResult` without `skipped_duplicate`. Adding the field will cause a compile error if not updated. **T2.3 handles this explicitly.**
+- **Existing invariant test will break**: `test_scrobbler_result_submitted_excludes_db_failures` at [hifimule-daemon/src/scrobbler.rs:339](hifimule-daemon/src/scrobbler.rs#L339) constructs `ScrobblerResult` without `skipped_duplicate`. Adding the field will cause a compile error if not updated. **T2.3 handles this explicitly.**
 - **`Database::memory()` is `#[cfg(test)]` only**: Correct — no changes to visibility needed. All new tests use it.
 
 ### Git Intelligence
@@ -204,7 +204,7 @@ Recent commits:
 - `6b48e53 Code 5.1` — Initial Story 5.1 implementation. `scrobble_history` table and `record_scrobble()` were introduced here.
 
 Uncommitted changes in working tree (`git status`):
-- `jellyfinsync-daemon/src/api.rs`, `scrobbler.rs`, `sync.rs` — modified. These are the Story 5.1 review fixes (not yet committed at story start). Do NOT revert any of these changes.
+- `hifimule-daemon/src/api.rs`, `scrobbler.rs`, `sync.rs` — modified. These are the Story 5.1 review fixes (not yet committed at story start). Do NOT revert any of these changes.
 - `_bmad-output/implementation-artifacts/5-1-rockbox-scrobbler-bridge.md` — story doc updated with review notes.
 
 No open technical debt affecting Story 5.2 scope.
@@ -215,14 +215,14 @@ No open technical debt affecting Story 5.2 scope.
 - [Source: epics.md#epic-5-ecosystem-lifecycle--advanced-tools] — Epic 5 objectives
 - [Source: architecture.md#data-architecture] — SQLite (rusqlite) for daemon state and scrobble history — confirms `scrobble_history` is the persistence layer
 - [Source: architecture.md#safety--atomicity-patterns] — Transaction wrapping patterns (not needed for this story's single-row lookups, but relevant context)
-- [jellyfinsync-daemon/src/db.rs:97](jellyfinsync-daemon/src/db.rs#L97) — `record_scrobble()` method — `is_scrobble_recorded()` goes directly below it
-- [jellyfinsync-daemon/src/db.rs:115](jellyfinsync-daemon/src/db.rs#L115) — `get_scrobble_count()` — pattern reference for `is_scrobble_recorded()`
-- [jellyfinsync-daemon/src/db.rs:68](jellyfinsync-daemon/src/db.rs#L68) — `idx_scrobble_unique` index definition — used by the dedup query
-- [jellyfinsync-daemon/src/scrobbler.rs:19](jellyfinsync-daemon/src/scrobbler.rs#L19) — `ScrobblerResult` struct — add `skipped_duplicate` field here
-- [jellyfinsync-daemon/src/scrobbler.rs:122](jellyfinsync-daemon/src/scrobbler.rs#L122) — Counter initialization block — add `let mut skipped_duplicate = 0usize;` here
-- [jellyfinsync-daemon/src/scrobbler.rs:128](jellyfinsync-daemon/src/scrobbler.rs#L128) — Top of the entry processing loop — dedup check goes after line 131 (the `rating != "L"` gate)
-- [jellyfinsync-daemon/src/scrobbler.rs:214](jellyfinsync-daemon/src/scrobbler.rs#L214) — Final `ScrobblerResult { ... }` construction — add `skipped_duplicate` field here
-- [jellyfinsync-daemon/src/scrobbler.rs:339](jellyfinsync-daemon/src/scrobbler.rs#L339) — `test_scrobbler_result_submitted_excludes_db_failures` — update struct literal and assertion
+- [hifimule-daemon/src/db.rs:97](hifimule-daemon/src/db.rs#L97) — `record_scrobble()` method — `is_scrobble_recorded()` goes directly below it
+- [hifimule-daemon/src/db.rs:115](hifimule-daemon/src/db.rs#L115) — `get_scrobble_count()` — pattern reference for `is_scrobble_recorded()`
+- [hifimule-daemon/src/db.rs:68](hifimule-daemon/src/db.rs#L68) — `idx_scrobble_unique` index definition — used by the dedup query
+- [hifimule-daemon/src/scrobbler.rs:19](hifimule-daemon/src/scrobbler.rs#L19) — `ScrobblerResult` struct — add `skipped_duplicate` field here
+- [hifimule-daemon/src/scrobbler.rs:122](hifimule-daemon/src/scrobbler.rs#L122) — Counter initialization block — add `let mut skipped_duplicate = 0usize;` here
+- [hifimule-daemon/src/scrobbler.rs:128](hifimule-daemon/src/scrobbler.rs#L128) — Top of the entry processing loop — dedup check goes after line 131 (the `rating != "L"` gate)
+- [hifimule-daemon/src/scrobbler.rs:214](hifimule-daemon/src/scrobbler.rs#L214) — Final `ScrobblerResult { ... }` construction — add `skipped_duplicate` field here
+- [hifimule-daemon/src/scrobbler.rs:339](hifimule-daemon/src/scrobbler.rs#L339) — `test_scrobbler_result_submitted_excludes_db_failures` — update struct literal and assertion
 
 ## Dev Agent Record
 
@@ -245,8 +245,8 @@ None — clean implementation with no debug iterations required.
 
 ### File List
 
-- jellyfinsync-daemon/src/db.rs
-- jellyfinsync-daemon/src/scrobbler.rs
+- hifimule-daemon/src/db.rs
+- hifimule-daemon/src/scrobbler.rs
 
 ## Senior Developer Review (AI)
 

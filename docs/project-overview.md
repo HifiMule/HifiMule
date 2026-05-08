@@ -1,4 +1,4 @@
-# JellyfinSync — Project Overview
+# HifiMule — Project Overview
 
 **Version:** 0.2.0 | **Generated:** 2026-05-07 | **Scan depth:** Exhaustive
 
@@ -6,15 +6,15 @@
 
 ## Purpose
 
-JellyfinSync is a cross-platform desktop application that synchronizes music from a Jellyfin media server to legacy mass-storage audio players — primarily iPods running Rockbox firmware, but also any USB MSC device or MTP device.
+HifiMule is a cross-platform desktop application that synchronizes music from a Jellyfin media server to legacy mass-storage audio players — primarily iPods running Rockbox firmware, but also any USB MSC device or MTP device.
 
-The core problem it solves: Jellyfin manages your music library with rich metadata, but portable players like Rockbox iPods cannot connect to Jellyfin directly. JellyfinSync bridges this gap by letting users curate a "basket" of albums/playlists/artists and then copying the files to the device with correct paths, M3U playlists, and a manifest that tracks sync state. It also reads the Rockbox `.scrobbler.log` and reports back played tracks to Jellyfin.
+The core problem it solves: Jellyfin manages your music library with rich metadata, but portable players like Rockbox iPods cannot connect to Jellyfin directly. HifiMule bridges this gap by letting users curate a "basket" of albums/playlists/artists and then copying the files to the device with correct paths, M3U playlists, and a manifest that tracks sync state. It also reads the Rockbox `.scrobbler.log` and reports back played tracks to Jellyfin.
 
 ---
 
 ## Core Principles
 
-1. **Managed Sync Mode** — The device has a designated "managed" folder. JellyfinSync owns this folder completely; it adds and removes files autonomously to match the basket. Unmanaged folders are untouched.
+1. **Managed Sync Mode** — The device has a designated "managed" folder. HifiMule owns this folder completely; it adds and removes files autonomously to match the basket. Unmanaged folders are untouched.
 2. **Jellyfin-First** — All library metadata (titles, album art, playlists) comes from Jellyfin. The app never maintains its own library database.
 3. **Speed is King** — Delta sync: only copy what changed. Skipping files that are already present and byte-identical (via Jellyfin etag matching and metadata comparison) keeps syncs fast.
 4. **Scrobble Bridge** — After each sync, parse the Rockbox `.scrobbler.log` and submit plays back to Jellyfin so listening history stays in sync.
@@ -23,12 +23,12 @@ The core problem it solves: Jellyfin manages your music library with rich metada
 
 ## Architecture Overview
 
-JellyfinSync is a **monorepo** containing two cooperating processes:
+HifiMule is a **monorepo** containing two cooperating processes:
 
 ```
-jellyfinsync/
-├── jellyfinsync-daemon/     Rust backend — Axum JSON-RPC server, device I/O, sync engine
-└── jellyfinsync-ui/         Tauri 2 desktop shell — TypeScript + Vite + Shoelace
+hifimule/
+├── hifimule-daemon/     Rust backend — Axum JSON-RPC server, device I/O, sync engine
+└── hifimule-ui/         Tauri 2 desktop shell — TypeScript + Vite + Shoelace
 ```
 
 The UI is a thin shell. All business logic lives in the daemon. The UI communicates exclusively with the daemon via **JSON-RPC 2.0 over HTTP on `localhost:19140`**.
@@ -71,7 +71,7 @@ The Tauri shell is responsible for:
 ### Multi-device
 - Multiple devices can be connected simultaneously (stored in a `HashMap` keyed by mount path)
 - The UI shows a "Device Hub" panel to switch between devices
-- Each device has its own `DeviceManifest` (`.jellyfinsync.json` at device root), basket, and sync settings
+- Each device has its own `DeviceManifest` (`.hifimule.json` at device root), basket, and sync settings
 
 ### Auto-fill
 - Fills remaining device capacity with highest-priority tracks: favorites → most-played → newest
@@ -98,8 +98,8 @@ The Tauri shell is responsible for:
 
 | Store | Location | Contents |
 |-------|----------|----------|
-| `DeviceManifest` | `<device-root>/.jellyfinsync.json` | Sync state, basket, auto-fill settings, dirty flag |
-| `config.json` | `%APPDATA%/JellyfinSync/` (Win) / `~/Library/Application Support/JellyfinSync/` (macOS) / `~/.local/share/JellyfinSync/` (Linux) | Jellyfin server URL, user ID |
+| `DeviceManifest` | `<device-root>/.hifimule.json` | Sync state, basket, auto-fill settings, dirty flag |
+| `config.json` | `%APPDATA%/HifiMule/` (Win) / `~/Library/Application Support/HifiMule/` (macOS) / `~/.local/share/HifiMule/` (Linux) | Jellyfin server URL, user ID |
 | OS keyring | System credential store | Jellyfin access token |
 | SQLite DB | Same app data dir as `config.json` | `devices` table (profile, auto-sync), `scrobble_history` |
 | `device-profiles.json` | Same app data dir | Available transcoding profiles (seeded from embedded asset) |

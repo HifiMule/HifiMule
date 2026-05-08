@@ -22,7 +22,7 @@ So that I can catch packaging regressions before releasing.
 ## Tasks / Subtasks
 
 - [x] **T1: Add `daemon.health` RPC endpoint to daemon** (AC: #3)
-  - [x] T1.1: In `jellyfinsync-daemon/src/rpc.rs`, add `"daemon.health"` to the match dispatch (line ~169) calling a new `handle_daemon_health()` handler
+  - [x] T1.1: In `hifimule-daemon/src/rpc.rs`, add `"daemon.health"` to the match dispatch (line ~169) calling a new `handle_daemon_health()` handler
   - [x] T1.2: `handle_daemon_health()` returns `Ok(serde_json::json!({ "status": "ok" }))` — no state needed, pure connectivity probe
   - [x] T1.3: Add a unit test in the existing `#[cfg(test)]` block in `rpc.rs` verifying the handler returns `{ "status": "ok" }`
 
@@ -49,7 +49,7 @@ So that I can catch packaging regressions before releasing.
 
 - T4 is the only remaining development scope. T1-T3 are already implemented and reviewed.
 - Add the MTP scope note to `.github/workflows/smoke-test.yml` and/or `scripts/smoke-tests/smoke-common.sh` with this exact wording: "MTP end-to-end detection requires manual hardware verification on each platform. Automated MTP IO coverage is provided by unit tests in device_io.rs."
-- `jellyfinsync-daemon/src/device_io.rs` has already been verified during story creation: it includes `MockMtpHandle` and `MtpBackend` tests for target-only write-with-verify behavior, manifest probing from fixture JSON, and dirty-marker listing.
+- `hifimule-daemon/src/device_io.rs` has already been verified during story creation: it includes `MockMtpHandle` and `MtpBackend` tests for target-only write-with-verify behavior, manifest probing from fixture JSON, and dirty-marker listing.
 
 ## Dev Notes
 
@@ -63,7 +63,7 @@ So that I can catch packaging regressions before releasing.
 
 ### Daemon RPC Health Check — Critical Details
 
-- **Port**: `19140` (hardcoded in `main.rs:191` — `rpc::run_server(19140, ...)`; also `RPC_PORT: u16 = 19140` in `jellyfinsync-ui/src-tauri/src/lib.rs:14`)
+- **Port**: `19140` (hardcoded in `main.rs:191` — `rpc::run_server(19140, ...)`; also `RPC_PORT: u16 = 19140` in `hifimule-ui/src-tauri/src/lib.rs:14`)
 - **Protocol**: JSON-RPC 2.0 over HTTP POST to `http://127.0.0.1:19140`
 - **New method**: `daemon.health` → handler returns `{ "status": "ok" }`
 - **No existing health endpoint** — `get_daemon_state` exists but requires a full DB/device state and is heavier; `daemon.health` is purpose-built and always succeeds if the server is up
@@ -75,7 +75,7 @@ So that I can catch packaging regressions before releasing.
   ```json
   { "jsonrpc": "2.0", "result": { "data": { "status": "ok" } }, "id": 1 }
   ```
-- **Dispatch location**: `jellyfinsync-daemon/src/rpc.rs`, match arm list starting at line 127. Add before the `_ =>` catch-all at line 169. No state required.
+- **Dispatch location**: `hifimule-daemon/src/rpc.rs`, match arm list starting at line 127. Add before the `_ =>` catch-all at line 169. No state required.
 
 ### Adding `daemon.health` to `rpc.rs`
 
@@ -97,7 +97,7 @@ No imports needed. No state needed. No async needed — but the match arm expect
 - `.github/workflows/smoke-test.yml` already has three independent jobs (`smoke-windows`, `smoke-linux`, `smoke-macos`), `timeout-minutes: 15`, failure log upload via `actions/upload-artifact@v4`, and runner labels `windows-latest`, `ubuntu-22.04`, and `macos-latest`. Do not rebuild this workflow; add only the MTP scope note unless verification exposes a defect.
 - `scripts/smoke-tests/smoke-common.sh` already provides `poll_health()` using JSON-RPC `daemon.health` and parses `.result.data.status == "ok"` with `jq`. If the note is added here, keep it near the helper header so it is visible in every platform smoke path.
 - `scripts/smoke-tests/smoke-linux.sh`, `smoke-macos.sh`, and `smoke-windows.ps1` already implement install -> launch -> daemon health -> uninstall with diagnostics. Do not add physical MTP probing to these scripts; CI runners have no reliable attached MTP hardware.
-- `jellyfinsync-daemon/src/device_io.rs` already proves the automated MTP IO boundary with `MockMtpHandle` and tests named `mtp_write_with_verify_writes_target_only`, `mtp_backend_manifest_probe`, and `mtp_dirty_marker_detected_on_reconnect`.
+- `hifimule-daemon/src/device_io.rs` already proves the automated MTP IO boundary with `MockMtpHandle` and tests named `mtp_write_with_verify_writes_target_only`, `mtp_backend_manifest_probe`, and `mtp_dirty_marker_detected_on_reconnect`.
 
 ### Implementation Guardrails for T4
 
@@ -120,9 +120,9 @@ Write-Host "[STEP 1] Installing $($msi.Name) ..."
 Start-Process msiexec.exe -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart" -Wait -NoNewWindow
 if ($LASTEXITCODE -ne 0) { Write-Error "FAIL: Install step returned $LASTEXITCODE"; exit 1 }
 
-Write-Host "[STEP 2] Launching JellyfinSync ..."
+Write-Host "[STEP 2] Launching HifiMule ..."
 # MSI installs to Program Files — find and launch the executable
-$exe = Get-ChildItem "C:\Program Files\JellyfinSync" -Filter "*.exe" -Recurse | Select-Object -First 1
+$exe = Get-ChildItem "C:\Program Files\HifiMule" -Filter "*.exe" -Recurse | Select-Object -First 1
 Start-Process $exe.FullName -WindowStyle Hidden
 
 Write-Host "[STEP 3] Polling daemon health (30s timeout) ..."
@@ -152,11 +152,11 @@ DEB=$(ls *.deb | head -1)
 echo "[STEP 1] Installing $DEB ..."
 sudo dpkg -i "$DEB"
 
-echo "[STEP 2] Launching JellyfinSync via Xvfb ..."
+echo "[STEP 2] Launching HifiMule via Xvfb ..."
 Xvfb :99 -screen 0 1024x768x24 &
 XVFB_PID=$!
 export DISPLAY=:99
-jellyfinsync &       # installed by deb to /usr/bin or similar; check package manifest
+hifimule &       # installed by deb to /usr/bin or similar; check package manifest
 APP_PID=$!
 
 echo "[STEP 3] Polling daemon health (30s timeout) ..."
@@ -166,11 +166,11 @@ echo "[STEP 3] Daemon responded OK"
 
 echo "[STEP 4] Uninstalling ..."
 kill $APP_PID $XVFB_PID 2>/dev/null || true
-sudo dpkg -r jellyfinsync
+sudo dpkg -r hifimule
 echo "PASS: Linux smoke test complete"
 ```
 
-> **Note:** Verify the installed binary name from `.deb` package manifest. It should match `productName` in `tauri.conf.json` ("JellyfinSync" → likely `jellyfinsync` lowercase on Linux). Check `jellyfinsync-ui/src-tauri/tauri.conf.json` `bundle.linux.deb` or `productName` for the actual binary name.
+> **Note:** Verify the installed binary name from `.deb` package manifest. It should match `productName` in `tauri.conf.json` ("HifiMule" → likely `hifimule` lowercase on Linux). Check `hifimule-ui/src-tauri/tauri.conf.json` `bundle.linux.deb` or `productName` for the actual binary name.
 
 #### macOS (DMG)
 
@@ -179,17 +179,17 @@ echo "PASS: Linux smoke test complete"
 set -euo pipefail
 DMG=$(ls *.dmg | head -1)
 echo "[STEP 1] Mounting $DMG ..."
-hdiutil attach "$DMG" -mountpoint /Volumes/JellyfinSync -nobrowse -quiet
+hdiutil attach "$DMG" -mountpoint /Volumes/HifiMule -nobrowse -quiet
 
 echo "[STEP 1] Installing app ..."
-cp -R /Volumes/JellyfinSync/JellyfinSync.app /Applications/
-hdiutil detach /Volumes/JellyfinSync -quiet
+cp -R /Volumes/HifiMule/HifiMule.app /Applications/
+hdiutil detach /Volumes/HifiMule -quiet
 
 # Remove quarantine attr — required for unsigned builds on CI runners
-xattr -d com.apple.quarantine /Applications/JellyfinSync.app 2>/dev/null || true
+xattr -d com.apple.quarantine /Applications/HifiMule.app 2>/dev/null || true
 
 echo "[STEP 2] Launching ..."
-open -a JellyfinSync
+open -a HifiMule
 sleep 3  # give Tauri time to spawn the sidecar
 
 echo "[STEP 3] Polling daemon health (30s timeout) ..."
@@ -198,8 +198,8 @@ poll_health 30 || { echo "FAIL: Daemon health check timed out"; exit 1; }
 echo "[STEP 3] Daemon responded OK"
 
 echo "[STEP 4] Removing app ..."
-pkill -f JellyfinSync || true
-rm -rf /Applications/JellyfinSync.app
+pkill -f HifiMule || true
+rm -rf /Applications/HifiMule.app
 echo "PASS: macOS smoke test complete"
 ```
 
@@ -285,25 +285,25 @@ jobs:
 #### macOS — Gatekeeper & Quarantine
 - Unsigned DMGs/apps (code signing is post-MVP per architecture.md) will be quarantined
 - `xattr -d com.apple.quarantine` removes the quarantine flag — **must run before `open`**
-- `open -a JellyfinSync` uses the app name; or use `open /Applications/JellyfinSync.app`
+- `open -a HifiMule` uses the app name; or use `open /Applications/HifiMule.app`
 - The universal DMG produced by 6.5 targets `universal-apple-darwin` — will run on both Intel and Apple Silicon runners
 
 #### Linux — Virtual Display
 - Tauri v2 requires a WebKit display. On headless CI: Xvfb (X virtual framebuffer) provides `:99`
 - Runtime packages: `libwebkit2gtk-4.1-0`, `libgtk-3-0`, `libappindicator3-1` (runtime, not `-dev`)
 - The daemon binary itself is headless — only the UI needs Xvfb. If we only need to verify the daemon starts, we could launch just the daemon binary. However, the installer smoke test must verify the full installed app (Tauri launches the daemon as a sidecar).
-- The installed binary name from the `.deb` comes from `tauri.conf.json` → `productName` → likely `jellyfinsync` (lowercase). Verify against the actual .deb after building.
+- The installed binary name from the `.deb` comes from `tauri.conf.json` → `productName` → likely `hifimule` (lowercase). Verify against the actual .deb after building.
 
 #### Windows — MSI Silent Install
 - `/qn` = quiet mode, no UI; `/norestart` = suppress reboot prompt
-- Installation target: `C:\Program Files\JellyfinSync\` (standard Tauri MSI default)
+- Installation target: `C:\Program Files\HifiMule\` (standard Tauri MSI default)
 - The Tauri-built MSI may register an uninstall GUID — `msiexec /x MSI_PATH /qn` works more reliably than hunting the GUID in the registry
 - The daemon starts as a child process of the UI (Tauri sidecar model) — the UI must be running for the daemon to start
 
 ### Project Structure Notes
 
 ```
-c:\Workspaces\JellyfinSync\
+c:\Workspaces\HifiMule\
 ├── .github/
 │   └── workflows/
 │       ├── release.yml                    ← existing (6.5); no changes
@@ -315,7 +315,7 @@ c:\Workspaces\JellyfinSync\
 │       ├── smoke-windows.ps1             ← Windows MSI smoke test
 │       ├── smoke-linux.sh                ← Linux .deb + Xvfb smoke test
 │       └── smoke-macos.sh               ← macOS DMG smoke test
-└── jellyfinsync-daemon/
+└── hifimule-daemon/
     └── src/
         └── rpc.rs                        ← ADD "daemon.health" handler (T1)
 ```
@@ -329,7 +329,7 @@ c:\Workspaces\JellyfinSync\
 | `scripts/smoke-tests/smoke-windows.ps1` | **CREATE** | MSI lifecycle test |
 | `scripts/smoke-tests/smoke-linux.sh` | **CREATE** | .deb lifecycle test with Xvfb |
 | `scripts/smoke-tests/smoke-macos.sh` | **CREATE** | DMG lifecycle test |
-| `jellyfinsync-daemon/src/rpc.rs` | **MODIFY** | Add `"daemon.health"` match arm + unit test |
+| `hifimule-daemon/src/rpc.rs` | **MODIFY** | Add `"daemon.health"` match arm + unit test |
 
 ### What NOT to Do
 
@@ -358,9 +358,9 @@ c:\Workspaces\JellyfinSync\
 
 ### References
 
-- Daemon RPC dispatch: [jellyfinsync-daemon/src/rpc.rs:127-174](jellyfinsync-daemon/src/rpc.rs#L127-L174)
-- Daemon port: [jellyfinsync-daemon/src/main.rs:184](jellyfinsync-daemon/src/main.rs#L184) — hardcoded `19140`
-- UI RPC_PORT constant: [jellyfinsync-ui/src-tauri/src/lib.rs:14](jellyfinsync-ui/src-tauri/src/lib.rs#L14)
+- Daemon RPC dispatch: [hifimule-daemon/src/rpc.rs:127-174](hifimule-daemon/src/rpc.rs#L127-L174)
+- Daemon port: [hifimule-daemon/src/main.rs:184](hifimule-daemon/src/main.rs#L184) — hardcoded `19140`
+- UI RPC_PORT constant: [hifimule-ui/src-tauri/src/lib.rs:14](hifimule-ui/src-tauri/src/lib.rs#L14)
 - Release workflow: [.github/workflows/release.yml](.github/workflows/release.yml)
 - Architecture IPC pattern: architecture.md §API & Communication Patterns — JSON-RPC 2.0 over localhost HTTP
 - Code signing deferred: architecture.md §Packaging & Distribution — post-MVP
@@ -389,7 +389,7 @@ Claude Sonnet 4.6
 
 ### File List
 
-- `jellyfinsync-daemon/src/rpc.rs` (modified — added `daemon.health` match arm + unit test `test_rpc_daemon_health`)
+- `hifimule-daemon/src/rpc.rs` (modified — added `daemon.health` match arm + unit test `test_rpc_daemon_health`)
 - `scripts/smoke-tests/smoke-common.sh` (created — shared `poll_health` helper; modified in T4 with MTP manual hardware verification scope note)
 - `scripts/smoke-tests/smoke-windows.ps1` (created — Windows MSI smoke test)
 - `scripts/smoke-tests/smoke-linux.sh` (created — Linux .deb + Xvfb smoke test)
@@ -411,7 +411,7 @@ Claude Sonnet 4.6
 - [x] [Review][Patch] `smoke-linux.sh`: `dpkg -i` dependency failures not auto-recovered — no `apt-get -f install` fallback [scripts/smoke-tests/smoke-linux.sh:35]
 - [x] [Review][Patch] `smoke-linux.sh`: app exit not verified before `poll_health` — immediate crash causes slow 30s timeout with no early diagnostic [scripts/smoke-tests/smoke-linux.sh:56-57]
 - [x] [Review][Defer] Xvfb `:99` port may be occupied on shared runner — pre-existing CI environment concern [scripts/smoke-tests/smoke-linux.sh:41] — deferred, pre-existing
-- [x] [Review][Defer] Windows install dir hardcoded to `C:\Program Files\JellyfinSync` — WiX MSI default; low risk [scripts/smoke-tests/smoke-windows.ps1:44] — deferred, pre-existing
+- [x] [Review][Defer] Windows install dir hardcoded to `C:\Program Files\HifiMule` — WiX MSI default; low risk [scripts/smoke-tests/smoke-windows.ps1:44] — deferred, pre-existing
 - [x] [Review][Defer] macOS DMG `.app` name assumed to match `APP_NAME` — controlled by tauri.conf.json; low risk [scripts/smoke-tests/smoke-macos.sh:53] — deferred, pre-existing
 - [x] [Review][Defer] No automated post-release trigger for smoke workflow — intentional per spec constraints [.github/workflows/smoke-test.yml:3] — deferred, pre-existing
 

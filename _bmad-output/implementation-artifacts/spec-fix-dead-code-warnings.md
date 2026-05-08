@@ -14,8 +14,8 @@ route: 'one-shot'
 
 ## Suggested Review Order
 
-1. [scrobbler.rs:11-19](../../jellyfinsync-daemon/src/scrobbler.rs) — field-level suppressions + rationale comment (highest signal, closest to a real design debt)
-2. [auto_fill.rs:183-184](../../jellyfinsync-daemon/src/auto_fill.rs) — `rank_and_truncate` suppression (only called from tests; dead_code lint ignores test usage in binary crates)
-3. [device/mod.rs:357-358](../../jellyfinsync-daemon/src/device/mod.rs) — `get_unrecognized_device_path` suppression
-4. [device/mod.rs:928-929](../../jellyfinsync-daemon/src/device/mod.rs) — `save_auto_fill_prefs` suppression
-5. [api.rs:640-641](../../jellyfinsync-daemon/src/api.rs) — `download_item_stream` suppression (no callers anywhere; streamed download path not yet wired up)
+1. [scrobbler.rs:11-19](../../hifimule-daemon/src/scrobbler.rs) — field-level suppressions + rationale comment (highest signal, closest to a real design debt)
+2. [auto_fill.rs:183-184](../../hifimule-daemon/src/auto_fill.rs) — `rank_and_truncate` suppression (only called from tests; dead_code lint ignores test usage in binary crates)
+3. [device/mod.rs:357-358](../../hifimule-daemon/src/device/mod.rs) — `get_unrecognized_device_path` suppression
+4. [device/mod.rs:928-929](../../hifimule-daemon/src/device/mod.rs) — `save_auto_fill_prefs` suppression
+5. [api.rs:640-641](../../hifimule-daemon/src/api.rs) — `download_item_stream` suppression (no callers anywhere; streamed download path not yet wired up)

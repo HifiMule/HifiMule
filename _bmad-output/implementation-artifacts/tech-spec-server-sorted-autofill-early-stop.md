@@ -6,8 +6,8 @@ status: 'Completed'
 stepsCompleted: [1, 2, 3, 4]
 tech_stack: ['rust', 'reqwest', 'serde_json', 'anyhow', 'jellyfin-items-api']
 files_to_modify:
-  - 'jellyfinsync-daemon/src/api.rs'
-  - 'jellyfinsync-daemon/src/auto_fill.rs'
+  - 'hifimule-daemon/src/api.rs'
+  - 'hifimule-daemon/src/auto_fill.rs'
 code_patterns:
   - 'reqwest with manual HeaderMap injection (X-Emby-Token)'
   - 'format! URL string construction with trim_end_matches'
@@ -72,8 +72,8 @@ Merge `get_audio_tracks_for_autofill` (api.rs) and `rank_and_truncate` (auto_fil
 
 | File | Change |
 | ---- | ------ |
-| `jellyfinsync-daemon/src/api.rs` | Delete `get_audio_tracks_for_autofill` method (lines 300–364) |
-| `jellyfinsync-daemon/src/auto_fill.rs` | Rewrite `run_auto_fill`; simplify `rank_and_truncate`; delete `date_sort_key`; add imports; update tests |
+| `hifimule-daemon/src/api.rs` | Delete `get_audio_tracks_for_autofill` method (lines 300–364) |
+| `hifimule-daemon/src/auto_fill.rs` | Rewrite `run_auto_fill`; simplify `rank_and_truncate`; delete `date_sort_key`; add imports; update tests |
 
 ### Technical Decisions
 
@@ -105,12 +105,12 @@ Merge `get_audio_tracks_for_autofill` (api.rs) and `rank_and_truncate` (auto_fil
 ### Tasks
 
 - [x] Task 1: Delete `get_audio_tracks_for_autofill` from `api.rs`
-  - File: `jellyfinsync-daemon/src/api.rs`
+  - File: `hifimule-daemon/src/api.rs`
   - Action: Delete lines 300–364 — the doc comment block (`///`) and the full `pub async fn get_audio_tracks_for_autofill` method including its closing `}`
   - Notes: No other callers outside `auto_fill.rs`. After this task, the project will not compile until Task 3 is complete.
 
 - [x] Task 2: Simplify `rank_and_truncate` in `auto_fill.rs`
-  - File: `jellyfinsync-daemon/src/auto_fill.rs`
+  - File: `hifimule-daemon/src/auto_fill.rs`
   - Action (a): Delete `date_sort_key` helper (lines 57–59 — `fn date_sort_key` and its body)
   - Action (b): In `rank_and_truncate`, delete the `exclude_set` construction and `tracks.retain(...)` call (currently lines 63–67)
   - Action (c): In `rank_and_truncate`, delete the entire `tracks.sort_by(...)` block (currently lines 70–90)
@@ -119,7 +119,7 @@ Merge `get_audio_tracks_for_autofill` (api.rs) and `rank_and_truncate` (auto_fil
   - Notes: `AutoFillParams` still passed (tests use it); `exclude_item_ids` field will be unused in the function body — that's fine for now.
 
 - [x] Task 3: Rewrite `run_auto_fill` in `auto_fill.rs`
-  - File: `jellyfinsync-daemon/src/auto_fill.rs`
+  - File: `hifimule-daemon/src/auto_fill.rs`
   - Action: Replace the body of `run_auto_fill` with the inline fetch+fill loop below. Keep the function signature unchanged.
   - New body:
     ```rust
@@ -239,14 +239,14 @@ Merge `get_audio_tracks_for_autofill` (api.rs) and `rank_and_truncate` (auto_fil
   - Notes: `client.http_client()` exposes the inner `reqwest::Client` — see Task 4. `JellyfinItemsResponse` accessed via `crate::api::JellyfinItemsResponse`. `serde_json` must be in scope — see Task 4. Remove the `println!("DEBUG: ...")` lines from the old body.
 
 - [x] Task 4: Update imports in `auto_fill.rs`
-  - File: `jellyfinsync-daemon/src/auto_fill.rs`
+  - File: `hifimule-daemon/src/auto_fill.rs`
   - Action (a): Add `JellyfinItemsResponse` to the `crate::api` import: `use crate::api::{CredentialManager, JellyfinClient, JellyfinItem, JellyfinItemsResponse};`
   - Action (b): Add `use serde_json;` (or use `serde_json::from_str` inline — confirm it's already available as a dependency in `Cargo.toml`)
   - Action (c): Add `pub fn http_client(&self) -> &reqwest::Client` accessor to `JellyfinClient` in `api.rs` so `auto_fill.rs` can call `client.http_client().get(...)` without duplicating the reqwest client setup
   - Notes: Alternatively to (c), move the pagination HTTP call directly using `reqwest::Client::new()` — but reusing the existing client on `JellyfinClient` is preferable. Check if `JellyfinClient.client` is already accessible; if not, add the accessor.
 
 - [x] Task 5: Update unit tests in `auto_fill.rs`
-  - File: `jellyfinsync-daemon/src/auto_fill.rs`
+  - File: `hifimule-daemon/src/auto_fill.rs`
   - Action (a): Delete these test functions entirely: `test_favorites_ranked_first`, `test_play_count_secondary_sort`, `test_date_created_tertiary_sort`, `test_capacity_skip_large_includes_smaller`, `test_exclude_item_ids`
   - Action (b): Add new test `test_stops_after_first_oversized`:
     ```rust
@@ -299,9 +299,9 @@ Merge `get_audio_tracks_for_autofill` (api.rs) and `rank_and_truncate` (auto_fil
 
 ### Testing Strategy
 
-- Unit tests: `rank_and_truncate` pure function tests cover capacity/size logic — run with `cargo test -p jellyfinsync-daemon auto_fill`
+- Unit tests: `rank_and_truncate` pure function tests cover capacity/size logic — run with `cargo test -p hifimule-daemon auto_fill`
 - Manual test: run auto-fill against a real Jellyfin instance; verify in debug logs that only 1-2 pages are fetched when device has small free space, and that the result is ordered favorites → play_count → newest
-- Compile check: `cargo check -p jellyfinsync-daemon` after Task 1 + before Task 3 should fail (expected); passing after Task 3+ completes is the acceptance signal
+- Compile check: `cargo check -p hifimule-daemon` after Task 1 + before Task 3 should fail (expected); passing after Task 3+ completes is the acceptance signal
 
 ### Notes
 

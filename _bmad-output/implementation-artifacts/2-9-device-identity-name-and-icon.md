@@ -190,27 +190,27 @@ If the user clears the name field and the Confirm button is re-disabled, `select
 ### File Structure
 
 **Only these files change:**
-- `jellyfinsync-daemon/src/device/mod.rs` — `DeviceManifest.name` serde(default), new `icon` field, `initialize_device()` signature
-- `jellyfinsync-daemon/src/rpc.rs` — `handle_device_initialize()` params, `handle_device_list()` response, `handle_get_daemon_state()` connectedDevices
-- `jellyfinsync-ui/src/components/InitDeviceModal.ts` — name input, icon picker, confirm wiring
-- `jellyfinsync-ui/src/components/BasketSidebar.ts` — wire `#init-device-btn` click → `openInitDeviceModal()` (was rendered in Story 2.8 but never connected)
+- `hifimule-daemon/src/device/mod.rs` — `DeviceManifest.name` serde(default), new `icon` field, `initialize_device()` signature
+- `hifimule-daemon/src/rpc.rs` — `handle_device_initialize()` params, `handle_device_list()` response, `handle_get_daemon_state()` connectedDevices
+- `hifimule-ui/src/components/InitDeviceModal.ts` — name input, icon picker, confirm wiring
+- `hifimule-ui/src/components/BasketSidebar.ts` — wire `#init-device-btn` click → `openInitDeviceModal()` (was rendered in Story 2.8 but never connected)
 
 **These files do NOT change:**
-- `jellyfinsync-ui/src/styles.css` — no new classes needed
-- `jellyfinsync-daemon/src/db.rs` — no DB schema changes
-- `jellyfinsync-daemon/src/main.rs` — no changes
+- `hifimule-ui/src/styles.css` — no new classes needed
+- `hifimule-daemon/src/db.rs` — no DB schema changes
+- `hifimule-daemon/src/main.rs` — no changes
 
 ### References
 
 - Previous story: `_bmad-output/implementation-artifacts/2-8-enhanced-multi-device-hub.md`
-- `DeviceManifest` struct: `jellyfinsync-daemon/src/device/mod.rs:49–73`
-- `initialize_device()`: `jellyfinsync-daemon/src/device/mod.rs:358–430`
-- `handle_device_initialize()`: `jellyfinsync-daemon/src/rpc.rs:1385–1483`
-- `handle_device_list()`: `jellyfinsync-daemon/src/rpc.rs:1850–1863`
-- `handle_get_daemon_state()` connectedDevices JSON: `jellyfinsync-daemon/src/rpc.rs:406–415`
-- `InitDeviceModal.ts` `renderContent()`: `jellyfinsync-ui/src/components/InitDeviceModal.ts:89–162`
-- `InitDeviceModal.ts` `handleConfirm()`: `jellyfinsync-ui/src/components/InitDeviceModal.ts:205–234`
-- `BasketSidebar.ts` `connectedDevices` type (already has `icon`): `jellyfinsync-ui/src/components/BasketSidebar.ts` (Story 2.8)
+- `DeviceManifest` struct: `hifimule-daemon/src/device/mod.rs:49–73`
+- `initialize_device()`: `hifimule-daemon/src/device/mod.rs:358–430`
+- `handle_device_initialize()`: `hifimule-daemon/src/rpc.rs:1385–1483`
+- `handle_device_list()`: `hifimule-daemon/src/rpc.rs:1850–1863`
+- `handle_get_daemon_state()` connectedDevices JSON: `hifimule-daemon/src/rpc.rs:406–415`
+- `InitDeviceModal.ts` `renderContent()`: `hifimule-ui/src/components/InitDeviceModal.ts:89–162`
+- `InitDeviceModal.ts` `handleConfirm()`: `hifimule-ui/src/components/InitDeviceModal.ts:205–234`
+- `BasketSidebar.ts` `connectedDevices` type (already has `icon`): `hifimule-ui/src/components/BasketSidebar.ts` (Story 2.8)
 - Architecture (Manifest Extension with name/icon): `_bmad-output/planning-artifacts/architecture.md` line ~80
 - Architecture (Multi-Device IPC, device.initialize params): `_bmad-output/planning-artifacts/architecture.md` line ~106
 - UX spec (Device Identity in Initialize Dialog): `_bmad-output/planning-artifacts/ux-design-specification.md` lines ~92–95
@@ -241,10 +241,10 @@ None — all changes compiled cleanly on first attempt.
 
 ### File List
 
-- `jellyfinsync-daemon/src/device/mod.rs`
-- `jellyfinsync-daemon/src/rpc.rs`
-- `jellyfinsync-ui/src/components/InitDeviceModal.ts`
-- `jellyfinsync-ui/src/components/BasketSidebar.ts`
+- `hifimule-daemon/src/device/mod.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-ui/src/components/InitDeviceModal.ts`
+- `hifimule-ui/src/components/BasketSidebar.ts`
 
 ## Change Log
 

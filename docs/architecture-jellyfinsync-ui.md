@@ -1,6 +1,6 @@
-# JellyfinSync UI — Architecture
+# HifiMule UI — Architecture
 
-**Part:** `jellyfinsync-ui` | **Generated:** 2026-05-07 | **Scan depth:** Exhaustive
+**Part:** `hifimule-ui` | **Generated:** 2026-05-07 | **Scan depth:** Exhaustive
 
 ---
 
@@ -48,8 +48,8 @@ Tauri 2 Shell (Rust)
 Executed in a background thread on startup:
 
 1. **Health check** — POST `get_daemon_state` to `http://127.0.0.1:19140`; if OK, daemon is running → status `"startup"`
-2. **Windows Service** (Windows only) — `sc start jellyfinsync-daemon`; health check after 2s → status `"service"`
-3. **Sidecar spawn** — `app.shell().sidecar("jellyfinsync-daemon").spawn()` → status `"running (pid=N)"`; monitors stdout/stderr/terminated events; kills child on `RunEvent::Exit`
+2. **Windows Service** (Windows only) — `sc start hifimule-daemon`; health check after 2s → status `"service"`
+3. **Sidecar spawn** — `app.shell().sidecar("hifimule-daemon").spawn()` → status `"running (pid=N)"`; monitors stdout/stderr/terminated events; kills child on `RunEvent::Exit`
 
 Status strings exposed via `get_sidecar_status`:
 - `"starting"` — initial state
@@ -62,7 +62,7 @@ Status strings exposed via `get_sidecar_status`:
 
 ### Logging
 
-`ui_log(msg)` writes to `<AppData>/JellyfinSync/ui.log` (1 MB cap, truncated on overflow) in addition to `println!`. Windows only (uses `APPDATA` env var).
+`ui_log(msg)` writes to `<AppData>/HifiMule/ui.log` (1 MB cap, truncated on overflow) in addition to `println!`. Windows only (uses `APPDATA` env var).
 
 ---
 
@@ -205,11 +205,11 @@ initLibraryView()
 
 ```json
 {
-  "productName": "JellyfinSync",
+  "productName": "HifiMule",
   "version": "0.2.0",
-  "identifier": "com.alexi.jellyfinsync",
+  "identifier": "com.alexi.hifimule",
   "bundle": {
-    "externalBin": ["sidecars/jellyfinsync-daemon"],
+    "externalBin": ["sidecars/hifimule-daemon"],
     "windows": {
       "wix": { "fragmentPaths": ["wix/startup-fragment.wxs"] },
       "nsis": { "installerHooks": "nsis/hooks.nsh" }
@@ -229,7 +229,7 @@ initLibraryView()
 
 ```bash
 # Development
-cd jellyfinsync-ui
+cd hifimule-ui
 npm run dev          # Starts Vite dev server on :1420 + Tauri in dev mode
 
 # Production
@@ -238,4 +238,4 @@ node ../scripts/prepare-sidecar.mjs   # copies daemon binary to src-tauri/sideca
 npm run tauri build  # Tauri bundles: .dmg / .deb / .exe
 ```
 
-`prepare-sidecar.mjs` finds the compiled daemon binary for the current platform and copies it to `jellyfinsync-ui/src-tauri/sidecars/jellyfinsync-daemon-<triple>` (Tauri sidecar naming convention).
+`prepare-sidecar.mjs` finds the compiled daemon binary for the current platform and copies it to `hifimule-ui/src-tauri/sidecars/hifimule-daemon-<triple>` (Tauri sidecar naming convention).

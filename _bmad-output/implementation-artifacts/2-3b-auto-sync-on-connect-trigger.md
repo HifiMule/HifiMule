@@ -14,7 +14,7 @@ so that I can plug in and walk away without any interaction.
 2. **AC2: Tray Icon Syncing State** — When auto-sync starts, the tray icon transitions to "Syncing" state with updated tooltip. No UI interaction is required.
 3. **AC3: Completion Notification** — When auto-sync completes, an OS-native notification is sent: "Sync Complete. Safe to eject." and the tray icon returns to "Idle" state.
 4. **AC4: Error Handling** — When auto-sync fails (device disconnected mid-sync, no credentials, server unreachable), the tray icon transitions to "Error" state and an OS-native notification describes the failure.
-5. **AC5: Auto-Sync Toggle Persistence** — The `auto_sync_on_connect` flag is stored both in SQLite device profile AND in the `.jellyfinsync.json` manifest on the device.
+5. **AC5: Auto-Sync Toggle Persistence** — The `auto_sync_on_connect` flag is stored both in SQLite device profile AND in the `.hifimule.json` manifest on the device.
 6. **AC6: RPC Configuration** — A JSON-RPC method allows the UI to enable/disable `auto_sync_on_connect` per device profile.
 7. **AC7: Headless Operation** — Auto-sync works identically whether the UI is open or not (daemon-only mode).
 
@@ -23,7 +23,7 @@ so that I can plug in and walk away without any interaction.
 - [x] Task 1: Add `auto_sync_on_connect` field to device profiles (AC: #5)
   - [x] 1.1 Add `auto_sync_on_connect BOOLEAN DEFAULT false` column to `device_profiles` table in `db.rs`
   - [x] 1.2 Add migration logic for existing databases (ALTER TABLE)
-  - [x] 1.3 Extend `DeviceManifest` struct to parse/write `autoSyncOnConnect` from `.jellyfinsync.json`
+  - [x] 1.3 Extend `DeviceManifest` struct to parse/write `autoSyncOnConnect` from `.hifimule.json`
   - [x] 1.4 Ensure manifest atomic write includes the new field via Write-Temp-Rename pattern
 - [x] Task 2: Implement auto-sync controller in device event handler (AC: #1, #7)
   - [x] 2.1 In `main.rs` device event handler (`DeviceEvent::Detected`), after `handle_device_detected()`, check if device profile has `auto_sync_on_connect` enabled
@@ -58,21 +58,21 @@ so that I can plug in and walk away without any interaction.
 - **IPC**: JSON-RPC 2.0 over HTTP on `localhost:19140`. All JSON payloads use camelCase (`#[serde(rename_all = "camelCase")]`).
 - **Async Runtime**: `tokio` — spawn auto-sync as `tokio::spawn` task. Use `tokio::task::spawn_blocking` for any SQLite operations.
 - **State Broadcasting**: Send `DaemonState` variants through the existing `state_tx: mpsc::Sender<DaemonState>` channel. Tray icon handler already listens on the receiver.
-- **Atomic Manifest Writes**: Always use the existing `DeviceManifest::write()` method which implements Write-Temp-Rename pattern (write to `.jellyfinsync.json.tmp`, `sync_all()`, rename).
+- **Atomic Manifest Writes**: Always use the existing `DeviceManifest::write()` method which implements Write-Temp-Rename pattern (write to `.hifimule.json.tmp`, `sync_all()`, rename).
 - **Error Handling**: Use `thiserror` for typed errors, `anyhow` at binary level. Log errors via `daemon_log!` macro in release builds.
-- **Logging**: Release mode writes to `%APPDATA%/JellyfinSync/daemon.log` via `daemon_log!`. No `println!` in release.
+- **Logging**: Release mode writes to `%APPDATA%/HifiMule/daemon.log` via `daemon_log!`. No `println!` in release.
 
 ### Source Tree Components to Touch
 
 | File | Purpose |
 |------|---------|
-| `jellyfinsync-daemon/src/db.rs` | Add `auto_sync_on_connect` column, migration, CRUD methods |
-| `jellyfinsync-daemon/src/device/mod.rs` | Extend `DeviceManifest` struct with `auto_sync_on_connect` field |
-| `jellyfinsync-daemon/src/main.rs` | Add auto-sync trigger logic in device event handler (lines ~179-233) |
-| `jellyfinsync-daemon/src/rpc.rs` | Add `device.setAutoSyncOnConnect` RPC method |
-| `jellyfinsync-daemon/src/sync.rs` | Reuse `SyncOperationManager` — no changes expected unless API needs exposure |
-| `jellyfinsync-daemon/src/tests.rs` | Add integration tests for auto-sync flow |
-| `jellyfinsync-daemon/Cargo.toml` | Add `notify-rust` dependency if not already present for OS notifications |
+| `hifimule-daemon/src/db.rs` | Add `auto_sync_on_connect` column, migration, CRUD methods |
+| `hifimule-daemon/src/device/mod.rs` | Extend `DeviceManifest` struct with `auto_sync_on_connect` field |
+| `hifimule-daemon/src/main.rs` | Add auto-sync trigger logic in device event handler (lines ~179-233) |
+| `hifimule-daemon/src/rpc.rs` | Add `device.setAutoSyncOnConnect` RPC method |
+| `hifimule-daemon/src/sync.rs` | Reuse `SyncOperationManager` — no changes expected unless API needs exposure |
+| `hifimule-daemon/src/tests.rs` | Add integration tests for auto-sync flow |
+| `hifimule-daemon/Cargo.toml` | Add `notify-rust` dependency if not already present for OS notifications |
 
 ### Critical Implementation Details
 
@@ -87,7 +87,7 @@ so that I can plug in and walk away without any interaction.
 
 4. **Duplicate Sync Prevention**: Before starting auto-sync, check `SyncOperationManager` for any active operation on the same device. If one exists, skip (device was likely reconnected quickly).
 
-5. **Notification Library**: Check if `notify-rust` is already in `Cargo.toml`. If not, add it. It supports Windows (toast), macOS (NSUserNotification), and Linux (libnotify). Use title "JellyfinSync" and appropriate body text.
+5. **Notification Library**: Check if `notify-rust` is already in `Cargo.toml`. If not, add it. It supports Windows (toast), macOS (NSUserNotification), and Linux (libnotify). Use title "HifiMule" and appropriate body text.
 
 6. **Existing Scrobbler Pattern**: The scrobbler is already auto-triggered on device detection (main.rs lines 197-219). Follow the same pattern: check conditions → spawn async task → update shared state on completion.
 
@@ -104,7 +104,7 @@ Key learnings from story 2-3 that directly apply:
 
 ### Project Structure Notes
 
-- All daemon code lives in `jellyfinsync-daemon/src/`
+- All daemon code lives in `hifimule-daemon/src/`
 - Rust naming: `snake_case` for variables/functions
 - JSON-RPC payloads: `camelCase` via `#[serde(rename_all = "camelCase")]`
 - DB tables: `snake_case` plural (e.g., `device_profiles`)
@@ -125,10 +125,10 @@ Key learnings from story 2-3 that directly apply:
 - [Source: _bmad-output/planning-artifacts/architecture.md — Auto-Sync Controller, Device Profile Fields, Data Architecture]
 - [Source: _bmad-output/planning-artifacts/ux-design-specification.md — Section 5.4 Device Profile Settings, Section 5.5 Headless Sync Feedback]
 - [Source: _bmad-output/implementation-artifacts/2-3-multi-device-profile-mapping.md — DeviceManager patterns, DB patterns, testing approach]
-- [Source: jellyfinsync-daemon/src/main.rs — Device event handler lines 179-233, scrobbler auto-trigger pattern lines 197-219]
-- [Source: jellyfinsync-daemon/src/device/mod.rs — DeviceManifest struct, atomic write pattern, DeviceEvent enum]
-- [Source: jellyfinsync-daemon/src/sync.rs — SyncOperationManager, SyncDelta, SyncOperation]
-- [Source: jellyfinsync-daemon/src/rpc.rs — AppState struct, RPC routing]
+- [Source: hifimule-daemon/src/main.rs — Device event handler lines 179-233, scrobbler auto-trigger pattern lines 197-219]
+- [Source: hifimule-daemon/src/device/mod.rs — DeviceManifest struct, atomic write pattern, DeviceEvent enum]
+- [Source: hifimule-daemon/src/sync.rs — SyncOperationManager, SyncDelta, SyncOperation]
+- [Source: hifimule-daemon/src/rpc.rs — AppState struct, RPC routing]
 
 ## Dev Agent Record
 
@@ -151,10 +151,10 @@ Claude Opus 4.6
 - 2026-03-18: Implemented Story 2.3b — Auto-Sync on Connect Trigger (all 6 tasks, all ACs satisfied)
 
 ### File List
-- `jellyfinsync-daemon/src/db.rs` — Added `auto_sync_on_connect` field to `DeviceMapping`, column to `devices` table with migration, `set_auto_sync_on_connect()` method, 3 unit tests
-- `jellyfinsync-daemon/src/device/mod.rs` — Added `auto_sync_on_connect` field to `DeviceManifest` struct, updated `initialize_device()`
-- `jellyfinsync-daemon/src/device/tests.rs` — Added 4 tests for manifest serde with `auto_sync_on_connect`, updated all existing test struct literals
-- `jellyfinsync-daemon/src/main.rs` — Added `run_auto_sync()` function, `to_desired_item()` helper, auto-sync trigger logic in device event handler, shared `SyncOperationManager` initialization
-- `jellyfinsync-daemon/src/rpc.rs` — Added `handle_device_set_auto_sync_on_connect()` handler, `device_set_auto_sync_on_connect` route, extended `handle_get_daemon_state()` with `autoSyncOnConnect` field, updated `run_server()` signature to accept shared `SyncOperationManager`, 2 RPC tests
-- `jellyfinsync-daemon/src/sync.rs` — Updated test `empty_manifest()` with new field
-- `jellyfinsync-daemon/src/tests.rs` — Added 2 integration tests for device detection with auto-sync enabled/disabled, updated existing test struct literal
+- `hifimule-daemon/src/db.rs` — Added `auto_sync_on_connect` field to `DeviceMapping`, column to `devices` table with migration, `set_auto_sync_on_connect()` method, 3 unit tests
+- `hifimule-daemon/src/device/mod.rs` — Added `auto_sync_on_connect` field to `DeviceManifest` struct, updated `initialize_device()`
+- `hifimule-daemon/src/device/tests.rs` — Added 4 tests for manifest serde with `auto_sync_on_connect`, updated all existing test struct literals
+- `hifimule-daemon/src/main.rs` — Added `run_auto_sync()` function, `to_desired_item()` helper, auto-sync trigger logic in device event handler, shared `SyncOperationManager` initialization
+- `hifimule-daemon/src/rpc.rs` — Added `handle_device_set_auto_sync_on_connect()` handler, `device_set_auto_sync_on_connect` route, extended `handle_get_daemon_state()` with `autoSyncOnConnect` field, updated `run_server()` signature to accept shared `SyncOperationManager`, 2 RPC tests
+- `hifimule-daemon/src/sync.rs` — Updated test `empty_manifest()` with new field
+- `hifimule-daemon/src/tests.rs` — Added 2 integration tests for device detection with auto-sync enabled/disabled, updated existing test struct literal

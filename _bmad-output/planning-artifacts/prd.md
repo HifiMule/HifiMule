@@ -10,7 +10,7 @@ classification:
 workflowType: 'prd'
 ---
 
-# Product Requirements Document - JellyfinSync
+# Product Requirements Document - HifiMule
 
 **Author:** Alexis
 **Date:** 2026-01-26
@@ -24,13 +24,13 @@ workflowType: 'prd'
 - **Ecosystem Continuity:** Listen history from the device is reflected on the Jellyfin server, making the DAP feel part of the modern library.
 
 ### Business Success
-- **Legacy Ecosystem Essential:** JellyfinSync becomes the top recommendation for the Rockbox/DAP community.
+- **Legacy Ecosystem Essential:** HifiMule becomes the top recommendation for the Rockbox/DAP community.
 - **Cross-Platform Parity:** Identical user experience across Windows, Linux, and macOS with zero feature loss.
 
 ### Technical Success
 - **Capped Idle Usage:** The Rust engine maintains a < 10MB RAM footprint during 72-hour idle state stress tests.
 - **Buffered IO Stability:** Memory-to-disk buffering ensures peak USB write speeds without impacting host system responsiveness.
-- **Atomic Manifest Updates:** The `.jellyfinsync.json` state is only committed after successful file verification.
+- **Atomic Manifest Updates:** The `.hifimule.json` state is only committed after successful file verification.
 
 ### Measurable Outcomes
 - **Time-to-Action:** < 5s from device detection to "Sync Ready" state (including manifest audit).
@@ -45,7 +45,7 @@ workflowType: 'prd'
 - **Basic Scrobbling (Direct):** Reading Rockbox `.scrobbler.log` and reporting finished tracks to Jellyfin via the `/Progress` API (one-way, fire-and-forget).
 - **Hardware-Aware Validation:** Automated sanity checks for path-length limits (255 chars) and filename character-set compatibility.
 - **Destructive Safety Protocol:** Mandatory manual user confirmation for any manifest-repair or cleanup operations exceeding 100MB of data deletion.
-- **Conflict-Free Manifest Sync:** Implementation of the `.jellyfinsync.json` logic for managed-folder isolation.
+- **Conflict-Free Manifest Sync:** Implementation of the `.hifimule.json` logic for managed-folder isolation.
 - **Profile Selection:** UI/CLI support for selecting the correct Jellyfin user account for playlist/scrobble routing.
 - **Auto-Fill Sync Mode:** Intelligent device-filling using a virtual basket slot. Enabling Auto-Fill places a single slot in the basket representing remaining capacity; the priority algorithm (favorites → play count → creation date) runs at sync time, not at basket-build time. Always uses the freshest library state. Can be mixed with manual basket selections.
 - **Auto-Sync on Connect:** Known devices with auto-sync enabled trigger synchronization automatically on detection, requiring zero user interaction.
@@ -60,7 +60,7 @@ workflowType: 'prd'
 ## User Journeys
 
 ### Arthur's Weekly Ritual (Legacy Success)
-*   **Narrative:** Every Saturday morning, Arthur plugs his beloved 160GB iPod Classic into his Linux desktop. The headless JellyfinSync engine detects the mount instantly. Arthur opens the UI, which automatically highlights 50 new tracks in his "Recently Added" Jellyfin playlist. He clicks "Sync".
+*   **Narrative:** Every Saturday morning, Arthur plugs his beloved 160GB iPod Classic into his Linux desktop. The headless HifiMule engine detects the mount instantly. Arthur opens the UI, which automatically highlights 50 new tracks in his "Recently Added" Jellyfin playlist. He clicks "Sync".
 *   **Success Moment:** The sync completes in under 20 seconds using the pre-calculated manifest. Arthur ejects the device, confident that his manual "Voice Memos" folder remains untouched.
 
 ### Sarah's Pre-Run Dash (Speed Success)
@@ -68,7 +68,7 @@ workflowType: 'prd'
 *   **Success Moment:** She unplugs and leaves. Zero clicks. The auto-fill prioritized her favorite running tracks and the tool handled everything silently in the background.
 
 ### The "Silent Engine" (Admin Setup)
-*   **Narrative:** Alexis sets up JellyfinSync on a new Mac Mini. He runs a simple wizard to connect to his Jellyfin server and selects his primary User Profile.
+*   **Narrative:** Alexis sets up HifiMule on a new Mac Mini. He runs a simple wizard to connect to his Jellyfin server and selects his primary User Profile.
 *   **Success Moment:** The Rust engine sits in the system tray, consuming negligible memory (< 10MB) while waiting for the next USB hardware connection.
 
 ### The Mid-Sync Eject (Edge Case Recovery)
@@ -86,7 +86,7 @@ workflowType: 'prd'
 ### Market Context & Competitive Landscape
 - **Generic Sync (rsync/Unison):** Low metadata awareness; unable to parse playlists or genres.
 - **Heavy Media Managers (iTunes/MediaMonkey):** High resource footprint (150MB+ idle); often lack direct Jellyfin integration.
-- **JellyfinSync's Position:** The only tool combining the "Leanness" of a CLI-first utility with the "Richness" of media-server metadata and background automation.
+- **HifiMule's Position:** The only tool combining the "Leanness" of a CLI-first utility with the "Richness" of media-server metadata and background automation.
 
 ### Validation Approach
 - **Sync Stress Test:** Validating the Rust engine against a simulated 10,000-file library across three OS platforms.
@@ -96,7 +96,7 @@ workflowType: 'prd'
 ## Desktop App Specific Requirements
 
 ### Project-Type Overview
-As a cross-platform desktop application, JellyfinSync consists of a performance-critical Rust-based sync engine (Headless) and a separate (detachable) user interface.
+As a cross-platform desktop application, HifiMule consists of a performance-critical Rust-based sync engine (Headless) and a separate (detachable) user interface.
 
 ### Technical Architecture Considerations
 - **Platform Support:** General support for Windows, Linux, and macOS.
@@ -143,10 +143,10 @@ As a cross-platform desktop application, JellyfinSync consists of a performance-
 ### 1. Device Connection & Discovery
 - **FR1:** The system can automatically detect Mass Storage (USB MSC) and MTP (Media Transfer Protocol) devices on Windows, Linux, and macOS.
 - **FR2:** Users can manually select a target device folder if automatic detection fails. Manual fallback applies to Mass Storage devices only; MTP devices must be detected automatically via the OS device manager.
-- **FR3:** The system can identify the presence of a `.jellyfinsync.json` manifest on discovery.
+- **FR3:** The system can identify the presence of a `.hifimule.json` manifest on discovery.
 - **FR4:** The system can read persistent hardware identifiers to link devices across different sessions. When multiple managed devices are connected simultaneously, the system tracks all of them and allows the user to select the active device context.
 - **FR33:** The system presents a persistent device hub showing all connected managed devices, each identified by its name and icon. The user can switch the active device context at any time. When no device is selected, the basket is empty and adding items is disabled.
-- **FR26:** The system can initialize a new `.jellyfinsync.json` manifest on a connected device that has not previously been managed, capturing a hardware identifier, a designated sync folder path, an associated Jellyfin user profile, a user-provided display name, and an optional icon identifier selected from a built-in library.
+- **FR26:** The system can initialize a new `.hifimule.json` manifest on a connected device that has not previously been managed, capturing a hardware identifier, a designated sync folder path, an associated Jellyfin user profile, a user-provided display name, and an optional icon identifier selected from a built-in library.
 
 ### 2. Server & Profile Management
 - **FR5:** Users can configure Jellyfin server credentials (URL, username, token).
@@ -196,7 +196,7 @@ As a cross-platform desktop application, JellyfinSync consists of a performance-
 
 ### 2. Reliability & Stability
 - **Write-Verify-Commit:** The system must utilize OS-level file sync primitives (e.g., `sync_all`) to ensure the directory structure and data are physically flushed to the device before marking a sync as complete in the manifest.
-- **Atomic Manifest Updates:** The `.jellyfinsync.json` manifest must be updated atomically to prevent corruption during unexpected power loss or disconnection.
+- **Atomic Manifest Updates:** The `.hifimule.json` manifest must be updated atomically to prevent corruption during unexpected power loss or disconnection.
 - **Robust Connection:** The system must handle network interruptions during buffered streaming, attempting to resume for at least 3 retry cycles.
 - **Hardware Disconnect:** Mid-sync ejections must not result in unbootable or unmountable media; the system must gracefully mark the session as "Interrupted" and trigger the Repair Utility on reconnection.
 

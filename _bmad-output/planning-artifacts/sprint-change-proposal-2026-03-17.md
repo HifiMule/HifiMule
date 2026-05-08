@@ -8,7 +8,7 @@
 
 ## 1. Issue Summary
 
-**Problem Statement:** JellyfinSync currently only supports manual curation via the Selection Basket (browse → pick → sync). There is no automated "fill my device" mode that intelligently selects music based on user preferences, nor any way to trigger sync automatically when a known device is connected.
+**Problem Statement:** HifiMule currently only supports manual curation via the Selection Basket (browse → pick → sync). There is no automated "fill my device" mode that intelligently selects music based on user preferences, nor any way to trigger sync automatically when a known device is connected.
 
 **Context:** Identified as a missing core workflow inspired by iTunes "Sync All" functionality. Two concrete use cases: filling a 1TB iPod with all favorites, and exporting loved songs to a Garmin watch. The feature maps directly to the "Sprinter" persona (Sarah) and the "Auto-Pilot Policy" concept already described in the PRD's Innovation section.
 
@@ -43,7 +43,7 @@
 - **Daemon:** New auto-fill priority algorithm querying Jellyfin API (IsFavorite, PlayCount, DateCreated)
 - **IPC:** Two new JSON-RPC methods
 - **SQLite:** Three new device profile fields (`auto_fill_enabled`, `max_fill_bytes`, `auto_sync_on_connect`)
-- **Manifest:** Optional `autoFill` config block in `.jellyfinsync.json`
+- **Manifest:** Optional `autoFill` config block in `.hifimule.json`
 - **No changes to:** technology stack, IPC protocol, proxy pattern, naming conventions, logging strategy, packaging
 
 ---
@@ -135,7 +135,7 @@ So that I can plug in and walk away without any interaction.
 
 **Acceptance Criteria:**
 
-**Given** a known device (has `.jellyfinsync.json` with a unique ID) is connected
+**Given** a known device (has `.hifimule.json` with a unique ID) is connected
 **When** the daemon reads the ID
 **Then** it automatically loads the associated Jellyfin User Profile and Sync Rules.
 
@@ -265,7 +265,7 @@ and completion feedback.
 
 #### 4.3.4 Manifest Extension
 
-**Add optional block to `.jellyfinsync.json`:**
+**Add optional block to `.hifimule.json`:**
 ```json
 "autoFill": {
   "enabled": true,

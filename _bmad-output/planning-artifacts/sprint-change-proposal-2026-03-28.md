@@ -44,7 +44,7 @@
 | Artifact | Sections Affected |
 |----------|------------------|
 | PRD | FR29 (auto-fill algorithm runs at sync time, not basket population) |
-| Architecture | `basket.autoFill` IPC removed; `sync.start` payload updated; `device.setBasket` IPC added; `on_sync_progress` event schema extended; `.jellyfinsync.json` manifest schema updated (basket block + playlists array + autoSyncOnConnect promotion) |
+| Architecture | `basket.autoFill` IPC removed; `sync.start` payload updated; `device.setBasket` IPC added; `on_sync_progress` event schema extended; `.hifimule.json` manifest schema updated (basket block + playlists array + autoSyncOnConnect promotion) |
 | UX Spec | §5.3 Auto-Fill Components (remove Auto Badge, Priority Reason Tags; update toggle description; add reservation slot component); §5.1 Foundation Components (artist view: alpha-jump bar, search box, scroll restoration); §5.2 Custom Components (Sync Basket: ETA label) |
 | Story 2.3 tech notes | `autoSyncOnConnect` now at device root of manifest, not inside `autoFill` block |
 | Story 4.5 tech notes | `on_sync_progress` payload updated with `bytesTransferred` and `totalBytes` |
@@ -53,7 +53,7 @@
 ### Technical Impact
 
 - **IPC contract changes:** `sync.start` payload restructured; `basket.autoFill` removed; `device.setBasket` added; `on_sync_progress` schema extended. All additive or scoped to the changed stories.
-- **Manifest schema change:** Breaking change to `.jellyfinsync.json` `autoFill` block — requires migration logic for existing managed devices (split `autoSyncOnConnect` out, introduce `basket` block).
+- **Manifest schema change:** Breaking change to `.hifimule.json` `autoFill` block — requires migration logic for existing managed devices (split `autoSyncOnConnect` out, introduce `basket` block).
 - **No daemon memory impact:** Auto-fill reservation is pure UI state until sync runs.
 - **No new external dependencies.**
 
@@ -106,7 +106,7 @@ NEW: Enabling the Auto-Fill toggle adds a single "Auto-Fill Reservation"
 - Sync follows same differential algorithm, buffered IO, and manifest update logic as standard sync.
 
 *Basket Persistence in Manifest*
-- On basket change (item add/remove, auto-fill toggle, slider adjust) → daemon writes basket state to `.jellyfinsync.json` via `device.setBasket` RPC using Write-Temp-Rename pattern.
+- On basket change (item add/remove, auto-fill toggle, slider adjust) → daemon writes basket state to `.hifimule.json` via `device.setBasket` RPC using Write-Temp-Rename pattern.
 - On known device reconnect → UI restores basket from manifest (manual items + auto-fill reservation slot if enabled). No auto-fill track resolution on restore.
 - Manual basket clear → writes `{ "manualItemIds": [], "autoFill": { "enabled": false, "maxBytes": null } }`.
 

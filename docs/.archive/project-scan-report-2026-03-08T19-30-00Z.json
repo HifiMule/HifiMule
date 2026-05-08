@@ -7,31 +7,31 @@
   },
   "mode": "initial_scan",
   "scan_level": "quick",
-  "project_root": "c:/Workspaces/JellyfinSync",
-  "project_knowledge": "c:/Workspaces/JellyfinSync/docs",
+  "project_root": "c:/Workspaces/HifiMule",
+  "project_knowledge": "c:/Workspaces/HifiMule/docs",
   "repository_type": "monorepo",
   "project_types": [
     {
-      "part_id": "jellyfinsync-daemon",
+      "part_id": "hifimule-daemon",
       "project_type_id": "backend",
-      "display_name": "JellyfinSync Daemon (Rust Backend)"
+      "display_name": "HifiMule Daemon (Rust Backend)"
     },
     {
-      "part_id": "jellyfinsync-ui",
+      "part_id": "hifimule-ui",
       "project_type_id": "desktop",
-      "display_name": "JellyfinSync UI (Tauri Desktop)"
+      "display_name": "HifiMule UI (Tauri Desktop)"
     }
   ],
   "project_parts": [
     {
-      "part_id": "jellyfinsync-daemon",
-      "root_path": "jellyfinsync-daemon/",
+      "part_id": "hifimule-daemon",
+      "root_path": "hifimule-daemon/",
       "project_type_id": "backend",
       "primary_tech": "Rust (axum, rusqlite, reqwest)"
     },
     {
-      "part_id": "jellyfinsync-ui",
-      "root_path": "jellyfinsync-ui/",
+      "part_id": "hifimule-ui",
+      "root_path": "hifimule-ui/",
       "project_type_id": "desktop",
       "primary_tech": "Tauri 2 + TypeScript + Vite (Shoelace)"
     }
@@ -64,11 +64,11 @@
     "project-overview.md",
     "source-tree-analysis.md",
     "integration-architecture.md",
-    "architecture-jellyfinsync-daemon.md",
-    "architecture-jellyfinsync-ui.md",
-    "api-contracts-jellyfinsync-daemon.md",
-    "data-models-jellyfinsync-daemon.md",
-    "component-inventory-jellyfinsync-ui.md",
+    "architecture-hifimule-daemon.md",
+    "architecture-hifimule-ui.md",
+    "api-contracts-hifimule-daemon.md",
+    "data-models-hifimule-daemon.md",
+    "component-inventory-hifimule-ui.md",
     "development-guide.md",
     "project-parts.json"
   ],

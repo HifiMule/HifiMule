@@ -34,14 +34,14 @@ context: []
 
 ## Code Map
 
-- `jellyfinsync-daemon/src/device/mod.rs` -- owns `DeviceManager.get_device_storage()` and `StorageInfo`.
-- `jellyfinsync-daemon/src/device_io.rs` -- defines backend `free_space()` used by MTP and MSC implementations.
-- `jellyfinsync-daemon/src/rpc.rs` -- `sync_calculate_delta` and `basket.autoFill` consume `get_device_storage()`.
+- `hifimule-daemon/src/device/mod.rs` -- owns `DeviceManager.get_device_storage()` and `StorageInfo`.
+- `hifimule-daemon/src/device_io.rs` -- defines backend `free_space()` used by MTP and MSC implementations.
+- `hifimule-daemon/src/rpc.rs` -- `sync_calculate_delta` and `basket.autoFill` consume `get_device_storage()`.
 
 ## Tasks & Acceptance
 
 **Execution:**
-- [x] `jellyfinsync-daemon/src/device/mod.rs` -- add `DeviceIO.free_space()` fallback in `get_device_storage()` -- allows MTP capacity lookup.
+- [x] `hifimule-daemon/src/device/mod.rs` -- add `DeviceIO.free_space()` fallback in `get_device_storage()` -- allows MTP capacity lookup.
 
 **Acceptance Criteria:**
 - Given a selected MTP device whose backend reports free space, when `sync_calculate_delta` expands auto-fill without `maxBytes`, then it does not fail with `could not determine device free space`.
@@ -50,15 +50,15 @@ context: []
 ## Verification
 
 **Commands:**
-- `rtk cargo check -p jellyfinsync-daemon` -- expected: daemon compiles.
+- `rtk cargo check -p hifimule-daemon` -- expected: daemon compiles.
 
 ## Suggested Review Order
 
 - Keep filesystem storage reporting first for mounted devices.
-  [`mod.rs:467`](../../jellyfinsync-daemon/src/device/mod.rs#L467)
+  [`mod.rs:467`](../../hifimule-daemon/src/device/mod.rs#L467)
 
 - Fall back to the active backend for MTP-style virtual paths.
-  [`mod.rs:471`](../../jellyfinsync-daemon/src/device/mod.rs#L471)
+  [`mod.rs:471`](../../hifimule-daemon/src/device/mod.rs#L471)
 
 - Return bounded free-space data when total capacity is unavailable.
-  [`mod.rs:479`](../../jellyfinsync-daemon/src/device/mod.rs#L479)
+  [`mod.rs:479`](../../hifimule-daemon/src/device/mod.rs#L479)

@@ -97,7 +97,7 @@ jobs:
           lipo "$LIBMTP_DYLIB" -verify_arch x86_64
 
       - name: Install frontend dependencies
-        working-directory: jellyfinsync-ui
+        working-directory: hifimule-ui
         run: pnpm install
 
       # macOS universal build: cross-compile daemon for both architectures and stage both sidecars.
@@ -107,17 +107,17 @@ jobs:
       - name: Stage daemon sidecars (macOS universal)
         if: matrix.platform == 'macos-latest'
         run: |
-          cargo build --release -p jellyfinsync-daemon --target aarch64-apple-darwin
-          cargo build --release -p jellyfinsync-daemon --target x86_64-apple-darwin
-          mkdir -p jellyfinsync-ui/src-tauri/sidecars
-          cp target/aarch64-apple-darwin/release/jellyfinsync-daemon \
-             jellyfinsync-ui/src-tauri/sidecars/jellyfinsync-daemon-aarch64-apple-darwin
-          cp target/x86_64-apple-darwin/release/jellyfinsync-daemon \
-             jellyfinsync-ui/src-tauri/sidecars/jellyfinsync-daemon-x86_64-apple-darwin
+          cargo build --release -p hifimule-daemon --target aarch64-apple-darwin
+          cargo build --release -p hifimule-daemon --target x86_64-apple-darwin
+          mkdir -p hifimule-ui/src-tauri/sidecars
+          cp target/aarch64-apple-darwin/release/hifimule-daemon \
+             hifimule-ui/src-tauri/sidecars/hifimule-daemon-aarch64-apple-darwin
+          cp target/x86_64-apple-darwin/release/hifimule-daemon \
+             hifimule-ui/src-tauri/sidecars/hifimule-daemon-x86_64-apple-darwin
           lipo -create -output \
-            jellyfinsync-ui/src-tauri/sidecars/jellyfinsync-daemon-universal-apple-darwin \
-            target/aarch64-apple-darwin/release/jellyfinsync-daemon \
-            target/x86_64-apple-darwin/release/jellyfinsync-daemon
+            hifimule-ui/src-tauri/sidecars/hifimule-daemon-universal-apple-darwin \
+            target/aarch64-apple-darwin/release/hifimule-daemon \
+            target/x86_64-apple-darwin/release/hifimule-daemon
 
       - name: Stage daemon sidecar
         if: matrix.platform != 'macos-latest'
@@ -127,7 +127,7 @@ jobs:
         if: matrix.platform == 'macos-latest'
         run: |
           set -euo pipefail
-          LIB_DIR="jellyfinsync-ui/src-tauri/bundled-libs"
+          LIB_DIR="hifimule-ui/src-tauri/bundled-libs"
           mkdir -p "$LIB_DIR"
           LIBMTP_PREFIX="$(brew --prefix libmtp)"
           LIBMTP_DYLIB="$(find "$LIBMTP_PREFIX/lib" -name 'libmtp*.dylib' ! -type l -print -quit)"
@@ -158,7 +158,7 @@ jobs:
             done
           done
 
-          find jellyfinsync-ui/src-tauri/sidecars -type f -name 'jellyfinsync-daemon-*apple-darwin' -print0 | while IFS= read -r -d '' sidecar; do
+          find hifimule-ui/src-tauri/sidecars -type f -name 'hifimule-daemon-*apple-darwin' -print0 | while IFS= read -r -d '' sidecar; do
             otool -L "$sidecar" | awk '/libmtp.*\.dylib/ { print $1 }' | while read -r dep; do
               install_name_tool -change "$dep" "@executable_path/../Resources/bundled-libs/$(basename "$LIBMTP_DYLIB")" "$sidecar"
             done
@@ -181,18 +181,18 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'JellyfinSync ${{ github.ref_name }}'
+          releaseName: 'HifiMule ${{ github.ref_name }}'
           releaseBody: 'See the release notes for details.'
           releaseDraft: true
           prerelease: false
-          projectPath: jellyfinsync-ui
+          projectPath: hifimule-ui
           args: ${{ matrix.args }}
 
       - name: Verify Linux AppImage bundles libmtp
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           set -euo pipefail
-          APPIMAGE="$(find jellyfinsync-ui/src-tauri/target/release/bundle -name '*.AppImage' -print -quit)"
+          APPIMAGE="$(find hifimule-ui/src-tauri/target/release/bundle -name '*.AppImage' -print -quit)"
           test -n "$APPIMAGE" || { echo "AppImage artifact not found"; exit 1; }
           chmod +x "$APPIMAGE"
           rm -rf squashfs-root
@@ -209,13 +209,13 @@ jobs:
         if: matrix.platform == 'macos-latest'
         run: |
           set -euo pipefail
-          APP_DIR="$(find jellyfinsync-ui/src-tauri/target -path '*.app' -type d -print -quit)"
+          APP_DIR="$(find hifimule-ui/src-tauri/target -path '*.app' -type d -print -quit)"
           test -n "$APP_DIR" || { echo ".app bundle not found"; exit 1; }
           test -n "$(find "$APP_DIR/Contents/Resources/bundled-libs" -name 'libmtp*.dylib' -print -quit)" || {
             echo "Bundled libmtp dylib not found in app resources"
             exit 1
           }
-          find "$APP_DIR/Contents/MacOS" -type f -name 'jellyfinsync-daemon*' -print0 | while IFS= read -r -d '' sidecar; do
+          find "$APP_DIR/Contents/MacOS" -type f -name 'hifimule-daemon*' -print0 | while IFS= read -r -d '' sidecar; do
             if otool -L "$sidecar" | grep -E '/opt/homebrew|/usr/local' | grep -q 'libmtp'; then
               echo "Homebrew libmtp path still present in bundled sidecar: $sidecar"
               otool -L "$sidecar"

@@ -1,4 +1,4 @@
-# Sprint Change Proposal — JellyfinSync
+# Sprint Change Proposal — HifiMule
 **Date:** 2026-02-22
 **Author:** Alexis
 **Scope Classification:** Minor — Direct implementation by development team

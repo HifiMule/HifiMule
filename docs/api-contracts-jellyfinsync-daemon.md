@@ -1,4 +1,4 @@
-# API Contracts — JellyfinSync Daemon
+# API Contracts — HifiMule Daemon
 
 **Generated:** 2026-05-07 | **Scan depth:** Exhaustive | **Protocol:** JSON-RPC 2.0 over HTTP POST to `localhost:19140`
 
@@ -87,7 +87,7 @@ Note: `serverConnected` is cached for 5 seconds to avoid excessive Jellyfin heal
 
 ### `device_initialize`
 
-Initializes a newly detected device that has no `.jellyfinsync.json` manifest.
+Initializes a newly detected device that has no `.hifimule.json` manifest.
 
 **Params:**
 ```json

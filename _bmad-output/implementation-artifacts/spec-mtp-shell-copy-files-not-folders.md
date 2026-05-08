@@ -27,17 +27,17 @@ context: []
 
 ## Code Map
 
-- `jellyfinsync-daemon/src/device/mtp.rs` -- Windows WPD backend and Shell copy fallback.
+- `hifimule-daemon/src/device/mtp.rs` -- Windows WPD backend and Shell copy fallback.
 
 ## Tasks & Acceptance
 
 **Execution:**
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` -- remove stale target child before Shell copy -- avoids copying into a bogus folder left by failed WPD creation.
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` -- create the temp source file with the final filename and copy without Shell rename -- avoids MTP providers ignoring `pszNewName`.
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` -- use Shell copy as the first file-write path for Garmin WPD devices -- avoids creating bogus folders before fallback starts.
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` -- initialize Shell copy with STA COM and verify destination visibility -- prevents silent success when `IFileOperation` does not materialize a file.
-- [x] `jellyfinsync-daemon/src/device_io.rs` -- write real MTP target objects directly instead of pre-writing `.dirty` marker files -- avoids blocking before the actual track copy.
-- [x] `jellyfinsync-daemon/src/device_io.rs` and `jellyfinsync-daemon/src/sync.rs` -- let Garmin MTP request MP3 audio and write `.mp3` target names -- avoids Garmin Shell import rejection of FLAC originals.
+- [x] `hifimule-daemon/src/device/mtp.rs` -- remove stale target child before Shell copy -- avoids copying into a bogus folder left by failed WPD creation.
+- [x] `hifimule-daemon/src/device/mtp.rs` -- create the temp source file with the final filename and copy without Shell rename -- avoids MTP providers ignoring `pszNewName`.
+- [x] `hifimule-daemon/src/device/mtp.rs` -- use Shell copy as the first file-write path for Garmin WPD devices -- avoids creating bogus folders before fallback starts.
+- [x] `hifimule-daemon/src/device/mtp.rs` -- initialize Shell copy with STA COM and verify destination visibility -- prevents silent success when `IFileOperation` does not materialize a file.
+- [x] `hifimule-daemon/src/device_io.rs` -- write real MTP target objects directly instead of pre-writing `.dirty` marker files -- avoids blocking before the actual track copy.
+- [x] `hifimule-daemon/src/device_io.rs` and `hifimule-daemon/src/sync.rs` -- let Garmin MTP request MP3 audio and write `.mp3` target names -- avoids Garmin Shell import rejection of FLAC originals.
 
 **Acceptance Criteria:**
 - Given WPD direct write creates a bad folder object for a track filename, when Shell fallback runs, then it removes that stale child before copying.
@@ -50,44 +50,44 @@ context: []
 ## Verification
 
 **Commands:**
-- `rtk cargo check -p jellyfinsync-daemon` -- passed with 0 errors and 4 existing dead-code warnings.
-- `rtk cargo test -p jellyfinsync-daemon mtp_write_with_verify_writes_target_only` -- passed.
-- `rtk cargo test -p jellyfinsync-daemon test_construct_file_path_extension_override` -- passed.
+- `rtk cargo check -p hifimule-daemon` -- passed with 0 errors and 4 existing dead-code warnings.
+- `rtk cargo test -p hifimule-daemon mtp_write_with_verify_writes_target_only` -- passed.
+- `rtk cargo test -p hifimule-daemon test_construct_file_path_extension_override` -- passed.
 
 ## Suggested Review Order
 
 - Delete stale target Shell child before fallback copy.
-  [`mtp.rs:506`](../../jellyfinsync-daemon/src/device/mtp.rs#L506)
+  [`mtp.rs:506`](../../hifimule-daemon/src/device/mtp.rs#L506)
 
 - Detect Garmin-style WPD devices that need Shell-first writes.
-  [`mtp.rs:258`](../../jellyfinsync-daemon/src/device/mtp.rs#L258)
+  [`mtp.rs:258`](../../hifimule-daemon/src/device/mtp.rs#L258)
 
 - Initialize Shell `IFileOperation` in an STA apartment.
-  [`mtp.rs:210`](../../jellyfinsync-daemon/src/device/mtp.rs#L210)
+  [`mtp.rs:210`](../../hifimule-daemon/src/device/mtp.rs#L210)
 
 - Skip direct WPD file creation before Shell copy on Garmin.
-  [`mtp.rs:792`](../../jellyfinsync-daemon/src/device/mtp.rs#L792)
+  [`mtp.rs:792`](../../hifimule-daemon/src/device/mtp.rs#L792)
 
 - Verify the destination appears after Shell reports success.
-  [`mtp.rs:587`](../../jellyfinsync-daemon/src/device/mtp.rs#L587)
+  [`mtp.rs:587`](../../hifimule-daemon/src/device/mtp.rs#L587)
 
 - Copy source file as-is instead of depending on Shell rename.
-  [`mtp.rs:554`](../../jellyfinsync-daemon/src/device/mtp.rs#L554)
+  [`mtp.rs:554`](../../hifimule-daemon/src/device/mtp.rs#L554)
 
 - Create local temp source with the destination filename.
-  [`mtp.rs:899`](../../jellyfinsync-daemon/src/device/mtp.rs#L899)
+  [`mtp.rs:899`](../../hifimule-daemon/src/device/mtp.rs#L899)
 
 - Avoid synthetic `.dirty` marker writes on MTP backends.
-  [`device_io.rs:247`](../../jellyfinsync-daemon/src/device_io.rs#L247)
+  [`device_io.rs:247`](../../hifimule-daemon/src/device_io.rs#L247)
 
 - Confirm MTP write verification targets the real file path.
-  [`device_io.rs:436`](../../jellyfinsync-daemon/src/device_io.rs#L436)
+  [`device_io.rs:436`](../../hifimule-daemon/src/device_io.rs#L436)
 
 - Advertise Garmin's preferred import-safe audio container.
-  [`mtp.rs:1031`](../../jellyfinsync-daemon/src/device/mtp.rs#L1031)
+  [`mtp.rs:1031`](../../hifimule-daemon/src/device/mtp.rs#L1031)
 
 - Force Jellyfin MP3 streaming for devices that require it.
-  [`sync.rs:355`](../../jellyfinsync-daemon/src/sync.rs#L355)
+  [`sync.rs:355`](../../hifimule-daemon/src/sync.rs#L355)
 
 - Use the forced container for both stream profile and destination extension.
-  [`sync.rs:543`](../../jellyfinsync-daemon/src/sync.rs#L543)
+  [`sync.rs:543`](../../hifimule-daemon/src/sync.rs#L543)

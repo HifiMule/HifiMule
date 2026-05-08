@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# smoke-macos.sh — macOS DMG smoke test for JellyfinSync
+# smoke-macos.sh — macOS DMG smoke test for HifiMule
 # Runs from the directory containing the .dmg installer artifact.
 # Requires: hdiutil, xattr, open, curl
 #
@@ -16,7 +16,7 @@ set -euo pipefail
 
 PLATFORM="macos"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MOUNT_POINT="/Volumes/JellyfinSync"
+MOUNT_POINT="/Volumes/HifiMule"
 APP_NAME=""
 APP_PATH=""
 

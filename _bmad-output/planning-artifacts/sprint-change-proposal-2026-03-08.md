@@ -9,7 +9,7 @@
 
 ## Section 1: Issue Summary
 
-**Problem Statement:** The current 5-epic plan for JellyfinSync covers all application features (workspace foundation, connection, library browsing, sync engine, scrobbling) but contains no coverage for how the finished application is packaged into distributable installers and delivered to users across Windows, Linux, and macOS.
+**Problem Statement:** The current 5-epic plan for HifiMule covers all application features (workspace foundation, connection, library browsing, sync engine, scrobbling) but contains no coverage for how the finished application is packaged into distributable installers and delivered to users across Windows, Linux, and macOS.
 
 **Context:** Identified during epic plan review. Without a packaging epic, the application can be built from source but cannot be installed by end users — a fundamental gap for a desktop application targeting cross-platform parity (PRD: NFR8).
 
@@ -84,7 +84,7 @@
 ```
 **Packaging & Distribution:**
 - **Bundler:** Tauri v2 built-in bundler for platform-native installers (MSI, DMG, AppImage/.deb).
-- **Daemon Bundling:** The `jellyfinsync-daemon` binary is included as a Tauri sidecar, bundled alongside the UI.
+- **Daemon Bundling:** The `hifimule-daemon` binary is included as a Tauri sidecar, bundled alongside the UI.
 - **CI/CD:** GitHub Actions matrix build targeting Windows, Linux, and macOS with artifact upload to GitHub Releases.
 - **Code Signing:** Platform-specific signing (Windows Authenticode, macOS notarization) deferred to post-MVP unless required for distribution.
 ```
@@ -103,10 +103,10 @@ FR28: Epic 6 - CI/CD Cross-Platform Build Pipeline
 
 #### Epic 6: Packaging & Distribution
 
-Package JellyfinSync into platform-native installers and establish automated cross-platform build pipelines.
+Package HifiMule into platform-native installers and establish automated cross-platform build pipelines.
 
 **Story 6.1: Tauri Bundler Configuration & Sidecar Packaging**
-- Configure Tauri bundler to include `jellyfinsync-daemon` as sidecar
+- Configure Tauri bundler to include `hifimule-daemon` as sidecar
 - Single installer delivers both UI and headless engine
 - Application icon, name, and metadata correctly embedded
 

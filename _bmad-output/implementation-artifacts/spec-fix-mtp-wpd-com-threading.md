@@ -45,29 +45,29 @@ context: []
 
 ## Code Map
 
-- `../../jellyfinsync-daemon/src/device/mtp.rs:13-26` — `MtpDeviceInfo` / `MtpDeviceInner`; add `#[derive(Clone)]` to both
-- `../../jellyfinsync-daemon/src/device/mtp.rs:188-210` — `WpdHandle` struct + `open()`; remove `_com_guard`, local guard in `open()`
-- `../../jellyfinsync-daemon/src/device/mtp.rs:194-197` — `unsafe impl Send/Sync for WpdHandle`; update safety comment
-- `../../jellyfinsync-daemon/src/device/mtp.rs:545-700` — `impl MtpHandle for WpdHandle` — all five methods; add local guard at entry
-- `../../jellyfinsync-daemon/src/device/mod.rs:1096-1145` — `run_mtp_observer`; wrap `create_mtp_backend` in `spawn_blocking`
+- `../../hifimule-daemon/src/device/mtp.rs:13-26` — `MtpDeviceInfo` / `MtpDeviceInner`; add `#[derive(Clone)]` to both
+- `../../hifimule-daemon/src/device/mtp.rs:188-210` — `WpdHandle` struct + `open()`; remove `_com_guard`, local guard in `open()`
+- `../../hifimule-daemon/src/device/mtp.rs:194-197` — `unsafe impl Send/Sync for WpdHandle`; update safety comment
+- `../../hifimule-daemon/src/device/mtp.rs:545-700` — `impl MtpHandle for WpdHandle` — all five methods; add local guard at entry
+- `../../hifimule-daemon/src/device/mod.rs:1096-1145` — `run_mtp_observer`; wrap `create_mtp_backend` in `spawn_blocking`
 
 ## Tasks & Acceptance
 
 **Execution:**
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` — Add `#[derive(Clone)]` to `MtpDeviceInfo` (line ~12) and `MtpDeviceInner` (line ~20). All fields (`String`, `u32`, `u8`) are `Clone`.
+- [x] `hifimule-daemon/src/device/mtp.rs` — Add `#[derive(Clone)]` to `MtpDeviceInfo` (line ~12) and `MtpDeviceInner` (line ~20). All fields (`String`, `u32`, `u8`) are `Clone`.
 
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` — Remove `_com_guard: CoInitGuard` from `WpdHandle` struct (line ~191). Struct body becomes `{ device: IPortableDevice }`. Update `// Safety:` comment on `unsafe impl Send / Sync` (lines ~194–197) to: `// Safety: IPortableDevice is a COM free-threaded (MTA) in-proc interface. Every method in impl MtpHandle for WpdHandle initialises COM via a local CoInitGuard before calling any WPD API.`
+- [x] `hifimule-daemon/src/device/mtp.rs` — Remove `_com_guard: CoInitGuard` from `WpdHandle` struct (line ~191). Struct body becomes `{ device: IPortableDevice }`. Update `// Safety:` comment on `unsafe impl Send / Sync` (lines ~194–197) to: `// Safety: IPortableDevice is a COM free-threaded (MTA) in-proc interface. Every method in impl MtpHandle for WpdHandle initialises COM via a local CoInitGuard before calling any WPD API.`
 
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` — Rewrite `WpdHandle::open()` (lines ~200–210): replace `let com_guard = CoInitGuard::init()?;` with `let _com = CoInitGuard::init()?;` (local, not stored), and change `Ok(Self { device, _com_guard: com_guard })` to `Ok(Self { device })`.
+- [x] `hifimule-daemon/src/device/mtp.rs` — Rewrite `WpdHandle::open()` (lines ~200–210): replace `let com_guard = CoInitGuard::init()?;` with `let _com = CoInitGuard::init()?;` (local, not stored), and change `Ok(Self { device, _com_guard: com_guard })` to `Ok(Self { device })`.
 
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` — Add `let _com = CoInitGuard::init()?;` as the **first line** of each `impl MtpHandle for WpdHandle` method body: `read_file` (~line 545), `write_file` (~line 580), `delete_file` (~line 655), `list_files` (~line 667), `free_space` (~line 679).
+- [x] `hifimule-daemon/src/device/mtp.rs` — Add `let _com = CoInitGuard::init()?;` as the **first line** of each `impl MtpHandle for WpdHandle` method body: `read_file` (~line 545), `write_file` (~line 580), `delete_file` (~line 655), `list_files` (~line 667), `free_space` (~line 679).
 
-- [x] `jellyfinsync-daemon/src/device/mod.rs` — In `run_mtp_observer` (~line 1108), replace the direct `match mtp::create_mtp_backend(dev)` call. Before the match, capture `dev_clone = dev.clone()`, `dev_id = dev.device_id.clone()`, `friendly_name = dev.friendly_name.clone()`. Wrap the call: `tokio::task::spawn_blocking(move || mtp::create_mtp_backend(&dev_clone)).await.unwrap_or_else(|e| Err(anyhow::anyhow!("spawn_blocking panicked: {}", e)))`. Adjust the match arms to use `dev_id` and `friendly_name` in place of `dev.device_id` and `dev.friendly_name`. Preserve all existing `DeviceEvent` sends verbatim.
+- [x] `hifimule-daemon/src/device/mod.rs` — In `run_mtp_observer` (~line 1108), replace the direct `match mtp::create_mtp_backend(dev)` call. Before the match, capture `dev_clone = dev.clone()`, `dev_id = dev.device_id.clone()`, `friendly_name = dev.friendly_name.clone()`. Wrap the call: `tokio::task::spawn_blocking(move || mtp::create_mtp_backend(&dev_clone)).await.unwrap_or_else(|e| Err(anyhow::anyhow!("spawn_blocking panicked: {}", e)))`. Adjust the match arms to use `dev_id` and `friendly_name` in place of `dev.device_id` and `dev.friendly_name`. Preserve all existing `DeviceEvent` sends verbatim.
 
 **Acceptance Criteria:**
 - Given an unrecognized MTP device is connected, when the user submits the Initialize form, then `write_with_verify` completes without error and the device becomes recognized (no `0x80070015`).
-- Given `cargo build --manifest-path jellyfinsync-daemon/Cargo.toml`, then zero errors, zero new warnings.
-- Given `cargo test --manifest-path jellyfinsync-daemon/Cargo.toml`, then all existing tests pass.
+- Given `cargo build --manifest-path hifimule-daemon/Cargo.toml`, then zero errors, zero new warnings.
+- Given `cargo test --manifest-path hifimule-daemon/Cargo.toml`, then all existing tests pass.
 - Given `WpdHandle` is dropped from any thread, then `CoUninitialize` is not called (no `_com_guard` field).
 - Given `run_mtp_observer` detects a new MTP device, then `create_mtp_backend` runs in `spawn_blocking`, not on the async worker.
 
@@ -82,31 +82,31 @@ context: []
 ## Verification
 
 **Commands:**
-- `cargo build --manifest-path jellyfinsync-daemon/Cargo.toml` -- expected: zero errors, zero new warnings
-- `cargo test --manifest-path jellyfinsync-daemon/Cargo.toml` -- expected: all tests pass
+- `cargo build --manifest-path hifimule-daemon/Cargo.toml` -- expected: zero errors, zero new warnings
+- `cargo test --manifest-path hifimule-daemon/Cargo.toml` -- expected: all tests pass
 
 ## Suggested Review Order
 
 **COM threading fix — WpdHandle**
 
 - Root of the bug: struct no longer holds `_com_guard`; safety comment explains per-call MTA contract.
-  [`mtp.rs:190`](../../jellyfinsync-daemon/src/device/mtp.rs#L190)
+  [`mtp.rs:190`](../../hifimule-daemon/src/device/mtp.rs#L190)
 
 - `open()` uses a local guard — COM initialised for the duration of open, then dropped cleanly.
-  [`mtp.rs:202`](../../jellyfinsync-daemon/src/device/mtp.rs#L202)
+  [`mtp.rs:202`](../../hifimule-daemon/src/device/mtp.rs#L202)
 
 - Pattern applied to all five trait methods; `read_file` is the entry point that was silently failing.
-  [`mtp.rs:547`](../../jellyfinsync-daemon/src/device/mtp.rs#L547)
+  [`mtp.rs:547`](../../hifimule-daemon/src/device/mtp.rs#L547)
 
 - Remaining four guards: `write_file`, `delete_file`, `list_files`, `free_space`.
-  [`mtp.rs:583`](../../jellyfinsync-daemon/src/device/mtp.rs#L583)
+  [`mtp.rs:583`](../../hifimule-daemon/src/device/mtp.rs#L583)
 
 **Async thread safety — run_mtp_observer**
 
 - `create_mtp_backend` (blocking COM open) moved into `spawn_blocking`; clones enable the move.
-  [`mod.rs:1107`](../../jellyfinsync-daemon/src/device/mod.rs#L1107)
+  [`mod.rs:1107`](../../hifimule-daemon/src/device/mod.rs#L1107)
 
 **Clone derivations — prerequisite for spawn_blocking**
 
 - `#[derive(Clone)]` on `MtpDeviceInfo` and `MtpDeviceInner` enables the `dev_clone` move.
-  [`mtp.rs:13`](../../jellyfinsync-daemon/src/device/mtp.rs#L13)
+  [`mtp.rs:13`](../../hifimule-daemon/src/device/mtp.rs#L13)

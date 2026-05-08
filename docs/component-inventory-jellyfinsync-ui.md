@@ -1,4 +1,4 @@
-# Component Inventory — JellyfinSync UI
+# Component Inventory — HifiMule UI
 
 **Generated:** 2026-05-07 | **Scan depth:** Exhaustive
 
@@ -88,7 +88,7 @@ interface AppState {
 Singleton class extending `EventTarget`.
 
 **Storage layers (in priority order):**
-1. `localStorage` key `"jellyfinsync-basket"` — session persistence
+1. `localStorage` key `"hifimule-basket"` — session persistence
 2. Daemon `manifest_save_basket` — authoritative per-device store (debounced 1s write)
 3. Daemon `manifest_get_basket` — hydration source when a device connects
 

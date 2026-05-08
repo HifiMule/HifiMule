@@ -111,7 +111,7 @@ so that I have full visibility into sync state regardless of whether sync was tr
   - [ ] T5.3: Manual — Let auto-sync complete. Observe: "Sync Complete" panel, basket clears, "Done" button returns to normal view.
   - [ ] T5.4: Manual — Trigger auto-sync (no UI open). Observe: OS notification "Sync Complete. Safe to eject." fires. No regressions in headless path.
   - [ ] T5.5: Manual — Click "Start Sync" button manually while no auto-sync is running. Verify behavior is identical to pre-story (no regression). `get_daemon_state` returning `activeOperationId` for a UI-triggered sync does NOT cause double-attach.
-  - [x] T5.6: Run `cargo test` in `jellyfinsync-daemon/` — all existing tests pass plus new T2.3 test.
+  - [x] T5.6: Run `cargo test` in `hifimule-daemon/` — all existing tests pass plus new T2.3 test.
 
 ## Dev Notes
 
@@ -154,14 +154,14 @@ The new auto-attach logic (T3.1) is placed AFTER the device hydration block for 
 ### Source Tree
 
 **Files to MODIFY:**
-1. [jellyfinsync-daemon/src/sync.rs](jellyfinsync-daemon/src/sync.rs) — T1: `get_active_operation_id()` method on `SyncOperationManager` (~line 196)
-2. [jellyfinsync-daemon/src/rpc.rs](jellyfinsync-daemon/src/rpc.rs) — T2: `activeOperationId` in `handle_get_daemon_state` (~line 357); add test
-3. [jellyfinsync-ui/src/components/BasketSidebar.ts](jellyfinsync-ui/src/components/BasketSidebar.ts) — T3: auto-attach block in `refreshAndRender()` (~line 220)
-4. [jellyfinsync-ui/src/components/StatusBar.ts](jellyfinsync-ui/src/components/StatusBar.ts) — T4: Syncing state in `pollDaemonState()` (~line 91)
+1. [hifimule-daemon/src/sync.rs](hifimule-daemon/src/sync.rs) — T1: `get_active_operation_id()` method on `SyncOperationManager` (~line 196)
+2. [hifimule-daemon/src/rpc.rs](hifimule-daemon/src/rpc.rs) — T2: `activeOperationId` in `handle_get_daemon_state` (~line 357); add test
+3. [hifimule-ui/src/components/BasketSidebar.ts](hifimule-ui/src/components/BasketSidebar.ts) — T3: auto-attach block in `refreshAndRender()` (~line 220)
+4. [hifimule-ui/src/components/StatusBar.ts](hifimule-ui/src/components/StatusBar.ts) — T4: Syncing state in `pollDaemonState()` (~line 91)
 
 **Files to READ (do NOT modify):**
-5. [jellyfinsync-daemon/src/main.rs](jellyfinsync-daemon/src/main.rs) — `run_auto_sync` (~line 482), device event loop (~line 199), `DaemonState::Syncing` pattern (~line 493)
-6. [jellyfinsync-ui/src/components/BasketSidebar.ts](jellyfinsync-ui/src/components/BasketSidebar.ts) — full `handleStartSync()`, `startPolling()`, `handleSyncComplete()`, `handleSyncFailed()` to understand the sync state machine before modifying `refreshAndRender()`
+5. [hifimule-daemon/src/main.rs](hifimule-daemon/src/main.rs) — `run_auto_sync` (~line 482), device event loop (~line 199), `DaemonState::Syncing` pattern (~line 493)
+6. [hifimule-ui/src/components/BasketSidebar.ts](hifimule-ui/src/components/BasketSidebar.ts) — full `handleStartSync()`, `startPolling()`, `handleSyncComplete()`, `handleSyncFailed()` to understand the sync state machine before modifying `refreshAndRender()`
 
 **Files NOT to touch:**
 - `main.rs` — `run_auto_sync` is complete; do NOT add `activeOperationId` broadcasting here
@@ -185,7 +185,7 @@ The new auto-attach logic (T3.1) is placed AFTER the device hydration block for 
 
 ### Testing Standards
 
-No TypeScript test framework in the UI project. All UI testing is manual (T5 tasks). Daemon: add one unit test in `rpc.rs` tests (T2.3). Run `cargo test` in `jellyfinsync-daemon/` to confirm no regressions.
+No TypeScript test framework in the UI project. All UI testing is manual (T5 tasks). Daemon: add one unit test in `rpc.rs` tests (T2.3). Run `cargo test` in `hifimule-daemon/` to confirm no regressions.
 
 ### Project Structure Notes
 
@@ -199,15 +199,15 @@ No TypeScript test framework in the UI project. All UI testing is manual (T5 tas
 
 ### References
 
-- [main.rs:480](jellyfinsync-daemon/src/main.rs#L480) — `run_auto_sync` function (already complete)
-- [main.rs:199](jellyfinsync-daemon/src/main.rs#L199) — Device event loop; `auto_sync_on_connect` trigger
-- [rpc.rs:357](jellyfinsync-daemon/src/rpc.rs#L357) — `handle_get_daemon_state` — modify here for T2
-- [rpc.rs:61](jellyfinsync-daemon/src/rpc.rs#L61) — `AppState.sync_operation_manager` field
-- [sync.rs:148](jellyfinsync-daemon/src/sync.rs#L148) — `SyncOperationManager` struct and impl
-- [sync.rs:193](jellyfinsync-daemon/src/sync.rs#L193) — `has_active_operation()` — model `get_active_operation_id()` after this
-- [BasketSidebar.ts:170](jellyfinsync-ui/src/components/BasketSidebar.ts#L170) — `refreshAndRender()` — T3 target
-- [BasketSidebar.ts:689](jellyfinsync-ui/src/components/BasketSidebar.ts#L689) — `handleStartSync()` — understand sync state machine before modifying
-- [StatusBar.ts:91](jellyfinsync-ui/src/components/StatusBar.ts#L91) — `pollDaemonState()` state derivation — T4 target
+- [main.rs:480](hifimule-daemon/src/main.rs#L480) — `run_auto_sync` function (already complete)
+- [main.rs:199](hifimule-daemon/src/main.rs#L199) — Device event loop; `auto_sync_on_connect` trigger
+- [rpc.rs:357](hifimule-daemon/src/rpc.rs#L357) — `handle_get_daemon_state` — modify here for T2
+- [rpc.rs:61](hifimule-daemon/src/rpc.rs#L61) — `AppState.sync_operation_manager` field
+- [sync.rs:148](hifimule-daemon/src/sync.rs#L148) — `SyncOperationManager` struct and impl
+- [sync.rs:193](hifimule-daemon/src/sync.rs#L193) — `has_active_operation()` — model `get_active_operation_id()` after this
+- [BasketSidebar.ts:170](hifimule-ui/src/components/BasketSidebar.ts#L170) — `refreshAndRender()` — T3 target
+- [BasketSidebar.ts:689](hifimule-ui/src/components/BasketSidebar.ts#L689) — `handleStartSync()` — understand sync state machine before modifying
+- [StatusBar.ts:91](hifimule-ui/src/components/StatusBar.ts#L91) — `pollDaemonState()` state derivation — T4 target
 - [Story 4.5](4-5-start-sync-ui-to-engine-trigger.md) — `SyncOperation` TypeScript interface, `startPolling()`, `handleSyncComplete()`, `handleSyncFailed()` — all reused unchanged
 - [Architecture: Communication Patterns](../_bmad-output/planning-artifacts/architecture.md#communication-patterns) — polling pattern (push events deferred)
 - [Epic 4 Story 4.5](../_bmad-output/planning-artifacts/epics.md#story-45-start-sync-ui-to-engine-trigger) — daemon-initiated AC (last "Given" block)
@@ -231,10 +231,10 @@ claude-sonnet-4-6
 
 ### File List
 
-- jellyfinsync-daemon/src/sync.rs
-- jellyfinsync-daemon/src/rpc.rs
-- jellyfinsync-ui/src/components/BasketSidebar.ts
-- jellyfinsync-ui/src/components/StatusBar.ts
+- hifimule-daemon/src/sync.rs
+- hifimule-daemon/src/rpc.rs
+- hifimule-ui/src/components/BasketSidebar.ts
+- hifimule-ui/src/components/StatusBar.ts
 
 ## Change Log
 

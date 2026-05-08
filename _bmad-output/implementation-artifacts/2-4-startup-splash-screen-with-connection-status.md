@@ -12,7 +12,7 @@ so that I know the application hasn't frozen during its initialization phase.
 
 ## Acceptance Criteria
 
-1. **Native Splash Screen:** A native Tauri splash screen featuring the JellyfinSync logo and name MUST be displayed upon launch. (AC: #1)
+1. **Native Splash Screen:** A native Tauri splash screen featuring the HifiMule logo and name MUST be displayed upon launch. (AC: #1)
 2. **Dynamic Status Text:** The splash screen MUST indicate the current initialization state (e.g., "Initializing Daemon...", "Connecting to Server..."). (AC: #2)
 3. **Auto-Dismissal:** The splash screen MUST auto-dismiss and show the main window only after the daemon is confirmed ready and the Jellyfin server connection is verified. (AC: #3)
 4. **Error Handling & Timeout:** If initialization or connection fails (including a 10-second timeout), the splash screen MUST display a clear error message with "Retry" and "Open Settings" options. (AC: #4)
@@ -28,7 +28,7 @@ so that I know the application hasn't frozen during its initialization phase.
   - [x] Design with "Vibrant Hub" aesthetics (Glassmorphism, Jellyfin Purple).
   - [x] Add status text container and error/action buttons (hidden by default).
 - [x] **T3: Implement Initialization Coordination** (AC: #3, #4)
-  - [x] Update `jellyfinsync-ui/src/main.ts` to poll the daemon's `get_daemon_state` RPC method.
+  - [x] Update `hifimule-ui/src/main.ts` to poll the daemon's `get_daemon_state` RPC method.
   - [x] Handle transition: `appWindow.get('main').show()` and `appWindow.get('splashscreen').close()`.
   - [x] Implement the 10-second timeout logic.
 - [x] **T4: Verification & Polish**
@@ -42,24 +42,24 @@ so that I know the application hasn't frozen during its initialization phase.
   - Use `tauri::window::WindowBuilder` if dynamic window creation is preferred over `tauri.conf.json`.
   - Rely on the `get_daemon_state` RPC method (implemented in Story 2.3) to check registration and connection status.
 - **Source tree components to touch:**
-  - `jellyfinsync-ui/src-tauri/tauri.conf.json`: Window configurations.
-  - `jellyfinsync-ui/splashscreen.html`: [NEW] The splash screen UI.
-  - `jellyfinsync-ui/src/main.ts`: Initialization logic and window management.
+  - `hifimule-ui/src-tauri/tauri.conf.json`: Window configurations.
+  - `hifimule-ui/splashscreen.html`: [NEW] The splash screen UI.
+  - `hifimule-ui/src/main.ts`: Initialization logic and window management.
 - **Testing standards summary:**
   - Manual verification of the startup flow on at least one platform.
   - Mock the daemon RPC response to test the timeout and error states.
 
 ### Project Structure Notes
 
-- The splash screen should reside in the `jellyfinsync-ui` project to maintain separation from the daemon.
-- Ensure the JellyfinSync logo is correctly referenced from `assets`.
+- The splash screen should reside in the `hifimule-ui` project to maintain separation from the daemon.
+- Ensure the HifiMule logo is correctly referenced from `assets`.
 
 ### References
 
-- [Functional Requirements FR24](file:///c:/Workspaces/JellyfinSync/_bmad-output/planning-artifacts/epics.md#L95)
-- [UX Design - Success Criteria](file:///c:/Workspaces/JellyfinSync/_bmad-output/planning-artifacts/ux-design-specification.md#L34-L35)
-- [Architecture - Event System Patterns](file:///c:/Workspaces/JellyfinSync/_bmad-output/planning-artifacts/architecture.md#L121-L124)
-- [Previous Story (2.3) RPC additions](file:///c:/Workspaces/JellyfinSync/_bmad-output/implementation-artifacts/2-3-multi-device-profile-mapping.md#L75)
+- [Functional Requirements FR24](file:///c:/Workspaces/HifiMule/_bmad-output/planning-artifacts/epics.md#L95)
+- [UX Design - Success Criteria](file:///c:/Workspaces/HifiMule/_bmad-output/planning-artifacts/ux-design-specification.md#L34-L35)
+- [Architecture - Event System Patterns](file:///c:/Workspaces/HifiMule/_bmad-output/planning-artifacts/architecture.md#L121-L124)
+- [Previous Story (2.3) RPC additions](file:///c:/Workspaces/HifiMule/_bmad-output/implementation-artifacts/2-3-multi-device-profile-mapping.md#L75)
 
 ## Dev Agent Record
 
@@ -82,11 +82,11 @@ Antigravity (Workflow Engine)
   - Externalized hardcoded RPC port to environment variable
   - Added http crate dependency for CORS configuration
 ### File List
-- `jellyfinsync-ui/src-tauri/tauri.conf.json`
-- `jellyfinsync-ui/splashscreen.html`
-- `jellyfinsync-ui/src/main.ts`
-- `jellyfinsync-ui/src/assets/logo.png`
-- `jellyfinsync-ui/.env`
-- `jellyfinsync-daemon/src/rpc.rs`
-- `jellyfinsync-daemon/Cargo.toml`
+- `hifimule-ui/src-tauri/tauri.conf.json`
+- `hifimule-ui/splashscreen.html`
+- `hifimule-ui/src/main.ts`
+- `hifimule-ui/src/assets/logo.png`
+- `hifimule-ui/.env`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-daemon/Cargo.toml`
 - `Cargo.toml`

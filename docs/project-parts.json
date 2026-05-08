@@ -3,20 +3,20 @@
   "workspace_type": "cargo",
   "parts": [
     {
-      "part_id": "jellyfinsync-daemon",
-      "display_name": "JellyfinSync Daemon",
+      "part_id": "hifimule-daemon",
+      "display_name": "HifiMule Daemon",
       "project_type_id": "backend",
-      "root_path": "jellyfinsync-daemon/",
+      "root_path": "hifimule-daemon/",
       "primary_language": "Rust",
       "primary_framework": "Axum",
       "entry_points": ["src/main.rs"],
       "description": "Background daemon service with system tray, JSON-RPC API, Jellyfin client, SQLite storage"
     },
     {
-      "part_id": "jellyfinsync-ui",
-      "display_name": "JellyfinSync UI",
+      "part_id": "hifimule-ui",
+      "display_name": "HifiMule UI",
       "project_type_id": "desktop",
-      "root_path": "jellyfinsync-ui/",
+      "root_path": "hifimule-ui/",
       "primary_language": "TypeScript",
       "primary_framework": "Tauri 2",
       "entry_points": ["src/main.ts", "src-tauri/src/main.rs"],
@@ -25,22 +25,22 @@
   ],
   "integration_points": [
     {
-      "from": "jellyfinsync-ui",
-      "to": "jellyfinsync-daemon",
+      "from": "hifimule-ui",
+      "to": "hifimule-daemon",
       "type": "JSON-RPC 2.0 over HTTP",
       "endpoint": "http://127.0.0.1:19140/",
       "method_count": 24,
       "details": "UI sends JSON-RPC requests to daemon for all data and operations"
     },
     {
-      "from": "jellyfinsync-ui",
-      "to": "jellyfinsync-daemon",
+      "from": "hifimule-ui",
+      "to": "hifimule-daemon",
       "type": "HTTP GET",
       "endpoint": "http://127.0.0.1:19140/jellyfin/image/{id}",
       "details": "Image proxy — daemon fetches Jellyfin artwork with auth"
     },
     {
-      "from": "jellyfinsync-daemon",
+      "from": "hifimule-daemon",
       "to": "Jellyfin Server (external)",
       "type": "HTTP/HTTPS",
       "details": "Daemon communicates with remote Jellyfin server for library data and media downloads"

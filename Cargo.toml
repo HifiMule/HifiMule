@@ -1,7 +1,7 @@
 [workspace]
 members = [
-    "jellyfinsync-daemon",
-    "jellyfinsync-ui/src-tauri",
+    "hifimule-daemon",
+    "hifimule-ui/src-tauri",
 ]
 resolver = "2"
 

@@ -1,0 +1,11 @@
+fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "windows" {
+        let mut res = winresource::WindowsResource::new();
+        res.set_icon("../hifimule-ui/src-tauri/icons/icon.ico");
+        res.compile().expect("Failed to compile Windows resources");
+    }
+    if std::env::var("CARGO_CFG_UNIX").is_ok() {
+        pkg_config::probe_library("libmtp")
+            .expect("libmtp not found — install libmtp-dev / libmtp");
+    }
+}

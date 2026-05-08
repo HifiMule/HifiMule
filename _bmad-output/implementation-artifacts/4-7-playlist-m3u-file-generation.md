@@ -351,7 +351,7 @@ so that my DAP or Rockbox player can natively load and play the playlist in the 
   - Creates playlist with 3 tracks, but only 2 exist in `all_synced_items`
   - Asserts the `.m3u` contains 2 track entries and one warning is returned
 
-- [x] **T7.5**: Run `cargo test` in `jellyfinsync-daemon/` — all existing 151 tests pass.
+- [x] **T7.5**: Run `cargo test` in `hifimule-daemon/` — all existing 151 tests pass.
 
 ## Dev Notes
 
@@ -427,10 +427,10 @@ These are defined in `sync.rs` and are not `pub`. Since `generate_m3u_files()` l
 ### Source Tree
 
 **Files to MODIFY:**
-1. [jellyfinsync-daemon/src/api.rs](jellyfinsync-daemon/src/api.rs) — T1: add `run_time_ticks` to `JellyfinItem`
-2. [jellyfinsync-daemon/src/sync.rs](jellyfinsync-daemon/src/sync.rs) — T2: new structs + `playlists` on `SyncDelta`; T5: `generate_m3u_files()` + helpers; T6: call site at end of `execute_sync`; T7: tests
-3. [jellyfinsync-daemon/src/device/mod.rs](jellyfinsync-daemon/src/device/mod.rs) — T3: `PlaylistManifestEntry` struct + `playlists` field on `DeviceManifest`
-4. [jellyfinsync-daemon/src/rpc.rs](jellyfinsync-daemon/src/rpc.rs) — T4: capture playlist items in `sync.calculate_delta` handler, set `delta.playlists`
+1. [hifimule-daemon/src/api.rs](hifimule-daemon/src/api.rs) — T1: add `run_time_ticks` to `JellyfinItem`
+2. [hifimule-daemon/src/sync.rs](hifimule-daemon/src/sync.rs) — T2: new structs + `playlists` on `SyncDelta`; T5: `generate_m3u_files()` + helpers; T6: call site at end of `execute_sync`; T7: tests
+3. [hifimule-daemon/src/device/mod.rs](hifimule-daemon/src/device/mod.rs) — T3: `PlaylistManifestEntry` struct + `playlists` field on `DeviceManifest`
+4. [hifimule-daemon/src/rpc.rs](hifimule-daemon/src/rpc.rs) — T4: capture playlist items in `sync.calculate_delta` handler, set `delta.playlists`
 
 **Files NOT to touch:**
 - `main.rs` (auto-sync path — playlists are still expanded to tracks for download; M3U generation is a sync.execute concern)
@@ -464,12 +464,12 @@ These are defined in `sync.rs` and are not `pub`. Since `generate_m3u_files()` l
 
 ### Testing Standards
 
-Following the existing pattern (Story 4.6 baseline: 151 tests in `jellyfinsync-daemon/`):
+Following the existing pattern (Story 4.6 baseline: 151 tests in `hifimule-daemon/`):
 - Co-located in `mod tests` block at bottom of `sync.rs`
 - Use `tempfile::tempdir()` for file system tests (already a dev-dependency)
 - `assert!`, `assert_eq!` for assertions
 - No mock required — functions take concrete types
-- Run `cargo test` in `jellyfinsync-daemon/` after implementation
+- Run `cargo test` in `hifimule-daemon/` after implementation
 
 ### Previous Story Learnings (4.6)
 
@@ -490,14 +490,14 @@ From Story 4.6 dev notes:
 ### Source References
 
 - Sprint change proposal: [_bmad-output/planning-artifacts/sprint-change-proposal-2026-03-28.md](_bmad-output/planning-artifacts/sprint-change-proposal-2026-03-28.md) §4.4
-- Path sanitization: [jellyfinsync-daemon/src/sync.rs](jellyfinsync-daemon/src/sync.rs) lines 325–386 (`sanitize_path_component`, `truncate_component`, `truncate_filename`)
-- Manifest write pattern: [jellyfinsync-daemon/src/device/mod.rs](jellyfinsync-daemon/src/device/mod.rs) `write_manifest()` lines 72–87
-- Atomic file write: [jellyfinsync-daemon/src/sync.rs](jellyfinsync-daemon/src/sync.rs) `write_file_streamed()` lines 742–805
-- Playlist expansion in RPC: [jellyfinsync-daemon/src/rpc.rs](jellyfinsync-daemon/src/rpc.rs) `sync.calculate_delta` handler lines 747–885
-- `JellyfinItem` struct: [jellyfinsync-daemon/src/api.rs](jellyfinsync-daemon/src/api.rs) lines 64–94
-- `DeviceManifest` struct: [jellyfinsync-daemon/src/device/mod.rs](jellyfinsync-daemon/src/device/mod.rs) lines 39–61
-- `SyncDelta` struct: [jellyfinsync-daemon/src/sync.rs](jellyfinsync-daemon/src/sync.rs) lines 99–106
-- `execute_sync` signature: [jellyfinsync-daemon/src/sync.rs](jellyfinsync-daemon/src/sync.rs) lines 394–427
+- Path sanitization: [hifimule-daemon/src/sync.rs](hifimule-daemon/src/sync.rs) lines 325–386 (`sanitize_path_component`, `truncate_component`, `truncate_filename`)
+- Manifest write pattern: [hifimule-daemon/src/device/mod.rs](hifimule-daemon/src/device/mod.rs) `write_manifest()` lines 72–87
+- Atomic file write: [hifimule-daemon/src/sync.rs](hifimule-daemon/src/sync.rs) `write_file_streamed()` lines 742–805
+- Playlist expansion in RPC: [hifimule-daemon/src/rpc.rs](hifimule-daemon/src/rpc.rs) `sync.calculate_delta` handler lines 747–885
+- `JellyfinItem` struct: [hifimule-daemon/src/api.rs](hifimule-daemon/src/api.rs) lines 64–94
+- `DeviceManifest` struct: [hifimule-daemon/src/device/mod.rs](hifimule-daemon/src/device/mod.rs) lines 39–61
+- `SyncDelta` struct: [hifimule-daemon/src/sync.rs](hifimule-daemon/src/sync.rs) lines 99–106
+- `execute_sync` signature: [hifimule-daemon/src/sync.rs](hifimule-daemon/src/sync.rs) lines 394–427
 
 ## Dev Agent Record
 
@@ -524,13 +524,13 @@ _None_
 
 ### File List
 
-- `jellyfinsync-daemon/src/api.rs` — Added `run_time_ticks: Option<u64>` to `JellyfinItem`
-- `jellyfinsync-daemon/src/sync.rs` — Added `PlaylistTrackInfo`, `PlaylistSyncItem` structs; `playlists` field on `SyncDelta`; `generate_m3u_files()`, `write_m3u_atomic()`, `extract_display_name()` functions; M3U call in `execute_sync()`; 4 new tests
-- `jellyfinsync-daemon/src/device/mod.rs` — Added `PlaylistManifestEntry` struct; `playlists` field on `DeviceManifest`; `playlists: vec![]` in `initialize_device()`
-- `jellyfinsync-daemon/src/rpc.rs` — Modified `handle_sync_calculate_delta` to capture `PlaylistSyncItem`s; updated `DeviceManifest` test literals
-- `jellyfinsync-daemon/src/device/tests.rs` — Added `playlists: vec![]` to all `DeviceManifest` test literals
-- `jellyfinsync-daemon/src/auto_fill.rs` — Added `run_time_ticks: None` and `playlists: vec![]` to test literals
-- `jellyfinsync-daemon/src/tests.rs` — Added `playlists: vec![]` to `DeviceManifest` test literals
+- `hifimule-daemon/src/api.rs` — Added `run_time_ticks: Option<u64>` to `JellyfinItem`
+- `hifimule-daemon/src/sync.rs` — Added `PlaylistTrackInfo`, `PlaylistSyncItem` structs; `playlists` field on `SyncDelta`; `generate_m3u_files()`, `write_m3u_atomic()`, `extract_display_name()` functions; M3U call in `execute_sync()`; 4 new tests
+- `hifimule-daemon/src/device/mod.rs` — Added `PlaylistManifestEntry` struct; `playlists` field on `DeviceManifest`; `playlists: vec![]` in `initialize_device()`
+- `hifimule-daemon/src/rpc.rs` — Modified `handle_sync_calculate_delta` to capture `PlaylistSyncItem`s; updated `DeviceManifest` test literals
+- `hifimule-daemon/src/device/tests.rs` — Added `playlists: vec![]` to all `DeviceManifest` test literals
+- `hifimule-daemon/src/auto_fill.rs` — Added `run_time_ticks: None` and `playlists: vec![]` to test literals
+- `hifimule-daemon/src/tests.rs` — Added `playlists: vec![]` to `DeviceManifest` test literals
 
 ## Change Log
 

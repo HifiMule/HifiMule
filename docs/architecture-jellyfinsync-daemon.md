@@ -1,6 +1,6 @@
-# JellyfinSync Daemon — Architecture
+# HifiMule Daemon — Architecture
 
-**Part:** `jellyfinsync-daemon` | **Generated:** 2026-05-07 | **Scan depth:** Exhaustive
+**Part:** `hifimule-daemon` | **Generated:** 2026-05-07 | **Scan depth:** Exhaustive
 
 ---
 
@@ -85,7 +85,7 @@ pub struct AppState {
 
 ### DeviceManifest
 
-The manifest is the source of truth for all sync state. It lives at `<device-root>/.jellyfinsync.json`:
+The manifest is the source of truth for all sync state. It lives at `<device-root>/.hifimule.json`:
 
 ```rust
 pub struct DeviceManifest {
@@ -95,7 +95,7 @@ pub struct DeviceManifest {
     pub icon: Option<String>,                   // icon key ("usb-drive", "phone-fill", etc.)
     pub synced_items: Vec<SyncedItem>,          // files confirmed on device
     pub basket_items: Vec<BasketItem>,          // user's selection for next sync
-    pub managed_paths: Vec<String>,             // folders owned by JellyfinSync
+    pub managed_paths: Vec<String>,             // folders owned by HifiMule
     pub dirty: bool,                            // true if sync was interrupted
     pub pending_item_ids: Vec<String>,          // IDs being synced when dirty was set
     pub auto_fill: AutoFillPrefs,               // auto-fill configuration
@@ -122,7 +122,7 @@ The "current device" concept maps to `selected_device_path` → lookup in `conne
 - **macOS**: scans `/Volumes/`
 - **Linux**: reads `/proc/mounts`
 
-For each mount, checks for `.jellyfinsync.json` to identify managed devices.
+For each mount, checks for `.hifimule.json` to identify managed devices.
 
 **MTP** (`run_mtp_observer`): polls every 3s via `enumerate_mtp_devices()`. Platform dispatch:
 - **Windows**: WPD COM API (`IPortableDeviceManager`)
@@ -293,7 +293,7 @@ Parses Rockbox `.scrobbler.log` (AudioScrobbler 1.1, tab-separated). Matching st
 
 ## Windows Service (`service.rs`)
 
-Uses `windows-service` crate. Service name: `"jellyfinsync-daemon"`.
+Uses `windows-service` crate. Service name: `"hifimule-daemon"`.
 
 - `install()`: creates/updates SCM entry with `AutoStart`; starts immediately
 - `uninstall()`: stop + delete
@@ -304,5 +304,5 @@ Uses `windows-service` crate. Service name: `"jellyfinsync-daemon"`.
 ## Logging
 
 - **Debug**: stdout/stderr
-- **Release**: `<AppData>/JellyfinSync/daemon.log` and `ui.log`, 1 MB cap, truncated on overflow
+- **Release**: `<AppData>/HifiMule/daemon.log` and `ui.log`, 1 MB cap, truncated on overflow
 - `daemon_log!` macro is aware of `#[cfg(debug_assertions)]`

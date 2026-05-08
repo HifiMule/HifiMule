@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# smoke-common.sh — Shared helpers for JellyfinSync smoke tests
+# smoke-common.sh — Shared helpers for HifiMule smoke tests
 # Source this file from platform-specific smoke scripts.
 #
 # MTP end-to-end detection requires manual hardware verification on each platform. Automated MTP IO coverage is provided by unit tests in device_io.rs.

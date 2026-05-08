@@ -77,8 +77,8 @@ So that bulk syncs to MTP devices are fast, atomic, and free of latent data-loss
   - [x] T6.5: Implemented T6.5: `ShellSession` struct factored as named RAII type; full per-job batching deferred to future story
 
 - [x] **T7: UUID temp file naming** (AC: #7)
-  - [x] T7.1: In both temp-file creation paths inside `write_file` (Garmin pre-copy path ~line 831 and Shell fallback path ~line 963), replace `format!("jellyfinsync_{}", std::time::SystemTime::now()...)` with `format!("jellyfinsync_{}", uuid::Uuid::new_v4())`
-  - [x] T7.2: Verify `uuid` crate is already in `Cargo.toml` for `jellyfinsync-daemon` (it is — used for device ID generation in `device/mod.rs:516`)
+  - [x] T7.1: In both temp-file creation paths inside `write_file` (Garmin pre-copy path ~line 831 and Shell fallback path ~line 963), replace `format!("hifimule_{}", std::time::SystemTime::now()...)` with `format!("hifimule_{}", uuid::Uuid::new_v4())`
+  - [x] T7.2: Verify `uuid` crate is already in `Cargo.toml` for `hifimule-daemon` (it is — used for device ID generation in `device/mod.rs:516`)
 
 - [x] **T8: Improve `mtp_dirty_marker_detected_on_reconnect` test** (AC: #8)
   - [x] T8.1: In `device_io.rs` test `mtp_dirty_marker_detected_on_reconnect`, change the dirty marker pre-population from `vec![]` (empty) to `b"\x00".to_vec()`
@@ -111,18 +111,18 @@ So that bulk syncs to MTP devices are fast, atomic, and free of latent data-loss
 
 ### Review Findings
 
-- [x] [Review][Patch] Shell session batching is only dead-code scaffolding, not per-job reuse [`jellyfinsync-daemon/src/device/mtp.rs:642`]
-- [x] [Review][Patch] MTP recursive enumeration warnings are logged but never surfaced in the sync result [`jellyfinsync-daemon/src/device/mtp.rs:840`]
-- [x] [Review][Patch] `path_to_object_id` tests do not use a mock `IPortableDeviceContent` fixture or exercise traversal [`jellyfinsync-daemon/src/device/mtp.rs:1638`]
+- [x] [Review][Patch] Shell session batching is only dead-code scaffolding, not per-job reuse [`hifimule-daemon/src/device/mtp.rs:642`]
+- [x] [Review][Patch] MTP recursive enumeration warnings are logged but never surfaced in the sync result [`hifimule-daemon/src/device/mtp.rs:840`]
+- [x] [Review][Patch] `path_to_object_id` tests do not use a mock `IPortableDeviceContent` fixture or exercise traversal [`hifimule-daemon/src/device/mtp.rs:1638`]
 
 ## Dev Notes
 
 ### Scope
 
 **Files in scope:**
-- `jellyfinsync-daemon/src/device/mtp.rs` — all WPD fixes (T1–T3, T5–T7, T9–T10, T12–T14)
-- `jellyfinsync-daemon/src/device/mod.rs` — `DeviceManifest.storage_id` field (T4.1) + `has_msc_drive_for_device` (T11)
-- `jellyfinsync-daemon/src/device_io.rs` — test improvement only (T8)
+- `hifimule-daemon/src/device/mtp.rs` — all WPD fixes (T1–T3, T5–T7, T9–T10, T12–T14)
+- `hifimule-daemon/src/device/mod.rs` — `DeviceManifest.storage_id` field (T4.1) + `has_msc_drive_for_device` (T11)
+- `hifimule-daemon/src/device_io.rs` — test improvement only (T8)
 
 **No new RPC methods** — this is a pure internal IO hardening story. Zero UI changes.
 
@@ -171,7 +171,7 @@ Currently `shell_copy_to_device` calls `let _com = CoInitGuard::init_sta()?;` at
 
 **Temp file naming (T7):**
 Two places in `write_file`:
-1. Garmin pre-copy path (~line 830–831): `std::env::temp_dir().join(format!("jellyfinsync_{}", ...))`
+1. Garmin pre-copy path (~line 830–831): `std::env::temp_dir().join(format!("hifimule_{}", ...))`
 2. Shell fallback path (~line 963–964): same pattern
 Both should use `uuid::Uuid::new_v4()` which is already in scope (used elsewhere in the crate).
 
@@ -223,9 +223,9 @@ For T11, may need to add `windows-sys` features for `Win32::Devices::DeviceAndDr
 
 ### Project Structure Notes
 
-- `mtp.rs` lives at `jellyfinsync-daemon/src/device/mtp.rs` — it's the `mtp` submodule of `device`
-- `device_io.rs` lives at `jellyfinsync-daemon/src/device_io.rs` — top-level module in the daemon crate
-- `device/mod.rs` lives at `jellyfinsync-daemon/src/device/mod.rs`
+- `mtp.rs` lives at `hifimule-daemon/src/device/mtp.rs` — it's the `mtp` submodule of `device`
+- `device_io.rs` lives at `hifimule-daemon/src/device_io.rs` — top-level module in the daemon crate
+- `device/mod.rs` lives at `hifimule-daemon/src/device/mod.rs`
 - Tests in `device_io.rs` are in `pub mod tests { ... }` (line 300) — `pub` so `device/mod.rs` can reference them
 - Tests in `mtp.rs` are in `mod tests { ... }` (line 1481)
 
@@ -241,8 +241,8 @@ The `daemon_log!` macro needs to be verified: it appears in `mtp.rs` as `crate::
 ### References
 
 - Epic 7, Story 7.1 full ACs: [`_bmad-output/planning-artifacts/epics.md#Story-7.1`]
-- Primary target file: [`jellyfinsync-daemon/src/device/mtp.rs`]
-- Secondary targets: [`jellyfinsync-daemon/src/device_io.rs`], [`jellyfinsync-daemon/src/device/mod.rs`]
+- Primary target file: [`hifimule-daemon/src/device/mtp.rs`]
+- Secondary targets: [`hifimule-daemon/src/device_io.rs`], [`hifimule-daemon/src/device/mod.rs`]
 - Architecture doc (DeviceIO trait, MTP patterns): [`_bmad-output/planning-artifacts/architecture.md`]
 
 ## Dev Agent Record
@@ -273,14 +273,14 @@ claude-sonnet-4-6
 
 ### File List
 
-- jellyfinsync-daemon/src/device/mtp.rs
-- jellyfinsync-daemon/src/device/mod.rs
-- jellyfinsync-daemon/src/device_io.rs
-- jellyfinsync-daemon/src/device/tests.rs
-- jellyfinsync-daemon/src/rpc.rs
-- jellyfinsync-daemon/src/sync.rs
-- jellyfinsync-daemon/src/tests.rs
-- jellyfinsync-daemon/Cargo.toml
+- hifimule-daemon/src/device/mtp.rs
+- hifimule-daemon/src/device/mod.rs
+- hifimule-daemon/src/device_io.rs
+- hifimule-daemon/src/device/tests.rs
+- hifimule-daemon/src/rpc.rs
+- hifimule-daemon/src/sync.rs
+- hifimule-daemon/src/tests.rs
+- hifimule-daemon/Cargo.toml
 - _bmad-output/implementation-artifacts/sprint-status.yaml
 
 ## Change Log

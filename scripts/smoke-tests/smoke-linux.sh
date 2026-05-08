@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# smoke-linux.sh — Linux .deb smoke test for JellyfinSync
+# smoke-linux.sh — Linux .deb smoke test for HifiMule
 # Runs from the directory containing the .deb installer artifact.
 # Requires: dpkg, Xvfb, curl
 #
@@ -29,7 +29,7 @@ start_xvfb() {
     if Xvfb -help 2>&1 | grep -q -- "-displayfd"; then
         local display_file
         display_file=$(mktemp)
-        Xvfb -displayfd 1 -screen 0 1024x768x24 >"$display_file" 2>/tmp/jellyfinsync-xvfb.log &
+        Xvfb -displayfd 1 -screen 0 1024x768x24 >"$display_file" 2>/tmp/hifimule-xvfb.log &
         XVFB_PID=$!
         for _ in {1..50}; do
             if [[ -s "$display_file" ]]; then
@@ -45,7 +45,7 @@ start_xvfb() {
     fi
 
     for display_number in 99 100; do
-        if Xvfb ":${display_number}" -screen 0 1024x768x24 >/tmp/jellyfinsync-xvfb.log 2>&1 & then
+        if Xvfb ":${display_number}" -screen 0 1024x768x24 >/tmp/hifimule-xvfb.log 2>&1 & then
             XVFB_PID=$!
             sleep 1
             if kill -0 "$XVFB_PID" 2>/dev/null; then
@@ -86,18 +86,18 @@ echo "  Install OK"
 
 # --- STEP 2: Launch ---
 echo ""
-echo "==> STEP 2: Launching JellyfinSync via Xvfb ..."
+echo "==> STEP 2: Launching HifiMule via Xvfb ..."
 start_xvfb || fail "launch" "Unable to start Xvfb on an available display"
 echo "  DISPLAY: $DISPLAY"
 
 # The installed binary name comes from productName in tauri.conf.json (lowercase on Linux)
-APP_BIN="jellyfinsync-ui"
+APP_BIN="hifimule-ui"
 if ! command -v "$APP_BIN" &>/dev/null; then
     # Fallback search in common install locations
-    APP_BIN=$(find /usr/bin /usr/local/bin /opt -name "jellyfinsync-ui" 2>/dev/null | head -1 || true)
+    APP_BIN=$(find /usr/bin /usr/local/bin /opt -name "hifimule-ui" 2>/dev/null | head -1 || true)
     if [[ -z "$APP_BIN" ]]; then
         kill "$XVFB_PID" 2>/dev/null || true
-        fail "launch" "Installed binary 'jellyfinsync-ui' not found — check package manifest"
+        fail "launch" "Installed binary 'hifimule-ui' not found — check package manifest"
     fi
 fi
 echo "  Binary: $APP_BIN"
@@ -127,7 +127,7 @@ kill "$XVFB_PID" 2>/dev/null || true
 APP_PID=""
 XVFB_PID=""
 # Package name from productName (lowercase)
-sudo dpkg -r jellyfinsync || fail "uninstall" "dpkg -r failed with exit code $?"
+sudo dpkg -r hifimule || fail "uninstall" "dpkg -r failed with exit code $?"
 echo "  Uninstall OK"
 
 echo ""

@@ -12,7 +12,7 @@ so that I can monitor the sync engine's health (Idle/Syncing/Error) without open
 
 ## Acceptance Criteria
 
-1. **Given** the `jellyfinsync-daemon` is running, **When** I check the system taskbar/menu bar, **Then** I see the JellyfinSync icon.
+1. **Given** the `hifimule-daemon` is running, **When** I check the system taskbar/menu bar, **Then** I see the HifiMule icon.
 2. **And** the icon provides a "Quit" and "Open UI" menu option.
 3. **And** the icon changes visually or provides tooltips to reflect the current daemon state (Idle, Syncing, Error).
 4. **And** the implementation works natively on Windows, Linux, and macOS.
@@ -21,7 +21,7 @@ so that I can monitor the sync engine's health (Idle/Syncing/Error) without open
 ## Tasks / Subtasks
 
 - [x] Task 1: Integrate `tray-icon` crate (AC: 1, 4)
-  - [x] Add `tray-icon` dependency to `jellyfinsync-daemon/Cargo.toml`.
+  - [x] Add `tray-icon` dependency to `hifimule-daemon/Cargo.toml`.
   - [x] Implement cross-platform icon loading (embed icon assets).
 - [x] Task 2: Implement Tray Menu and Actions (AC: 2)
   - [x] Create menu with "Open UI" and "Quit" options.
@@ -43,13 +43,13 @@ so that I can monitor the sync engine's health (Idle/Syncing/Error) without open
 
 ### Project Structure Notes
 
-- Daemon logic remains in `jellyfinsync-daemon`.
+- Daemon logic remains in `hifimule-daemon`.
 - UI communication for "Open UI" will be handled via the existing architecture (Story 1.3).
 
 ### References
 
-- [Epics: Story 1.2](file:///c:/Workspaces/JellyfinSync/_bmad-output/planning-artifacts/epics.md#Story%201.2:%20Cross-Platform%20System%20Tray%20Hub)
-- [Architecture: Multi-Process Isolation](file:///c:/Workspaces/JellyfinSync/_bmad-output/planning-artifacts/architecture.md#Architectural%20Decisions%20Provided%20by%20Foundation)
+- [Epics: Story 1.2](file:///c:/Workspaces/HifiMule/_bmad-output/planning-artifacts/epics.md#Story%201.2:%20Cross-Platform%20System%20Tray%20Hub)
+- [Architecture: Multi-Process Isolation](file:///c:/Workspaces/HifiMule/_bmad-output/planning-artifacts/architecture.md#Architectural%20Decisions%20Provided%20by%20Foundation)
 
 ## Dev Agent Record
 
@@ -71,12 +71,12 @@ Antigravity (Gemini 2.0 Flash)
 - Committed untracked assets directory to git
 
 ### File List
-- `jellyfinsync-daemon/Cargo.toml` (Modified: Added dependencies)
-- `jellyfinsync-daemon/src/main.rs` (Modified: Implemented tray hub, multi-threading, error handling, graceful shutdown)
-- `jellyfinsync-daemon/src/tests.rs` (New: Integration tests)
-- `jellyfinsync-daemon/assets/icon.png` (New: Idle icon)
-- `jellyfinsync-daemon/assets/icon_syncing.png` (New: Syncing icon)
-- `jellyfinsync-daemon/assets/icon_error.png` (New: Error icon)
+- `hifimule-daemon/Cargo.toml` (Modified: Added dependencies)
+- `hifimule-daemon/src/main.rs` (Modified: Implemented tray hub, multi-threading, error handling, graceful shutdown)
+- `hifimule-daemon/src/tests.rs` (New: Integration tests)
+- `hifimule-daemon/assets/icon.png` (New: Idle icon)
+- `hifimule-daemon/assets/icon_syncing.png` (New: Syncing icon)
+- `hifimule-daemon/assets/icon_error.png` (New: Error icon)
 - `Cargo.toml` (Modified: Added workspace dependencies with optimized image crate)
 - `Cargo.lock` (Modified: Dependency resolution updates)
 

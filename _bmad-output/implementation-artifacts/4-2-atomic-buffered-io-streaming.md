@@ -37,7 +37,7 @@ so that **the sync is fast and doesn't consume local temporary disk space.**
    - Return detailed error information in the final sync result
    (AC: #5)
 
-6. **Manifest Update**: After ALL files are successfully written and synced, the engine MUST update the device manifest (`.jellyfinsync.json`) using the atomic Write-Temp-Rename pattern established in Story 4.1, adding all successfully synced items to `synced_items` array. (AC: #6)
+6. **Manifest Update**: After ALL files are successfully written and synced, the engine MUST update the device manifest (`.hifimule.json`) using the atomic Write-Temp-Rename pattern established in Story 4.1, adding all successfully synced items to `synced_items` array. (AC: #6)
 
 7. **RPC Integration**: A new `sync_execute` RPC method MUST accept a delta object (from `sync_calculate_delta`) and execute the sync operation asynchronously, returning an operation ID that can be used to track progress. (AC: #7)
 
@@ -138,7 +138,7 @@ so that **the sync is fast and doesn't consume local temporary disk space.**
 GET /Items/{id}/Download
 Headers:
   X-Emby-Token: {api_token}
-  X-Emby-Authorization: MediaBrowser Client="JellyfinSync", Device="{device_name}", DeviceId="{device_id}", Version="0.1.0"
+  X-Emby-Authorization: MediaBrowser Client="HifiMule", Device="{device_name}", DeviceId="{device_id}", Version="0.1.0"
 Response: Binary stream (audio file bytes)
 ```
 
@@ -240,14 +240,14 @@ pub enum SyncStatus {
 - None (all modifications to existing files)
 
 **Files to modify:**
-- `jellyfinsync-daemon/src/sync.rs` — Add streaming file write, sync execution engine, operation state management
-- `jellyfinsync-daemon/src/api.rs` — Add `download_item_stream` method to Jellyfin client
-- `jellyfinsync-daemon/src/rpc.rs` — Add `sync_execute` and `sync_get_operation_status` RPC handlers
-- `jellyfinsync-daemon/Cargo.toml` — Potentially add `uuid` crate for operation IDs
+- `hifimule-daemon/src/sync.rs` — Add streaming file write, sync execution engine, operation state management
+- `hifimule-daemon/src/api.rs` — Add `download_item_stream` method to Jellyfin client
+- `hifimule-daemon/src/rpc.rs` — Add `sync_execute` and `sync_get_operation_status` RPC handlers
+- `hifimule-daemon/Cargo.toml` — Potentially add `uuid` crate for operation IDs
 
 **Module Organization:**
 ```
-jellyfinsync-daemon/src/
+hifimule-daemon/src/
 ├── main.rs
 ├── api.rs          <- Add download_item_stream method
 ├── sync.rs         <- Add execute_sync, write_file_streamed, SyncOperation types
@@ -451,10 +451,10 @@ async fn test_write_file_streamed_success() {
 - [UUID Crate](https://docs.rs/uuid/latest/uuid/) — Operation ID generation
 
 **Source Code Locations:**
-- [jellyfinsync-daemon/src/sync.rs](../../jellyfinsync-daemon/src/sync.rs) — Sync engine module (extend here)
-- [jellyfinsync-daemon/src/api.rs](../../jellyfinsync-daemon/src/api.rs) — Jellyfin API client (add download_item_stream)
-- [jellyfinsync-daemon/src/rpc.rs](../../jellyfinsync-daemon/src/rpc.rs) — RPC handlers (add sync_execute)
-- [jellyfinsync-daemon/src/device/mod.rs](../../jellyfinsync-daemon/src/device/mod.rs) — Device manifest (use write_manifest)
+- [hifimule-daemon/src/sync.rs](../../hifimule-daemon/src/sync.rs) — Sync engine module (extend here)
+- [hifimule-daemon/src/api.rs](../../hifimule-daemon/src/api.rs) — Jellyfin API client (add download_item_stream)
+- [hifimule-daemon/src/rpc.rs](../../hifimule-daemon/src/rpc.rs) — RPC handlers (add sync_execute)
+- [hifimule-daemon/src/device/mod.rs](../../hifimule-daemon/src/device/mod.rs) — Device manifest (use write_manifest)
 
 ## Dev Agent Record
 
@@ -530,10 +530,10 @@ None - implementation completed successfully on first attempt with minor compila
 Modified files (relative to repo root):
 - Cargo.toml
 - Cargo.lock
-- jellyfinsync-daemon/Cargo.toml
-- jellyfinsync-daemon/src/sync.rs
-- jellyfinsync-daemon/src/api.rs
-- jellyfinsync-daemon/src/rpc.rs
+- hifimule-daemon/Cargo.toml
+- hifimule-daemon/src/sync.rs
+- hifimule-daemon/src/api.rs
+- hifimule-daemon/src/rpc.rs
 
 ### Senior Developer Review (AI)
 

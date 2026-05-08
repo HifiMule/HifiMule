@@ -75,13 +75,13 @@ So that browsing a large music library feels snappy and I never lose my place wh
 
 | What | Where | How to Reuse |
 |------|-------|-------------|
-| Library state (`AppState`) | `jellyfinsync-ui/src/library.ts:17-37` | Extend with `scrollCache` and `pageCache` fields |
-| `renderGrid()` | `jellyfinsync-ui/src/library.ts:196-241` | Insert quick-nav bar between breadcrumbs and grid div |
-| `navigateToItem()` | `jellyfinsync-ui/src/library.ts:136-150` | Save scroll before navigation |
-| `navigateToCrumb()` | `jellyfinsync-ui/src/library.ts:126-134` | Check page cache before fetch; restore scroll after render |
-| `loadItems()` | `jellyfinsync-ui/src/library.ts:152-189` | Add page cache hit check at top of function |
-| `renderLibrarySelection()` | `jellyfinsync-ui/src/library.ts:95-113` | Call `clearNavigationCache()` here |
-| Basket `clearForDevice()` | `jellyfinsync-ui/src/state/basket.ts:61-65` | Model device-change clearing on this pattern |
+| Library state (`AppState`) | `hifimule-ui/src/library.ts:17-37` | Extend with `scrollCache` and `pageCache` fields |
+| `renderGrid()` | `hifimule-ui/src/library.ts:196-241` | Insert quick-nav bar between breadcrumbs and grid div |
+| `navigateToItem()` | `hifimule-ui/src/library.ts:136-150` | Save scroll before navigation |
+| `navigateToCrumb()` | `hifimule-ui/src/library.ts:126-134` | Check page cache before fetch; restore scroll after render |
+| `loadItems()` | `hifimule-ui/src/library.ts:152-189` | Add page cache hit check at top of function |
+| `renderLibrarySelection()` | `hifimule-ui/src/library.ts:95-113` | Call `clearNavigationCache()` here |
+| Basket `clearForDevice()` | `hifimule-ui/src/state/basket.ts:61-65` | Model device-change clearing on this pattern |
 | `<sl-button>` | Used throughout UI | Use for quick-nav letter buttons (size="small", variant="text") |
 
 ### Scroll Container Clarification
@@ -120,8 +120,8 @@ _Original scrollIntoView approach was superseded post user-test — see AC3 desi
 
 ### Project Structure Notes
 
-- Only file modified: `jellyfinsync-ui/src/library.ts` (state extension + cache + quick-nav logic)
-- CSS changes: existing UI stylesheet (check `jellyfinsync-ui/src/` for the main CSS file)
+- Only file modified: `hifimule-ui/src/library.ts` (state extension + cache + quick-nav logic)
+- CSS changes: existing UI stylesheet (check `hifimule-ui/src/` for the main CSS file)
 - No new files needed
 - No Rust changes
 
@@ -136,8 +136,8 @@ _Original scrollIntoView approach was superseded post user-test — see AC3 desi
 
 - [Source: _bmad-output/planning-artifacts/epics.md#Epic 3]
 - [Source: _bmad-output/implementation-artifacts/3-6-auto-fill-sync-mode-synchronise-all.md — device event patterns]
-- [Source: jellyfinsync-ui/src/library.ts — full existing implementation]
-- [Source: jellyfinsync-ui/src/components/MediaCard.ts — card creation pattern]
+- [Source: hifimule-ui/src/library.ts — full existing implementation]
+- [Source: hifimule-ui/src/components/MediaCard.ts — card creation pattern]
 
 ## Dev Agent Record
 
@@ -158,8 +158,8 @@ claude-sonnet-4-6
 
 ### File List
 
-- jellyfinsync-ui/src/library.ts (modified)
-- jellyfinsync-ui/src/styles.css (modified)
+- hifimule-ui/src/library.ts (modified)
+- hifimule-ui/src/styles.css (modified)
 
 ### Change Log
 

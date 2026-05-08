@@ -1,6 +1,6 @@
 {
   "scripts": {
-    "build:ui": "npm run tauri build --prefix jellyfinsync-ui",
+    "build:ui": "npm run tauri build --prefix hifimule-ui",
     "build:daemon": "cargo build --release",
     "build": "npm run build:ui && npm run build:daemon"
   },

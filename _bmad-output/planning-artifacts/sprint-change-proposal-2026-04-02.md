@@ -14,7 +14,7 @@
 
 - **Artist basket items:** Adding an artist from the library browser eagerly expands to all individual tracks at add-time. If the artist releases new music in Jellyfin, those tracks are absent from the current basket and missed on the next sync.
 
-**Discovery:** Identified during active use of Epic 3 / Story 3.6 implementation. The daemon already proves the correct pattern: [main.rs:503–526](../../jellyfinsync-daemon/src/main.rs) runs `run_auto_fill()` at sync-time for the auto-sync-on-connect path, not at basket-build time. Similarly, [rpc.rs:807–866](../../jellyfinsync-daemon/src/rpc.rs) already expands any container ID (album/playlist/artist) to children at `sync.start` time.
+**Discovery:** Identified during active use of Epic 3 / Story 3.6 implementation. The daemon already proves the correct pattern: [main.rs:503–526](../../hifimule-daemon/src/main.rs) runs `run_auto_fill()` at sync-time for the auto-sync-on-connect path, not at basket-build time. Similarly, [rpc.rs:807–866](../../hifimule-daemon/src/rpc.rs) already expands any container ID (album/playlist/artist) to children at `sync.start` time.
 
 **Evidence:**
 - `BasketSidebar.ts:149–335`: `autoFillInFlight`, `autoFillPendingRetrigger`, `autoFillDebounceTimer`, `scheduleAutoFill()` — all complexity caused by the eager-call model.
@@ -120,7 +120,7 @@ So that I don't wait for a slow basket population and always get the freshest tr
 - **Remove** from `BasketSidebar.ts`: `triggerAutoFill()`, `scheduleAutoFill()`, `autoFillInFlight`, `autoFillPendingRetrigger`, `autoFillDebounceTimer`, `isAutoFillLoading`, `basketStore.replaceAutoFilled()`
 - **Add** to `BasketSidebar.ts`: toggle inserts a single `{ id: '__auto_fill_slot__', type: 'AutoFillSlot', maxBytes: N }` virtual item into `basketStore`
 - **`basket.autoFill` RPC**: no longer called by UI for basket population; retained as optional preview/debug endpoint
-- **`sync.start` RPC handler** ([rpc.rs](../../jellyfinsync-daemon/src/rpc.rs)): if request contains `autoFill: { enabled: true, maxBytes?, excludeItemIds[] }`, call `run_auto_fill()` and merge results with explicit item list before executing — mirrors existing daemon-initiated path at [main.rs:503](../../jellyfinsync-daemon/src/main.rs)
+- **`sync.start` RPC handler** ([rpc.rs](../../hifimule-daemon/src/rpc.rs)): if request contains `autoFill: { enabled: true, maxBytes?, excludeItemIds[] }`, call `run_auto_fill()` and merge results with explicit item list before executing — mirrors existing daemon-initiated path at [main.rs:503](../../hifimule-daemon/src/main.rs)
 - **`sync.start` params** gain: `autoFill?: { enabled: boolean, maxBytes?: number, excludeItemIds: string[] }`
 - Story 3.6 eager-population flow superseded
 
@@ -154,7 +154,7 @@ So that any new albums or tracks added to that artist in Jellyfin are automatica
 *Sync expansion*
 - Given the basket contains one or more artist cards
 - When sync starts
-- Then the daemon calls `get_child_items_with_sizes` for each artist ID to resolve current tracks (this already occurs at [rpc.rs:831](../../jellyfinsync-daemon/src/rpc.rs) for any container ID)
+- Then the daemon calls `get_child_items_with_sizes` for each artist ID to resolve current tracks (this already occurs at [rpc.rs:831](../../hifimule-daemon/src/rpc.rs) for any container ID)
 - And newly added tracks from that artist (since the basket was built) are included in the sync
 
 *Mixed basket deduplication*

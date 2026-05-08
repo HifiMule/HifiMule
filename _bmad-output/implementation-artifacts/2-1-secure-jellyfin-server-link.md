@@ -16,7 +16,7 @@ so that I don't have to re-enter them and my tokens are safe from other users.
    - Successful call (HTTP 200) with a valid JSON response confirms connection.
 2. **Secure Credential Storage**:
    - Jellyfin URL and Token must be stored in a local file `credentials.json` (Fallback for V1).
-   - Service Name: `jellyfinsync` (internal reference)
+   - Service Name: `hifimule` (internal reference)
    - Keys: `server_url`, `server_token`
    - **Note**: Keyring storage is postponed to V2.
 3. **IPC Exposure**:
@@ -46,13 +46,13 @@ so that I don't have to re-enter them and my tokens are safe from other users.
 ## Dev Notes
 
 - **Jellyfin Auth**: Use `X-Emby-Token` header or `Authorization: MediaBrowser ... Token="..."`.
-- **Keyring**: Use `keyring::Entry::new("jellyfinsync", "server_url")` pattern.
-- **IPC Port**: 19140 is the designated port for JellyfinSync (randomly selected from private range).
+- **Keyring**: Use `keyring::Entry::new("hifimule", "server_url")` pattern.
+- **IPC Port**: 19140 is the designated port for HifiMule (randomly selected from private range).
 - **Architecture**: The IPC server should run on the Tokio runtime already present in `main.rs`.
 
 ### Project Structure Notes
 
-- New code should live in `jellyfinsync-daemon/src/api` or directly in `main.rs` if small.
+- New code should live in `hifimule-daemon/src/api` or directly in `main.rs` if small.
 - For this story, keep it simple but extensible.
 
 ### References
@@ -79,11 +79,11 @@ Antigravity (Claude 3.5 Sonnet)
 ### File List
 
 **New Files:**
-- `jellyfinsync-daemon/src/api.rs` - Jellyfin API client and file-based credential manager
-- `jellyfinsync-daemon/src/rpc.rs` - JSON-RPC 2.0 server implementation
+- `hifimule-daemon/src/api.rs` - Jellyfin API client and file-based credential manager
+- `hifimule-daemon/src/rpc.rs` - JSON-RPC 2.0 server implementation
 
 **Modified Files:**
-- `jellyfinsync-daemon/src/main.rs` - Added RPC server startup in tokio runtime
-- `jellyfinsync-daemon/src/tests.rs` - Added credential storage tests
-- `jellyfinsync-daemon/Cargo.toml` - Added dependencies: reqwest, serde, serde_json, axum, lazy_static, mockito (dev)
+- `hifimule-daemon/src/main.rs` - Added RPC server startup in tokio runtime
+- `hifimule-daemon/src/tests.rs` - Added credential storage tests
+- `hifimule-daemon/Cargo.toml` - Added dependencies: reqwest, serde, serde_json, axum, lazy_static, mockito (dev)
 - `Cargo.lock` - Dependency lockfile updates

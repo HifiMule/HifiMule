@@ -20,10 +20,10 @@ so that I can browse my library while the background sync remains active.
 ## Tasks / Subtasks
 
 - [x] Task 1: UI Launch Mechanism (AC: 1, 2)
-  - [x] Implement `Open UI` action in `jellyfinsync-daemon` using `std::process::Command`.
+  - [x] Implement `Open UI` action in `hifimule-daemon` using `std::process::Command`.
   - [x] Ensure the daemon correctly handles the spawn event across platforms.
 - [x] Task 2: Shoelace "Vibrant Hub" Skeleton (AC: 1, 3, 4)
-  - [x] Clean up default Tauri boilerplate in `jellyfinsync-ui`.
+  - [x] Clean up default Tauri boilerplate in `hifimule-ui`.
   - [x] Implement the 70/30 split layout using Shoelace components.
   - [x] Set up the "Basket" sidebar and "Library" main view placeholders.
 - [x] Task 3: Lifecycle and Verification (AC: 2)
@@ -35,7 +35,7 @@ so that I can browse my library while the background sync remains active.
 ### Architecture Guardrails
 - **Multi-Process Isolation:** The daemon and UI are separate workspace members. The daemon's 10MB idle goal depends on this separation.
 - **macOS Main Thread:** The daemon's tray icon MUST run on the main thread.
-- **IPC Pattern:** While this story focuses on window management, any future communication should use JSON-RPC over localhost HTTP as per [Architecture Decision Document](file:///c:/Workspaces/JellyfinSync/_bmad-output/planning-artifacts/architecture.md).
+- **IPC Pattern:** While this story focuses on window management, any future communication should use JSON-RPC over localhost HTTP as per [Architecture Decision Document](file:///c:/Workspaces/HifiMule/_bmad-output/planning-artifacts/architecture.md).
 
 ### UI / UX Requirements
 - **Framework:** Tauri v2 + Vanilla TypeScript.
@@ -45,9 +45,9 @@ so that I can browse my library while the background sync remains active.
 
 ### References
 
-- [Epics: Story 1.3](file:///c:/Workspaces/JellyfinSync/_bmad-output/planning-artifacts/epics.md#Story%201.3:%20Detachable%20Tauri%20UI%20Skeleton)
-- [Architecture: Multi-Process Isolation](file:///c:/Workspaces/JellyfinSync/_bmad-output/planning-artifacts/architecture.md#Starter%20Options%20Considered)
-- [Story 1.2: Tray Hub Context](file:///c:/Workspaces/JellyfinSync/_bmad-output/implementation-artifacts/1-2-cross-platform-system-tray-hub.md)
+- [Epics: Story 1.3](file:///c:/Workspaces/HifiMule/_bmad-output/planning-artifacts/epics.md#Story%201.3:%20Detachable%20Tauri%20UI%20Skeleton)
+- [Architecture: Multi-Process Isolation](file:///c:/Workspaces/HifiMule/_bmad-output/planning-artifacts/architecture.md#Starter%20Options%20Considered)
+- [Story 1.2: Tray Hub Context](file:///c:/Workspaces/HifiMule/_bmad-output/implementation-artifacts/1-2-cross-platform-system-tray-hub.md)
 
 ## Dev Agent Record
 
@@ -61,15 +61,15 @@ Antigravity (Gemini 2.0 Flash)
 - [Code Review Fix] Added Google Fonts 'Inter' to index.html.
 - [Code Review Fix] Added unit tests for DaemonState and icon loading in `tests.rs`.
 - [Code Review Fix] Refactored `load_icon` for testability.
-- Implemented `Open UI` in `jellyfinsync-daemon` using `std::process::Command`.
+- Implemented `Open UI` in `hifimule-daemon` using `std::process::Command`.
 - The UI is launched via `npm run tauri dev` for development.
-- Implemented "Vibrant Hub" skeleton in `jellyfinsync-ui` using Shoelace.
+- Implemented "Vibrant Hub" skeleton in `hifimule-ui` using Shoelace.
 - Established 70/30 split layout (Library/Basket).
 - Applied dark theme and glassmorphism styling.
 
 ### File List
-- `jellyfinsync-daemon/src/main.rs` (Modified)
-- `jellyfinsync-ui/index.html` (Modified)
-- `jellyfinsync-ui/package.json` (Modified)
-- `jellyfinsync-ui/src/main.ts` (Modified)
-- `jellyfinsync-ui/src/styles.css` (Modified)
+- `hifimule-daemon/src/main.rs` (Modified)
+- `hifimule-ui/index.html` (Modified)
+- `hifimule-ui/package.json` (Modified)
+- `hifimule-ui/src/main.ts` (Modified)
+- `hifimule-ui/src/styles.css` (Modified)

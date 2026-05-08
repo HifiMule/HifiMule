@@ -21,7 +21,7 @@ context: []
 - All WPD calls run synchronously inside `spawn_blocking` — do not introduce async or `tokio::fs` inside `WpdHandle`.
 - `write_file` must overwrite: if an object already exists at the target path, delete it before creating the new one.
 - `write_file` must create missing parent directories via `CreateObjectWithPropertiesOnly` (content type = folder).
-- Only `jellyfinsync-daemon/src/device/mtp.rs` is modified. No other files.
+- Only `hifimule-daemon/src/device/mtp.rs` is modified. No other files.
 
 **Ask First:**
 - If `IPortableDeviceContent::Delete`'s `ppResults` parameter is typed as `*mut Option<IPortableDevicePropVariantCollection>` rather than being droppable as `None`/`ptr::null_mut()`, halt and ask before choosing an approach.
@@ -35,10 +35,10 @@ context: []
 
 | Scenario | Input / State | Expected Output / Behavior | Error Handling |
 |----------|--------------|---------------------------|----------------|
-| Write new file at root | `path=".jellyfinsync.json"`, data = manifest bytes | Object created under storage root; data persisted on device | Bubble WPD HRESULT as `Err` |
+| Write new file at root | `path=".hifimule.json"`, data = manifest bytes | Object created under storage root; data persisted on device | Bubble WPD HRESULT as `Err` |
 | Write into non-existent dir | `path="Music/Artist/track.mp3"`, `Music/Artist` absent | Folders created, then file object written | Error if any intermediate folder create fails |
 | Overwrite existing file | Same path, different data | Old object deleted, new one created | Error if delete step fails |
-| Delete existing file | `path=".jellyfinsync.json.dirty"` | Object removed from device | Error if path resolution fails |
+| Delete existing file | `path=".hifimule.json.dirty"` | Object removed from device | Error if path resolution fails |
 | `list_files("")` | Storage root | Recursive `Vec<FileEntry>` for all non-folder objects | Skip entries where name/size props error |
 | `free_space` | — | `u64` bytes free on first storage object | Bubble WPD error |
 
@@ -46,30 +46,30 @@ context: []
 
 ## Code Map
 
-- `../../jellyfinsync-daemon/src/device/mtp.rs:48-68` — Existing WPD `PROPERTYKEY` constants; new constants appended here
-- `../../jellyfinsync-daemon/src/device/mtp.rs:93-205` — `WpdHandle::open` + `path_to_object_id`; new private helpers follow this pattern
-- `../../jellyfinsync-daemon/src/device/mtp.rs:207-258` — `MtpHandle for WpdHandle`; the four stubs to replace
-- `../../jellyfinsync-daemon/src/device_io.rs:228-243` — `MtpBackend::write_file` + `write_with_verify`; shows the dirty-marker sequence that requires both `write_file` and `delete_file`
+- `../../hifimule-daemon/src/device/mtp.rs:48-68` — Existing WPD `PROPERTYKEY` constants; new constants appended here
+- `../../hifimule-daemon/src/device/mtp.rs:93-205` — `WpdHandle::open` + `path_to_object_id`; new private helpers follow this pattern
+- `../../hifimule-daemon/src/device/mtp.rs:207-258` — `MtpHandle for WpdHandle`; the four stubs to replace
+- `../../hifimule-daemon/src/device_io.rs:228-243` — `MtpBackend::write_file` + `write_with_verify`; shows the dirty-marker sequence that requires both `write_file` and `delete_file`
 
 ## Tasks & Acceptance
 
 **Execution:**
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` — Add WPD constants (inside `windows_wpd` module, after existing constants):
+- [x] `hifimule-daemon/src/device/mtp.rs` — Add WPD constants (inside `windows_wpd` module, after existing constants):
   - `PROPERTYKEY`: `WPD_OBJECT_PARENT_ID` (pid=3), `WPD_OBJECT_NAME` (pid=4), `WPD_OBJECT_FORMAT` (pid=6), `WPD_OBJECT_CONTENT_TYPE` (pid=7), `WPD_OBJECT_SIZE` (pid=11) — all share GUID `{EF6B490D-5CD8-437A-AFFC-DA8B60EE4A3C}`
   - `PROPERTYKEY`: `WPD_STORAGE_FREE_SPACE_IN_BYTES` — GUID `{01A3057A-74D6-4E80-BEA7-DC4C212CE50A}`, pid=5
   - `windows::core::GUID`: `WPD_CONTENT_TYPE_GENERIC_FILE` = `{0EBC0471-A718-4C0F-BC31-18CE37F4F284}`, `WPD_CONTENT_TYPE_FOLDER` = `{27E2E392-A111-48E0-AB0C-E17705A05F85}`, `WPD_OBJECT_FORMAT_UNDEFINED` = `{30010000-AE6C-4804-98BA-C57B46965FE7}`
 
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` — Add imports inside `windows_wpd`:
+- [x] `hifimule-daemon/src/device/mtp.rs` — Add imports inside `windows_wpd`:
   - `IPortableDeviceDataStream`, `IPortableDevicePropVariantCollection`, `PortableDevicePropVariantCollection` from `windows::Win32::Devices::PortableDevices`
   - `PROPVARIANT` and `VT_LPWSTR` (for PROPVARIANT construction needed by `Add`)
   - `std::mem::ManuallyDrop`
 
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` — Add private helpers inside `WpdHandle`:
+- [x] `hifimule-daemon/src/device/mtp.rs` — Add private helpers inside `WpdHandle`:
   1. `find_child_object_id(&self, parent_id: &str, name: &str) -> Result<Option<String>>` — enumerate `parent_id`'s children, return the first object ID whose `WPD_OBJECT_ORIGINAL_FILE_NAME` matches `name` (case-insensitive), or `None`.
   2. `make_object_id_collection(&self, obj_id: &str) -> Result<IPortableDevicePropVariantCollection>` — create `PortableDevicePropVariantCollection`, build a `PROPVARIANT` with `vt=VT_LPWSTR` and `pwszVal` pointing to a `CoTaskMemAlloc`-allocated UTF-16 buffer for `obj_id`, call `collection.Add(&pv)`, then free the buffer. Return collection.
   3. `ensure_dir_chain(&self, components: &[&str]) -> Result<HSTRING>` — walk `components` from the storage root, calling `find_child_object_id` at each step; if a component is absent, create a folder object via `CreateObjectWithPropertiesOnly` (properties: `WPD_OBJECT_PARENT_ID`, `WPD_OBJECT_NAME`, `WPD_OBJECT_CONTENT_TYPE=WPD_CONTENT_TYPE_FOLDER`). Return the final object's `HSTRING` ID.
 
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` — Implement `WpdHandle::write_file`:
+- [x] `hifimule-daemon/src/device/mtp.rs` — Implement `WpdHandle::write_file`:
   - Split `path` by `/` into parent components + filename using `split_path_components`.
   - Call `ensure_dir_chain` on the parent components to get `parent_id`.
   - Call `find_child_object_id(parent_id, filename)`; if `Some(existing)`, delete it via `make_object_id_collection` + `content.Delete`.
@@ -78,27 +78,27 @@ context: []
   - Write `data` to the returned `IStream` in `optimal_buf`-sized chunks.
   - Cast the stream to `IPortableDeviceDataStream`, call `Commit(STGC_DEFAULT as u32)`.
 
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` — Implement `WpdHandle::delete_file`:
+- [x] `hifimule-daemon/src/device/mtp.rs` — Implement `WpdHandle::delete_file`:
   - `path_to_object_id(path)` → `obj_id`.
   - `make_object_id_collection(&obj_id.to_string())` → `collection`.
   - `content.Delete(0, &collection, …)` (pass `None` or `ptr::null_mut()` for `ppResults` per resolved constraint).
 
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` — Implement `WpdHandle::list_files`:
+- [x] `hifimule-daemon/src/device/mtp.rs` — Implement `WpdHandle::list_files`:
   - Private recursive helper `collect_files(&self, content, props, parent_id, prefix, acc)`.
   - For each child: read `WPD_OBJECT_ORIGINAL_FILE_NAME`, `WPD_OBJECT_CONTENT_TYPE`, `WPD_OBJECT_SIZE`.
   - If content type == `WPD_CONTENT_TYPE_FOLDER`: recurse with updated prefix.
   - Otherwise: push `FileEntry { path: prefix/name, name, size }` to `acc`.
   - `list_files` obtains the root object ID via `path_to_object_id(path)` and calls the helper.
 
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` — Implement `WpdHandle::free_space`:
+- [x] `hifimule-daemon/src/device/mtp.rs` — Implement `WpdHandle::free_space`:
   - Enumerate one child of `"DEVICE"` to get the storage object ID (same pattern as `path_to_object_id` already does for `storage_id`).
   - Call `props.GetValues(storage_obj, None)` with a key collection containing `WPD_STORAGE_FREE_SPACE_IN_BYTES`.
   - Return `values.GetUnsignedLargeIntegerValue(&WPD_STORAGE_FREE_SPACE_IN_BYTES)`.
 
 **Acceptance Criteria:**
 - Given an unrecognized WPD/MTP device is connected and `device_init` is called, when the RPC handler executes, then `write_with_verify` completes without error and the device appears as initialized (no "WPD write_file: not yet implemented").
-- Given `cargo build --manifest-path jellyfinsync-daemon/Cargo.toml` is run on Windows, then it compiles with zero errors and zero new warnings.
-- Given `cargo test --manifest-path jellyfinsync-daemon/Cargo.toml` is run, then all existing tests pass.
+- Given `cargo build --manifest-path hifimule-daemon/Cargo.toml` is run on Windows, then it compiles with zero errors and zero new warnings.
+- Given `cargo test --manifest-path hifimule-daemon/Cargo.toml` is run, then all existing tests pass.
 
 ## Spec Change Log
 
@@ -127,50 +127,50 @@ The collection makes its own copy; free `ptr` immediately after `Add`.
 ## Verification
 
 **Commands:**
-- `cargo build --manifest-path jellyfinsync-daemon/Cargo.toml` -- expected: zero errors, zero new warnings
-- `cargo test --manifest-path jellyfinsync-daemon/Cargo.toml` -- expected: all tests pass
+- `cargo build --manifest-path hifimule-daemon/Cargo.toml` -- expected: zero errors, zero new warnings
+- `cargo test --manifest-path hifimule-daemon/Cargo.toml` -- expected: all tests pass
 
 ## Suggested Review Order
 
 **Write path — initialization critical**
 
 - Entry point: `ensure_dir_chain` walks storage root → creates missing folder objects via `CreateObjectWithPropertiesOnly`.
-  [`mtp.rs:399`](../../jellyfinsync-daemon/src/device/mtp.rs#L399)
+  [`mtp.rs:399`](../../hifimule-daemon/src/device/mtp.rs#L399)
 
 - Core write: props + `CreateObjectWithPropertiesAndData` → IStream write loop → `IPortableDeviceDataStream::Commit`.
-  [`mtp.rs:580`](../../jellyfinsync-daemon/src/device/mtp.rs#L580)
+  [`mtp.rs:580`](../../hifimule-daemon/src/device/mtp.rs#L580)
 
 - Overwrite guard: `find_child_object_id` → delete existing object before creating new one.
-  [`mtp.rs:596`](../../jellyfinsync-daemon/src/device/mtp.rs#L596)
+  [`mtp.rs:596`](../../hifimule-daemon/src/device/mtp.rs#L596)
 
 **Delete path**
 
 - `delete_file`: resolves path to object ID, creates single-item PVC, calls `content.Delete`.
-  [`mtp.rs:655`](../../jellyfinsync-daemon/src/device/mtp.rs#L655)
+  [`mtp.rs:655`](../../hifimule-daemon/src/device/mtp.rs#L655)
 
 - PROPVARIANT helper: `CoTaskMemAlloc`-allocated UTF-16 buffer → `ManuallyDrop<PROPVARIANT>` → `Add` → free immediately.
-  [`mtp.rs:360`](../../jellyfinsync-daemon/src/device/mtp.rs#L360)
+  [`mtp.rs:360`](../../hifimule-daemon/src/device/mtp.rs#L360)
 
 **Listing and free space**
 
 - `list_files`: delegates to `collect_files_recursive`; skips individual entries on property errors.
-  [`mtp.rs:667`](../../jellyfinsync-daemon/src/device/mtp.rs#L667)
+  [`mtp.rs:667`](../../hifimule-daemon/src/device/mtp.rs#L667)
 
 - Recursive collector: folder objects recurse, non-folders push `FileEntry`; errors from a subtree are swallowed.
-  [`mtp.rs:462`](../../jellyfinsync-daemon/src/device/mtp.rs#L462)
+  [`mtp.rs:462`](../../hifimule-daemon/src/device/mtp.rs#L462)
 
 - `free_space`: first storage child of `"DEVICE"` → `WPD_STORAGE_FREE_SPACE_IN_BYTES` property.
-  [`mtp.rs:679`](../../jellyfinsync-daemon/src/device/mtp.rs#L679)
+  [`mtp.rs:679`](../../hifimule-daemon/src/device/mtp.rs#L679)
 
 **Shared helper**
 
 - `find_child_object_id`: batch `EnumObjects` + `GetStringValue(WPD_OBJECT_ORIGINAL_FILE_NAME)`, case-insensitive match.
-  [`mtp.rs:303`](../../jellyfinsync-daemon/src/device/mtp.rs#L303)
+  [`mtp.rs:303`](../../hifimule-daemon/src/device/mtp.rs#L303)
 
 **Constants and config**
 
 - New `PROPERTYKEY` constants (parent, name, format, content_type, size) and content-type/format GUIDs.
-  [`mtp.rs:78`](../../jellyfinsync-daemon/src/device/mtp.rs#L78)
+  [`mtp.rs:78`](../../hifimule-daemon/src/device/mtp.rs#L78)
 
 - `Win32_System_Variant` feature added for `VT_LPWSTR`.
-  [`Cargo.toml:44`](../../jellyfinsync-daemon/Cargo.toml#L44)
+  [`Cargo.toml:44`](../../hifimule-daemon/Cargo.toml#L44)

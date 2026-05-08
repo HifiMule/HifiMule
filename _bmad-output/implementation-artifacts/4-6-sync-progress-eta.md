@@ -25,7 +25,7 @@ so that I know whether to wait by the screen or step away.
 
 5. **ETA replaced on completion**: When `status === 'complete'`, the ETA line is replaced by the existing "Sync Complete" panel. (AC: #5)
 
-6. **Tray tooltip unchanged**: The tray tooltip remains `"JellyfinSync: Syncing..."` — ETA is UI-side only and the tray is daemon-controlled (see Known Variances). (AC: #6, known variance)
+6. **Tray tooltip unchanged**: The tray tooltip remains `"HifiMule: Syncing..."` — ETA is UI-side only and the tray is daemon-controlled (see Known Variances). (AC: #6, known variance)
 
 ## Tasks / Subtasks
 
@@ -115,7 +115,7 @@ so that I know whether to wait by the screen or step away.
     assert_eq!(op.total_bytes, 0);
     ```
   - [x] T3.2: In `rpc.rs` test at line ~2827, add `bytes_transferred: 0, total_bytes: 0` if the test manually constructs a `SyncOperation` struct literal (check whether it uses struct update syntax or full construction).
-  - [x] T3.3: Run `cargo test` in `jellyfinsync-daemon/` — all existing tests must pass.
+  - [x] T3.3: Run `cargo test` in `hifimule-daemon/` — all existing tests must pass.
 
 ### UI Work (BasketSidebar.ts)
 
@@ -237,7 +237,7 @@ so that I know whether to wait by the screen or step away.
     ```
 
 - [x] **T7: TypeScript compilation** (AC: all)
-  - [x] T7.1: Run `pnpm tsc --noEmit` (or equivalent) in `jellyfinsync-ui/` — no TypeScript errors.
+  - [x] T7.1: Run `pnpm tsc --noEmit` (or equivalent) in `hifimule-ui/` — no TypeScript errors.
 
 ## Dev Notes
 
@@ -294,12 +294,12 @@ The `id_changes` loop (lines ~600–690) also streams file content. The `SyncDel
 ### Source Tree
 
 **Files to MODIFY:**
-1. [jellyfinsync-daemon/src/sync.rs](jellyfinsync-daemon/src/sync.rs) — T1: `SyncOperation` struct fields; T2: `execute_sync` cumulative byte tracking
-2. [jellyfinsync-ui/src/components/BasketSidebar.ts](jellyfinsync-ui/src/components/BasketSidebar.ts) — T4: `SyncOperation` interface; T5: ETA state + `computeEta()`; T6: `renderSyncProgress()` update
+1. [hifimule-daemon/src/sync.rs](hifimule-daemon/src/sync.rs) — T1: `SyncOperation` struct fields; T2: `execute_sync` cumulative byte tracking
+2. [hifimule-ui/src/components/BasketSidebar.ts](hifimule-ui/src/components/BasketSidebar.ts) — T4: `SyncOperation` interface; T5: ETA state + `computeEta()`; T6: `renderSyncProgress()` update
 
 **Files to READ (do NOT modify):**
-3. [jellyfinsync-daemon/src/rpc.rs](jellyfinsync-daemon/src/rpc.rs) — verify `create_operation` call at ~line 939 (no signature change needed); verify `sync_get_operation_status` serializes `SyncOperation` as-is
-4. [jellyfinsync-daemon/src/main.rs](jellyfinsync-daemon/src/main.rs) — verify `create_operation` call at ~line 633; understand tray tooltip ("JellyfinSync: Syncing..." stays unchanged)
+3. [hifimule-daemon/src/rpc.rs](hifimule-daemon/src/rpc.rs) — verify `create_operation` call at ~line 939 (no signature change needed); verify `sync_get_operation_status` serializes `SyncOperation` as-is
+4. [hifimule-daemon/src/main.rs](hifimule-daemon/src/main.rs) — verify `create_operation` call at ~line 633; understand tray tooltip ("HifiMule: Syncing..." stays unchanged)
 
 **Files NOT to touch:**
 - `rpc.rs` — `create_operation` signature unchanged; no new RPCs
@@ -323,7 +323,7 @@ The `id_changes` loop (lines ~600–690) also streams file content. The `SyncDel
 
 ### Testing Standards
 
-No TypeScript unit test framework in the UI project. UI testing is manual. Daemon: run `cargo test` in `jellyfinsync-daemon/` after adding new struct fields — the compiler will flag any test that constructs `SyncOperation` with a struct literal (if any). Fix those by adding the two new `0` fields. The `SyncOperation` struct uses named fields so partial initialization is a compiler error.
+No TypeScript unit test framework in the UI project. UI testing is manual. Daemon: run `cargo test` in `hifimule-daemon/` after adding new struct fields — the compiler will flag any test that constructs `SyncOperation` with a struct literal (if any). Fix those by adding the two new `0` fields. The `SyncOperation` struct uses named fields so partial initialization is a compiler error.
 
 ### Previous Story Learnings (4.5b)
 
@@ -371,8 +371,8 @@ None — clean implementation, no blockers.
 
 ### File List
 
-- `jellyfinsync-daemon/src/sync.rs`
-- `jellyfinsync-ui/src/components/BasketSidebar.ts`
+- `hifimule-daemon/src/sync.rs`
+- `hifimule-ui/src/components/BasketSidebar.ts`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
 
 ## Change Log

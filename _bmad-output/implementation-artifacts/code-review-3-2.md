@@ -5,7 +5,7 @@
 **Issues Found:** 1 High, 3 Medium, 1 Low
 
 ## 🔴 CRITICAL / HIGH ISSUES
-- **Hardcoded Port**: `jellyfinsync-ui/src/components/BasketSidebar.ts` uses `http://localhost:19140` directly. This will break if the daemon port is configured differently (env `VITE_RPC_PORT` is ignored here).
+- **Hardcoded Port**: `hifimule-ui/src/components/BasketSidebar.ts` uses `http://localhost:19140` directly. This will break if the daemon port is configured differently (env `VITE_RPC_PORT` is ignored here).
 
 ## 🟡 MEDIUM ISSUES
 - **Performance (RPC)**: `handle_jellyfin_get_item_counts` in `rpc.rs` processes item IDs serially (`for id_val in ids`). It should use `futures::future::join_all` to fetch metadata in parallel.

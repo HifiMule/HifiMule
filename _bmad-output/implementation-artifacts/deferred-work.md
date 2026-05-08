@@ -6,7 +6,7 @@ All previously deferred items have been incorporated into Epic 7 stories (7.1–
 
 - **`copy_brew_dylib` basename collision** — two dylibs from different Homebrew prefix paths with identical basenames overwrite each other in `LIB_DIR`; install_name_tool rewrites may miss the dropped copy. Unlikely for libmtp's typical transitive deps but not impossible.
 - **AppImage `files` mapping hardcodes x86_64 source path** — `/usr/lib/x86_64-linux-gnu/libmtp.so.9` will fail silently if CI runner ever changes to arm64. Should use a `find`-based path resolution at build time.
-- **macOS DMG smoke test MOUNT_POINT conflict** — `/Volumes/JellyfinSync` is hardcoded; a different volume mounted at that path before the test would be silently detached. Pre-existing issue.
+- **macOS DMG smoke test MOUNT_POINT conflict** — `/Volumes/HifiMule` is hardcoded; a different volume mounted at that path before the test would be silently detached. Pre-existing issue.
 - **`-displayfd` polling timeout** — 50 × 0.1s = 5 seconds max wait for Xvfb to write the display number; may not be sufficient on very slow or heavily loaded CI runners.
 - **`is_boot_volume_device` fail-safe skip on metadata error** — `std::fs::metadata` failure causes the candidate volume to be silently skipped rather than retried. Documented design decision; a momentary metadata error could cause a connected device to be missed until the next observer cycle.
 
