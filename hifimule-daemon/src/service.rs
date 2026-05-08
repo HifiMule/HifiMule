@@ -89,8 +89,7 @@ pub fn install() -> anyhow::Result<()> {
 
     crate::daemon_log!("--install-service: setting description");
 
-    let _ =
-        service.set_description("Background sync service for HifiMule media synchronization");
+    let _ = service.set_description("Background sync service for HifiMule media synchronization");
 
     crate::daemon_log!("--install-service: starting service");
 
