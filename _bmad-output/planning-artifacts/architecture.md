@@ -2,6 +2,8 @@ stepsCompleted: ['step-01-init', 'step-02-context', 'step-03-starter', 'step-04-
 workflowType: 'architecture'
 status: 'complete'
 completedAt: '2026-01-26'
+lastAmended: '2026-05-08'
+amendments: ['epic-8-library-browsing-rpc-contract', 'epic-8-provider-layer-type-definitions', 'epic-8-factory-lifecycle-config', 'epic-8-subsonic-auth-scrobble-incremental-sync']
 ---
 
 # Architecture Decision Document
@@ -278,3 +280,214 @@ Subsonic embeds auth credentials (`u`, `p`, `t`, `s`) as query parameters in eve
 - Route all media server API calls through `Arc<dyn MediaProvider>` — never call Jellyfin or Subsonic HTTP APIs directly outside of `providers/` module.
 - Call `sanitize_subsonic_url()` on any Subsonic URL before passing to `tracing::` macros or file-based logging.
 - Use `String` for all item/track/album/artist IDs — never `i64` or `u64`.
+
+## Library Browsing — Multi-Provider RPC Contract
+
+### RPC Method Inventory
+
+Level-specific `browse.*` methods expose the provider hierarchy to the UI. Each maps to exactly one `MediaProvider` call; no generic dispatch exists.
+
+| Method | Params | Returns |
+|---|---|---|
+| `browse.listLibraries` | — | `{ libraries: Library[] }` |
+| `browse.listArtists` | `{ libraryId?: string, letter?: string }` | `{ artists: Artist[], total: number }` |
+| `browse.getArtist` | `{ artistId: string }` | `{ artist: Artist, albums: Album[] }` |
+| `browse.getAlbum` | `{ albumId: string }` | `{ album: Album, tracks: Track[] }` |
+| `browse.listPlaylists` | — | `{ playlists: Playlist[] }` |
+| `browse.getPlaylist` | `{ playlistId: string }` | `{ playlist: Playlist, tracks: Track[] }` |
+
+**Response shapes (camelCase per IPC naming convention):**
+```typescript
+type Library  = { id: string; name: string }
+type Artist   = { id: string; name: string; albumCount: number; coverArtId: string | null }
+type Album    = { id: string; name: string; artistId: string; artistName: string;
+                  year: number | null; trackCount: number; coverArtId: string | null }
+type Track    = { id: string; title: string; artistName: string; albumName: string;
+                  trackNumber: number | null; duration: number; bitrateKbps: number | null;
+                  coverArtId: string | null; sizeBytes: number | null }
+type Playlist = { id: string; name: string; trackCount: number; durationSeconds: number }
+```
+
+### Subsonic Library Level
+
+`SubsonicProvider::list_libraries()` returns one synthetic entry:
+```rust
+vec![Library { id: "all".into(), name: "All Music".into() }]
+```
+
+**UI rule:** when `libraries.length === 1`, the library picker is hidden and `libraryId` is auto-forwarded to `"all"` on all subsequent `browse.*` calls — making the Subsonic single-library experience visually identical to a single-library Jellyfin setup.
+
+`SubsonicProvider::list_artists` ignores `library_id` entirely; Subsonic has no per-library artist scope.
+
+### Alphabetical Quick-Nav — Provider Contract
+
+**Trait amendment** — `list_artists` gains a `letter` parameter:
+```rust
+async fn list_artists(
+    &self,
+    library_id: Option<&str>,
+    letter: Option<char>,   // None = all; Some('A') = artists whose name starts with A
+) -> Result<Vec<Artist>, ProviderError>;
+```
+
+**Provider implementations:**
+- **JellyfinProvider:** appends `&NameStartsWith={letter}&NameLessThan={next_letter}` to the `/Artists` query. Server-side filter; only matching artists are transferred.
+- **SubsonicProvider:** calls `GET /rest/getArtists.view` once (no filter param in the API); filters the returned index array by matching the letter key (`index.iter().find(|i| i.name == letter_str)`). Full artist list is fetched in-process; no caching at the daemon layer.
+
+`browse.listArtists` forwards `letter` (single uppercase char or absent) directly to `provider.list_artists()`.
+
+### Cover Art Routing
+
+All browse responses carry `coverArtId: string | null`. The UI fetches artwork exclusively via the existing `image_proxy` Tauri command — it never calls `cover_art_url()` directly.
+
+For Subsonic, `coverArtId` is the `coverArt` field from the API response, which is **not** equal to the item ID. `SubsonicProvider` maps this field into the domain type at the adapter boundary. No caller outside `providers/subsonic.rs` is aware of this distinction.
+
+**Enforcement:** All AI agents MUST use `provider.cover_art_url(cover_art_id, size)` to build artwork URLs — never construct Subsonic or Jellyfin artwork URLs manually.
+
+## Epic 8: Provider Layer — Remaining Architectural Decisions
+
+### Provider Type Definitions
+
+All types live in `providers/mod.rs` alongside the `MediaProvider` trait.
+
+**`ProviderError`:**
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum ProviderError {
+    #[error("HTTP {status}: {message}")]
+    Http { status: u16, message: String },
+    #[error("Authentication failed: {0}")]
+    AuthFailed(String),
+    #[error("Item not found: {0}")]
+    NotFound(String),
+    #[error("Capability not supported: {0}")]
+    NotSupported(String),
+    #[error("Deserialization error: {0}")]
+    Deserialization(String),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+```
+
+**`ChangeEvent`, `ItemRef`, `ItemType`:**
+```rust
+pub enum ChangeEvent {
+    Added(ItemRef),
+    Updated(ItemRef),
+    Removed { id: String, item_type: ItemType },
+}
+pub struct ItemRef { pub id: String, pub item_type: ItemType }
+pub enum ItemType { Song, Album, Artist, Playlist }
+```
+
+**`SearchResult`** (domain layer, uses types from `domain/models.rs`):
+```rust
+pub struct SearchResult {
+    pub artists: Vec<Artist>,
+    pub albums:  Vec<Album>,
+    pub songs:   Vec<Song>,
+}
+```
+
+**`Capabilities`:**
+```rust
+pub struct Capabilities {
+    pub open_subsonic: bool,                  // OpenSubsonic extension detected
+    pub supports_changes_since: bool,          // getIndexes?ifModifiedSince reliable
+    pub supports_server_transcoding: bool,     // PlaybackInfo (Jellyfin) / stream params (Subsonic)
+}
+```
+Cached via `std::sync::OnceLock<Capabilities>` in each provider struct, populated on first `server.connect`. Reset only when `server.connect` is called with a new URL (i.e. when the provider is replaced).
+
+### Trait Amendment — `scrobble()`
+
+The `MediaProvider` trait gains one additional method:
+```rust
+async fn scrobble(&self, track_id: &str, timestamp_ms: u64) -> Result<(), ProviderError>;
+```
+- **JellyfinProvider:** calls the Progressive Sync API (`POST /Sessions/{sessionId}/Playing/Stopped`).
+- **SubsonicProvider:** calls `GET /rest/scrobble.view?id={track_id}&submission=true&time={timestamp_ms}`.
+
+`ScrobbleSubmitter` holds `Arc<dyn MediaProvider>` and calls `provider.scrobble()` exclusively — no `match provider.server_type()` branching outside `providers/`.
+
+### Provider Factory
+
+A free function in `providers/mod.rs`:
+```rust
+pub async fn connect(
+    url: &str,
+    creds: &Credentials,
+    hint: ServerTypeHint,
+) -> Result<Arc<dyn MediaProvider>, ProviderError>
+
+pub enum ServerTypeHint { Auto, Jellyfin, Subsonic }
+```
+
+**Auto-detection ping sequence** (when `hint = Auto`):
+1. `GET /rest/ping.view` → `openSubsonic: true` in response → `SubsonicProvider` (OpenSubsonic)
+2. `GET /rest/ping.view` succeeds, no `openSubsonic` flag → `SubsonicProvider` (classic)
+3. `GET /System/Info` succeeds → `JellyfinProvider`
+4. All fail → `ProviderError::AuthFailed("Unknown server type at this URL")`
+
+When `hint` is `Jellyfin` or `Subsonic`, the detection step is skipped and the specified provider is instantiated directly.
+
+### Provider Lifecycle
+
+`AppState` holds the active provider:
+```rust
+pub struct AppState {
+    // ...existing fields...
+    pub provider: Arc<RwLock<Option<Arc<dyn MediaProvider>>>>,
+}
+```
+
+- RPC handlers acquire a read lock: `state.provider.read().await` → clone the `Arc` → release lock immediately before any async work.
+- `server.connect` acquires a write lock, calls `connect()`, replaces the inner `Option`. The old provider (and any in-memory credentials) is dropped when the `Arc` refcount reaches zero.
+- All `browse.*`, `sync.*`, and scrobble RPC handlers that need the provider call a shared helper:
+  ```rust
+  async fn require_provider(state: &AppState) -> Result<Arc<dyn MediaProvider>, RpcError> {
+      state.provider.read().await.clone().ok_or(RpcError::NotConnected)
+  }
+  ```
+
+### Server Config Persistence
+
+Server URL, detected type, and username are persisted in SQLite so the daemon can reconnect on restart. Credentials remain exclusively in the OS keyring.
+
+**Schema:**
+```sql
+CREATE TABLE IF NOT EXISTS server_config (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),  -- single-row enforced
+    url         TEXT    NOT NULL,
+    server_type TEXT    NOT NULL,  -- 'jellyfin' | 'subsonic'
+    username    TEXT    NOT NULL,
+    updated_at  INTEGER NOT NULL   -- unix timestamp
+);
+```
+
+On daemon startup: if a `server_config` row exists, the daemon calls `connect()` with the stored URL, fetches credentials from keyring, and restores the active provider before the RPC server starts accepting requests.
+
+### Subsonic Auth Internals
+
+`SubsonicProvider` fetches the password from keyring **once at construction time** and holds it in memory for the session lifetime of the struct.
+
+Every outgoing HTTP request appends auth params:
+```
+u={username}&t={md5(password + salt)}&s={salt}&v=1.16.1&c=hifimule&f=json
+```
+where `salt` is a freshly generated random alphanumeric string **per request**.
+
+- The raw password **never leaves** `providers/subsonic.rs` — not stored in `AppState`, not passed to callers, not logged.
+- When `server.connect` replaces the provider, the old `SubsonicProvider` (and its in-memory password) is dropped with the `Arc`.
+- All Subsonic URLs containing auth params MUST be sanitized via `sanitize_subsonic_url()` before any logging (existing enforcement rule).
+
+### Subsonic Incremental Sync — Album-Level Fallback
+
+`SubsonicProvider::changes_since(since)` handles the Navidrome/Subsonic limitation internally. The sync engine always receives a `Vec<ChangeEvent>` and is never aware of the fallback.
+
+**Implementation contract inside `SubsonicProvider`:**
+1. Call `GET /rest/getIndexes.view?ifModifiedSince={since_epoch_ms}`.
+2. If the response indicates the artist index is unchanged **and** `since > EPOCH` (i.e. not initial sync): re-fetch every album present in the current manifest via `getAlbum` and compare song count + track ID set. Emit `ChangeEvent::Added` / `ChangeEvent::Removed` for any drift detected.
+3. If `since == EPOCH` (initial sync): use `search3?query=&songCount=500&songOffset={n}` with pagination to enumerate all tracks instead of the index-based path.
+
+**Enforcement:** All AI agents MUST NOT add album-level drift detection outside `providers/subsonic.rs`. The sync engine calls `provider.changes_since()` and processes the returned `Vec<ChangeEvent>` only.
