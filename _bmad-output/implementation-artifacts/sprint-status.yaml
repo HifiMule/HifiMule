@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-05-08  # Story 7.4 ready for review
+last_updated: 2026-05-08  # Story 7.4 review complete
 project: JellyfinSync
 project_key: NOKEY
 tracking_system: file-system
@@ -102,9 +102,9 @@ development_status:
   6-6-installation-smoke-tests: done
   epic-6-retrospective: done
 
-  epic-7: in-progress
+  epic-7: done
   7-1-mtp-io-and-wpd-hardening: done
   7-2-devicemanager-concurrency-refactor: done
   7-3-device-ui-and-identity-polish: done
-  7-4-packaging-and-cicd-hardening: review
-  epic-7-retrospective: optional
+  7-4-packaging-and-cicd-hardening: done
+  epic-7-retrospective: done

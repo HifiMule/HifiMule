@@ -33,8 +33,8 @@ if (!targetTriple) {
 console.log(`Target triple: ${targetTriple}`);
 
 if (!existsSync(join(uiDir, "node_modules"))) {
-  console.log("jellyfinsync-ui/node_modules is missing; running npm install...");
-  execSync("npm install", {
+  console.log("jellyfinsync-ui/node_modules is missing; running pnpm install...");
+  execSync("pnpm install", {
     cwd: uiDir,
     stdio: "inherit",
   });
@@ -56,20 +56,21 @@ const tempBinary = `${destBinary}.tmp`;
 // Ensure sidecars directory exists
 mkdirSync(sidecarsDir, { recursive: true });
 
-for (const entry of readdirSync(sidecarsDir, { withFileTypes: true })) {
-  if (entry.isFile() && entry.name.startsWith("jellyfinsync-daemon-")) {
-    rmSync(join(sidecarsDir, entry.name), { force: true });
-  }
-}
-
 try {
   rmSync(tempBinary, { force: true });
   copyFileSync(sourceBinary, tempBinary);
   renameSync(tempBinary, destBinary);
 } catch (error) {
   rmSync(tempBinary, { force: true });
-  rmSync(destBinary, { force: true });
   throw error;
+}
+
+// Remove stale sidecars for other architectures after the new binary is in place
+for (const entry of readdirSync(sidecarsDir, { withFileTypes: true })) {
+  const fullPath = join(sidecarsDir, entry.name);
+  if (entry.isFile() && entry.name.startsWith("jellyfinsync-daemon-") && fullPath !== destBinary) {
+    rmSync(fullPath, { force: true });
+  }
 }
 
 console.log(`Sidecar copied: ${destBinary}`);
