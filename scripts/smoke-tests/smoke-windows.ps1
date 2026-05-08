@@ -23,6 +23,31 @@ function Fail([string]$platform, [string]$step, [string]$message) {
 
 $Platform = "windows"
 
+function Get-InstallDir {
+    $registryPaths = @(
+        "HKLM:\SOFTWARE\JellyfinSync",
+        "HKLM:\SOFTWARE\WOW6432Node\JellyfinSync",
+        "HKCU:\SOFTWARE\JellyfinSync"
+    )
+    foreach ($path in $registryPaths) {
+        $value = Get-ItemProperty -Path $path -Name "InstallDir" -ErrorAction SilentlyContinue
+        if ($value -and $value.InstallDir -and (Test-Path $value.InstallDir)) {
+            return $value.InstallDir
+        }
+    }
+
+    $fallbacks = @(
+        "C:\Program Files\JellyfinSync",
+        "C:\Program Files (x86)\JellyfinSync"
+    )
+    foreach ($path in $fallbacks) {
+        if (Test-Path $path) {
+            return $path
+        }
+    }
+    return $null
+}
+
 # --- STEP 1: Install ---
 Write-Step "STEP 1: Installing MSI ..."
 $msi = Get-Item "*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -41,7 +66,10 @@ Write-Host "  Install OK"
 
 # --- STEP 2: Launch ---
 Write-Step "STEP 2: Launching JellyfinSync ..."
-$installDir = "C:\Program Files\JellyfinSync"
+$installDir = Get-InstallDir
+if (-not $installDir) {
+    Fail $Platform "launch" "Install directory not found in registry or common install locations"
+}
 $exe = Get-ChildItem $installDir -Filter "jellyfinsync.exe" -Recurse -ErrorAction SilentlyContinue |
        Select-Object -First 1
 if (-not $exe) {

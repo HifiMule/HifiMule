@@ -3,6 +3,12 @@ name: Smoke Test
 # MTP end-to-end detection requires manual hardware verification on each platform. Automated MTP IO coverage is provided by unit tests in device_io.rs.
 
 on:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: 'Release tag to test (e.g. v0.1.0)'
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       release_tag:
@@ -20,7 +26,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download MSI artifact
-        run: gh release download ${{ github.event.inputs.release_tag }} --pattern "*.msi" --dir ./installers
+        run: gh release download ${{ inputs.release_tag }} --pattern "*.msi" --dir ./installers
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -49,10 +55,10 @@ jobs:
       - name: Install runtime dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb libgtk-3-0 libwebkit2gtk-4.1-0 libappindicator3-1
+          sudo apt-get install -y xvfb jq libgtk-3-0 libwebkit2gtk-4.1-0 libappindicator3-1
 
       - name: Download .deb artifact
-        run: gh release download ${{ github.event.inputs.release_tag }} --pattern "*.deb" --dir ./installers
+        run: gh release download ${{ inputs.release_tag }} --pattern "*.deb" --dir ./installers
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -78,7 +84,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download DMG artifact
-        run: gh release download ${{ github.event.inputs.release_tag }} --pattern "*.dmg" --dir ./installers
+        run: gh release download ${{ inputs.release_tag }} --pattern "*.dmg" --dir ./installers
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

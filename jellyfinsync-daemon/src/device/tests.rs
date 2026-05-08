@@ -1915,6 +1915,32 @@ fn test_empty_device_name_falls_back_to_device_id() {
     assert_eq!(resolved_real, "My Garmin", "real name must be preserved");
 }
 
+// ===== Story 7.4 Tests =====
+
+#[test]
+fn test_boot_volume_device_is_skipped_when_device_id_matches_root() {
+    assert!(
+        is_boot_volume_device(Some(42), 42),
+        "candidate with the root device ID must be skipped"
+    );
+}
+
+#[test]
+fn test_boot_volume_device_allows_different_device_id() {
+    assert!(
+        !is_boot_volume_device(Some(43), 42),
+        "candidate with a different device ID can be considered a removable mount"
+    );
+}
+
+#[test]
+fn test_boot_volume_device_metadata_error_is_fail_safe_skip() {
+    assert!(
+        is_boot_volume_device(None, 42),
+        "metadata failures must skip the candidate rather than risk selecting the boot volume"
+    );
+}
+
 #[tokio::test]
 async fn test_cleanup_tmp_files_at_device_root() {
     // T8: root-level .tmp files must be swept even with empty managed_paths.

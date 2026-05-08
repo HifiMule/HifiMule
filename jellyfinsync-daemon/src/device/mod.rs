@@ -1472,6 +1472,11 @@ fn is_mount_point(path: &Path) -> bool {
     false
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn is_boot_volume_device(candidate_dev: Option<u64>, root_dev: u64) -> bool {
+    candidate_dev.map(|dev| dev == root_dev).unwrap_or(true)
+}
+
 #[cfg(target_os = "windows")]
 fn get_mounts() -> Vec<PathBuf> {
     use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
@@ -1503,10 +1508,8 @@ fn get_mounts() -> Vec<PathBuf> {
             // as the root filesystem. Device-ID comparison is firmlink-safe;
             // canonicalize/realpath does not reliably follow APFS firmlinks.
             // On metadata error, skip the entry (fail-safe).
-            let is_root_device = std::fs::metadata(&path)
-                .map(|m| m.dev() == root_dev)
-                .unwrap_or(true);
-            if is_root_device {
+            let candidate_dev = std::fs::metadata(&path).ok().map(|m| m.dev());
+            if is_boot_volume_device(candidate_dev, root_dev) {
                 continue;
             }
             if is_mount_point(&path) {
