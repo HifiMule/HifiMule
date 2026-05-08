@@ -139,7 +139,12 @@ pub async fn cleanup_tmp_files(
     managed_paths: &[String],
 ) -> Result<usize> {
     let mut count = 0;
-    for path_str in managed_paths {
+    // Sweep device root ("") plus all managed paths. managed_paths never contains "" because
+    // initialize_device validates folder_path is non-empty before adding it.
+    let paths: Vec<&str> = std::iter::once("")
+        .chain(managed_paths.iter().map(|s| s.as_str()))
+        .collect();
+    for path_str in paths {
         let entries = match device_io.list_files(path_str).await {
             Ok(e) => e,
             Err(_) => continue,
@@ -520,16 +525,19 @@ impl DeviceManager {
         icon: Option<String>,
         _device_io: std::sync::Arc<dyn crate::device_io::DeviceIO>,
     ) -> Result<DeviceManifest> {
-        // Validate folder_path: no traversal, no absolute paths, single-level only
+        // Validate folder_path: no traversal, no absolute paths; multi-level paths (e.g.
+        // "Music/JellyfinSync") are allowed — both MscBackend (create_dir_all) and MtpBackend
+        // (auto-creates parent objects) handle them transparently.
         if !folder_path.is_empty() {
-            if folder_path.contains("..")
-                || folder_path.starts_with('/')
-                || folder_path.starts_with('\\')
-                || folder_path.contains('/')
-                || folder_path.contains('\\')
-            {
+            let components: Vec<&str> = folder_path.split(&['/', '\\']).collect();
+            if components.iter().any(|c| *c == "..") {
                 return Err(anyhow::anyhow!(
-                    "Invalid folder path: must be a single folder name without path separators"
+                    "Invalid folder path: path traversal ('..') not allowed"
+                ));
+            }
+            if folder_path.starts_with('/') || folder_path.starts_with('\\') {
+                return Err(anyhow::anyhow!(
+                    "Invalid folder path: absolute paths not allowed"
                 ));
             }
         }
@@ -540,6 +548,14 @@ impl DeviceManager {
             .ok_or_else(|| anyhow::anyhow!("No unrecognized device connected"))?;
         let device_root = pending.path;
         let device_io = pending.io;
+
+        // Liveness probe: detect stale IO from a device that disconnected and reconnected
+        // between the Unrecognized event and the user completing initialization.
+        if device_io.list_files("").await.is_err() {
+            return Err(anyhow::anyhow!(
+                "Device no longer accessible — reconnect the device and try again"
+            ));
+        }
 
         let device_id = uuid::Uuid::new_v4().to_string();
 
@@ -1339,6 +1355,7 @@ pub async fn run_mtp_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
                 }
                 let synthetic_path = PathBuf::from(format!("mtp://{}", dev.device_id));
                 let dev_clone = dev.clone();
+                let dev_for_probe = dev.clone();
                 let dev_id = dev.device_id.clone();
                 let friendly_name = dev.friendly_name.clone();
 
@@ -1355,6 +1372,7 @@ pub async fn run_mtp_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
                             &tx,
                             synthetic_path,
                             &dev_id,
+                            dev_for_probe,
                             friendly_name,
                             backend_arc,
                         )
@@ -1389,19 +1407,37 @@ async fn emit_mtp_probe_event(
     tx: &tokio::sync::mpsc::Sender<DeviceEvent>,
     synthetic_path: PathBuf,
     dev_id: &str,
+    dev_info: mtp::MtpDeviceInfo,
     friendly_name: String,
     backend_arc: std::sync::Arc<dyn crate::device_io::DeviceIO>,
 ) -> bool {
     match backend_arc.read_file(".jellyfinsync.json").await {
         Ok(data) => match serde_json::from_slice::<DeviceManifest>(&data) {
-            Ok(manifest) => tx
-                .send(DeviceEvent::Detected {
+            Ok(manifest) => {
+                // If the manifest carries a cached storage_id, open a second backend that
+                // uses it directly — this makes free_space() and path lookups skip the
+                // first-child DEVICE enumeration on every call.
+                let final_io: std::sync::Arc<dyn crate::device_io::DeviceIO> =
+                    if let Some(storage_id) = manifest.storage_id.clone() {
+                        match tokio::task::spawn_blocking(move || {
+                            mtp::create_mtp_backend(&dev_info, Some(storage_id))
+                        })
+                        .await
+                        {
+                            Ok(Ok(storage_backend)) => std::sync::Arc::new(storage_backend),
+                            _ => backend_arc,
+                        }
+                    } else {
+                        backend_arc
+                    };
+                tx.send(DeviceEvent::Detected {
                     path: synthetic_path,
                     manifest,
-                    device_io: backend_arc,
+                    device_io: final_io,
                 })
                 .await
-                .is_ok(),
+                .is_ok()
+            }
             Err(e) => {
                 daemon_log!("[MTP] Manifest parse error on {}: {}", dev_id, e);
                 tx.send(DeviceEvent::Unrecognized {

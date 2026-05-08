@@ -27,6 +27,7 @@ interface RootFoldersResponse {
     managedCount: number;
     unmanagedCount: number;
     pendingDevicePath?: string;
+    pendingDeviceFriendlyName?: string;
 }
 
 interface SyncOperation {
@@ -154,6 +155,7 @@ export class BasketSidebar {
     private connectedDevices: Array<{ path: string; deviceId: string; name: string; icon?: string | null }> = [];
     private selectedDevicePath: string | null = null;
     private deviceSwitchInFlight: boolean = false;
+    private pendingDeviceFriendlyName: string | undefined = undefined;
 
     constructor(container: HTMLElement) {
         this.container = container;
@@ -191,6 +193,7 @@ export class BasketSidebar {
             // Sync multi-device state so the hub renders correctly on every refreshAndRender,
             // not just during the 2s polling cycle.
             this.connectedDevices = state.connectedDevices ?? this.connectedDevices;
+            this.pendingDeviceFriendlyName = state.pendingDeviceFriendlyName ?? undefined;
             // Use explicit field-presence check: if field present in response, use it (including null);
             // otherwise keep current. Fixes the null-coalescing bug where selectedDevicePath: null
             // would be ignored by the ?? operator.
@@ -429,6 +432,7 @@ export class BasketSidebar {
                 const selectedDeviceChanged = newSelectedDevicePath !== this.selectedDevicePath;
                 this.connectedDevices = newConnectedDevices;
                 this.selectedDevicePath = newSelectedDevicePath;
+                this.pendingDeviceFriendlyName = daemonStateResult?.pendingDeviceFriendlyName ?? undefined;
 
                 if (newDirty !== this.isDirtyManifest || hasPendingDevice !== hadPendingDevice || isNewDevice || deviceDisconnected || activeOperationId || deviceCountChanged || selectedDeviceChanged) {
                     this.isDirtyManifest = newDirty;
@@ -495,12 +499,17 @@ export class BasketSidebar {
             `;
         }
 
+        const isMtp = this.folderInfo.devicePath.toLowerCase().startsWith('mtp://');
+        const unmanagedSummary = isMtp
+            ? 'MTP — folder enumeration not available'
+            : `${unmanagedCount} protected`;
+
         let content = `
             <div class="device-folders-panel">
                 <div class="device-folders-header" id="device-folders-toggle">
                     <h3>Device Folders</h3>
                     <div style="display: flex; align-items: center; gap: 0.5rem;">
-                        <span class="device-folders-summary">${managedCount} managed | ${unmanagedCount} protected</span>
+                        <span class="device-folders-summary">${managedCount} managed | ${unmanagedSummary}</span>
                         <sl-icon name="${this.isFoldersExpanded ? 'chevron-up' : 'chevron-down'}" style="font-size: 0.8rem; opacity: 0.5;"></sl-icon>
                     </div>
                 </div>
@@ -771,7 +780,7 @@ export class BasketSidebar {
         const modal = new InitDeviceModal(this.container, () => {
             this.refreshAndRender();
         });
-        modal.open();
+        modal.open(this.pendingDeviceFriendlyName);
     }
 
     private async handleStartSync() {

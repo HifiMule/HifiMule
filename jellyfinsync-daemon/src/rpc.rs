@@ -382,12 +382,12 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
     // Capture dirty before device is moved into json!()
     let dirty = device.as_ref().map(|d| d.dirty).unwrap_or(false);
 
-    // Include pending device path for unrecognized devices awaiting initialization
-    let pending_device_path = state
-        .device_manager
-        .get_unrecognized_device_path()
-        .await
-        .map(|p| p.to_string_lossy().to_string());
+    // Include pending device path and friendly name for unrecognized devices awaiting initialization
+    let pending_device_snapshot = state.device_manager.get_unrecognized_device_snapshot().await;
+    let pending_device_path = pending_device_snapshot
+        .as_ref()
+        .map(|s| s.path.to_string_lossy().to_string());
+    let pending_device_friendly_name = pending_device_snapshot.and_then(|s| s.friendly_name);
 
     let auto_sync_on_connect = mapping
         .as_ref()
@@ -412,7 +412,7 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
             serde_json::json!({
                 "path": p.to_string_lossy(),
                 "deviceId": m.device_id,
-                "name": m.name.clone().unwrap_or_else(|| m.device_id.clone()),
+                "name": m.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| m.device_id.clone()),
                 "icon": m.icon.clone(),
                 "deviceClass": match class {
                     crate::device::DeviceClass::Msc => "msc",
@@ -428,6 +428,7 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         "serverConnected": server_connected,
         "dirtyManifest": dirty,
         "pendingDevicePath": pending_device_path,
+        "pendingDeviceFriendlyName": pending_device_friendly_name,
         "autoSyncOnConnect": auto_sync_on_connect,
         "autoFill": auto_fill,
         "activeOperationId": active_operation_id,
@@ -1305,16 +1306,26 @@ async fn handle_scrobbler_get_last_result(state: &AppState) -> Result<Value, Jso
 }
 
 async fn broadcast_device_state(state: &AppState) {
-    if let Some((device, device_io)) = state.device_manager.get_manifest_and_io().await {
-        if let Some(path) = state.device_manager.get_current_device_path().await {
-            if let Ok(daemon_state) = state
-                .device_manager
-                .handle_device_detected(path, device, device_io)
-                .await
-            {
-                let _ = state.state_tx.send(daemon_state);
+    if let Some(manifest) = state.device_manager.get_current_device().await {
+        let name = manifest
+            .name
+            .clone()
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| manifest.device_id.clone());
+        let mapping = state
+            .db
+            .get_device_mapping(&manifest.device_id)
+            .unwrap_or(None);
+        let daemon_state = if let Some(m) = mapping {
+            if let Some(profile_id) = m.jellyfin_user_id {
+                crate::DaemonState::DeviceRecognized { name, profile_id }
+            } else {
+                crate::DaemonState::DeviceFound(name)
             }
-        }
+        } else {
+            crate::DaemonState::DeviceFound(name)
+        };
+        let _ = state.state_tx.send(daemon_state);
     }
 }
 
