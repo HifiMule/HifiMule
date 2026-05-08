@@ -20,10 +20,10 @@ so that **I can focus purely on my music collection for my DAP.**
 ## Tasks / Subtasks
 
 - [x] **T1: Daemon - Enhance Jellyfin Client** (AC: #1, #3)
-    - [x] Update `jellyfinsync-daemon/src/api.rs`: Modify `get_items` to ensure it correctly handles the `include_item_types` parameter.
+    - [x] Update `hifimule-daemon/src/api.rs`: Modify `get_items` to ensure it correctly handles the `include_item_types` parameter.
     - [x] Define or verify the use of a constant/config for `MUSIC_ITEM_TYPES` (e.g., `"MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo"`).
 - [x] **T2: UI - Apply Filtering in Library View** (AC: #2, #4)
-    - [x] Update `jellyfinsync-ui/src/library.ts`: Modify `loadItems` to pass the music-only filter string to the `fetchItems` RPC call.
+    - [x] Update `hifimule-ui/src/library.ts`: Modify `loadItems` to pass the music-only filter string to the `fetchItems` RPC call.
     - [x] Implement UI-side filtering if necessary to ensure `fetchViews` doesn't show non-music libraries (e.g. Movies/TV).
 - [x] **T3: Verification & Edge Cases** (AC: #1, #2)
     - [x] Verify that libraries containing mixed content only show the music-related items.
@@ -38,8 +38,8 @@ so that **I can focus purely on my music collection for my DAP.**
     - The `/Items?userId={userId}` endpoint accepts `IncludeItemTypes`.
     - Recommended filter: `MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo`.
 - **Source tree components to touch:**
-    - `jellyfinsync-daemon/src/api.rs`: Verify `get_items` and types.
-    - `jellyfinsync-ui/src/library.ts`: Update `loadItems` call.
+    - `hifimule-daemon/src/api.rs`: Verify `get_items` and types.
+    - `hifimule-ui/src/library.ts`: Update `loadItems` call.
 
 ### Project Structure Notes
 
@@ -47,7 +47,7 @@ so that **I can focus purely on my music collection for my DAP.**
 
 ### References
 
-- [Story 3.1 (Library Integration)](file:///c:/Workspaces/JellyfinSync/_bmad-output/implementation-artifacts/3-1-immersive-media-browser-jellyfin-integration.md)
+- [Story 3.1 (Library Integration)](file:///c:/Workspaces/HifiMule/_bmad-output/implementation-artifacts/3-1-immersive-media-browser-jellyfin-integration.md)
 - [Jellyfin API - Items](https://api.jellyfin.org/#tag/Items/operation/GetItems)
 
 ## Dev Agent Record
@@ -66,6 +66,6 @@ Antigravity (Workflow Engine)
 - Verified backend with `cargo test`.
 
 ### File List
-- `jellyfinsync-daemon/src/api.rs`
-- `jellyfinsync-ui/src/components/MediaCard.ts`
-- `jellyfinsync-ui/src/library.ts`
+- `hifimule-daemon/src/api.rs`
+- `hifimule-ui/src/components/MediaCard.ts`
+- `hifimule-ui/src/library.ts`

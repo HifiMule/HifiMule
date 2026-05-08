@@ -7,35 +7,35 @@ Status: done
 ## Story
 
 As a **System Admin (Alexis)**,
-I want **the engine to calculate exactly which files to add or delete by comparing the Jellyfin server state with the local `.jellyfinsync.json` manifest**,
+I want **the engine to calculate exactly which files to add or delete by comparing the Jellyfin server state with the local `.hifimule.json` manifest**,
 so that **only necessary changes are made to the disk, preserving the hardware's life.**
 
 ## Acceptance Criteria
 
-1. **Manifest Extension**: The `.jellyfinsync.json` manifest MUST include a `synced_items` array that records every item currently synced to the device, including Jellyfin item ID, server-side metadata hash or version identifier, and the local file path written to disk. (AC: #1)
+1. **Manifest Extension**: The `.hifimule.json` manifest MUST include a `synced_items` array that records every item currently synced to the device, including Jellyfin item ID, server-side metadata hash or version identifier, and the local file path written to disk. (AC: #1)
 2. **Delta Calculation**: Given a Selection Basket with N items, the sync engine MUST generate a precise list of "Adds" (items in basket but not on device) and "Deletes" (items on device but no longer in basket) by comparing the basket item IDs against the manifest's `synced_items` records. (AC: #2)
 3. **Server ID Change Detection**: The engine MUST detect if a Jellyfin server has reassigned IDs for existing local files (e.g., after a library re-scan) by comparing item metadata (name, album, artist) as a secondary match when IDs don't align. (AC: #3)
-4. **Atomic Manifest Updates**: All manifest writes MUST use the "Write-Temp-Rename" pattern: write to `.jellyfinsync.json.tmp`, call `sync_all`, then atomically rename to `.jellyfinsync.json`. (AC: #4)
+4. **Atomic Manifest Updates**: All manifest writes MUST use the "Write-Temp-Rename" pattern: write to `.hifimule.json.tmp`, call `sync_all`, then atomically rename to `.hifimule.json`. (AC: #4)
 5. **RPC Integration**: A new `sync_calculate_delta` RPC method MUST accept a list of desired item IDs from the UI basket and return the computed `{ adds: [...], deletes: [...], unchanged: count }` delta. (AC: #5)
 6. **Device Status Map**: The existing `sync_get_device_status_map` stub MUST be replaced with a real implementation that reads `synced_items` from the current device manifest and returns the list of synced Jellyfin item IDs. (AC: #6)
 
 ## Tasks / Subtasks
 
 - [x] **T1: Extend DeviceManifest struct** (AC: #1, #4)
-  - [x] T1.1: Add `synced_items: Vec<SyncedItem>` field to `DeviceManifest` in `jellyfinsync-daemon/src/device/mod.rs`
+  - [x] T1.1: Add `synced_items: Vec<SyncedItem>` field to `DeviceManifest` in `hifimule-daemon/src/device/mod.rs`
   - [x] T1.2: Define `SyncedItem` struct with fields: `jellyfin_id: String`, `name: String`, `album: Option<String>`, `artist: Option<String>`, `local_path: String`, `size_bytes: u64`, `synced_at: String`
   - [x] T1.3: Ensure `#[serde(default)]` on `synced_items` for backward compatibility with existing manifests
   - [x] T1.4: Implement atomic manifest write function using Write-Temp-Rename pattern (`write_manifest(path, manifest)`)
 
 - [x] **T2: Create sync engine module** (AC: #2, #3)
-  - [x] T2.1: Create `jellyfinsync-daemon/src/sync.rs` module
+  - [x] T2.1: Create `hifimule-daemon/src/sync.rs` module
   - [x] T2.2: Define `SyncDelta` struct: `adds: Vec<SyncAddItem>`, `deletes: Vec<SyncDeleteItem>`, `unchanged: Vec<String>`
   - [x] T2.3: Define `SyncAddItem` (jellyfin_id, name, album, artist, size_bytes) and `SyncDeleteItem` (jellyfin_id, local_path, name)
   - [x] T2.4: Implement `calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest) -> SyncDelta`
   - [x] T2.5: Implement server ID change detection via metadata matching (name + album + artist fallback)
 
 - [x] **T3: RPC integration** (AC: #5, #6)
-  - [x] T3.1: Add `sync_calculate_delta` RPC handler in `jellyfinsync-daemon/src/rpc.rs` accepting `{ "itemIds": [...] }` params
+  - [x] T3.1: Add `sync_calculate_delta` RPC handler in `hifimule-daemon/src/rpc.rs` accepting `{ "itemIds": [...] }` params
   - [x] T3.2: Handler fetches item details from Jellyfin API for each desired ID, then calls `calculate_delta`
   - [x] T3.3: Replace `sync_get_device_status_map` stub with real implementation reading manifest `synced_items`
   - [x] T3.4: Register new method in the RPC handler match block
@@ -54,12 +54,12 @@ so that **only necessary changes are made to the disk, preserving the hardware's
 - **IPC Protocol**: JSON-RPC 2.0 over localhost HTTP (port `19140`). All new RPC methods MUST follow existing patterns in `rpc.rs` — match on method name string, delegate to `handle_*` async function, return `Result<Value, JsonRpcError>`.
 - **Naming**: Rust uses `snake_case`, JSON payloads use `camelCase` (enforce with `#[serde(rename_all = "camelCase")]` on all structs exposed via RPC).
 - **Error Handling**: Use `thiserror` for typed errors in the sync module, `anyhow` at the RPC boundary.
-- **Atomic IO**: The "Write-Temp-Rename" pattern is MANDATORY for `.jellyfinsync.json` per architecture doc. Use `std::fs::write` to temp file → `File::sync_all()` → `std::fs::rename`.
+- **Atomic IO**: The "Write-Temp-Rename" pattern is MANDATORY for `.hifimule.json` per architecture doc. Use `std::fs::write` to temp file → `File::sync_all()` → `std::fs::rename`.
 
 ### Technical Implementation Details
 
-- **DeviceManifest location**: `jellyfinsync-daemon/src/device/mod.rs` — Current struct at ~line 20. Add `synced_items` field with `#[serde(default)]` for backward compat.
-- **RPC handler**: `jellyfinsync-daemon/src/rpc.rs` — The `handler` function matches method names. Add `"sync_calculate_delta"` case. The existing `"sync_get_device_status_map"` handler has a `TODO` comment and returns a stub.
+- **DeviceManifest location**: `hifimule-daemon/src/device/mod.rs` — Current struct at ~line 20. Add `synced_items` field with `#[serde(default)]` for backward compat.
+- **RPC handler**: `hifimule-daemon/src/rpc.rs` — The `handler` function matches method names. Add `"sync_calculate_delta"` case. The existing `"sync_get_device_status_map"` handler has a `TODO` comment and returns a stub.
 - **DeviceManager access**: Use `state.device_manager.get_current_device()` to get `Option<DeviceManifest>` and `get_current_device_path()` for the device root.
 - **Jellyfin API**: Use `state.jellyfin_client.get_item_details(url, token, user_id, item_id)` to fetch item metadata for delta comparison. `JellyfinItem` already has `id`, `name`, `album_artist`, `item_type` fields.
 - **Credentials**: Use `crate::api::CredentialManager::get_credentials()` to get `(url, token, user_id)`.
@@ -72,7 +72,7 @@ so that **only necessary changes are made to the disk, preserving the hardware's
 
 ### Manifest Schema Evolution
 
-The `.jellyfinsync.json` format evolves from:
+The `.hifimule.json` format evolves from:
 ```json
 {
   "device_id": "abc-123",
@@ -124,13 +124,13 @@ fn calculate_delta(desired, manifest):
 ### File Structure & Source Tree
 
 Files to create:
-- `jellyfinsync-daemon/src/sync.rs` — New sync engine module
+- `hifimule-daemon/src/sync.rs` — New sync engine module
 
 Files to modify:
-- `jellyfinsync-daemon/src/main.rs` — Add `mod sync;` declaration
-- `jellyfinsync-daemon/src/device/mod.rs` — Extend `DeviceManifest`, add `SyncedItem`, add `write_manifest` function
-- `jellyfinsync-daemon/src/rpc.rs` — Replace stub, add `sync_calculate_delta` handler
-- `jellyfinsync-daemon/src/device/tests.rs` — Add manifest backward-compat tests
+- `hifimule-daemon/src/main.rs` — Add `mod sync;` declaration
+- `hifimule-daemon/src/device/mod.rs` — Extend `DeviceManifest`, add `SyncedItem`, add `write_manifest` function
+- `hifimule-daemon/src/rpc.rs` — Replace stub, add `sync_calculate_delta` handler
+- `hifimule-daemon/src/device/tests.rs` — Add manifest backward-compat tests
 
 ### Testing Standards
 
@@ -141,7 +141,7 @@ Files to modify:
 
 ### Project Structure Notes
 
-- Alignment with workspace: New `sync.rs` sits alongside `api.rs`, `db.rs`, `device/mod.rs` in `jellyfinsync-daemon/src/`
+- Alignment with workspace: New `sync.rs` sits alongside `api.rs`, `db.rs`, `device/mod.rs` in `hifimule-daemon/src/`
 - The `sync` module is intentionally a single file (not a directory) for Story 4.1 scope — Story 4.2 (Atomic Buffered IO) will expand it if needed
 - No UI changes needed for this story — the UI already calls `sync_get_device_status_map` and will benefit from the real implementation
 
@@ -180,12 +180,12 @@ No blocking issues encountered during implementation.
 
 ### File List
 
-- `jellyfinsync-daemon/src/sync.rs` (new) — Sync engine module with delta calculation and server ID change detection
-- `jellyfinsync-daemon/src/device/mod.rs` (modified) — Added `SyncedItem` struct, `synced_items` field on `DeviceManifest`, `write_manifest()` function
-- `jellyfinsync-daemon/src/device/tests.rs` (modified) — Added backward compat, serialization, and atomic write tests
-- `jellyfinsync-daemon/src/main.rs` (modified) — Added `mod sync;` declaration
-- `jellyfinsync-daemon/src/rpc.rs` (modified) — Added `sync_calculate_delta` handler, replaced `sync_get_device_status_map` stub, added RPC tests
-- `jellyfinsync-daemon/src/tests.rs` (modified) — Updated `DeviceManifest` literal to include `synced_items`
+- `hifimule-daemon/src/sync.rs` (new) — Sync engine module with delta calculation and server ID change detection
+- `hifimule-daemon/src/device/mod.rs` (modified) — Added `SyncedItem` struct, `synced_items` field on `DeviceManifest`, `write_manifest()` function
+- `hifimule-daemon/src/device/tests.rs` (modified) — Added backward compat, serialization, and atomic write tests
+- `hifimule-daemon/src/main.rs` (modified) — Added `mod sync;` declaration
+- `hifimule-daemon/src/rpc.rs` (modified) — Added `sync_calculate_delta` handler, replaced `sync_get_device_status_map` stub, added RPC tests
+- `hifimule-daemon/src/tests.rs` (modified) — Updated `DeviceManifest` literal to include `synced_items`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml` (modified) — Story status updated
 
 ## Code Review Findings (Adversarial) — Round 2

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Builds the jellyfinsync-daemon and copies it to the Tauri sidecars directory
+// Builds the hifimule-daemon and copies it to the Tauri sidecars directory
 // with the correct target-triple naming convention required by Tauri v2.
 
 import { execSync } from "node:child_process";
@@ -16,8 +16,8 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const projectRoot = resolve(__dirname, "..");
-const uiDir = join(projectRoot, "jellyfinsync-ui");
-const sidecarsDir = join(projectRoot, "jellyfinsync-ui", "src-tauri", "sidecars");
+const uiDir = join(projectRoot, "hifimule-ui");
+const sidecarsDir = join(projectRoot, "hifimule-ui", "src-tauri", "sidecars");
 
 // Get the current Rust target triple
 const rustcOutput = execSync("rustc -vV", { encoding: "utf-8" });
@@ -33,7 +33,7 @@ if (!targetTriple) {
 console.log(`Target triple: ${targetTriple}`);
 
 if (!existsSync(join(uiDir, "node_modules"))) {
-  console.log("jellyfinsync-ui/node_modules is missing; running pnpm install...");
+  console.log("hifimule-ui/node_modules is missing; running pnpm install...");
   execSync("pnpm install", {
     cwd: uiDir,
     stdio: "inherit",
@@ -41,16 +41,16 @@ if (!existsSync(join(uiDir, "node_modules"))) {
 }
 
 // Build the daemon in release mode
-console.log("Building jellyfinsync-daemon...");
-execSync("cargo build --release -p jellyfinsync-daemon", {
+console.log("Building hifimule-daemon...");
+execSync("cargo build --release -p hifimule-daemon", {
   cwd: projectRoot,
   stdio: "inherit",
 });
 
 // Determine source and destination paths
 const ext = process.platform === "win32" ? ".exe" : "";
-const sourceBinary = join(projectRoot, "target", "release", `jellyfinsync-daemon${ext}`);
-const destBinary = join(sidecarsDir, `jellyfinsync-daemon-${targetTriple}${ext}`);
+const sourceBinary = join(projectRoot, "target", "release", `hifimule-daemon${ext}`);
+const destBinary = join(sidecarsDir, `hifimule-daemon-${targetTriple}${ext}`);
 const tempBinary = `${destBinary}.tmp`;
 
 // Ensure sidecars directory exists
@@ -68,7 +68,7 @@ try {
 // Remove stale sidecars for other architectures after the new binary is in place
 for (const entry of readdirSync(sidecarsDir, { withFileTypes: true })) {
   const fullPath = join(sidecarsDir, entry.name);
-  if (entry.isFile() && entry.name.startsWith("jellyfinsync-daemon-") && fullPath !== destBinary) {
+  if (entry.isFile() && entry.name.startsWith("hifimule-daemon-") && fullPath !== destBinary) {
     rmSync(fullPath, { force: true });
   }
 }

@@ -11,7 +11,7 @@ completedAt: '2026-01-26'
 ### Requirements Overview
 
 **Functional Requirements:**
-JellyfinSync requires a robust synchronization core capable of differential manifest management and direct Rockbox log processing. The architecture must support asynchronous device discovery and a detachable communication layer for the UI.
+HifiMule requires a robust synchronization core capable of differential manifest management and direct Rockbox log processing. The architecture must support asynchronous device discovery and a detachable communication layer for the UI.
 
 **Non-Functional Requirements:**
 Architecture is driven by extreme efficiency (< 10MB RAM) and high stability (Atomic IO). Cross-platform parity is mandatory, requiring abstraction layers for Windows/Linux/macOS filesystem and notification primitives.
@@ -27,7 +27,7 @@ Architecture is driven by extreme efficiency (< 10MB RAM) and high stability (At
   - **Windows:** `WM_DEVICECHANGE` + `DBT_DEVICEARRIVAL` for MSC (drive letters) and `GUID_DEVINTERFACE_WPD` registration for MTP portable devices, both via `windows-rs`.
   - **Linux:** `udev` for MSC block devices; `udev` USB subsystem + `libmtp` device enumeration for MTP.
   - **macOS:** `DiskArbitration` for MSC; `IOKit` USB matching + `libmtp` notification callbacks for MTP.
-- **Manifest-Only Truth:** The `.jellyfinsync.json` file on the target device is the definitive record of "Managed State".
+- **Manifest-Only Truth:** The `.hifimule.json` file on the target device is the definitive record of "Managed State".
 
 ## Starter Template Evaluation
 
@@ -37,7 +37,7 @@ Desktop Utility (Rust Daemon + Tauri UI)
 ### Starter Options Considered
 - **Standard Tauri v2 App:** Single-process; harder to manage a persistent background daemon that lives after the window closes.
 - **Pure egui/Slint:** Leanest (~5-8MB), but UI development is more rigid and requires more boilerplate for media browsing.
-- **[SELECTED] Tauri + Sidecar Workspace:** A Rust Workspace with two members: `jellyfinsync-daemon` (engine) and `jellyfinsync-ui` (Tauri).
+- **[SELECTED] Tauri + Sidecar Workspace:** A Rust Workspace with two members: `hifimule-daemon` (engine) and `hifimule-ui` (Tauri).
 
 ### Selected Starter: Custom Tauri Sidecar Workspace
 
@@ -47,8 +47,8 @@ Isolates the sub-10MB headless engine from the active UI runtime. Allows for a r
 **Initialization Command:**
 ```bash
 # Workspace setup for multi-process isolation
-cargo new jellyfinsync-daemon --bin
-npx create-tauri-app@latest jellyfinsync-ui --template vanilla-ts
+cargo new hifimule-daemon --bin
+npx create-tauri-app@latest hifimule-ui --template vanilla-ts
 ```
 
 **Architectural Decisions Provided by Foundation:**
@@ -80,7 +80,7 @@ npx create-tauri-app@latest jellyfinsync-ui --template vanilla-ts
 - **Daemon State:** Managed via a local SQLite database to ensure atomic scrobble commits and robust history tracking.
 - **UI Preferences:** Stored in standard JSON configuration files for ease of access from the Tauri frontend.
 - **Device Profile Fields:** `auto_fill_enabled BOOLEAN DEFAULT false`, `max_fill_bytes INTEGER NULL` (null = fill to capacity), `auto_sync_on_connect BOOLEAN DEFAULT false`, `transcoding_profile_id TEXT NULL` (references id in `device-profiles.json`; null = passthrough).
-- **Manifest Extension:** `.jellyfinsync.json` includes `auto_sync_on_connect` (boolean), `auto_fill` block (`{ "enabled": bool, "maxBytes": number | null }`), `transcoding_profile_id` (string | null), `name` (string | null), and `icon` (string | null). Both `name` and `icon` use `#[serde(default)]` for backward compatibility with manifests written before Story 2.9.
+- **Manifest Extension:** `.hifimule.json` includes `auto_sync_on_connect` (boolean), `auto_fill` block (`{ "enabled": bool, "maxBytes": number | null }`), `transcoding_profile_id` (string | null), `name` (string | null), and `icon` (string | null). Both `name` and `icon` use `#[serde(default)]` for backward compatibility with manifests written before Story 2.9.
 - **device-profiles.json:** Seeded to `{app_data_dir}/device-profiles.json` on first daemon startup from an embedded binary asset (`include_bytes!`). User-editable post-install. Contains named `DeviceProfile` payloads for Jellyfin PlaybackInfo negotiation. A `passthrough` profile (`deviceProfile: null`) explicitly disables transcoding.
 
 ### DeviceManager Struct
@@ -142,13 +142,13 @@ unrecognized_device_path: Option<PathBuf>            // device awaiting initiali
 ### Structure Patterns
 
 **Project Organization:**
-- Rust Workspace with crates: `jellyfinsync-daemon` (engine) and `jellyfinsync-ui` (Tauri).
-- **Core Logic:** Extracted into a local `jellyfinsync-core` library crate shared between binary crates if needed.
+- Rust Workspace with crates: `hifimule-daemon` (engine) and `hifimule-ui` (Tauri).
+- **Core Logic:** Extracted into a local `hifimule-core` library crate shared between binary crates if needed.
 - **Tests:** Co-located in mod `tests` blocks (Rust) or `*.test.ts` (TypeScript).
 
 **Packaging & Distribution:**
 - **Bundler:** Tauri v2 built-in bundler for platform-native installers (MSI, DMG, AppImage/.deb).
-- **Daemon Bundling:** The `jellyfinsync-daemon` binary is included as a Tauri sidecar, bundled alongside the UI.
+- **Daemon Bundling:** The `hifimule-daemon` binary is included as a Tauri sidecar, bundled alongside the UI.
 - **CI/CD:** GitHub Actions matrix build targeting Windows, Linux, and macOS with artifact upload to GitHub Releases.
 - **Code Signing:** Platform-specific signing (Windows Authenticode, macOS notarization) deferred to post-MVP unless required for distribution.
 
@@ -173,11 +173,11 @@ unrecognized_device_path: Option<PathBuf>            // device awaiting initiali
 - Background tasks (Syncing/Discovery) are represented as "Job IDs" in the state, allowing the UI to re-attach to long-running tasks.
 
 ### Safety & Atomicity Patterns
-- **Atomic Manifest Commitment:** Utilize the "Write-Temp-Rename" pattern for all `.jellyfinsync.json` updates to prevent state corruption during disconnection.
+- **Atomic Manifest Commitment:** Utilize the "Write-Temp-Rename" pattern for all `.hifimule.json` updates to prevent state corruption during disconnection.
 - **Database Consistency:** Mandatory Transaction wrapping for all multi-row scrobble history updates.
 
 ### Logging & Diagnostics
-- **Release Mode Logging:** In release builds, stdout/stderr are unavailable. Both the daemon (`daemon_log!` macro) and the UI Rust backend (`ui_log` function) write to file-based logs in the OS application data directory (`%APPDATA%/JellyfinSync/` on Windows).
+- **Release Mode Logging:** In release builds, stdout/stderr are unavailable. Both the daemon (`daemon_log!` macro) and the UI Rust backend (`ui_log` function) write to file-based logs in the OS application data directory (`%APPDATA%/HifiMule/` on Windows).
   - Daemon log: `daemon.log`
   - UI log: `ui.log`
 - **Debug Mode:** Standard `println!`/`eprintln!` output to the terminal as usual.

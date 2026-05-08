@@ -26,11 +26,11 @@ so that every release artifact is verifiable, installable on clean machines, and
 
 8. **Given** a CI runner or fresh clone **When** `prepare-sidecar.mjs` executes **Then** it verifies `node_modules` is populated, or runs the existing project install command before invoking `npm run build`.
 
-9. **Given** `beforeBuildCommand` in `tauri.conf.json` **When** triggered by `cargo tauri build` on Windows and Linux **Then** the command resolves relative paths correctly whether the CWD is the workspace root or `jellyfinsync-ui`.
+9. **Given** `beforeBuildCommand` in `tauri.conf.json` **When** triggered by `cargo tauri build` on Windows and Linux **Then** the command resolves relative paths correctly whether the CWD is the workspace root or `hifimule-ui`.
 
 10. **Given** the boot-volume exclusion guard in `get_mounts` **When** unit tests run **Then** at least one test covers the root-device check with a mocked or factored filesystem path.
 
-11. **Given** the installation smoke tests **When** run in CI **Then** the macOS step discovers the mounted `.app` with `find "${MOUNT_POINT}" -maxdepth 1 -name "*.app"` rather than hardcoding `JellyfinSync.app`.
+11. **Given** the installation smoke tests **When** run in CI **Then** the macOS step discovers the mounted `.app` with `find "${MOUNT_POINT}" -maxdepth 1 -name "*.app"` rather than hardcoding `HifiMule.app`.
 
 12. **Given** the smoke test workflow **When** a release is published **Then** the workflow also has a `workflow_call` trigger so it can be invoked programmatically from the release pipeline.
 
@@ -40,12 +40,12 @@ so that every release artifact is verifiable, installable on clean machines, and
 
 15. **Given** the Xvfb display server is started in the Linux smoke test **When** another process already occupies `:99` **Then** the script auto-selects an available display instead of failing silently with a wrong display.
 
-16. **Given** the Windows smoke test searches for the installed executable **When** the MSI `INSTALLDIR` is customized or a NSIS target is added **Then** the smoke test resolves the install path via the registry rather than hardcoding `C:\Program Files\JellyfinSync`.
+16. **Given** the Windows smoke test searches for the installed executable **When** the MSI `INSTALLDIR` is customized or a NSIS target is added **Then** the smoke test resolves the install path via the registry rather than hardcoding `C:\Program Files\HifiMule`.
 
 ## Tasks / Subtasks
 
 - [x] **T1: Declare and verify Linux runtime dependencies** (AC: #1, #14)
-  - [x] In `jellyfinsync-ui/src-tauri/tauri.conf.json`, add Linux bundle config for `.deb` runtime deps: `"linux": { "deb": { "depends": ["libmtp9"] } }` under `bundle`.
+  - [x] In `hifimule-ui/src-tauri/tauri.conf.json`, add Linux bundle config for `.deb` runtime deps: `"linux": { "deb": { "depends": ["libmtp9"] } }` under `bundle`.
   - [x] Keep build-time deps in `.github/workflows/release.yml` (`libmtp-dev`, `pkgconf`) separate from runtime deps (`libmtp9`).
   - [x] Update `scripts/smoke-tests/smoke-linux.sh` so the clean install path uses `sudo dpkg -i "$DEB"` followed by `sudo apt-get install -f -y` only for dependency resolution, then launches the installed desktop binary and polls `daemon.health`.
   - [x] Add a CI check or smoke-test assertion that `dpkg-deb -f "$DEB" Depends` contains a `libmtp` runtime package.
@@ -70,15 +70,15 @@ so that every release artifact is verifiable, installable on clean machines, and
 
 - [x] **T5: Harden `prepare-sidecar.mjs`** (AC: #5, #6, #7, #8, #9)
   - [x] Replace direct `copyFileSync(sourceBinary, destBinary)` with copy-to-temp plus `renameSync` into the final sidecar path; delete the temp/final partial on failure.
-  - [x] Before copying, remove stale `jellyfinsync-daemon-*` sidecars from `jellyfinsync-ui/src-tauri/sidecars`, preserving unrelated files if any are added later.
+  - [x] Before copying, remove stale `hifimule-daemon-*` sidecars from `hifimule-ui/src-tauri/sidecars`, preserving unrelated files if any are added later.
   - [x] Parse `rustc -vV` with a strict `^host: (\\S+)$` regex; fail with stderr containing the captured `rustc -vV` output when absent.
-  - [x] Detect missing `jellyfinsync-ui/node_modules`; run `npm install` in `jellyfinsync-ui` or fail with a clear instruction if package-manager choice is ambiguous.
-  - [x] Resolve all paths from `import.meta.url` / repository root so the script works when invoked from either the workspace root or `jellyfinsync-ui`.
-  - [x] Update `tauri.conf.json` `build.beforeBuildCommand` to call the script via a path that is valid from `jellyfinsync-ui` (current command is `npm run build && node ../scripts/prepare-sidecar.mjs`).
+  - [x] Detect missing `hifimule-ui/node_modules`; run `npm install` in `hifimule-ui` or fail with a clear instruction if package-manager choice is ambiguous.
+  - [x] Resolve all paths from `import.meta.url` / repository root so the script works when invoked from either the workspace root or `hifimule-ui`.
+  - [x] Update `tauri.conf.json` `build.beforeBuildCommand` to call the script via a path that is valid from `hifimule-ui` (current command is `npm run build && node ../scripts/prepare-sidecar.mjs`).
 
 - [x] **T6: Factor and test macOS boot-volume exclusion** (AC: #10)
-  - [x] In `jellyfinsync-daemon/src/device/mod.rs`, factor the macOS root-device decision into a small pure helper that accepts candidate/root device IDs or metadata results.
-  - [x] Add tests in `jellyfinsync-daemon/src/device/tests.rs` covering same-device skip, different-device include, and metadata-error fail-safe skip.
+  - [x] In `hifimule-daemon/src/device/mod.rs`, factor the macOS root-device decision into a small pure helper that accepts candidate/root device IDs or metadata results.
+  - [x] Add tests in `hifimule-daemon/src/device/tests.rs` covering same-device skip, different-device include, and metadata-error fail-safe skip.
   - [x] Preserve current behavior: APFS firmlink-safe device-ID comparison, no direct `canonicalize` dependency.
 
 - [x] **T7: Make smoke tests release-pipeline callable and less brittle** (AC: #11, #12, #15, #16)
@@ -87,12 +87,12 @@ so that every release artifact is verifiable, installable on clean machines, and
   - [x] Optionally add a release workflow job that calls `./.github/workflows/smoke-test.yml` after artifacts are published to the draft release, passing `${{ github.ref_name }}`.
   - [x] In `scripts/smoke-tests/smoke-macos.sh`, discover the `.app` under the mount point using `find` and derive `APP_NAME` / `APP_PATH` from the result.
   - [x] In `scripts/smoke-tests/smoke-linux.sh`, replace hardcoded `Xvfb :99` with `Xvfb -displayfd` or a deterministic `:99` to `:100` fallback loop.
-  - [x] In `scripts/smoke-tests/smoke-windows.ps1`, read install location from registry first, then fall back to common locations. Add/update WiX config to write `HKLM\SOFTWARE\JellyfinSync\InstallDir`.
+  - [x] In `scripts/smoke-tests/smoke-windows.ps1`, read install location from registry first, then fall back to common locations. Add/update WiX config to write `HKLM\SOFTWARE\HifiMule\InstallDir`.
 
 - [x] **T8: Validate the hardening work** (AC: all)
-  - [x] Run `rtk cargo test -p jellyfinsync-daemon`.
-  - [x] Run `rtk tsc` or `npm run build` in `jellyfinsync-ui` after script/config edits.
-  - [x] Run `node scripts/prepare-sidecar.mjs` from the workspace root and from `jellyfinsync-ui` to prove path handling.
+  - [x] Run `rtk cargo test -p hifimule-daemon`.
+  - [x] Run `rtk tsc` or `npm run build` in `hifimule-ui` after script/config edits.
+  - [x] Run `node scripts/prepare-sidecar.mjs` from the workspace root and from `hifimule-ui` to prove path handling.
   - [x] If local platform limits prevent full installer verification, document which checks were deferred to GitHub Actions and why.
 
 ## Dev Notes
@@ -102,9 +102,9 @@ so that every release artifact is verifiable, installable on clean machines, and
 - `release.yml` currently builds on `macos-latest`, `ubuntu-22.04`, and `windows-latest`. It installs `pnpm/action-setup@v4` with `version: latest`, uses `actions/setup-node@v4` with `node-version: lts/*`, and uses `tauri-apps/tauri-action@v0`; these are intentionally targeted by AC4.
 - Linux release setup installs `libmtp-dev` for build/link, but `tauri.conf.json` has no Linux `.deb` `depends` entry, so clean machines may not receive `libmtp` at install time.
 - macOS release setup already builds a universal `libmtp` dylib for the CI build environment, but there is no app-bundle dylib copy/fixup step. Do not remove the existing universal merge; extend it into packaging verification.
-- `scripts/prepare-sidecar.mjs` already resolves `projectRoot` from `import.meta.url`, builds `jellyfinsync-daemon`, and copies to `jellyfinsync-ui/src-tauri/sidecars/jellyfinsync-daemon-${targetTriple}`. It does not clean stale sidecars, does not copy atomically, and does not check `node_modules`.
-- `tauri.conf.json` currently sets `beforeBuildCommand` to `npm run build && node ../scripts/prepare-sidecar.mjs` and `externalBin` to `sidecars/jellyfinsync-daemon`.
-- `smoke-test.yml` currently supports only `workflow_dispatch`. Platform scripts already install, launch, poll `daemon.health`, and uninstall, but Linux hardcodes `DISPLAY=:99`, macOS hardcodes `JellyfinSync.app`, and Windows hardcodes `C:\Program Files\JellyfinSync`.
+- `scripts/prepare-sidecar.mjs` already resolves `projectRoot` from `import.meta.url`, builds `hifimule-daemon`, and copies to `hifimule-ui/src-tauri/sidecars/hifimule-daemon-${targetTriple}`. It does not clean stale sidecars, does not copy atomically, and does not check `node_modules`.
+- `tauri.conf.json` currently sets `beforeBuildCommand` to `npm run build && node ../scripts/prepare-sidecar.mjs` and `externalBin` to `sidecars/hifimule-daemon`.
+- `smoke-test.yml` currently supports only `workflow_dispatch`. Platform scripts already install, launch, poll `daemon.health`, and uninstall, but Linux hardcodes `DISPLAY=:99`, macOS hardcodes `HifiMule.app`, and Windows hardcodes `C:\Program Files\HifiMule`.
 - `get_mounts` on macOS now excludes the boot volume by comparing device IDs rather than using `canonicalize`; keep that APFS-safe approach while making it testable.
 
 ### Architecture & Compliance Guardrails
@@ -125,10 +125,10 @@ so that every release artifact is verifiable, installable on clean machines, and
 
 ### Previous Story Intelligence
 
-- Story 7.3 touched `jellyfinsync-daemon/src/device/mod.rs`, `jellyfinsync-daemon/src/device/tests.rs`, `jellyfinsync-daemon/src/rpc.rs`, `jellyfinsync-ui/src/components/BasketSidebar.ts`, and `jellyfinsync-ui/src/components/InitDeviceModal.ts`.
+- Story 7.3 touched `hifimule-daemon/src/device/mod.rs`, `hifimule-daemon/src/device/tests.rs`, `hifimule-daemon/src/rpc.rs`, `hifimule-ui/src/components/BasketSidebar.ts`, and `hifimule-ui/src/components/InitDeviceModal.ts`.
 - Story 7.3 added tests around `cleanup_tmp_files`, empty device names, MTP probe retryability, and storage-aware MTP backend creation. Continue this pattern: small focused tests in existing Rust test modules, not broad integration rewrites.
 - The Story 7.3 review patched freshly initialized MTP manifests missing `storage_id`. Packaging checks in this story must preserve MTP runtime dependency handling; otherwise the UI can look correct locally while installers fail on clean machines.
-- Recent validation baseline from Story 7.3: `rtk cargo test -p jellyfinsync-daemon` passed 198 tests, daemon clippy had 32 pre-existing warnings, and UI TypeScript had no errors. Treat new failures as regressions unless clearly unrelated.
+- Recent validation baseline from Story 7.3: `rtk cargo test -p hifimule-daemon` passed 198 tests, daemon clippy had 32 pre-existing warnings, and UI TypeScript had no errors. Treat new failures as regressions unless clearly unrelated.
 
 ### Project Structure Notes
 
@@ -139,10 +139,10 @@ so that every release artifact is verifiable, installable on clean machines, and
   - `scripts/smoke-tests/smoke-linux.sh`
   - `scripts/smoke-tests/smoke-macos.sh`
   - `scripts/smoke-tests/smoke-windows.ps1`
-  - `jellyfinsync-ui/src-tauri/tauri.conf.json`
-  - `jellyfinsync-ui/src-tauri/wix/startup-fragment.wxs`
-  - `jellyfinsync-daemon/src/device/mod.rs`
-  - `jellyfinsync-daemon/src/device/tests.rs`
+  - `hifimule-ui/src-tauri/tauri.conf.json`
+  - `hifimule-ui/src-tauri/wix/startup-fragment.wxs`
+  - `hifimule-daemon/src/device/mod.rs`
+  - `hifimule-daemon/src/device/tests.rs`
 - Avoid unrelated UI component changes; this story is packaging, CI, installer, and daemon mount-test hardening.
 
 ### References
@@ -152,10 +152,10 @@ so that every release artifact is verifiable, installable on clean machines, and
 - Prior story context: `_bmad-output/implementation-artifacts/7-3-device-ui-and-identity-polish.md`.
 - Current release workflow: `.github/workflows/release.yml`.
 - Current smoke workflow and scripts: `.github/workflows/smoke-test.yml`, `scripts/smoke-tests/*`.
-- Current Tauri bundler config: `jellyfinsync-ui/src-tauri/tauri.conf.json`.
+- Current Tauri bundler config: `hifimule-ui/src-tauri/tauri.conf.json`.
 - Current sidecar staging script: `scripts/prepare-sidecar.mjs`.
-- Current WiX fragment: `jellyfinsync-ui/src-tauri/wix/startup-fragment.wxs`.
-- Current macOS mount filtering: `jellyfinsync-daemon/src/device/mod.rs`.
+- Current WiX fragment: `hifimule-ui/src-tauri/wix/startup-fragment.wxs`.
+- Current macOS mount filtering: `hifimule-daemon/src/device/mod.rs`.
 
 ## Dev Agent Record
 
@@ -165,11 +165,11 @@ GPT-5
 
 ### Debug Log References
 
-- `rtk cargo test -p jellyfinsync-daemon test_boot_volume_device` — 3 boot-volume helper tests passed.
-- `rtk cargo test -p jellyfinsync-daemon` — 202 daemon tests passed.
-- `rtk cmd /c "set PATH=... && npm.cmd run build"` from `jellyfinsync-ui` — TypeScript and Vite production build passed.
+- `rtk cargo test -p hifimule-daemon test_boot_volume_device` — 3 boot-volume helper tests passed.
+- `rtk cargo test -p hifimule-daemon` — 202 daemon tests passed.
+- `rtk cmd /c "set PATH=... && npm.cmd run build"` from `hifimule-ui` — TypeScript and Vite production build passed.
 - `rtk cmd /c "set PATH=... && node scripts/prepare-sidecar.mjs"` from repo root — sidecar preparation passed.
-- `rtk cmd /c "set PATH=... && node ..\scripts\prepare-sidecar.mjs"` from `jellyfinsync-ui` — sidecar preparation passed outside sandbox after sandboxed cargo hit `.cargo-lock` access denied.
+- `rtk cmd /c "set PATH=... && node ..\scripts\prepare-sidecar.mjs"` from `hifimule-ui` — sidecar preparation passed outside sandbox after sandboxed cargo hit `.cargo-lock` access denied.
 - PowerShell JSON/XML parse checks passed for `tauri.conf.json` and `startup-fragment.wxs`.
 
 ### Completion Notes List
@@ -180,7 +180,7 @@ GPT-5
 - Added macOS dylib staging/fixup logic that copies Homebrew `libmtp` and transitive Homebrew dylibs, rewrites install names, and verifies no Homebrew `libmtp` path remains in sidecars.
 - Hardened `prepare-sidecar.mjs` with strict target-triple parsing, `node_modules` recovery, stale sidecar cleanup, atomic temp-copy/rename, and cwd-independent path resolution.
 - Made smoke tests less brittle: Linux verifies `.deb` Depends and auto-selects Xvfb display; macOS discovers the `.app`; Windows resolves install dir from registry with common-location fallback.
-- Added WiX registry value for `HKLM\SOFTWARE\JellyfinSync\InstallDir`.
+- Added WiX registry value for `HKLM\SOFTWARE\HifiMule\InstallDir`.
 - Factored macOS boot-volume exclusion into a pure helper and added tests for same-device skip, different-device allow, and metadata-error fail-safe skip.
 - Local platform limits: full Linux AppImage extraction, macOS dylib `otool` verification, installer smoke tests, and GitHub workflow execution are validated by CI steps added in this story rather than runnable on this Windows workspace.
 
@@ -188,11 +188,11 @@ GPT-5
 
 - `.github/workflows/release.yml`
 - `.github/workflows/smoke-test.yml`
-- `jellyfinsync-daemon/src/device/mod.rs`
-- `jellyfinsync-daemon/src/device/tests.rs`
-- `jellyfinsync-ui/src-tauri/bundled-libs/.gitkeep`
-- `jellyfinsync-ui/src-tauri/tauri.conf.json`
-- `jellyfinsync-ui/src-tauri/wix/startup-fragment.wxs`
+- `hifimule-daemon/src/device/mod.rs`
+- `hifimule-daemon/src/device/tests.rs`
+- `hifimule-ui/src-tauri/bundled-libs/.gitkeep`
+- `hifimule-ui/src-tauri/tauri.conf.json`
+- `hifimule-ui/src-tauri/wix/startup-fragment.wxs`
 - `scripts/check-macos-minimum-system-version.mjs`
 - `scripts/prepare-sidecar.mjs`
 - `scripts/smoke-tests/smoke-linux.sh`
@@ -204,17 +204,17 @@ GPT-5
 ### Review Findings
 
 - [x] [Review][Patch] AC4: Pin `pnpm/action-setup` to a specific immutable version tag or commit SHA — currently `@v4` is a mutable major-version tag [.github/workflows/release.yml]
-- [x] [Review][Patch] Move WiX `InstallDir` registry value to `HKCU\SOFTWARE\JellyfinSync` — `HKLM` write requires elevation and silently fails on non-elevated installs; `HKCU` is already checked first by `Get-InstallDir` [jellyfinsync-ui/src-tauri/wix/startup-fragment.wxs]
+- [x] [Review][Patch] Move WiX `InstallDir` registry value to `HKCU\SOFTWARE\HifiMule` — `HKLM` write requires elevation and silently fails on non-elevated installs; `HKCU` is already checked first by `Get-InstallDir` [hifimule-ui/src-tauri/wix/startup-fragment.wxs]
 - [x] [Review][Patch] AC8: `npm install` used instead of `pnpm install` in node_modules recovery — project uses pnpm workspace; `npm install` may produce incorrect node_modules [scripts/prepare-sidecar.mjs:37]
-- [x] [Review][Patch] AC16 (NSIS gap): NSIS `hooks.nsh` does not write `HKCU\Software\JellyfinSync\InstallDir` — WiX does, but NSIS installs leave `Get-InstallDir` with no registry entry, falling back to hardcoded paths [jellyfinsync-ui/src-tauri/nsis/hooks.nsh]
+- [x] [Review][Patch] AC16 (NSIS gap): NSIS `hooks.nsh` does not write `HKCU\Software\HifiMule\InstallDir` — WiX does, but NSIS installs leave `Get-InstallDir` with no registry entry, falling back to hardcoded paths [hifimule-ui/src-tauri/nsis/hooks.nsh]
 - [x] [Review][Patch] `install_name_tool -id ... || true` silently swallows dylib identity rewrite errors in macOS bundling step — should at minimum log a warning on failure [.github/workflows/release.yml — Bundle macOS libmtp dylibs]
 - [x] [Review][Patch] `squashfs-root` directory not cleaned up after AppImage extraction verification — no trap/cleanup, left behind on CI runner if step fails mid-way [.github/workflows/release.yml — Verify Linux AppImage]
 - [x] [Review][Patch] Stale sidecar cleanup runs before atomic copy — if `renameSync` fails on a re-run, the previously valid sidecar was already deleted by the top-level loop, leaving sidecars/ empty with no recovery [scripts/prepare-sidecar.mjs:59-73]
 - [x] [Review][Defer] `copy_brew_dylib` basename collision — two dylibs from different Homebrew prefix paths with the same basename would collide; unlikely for libmtp's transitive deps in practice [.github/workflows/release.yml] — deferred, pre-existing limitation of basename-keyed dedup
-- [x] [Review][Defer] AppImage files mapping hardcodes x86_64 source path — only breaks if CI runner changes to arm64; currently ubuntu-22.04 is x86_64 only [jellyfinsync-ui/src-tauri/tauri.conf.json] — deferred, not a current issue
-- [x] [Review][Defer] macOS DMG smoke test MOUNT_POINT conflict — `/Volumes/JellyfinSync` could collide with an existing mount; pre-existing issue [scripts/smoke-tests/smoke-macos.sh] — deferred, pre-existing, out of scope
+- [x] [Review][Defer] AppImage files mapping hardcodes x86_64 source path — only breaks if CI runner changes to arm64; currently ubuntu-22.04 is x86_64 only [hifimule-ui/src-tauri/tauri.conf.json] — deferred, not a current issue
+- [x] [Review][Defer] macOS DMG smoke test MOUNT_POINT conflict — `/Volumes/HifiMule` could collide with an existing mount; pre-existing issue [scripts/smoke-tests/smoke-macos.sh] — deferred, pre-existing, out of scope
 - [x] [Review][Defer] `-displayfd` display file polling may time out on very slow CI runners (50 × 0.1s = 5s max) — practical tradeoff [scripts/smoke-tests/smoke-linux.sh] — deferred, tuning concern
-- [x] [Review][Defer] `is_boot_volume_device` fail-safe skip on metadata error is a documented design decision — silently skips drives that fail `metadata()` during the observer poll [jellyfinsync-daemon/src/device/mod.rs] — deferred, intentional design
+- [x] [Review][Defer] `is_boot_volume_device` fail-safe skip on metadata error is a documented design decision — silently skips drives that fail `metadata()` during the observer poll [hifimule-daemon/src/device/mod.rs] — deferred, intentional design
 
 ## Change Log
 

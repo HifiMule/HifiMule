@@ -7,13 +7,13 @@ Status: done
 ## Story
 
 As a Ritualist (Arthur) and Convenience Seeker (Sarah),
-I want the application to detect when a connected removable disk has no `.jellyfinsync.json` manifest and guide me through initializing it,
+I want the application to detect when a connected removable disk has no `.hifimule.json` manifest and guide me through initializing it,
 so that I can bring a brand-new device into the managed sync model without manually creating any files.
 
 ## Acceptance Criteria
 
 1. **Unrecognized Device Detection:**
-   - **Given** a USB mass storage device is connected with no `.jellyfinsync.json` present in its root
+   - **Given** a USB mass storage device is connected with no `.hifimule.json` present in its root
    - **When** the daemon completes its device discovery scan
    - **Then** it broadcasts an `on_device_unrecognized` event (via a new `DeviceEvent::Unrecognized { path }` internal event)
    - **And** the daemon state transitions to `DeviceFound(path_string)`
@@ -33,7 +33,7 @@ so that I can bring a brand-new device into the managed sync model without manua
    - **Given** a valid `device_initialize` RPC call
    - **When** the daemon processes the request
    - **Then** it generates a new unique hardware ID (UUID v4)
-   - **And** it writes an initial `.jellyfinsync.json` to the device using the **atomic Write-Temp-Rename pattern** (`write_manifest`)
+   - **And** it writes an initial `.hifimule.json` to the device using the **atomic Write-Temp-Rename pattern** (`write_manifest`)
    - **And** the manifest contains: `device_id` (new UUID), `version: "1.0"`, `managed_paths` derived from the chosen folder, `synced_items: []`, `dirty: false`
    - **And** if a non-root folder was specified, the daemon creates that folder on the device if it doesn't exist
    - **And** the device profile mapping is stored in SQLite via `db.upsert_device_mapping`
@@ -42,7 +42,7 @@ so that I can bring a brand-new device into the managed sync model without manua
 
 4. **MTP Device Manifest Write (Sprint Change 2026-04-30):**
    - **Given** the target device is an MTP device
-   - **When** the daemon writes the initial `.jellyfinsync.json`
+   - **When** the daemon writes the initial `.hifimule.json`
    - **Then** it uses `device_io.write_with_verify()` instead of calling `write_manifest` (Write-Temp-Rename) directly
    - **And** the `device.initialize` RPC handler receives `Arc<dyn DeviceIO>` from `DeviceManager` — no direct `std::fs` calls in the handler
    - **Note:** `write_with_verify()` delegates to Write-Temp-Rename for MSC and dirty-marker + overwrite for MTP (defined in Story 4.0)
@@ -86,7 +86,7 @@ so that I can bring a brand-new device into the managed sync model without manua
   - [x] Wire up the "Initialize" button click to open the `InitDeviceModal`
 
 - [x] **Frontend: New `InitDeviceModal` component** (AC: #2, #3, #4)
-  - [x] Create `jellyfinsync-ui/src/components/InitDeviceModal.ts` following the `RepairModal.ts` pattern
+  - [x] Create `hifimule-ui/src/components/InitDeviceModal.ts` following the `RepairModal.ts` pattern
   - [x] Render `sl-dialog` with:
     - Device path display (non-editable)
     - `sl-input` for sync folder name (placeholder: "Leave empty for device root", default: empty)
@@ -135,7 +135,7 @@ Key current code locations (updated line numbers):
 - `handle_device_initialize` RPC: `rpc.rs:1387–1468`
   - Calls `device_manager.initialize_device(folder_path, transcoding_profile_id, device_name, device_icon).await` — **this caller must pass `Arc<dyn DeviceIO>` once Story 4.0 adds it**
 - `BasketSidebar` banner: `BasketSidebar.ts:480–495`
-- `InitDeviceModal`: `jellyfinsync-ui/src/components/InitDeviceModal.ts` (fully implemented)
+- `InitDeviceModal`: `hifimule-ui/src/components/InitDeviceModal.ts` (fully implemented)
 
 ### Architecture & Pattern Compliance
 
@@ -210,13 +210,13 @@ From Story 2.5 (`2-5-interactive-login-and-identity-management.md`) implementati
 - Config (`config.json`) stores `serverUrl` and `userId` (from `AuthenticationResult`)
 - `CredentialManager::get_credentials()` returns `(url, token, Option<user_id>)` — the `user_id` is the `Option<String>`
 - The UI uses `rpcCall('get_credentials')` to retrieve credentials for display
-- **Device ID pattern:** A persistent `device_id` was added to `api.rs` config for JellyfinSync's own client identity — the new manifest `device_id` is DIFFERENT (it's the target hardware's ID, not JellyfinSync's client ID)
+- **Device ID pattern:** A persistent `device_id` was added to `api.rs` config for HifiMule's own client identity — the new manifest `device_id` is DIFFERENT (it's the target hardware's ID, not HifiMule's client ID)
 
 From Story 2.2 (`2-2-mass-storage-heartbeat-autodetection.md`): The device observer pattern in `device/mod.rs` is established. The `DeviceProber::probe` → `DeviceEvent::Detected` flow is the template to extend.
 
 ### Git Intelligence (Recent Commits)
 
-- `e2f9903 Add story for creating .jellyfinsync.json` — This is the story we're implementing
+- `e2f9903 Add story for creating .hifimule.json` — This is the story we're implementing
 - `3677f2d Done` — Story 5.4 (Visual Manifest Repair Utility) completed
 - `067ec1e Review 5.4` / `434197a Code 5.4` — RepairModal.ts was completed in these commits; use it as the UI modal template
 
@@ -224,11 +224,11 @@ The RepairModal.ts pattern (Shoelace `sl-dialog`, class-based, `open()` method, 
 
 ### File Structure
 
-- `jellyfinsync-daemon/src/device/mod.rs` — Add `DeviceEvent::Unrecognized`, `DeviceManager.unrecognized_device_path`, `handle_device_unrecognized`, `get_unrecognized_device_path`, `initialize_device`, update `run_observer`, update `list_root_folders`, update `handle_device_removed`
-- `jellyfinsync-daemon/src/main.rs` — Add `DeviceEvent::Unrecognized` handler arm
-- `jellyfinsync-daemon/src/rpc.rs` — Add `device_initialize` dispatch, implement `handle_device_initialize`, update `handle_get_daemon_state`
-- `jellyfinsync-ui/src/components/InitDeviceModal.ts` — New component (follow RepairModal.ts pattern)
-- `jellyfinsync-ui/src/components/BasketSidebar.ts` — Add `has_manifest: false` banner rendering and InitDeviceModal integration
+- `hifimule-daemon/src/device/mod.rs` — Add `DeviceEvent::Unrecognized`, `DeviceManager.unrecognized_device_path`, `handle_device_unrecognized`, `get_unrecognized_device_path`, `initialize_device`, update `run_observer`, update `list_root_folders`, update `handle_device_removed`
+- `hifimule-daemon/src/main.rs` — Add `DeviceEvent::Unrecognized` handler arm
+- `hifimule-daemon/src/rpc.rs` — Add `device_initialize` dispatch, implement `handle_device_initialize`, update `handle_get_daemon_state`
+- `hifimule-ui/src/components/InitDeviceModal.ts` — New component (follow RepairModal.ts pattern)
+- `hifimule-ui/src/components/BasketSidebar.ts` — Add `has_manifest: false` banner rendering and InitDeviceModal integration
 
 ### MTP Task: Exact Changes Required (post-Story 4.0)
 
@@ -253,7 +253,7 @@ write_manifest(&device_root, &manifest).await?;
 
 // After:
 let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
-device_io.write_with_verify(".jellyfinsync.json", &manifest_bytes)?;
+device_io.write_with_verify(".hifimule.json", &manifest_bytes)?;
 ```
 
 **4. `handle_device_initialize` in `rpc.rs:1387`:**
@@ -274,7 +274,7 @@ Retrieve `device_io` from `DeviceManager` for the unrecognized device path and p
 - `handle_device_initialize` RPC: `rpc.rs:1387–1468`
 - `handle_get_daemon_state`: `rpc.rs:374–428`
 - `BasketSidebar` banner render: `BasketSidebar.ts:480–495`
-- `InitDeviceModal`: `jellyfinsync-ui/src/components/InitDeviceModal.ts`
+- `InitDeviceModal`: `hifimule-ui/src/components/InitDeviceModal.ts`
 - Story 4.0 (DeviceIO definition): `_bmad-output/implementation-artifacts/4-0-device-io-abstraction-layer.md`
 
 ## Dev Agent Record
@@ -302,12 +302,12 @@ claude-sonnet-4-6
 
 ### File List
 
-- `jellyfinsync-daemon/src/device/mod.rs`
-- `jellyfinsync-daemon/src/device/tests.rs`
-- `jellyfinsync-daemon/src/main.rs`
-- `jellyfinsync-daemon/src/rpc.rs`
-- `jellyfinsync-ui/src/components/InitDeviceModal.ts` (new)
-- `jellyfinsync-ui/src/components/BasketSidebar.ts`
+- `hifimule-daemon/src/device/mod.rs`
+- `hifimule-daemon/src/device/tests.rs`
+- `hifimule-daemon/src/main.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-ui/src/components/InitDeviceModal.ts` (new)
+- `hifimule-ui/src/components/BasketSidebar.ts`
 - `_bmad-output/implementation-artifacts/2-6-initialize-new-device-manifest.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
 

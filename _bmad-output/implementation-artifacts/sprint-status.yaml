@@ -1,5 +1,5 @@
 # generated: 2026-03-08
-# project: JellyfinSync
+# project: HifiMule
 # project_key: NOKEY
 # tracking_system: file-system
 # story_location: _bmad-output/implementation-artifacts
@@ -35,7 +35,7 @@
 
 generated: 2026-03-08
 last_updated: 2026-05-08  # Story 7.4 review complete
-project: JellyfinSync
+project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
 story_location: _bmad-output/implementation-artifacts

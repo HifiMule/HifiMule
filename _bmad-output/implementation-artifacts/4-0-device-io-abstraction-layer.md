@@ -12,7 +12,7 @@ so that **the sync engine works identically for both MSC and MTP devices without
 
 ## Acceptance Criteria
 
-1. **DeviceIO Trait Enforcement**: The `DeviceIO` trait MUST be defined in `jellyfinsync-daemon`. When any sync, manifest, or scrobble operation targets a device, it MUST call methods on `Arc<dyn DeviceIO>` exclusively — no direct `std::fs` or `tokio::fs` calls with a device path anywhere outside `MscBackend`. (AC: #1)
+1. **DeviceIO Trait Enforcement**: The `DeviceIO` trait MUST be defined in `hifimule-daemon`. When any sync, manifest, or scrobble operation targets a device, it MUST call methods on `Arc<dyn DeviceIO>` exclusively — no direct `std::fs` or `tokio::fs` calls with a device path anywhere outside `MscBackend`. (AC: #1)
 2. **MSC Backend**: When `DeviceManager` detects a connected MSC device, it MUST create `MscBackend { root: PathBuf }`. `MscBackend::write_with_verify()` MUST use the Write-Temp-Rename pattern (`write to .tmp` → `sync_all()` → `rename`) — this is the existing MSC manifest-write behavior, now generalized. (AC: #2)
 3. **MTP Backend — Write**: When `DeviceManager` detects a connected MTP device, it MUST create `MtpBackend { handle: Arc<MtpHandle> }`. `MtpBackend::write_file()` MUST transfer data via WPD `IPortableDeviceContent` object creation on Windows, or `libmtp_send_file_from_memory` on Linux/macOS. (AC: #3)
 4. **MTP Backend — Verified Write**: `MtpBackend::write_with_verify()` MUST write a `".dirty"` marker object first, overwrite the target object, then delete the marker. (AC: #3)
@@ -23,11 +23,11 @@ so that **the sync engine works identically for both MSC and MTP devices without
 ## Tasks / Subtasks
 
 - [x] **T1: Create DeviceIO trait** (AC: #1)
-  - [x] T1.1: Create `jellyfinsync-daemon/src/device_io.rs` — new file
-  - [x] T1.2: Add dependency `async-trait = "0.1"` to `jellyfinsync-daemon/Cargo.toml` (required for `async fn` in `dyn Trait` — see Dev Notes)
+  - [x] T1.1: Create `hifimule-daemon/src/device_io.rs` — new file
+  - [x] T1.2: Add dependency `async-trait = "0.1"` to `hifimule-daemon/Cargo.toml` (required for `async fn` in `dyn Trait` — see Dev Notes)
   - [x] T1.3: Define `FileEntry` struct: `pub path: String, pub name: String, pub size: u64` with `#[serde(rename_all = "camelCase")]`
   - [x] T1.4: Define `DeviceIO` trait with `#[async_trait]` and all six methods: `read_file`, `write_file`, `write_with_verify`, `delete_file`, `list_files`, `free_space`
-  - [x] T1.5: Add `pub mod device_io;` to `jellyfinsync-daemon/src/main.rs`
+  - [x] T1.5: Add `pub mod device_io;` to `hifimule-daemon/src/main.rs`
 
 - [x] **T2: Implement MscBackend** (AC: #2)
   - [x] T2.1: Implement `MscBackend { root: PathBuf }` in `device_io.rs`
@@ -166,7 +166,7 @@ pub async fn write_manifest(device_root: &Path, manifest: &DeviceManifest) -> Re
 // After:
 pub async fn write_manifest(device_io: Arc<dyn DeviceIO>, manifest: &DeviceManifest) -> Result<()> {
     let json = serde_json::to_string_pretty(manifest)?;
-    device_io.write_with_verify(".jellyfinsync.json", json.as_bytes()).await
+    device_io.write_with_verify(".hifimule.json", json.as_bytes()).await
 }
 ```
 
@@ -196,17 +196,17 @@ pub async fn write_manifest(device_io: Arc<dyn DeviceIO>, manifest: &DeviceManif
 ### File Structure
 
 Files to create:
-- `jellyfinsync-daemon/src/device_io.rs` — `DeviceIO` trait, `FileEntry`, `MscBackend`, `MtpBackend`
+- `hifimule-daemon/src/device_io.rs` — `DeviceIO` trait, `FileEntry`, `MscBackend`, `MtpBackend`
 
 Files to modify:
-- `jellyfinsync-daemon/Cargo.toml` — add `async-trait`, platform-gated MTP deps
-- `jellyfinsync-daemon/src/main.rs` — add `pub mod device_io;`
-- `jellyfinsync-daemon/src/device/mod.rs` — `ConnectedDevice` struct, `DeviceManager` HashMap change, `write_manifest` refactor, `cleanup_tmp_files` refactor, `get_device_io()` accessor
-- `jellyfinsync-daemon/src/sync.rs` — `execute_sync()` gains `device_io` param, all device `tokio::fs` calls replaced
-- `jellyfinsync-daemon/src/rpc.rs` — `sync.start` and scrobbler handlers pass `device_io` to callers
-- `jellyfinsync-daemon/src/scrobbler.rs` — scrobbler log read via `DeviceIO::read_file()`
-- `jellyfinsync-daemon/src/main.rs` — `run_auto_sync()` retrieves and passes `device_io`
-- `jellyfinsync-daemon/src/device/tests.rs` — update any tests constructing `ConnectedDevice`
+- `hifimule-daemon/Cargo.toml` — add `async-trait`, platform-gated MTP deps
+- `hifimule-daemon/src/main.rs` — add `pub mod device_io;`
+- `hifimule-daemon/src/device/mod.rs` — `ConnectedDevice` struct, `DeviceManager` HashMap change, `write_manifest` refactor, `cleanup_tmp_files` refactor, `get_device_io()` accessor
+- `hifimule-daemon/src/sync.rs` — `execute_sync()` gains `device_io` param, all device `tokio::fs` calls replaced
+- `hifimule-daemon/src/rpc.rs` — `sync.start` and scrobbler handlers pass `device_io` to callers
+- `hifimule-daemon/src/scrobbler.rs` — scrobbler log read via `DeviceIO::read_file()`
+- `hifimule-daemon/src/main.rs` — `run_auto_sync()` retrieves and passes `device_io`
+- `hifimule-daemon/src/device/tests.rs` — update any tests constructing `ConnectedDevice`
 
 ### Testing Standards
 
@@ -253,14 +253,14 @@ claude-sonnet-4-6
 
 ### File List
 
-- `jellyfinsync-daemon/src/device_io.rs` — NEW: `DeviceIO` trait, `FileEntry`, `MscBackend`, `MtpBackend`, `MtpHandle`, `MockMtpHandle`, unit tests
-- `jellyfinsync-daemon/Cargo.toml` — added `async-trait = "0.1"`; commented-out MTP platform dep placeholders
-- `jellyfinsync-daemon/src/main.rs` — added `pub mod device_io;`; `run_auto_sync` retrieves device_io and passes to `execute_sync`; scrobbler spawn updated with `device_io` and `device_id`
-- `jellyfinsync-daemon/src/device/mod.rs` — `ConnectedDevice` struct; HashMap value type changed; `write_manifest` and `cleanup_tmp_files` signatures refactored; `get_device_io()` accessor; `handle_device_detected` creates `MscBackend` and checks `.dirty` markers; `update_manifest` drops lock before I/O
-- `jellyfinsync-daemon/src/sync.rs` — `execute_sync` gains `device_io` param; `buffer_stream` helper; all device `tokio::fs` calls replaced; `generate_m3u_files` updated; `write_m3u_atomic` removed
-- `jellyfinsync-daemon/src/rpc.rs` — `handle_sync_execute` and `handle_sync_get_resume_state` retrieve and pass `device_io`
-- `jellyfinsync-daemon/src/scrobbler.rs` — `process_device_scrobbles` signature updated; direct fs read replaced with `device_io.read_file`
-- `jellyfinsync-daemon/src/device/tests.rs` — all `write_manifest` and `cleanup_tmp_files` call sites updated to use `MscBackend`
+- `hifimule-daemon/src/device_io.rs` — NEW: `DeviceIO` trait, `FileEntry`, `MscBackend`, `MtpBackend`, `MtpHandle`, `MockMtpHandle`, unit tests
+- `hifimule-daemon/Cargo.toml` — added `async-trait = "0.1"`; commented-out MTP platform dep placeholders
+- `hifimule-daemon/src/main.rs` — added `pub mod device_io;`; `run_auto_sync` retrieves device_io and passes to `execute_sync`; scrobbler spawn updated with `device_io` and `device_id`
+- `hifimule-daemon/src/device/mod.rs` — `ConnectedDevice` struct; HashMap value type changed; `write_manifest` and `cleanup_tmp_files` signatures refactored; `get_device_io()` accessor; `handle_device_detected` creates `MscBackend` and checks `.dirty` markers; `update_manifest` drops lock before I/O
+- `hifimule-daemon/src/sync.rs` — `execute_sync` gains `device_io` param; `buffer_stream` helper; all device `tokio::fs` calls replaced; `generate_m3u_files` updated; `write_m3u_atomic` removed
+- `hifimule-daemon/src/rpc.rs` — `handle_sync_execute` and `handle_sync_get_resume_state` retrieve and pass `device_io`
+- `hifimule-daemon/src/scrobbler.rs` — `process_device_scrobbles` signature updated; direct fs read replaced with `device_io.read_file`
+- `hifimule-daemon/src/device/tests.rs` — all `write_manifest` and `cleanup_tmp_files` call sites updated to use `MscBackend`
 
 ### Review Findings
 

@@ -181,12 +181,12 @@ ADD:
 **FR26:**
 ```
 OLD:
-FR26: The system can initialize a new `.jellyfinsync.json` manifest on a connected 
+FR26: The system can initialize a new `.hifimule.json` manifest on a connected 
   device that has not previously been managed, capturing a hardware identifier, a 
   designated sync folder path, and an associated Jellyfin user profile.
 
 NEW:
-FR26: The system can initialize a new `.jellyfinsync.json` manifest on a connected 
+FR26: The system can initialize a new `.hifimule.json` manifest on a connected 
   device that has not previously been managed, capturing a hardware identifier, a 
   designated sync folder path, an associated Jellyfin user profile, a user-provided 
   display name, and an optional icon identifier selected from a built-in library.
@@ -218,11 +218,11 @@ FR26: Epic 2 — Device Identity (Story 2.9)
 **Data Architecture — Manifest Extension:**
 ```
 OLD:
-Manifest Extension: `.jellyfinsync.json` includes `auto_sync_on_connect` (boolean), 
+Manifest Extension: `.hifimule.json` includes `auto_sync_on_connect` (boolean), 
   `auto_fill` block, and `transcoding_profile_id` (string | null).
 
 NEW:
-Manifest Extension: `.jellyfinsync.json` includes `auto_sync_on_connect` (boolean), 
+Manifest Extension: `.hifimule.json` includes `auto_sync_on_connect` (boolean), 
   `auto_fill` block, `transcoding_profile_id` (string | null), `name` (string | null), 
   and `icon` (string | null). Both `name` and `icon` use `#[serde(default)]` for 
   backward compatibility with manifests written before Story 2.9.

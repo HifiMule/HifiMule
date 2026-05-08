@@ -5,9 +5,9 @@ created: '2026-03-01'
 status: 'completed'
 stepsCompleted: [1, 2, 3, 4]
 tech_stack: ['TypeScript', 'Shoelace Web Components', 'Vite', 'Plain DOM (no framework)']
-files_to_modify: ['jellyfinsync-ui/src/library.ts', 'jellyfinsync-ui/src/components/MediaCard.ts', 'jellyfinsync-ui/src/styles.css']
+files_to_modify: ['hifimule-ui/src/library.ts', 'hifimule-ui/src/components/MediaCard.ts', 'hifimule-ui/src/styles.css']
 code_patterns: ['DOM class toggling (classList.add/toggle)', 'Shoelace sl-spinner element injection', 'Absolute-positioned overlay on .card-image (position:relative + overflow:hidden)']
-test_patterns: ['No test suite exists in jellyfinsync-ui — manual verification only']
+test_patterns: ['No test suite exists in hifimule-ui — manual verification only']
 ---
 
 # Tech-Spec: Library Item Navigation Loading Feedback
@@ -46,15 +46,15 @@ When clicking an artist or playlist card in the library browser, there is no imm
 - **Overlay pattern already established**: `.selection-overlay` (`styles.css:242-259`) — `position: absolute; top:0; left:0; width:100%; height:100%; background: rgba(0,0,0,0.4); display:flex; justify-content:center; align-items:center; z-index:10`. The `.card-image` parent has `position:relative; overflow:hidden` — a perfect container for another absolute overlay.
 - **Card state classes**: `is-selected`, `synced` toggled via `card.classList`. `is-navigating` follows the same naming convention.
 - **DOM auto-teardown**: `loadItems(true)` sets `container.innerHTML = '<sl-spinner ...>'` synchronously at line 157. All card DOM — including any `is-navigating` overlay — is destroyed automatically. No cleanup required in `navigateToLibrary` or `navigateToItem`.
-- **No UI tests**: `jellyfinsync-ui` has no test suite. Verification is manual.
+- **No UI tests**: `hifimule-ui` has no test suite. Verification is manual.
 
 ### Files to Reference
 
 | File | Purpose |
 | ---- | ------- |
-| [jellyfinsync-ui/src/library.ts](jellyfinsync-ui/src/library.ts) | `containerTypes` (line 139), `navigateToItem`, `navigateToLibrary`, `loadItems`, `renderGrid` |
-| [jellyfinsync-ui/src/components/MediaCard.ts](jellyfinsync-ui/src/components/MediaCard.ts) | `MediaCard.create` — card DOM construction and click event wiring (lines 68–74) |
-| [jellyfinsync-ui/src/styles.css](jellyfinsync-ui/src/styles.css) | `.selection-overlay` (line 242), `.media-card` (line 220), `.media-card.synced` (line 336) |
+| [hifimule-ui/src/library.ts](hifimule-ui/src/library.ts) | `containerTypes` (line 139), `navigateToItem`, `navigateToLibrary`, `loadItems`, `renderGrid` |
+| [hifimule-ui/src/components/MediaCard.ts](hifimule-ui/src/components/MediaCard.ts) | `MediaCard.create` — card DOM construction and click event wiring (lines 68–74) |
+| [hifimule-ui/src/styles.css](hifimule-ui/src/styles.css) | `.selection-overlay` (line 242), `.media-card` (line 220), `.media-card.synced` (line 336) |
 
 ### Technical Decisions
 
@@ -67,14 +67,14 @@ When clicking an artist or playlist card in the library browser, there is no imm
 ### Tasks
 
 - [x] Task 1: Add `MusicArtist` to navigable container types
-  - File: `jellyfinsync-ui/src/library.ts`
+  - File: `hifimule-ui/src/library.ts`
   - Action: On line 139, add `'MusicArtist'` to the `containerTypes` array.
   - Before: `const containerTypes = ['MusicAlbum', 'Playlist', 'Folder', 'CollectionFolder', 'BoxSet', 'Series', 'Season'];`
   - After: `const containerTypes = ['MusicArtist', 'MusicAlbum', 'Playlist', 'Folder', 'CollectionFolder', 'BoxSet', 'Series', 'Season'];`
   - Notes: No other changes needed in this file. The existing `navigateToItem` call and `loadItems(true)` path handles the rest.
 
 - [x] Task 2: Add CSS rules for `is-navigating` state and loading overlay
-  - File: `jellyfinsync-ui/src/styles.css`
+  - File: `hifimule-ui/src/styles.css`
   - Action: After the `.media-card.synced` block (line 338), insert the following two new rule blocks:
   ```css
   /* Navigation loading state */
@@ -105,7 +105,7 @@ When clicking an artist or playlist card in the library browser, there is no imm
   - Notes: `z-index: 20` places the overlay above the `synced-badge` (no explicit z-index) and `selection-overlay` (z-index: 10). `.card-image` already has `position: relative; overflow: hidden` so the absolute overlay clips correctly.
 
 - [x] Task 3: Inject loading state into the card on navigation click
-  - File: `jellyfinsync-ui/src/components/MediaCard.ts`
+  - File: `hifimule-ui/src/components/MediaCard.ts`
   - Action: In the `card.addEventListener('click', ...)` handler (lines 68–74), add the `is-navigating` class and overlay injection **inside the `if (!isButton)` branch, before `onNavigate()` is called**.
   - Before:
   ```ts
@@ -160,7 +160,7 @@ None — no new libraries or packages required.
 
 ### Testing Strategy
 
-No automated test suite exists for `jellyfinsync-ui`. Manual verification only:
+No automated test suite exists for `hifimule-ui`. Manual verification only:
 - Run the app, browse to a Music library, click an Artist card → card dims with spinner overlay, then navigates into the artist's albums.
 - Click a Playlist card → same loading feedback appears, then navigates.
 - Click a library root card (libraries view) → same loading feedback.

@@ -56,7 +56,7 @@ so that **my sync never fails due to filesystem errors**.
   - [x] T3.6: Build `PathBuf` from components, return `Ok(PathConstructionResult { path, original_name })`
 
 - [x] **T4: Add `original_name` field to `SyncedItem`** (AC: #4)
-  - [x] T4.1: In `jellyfinsync-daemon/src/device/mod.rs`, add to `SyncedItem` struct:
+  - [x] T4.1: In `hifimule-daemon/src/device/mod.rs`, add to `SyncedItem` struct:
     ```rust
     #[serde(default)]
     pub original_name: Option<String>,
@@ -329,13 +329,13 @@ fn test_construct_file_path_long_filename_extension_preserved() {
 - **`SyncedItem` struct addition**: Adding `original_name` is backward-compatible — existing manifests without this field will deserialize with `None` due to `#[serde(default)]`. No migration needed.
 
 **Files to Modify:**
-1. `jellyfinsync-daemon/src/sync.rs` — Add constant, struct, truncation helpers, update `construct_file_path` signature and body, update `execute_sync` caller, update and add tests
-2. `jellyfinsync-daemon/src/device/mod.rs` — Add `original_name` field to `SyncedItem`
+1. `hifimule-daemon/src/sync.rs` — Add constant, struct, truncation helpers, update `construct_file_path` signature and body, update `execute_sync` caller, update and add tests
+2. `hifimule-daemon/src/device/mod.rs` — Add `original_name` field to `SyncedItem`
 
 **Files NOT to Modify:**
-- `jellyfinsync-daemon/src/api.rs` — No changes
-- `jellyfinsync-daemon/src/rpc.rs` — No changes
-- `jellyfinsync-daemon/Cargo.toml` — No new dependencies
+- `hifimule-daemon/src/api.rs` — No changes
+- `hifimule-daemon/src/rpc.rs` — No changes
+- `hifimule-daemon/Cargo.toml` — No new dependencies
 - `Cargo.lock` — No new dependencies
 
 ### Critical Developer Guardrails
@@ -373,12 +373,12 @@ fn test_construct_file_path_long_filename_extension_preserved() {
 - [Story 4.1: Differential Sync](../../_bmad-output/implementation-artifacts/4-1-differential-sync-algorithm-manifest-comparison.md) — `write_manifest` function, manifest format
 
 **Source Code Locations:**
-- [jellyfinsync-daemon/src/sync.rs:145-184](../../jellyfinsync-daemon/src/sync.rs#L145) — `construct_file_path` (change return type, add truncation, remove TODO comment)
-- [jellyfinsync-daemon/src/sync.rs:187-201](../../jellyfinsync-daemon/src/sync.rs#L187) — `sanitize_path_component` (used BEFORE length truncation — do not modify)
-- [jellyfinsync-daemon/src/sync.rs:227-256](../../jellyfinsync-daemon/src/sync.rs#L227) — `execute_sync` path construction block (update to unpack PathConstructionResult)
-- [jellyfinsync-daemon/src/sync.rs:309-334](../../jellyfinsync-daemon/src/sync.rs#L309) — `execute_sync` SyncedItem push (add `original_name` field)
-- [jellyfinsync-daemon/src/device/mod.rs:7-19](../../jellyfinsync-daemon/src/device/mod.rs#L7) — `SyncedItem` struct (add `original_name` field)
-- [jellyfinsync-daemon/src/sync.rs:709-758](../../jellyfinsync-daemon/src/sync.rs#L709) — Existing `test_construct_file_path_*` tests (update to unpack `.path`)
+- [hifimule-daemon/src/sync.rs:145-184](../../hifimule-daemon/src/sync.rs#L145) — `construct_file_path` (change return type, add truncation, remove TODO comment)
+- [hifimule-daemon/src/sync.rs:187-201](../../hifimule-daemon/src/sync.rs#L187) — `sanitize_path_component` (used BEFORE length truncation — do not modify)
+- [hifimule-daemon/src/sync.rs:227-256](../../hifimule-daemon/src/sync.rs#L227) — `execute_sync` path construction block (update to unpack PathConstructionResult)
+- [hifimule-daemon/src/sync.rs:309-334](../../hifimule-daemon/src/sync.rs#L309) — `execute_sync` SyncedItem push (add `original_name` field)
+- [hifimule-daemon/src/device/mod.rs:7-19](../../hifimule-daemon/src/device/mod.rs#L7) — `SyncedItem` struct (add `original_name` field)
+- [hifimule-daemon/src/sync.rs:709-758](../../hifimule-daemon/src/sync.rs#L709) — Existing `test_construct_file_path_*` tests (update to unpack `.path`)
 
 ## Dev Agent Record
 
@@ -403,11 +403,11 @@ None — implementation proceeded without blockers.
 
 ### File List
 
-- `jellyfinsync-daemon/src/sync.rs`
-- `jellyfinsync-daemon/src/device/mod.rs`
-- `jellyfinsync-daemon/src/device/tests.rs`
-- `jellyfinsync-daemon/src/rpc.rs`
-- `jellyfinsync-daemon/src/api.rs` (pre-existing staged change: etag field on JellyfinItem, get_items_by_ids method; debug println removed by code review)
+- `hifimule-daemon/src/sync.rs`
+- `hifimule-daemon/src/device/mod.rs`
+- `hifimule-daemon/src/device/tests.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-daemon/src/api.rs` (pre-existing staged change: etag field on JellyfinItem, get_items_by_ids method; debug println removed by code review)
 
 ## Senior Developer Review (AI)
 
@@ -416,12 +416,12 @@ None — implementation proceeded without blockers.
 
 ### Action Items
 
-- [x] [High] Remove debug `println!` logging full API response body from `api.rs:get_items_by_ids` — sensitive data exposure risk (`jellyfinsync-daemon/src/api.rs`)
-- [x] [High] `etag` field added to `SyncedItem` and `api.rs` without story documentation — `api.rs` added to File List with explanation (`jellyfinsync-daemon/src/api.rs`)
-- [x] [High] AC #4 violated: `original_name` silently set to `None` for ID-change items in `execute_sync` — added `original_name` to `SyncIdChangeItem`, preserved in `calculate_delta` (`jellyfinsync-daemon/src/sync.rs:509`)
-- [x] [Medium] `truncate_component` could produce empty string for all-dots/spaces inputs → invalid path component — fallback to `"_"` added (`jellyfinsync-daemon/src/sync.rs:283`)
-- [x] [Medium] `truncate_filename` pathological branch returned filename with no extension — fixed to return `.{truncated_ext}` instead (`jellyfinsync-daemon/src/sync.rs:299`)
-- [x] [Low] `PathConstructionResult` missing `#[derive(Debug)]` — added (`jellyfinsync-daemon/src/sync.rs:198`)
+- [x] [High] Remove debug `println!` logging full API response body from `api.rs:get_items_by_ids` — sensitive data exposure risk (`hifimule-daemon/src/api.rs`)
+- [x] [High] `etag` field added to `SyncedItem` and `api.rs` without story documentation — `api.rs` added to File List with explanation (`hifimule-daemon/src/api.rs`)
+- [x] [High] AC #4 violated: `original_name` silently set to `None` for ID-change items in `execute_sync` — added `original_name` to `SyncIdChangeItem`, preserved in `calculate_delta` (`hifimule-daemon/src/sync.rs:509`)
+- [x] [Medium] `truncate_component` could produce empty string for all-dots/spaces inputs → invalid path component — fallback to `"_"` added (`hifimule-daemon/src/sync.rs:283`)
+- [x] [Medium] `truncate_filename` pathological branch returned filename with no extension — fixed to return `.{truncated_ext}` instead (`hifimule-daemon/src/sync.rs:299`)
+- [x] [Low] `PathConstructionResult` missing `#[derive(Debug)]` — added (`hifimule-daemon/src/sync.rs:198`)
 
 ## Change Log
 

@@ -1,4 +1,4 @@
-# JellyfinSync — Project Documentation Index
+# HifiMule — Project Documentation Index
 
 **Generated:** 2026-05-07 | **Scan depth:** Exhaustive | **Version:** 0.2.0
 
@@ -16,20 +16,20 @@
 
 ## Quick Reference
 
-### `jellyfinsync-daemon`
+### `hifimule-daemon`
 
 - **Type:** Backend service (Rust, Tokio async)
 - **Tech Stack:** Axum 0.8, rusqlite, reqwest, tray-icon, keyring; WPD (Windows MTP) / libmtp (Unix MTP)
-- **Root:** [jellyfinsync-daemon/](../jellyfinsync-daemon/)
-- **Entry Point:** [src/main.rs](../jellyfinsync-daemon/src/main.rs)
+- **Root:** [hifimule-daemon/](../hifimule-daemon/)
+- **Entry Point:** [src/main.rs](../hifimule-daemon/src/main.rs)
 - **RPC Port:** 19140
 
-### `jellyfinsync-ui`
+### `hifimule-ui`
 
 - **Type:** Desktop app (Tauri 2)
 - **Tech Stack:** TypeScript 5.6, Vite 6, Shoelace 2.19.1 web components
-- **Root:** [jellyfinsync-ui/](../jellyfinsync-ui/)
-- **Entry Points:** [src/main.ts](../jellyfinsync-ui/src/main.ts), [src-tauri/src/lib.rs](../jellyfinsync-ui/src-tauri/src/lib.rs)
+- **Root:** [hifimule-ui/](../hifimule-ui/)
+- **Entry Points:** [src/main.ts](../hifimule-ui/src/main.ts), [src-tauri/src/lib.rs](../hifimule-ui/src-tauri/src/lib.rs)
 
 ---
 
@@ -43,17 +43,17 @@
 
 ### Architecture (per part)
 
-- [Architecture — Daemon](./architecture-jellyfinsync-daemon.md) — Process model, AppState, RPC server, DeviceManager, sync engine, MTP backends, Windows Service
-- [Architecture — UI](./architecture-jellyfinsync-ui.md) — Tauri shell, daemon launch strategy, RPC layer, BasketStore, component lifecycle
+- [Architecture — Daemon](./architecture-hifimule-daemon.md) — Process model, AppState, RPC server, DeviceManager, sync engine, MTP backends, Windows Service
+- [Architecture — UI](./architecture-hifimule-ui.md) — Tauri shell, daemon launch strategy, RPC layer, BasketStore, component lifecycle
 
 ### API & Data
 
-- [API Contracts — Daemon](./api-contracts-jellyfinsync-daemon.md) — All 34 RPC methods with params, return types, and error codes
-- [Data Models — Daemon](./data-models-jellyfinsync-daemon.md) — DeviceManifest, SyncedItem, BasketItem, SyncDelta, SyncOperation, JellyfinItem, DeviceMapping
+- [API Contracts — Daemon](./api-contracts-hifimule-daemon.md) — All 34 RPC methods with params, return types, and error codes
+- [Data Models — Daemon](./data-models-hifimule-daemon.md) — DeviceManifest, SyncedItem, BasketItem, SyncDelta, SyncOperation, JellyfinItem, DeviceMapping
 
 ### UI
 
-- [Component Inventory — UI](./component-inventory-jellyfinsync-ui.md) — All TypeScript components: BasketSidebar, MediaCard, StatusBar, InitDeviceModal, RepairModal, library.ts, basket.ts
+- [Component Inventory — UI](./component-inventory-hifimule-ui.md) — All TypeScript components: BasketSidebar, MediaCard, StatusBar, InitDeviceModal, RepairModal, library.ts, basket.ts
 
 ### Development
 
@@ -82,15 +82,15 @@
 # Prerequisites: Rust stable, Node.js LTS, pnpm, platform MTP libs (see development-guide.md)
 
 # Build daemon
-cargo build -p jellyfinsync-daemon
+cargo build -p hifimule-daemon
 
 # Build & run UI in dev mode
-cd jellyfinsync-ui
+cd hifimule-ui
 pnpm install
 pnpm tauri dev
 
 # Run all daemon tests
-cargo test -p jellyfinsync-daemon
+cargo test -p hifimule-daemon
 
 # Direct RPC call (daemon running on :19140)
 curl -s -X POST http://localhost:19140 \

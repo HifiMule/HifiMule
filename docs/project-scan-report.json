@@ -7,31 +7,31 @@
   },
   "mode": "full_rescan",
   "scan_level": "exhaustive",
-  "project_root": "/Users/akartmann/Documents/Projects/JellyfinSync",
-  "project_knowledge": "/Users/akartmann/Documents/Projects/JellyfinSync/docs",
+  "project_root": "/Users/akartmann/Documents/Projects/HifiMule",
+  "project_knowledge": "/Users/akartmann/Documents/Projects/HifiMule/docs",
   "repository_type": "monorepo",
   "project_types": [
     {
-      "part_id": "jellyfinsync-daemon",
+      "part_id": "hifimule-daemon",
       "project_type_id": "backend",
-      "display_name": "JellyfinSync Daemon (Rust Backend)"
+      "display_name": "HifiMule Daemon (Rust Backend)"
     },
     {
-      "part_id": "jellyfinsync-ui",
+      "part_id": "hifimule-ui",
       "project_type_id": "desktop",
-      "display_name": "JellyfinSync UI (Tauri 2 Desktop)"
+      "display_name": "HifiMule UI (Tauri 2 Desktop)"
     }
   ],
   "project_parts": [
     {
-      "part_id": "jellyfinsync-daemon",
-      "root_path": "jellyfinsync-daemon/",
+      "part_id": "hifimule-daemon",
+      "root_path": "hifimule-daemon/",
       "project_type_id": "backend",
       "primary_tech": "Rust (Axum 0.8, Tokio, rusqlite, reqwest, keyring, tray-icon, windows-sys/libmtp)"
     },
     {
-      "part_id": "jellyfinsync-ui",
-      "root_path": "jellyfinsync-ui/",
+      "part_id": "hifimule-ui",
+      "root_path": "hifimule-ui/",
       "project_type_id": "desktop",
       "primary_tech": "Tauri 2 + TypeScript 5.6 + Vite 6 + Shoelace 2.19.1"
     }
@@ -56,7 +56,7 @@
     "project_classification": "Monorepo (Cargo workspace), 2 parts: Rust backend + Tauri 2 desktop",
     "technology_stack": "Rust (Tokio/Axum 0.8/rusqlite/keyring/WPD/libmtp) + TypeScript (Tauri 2/Vite 6/Shoelace 2.19.1)",
     "api_summary": "34 JSON-RPC methods on localhost:19140 + image proxy endpoint",
-    "data_summary": "DeviceManifest (.jellyfinsync.json on device) + SQLite (devices, scrobble_history) + OS keyring (token) + localStorage (basket session)",
+    "data_summary": "DeviceManifest (.hifimule.json on device) + SQLite (devices, scrobble_history) + OS keyring (token) + localStorage (basket session)",
     "ui_summary": "5 components (BasketSidebar, MediaCard, StatusBar, InitDeviceModal, RepairModal) + 3 views (library, login, splash) + 1 state store (BasketStore)"
   },
   "outputs_generated": [
@@ -65,11 +65,11 @@
     "project-overview.md",
     "source-tree-analysis.md",
     "integration-architecture.md",
-    "architecture-jellyfinsync-daemon.md",
-    "architecture-jellyfinsync-ui.md",
-    "api-contracts-jellyfinsync-daemon.md",
-    "data-models-jellyfinsync-daemon.md",
-    "component-inventory-jellyfinsync-ui.md",
+    "architecture-hifimule-daemon.md",
+    "architecture-hifimule-ui.md",
+    "api-contracts-hifimule-daemon.md",
+    "data-models-hifimule-daemon.md",
+    "component-inventory-hifimule-ui.md",
     "development-guide.md"
   ],
   "resume_instructions": "Workflow completed successfully (exhaustive full_rescan, 2026-05-07)"

@@ -13,7 +13,7 @@
 **Discovery:** Direct testing/use during Epic 2–4 implementation. Transcoding gap identified by reviewing git status showing `transcoding.rs` and `device-profiles.json` as new files against no matching story in `epics.md`.
 
 **Evidence:**
-- Multi-device: `DeviceManager` ([device/mod.rs:166-171](../../jellyfinsync-daemon/src/device/mod.rs)) holds a single `current_device` / `current_device_path`; `handle_device_detected` overwrites on every new detection; `get_daemon_state` returns singular `currentDevice` with no list or selection mechanism.
+- Multi-device: `DeviceManager` ([device/mod.rs:166-171](../../hifimule-daemon/src/device/mod.rs)) holds a single `current_device` / `current_device_path`; `handle_device_detected` overwrites on every new detection; `get_daemon_state` returns singular `currentDevice` with no list or selection mechanism.
 - Transcoding: `tech-spec-transcoding-device-profiles-playback-handshake.md` status `review`, all 13 tasks `[x]`; PRD still lists "Transcoding Handshake" as Phase 2 Post-MVP; `epics.md` has no transcoding story.
 
 ---
@@ -255,7 +255,7 @@ NEW: execute_sync(client, device_path, manifest, item_ids, ...,
 **Data Architecture — Device Profile Fields (update):**
 
 ```
-Added to DeviceManifest (.jellyfinsync.json):
+Added to DeviceManifest (.hifimule.json):
   transcoding_profile_id: Option<String>   // references id in device-profiles.json
 
 Added to SQLite devices table:

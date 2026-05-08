@@ -36,15 +36,15 @@ context: []
 
 ## Code Map
 
-- `jellyfinsync-ui/src/rpc.ts` -- shared Tauri invoke wrapper for daemon RPC calls; best place to normalize rejection shape.
-- `jellyfinsync-ui/src/components/BasketSidebar.ts` -- sync start catch block and sync failure panel rendering.
-- `jellyfinsync-ui/src-tauri/src/lib.rs` -- confirms `rpc_proxy` returns `Result<serde_json::Value, String>`, so TypeScript may catch strings.
+- `hifimule-ui/src/rpc.ts` -- shared Tauri invoke wrapper for daemon RPC calls; best place to normalize rejection shape.
+- `hifimule-ui/src/components/BasketSidebar.ts` -- sync start catch block and sync failure panel rendering.
+- `hifimule-ui/src-tauri/src/lib.rs` -- confirms `rpc_proxy` returns `Result<serde_json::Value, String>`, so TypeScript may catch strings.
 
 ## Tasks & Acceptance
 
 **Execution:**
-- [x] `jellyfinsync-ui/src/rpc.ts` -- wrap `invoke('rpc_proxy')` failures in `Error` with a normalized message -- prevents all RPC call sites from seeing string/plain-object rejections.
-- [x] `jellyfinsync-ui/src/components/BasketSidebar.ts` -- avoid `undefined` in operation failure entries -- keeps sync failure details readable.
+- [x] `hifimule-ui/src/rpc.ts` -- wrap `invoke('rpc_proxy')` failures in `Error` with a normalized message -- prevents all RPC call sites from seeing string/plain-object rejections.
+- [x] `hifimule-ui/src/components/BasketSidebar.ts` -- avoid `undefined` in operation failure entries -- keeps sync failure details readable.
 
 **Acceptance Criteria:**
 - Given a sync-start RPC rejects with a string, when the basket shows the failure panel, then the panel includes that string after `Failed to start sync:` instead of `undefined`.
@@ -56,19 +56,19 @@ context: []
 ## Verification
 
 **Commands:**
-- `rtk npm run build --prefix jellyfinsync-ui` -- expected: TypeScript and Vite build succeed.
+- `rtk npm run build --prefix hifimule-ui` -- expected: TypeScript and Vite build succeed.
 
 ## Suggested Review Order
 
 **RPC Error Boundary**
 
 - Normalize Tauri rejection shapes before UI callers inspect `.message`.
-  [`rpc.ts:7`](../../jellyfinsync-ui/src/rpc.ts#L7)
+  [`rpc.ts:7`](../../hifimule-ui/src/rpc.ts#L7)
 
 - Re-throw normalized RPC failures as real `Error` instances.
-  [`rpc.ts:46`](../../jellyfinsync-ui/src/rpc.ts#L46)
+  [`rpc.ts:46`](../../hifimule-ui/src/rpc.ts#L46)
 
 **Sync Error Rendering**
 
 - Prevent incomplete operation error payloads from rendering `undefined`.
-  [`BasketSidebar.ts:1019`](../../jellyfinsync-ui/src/components/BasketSidebar.ts#L1019)
+  [`BasketSidebar.ts:1019`](../../hifimule-ui/src/components/BasketSidebar.ts#L1019)

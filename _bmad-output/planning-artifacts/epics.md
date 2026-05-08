@@ -3,11 +3,11 @@ inputDocuments: ['prd.md', 'architecture.md', 'ux-design-specification.md', 'pro
 status: 'complete'
 completedAt: '2026-01-27'
 
-# JellyfinSync - Epic Breakdown
+# HifiMule - Epic Breakdown
 
 ## Overview
 
-This document provides the complete epic and story breakdown for JellyfinSync, decomposing the requirements from the PRD, UX Design, and Architecture requirements into implementable stories.
+This document provides the complete epic and story breakdown for HifiMule, decomposing the requirements from the PRD, UX Design, and Architecture requirements into implementable stories.
 
 ## Requirements Inventory
 
@@ -15,7 +15,7 @@ This document provides the complete epic and story breakdown for JellyfinSync, d
 
 FR1: Automatically detect Mass Storage devices (USB) on Windows, Linux, and macOS.
 FR2: Manually select a target device folder if automatic detection fails.
-FR3: Identify the presence of a `.jellyfinsync.json` manifest on discovery.
+FR3: Identify the presence of a `.hifimule.json` manifest on discovery.
 FR4: Read persistent hardware identifiers to link devices across different sessions.
 FR5: Configure Jellyfin server credentials (URL, username, token).
 FR6: Select a specific Jellyfin user profile for syncing.
@@ -44,7 +44,7 @@ NFR1: Memory footprint < 10MB during idle states.
 NFR2: Complete manifest audit and be "ready to sync" in < 5 seconds.
 NFR3: Sync throughput limited only by target hardware or network bandwidth.
 NFR4: Utilize OS-level file sync primitives (sync_all) for data integrity.
-NFR5: Atomic `.jellyfinsync.json` manifest updates.
+NFR5: Atomic `.hifimule.json` manifest updates.
 NFR6: Network interruption handling with at least 3 retry cycles.
 NFR7: Graceful "Interrupted" session marking and repair utility trigger on mid-sync disconnect.
 NFR8: 100% feature parity between Windows, Linux, and macOS.
@@ -59,7 +59,7 @@ NFR13: CLI-first architecture for the core sync engine.
 - **Multi-process Architecture:** Rust Daemon + Tauri v2 UI (Detachable).
 - **IPC Mechanism:** JSON-RPC 2.0 over localhost HTTP.
 - **Data Persistence:** SQLite (`rusqlite`) for daemon state and scrobble history.
-- **Project Structure:** Rust Cargo Workspace containing `jellyfinsync-daemon` and `jellyfinsync-ui`.
+- **Project Structure:** Rust Cargo Workspace containing `hifimule-daemon` and `hifimule-ui`.
 - **UI Framework:** Shoelace Web Components for performance and consistency.
 - **Design Layout:** "Basket Centric" (70/30 split view).
 - **Managed Safety:** Visual "Managed Zone" shield to isolate personal data.
@@ -120,8 +120,8 @@ So that the sync engine can operate under the 10MB memory goal independent of th
 
 **Given** a clean project directory
 **When** I run `cargo build`
-**Then** the workspace successfully compiles both `jellyfinsync-daemon` and `jellyfinsync-ui` (Tauri).
-**And** `jellyfinsync-daemon` starts as a standalone headless binary.
+**Then** the workspace successfully compiles both `hifimule-daemon` and `hifimule-ui` (Tauri).
+**And** `hifimule-daemon` starts as a standalone headless binary.
 
 ### Story 1.2: Cross-Platform System Tray Hub
 
@@ -131,9 +131,9 @@ So that I can monitor the sync engine's health (Idle/Syncing/Error) without open
 
 **Acceptance Criteria:**
 
-**Given** the `jellyfinsync-daemon` is running
+**Given** the `hifimule-daemon` is running
 **When** I check the system taskbar/menu bar
-**Then** I see the JellyfinSync icon.
+**Then** I see the HifiMule icon.
 **And** the icon provides a "Quit" and "Open UI" menu option.
 
 ### Story 1.3: Detachable Tauri UI Skeleton
@@ -179,7 +179,7 @@ So that I don't have to manually hunt for folder paths.
 **Given** the daemon is running in the tray
 **When** a USB Mass Storage device is connected
 **Then** the daemon triggers a "Device Detected" event.
-**And** it checks for the presence of a `.jellyfinsync.json` manifest in the root directory.
+**And** it checks for the presence of a `.hifimule.json` manifest in the root directory.
 
 **Note:** This story covers MSC (Mass Storage Class) devices only — USB devices that mount as drive letters. MTP device detection is covered by Story 2.10.
 
@@ -191,7 +191,7 @@ So that I can plug in and walk away without any interaction.
 
 **Acceptance Criteria:**
 
-**Given** a known device (has `.jellyfinsync.json` with a unique ID) is connected
+**Given** a known device (has `.hifimule.json` with a unique ID) is connected
 **When** the daemon reads the ID
 **Then** it automatically loads the associated Jellyfin User Profile and Sync Rules.
 
@@ -213,9 +213,9 @@ So that I know the application hasn't frozen during its initialization phase.
 
 **Acceptance Criteria:**
 
-**Given** the `jellyfinsync-ui` is launched
+**Given** the `hifimule-ui` is launched
 **When** the application is initializing (loading daemon, checking connection)
-**Then** a native Tauri splash screen featuring the JellyfinSync logo and name is displayed.
+**Then** a native Tauri splash screen featuring the HifiMule logo and name is displayed.
 **And** it clearly indicates the current state via status text (e.g., "Initializing Daemon...", "Connecting to Server...").
 **When** the daemon is ready and connection is verified
 **Then** the splash screen auto-dismisses and the main window appears.
@@ -245,12 +245,12 @@ So that I can easily connect to my library without manually copying API tokens.
 ### Story 2.6: Initialize New Device Manifest
 
 As a Ritualist (Arthur) and Convenience Seeker (Sarah),
-I want the application to detect when a connected removable disk has no `.jellyfinsync.json` manifest and guide me through initializing it,
+I want the application to detect when a connected removable disk has no `.hifimule.json` manifest and guide me through initializing it,
 So that I can bring a brand-new device into the managed sync model without manually creating any files.
 
 **Acceptance Criteria:**
 
-**Given** a USB mass storage device is connected with no `.jellyfinsync.json` present in its root
+**Given** a USB mass storage device is connected with no `.hifimule.json` present in its root
 **When** the daemon completes its device discovery scan
 **Then** it broadcasts an `on_device_unrecognized` event to the UI.
 **And** the UI displays an "Initialize Device" banner in the Device State panel.
@@ -261,7 +261,7 @@ So that I can bring a brand-new device into the managed sync model without manua
 **And** I can select the associated Jellyfin user profile for this device.
 **When** I click "Confirm"
 **Then** the UI sends a `device.initialize` JSON-RPC request to the daemon with the chosen folder path and profile ID.
-**And** the daemon writes an initial `.jellyfinsync.json` to the device via `device_io.write_with_verify()`, containing a new unique hardware ID and the selected profile.
+**And** the daemon writes an initial `.hifimule.json` to the device via `device_io.write_with_verify()`, containing a new unique hardware ID and the selected profile.
 **And** the daemon broadcasts an updated device state marking the device as "Managed".
 **And** the UI transitions to the normal sync-ready state.
 
@@ -375,14 +375,14 @@ So that it appears in the device hub without requiring manual steps.
 **When** an MTP device is connected
 **Then** the daemon receives a `WM_DEVICECHANGE` event with `GUID_DEVINTERFACE_WPD`.
 **And** it enumerates the device via `IPortableDeviceManager` to retrieve its device ID and friendly name.
-**And** it checks for a `.jellyfinsync.json` object in the device root storage.
+**And** it checks for a `.hifimule.json` object in the device root storage.
 **And** it fires a `on_device_detected` or `on_device_unrecognized` event (identical behavior to MSC Story 2.2).
 
 **Given** the daemon is running on Linux
 **When** an MTP device is connected
 **Then** the daemon receives a `udev` USB event.
 **And** `libmtp` enumerates the device and retrieves its serial/device ID.
-**And** it checks for `.jellyfinsync.json` and fires the appropriate event.
+**And** it checks for `.hifimule.json` and fires the appropriate event.
 
 **Given** the daemon is running on macOS
 **When** an MTP device is connected
@@ -466,7 +466,7 @@ So that I can focus purely on my music collection for my DAP.
 **Acceptance Criteria:**
 
 **Given** a Jellyfin library with mixed content types
-**When** browsing the library in JellyfinSync
+**When** browsing the library in HifiMule
 **Then** only MusicAlbums, Playlists, Artists, and MusicVideos (optional) are retrieved.
 **And** Movies, Series, and Books are explicitly excluded from the UI views.
 
@@ -633,7 +633,7 @@ So that the sync engine works identically for both MSC and MTP devices without d
 
 **Acceptance Criteria:**
 
-**Given** the `DeviceIO` trait is defined in `jellyfinsync-daemon`
+**Given** the `DeviceIO` trait is defined in `hifimule-daemon`
 **When** any sync, manifest, or scrobble operation targets a device
 **Then** it calls methods on `Arc<dyn DeviceIO>` exclusively — no direct `std::fs` calls with a device path anywhere outside `MscBackend`.
 
@@ -672,14 +672,14 @@ So that the sync engine works identically for both MSC and MTP devices without d
 ### Story 4.1: Differential Sync Algorithm (Manifest Comparison)
 
 As a System Admin (Alexis),
-I want the engine to calculate exactly which files to add or delete by comparing the Jellyfin server state with the local `.jellyfinsync.json` manifest,
+I want the engine to calculate exactly which files to add or delete by comparing the Jellyfin server state with the local `.hifimule.json` manifest,
 So that only necessary changes are made to the disk, preserving the hardware's life.
 
 **Acceptance Criteria:**
 
 **Given** a Selection Basket with 50 items
 **When** the sync engine starts
-**Then** it generates a list of "Adds" and "Deletes" based on the `.jellyfinsync.json` record.
+**Then** it generates a list of "Adds" and "Deletes" based on the `.hifimule.json` record.
 **And** it detects if server IDs have changed for existing local files.
 
 ### Story 4.2: Atomic Buffered-IO Streaming
@@ -783,7 +783,7 @@ So that I know whether to wait by the screen or step away.
 - Daemon: `SyncOperation` gains `bytes_transferred: u64` (cumulative across completed + in-progress file) and `total_bytes: u64` (pre-computed sum of all file sizes at sync start)
 - `total_bytes` written once at start of `execute_sync()`; `bytes_transferred` updated in the per-file progress callback
 - ETA calculation and display are UI-side only (`BasketSidebar.ts`)
-- Tray tooltip remains "JellyfinSync: Syncing…" — ETA is UI-only (known variance)
+- Tray tooltip remains "HifiMule: Syncing…" — ETA is UI-only (known variance)
 
 ### Story 4.7: Playlist M3U File Generation
 
@@ -927,12 +927,12 @@ So that I can recover my "Managed" status without a full wipe.
 
 ## Epic 6: Packaging & Distribution
 
-Package JellyfinSync into platform-native installers and establish automated cross-platform build pipelines.
+Package HifiMule into platform-native installers and establish automated cross-platform build pipelines.
 
 ### Story 6.1: Tauri Bundler Configuration & Sidecar Packaging
 
 As a System Admin (Alexis),
-I want the Tauri bundler configured to include the `jellyfinsync-daemon` binary as a sidecar,
+I want the Tauri bundler configured to include the `hifimule-daemon` binary as a sidecar,
 So that a single installer delivers both the UI and the headless engine as a cohesive application.
 
 **Acceptance Criteria:**
@@ -941,26 +941,26 @@ So that a single installer delivers both the UI and the headless engine as a coh
 **When** I run `cargo tauri build`
 **Then** the output produces a platform-native installer containing both the Tauri UI and the daemon sidecar.
 **And** the installed application can launch the daemon from the bundled sidecar path.
-**And** the application icon, name ("JellyfinSync"), and metadata are correctly embedded.
+**And** the application icon, name ("HifiMule"), and metadata are correctly embedded.
 
 ### Story 6.2: Windows Installer (MSI)
 
 As a Ritualist (Arthur),
 I want a standard Windows MSI installer,
-So that I can install JellyfinSync like any other desktop application on my Windows PC.
+So that I can install HifiMule like any other desktop application on my Windows PC.
 
 **Acceptance Criteria:**
 
 **Given** a successful `cargo tauri build` on Windows
 **When** I run the generated MSI
-**Then** JellyfinSync is installed to Program Files with Start Menu shortcuts.
+**Then** HifiMule is installed to Program Files with Start Menu shortcuts.
 **And** the daemon sidecar is placed alongside the main executable.
 **And** uninstallation via "Add/Remove Programs" cleanly removes all installed files.
 
 **Post-MVP: Daemon as Windows Startup Application**
 **Given** the MSI installation completes
 **When** the installer registers the startup entry
-**Then** `jellyfinsync-daemon` is registered as a startup application via a Registry `Run` key (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`).
+**Then** `hifimule-daemon` is registered as a startup application via a Registry `Run` key (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`).
 **And** the daemon launches automatically when the user logs in, running in the user session with full tray icon and notification support.
 **And** the UI detects the running daemon via a health-check RPC call instead of spawning a sidecar.
 **And** if the daemon is not running, the UI attempts to launch it directly.
@@ -970,13 +970,13 @@ So that I can install JellyfinSync like any other desktop application on my Wind
 
 As a Convenience Seeker (Sarah),
 I want a macOS DMG with drag-to-Applications install,
-So that I can install JellyfinSync following standard macOS conventions.
+So that I can install HifiMule following standard macOS conventions.
 
 **Acceptance Criteria:**
 
 **Given** a successful `cargo tauri build` on macOS
 **When** I open the generated DMG
-**Then** I see the JellyfinSync app bundle with a drag-to-Applications prompt.
+**Then** I see the HifiMule app bundle with a drag-to-Applications prompt.
 **And** the app runs without requiring root/sudo privileges (macOS sandbox compliance — NFR9).
 **And** the daemon sidecar is embedded within the .app bundle.
 
@@ -993,24 +993,24 @@ So that I can install JellyfinSync following standard macOS conventions.
 
 As a System Admin (Alexis),
 I want AppImage and .deb packages for Linux,
-So that I can install JellyfinSync on both Debian-based systems and any Linux distro via AppImage.
+So that I can install HifiMule on both Debian-based systems and any Linux distro via AppImage.
 
 **Acceptance Criteria:**
 
 **Given** a successful `cargo tauri build` on Linux
 **When** I run the AppImage
-**Then** JellyfinSync launches without requiring installation.
+**Then** HifiMule launches without requiring installation.
 **When** I install the .deb package
-**Then** JellyfinSync is installed with a desktop entry and can be launched from the application menu.
+**Then** HifiMule is installed with a desktop entry and can be launched from the application menu.
 **And** both formats include the daemon sidecar binary.
 
 **Post-MVP: Daemon as systemd User Service**
 **Given** the .deb package is installed
 **When** the post-install script runs
-**Then** a systemd user service unit is installed and enabled via `systemctl --user enable jellyfinsync-daemon`.
+**Then** a systemd user service unit is installed and enabled via `systemctl --user enable hifimule-daemon`.
 **And** the daemon starts automatically on user login.
 **And** the UI detects the running daemon via a health-check RPC call instead of spawning a sidecar.
-**And** if the service is not running, the UI attempts `systemctl --user start jellyfinsync-daemon`.
+**And** if the service is not running, the UI attempts `systemctl --user start hifimule-daemon`.
 **And** package removal disables and removes the service unit.
 **Note:** AppImage cannot register services; it falls back to the sidecar model.
 
@@ -1024,7 +1024,7 @@ So that every release produces verified, downloadable artifacts without manual p
 
 **Given** a tagged release commit (e.g., `v0.1.0`) is pushed
 **When** the GitHub Actions workflow triggers
-**Then** it builds JellyfinSync on Windows, macOS, and Linux runners in parallel.
+**Then** it builds HifiMule on Windows, macOS, and Linux runners in parallel.
 **And** each build produces the platform-native installer (MSI, DMG, AppImage, .deb).
 **And** all artifacts are uploaded to a GitHub Release draft.
 **And** the workflow fails clearly if any platform build fails.
@@ -1275,7 +1275,7 @@ So that every release artifact is verifiable, installable on clean machines, and
 
 **Given** `beforeBuildCommand` in `tauri.conf.json`
 **When** triggered by `cargo tauri build` on Windows and Linux
-**Then** the command resolves relative paths correctly regardless of whether the CWD is the workspace root or the `jellyfinsync-ui` directory.
+**Then** the command resolves relative paths correctly regardless of whether the CWD is the workspace root or the `hifimule-ui` directory.
 
 **Given** the boot-volume exclusion guard in `get_mounts` (`device/mod.rs:968-975`)
 **When** unit tests run
@@ -1283,7 +1283,7 @@ So that every release artifact is verifiable, installable on clean machines, and
 
 **Given** the installation smoke tests
 **When** run in CI
-**Then** the macOS step uses `find "${MOUNT_POINT}" -name "*.app" -maxdepth 1` rather than hardcoding `JellyfinSync.app`, so a `productName` change in `tauri.conf.json` does not silently break the test.
+**Then** the macOS step uses `find "${MOUNT_POINT}" -name "*.app" -maxdepth 1` rather than hardcoding `HifiMule.app`, so a `productName` change in `tauri.conf.json` does not silently break the test.
 
 **Given** the smoke test workflow
 **When** a release is published
@@ -1304,7 +1304,7 @@ So that every release artifact is verifiable, installable on clean machines, and
 
 **Given** the Windows smoke test searches for the installed executable
 **When** the MSI `INSTALLDIR` is customized or a NSIS target is added
-**Then** the smoke test resolves the install path via the registry (`HKLM\SOFTWARE\JellyfinSync\InstallDir`) rather than the hardcoded `C:\Program Files\JellyfinSync`. [`.github/workflows/smoke-tests.yml`]
+**Then** the smoke test resolves the install path via the registry (`HKLM\SOFTWARE\HifiMule\InstallDir`) rather than the hardcoded `C:\Program Files\HifiMule`. [`.github/workflows/smoke-tests.yml`]
 
 **Technical Notes:**
 - `.deb` runtime deps: add `"deb": { "depends": ["libmtp9"] }` in `tauri.conf.json` bundle config

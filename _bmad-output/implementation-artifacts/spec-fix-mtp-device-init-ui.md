@@ -44,19 +44,19 @@ context: []
 
 ## Code Map
 
-- `jellyfinsync-daemon/src/device/mod.rs:143-155` — `DeviceEvent` enum; add `friendly_name` field to `Unrecognized` variant
-- `jellyfinsync-daemon/src/device/mod.rs:172-190` — `DeviceManager` struct + `new()`; add `unrecognized_device_friendly_name` field
-- `jellyfinsync-daemon/src/device/mod.rs:300-323` — `handle_device_unrecognized`; accept and store `friendly_name`
-- `jellyfinsync-daemon/src/device/mod.rs:333-362` — `handle_device_removed`; clear `friendly_name` atomically
-- `jellyfinsync-daemon/src/device/mod.rs:543-616` — `list_root_folders`; early-exit for `mtp://` paths
-- `jellyfinsync-daemon/src/device/mod.rs:992-1045` — `run_observer` (MSC); pass `friendly_name: None`
-- `jellyfinsync-daemon/src/device/mod.rs:1048-1110` — `run_mtp_observer`; pass `friendly_name: Some(dev.friendly_name.clone())`
-- `jellyfinsync-daemon/src/main.rs:300-304` — `DeviceEvent::Unrecognized` handler; destructure `friendly_name` and pass to `handle_device_unrecognized`
+- `hifimule-daemon/src/device/mod.rs:143-155` — `DeviceEvent` enum; add `friendly_name` field to `Unrecognized` variant
+- `hifimule-daemon/src/device/mod.rs:172-190` — `DeviceManager` struct + `new()`; add `unrecognized_device_friendly_name` field
+- `hifimule-daemon/src/device/mod.rs:300-323` — `handle_device_unrecognized`; accept and store `friendly_name`
+- `hifimule-daemon/src/device/mod.rs:333-362` — `handle_device_removed`; clear `friendly_name` atomically
+- `hifimule-daemon/src/device/mod.rs:543-616` — `list_root_folders`; early-exit for `mtp://` paths
+- `hifimule-daemon/src/device/mod.rs:992-1045` — `run_observer` (MSC); pass `friendly_name: None`
+- `hifimule-daemon/src/device/mod.rs:1048-1110` — `run_mtp_observer`; pass `friendly_name: Some(dev.friendly_name.clone())`
+- `hifimule-daemon/src/main.rs:300-304` — `DeviceEvent::Unrecognized` handler; destructure `friendly_name` and pass to `handle_device_unrecognized`
 
 ## Tasks & Acceptance
 
 **Execution:**
-- [x] `jellyfinsync-daemon/src/device/mod.rs` — Apply all changes atomically:
+- [x] `hifimule-daemon/src/device/mod.rs` — Apply all changes atomically:
   1. Add `friendly_name: Option<String>` to `DeviceEvent::Unrecognized` (line 151).
   2. Add `unrecognized_device_friendly_name: Arc<RwLock<Option<String>>>` field after `unrecognized_device_io` in `DeviceManager` struct; initialize to `Arc::new(RwLock::new(None))` in `new()`.
   3. In `handle_device_unrecognized`: add `friendly_name: Option<String>` parameter; acquire all three locks together; store `friendly_name`; keep existing overwrite-warning log.
@@ -64,7 +64,7 @@ context: []
   5. In `list_root_folders` (after resolving `device_path`, before `read_dir`): if `device_path.to_string_lossy().starts_with("mtp://")`, build and return a `DeviceRootFoldersResponse` from `managed_paths` and stored `friendly_name` without calling `fs::read_dir`. Managed device: `folders = managed_paths.iter().map(|p| DeviceFolderInfo { name: p.clone(), relative_path: p.clone(), is_managed: true }).collect()`. Unrecognized: `folders = vec![]`.
   6. In `run_observer` (MSC `Unrecognized` emit at line ~1022): add `friendly_name: None`.
   7. In `run_mtp_observer` (both `Unrecognized` emits): add `friendly_name: Some(dev.friendly_name.clone())`.
-- [x] `jellyfinsync-daemon/src/main.rs` — Update `DeviceEvent::Unrecognized` match arm to destructure `friendly_name` and pass it to `handle_device_unrecognized(path, device_io, friendly_name).await`.
+- [x] `hifimule-daemon/src/main.rs` — Update `DeviceEvent::Unrecognized` match arm to destructure `friendly_name` and pass it to `handle_device_unrecognized(path, device_io, friendly_name).await`.
 
 **Acceptance Criteria:**
 - Given the daemon is running and a Garmin watch (or any unrecognized MTP device) is plugged in, when the UI polls `get_daemon_state`, then `pendingDevicePath` is non-null AND `device_list_root_folders` returns `{ hasManifest: false }` — the "New Device Detected / Initialize" banner appears in BasketSidebar.
@@ -77,45 +77,45 @@ context: []
 **Core fix — MTP path bypass in `list_root_folders`**
 
 - Early-exit for `mtp://` paths: no filesystem access, returns valid `has_manifest` response.
-  [`mod.rs:569`](../../jellyfinsync-daemon/src/device/mod.rs#L569)
+  [`mod.rs:569`](../../hifimule-daemon/src/device/mod.rs#L569)
 
 - Friendly-name read: extracted before `device_name` expression to avoid `try_read` race.
-  [`mod.rs:577`](../../jellyfinsync-daemon/src/device/mod.rs#L577)
+  [`mod.rs:577`](../../hifimule-daemon/src/device/mod.rs#L577)
 
 **Event & state plumbing**
 
 - `DeviceEvent::Unrecognized` gains `friendly_name` field; all match sites updated.
-  [`mod.rs:151`](../../jellyfinsync-daemon/src/device/mod.rs#L151)
+  [`mod.rs:151`](../../hifimule-daemon/src/device/mod.rs#L151)
 
 - `DeviceManager` stores `unrecognized_device_friendly_name`; init and clear are atomic with path+io.
-  [`mod.rs:182`](../../jellyfinsync-daemon/src/device/mod.rs#L182)
+  [`mod.rs:182`](../../hifimule-daemon/src/device/mod.rs#L182)
 
 - `handle_device_unrecognized` stores `friendly_name`; three locks acquired together.
-  [`mod.rs:305`](../../jellyfinsync-daemon/src/device/mod.rs#L305)
+  [`mod.rs:305`](../../hifimule-daemon/src/device/mod.rs#L305)
 
 - `handle_device_removed` clears `friendly_name` alongside path and io.
-  [`mod.rs:356`](../../jellyfinsync-daemon/src/device/mod.rs#L356)
+  [`mod.rs:356`](../../hifimule-daemon/src/device/mod.rs#L356)
 
 **Observer wiring**
 
 - MTP observer passes `Some(dev.friendly_name.clone())` on both Unrecognized paths.
-  [`mod.rs:1119`](../../jellyfinsync-daemon/src/device/mod.rs#L1119)
+  [`mod.rs:1119`](../../hifimule-daemon/src/device/mod.rs#L1119)
 
 - MSC observer passes `friendly_name: None`.
-  [`mod.rs:1064`](../../jellyfinsync-daemon/src/device/mod.rs#L1064)
+  [`mod.rs:1064`](../../hifimule-daemon/src/device/mod.rs#L1064)
 
 - `main.rs` event handler destructures and forwards `friendly_name`.
-  [`main.rs:300`](../../jellyfinsync-daemon/src/main.rs#L300)
+  [`main.rs:300`](../../hifimule-daemon/src/main.rs#L300)
 
 **Tests**
 
 - Two new MTP-specific `list_root_folders` tests (with and without friendly_name).
-  [`tests.rs:884`](../../jellyfinsync-daemon/src/device/tests.rs#L884)
+  [`tests.rs:884`](../../hifimule-daemon/src/device/tests.rs#L884)
 
 ## Spec Change Log
 
 ## Verification
 
 **Commands:**
-- `cargo build --manifest-path jellyfinsync-daemon/Cargo.toml` -- expected: zero errors, zero new warnings
-- `cargo test --manifest-path jellyfinsync-daemon/Cargo.toml` -- expected: all tests pass
+- `cargo build --manifest-path hifimule-daemon/Cargo.toml` -- expected: zero errors, zero new warnings
+- `cargo test --manifest-path hifimule-daemon/Cargo.toml` -- expected: all tests pass

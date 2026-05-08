@@ -50,20 +50,20 @@ so that **I can see exactly what I'm about to sync without committing yet.**
     -   **Navigation:** Ensure the "Add to Basket" action does NOT conflict with the "Navigate to Album" action. Use a specific button or handle click (add) vs double-click (navigate), or separate click zones. *Decision: Use a dedicated (+) button overlay on hover/focus.*
     -   **Image Proxy:** Continue using the correctly implemented image proxy from Story 3.1.
 -   **Source tree components to touch:**
-    - `jellyfinsync-daemon/src/rpc.rs`: [MODIFY] Add item count helper.
-    - `jellyfinsync-ui/src/state/basket.ts`: [NEW] State management.
-    - `jellyfinsync-ui/src/components/BasketSidebar.ts`: [NEW] Sidebar logic.
-    - `jellyfinsync-ui/src/components/MediaCard.ts`: [NEW] Add selection overlay.
-    - `jellyfinsync-ui/src/library.ts`: [NOTE] Integrate basket sidebar.
+    - `hifimule-daemon/src/rpc.rs`: [MODIFY] Add item count helper.
+    - `hifimule-ui/src/state/basket.ts`: [NEW] State management.
+    - `hifimule-ui/src/components/BasketSidebar.ts`: [NEW] Sidebar logic.
+    - `hifimule-ui/src/components/MediaCard.ts`: [NEW] Add selection overlay.
+    - `hifimule-ui/src/library.ts`: [NOTE] Integrate basket sidebar.
 
 ### Project Structure Notes
 
--   Create `jellyfinsync-ui/src/state/` directory for `basket.ts` if it doesn't exist, to keep state logic separate from UI components.
+-   Create `hifimule-ui/src/state/` directory for `basket.ts` if it doesn't exist, to keep state logic separate from UI components.
 
 ### References
 
--   [Story 3.1 (Library)](file:///c:/Workspaces/JellyfinSync/_bmad-output/implementation-artifacts/3-1-immersive-media-browser-jellyfin-integration.md)
--   [UX Design - Basket Layout](file:///c:/Workspaces/JellyfinSync/_bmad-output/planning-artifacts/ux-design-specification.md#L58-L59)
+-   [Story 3.1 (Library)](file:///c:/Workspaces/HifiMule/_bmad-output/implementation-artifacts/3-1-immersive-media-browser-jellyfin-integration.md)
+-   [UX Design - Basket Layout](file:///c:/Workspaces/HifiMule/_bmad-output/planning-artifacts/ux-design-specification.md#L58-L59)
 
 ## Dev Agent Record
 

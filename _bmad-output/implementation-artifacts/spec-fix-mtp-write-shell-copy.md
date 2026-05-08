@@ -27,7 +27,7 @@ context: ['spec-fix-mtp-wpd-com-threading.md', 'spec-fix-mtp-write-not-ready.md'
 - The WPD phase (ensure dirs + delete existing) runs first; the Shell phase runs second. The WPD session (`_com` + `device`) is fully dropped before the Shell phase begins — no concurrent WPD + Shell sessions.
 - `IFileOperation` is called with `FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT` (decimal: 0x0414). No parent HWND.
 - The temp file is always deleted (best-effort) after `PerformOperations` returns, regardless of success or failure.
-- Temp file name: `jellyfinsync_{nanos}.tmp` in `std::env::temp_dir()`. Uses SystemTime nanoseconds for uniqueness (sufficient for sequential daemon writes).
+- Temp file name: `hifimule_{nanos}.tmp` in `std::env::temp_dir()`. Uses SystemTime nanoseconds for uniqueness (sufficient for sequential daemon writes).
 - All Shell helpers are private free functions in `windows_wpd`; they are only called from `write_file`.
 - `read_file`, `delete_file`, `list_files`, `free_space` are not touched.
 - Diagnostic `daemon_log!` is added to the new Shell phase: before and after `PerformOperations`.
@@ -46,10 +46,10 @@ context: ['spec-fix-mtp-wpd-com-threading.md', 'spec-fix-mtp-write-not-ready.md'
 
 | Scenario | Input / State | Expected Output / Behavior | Error Handling |
 |----------|--------------|---------------------------|----------------|
-| Write dirty marker to storage root | `write_file(".jellyfinsync.json.dirty", b"\x00")` | WPD phase: no parent dirs, no existing object; Shell: 1-byte temp file copied to storage root | Error from any phase propagates |
-| Write manifest to storage root | `write_file(".jellyfinsync.json", b"{\x22...}")` | Same as above but with JSON payload | Same |
+| Write dirty marker to storage root | `write_file(".hifimule.json.dirty", b"\x00")` | WPD phase: no parent dirs, no existing object; Shell: 1-byte temp file copied to storage root | Error from any phase propagates |
+| Write manifest to storage root | `write_file(".hifimule.json", b"{\x22...}")` | Same as above but with JSON payload | Same |
 | Write to nested path | `write_file("Music/track.mp3", data)` | WPD: `ensure_dir_chain(["Music"])` creates folder if missing; Shell: temp file copied to `Music/` | If dir creation fails, WPD error propagates before Shell phase |
-| Overwrite existing file | Existing `.jellyfinsync.json` on device | WPD delete removes it; Shell copy writes new version | Delete failure: `best-effort` (ignored); copy still attempted |
+| Overwrite existing file | Existing `.hifimule.json` on device | WPD delete removes it; Shell copy writes new version | Delete failure: `best-effort` (ignored); copy still attempted |
 | Device not in Shell namespace | Friendly name not found under "This PC" | `find_shell_child_by_name` returns error | Error propagates; initialization fails with descriptive message |
 | Temp file write fails | `%TEMP%` full | `std::fs::write` returns `Err` | Error propagates before Shell phase |
 | `PerformOperations` aborts | Shell copy aborted | `GetAnyOperationsAborted()` returns true | Returns `Err` with message including filename |
@@ -58,20 +58,20 @@ context: ['spec-fix-mtp-wpd-com-threading.md', 'spec-fix-mtp-write-not-ready.md'
 
 ## Code Map
 
-- `../../jellyfinsync-daemon/Cargo.toml` — add `"Win32_UI_Shell"` to windows features
-- `../../jellyfinsync-daemon/src/device/mtp.rs:195-197` — `WpdHandle` struct; add `friendly_name: String`
-- `../../jellyfinsync-daemon/src/device/mtp.rs:200-202` — `WpdHandle::open`; add `friendly_name` parameter and store it
-- `../../jellyfinsync-daemon/src/device/mtp.rs:1136` — `create_mtp_backend`; pass `info.friendly_name` to `WpdHandle::open`
-- `../../jellyfinsync-daemon/src/device/mtp.rs:571-650` — `WpdHandle::write_file`; rewrite to two-phase approach
+- `../../hifimule-daemon/Cargo.toml` — add `"Win32_UI_Shell"` to windows features
+- `../../hifimule-daemon/src/device/mtp.rs:195-197` — `WpdHandle` struct; add `friendly_name: String`
+- `../../hifimule-daemon/src/device/mtp.rs:200-202` — `WpdHandle::open`; add `friendly_name` parameter and store it
+- `../../hifimule-daemon/src/device/mtp.rs:1136` — `create_mtp_backend`; pass `info.friendly_name` to `WpdHandle::open`
+- `../../hifimule-daemon/src/device/mtp.rs:571-650` — `WpdHandle::write_file`; rewrite to two-phase approach
 - NEW helpers added after `find_child_object_id` in `windows_wpd`: `shell_copy_to_device`, `find_shell_child_by_name`, `first_shell_folder_child`
 
 ## Tasks & Acceptance
 
 **Execution:**
 
-- [x] `jellyfinsync-daemon/Cargo.toml` — In the windows features list, add `"Win32_UI_Shell"` after `"Win32_UI_Shell_PropertiesSystem"`.
+- [x] `hifimule-daemon/Cargo.toml` — In the windows features list, add `"Win32_UI_Shell"` after `"Win32_UI_Shell_PropertiesSystem"`.
 
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` — After the existing manually-defined constants block (around line 165), add any required Shell constants not present in the windows crate:
+- [x] `hifimule-daemon/src/device/mtp.rs` — After the existing manually-defined constants block (around line 165), add any required Shell constants not present in the windows crate:
   ```rust
   // FOLDERID_ComputerFolder = {0AC0837C-BBF8-452A-850D-79D08E667CA7}
   const FOLDERID_ComputerFolder: windows::core::GUID = windows::core::GUID::from_values(
@@ -84,7 +84,7 @@ context: ['spec-fix-mtp-wpd-com-threading.md', 'spec-fix-mtp-write-not-ready.md'
   ```
   If `FOLDERID_ComputerFolder` or `BHID_SFObject` are already re-exported by the `Win32_UI_Shell` feature, skip the corresponding manual definition.
 
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` — Update `WpdHandle` struct (line ~195):
+- [x] `hifimule-daemon/src/device/mtp.rs` — Update `WpdHandle` struct (line ~195):
   ```rust
   pub struct WpdHandle {
       device_id: String,
@@ -101,12 +101,12 @@ context: ['spec-fix-mtp-wpd-com-threading.md', 'spec-fix-mtp-write-not-ready.md'
   }
   ```
 
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` — Update `create_mtp_backend` (line ~1136):
+- [x] `hifimule-daemon/src/device/mtp.rs` — Update `create_mtp_backend` (line ~1136):
   ```rust
   Arc::new(windows_wpd::WpdHandle::open(wpd_device_id, &info.friendly_name)?)
   ```
 
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` — Add new imports to the `windows_wpd` `use` block:
+- [x] `hifimule-daemon/src/device/mtp.rs` — Add new imports to the `windows_wpd` `use` block:
   ```rust
   use windows::Win32::UI::Shell::{
       FileOperation, IEnumIDList, IFileOperation, IShellFolder, IShellItem,
@@ -118,7 +118,7 @@ context: ['spec-fix-mtp-wpd-com-threading.md', 'spec-fix-mtp-write-not-ready.md'
   ```
   Adjust the import list if any of these symbols are in different submodules or named differently in `windows = 0.58`. Check by attempting `cargo build` and fixing unresolved paths.
 
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` — Add the three Shell helpers as private free functions inside `windows_wpd`, placed after the existing `find_child_object_id` function:
+- [x] `hifimule-daemon/src/device/mtp.rs` — Add the three Shell helpers as private free functions inside `windows_wpd`, placed after the existing `find_child_object_id` function:
 
   **`shell_copy_to_device`**: Initializes COM (MTA), navigates Shell namespace to find device and destination folder, copies temp file via `IFileOperation`.
   ```rust
@@ -249,7 +249,7 @@ context: ['spec-fix-mtp-wpd-com-threading.md', 'spec-fix-mtp-write-not-ready.md'
   }
   ```
 
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` — Rewrite `WpdHandle::write_file` (line ~571). Replace the current body wholesale with the two-phase approach:
+- [x] `hifimule-daemon/src/device/mtp.rs` — Rewrite `WpdHandle::write_file` (line ~571). Replace the current body wholesale with the two-phase approach:
   ```rust
   fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
       let components = super::split_path_components(path);
@@ -277,7 +277,7 @@ context: ['spec-fix-mtp-wpd-com-threading.md', 'spec-fix-mtp-write-not-ready.md'
 
       // Phase 2 (Shell): write temp file, copy to device, clean up.
       let temp_path = std::env::temp_dir().join(format!(
-          "jellyfinsync_{}.tmp",
+          "hifimule_{}.tmp",
           std::time::SystemTime::now()
               .duration_since(std::time::UNIX_EPOCH)
               .map(|d| d.as_nanos())
@@ -292,10 +292,10 @@ context: ['spec-fix-mtp-wpd-com-threading.md', 'spec-fix-mtp-write-not-ready.md'
   ```
 
 **Acceptance Criteria:**
-- Given a Garmin Forerunner 945 is connected and the user submits the Initialize form, then `write_with_verify` writes `.jellyfinsync.json.dirty` as a **file** (not a folder) on the device storage root and completes without error; the device transitions to recognized state.
-- Given `cargo build --manifest-path jellyfinsync-daemon/Cargo.toml`, then zero errors, zero new warnings.
-- Given `cargo test --manifest-path jellyfinsync-daemon/Cargo.toml`, then all existing tests pass.
-- Given any path with no parent components (e.g. `".jellyfinsync.json"`), `write_file` calls `ensure_dir_chain` with an empty slice (no-op) and `navigate_shell_path` with an empty slice (returns storage root unchanged).
+- Given a Garmin Forerunner 945 is connected and the user submits the Initialize form, then `write_with_verify` writes `.hifimule.json.dirty` as a **file** (not a folder) on the device storage root and completes without error; the device transitions to recognized state.
+- Given `cargo build --manifest-path hifimule-daemon/Cargo.toml`, then zero errors, zero new warnings.
+- Given `cargo test --manifest-path hifimule-daemon/Cargo.toml`, then all existing tests pass.
+- Given any path with no parent components (e.g. `".hifimule.json"`), `write_file` calls `ensure_dir_chain` with an empty slice (no-op) and `navigate_shell_path` with an empty slice (returns storage root unchanged).
 - Given `PerformOperations` is aborted (e.g. no free space), `write_file` returns `Err` and the temp file is deleted.
 
 ## Spec Change Log
@@ -341,5 +341,5 @@ context: ['spec-fix-mtp-wpd-com-threading.md', 'spec-fix-mtp-write-not-ready.md'
 ## Verification
 
 **Commands:**
-- `rtk cargo build --manifest-path jellyfinsync-daemon/Cargo.toml` — expected: zero errors, zero new warnings
-- `rtk cargo test --manifest-path jellyfinsync-daemon/Cargo.toml` — expected: all tests pass
+- `rtk cargo build --manifest-path hifimule-daemon/Cargo.toml` — expected: zero errors, zero new warnings
+- `rtk cargo test --manifest-path hifimule-daemon/Cargo.toml` — expected: all tests pass

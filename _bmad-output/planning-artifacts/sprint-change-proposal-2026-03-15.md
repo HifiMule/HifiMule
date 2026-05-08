@@ -16,7 +16,7 @@
 ### Change B: Daemon as OS-Native Service (Post-MVP)
 **Problem:** The current sidecar model ties the daemon lifecycle to the UI — the daemon only runs while the UI is open and is killed on exit. For a sync tool that should respond to device connections at any time, this is limiting.
 
-**Requirement:** `jellyfinsync-daemon` should be installable as an OS-native background service (Windows Service, systemd user unit, launchd agent) so it runs independently of the UI, surviving reboots and user logoffs. The UI should connect to the running service rather than spawning a process.
+**Requirement:** `hifimule-daemon` should be installable as an OS-native background service (Windows Service, systemd user unit, launchd agent) so it runs independently of the UI, surviving reboots and user logoffs. The UI should connect to the running service rather than spawning a process.
 
 ## Section 2: Impact Analysis
 
@@ -102,7 +102,7 @@ All documentation updates have been applied directly. No further action needed f
 
 ### Section 1: Issue Summary
 
-**Problem:** Change B (above) added Post-MVP criteria for registering `jellyfinsync-daemon` as a **Windows Service** in Story 6.2. However, a Windows Service runs in Session 0 — an isolated, non-interactive session — which **cannot**:
+**Problem:** Change B (above) added Post-MVP criteria for registering `hifimule-daemon` as a **Windows Service** in Story 6.2. However, a Windows Service runs in Session 0 — an isolated, non-interactive session — which **cannot**:
 
 1. Display a system tray icon (FR22) — the `tray-icon` + `tao` event loop requires a user desktop session
 2. Show OS-native desktop notifications (FR23) — `notify-rust` requires user session access
@@ -182,11 +182,11 @@ Update three documentation sections in planning artifacts to replace the Windows
 
 **OLD:**
 > **Post-MVP: Daemon as Windows Service**
-> Given the MSI installation completes / When the service registration step runs / Then `jellyfinsync-daemon` is registered as a Windows Service (via `sc.exe` or NSSM). And the service is configured to start automatically on user login. And the UI detects the running service via a health-check RPC call instead of spawning a sidecar. And if the service is not running, the UI attempts to start it via `sc start`. And uninstallation removes the service registration.
+> Given the MSI installation completes / When the service registration step runs / Then `hifimule-daemon` is registered as a Windows Service (via `sc.exe` or NSSM). And the service is configured to start automatically on user login. And the UI detects the running service via a health-check RPC call instead of spawning a sidecar. And if the service is not running, the UI attempts to start it via `sc start`. And uninstallation removes the service registration.
 
 **NEW:**
 > **Post-MVP: Daemon as Windows Startup Application**
-> Given the MSI installation completes / When the installer registers the startup entry / Then `jellyfinsync-daemon` is registered as a startup application via a Registry `Run` key (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`). And the daemon launches automatically when the user logs in, running in the user session with full tray icon and notification support. And the UI detects the running daemon via a health-check RPC call instead of spawning a sidecar. And if the daemon is not running, the UI attempts to launch it directly. And uninstallation removes the Registry `Run` entry.
+> Given the MSI installation completes / When the installer registers the startup entry / Then `hifimule-daemon` is registered as a startup application via a Registry `Run` key (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`). And the daemon launches automatically when the user logs in, running in the user session with full tray icon and notification support. And the UI detects the running daemon via a health-check RPC call instead of spawning a sidecar. And if the daemon is not running, the UI attempts to launch it directly. And uninstallation removes the Registry `Run` entry.
 
 ### Section 5: Implementation Handoff
 

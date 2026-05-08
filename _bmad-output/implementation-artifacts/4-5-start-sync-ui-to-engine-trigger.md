@@ -306,7 +306,7 @@ so that **I can execute my prepared sync selection and monitor real-time progres
     ```
 
 - [x] **T6: Add CSS for progress/success/error panels** (AC: #3)
-  - [x] T6.1: Append the following rules to `jellyfinsync-ui/src/styles.css`:
+  - [x] T6.1: Append the following rules to `hifimule-ui/src/styles.css`:
     ```css
     /* ========================
        Sync Progress / Result Panels
@@ -387,7 +387,7 @@ so that **I can execute my prepared sync selection and monitor real-time progres
   - [x] T7.4: Manual — If `sync_execute` throws (e.g., no device): error panel appears with dismiss, basket NOT cleared
   - [x] T7.5: Manual — Click "Start Sync" twice rapidly → second click is ignored (`isSyncing` guard)
   - [x] T7.6: Manual — During active sync, navigate away and back → `destroy()` stops polling (no orphaned intervals)
-  - [x] T7.7: Run `cargo test` in `jellyfinsync-daemon/` — all existing tests still pass (no daemon changes)
+  - [x] T7.7: Run `cargo test` in `hifimule-daemon/` — all existing tests still pass (no daemon changes)
 
 ## Dev Notes
 
@@ -452,14 +452,14 @@ so that **I can execute my prepared sync selection and monitor real-time progres
 ### Source Tree Components to Touch
 
 **Files to MODIFY:**
-1. [jellyfinsync-ui/src/components/BasketSidebar.ts](jellyfinsync-ui/src/components/BasketSidebar.ts) — Primary implementation: T1–T5 changes
-2. [jellyfinsync-ui/src/styles.css](jellyfinsync-ui/src/styles.css) — T6: CSS for progress/success/error panels
+1. [hifimule-ui/src/components/BasketSidebar.ts](hifimule-ui/src/components/BasketSidebar.ts) — Primary implementation: T1–T5 changes
+2. [hifimule-ui/src/styles.css](hifimule-ui/src/styles.css) — T6: CSS for progress/success/error panels
 
 **Files to READ (do NOT modify):**
-3. [jellyfinsync-ui/src/rpc.ts](jellyfinsync-ui/src/rpc.ts) — `rpcCall(method, params)` function; `RPC_PORT`, `IMAGE_PROXY_URL`
-4. [jellyfinsync-ui/src/state/basket.ts](jellyfinsync-ui/src/state/basket.ts) — `BasketStore.getItems()`, `BasketStore.clear()`, `BasketItem` interface
-5. [jellyfinsync-daemon/src/rpc.rs](jellyfinsync-daemon/src/rpc.rs) — `handle_sync_execute` (line ~725), `handle_sync_get_operation_status` (line ~867)
-6. [jellyfinsync-daemon/src/sync.rs](jellyfinsync-daemon/src/sync.rs) — `SyncOperation`, `SyncFileError`, `SyncDelta` struct definitions
+3. [hifimule-ui/src/rpc.ts](hifimule-ui/src/rpc.ts) — `rpcCall(method, params)` function; `RPC_PORT`, `IMAGE_PROXY_URL`
+4. [hifimule-ui/src/state/basket.ts](hifimule-ui/src/state/basket.ts) — `BasketStore.getItems()`, `BasketStore.clear()`, `BasketItem` interface
+5. [hifimule-daemon/src/rpc.rs](hifimule-daemon/src/rpc.rs) — `handle_sync_execute` (line ~725), `handle_sync_get_operation_status` (line ~867)
+6. [hifimule-daemon/src/sync.rs](hifimule-daemon/src/sync.rs) — `SyncOperation`, `SyncFileError`, `SyncDelta` struct definitions
 
 **Files NOT to create or modify:**
 - Do NOT create a separate `SyncProgressPanel.ts` — keep all changes in `BasketSidebar.ts` (consistent with existing component co-location pattern)
@@ -468,7 +468,7 @@ so that **I can execute my prepared sync selection and monitor real-time progres
 
 ### Testing Standards Summary
 
-No TypeScript test framework is set up in the UI project. All testing is manual verification against the running application. Verify daemon side by running `cargo test` in `jellyfinsync-daemon/` to confirm no regressions (no daemon code changes in this story).
+No TypeScript test framework is set up in the UI project. All testing is manual verification against the running application. Verify daemon side by running `cargo test` in `hifimule-daemon/` to confirm no regressions (no daemon code changes in this story).
 
 ### Project Structure Notes
 
@@ -491,14 +491,14 @@ No TypeScript test framework is set up in the UI project. All testing is manual 
 - [Architecture: Loading State Patterns](../_bmad-output/planning-artifacts/architecture.md#process-patterns) — "Background tasks represented as Job IDs"
 - [Epic 4 Story 4.5](../_bmad-output/planning-artifacts/epics.md#story-45-start-sync-ui-to-engine-trigger) — Original AC + Technical Notes
 - [Story 4.4 Dev Notes](../_bmad-output/implementation-artifacts/4-4-self-healing-dirty-manifest-resume.md#dev-notes) — `sync_execute` dirty flag behavior; `sync_get_resume_state` API
-- [BasketSidebar.ts:108](jellyfinsync-ui/src/components/BasketSidebar.ts#L108) — `BasketSidebar` class start; render/state/event-binding patterns
-- [BasketSidebar.ts:262](jellyfinsync-ui/src/components/BasketSidebar.ts#L262) — Existing Start Sync button render location
-- [rpc.ts:5](jellyfinsync-ui/src/rpc.ts#L5) — `rpcCall()` signature
-- [basket.ts:75](jellyfinsync-ui/src/state/basket.ts#L75) — `BasketStore.getItems()` and `BasketStore.clear()`
-- [rpc.rs:126](jellyfinsync-daemon/src/rpc.rs#L126) — `sync_execute` route in handler match
-- [rpc.rs:867](jellyfinsync-daemon/src/rpc.rs#L867) — `handle_sync_get_operation_status` implementation
-- [sync.rs:109-139](jellyfinsync-daemon/src/sync.rs#L109) — `SyncStatus`, `SyncFileError`, `SyncOperation` definitions (camelCase serde)
-- [sync.rs:141](jellyfinsync-daemon/src/sync.rs#L141) — Comment: "Push-based SyncProgress events deferred to future story"
+- [BasketSidebar.ts:108](hifimule-ui/src/components/BasketSidebar.ts#L108) — `BasketSidebar` class start; render/state/event-binding patterns
+- [BasketSidebar.ts:262](hifimule-ui/src/components/BasketSidebar.ts#L262) — Existing Start Sync button render location
+- [rpc.ts:5](hifimule-ui/src/rpc.ts#L5) — `rpcCall()` signature
+- [basket.ts:75](hifimule-ui/src/state/basket.ts#L75) — `BasketStore.getItems()` and `BasketStore.clear()`
+- [rpc.rs:126](hifimule-daemon/src/rpc.rs#L126) — `sync_execute` route in handler match
+- [rpc.rs:867](hifimule-daemon/src/rpc.rs#L867) — `handle_sync_get_operation_status` implementation
+- [sync.rs:109-139](hifimule-daemon/src/sync.rs#L109) — `SyncStatus`, `SyncFileError`, `SyncOperation` definitions (camelCase serde)
+- [sync.rs:141](hifimule-daemon/src/sync.rs#L141) — Comment: "Push-based SyncProgress events deferred to future story"
 
 ## Dev Agent Record
 
@@ -510,9 +510,9 @@ GPT-5 Codex
 ### Debug Log References
 
 - Updated _bmad-output/implementation-artifacts/sprint-status.yaml for story 4-5-start-sync-ui-to-engine-trigger: in-progress.
-- Implemented Start Sync flow in jellyfinsync-ui/src/components/BasketSidebar.ts.
-- Added sync progress/result styling in jellyfinsync-ui/src/styles.css.
-- Ran cargo test in jellyfinsync-daemon (82 tests passed).
+- Implemented Start Sync flow in hifimule-ui/src/components/BasketSidebar.ts.
+- Added sync progress/result styling in hifimule-ui/src/styles.css.
+- Ran cargo test in hifimule-daemon (82 tests passed).
 
 ### Completion Notes List
 
@@ -527,13 +527,13 @@ GPT-5 Codex
 
 ### File List
 
-- jellyfinsync-ui/src/components/BasketSidebar.ts (modified)
-- jellyfinsync-ui/src/styles.css (modified)
+- hifimule-ui/src/components/BasketSidebar.ts (modified)
+- hifimule-ui/src/styles.css (modified)
 - _bmad-output/implementation-artifacts/sprint-status.yaml (modified)
-- jellyfinsync-daemon/src/api.rs (modified — added `container` field to `JellyfinItem`, moved credential test, added test mutex)
-- jellyfinsync-daemon/src/rpc.rs (modified — added deduplication logic for `sync_calculate_delta`, added playlist expansion test)
-- jellyfinsync-daemon/src/tests.rs (modified — moved `test_file_storage` to api.rs)
-- jellyfinsync-daemon/src/sync.rs (modified — fixed file extension derivation to use `media_sources[0].container`)
+- hifimule-daemon/src/api.rs (modified — added `container` field to `JellyfinItem`, moved credential test, added test mutex)
+- hifimule-daemon/src/rpc.rs (modified — added deduplication logic for `sync_calculate_delta`, added playlist expansion test)
+- hifimule-daemon/src/tests.rs (modified — moved `test_file_storage` to api.rs)
+- hifimule-daemon/src/sync.rs (modified — fixed file extension derivation to use `media_sources[0].container`)
 
 ## Change Log
 

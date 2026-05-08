@@ -11,19 +11,19 @@ I have implemented the **Live Selection Basket** feature, allowing users to coll
 ## 🛠️ Changes Made
 
 ### 🖥️ Frontend (UI)
-- [NEW] [basket.ts](file:///c:/Workspaces/JellyfinSync/jellyfinsync-ui/src/state/basket.ts): Centralized state management for the selection basket using `EventTarget` for reactivity.
-- [NEW] [BasketSidebar.ts](file:///c:/Workspaces/JellyfinSync/jellyfinsync-ui/src/components/BasketSidebar.ts): Reactive sidebar component displaying the current selection and summary.
-- [NEW] [MediaCard.ts](file:///c:/Workspaces/JellyfinSync/jellyfinsync-ui/src/components/MediaCard.ts): Enhanced media card with hover-triggered selection overlay and status badges.
-- [MODIFY] [main.ts](file:///c:/Workspaces/JellyfinSync/jellyfinsync-ui/src/main.ts): Integrated the split-panel layout to house the library and basket.
+- [NEW] [basket.ts](file:///c:/Workspaces/HifiMule/hifimule-ui/src/state/basket.ts): Centralized state management for the selection basket using `EventTarget` for reactivity.
+- [NEW] [BasketSidebar.ts](file:///c:/Workspaces/HifiMule/hifimule-ui/src/components/BasketSidebar.ts): Reactive sidebar component displaying the current selection and summary.
+- [NEW] [MediaCard.ts](file:///c:/Workspaces/HifiMule/hifimule-ui/src/components/MediaCard.ts): Enhanced media card with hover-triggered selection overlay and status badges.
+- [MODIFY] [main.ts](file:///c:/Workspaces/HifiMule/hifimule-ui/src/main.ts): Integrated the split-panel layout to house the library and basket.
 
 ### ⚙️ Backend (Daemon)
-- [MODIFY] [rpc.rs](file:///c:/Workspaces/JellyfinSync/jellyfinsync-daemon/src/rpc.rs): Optimized `jellyfin_get_item_counts` to fetch metadata in parallel using `futures::join_all`.
-- [MODIFY] [Cargo.toml](file:///c:/Workspaces/JellyfinSync/jellyfinsync-daemon/Cargo.toml): Added `futures` dependency.
+- [MODIFY] [rpc.rs](file:///c:/Workspaces/HifiMule/hifimule-daemon/src/rpc.rs): Optimized `jellyfin_get_item_counts` to fetch metadata in parallel using `futures::join_all`.
+- [MODIFY] [Cargo.toml](file:///c:/Workspaces/HifiMule/hifimule-daemon/Cargo.toml): Added `futures` dependency.
 
 ## ✅ Verification Results
 
 ### Automated Tests
-- Ran `cargo check -p jellyfinsync-daemon` to verify type safety and async logic: **PASSED**
+- Ran `cargo check -p hifimule-daemon` to verify type safety and async logic: **PASSED**
 - Added test case in `rpc.rs` to verify metadata serialization for recursive item counts.
 
 ### Manual Verification

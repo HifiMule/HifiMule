@@ -13,7 +13,7 @@ so that I don't have to manually hunt for folder paths.
 ## Acceptance Criteria
 
 1. **Event-Driven Detection:** The daemon MUST trigger a "Device Detected" event the moment a USB Mass Storage device is connected to the system. (AC: #1)
-2. **Manifest Probing:** Upon detection, the daemon MUST automatically check the root directory of the new mount for a `.jellyfinsync.json` manifest. (AC: #2)
+2. **Manifest Probing:** Upon detection, the daemon MUST automatically check the root directory of the new mount for a `.hifimule.json` manifest. (AC: #2)
 3. **Cross-Platform Parity:** Detection logic MUST function on Windows, Linux, and macOS using OS-native notification primitives. (AC: #3)
 4. **Performance Compliance:** The detection service MUST maintain the < 10MB idle memory footprint. (AC: #4)
 5. **UI Feedback:** The system tray icon SHOULD pulse or update its tooltip to reflect the "Scanning..." or "Device Found" state. (AC: #5)
@@ -26,7 +26,7 @@ so that I don't have to manually hunt for folder paths.
   - [x] macOS: Implement `/Volumes` scanning.
 - [x] **T2: Implement Manifest Probing & Validation** (AC: #2)
   - [x] Create a `DeviceProber` service to scan the root of newly mounted volumes.
-  - [x] Parse `.jellyfinsync.json` if it exists.
+  - [x] Parse `.hifimule.json` if it exists.
   - [x] Validate manifest schema (minimal ID check for now).
 - [x] **T3: Integrate with Daemon Event Loop** (AC: #1, #5)
   - [x] Add `DeviceDetected` variant to the `DaemonEvent` or internal message bus.
@@ -41,8 +41,8 @@ so that I don't have to manually hunt for folder paths.
   - Use `tokio` for handling concurrent IO and mount events (from `architecture.md`).
   - Use `anyhow` and `thiserror` for error handling as per `architecture.md`.
 - **Source tree components to touch:**
-  - `jellyfinsync-daemon/src/main.rs`: Integrate the mount observer.
-  - `jellyfinsync-daemon/src/device/`: Create new module for device discovery.
+  - `hifimule-daemon/src/main.rs`: Integrate the mount observer.
+  - `hifimule-daemon/src/device/`: Create new module for device discovery.
 - **Testing standards summary:**
   - Mock mount events in unit tests.
   - Verify path sanitization for legacy hardware (FAT32 constraints).
@@ -55,9 +55,9 @@ so that I don't have to manually hunt for folder paths.
 
 ### References
 
-- [Functional Requirements FR1-FR4](file:///c:/Workspaces/JellyfinSync/_bmad-output/planning-artifacts/epics.md#L16-L19)
-- [Architecture Technical Constraints](file:///c:/Workspaces/JellyfinSync/_bmad-output/planning-artifacts/architecture.md#L24-L28)
-- [UX Sarah's Dash Journey](file:///c:/Workspaces/JellyfinSync/_bmad-output/planning-artifacts/ux-design-specification.md#L61-L69)
+- [Functional Requirements FR1-FR4](file:///c:/Workspaces/HifiMule/_bmad-output/planning-artifacts/epics.md#L16-L19)
+- [Architecture Technical Constraints](file:///c:/Workspaces/HifiMule/_bmad-output/planning-artifacts/architecture.md#L24-L28)
+- [UX Sarah's Dash Journey](file:///c:/Workspaces/HifiMule/_bmad-output/planning-artifacts/ux-design-specification.md#L61-L69)
 
 ## Dev Agent Record
 
@@ -76,8 +76,8 @@ Antigravity (BMad Create-Story Workflow)
 
 ### File List
 
-- [main.rs](file:///C:/Workspaces/JellyfinSync/jellyfinsync-daemon/src/main.rs)
-- [device/mod.rs](file:///C:/Workspaces/JellyfinSync/jellyfinsync-daemon/src/device/mod.rs)
-- [device/tests.rs](file:///C:/Workspaces/JellyfinSync/jellyfinsync-daemon/src/device/tests.rs)
-- [Cargo.toml](file:///C:/Workspaces/JellyfinSync/Cargo.toml)
-- [jellyfinsync-daemon/Cargo.toml](file:///C:/Workspaces/JellyfinSync/jellyfinsync-daemon/Cargo.toml)
+- [main.rs](file:///C:/Workspaces/HifiMule/hifimule-daemon/src/main.rs)
+- [device/mod.rs](file:///C:/Workspaces/HifiMule/hifimule-daemon/src/device/mod.rs)
+- [device/tests.rs](file:///C:/Workspaces/HifiMule/hifimule-daemon/src/device/tests.rs)
+- [Cargo.toml](file:///C:/Workspaces/HifiMule/Cargo.toml)
+- [hifimule-daemon/Cargo.toml](file:///C:/Workspaces/HifiMule/hifimule-daemon/Cargo.toml)

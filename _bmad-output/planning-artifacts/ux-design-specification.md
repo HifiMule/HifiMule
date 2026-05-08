@@ -3,7 +3,7 @@ inputDocuments: ['prd.md', 'architecture.md', 'product-brief-bmad-2026-01-26.md'
 status: 'complete'
 completedAt: '2026-01-27'
 
-# UX Design Specification: JellyfinSync
+# UX Design Specification: HifiMule
 
 **Author:** Alexis
 **Date:** 2026-01-26
@@ -111,7 +111,7 @@ The device hub is a persistent panel displayed whenever at least one managed dev
 ## 6. Responsive Design & Accessibility
 
 ### 6.1 Responsive Strategy
-JellyfinSync utilizes a **"Detachable Sidebar"** strategy. The UI remains fully functional even when shrunk to a compact utility state, ensuring users can monitor sync progress without sacrificing screen real estate.
+HifiMule utilizes a **"Detachable Sidebar"** strategy. The UI remains fully functional even when shrunk to a compact utility state, ensuring users can monitor sync progress without sacrificing screen real estate.
 
 ### 6.2 Breakpoint Strategy
 *   **Narrow (< 600px):** Compact list-view for rapid library scanning.

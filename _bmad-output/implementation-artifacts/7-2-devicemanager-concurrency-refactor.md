@@ -24,7 +24,7 @@ so that multi-device scenarios are reliable and concurrent operations never dead
 ## Tasks / Subtasks
 
 - [x] **T1: Replace split unrecognized fields with `UnrecognizedDeviceState`** (AC: #1, #7, #8)
-  - [x] Add `pub struct UnrecognizedDeviceState { pub path: PathBuf, pub io: Arc<dyn DeviceIO>, pub friendly_name: Option<String> }` near `ConnectedDevice` in `jellyfinsync-daemon/src/device/mod.rs`.
+  - [x] Add `pub struct UnrecognizedDeviceState { pub path: PathBuf, pub io: Arc<dyn DeviceIO>, pub friendly_name: Option<String> }` near `ConnectedDevice` in `hifimule-daemon/src/device/mod.rs`.
   - [x] Replace `unrecognized_device_path`, `unrecognized_device_io`, and `unrecognized_device_friendly_name` fields with `unrecognized_device: Arc<RwLock<Option<UnrecognizedDeviceState>>>`.
   - [x] Update `new()`, `handle_device_unrecognized`, `get_unrecognized_device_path`, `get_unrecognized_device_io`, `handle_device_removed`, `initialize_device`, and `list_root_folders`.
   - [x] Keep current public helper names where callers already use them; add `get_unrecognized_device_friendly_name()` only if it reduces duplicate lock reads.
@@ -45,7 +45,7 @@ so that multi-device scenarios are reliable and concurrent operations never dead
 - [x] **T4: Fix MTP observer retry suppression** (AC: #4)
   - [x] In `run_mtp_observer`, do not insert `dev_id` into `known_ids` immediately after `create_mtp_backend` succeeds.
   - [x] Insert only after successfully sending either `DeviceEvent::Detected` or `DeviceEvent::Unrecognized`.
-  - [x] If backend creation, `.jellyfinsync.json` read, JSON parsing before event creation, or channel send fails, leave the ID absent so the next physical reconnect can retry.
+  - [x] If backend creation, `.hifimule.json` read, JSON parsing before event creation, or channel send fails, leave the ID absent so the next physical reconnect can retry.
   - [x] Preserve MSC preference: if `has_msc_drive_for_device` matches, continue without inserting into `known_ids`.
 
 - [x] **T5: Verify libmtp storage behavior and document/code accordingly** (AC: #5)
@@ -66,7 +66,7 @@ so that multi-device scenarios are reliable and concurrent operations never dead
   - [x] Preserve Windows drive-letter enumeration behavior unless a regression is clearly tied to this story.
 
 - [x] **T8: Tests** (AC: #2, #3, #4, #6, #7, #8)
-  - [x] Add or update tests in `jellyfinsync-daemon/src/device/tests.rs` for consolidated unrecognized state, concurrent set/remove, auto-reselect with more than one remaining device, and no duplicate connected entry for an unrecognized path.
+  - [x] Add or update tests in `hifimule-daemon/src/device/tests.rs` for consolidated unrecognized state, concurrent set/remove, auto-reselect with more than one remaining device, and no duplicate connected entry for an unrecognized path.
   - [x] Add a DeviceManager concurrency test that uses `tokio::time::timeout` around concurrent `select_device` and `update_manifest` calls; the test must fail on deadlock.
   - [x] Add an MTP backend serialization test in `device_io.rs` using a mock `MtpHandle` with an atomic in-flight counter; assert max in-flight operations for one backend is 1.
   - [x] If `run_mtp_observer` is hard to test directly because it loops forever, extract a small pure/helper function for one observed device and test `known_ids` insertion rules there.
@@ -87,14 +87,14 @@ so that multi-device scenarios are reliable and concurrent operations never dead
 ### Scope
 
 Primary files:
-- `jellyfinsync-daemon/src/device/mod.rs` - `DeviceManager`, mount observers, MTP observer, mount scanning.
-- `jellyfinsync-daemon/src/device/tests.rs` - DeviceManager regression and concurrency tests.
-- `jellyfinsync-daemon/src/device_io.rs` - `MtpBackend` per-device serialization and mock-handle tests.
-- `jellyfinsync-daemon/src/device/mtp.rs` - libmtp storage-zero comment or explicit storage iteration only.
+- `hifimule-daemon/src/device/mod.rs` - `DeviceManager`, mount observers, MTP observer, mount scanning.
+- `hifimule-daemon/src/device/tests.rs` - DeviceManager regression and concurrency tests.
+- `hifimule-daemon/src/device_io.rs` - `MtpBackend` per-device serialization and mock-handle tests.
+- `hifimule-daemon/src/device/mtp.rs` - libmtp storage-zero comment or explicit storage iteration only.
 
 Secondary files only if signatures require updates:
-- `jellyfinsync-daemon/src/rpc.rs` - currently reads pending path and IO separately in `handle_device_initialize`; prefer a coherent snapshot helper if one is added.
-- `jellyfinsync-daemon/src/main.rs` - event dispatch calls `handle_device_detected`, `handle_device_unrecognized`, and `handle_device_removed`; keep behavior unchanged.
+- `hifimule-daemon/src/rpc.rs` - currently reads pending path and IO separately in `handle_device_initialize`; prefer a coherent snapshot helper if one is added.
+- `hifimule-daemon/src/main.rs` - event dispatch calls `handle_device_detected`, `handle_device_unrecognized`, and `handle_device_removed`; keep behavior unchanged.
 
 No UI changes, no new RPC methods, and no DB schema changes are required for this story.
 
@@ -159,9 +159,9 @@ The libmtp source implements `storage == 0` by mapping it to `PTP_GOH_ALL_STORAG
 - Epic 7 Story 7.2: `_bmad-output/planning-artifacts/epics.md`
 - Architecture DeviceManager and DeviceIO sections: `_bmad-output/planning-artifacts/architecture.md`
 - Previous story: `_bmad-output/implementation-artifacts/7-1-mtp-io-and-wpd-hardening.md`
-- Current DeviceManager: `jellyfinsync-daemon/src/device/mod.rs`
-- Current MTP backend: `jellyfinsync-daemon/src/device_io.rs`
-- Current MTP platform code: `jellyfinsync-daemon/src/device/mtp.rs`
+- Current DeviceManager: `hifimule-daemon/src/device/mod.rs`
+- Current MTP backend: `hifimule-daemon/src/device_io.rs`
+- Current MTP platform code: `hifimule-daemon/src/device/mtp.rs`
 
 ## Project Structure Notes
 
@@ -195,10 +195,10 @@ GPT-5 Codex
 
 - `_bmad-output/implementation-artifacts/7-2-devicemanager-concurrency-refactor.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
-- `jellyfinsync-daemon/src/device/mod.rs`
-- `jellyfinsync-daemon/src/device/mtp.rs`
-- `jellyfinsync-daemon/src/device/tests.rs`
-- `jellyfinsync-daemon/src/device_io.rs`
+- `hifimule-daemon/src/device/mod.rs`
+- `hifimule-daemon/src/device/mtp.rs`
+- `hifimule-daemon/src/device/tests.rs`
+- `hifimule-daemon/src/device_io.rs`
 
 ### Change Log
 

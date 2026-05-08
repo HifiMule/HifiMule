@@ -1,4 +1,4 @@
-# JellyfinSync — Source Tree Analysis
+# HifiMule — Source Tree Analysis
 
 **Generated:** 2026-05-07 | **Scan depth:** Exhaustive
 
@@ -7,7 +7,7 @@
 ## Repository Structure
 
 ```
-jellyfinsync/
+hifimule/
 ├── Cargo.toml                        Workspace root (members: daemon, workspace deps)
 ├── Cargo.lock
 ├── .github/
@@ -17,7 +17,7 @@ jellyfinsync/
 ├── scripts/
 │   ├── prepare-sidecar.mjs           Build step: copies compiled daemon → ui/src-tauri/sidecars/
 │   └── smoke-tests/                  Smoke test scripts
-├── jellyfinsync-daemon/              Rust backend (project part: "backend")
+├── hifimule-daemon/              Rust backend (project part: "backend")
 │   ├── Cargo.toml
 │   ├── build.rs                      Windows: winresource (EXE icon); Unix: pkg_config libmtp
 │   ├── assets/
@@ -39,7 +39,7 @@ jellyfinsync/
 │       │   ├── mtp.rs                WpdHandle (Windows WPD COM), LibmtpHandle (Unix FFI)
 │       │   └── tests.rs              Device module integration tests
 │       └── tests.rs                  Top-level integration tests
-└── jellyfinsync-ui/                  Tauri 2 desktop shell (project part: "desktop")
+└── hifimule-ui/                  Tauri 2 desktop shell (project part: "desktop")
     ├── package.json                  npm/pnpm; deps: @tauri-apps/api ~2.10, shoelace ^2.19.1, vite ^6
     ├── tsconfig.json
     ├── vite.config.ts
@@ -71,7 +71,7 @@ jellyfinsync/
 
 ---
 
-## Part 1: `jellyfinsync-daemon`
+## Part 1: `hifimule-daemon`
 
 ### Language & Runtime
 - **Rust** (MSRV 1.93.0), async via **Tokio** multi-thread runtime
@@ -138,7 +138,7 @@ Main thread (macOS: event loop; Windows: main)
 
 ---
 
-## Part 2: `jellyfinsync-ui`
+## Part 2: `hifimule-ui`
 
 ### Language & Build
 - **TypeScript 5.6**, compiled by **tsc**, bundled by **Vite 6**
@@ -183,8 +183,8 @@ The Rust-side `src-tauri/src/lib.rs` exposes three Tauri commands:
 ### Daemon Launch Strategy (in order)
 
 1. **Health check** — `POST http://127.0.0.1:19140` with `get_daemon_state`; if successful, daemon is already running (startup app or previous instance)
-2. **Windows Service** (Windows only) — `sc start jellyfinsync-daemon`; verify with health check
-3. **Sidecar spawn** — `app.shell().sidecar("jellyfinsync-daemon").spawn()`; monitors stdout/stderr; kills on `RunEvent::Exit`
+2. **Windows Service** (Windows only) — `sc start hifimule-daemon`; verify with health check
+3. **Sidecar spawn** — `app.shell().sidecar("hifimule-daemon").spawn()`; monitors stdout/stderr; kills on `RunEvent::Exit`
 
 ### Window Configuration
 
@@ -208,10 +208,10 @@ The Rust-side `src-tauri/src/lib.rs` exposes three Tauri commands:
 
 ## Test Coverage
 
-- `jellyfinsync-daemon/src/api.rs` — Comprehensive mockito-based integration tests for all Jellyfin API calls
-- `jellyfinsync-daemon/src/db.rs` — In-memory SQLite tests for all CRUD operations and migrations
-- `jellyfinsync-daemon/src/auto_fill.rs` — Unit tests for `rank_and_truncate` (capacity, negatives, zero-size, break semantics)
-- `jellyfinsync-daemon/src/sync.rs` — Delta calculation tests
-- `jellyfinsync-daemon/src/device/tests.rs` — Device module tests
-- `jellyfinsync-daemon/src/tests.rs` — Top-level integration tests
+- `hifimule-daemon/src/api.rs` — Comprehensive mockito-based integration tests for all Jellyfin API calls
+- `hifimule-daemon/src/db.rs` — In-memory SQLite tests for all CRUD operations and migrations
+- `hifimule-daemon/src/auto_fill.rs` — Unit tests for `rank_and_truncate` (capacity, negatives, zero-size, break semantics)
+- `hifimule-daemon/src/sync.rs` — Delta calculation tests
+- `hifimule-daemon/src/device/tests.rs` — Device module tests
+- `hifimule-daemon/src/tests.rs` — Top-level integration tests
 - No UI tests (Tauri/DOM testing not wired up)

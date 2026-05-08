@@ -14,14 +14,14 @@ So that it appears in the device hub without requiring manual steps.
    - **Given** the daemon is running on Windows
    - **When** an MTP device is connected
    - **Then** the daemon enumerates it via WPD (`IPortableDeviceManager`) to retrieve its device ID and friendly name
-   - **And** it checks for a `.jellyfinsync.json` object in the device root storage
+   - **And** it checks for a `.hifimule.json` object in the device root storage
    - **And** it fires `on_device_detected` (managed) or `on_device_unrecognized` (new) — identical behavior to MSC (Story 2.2)
 
 2. **Linux MTP Detection:**
    - **Given** the daemon is running on Linux
    - **When** an MTP device is connected
    - **Then** `libmtp` enumerates the device and retrieves its serial/device ID
-   - **And** it checks for `.jellyfinsync.json` and fires the appropriate event
+   - **And** it checks for `.hifimule.json` and fires the appropriate event
 
 3. **macOS MTP Detection:**
    - **Given** the daemon is running on macOS
@@ -35,7 +35,7 @@ So that it appears in the device hub without requiring manual steps.
    - **And** passes `Arc<dyn DeviceIO>` to all downstream device operations (manifest read, sync, scrobble)
 
 5. **Device Hub — MTP Device Appears:**
-   - **Given** an MTP device with a `.jellyfinsync.json` manifest is connected
+   - **Given** an MTP device with a `.hifimule.json` manifest is connected
    - **When** the daemon processes it
    - **Then** the device appears in the device hub alongside MSC devices
    - **And** `device.list` and `get_daemon_state` include `"deviceClass": "mtp"` for MTP devices and `"deviceClass": "msc"` for MSC devices
@@ -168,7 +168,7 @@ So that it appears in the device hub without requiring manual steps.
 
 - [x] **`device/mtp.rs` — New file: platform-specific MTP enumeration + handle implementations** (AC: #1, #2, #3, #4)
 
-  Create `jellyfinsync-daemon/src/device/mtp.rs`. Add `pub mod mtp;` to `device/mod.rs`.
+  Create `hifimule-daemon/src/device/mtp.rs`. Add `pub mod mtp;` to `device/mod.rs`.
 
   **Module structure:**
   ```rust
@@ -421,7 +421,7 @@ So that it appears in the device hub without requiring manual steps.
                               std::sync::Arc::new(backend);
                           // Cannot use DeviceProber::probe() (requires filesystem path).
                           // Read manifest directly via the MTP IO backend.
-                          match backend_arc.read_file(".jellyfinsync.json").await {
+                          match backend_arc.read_file(".hifimule.json").await {
                               Ok(data) => match serde_json::from_slice::<DeviceManifest>(&data) {
                                   Ok(manifest) => {
                                       let _ = tx.send(DeviceEvent::Detected {
@@ -537,11 +537,11 @@ So that it appears in the device hub without requiring manual steps.
     async fn mtp_backend_manifest_probe() {
         let mock = Arc::new(MockMtpHandle::new());
         mock.files.lock().unwrap().insert(
-            ".jellyfinsync.json".to_string(),
+            ".hifimule.json".to_string(),
             br#"{"deviceId":"test-id","version":"1.0","managedPaths":[],"syncedItems":[]}"#.to_vec(),
         );
         let backend = MtpBackend { handle: mock };
-        let data = backend.read_file(".jellyfinsync.json").await.unwrap();
+        let data = backend.read_file(".hifimule.json").await.unwrap();
         let manifest: serde_json::Value = serde_json::from_slice(&data).unwrap();
         assert_eq!(manifest["deviceId"], "test-id");
     }
@@ -562,7 +562,7 @@ The ACs describe interrupt-driven event handling (WM_DEVICECHANGE, udev events) 
 
 ### Cargo.toml Already Has Commented-Out MTP Deps
 
-`jellyfinsync-daemon/Cargo.toml` lines 37–43 have:
+`hifimule-daemon/Cargo.toml` lines 37–43 have:
 ```toml
 # windows = { version = "0.58", features = [...] }  # Add when Story 2.10 wires up MTP detection
 # libmtp-rs = "0.7"  # Add when Story 2.10 wires up MTP detection
@@ -583,7 +583,7 @@ The UI receives this synthetic path in `device.list` and `device.select` RPCs. F
 
 ### `DeviceProber::probe()` Cannot Be Used for MTP
 
-`DeviceProber::probe()` calls `tokio::fs::metadata()` and only works with filesystem paths. `run_mtp_observer()` instead calls `backend_arc.read_file(".jellyfinsync.json")` directly on the `MtpBackend`. Successful parse → `Detected`; file-not-found error → `Unrecognized`.
+`DeviceProber::probe()` calls `tokio::fs::metadata()` and only works with filesystem paths. `run_mtp_observer()` instead calls `backend_arc.read_file(".hifimule.json")` directly on the `MtpBackend`. Successful parse → `Detected`; file-not-found error → `Unrecognized`.
 
 ### COM Threading (Windows)
 
@@ -608,7 +608,7 @@ For `write_file`, if the parent path doesn't exist yet (new file), create parent
 
 `initialize_device()` in `device/mod.rs:437` uses `self.unrecognized_device_io` (an `Arc<dyn DeviceIO>`) to write the manifest. For MTP, this IO backend is the `MtpBackend`. No changes needed to `initialize_device()` itself.
 
-The `folder_path` RPC param for MTP devices should be `""` (empty = device root) since there's no concept of "mount point subfolder" for MTP. The UI's Initialize dialog already accepts empty/root paths. The DeviceManifest will be written to `.jellyfinsync.json` at the object root of the MTP storage.
+The `folder_path` RPC param for MTP devices should be `""` (empty = device root) since there's no concept of "mount point subfolder" for MTP. The UI's Initialize dialog already accepts empty/root paths. The DeviceManifest will be written to `.hifimule.json` at the object root of the MTP storage.
 
 ### `DeviceClass` Derivation from Path
 
@@ -621,38 +621,38 @@ The dirty-marker scan at lines 187–228 calls `device_io.list_files("")` and ch
 ### File Structure
 
 **New files:**
-- `jellyfinsync-daemon/src/device/mtp.rs` — Platform-specific MtpHandle implementations + enumeration
+- `hifimule-daemon/src/device/mtp.rs` — Platform-specific MtpHandle implementations + enumeration
 
 **Modified files:**
-- `jellyfinsync-daemon/Cargo.toml` — Uncomment `windows` and `libmtp-rs` deps
-- `jellyfinsync-daemon/src/device/mod.rs` — `DeviceClass`, `ConnectedDevice` update, `DeviceEvent::Detected` update, `handle_device_detected()` signature, `get_connected_devices()`/`get_multi_device_snapshot()` return types, `run_mtp_observer()`, `device_class_from_path()`
-- `jellyfinsync-daemon/src/device_io.rs` — New test for `MtpBackend` manifest probe
-- `jellyfinsync-daemon/src/rpc.rs` — `deviceClass` in `handle_device_list()` and `handle_get_daemon_state()`
-- `jellyfinsync-daemon/src/main.rs` — Spawn `run_mtp_observer()`, update `DeviceEvent::Detected` match arm
+- `hifimule-daemon/Cargo.toml` — Uncomment `windows` and `libmtp-rs` deps
+- `hifimule-daemon/src/device/mod.rs` — `DeviceClass`, `ConnectedDevice` update, `DeviceEvent::Detected` update, `handle_device_detected()` signature, `get_connected_devices()`/`get_multi_device_snapshot()` return types, `run_mtp_observer()`, `device_class_from_path()`
+- `hifimule-daemon/src/device_io.rs` — New test for `MtpBackend` manifest probe
+- `hifimule-daemon/src/rpc.rs` — `deviceClass` in `handle_device_list()` and `handle_get_daemon_state()`
+- `hifimule-daemon/src/main.rs` — Spawn `run_mtp_observer()`, update `DeviceEvent::Detected` match arm
 
 **Unchanged files:**
-- `jellyfinsync-ui/` — No UI changes; hub already handles whatever devices the daemon reports
-- `jellyfinsync-daemon/src/sync.rs` — IO abstraction means sync engine works transparently
-- `jellyfinsync-daemon/src/db.rs` — No schema changes
-- `jellyfinsync-daemon/src/scrobble.rs` — Uses `DeviceIO` trait, works with MTP automatically
+- `hifimule-ui/` — No UI changes; hub already handles whatever devices the daemon reports
+- `hifimule-daemon/src/sync.rs` — IO abstraction means sync engine works transparently
+- `hifimule-daemon/src/db.rs` — No schema changes
+- `hifimule-daemon/src/scrobble.rs` — Uses `DeviceIO` trait, works with MTP automatically
 
 ### References
 
 - Previous story (2.9): `_bmad-output/implementation-artifacts/2-9-device-identity-name-and-icon.md`
 - Story 4.0 (Device IO Abstraction): `_bmad-output/implementation-artifacts/4-0-device-io-abstraction-layer.md`
-- `MtpBackend` + `MtpHandle` trait: `jellyfinsync-daemon/src/device_io.rs:208–287`
-- `MockMtpHandle`: `jellyfinsync-daemon/src/device_io.rs:372–433`
-- `run_observer()`: `jellyfinsync-daemon/src/device/mod.rs:965–1016`
-- `handle_device_detected()`: `jellyfinsync-daemon/src/device/mod.rs:176–272`
-- `ConnectedDevice` struct: `jellyfinsync-daemon/src/device/mod.rs:97–100`
-- `DeviceEvent` enum: `jellyfinsync-daemon/src/device/mod.rs:126–137`
-- `get_connected_devices()`: `jellyfinsync-daemon/src/device/mod.rs:368–375`
-- `get_multi_device_snapshot()`: `jellyfinsync-daemon/src/device/mod.rs:379–389`
-- `handle_device_list()`: `jellyfinsync-daemon/src/rpc.rs:1913–1927`
-- `handle_get_daemon_state()` connected_devices: `jellyfinsync-daemon/src/rpc.rs:404–430`
-- Device detection spawn: `jellyfinsync-daemon/src/main.rs:168–171`
-- DeviceEvent::Detected match arm: `jellyfinsync-daemon/src/main.rs:202`
-- Cargo.toml MTP placeholders: `jellyfinsync-daemon/Cargo.toml:37–43`
+- `MtpBackend` + `MtpHandle` trait: `hifimule-daemon/src/device_io.rs:208–287`
+- `MockMtpHandle`: `hifimule-daemon/src/device_io.rs:372–433`
+- `run_observer()`: `hifimule-daemon/src/device/mod.rs:965–1016`
+- `handle_device_detected()`: `hifimule-daemon/src/device/mod.rs:176–272`
+- `ConnectedDevice` struct: `hifimule-daemon/src/device/mod.rs:97–100`
+- `DeviceEvent` enum: `hifimule-daemon/src/device/mod.rs:126–137`
+- `get_connected_devices()`: `hifimule-daemon/src/device/mod.rs:368–375`
+- `get_multi_device_snapshot()`: `hifimule-daemon/src/device/mod.rs:379–389`
+- `handle_device_list()`: `hifimule-daemon/src/rpc.rs:1913–1927`
+- `handle_get_daemon_state()` connected_devices: `hifimule-daemon/src/rpc.rs:404–430`
+- Device detection spawn: `hifimule-daemon/src/main.rs:168–171`
+- DeviceEvent::Detected match arm: `hifimule-daemon/src/main.rs:202`
+- Cargo.toml MTP placeholders: `hifimule-daemon/Cargo.toml:37–43`
 - Architecture (OS Native IO): `_bmad-output/planning-artifacts/architecture.md` lines 27–29
 - Architecture (Device IO Abstraction): `_bmad-output/planning-artifacts/architecture.md` lines 185–215
 
@@ -682,14 +682,14 @@ claude-sonnet-4-6
 
 ### File List
 
-- `jellyfinsync-daemon/Cargo.toml` — Added `windows 0.58` WPD features (Windows); `build.rs` libmtp link (Unix fallback)
-- `jellyfinsync-daemon/build.rs` — Added `cargo:rustc-link-lib=mtp` for Unix
-- `jellyfinsync-daemon/src/device/mod.rs` — `DeviceClass` enum, `device_class_from_path()`, `ConnectedDevice.device_class`, `DeviceEvent::Detected.device_io`, `handle_device_detected()` 3-arg signature, `run_observer()` backend creation, `get_connected_devices()`/`get_multi_device_snapshot()` return type, `run_mtp_observer()`
-- `jellyfinsync-daemon/src/device/mtp.rs` — New file: `MtpDeviceInfo`, `MtpDeviceInner`, `windows_wpd::{WpdHandle, enumerate}`, `libmtp::{LibmtpHandle, enumerate}`, `enumerate_mtp_devices()`, `create_mtp_backend()`, tests for `split_path_components`
-- `jellyfinsync-daemon/src/device_io.rs` — Added `mtp_backend_manifest_probe` test
-- `jellyfinsync-daemon/src/rpc.rs` — `deviceClass` field in `handle_device_list()` and `handle_get_daemon_state()`; all test call sites updated
-- `jellyfinsync-daemon/src/main.rs` — Spawns `run_mtp_observer()`; `DeviceEvent::Detected` match arm updated
-- `jellyfinsync-daemon/src/tests.rs` — `handle_device_detected` test call sites updated
+- `hifimule-daemon/Cargo.toml` — Added `windows 0.58` WPD features (Windows); `build.rs` libmtp link (Unix fallback)
+- `hifimule-daemon/build.rs` — Added `cargo:rustc-link-lib=mtp` for Unix
+- `hifimule-daemon/src/device/mod.rs` — `DeviceClass` enum, `device_class_from_path()`, `ConnectedDevice.device_class`, `DeviceEvent::Detected.device_io`, `handle_device_detected()` 3-arg signature, `run_observer()` backend creation, `get_connected_devices()`/`get_multi_device_snapshot()` return type, `run_mtp_observer()`
+- `hifimule-daemon/src/device/mtp.rs` — New file: `MtpDeviceInfo`, `MtpDeviceInner`, `windows_wpd::{WpdHandle, enumerate}`, `libmtp::{LibmtpHandle, enumerate}`, `enumerate_mtp_devices()`, `create_mtp_backend()`, tests for `split_path_components`
+- `hifimule-daemon/src/device_io.rs` — Added `mtp_backend_manifest_probe` test
+- `hifimule-daemon/src/rpc.rs` — `deviceClass` field in `handle_device_list()` and `handle_get_daemon_state()`; all test call sites updated
+- `hifimule-daemon/src/main.rs` — Spawns `run_mtp_observer()`; `DeviceEvent::Detected` match arm updated
+- `hifimule-daemon/src/tests.rs` — `handle_device_detected` test call sites updated
 
 ## Change Log
 

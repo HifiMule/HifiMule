@@ -281,17 +281,17 @@ From Story 2.6 implementation:
 
 ### File Structure
 
-- `jellyfinsync-daemon/src/device/mod.rs` — Replace `current_device` + `current_device_path` fields with `connected_devices` + `selected_device_path`; update `new()`, `handle_device_detected`, `handle_device_removed`, `handle_device_unrecognized`, `initialize_device`, `get_current_device`, `get_current_device_path`, `update_manifest`, `get_device_storage`; add `get_connected_devices()`
-- `jellyfinsync-daemon/src/main.rs` — Update `DeviceEvent::Removed` handler to pass path to `handle_device_removed`
-- `jellyfinsync-daemon/src/rpc.rs` — Add `device.list` dispatch + handler; add `device.select` dispatch + handler; extend `handle_get_daemon_state` with `connectedDevices` + `selectedDevicePath`
-- `jellyfinsync-ui/src/components/BasketSidebar.ts` — Add `connectedDevices` + `selectedDevicePath` instance vars; add `renderDevicePicker()`; update polling; wire `sl-change` event; reload basket on device switch
+- `hifimule-daemon/src/device/mod.rs` — Replace `current_device` + `current_device_path` fields with `connected_devices` + `selected_device_path`; update `new()`, `handle_device_detected`, `handle_device_removed`, `handle_device_unrecognized`, `initialize_device`, `get_current_device`, `get_current_device_path`, `update_manifest`, `get_device_storage`; add `get_connected_devices()`
+- `hifimule-daemon/src/main.rs` — Update `DeviceEvent::Removed` handler to pass path to `handle_device_removed`
+- `hifimule-daemon/src/rpc.rs` — Add `device.list` dispatch + handler; add `device.select` dispatch + handler; extend `handle_get_daemon_state` with `connectedDevices` + `selectedDevicePath`
+- `hifimule-ui/src/components/BasketSidebar.ts` — Add `connectedDevices` + `selectedDevicePath` instance vars; add `renderDevicePicker()`; update polling; wire `sl-change` event; reload basket on device switch
 
 ### References
 
 - Architecture DeviceManager spec: `_bmad-output/planning-artifacts/architecture.md` (DeviceManager Struct section)
 - Multi-Device IPC spec: `_bmad-output/planning-artifacts/architecture.md` (Multi-Device IPC section)
 - UX picker spec: `_bmad-output/planning-artifacts/ux-design-specification.md` (section 5.4)
-- Current `DeviceManager` struct: `jellyfinsync-daemon/src/device/mod.rs:178–193`
+- Current `DeviceManager` struct: `hifimule-daemon/src/device/mod.rs:178–193`
 - `handle_device_detected`: `device/mod.rs:195–231`
 - `handle_device_removed`: `device/mod.rs:255–262`
 - `handle_device_unrecognized`: `device/mod.rs:233–249`
@@ -330,12 +330,12 @@ claude-sonnet-4-6
 
 ### File List
 
-- `jellyfinsync-daemon/src/device/mod.rs`
-- `jellyfinsync-daemon/src/device/tests.rs`
-- `jellyfinsync-daemon/src/main.rs`
-- `jellyfinsync-daemon/src/rpc.rs`
-- `jellyfinsync-daemon/src/tests.rs`
-- `jellyfinsync-ui/src/components/BasketSidebar.ts`
+- `hifimule-daemon/src/device/mod.rs`
+- `hifimule-daemon/src/device/tests.rs`
+- `hifimule-daemon/src/main.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-daemon/src/tests.rs`
+- `hifimule-ui/src/components/BasketSidebar.ts`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
 
 ### Change Log

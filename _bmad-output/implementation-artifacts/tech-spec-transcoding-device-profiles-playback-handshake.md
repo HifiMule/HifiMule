@@ -6,15 +6,15 @@ status: 'review'
 stepsCompleted: [1, 2, 3, 4]
 tech_stack: ['Rust', 'Tokio', 'reqwest', 'serde_json', 'SQLite/rusqlite']
 files_to_modify:
-  - 'jellyfinsync-daemon/assets/device-profiles.json'
-  - 'jellyfinsync-daemon/src/paths.rs'
-  - 'jellyfinsync-daemon/src/transcoding.rs'
-  - 'jellyfinsync-daemon/src/api.rs'
-  - 'jellyfinsync-daemon/src/device/mod.rs'
-  - 'jellyfinsync-daemon/src/db.rs'
-  - 'jellyfinsync-daemon/src/sync.rs'
-  - 'jellyfinsync-daemon/src/rpc.rs'
-  - 'jellyfinsync-daemon/src/main.rs'
+  - 'hifimule-daemon/assets/device-profiles.json'
+  - 'hifimule-daemon/src/paths.rs'
+  - 'hifimule-daemon/src/transcoding.rs'
+  - 'hifimule-daemon/src/api.rs'
+  - 'hifimule-daemon/src/device/mod.rs'
+  - 'hifimule-daemon/src/db.rs'
+  - 'hifimule-daemon/src/sync.rs'
+  - 'hifimule-daemon/src/rpc.rs'
+  - 'hifimule-daemon/src/main.rs'
 code_patterns: []
 test_patterns: []
 ---
@@ -64,9 +64,9 @@ Install a user-editable `device-profiles.json` file into the app data directory 
 
 - **Download today** (`api.rs:635`): `download_item_stream()` calls `GET /Items/{id}/Download` and returns a `bytes_stream()`. No profile, no negotiation.
 - **Sync call site** (`sync.rs:472`): `execute_sync()` calls `download_item_stream()` per add-item. Two callers: `rpc.rs:955` (UI-triggered) and `main.rs:641` (auto-sync).
-- **DeviceManifest** (`device/mod.rs:39`): The `.jellyfinsync.json` manifest struct. Add `transcoding_profile_id: Option<String>` here — it persists per device on the removable medium.
+- **DeviceManifest** (`device/mod.rs:39`): The `.hifimule.json` manifest struct. Add `transcoding_profile_id: Option<String>` here — it persists per device on the removable medium.
 - **DeviceMapping in DB** (`db.rs:8`): SQLite `devices` table, queried in the sync trigger path. Needs `transcoding_profile_id TEXT` column. Note: existing `handle_set_device_profile` in `rpc.rs:316` uses the confusingly-named `profile_id` parameter to store the Jellyfin *user* ID — NOT a transcoding profile. Our new field is distinct.
-- **App data dir** (`paths.rs:4`): `get_app_data_dir()` → `%APPDATA%/JellyfinSync/` (Win), `~/Library/Application Support/JellyfinSync/` (mac), `~/.local/share/JellyfinSync/` (Linux). Config (`config.json`) and DB (`jellyfinsync.db`) already live here. `device-profiles.json` goes here too.
+- **App data dir** (`paths.rs:4`): `get_app_data_dir()` → `%APPDATA%/HifiMule/` (Win), `~/Library/Application Support/HifiMule/` (mac), `~/.local/share/HifiMule/` (Linux). Config (`config.json`) and DB (`hifimule.db`) already live here. `device-profiles.json` goes here too.
 - **Asset embedding pattern**: Icons are embedded via `include_bytes!("../assets/icon.png")` in `main.rs`. Use the same pattern for `device-profiles.json` default.
 - **Atomic writes pattern**: All manifest writes use Write-Temp-Rename. Not needed for `device-profiles.json` (read-only from the daemon's perspective after seeding).
 - **Error handling**: Anyhow `Result<T>` throughout. Async via Tokio. All API errors are non-fatal at the per-file level in `execute_sync` — follow the existing `errors.push(SyncFileError {...})` pattern for PlaybackInfo failures.
@@ -76,17 +76,17 @@ Install a user-editable `device-profiles.json` file into the app data directory 
 
 | File | Purpose |
 | ---- | ------- |
-| [jellyfinsync-daemon/src/api.rs](jellyfinsync-daemon/src/api.rs) | `JellyfinClient`, `download_item_stream()` at line 635 |
-| [jellyfinsync-daemon/src/sync.rs](jellyfinsync-daemon/src/sync.rs) | `execute_sync()` at line 384, download call at line 472 |
-| [jellyfinsync-daemon/src/rpc.rs](jellyfinsync-daemon/src/rpc.rs) | sync.start handler at line 950, `handle_set_device_profile` at 316 |
-| [jellyfinsync-daemon/src/main.rs](jellyfinsync-daemon/src/main.rs) | `run_auto_sync()` at line 472, `execute_sync` call at line 641 |
-| [jellyfinsync-daemon/src/device/mod.rs](jellyfinsync-daemon/src/device/mod.rs) | `DeviceManifest` struct at line 39 |
-| [jellyfinsync-daemon/src/db.rs](jellyfinsync-daemon/src/db.rs) | `DeviceMapping` struct at line 8, `init()` migrations at line 43 |
-| [jellyfinsync-daemon/src/paths.rs](jellyfinsync-daemon/src/paths.rs) | `get_app_data_dir()` at line 4 |
+| [hifimule-daemon/src/api.rs](hifimule-daemon/src/api.rs) | `JellyfinClient`, `download_item_stream()` at line 635 |
+| [hifimule-daemon/src/sync.rs](hifimule-daemon/src/sync.rs) | `execute_sync()` at line 384, download call at line 472 |
+| [hifimule-daemon/src/rpc.rs](hifimule-daemon/src/rpc.rs) | sync.start handler at line 950, `handle_set_device_profile` at 316 |
+| [hifimule-daemon/src/main.rs](hifimule-daemon/src/main.rs) | `run_auto_sync()` at line 472, `execute_sync` call at line 641 |
+| [hifimule-daemon/src/device/mod.rs](hifimule-daemon/src/device/mod.rs) | `DeviceManifest` struct at line 39 |
+| [hifimule-daemon/src/db.rs](hifimule-daemon/src/db.rs) | `DeviceMapping` struct at line 8, `init()` migrations at line 43 |
+| [hifimule-daemon/src/paths.rs](hifimule-daemon/src/paths.rs) | `get_app_data_dir()` at line 4 |
 
 ### Technical Decisions
 
-- **Profile storage in manifest vs DB**: `transcoding_profile_id` is stored in **both** the device manifest (`.jellyfinsync.json` on the device) and the SQLite DB. The manifest is the source of truth (travels with the device); the DB column is for quick lookup in the sync trigger without reading the manifest. On device connect, the manifest value is authoritative.
+- **Profile storage in manifest vs DB**: `transcoding_profile_id` is stored in **both** the device manifest (`.hifimule.json` on the device) and the SQLite DB. The manifest is the source of truth (travels with the device); the DB column is for quick lookup in the sync trigger without reading the manifest. On device connect, the manifest value is authoritative.
 - **`DeviceProfile` payload type**: Use `serde_json::Value` for the actual `deviceProfile` payload within each profile entry. This allows the user to freely edit the JSON without Rust recompile, and avoids a rigid struct that would break if Jellyfin's schema evolves. Schema reference: OpenAPI `DeviceProfile` (fields: `Name`, `MaxStreamingBitrate`, `MusicStreamingTranscodingBitrate`, `DirectPlayProfiles`, `TranscodingProfiles`, `CodecProfiles`). `TranscodingProfile` fields: `Container`, `Type`, `AudioCodec`, `Protocol`, `EstimateContentLength` (boolean, note: NOT `EstimatedContentLength`), `EnableMpegtsM2TsMode`.
 - **PlaybackInfo response handling**: Jellyfin returns `MediaSources[0].SupportsDirectPlay` (boolean) and `MediaSources[0].TranscodingUrl` (path string, not full URL). Construct full URL as `{jellyfin_base_url}{TranscodingUrl}`. If `TranscodingUrl` is absent or `SupportsDirectPlay` is true, fall back to `/Items/{id}/Download`.
 - **`passthrough` profile**: A special profile with `"deviceProfile": null` in the JSON means no transcoding (same as having no `transcoding_profile_id`). Include this so users can explicitly reset a device without setting the manifest field to null.
@@ -99,10 +99,10 @@ Install a user-editable `device-profiles.json` file into the app data directory 
 
 ### Task Checklist
 
-- [x] **Task 1** — Create `jellyfinsync-daemon/assets/device-profiles.json` with 4 default profiles
-- [x] **Task 2** — Add `get_device_profiles_path()` to `jellyfinsync-daemon/src/paths.rs`
-- [x] **Task 3** — Create `jellyfinsync-daemon/src/transcoding.rs` (types, loader, seeder)
-- [x] **Task 4** — Add `get_item_stream()` + `resolve_stream_url()` to `jellyfinsync-daemon/src/api.rs`
+- [x] **Task 1** — Create `hifimule-daemon/assets/device-profiles.json` with 4 default profiles
+- [x] **Task 2** — Add `get_device_profiles_path()` to `hifimule-daemon/src/paths.rs`
+- [x] **Task 3** — Create `hifimule-daemon/src/transcoding.rs` (types, loader, seeder)
+- [x] **Task 4** — Add `get_item_stream()` + `resolve_stream_url()` to `hifimule-daemon/src/api.rs`
 - [x] **Task 5** — Add `transcoding_profile_id` to `DeviceManifest` + update `initialize_device()` in `device/mod.rs`
 - [x] **Task 6** — Add `transcoding_profile_id` column to SQLite + `set_transcoding_profile()` method in `db.rs`
 - [x] **Task 7** — Update `handle_device_initialize` in `rpc.rs` to accept and persist `transcodingProfileId`
@@ -119,7 +119,7 @@ Install a user-editable `device-profiles.json` file into the app data directory 
 
 #### Task 1 — Create default `device-profiles.json` asset
 
-**File:** `jellyfinsync-daemon/assets/device-profiles.json` (NEW)
+**File:** `hifimule-daemon/assets/device-profiles.json` (NEW)
 
 Create the bundled default profiles file:
 
@@ -137,7 +137,7 @@ Create the bundled default profiles file:
       "name": "Rockbox / iPod — MP3 320 kbps",
       "description": "For iPods and DAPs running Rockbox firmware. Transcodes non-MP3 to MP3 320 kbps; passes through MP3 and FLAC directly.",
       "deviceProfile": {
-        "Name": "JellyfinSync-Rockbox",
+        "Name": "HifiMule-Rockbox",
         "MaxStreamingBitrate": 320000,
         "MusicStreamingTranscodingBitrate": 320000,
         "DirectPlayProfiles": [
@@ -164,7 +164,7 @@ Create the bundled default profiles file:
       "name": "Rockbox / iPod — MP3 192 kbps",
       "description": "For devices with limited storage. Transcodes everything to MP3 192 kbps.",
       "deviceProfile": {
-        "Name": "JellyfinSync-Rockbox-192",
+        "Name": "HifiMule-Rockbox-192",
         "MaxStreamingBitrate": 192000,
         "MusicStreamingTranscodingBitrate": 192000,
         "DirectPlayProfiles": [],
@@ -186,7 +186,7 @@ Create the bundled default profiles file:
       "name": "Generic MP3 Player",
       "description": "For basic MP3 players that only support MP3. Transcodes all audio to MP3 256 kbps.",
       "deviceProfile": {
-        "Name": "JellyfinSync-Generic",
+        "Name": "HifiMule-Generic",
         "MaxStreamingBitrate": 256000,
         "MusicStreamingTranscodingBitrate": 256000,
         "DirectPlayProfiles": [
@@ -213,7 +213,7 @@ Create the bundled default profiles file:
 
 #### Task 2 — Add `get_device_profiles_path()` to `paths.rs`
 
-**File:** `jellyfinsync-daemon/src/paths.rs`
+**File:** `hifimule-daemon/src/paths.rs`
 
 Add after the existing `get_app_data_dir()` function:
 
@@ -227,7 +227,7 @@ pub fn get_device_profiles_path() -> Result<PathBuf> {
 
 #### Task 3 — Create `transcoding.rs` module
 
-**File:** `jellyfinsync-daemon/src/transcoding.rs` (NEW)
+**File:** `hifimule-daemon/src/transcoding.rs` (NEW)
 
 ```rust
 use anyhow::{anyhow, Result};
@@ -287,7 +287,7 @@ pub fn ensure_profiles_file_exists(dest_path: &Path, default_bytes: &[u8]) -> Re
 
 #### Task 4 — Add `get_item_stream()` to `api.rs`
 
-**File:** `jellyfinsync-daemon/src/api.rs`
+**File:** `hifimule-daemon/src/api.rs`
 
 **Design rationale:** `write_file_streamed` (sync.rs:711) requires `S: Stream + Unpin`. Two separate `impl Stream` return types (from `download_item_stream` vs a new transcoding stream) are different concrete types and cannot be assigned to the same variable without type erasure. Since both code paths ultimately call `response.bytes_stream()` on a `reqwest::Response`, we unify them in a single method that returns one concrete `impl Stream` type.
 
@@ -413,7 +413,7 @@ async fn resolve_stream_url(
 
 #### Task 5 — Add `transcoding_profile_id` to `DeviceManifest` and `initialize_device()`
 
-**File:** `jellyfinsync-daemon/src/device/mod.rs`
+**File:** `hifimule-daemon/src/device/mod.rs`
 
 **5a.** In the `DeviceManifest` struct (line 39), add after `auto_fill`:
 
@@ -447,17 +447,17 @@ let manifest = DeviceManifest {
     basket_items: vec![],
     auto_sync_on_connect: false,
     auto_fill: AutoFillPrefs::default(),
-    transcoding_profile_id,   // NEW — stored in .jellyfinsync.json on the device
+    transcoding_profile_id,   // NEW — stored in .hifimule.json on the device
 };
 ```
 
-**Note:** The `transcoding_profile_id` is serialized into the `.jellyfinsync.json` manifest on the device. This means if the same device is connected to a different machine or reinstallation, the profile preference travels with the device.
+**Note:** The `transcoding_profile_id` is serialized into the `.hifimule.json` manifest on the device. This means if the same device is connected to a different machine or reinstallation, the profile preference travels with the device.
 
 ---
 
 #### Task 6 — Add `transcoding_profile_id` to SQLite `devices` table
 
-**File:** `jellyfinsync-daemon/src/db.rs`
+**File:** `hifimule-daemon/src/db.rs`
 
 **6a.** In `DeviceMapping` struct (line 8), add:
 ```rust
@@ -504,7 +504,7 @@ pub fn set_transcoding_profile(&self, device_id: &str, profile_id: Option<&str>)
 
 #### Task 7 — Update `handle_device_initialize` in `rpc.rs` to accept transcoding profile
 
-**File:** `jellyfinsync-daemon/src/rpc.rs`
+**File:** `hifimule-daemon/src/rpc.rs`
 
 The existing `device_initialize` handler (line 1244) accepts `folderPath` and `profileId` (Jellyfin user ID). Add an optional `transcodingProfileId` parameter for the transcoding device profile.
 
@@ -581,7 +581,7 @@ Ok(serde_json::json!({
 
 #### Task 8 — Modify `execute_sync()` in `sync.rs`
 
-**File:** `jellyfinsync-daemon/src/sync.rs`
+**File:** `hifimule-daemon/src/sync.rs`
 
 **8a.** Add `transcoding_profile: Option<serde_json::Value>` as the last parameter to `execute_sync()` (line 384):
 
@@ -633,7 +633,7 @@ let stream = match stream_result {
 
 #### Task 9 — Add RPC method `device_profiles.list`
 
-**File:** `jellyfinsync-daemon/src/rpc.rs`
+**File:** `hifimule-daemon/src/rpc.rs`
 
 **8a.** In the match dispatch (line 127), add:
 ```rust
@@ -675,7 +675,7 @@ async fn handle_device_profiles_list() -> Result<Value, JsonRpcError> {
 
 #### Task 10 — Add RPC method `device.set_transcoding_profile`
 
-**File:** `jellyfinsync-daemon/src/rpc.rs`
+**File:** `hifimule-daemon/src/rpc.rs`
 
 **9a.** In the match dispatch, add:
 ```rust
@@ -757,7 +757,7 @@ async fn handle_set_transcoding_profile(
 
 #### Task 11 — Update `rpc.rs` sync.start handler to load and pass profile
 
-**File:** `jellyfinsync-daemon/src/rpc.rs`
+**File:** `hifimule-daemon/src/rpc.rs`
 
 In the `sync.start` handler's `tokio::spawn` block (around line 954), before calling `execute_sync()`, load the device's transcoding profile:
 
@@ -791,7 +791,7 @@ Then add `transcoding_profile` as the last argument to `execute_sync()`.
 
 #### Task 12 — Update `main.rs` `run_auto_sync()` to load and pass profile
 
-**File:** `jellyfinsync-daemon/src/main.rs`
+**File:** `hifimule-daemon/src/main.rs`
 
 In `run_auto_sync()`, after building `desired_items` and before calling `execute_sync()` (around line 641), add:
 
@@ -818,7 +818,7 @@ Then add `transcoding_profile` as the last argument to `execute_sync()`.
 
 #### Task 13 — Seed `device-profiles.json` on daemon startup
 
-**File:** `jellyfinsync-daemon/src/main.rs`
+**File:** `hifimule-daemon/src/main.rs`
 
 **12a.** Add `mod transcoding;` to the module declarations.
 
@@ -855,7 +855,7 @@ if let Ok(profiles_path) = crate::paths::get_device_profiles_path() {
 
 **Given** a new unrecognized device is connected
 **When** a `device_initialize` RPC call is made with `{"folderPath": "Music", "profileId": "user-abc", "transcodingProfileId": "rockbox-mp3-320"}`
-**Then** the `.jellyfinsync.json` written to the device contains `"transcoding_profile_id": "rockbox-mp3-320"`
+**Then** the `.hifimule.json` written to the device contains `"transcoding_profile_id": "rockbox-mp3-320"`
 **And** the in-memory manifest has `transcoding_profile_id = Some("rockbox-mp3-320")`
 **And** the SQLite `devices` table row has `transcoding_profile_id = "rockbox-mp3-320"`
 **And** the RPC response includes `"transcodingProfileId": "rockbox-mp3-320"` in `data`
@@ -946,7 +946,7 @@ No new Cargo dependencies required. `serde_json::Value` (already a dependency vi
 
 ### Notes
 
-- The `device-profiles.json` path on each platform: Windows `%APPDATA%\JellyfinSync\device-profiles.json`, macOS `~/Library/Application Support/JellyfinSync/device-profiles.json`, Linux `~/.local/share/JellyfinSync/device-profiles.json`.
+- The `device-profiles.json` path on each platform: Windows `%APPDATA%\HifiMule\device-profiles.json`, macOS `~/Library/Application Support/HifiMule/device-profiles.json`, Linux `~/.local/share/HifiMule/device-profiles.json`.
 - No `Box::pin` type erasure required. `get_item_stream()` resolves both download and transcode paths via `response.bytes_stream()` on the same `reqwest::Response` type. The return type unifies naturally as one concrete `impl Stream`.
 - The Jellyfin `TranscodingUrl` field is a path like `/Videos/abc123/stream.mp3?api_key=...&...`. Prepend the server base URL. The token in the URL query string may duplicate the `X-Emby-Token` header — this is fine; Jellyfin accepts both.
 - **Pre-mortem risk — Jellyfin auth on TranscodingUrl**: The `TranscodingUrl` path from Jellyfin typically includes `?api_key=...` in the query string for authentication. Our `get_item_stream()` also sends an `X-Emby-Token` header for the stream request. This is redundant but harmless. If the token is absent from the URL, the header auth is the fallback.
@@ -964,7 +964,7 @@ No new Cargo dependencies required. `serde_json::Value` (already a dependency vi
 **Status:** All 13 tasks implemented and verified.
 
 **Summary:**
-- Created `jellyfinsync-daemon/assets/device-profiles.json` with 4 profiles: passthrough, rockbox-mp3-320, rockbox-mp3-192, generic-mp3-player
+- Created `hifimule-daemon/assets/device-profiles.json` with 4 profiles: passthrough, rockbox-mp3-320, rockbox-mp3-192, generic-mp3-player
 - Added `get_device_profiles_path()` to `paths.rs`
 - Created `transcoding.rs` with `DeviceProfileEntry`, `load_profiles()`, `find_device_profile()`, `ensure_profiles_file_exists()` + unit tests (10 tests)
 - Added `get_item_stream()` and `resolve_stream_url()` to `api.rs` — unified stream resolver with PlaybackInfo negotiation
@@ -982,17 +982,17 @@ No new Cargo dependencies required. `serde_json::Value` (already a dependency vi
 
 ### File List
 
-- `jellyfinsync-daemon/assets/device-profiles.json` (NEW)
-- `jellyfinsync-daemon/src/transcoding.rs` (NEW)
-- `jellyfinsync-daemon/src/paths.rs` (modified)
-- `jellyfinsync-daemon/src/api.rs` (modified)
-- `jellyfinsync-daemon/src/device/mod.rs` (modified)
-- `jellyfinsync-daemon/src/db.rs` (modified)
-- `jellyfinsync-daemon/src/sync.rs` (modified)
-- `jellyfinsync-daemon/src/rpc.rs` (modified)
-- `jellyfinsync-daemon/src/main.rs` (modified)
-- `jellyfinsync-daemon/src/device/tests.rs` (modified — test fixes)
-- `jellyfinsync-daemon/src/tests.rs` (modified — test fixes)
+- `hifimule-daemon/assets/device-profiles.json` (NEW)
+- `hifimule-daemon/src/transcoding.rs` (NEW)
+- `hifimule-daemon/src/paths.rs` (modified)
+- `hifimule-daemon/src/api.rs` (modified)
+- `hifimule-daemon/src/device/mod.rs` (modified)
+- `hifimule-daemon/src/db.rs` (modified)
+- `hifimule-daemon/src/sync.rs` (modified)
+- `hifimule-daemon/src/rpc.rs` (modified)
+- `hifimule-daemon/src/main.rs` (modified)
+- `hifimule-daemon/src/device/tests.rs` (modified — test fixes)
+- `hifimule-daemon/src/tests.rs` (modified — test fixes)
 
 ### Change Log
 

@@ -43,11 +43,11 @@ so that **my on-the-go listening is reflected on my Jellyfin server**.
   - [x] T7.3: MSC unit tests were updated to use `MscBackend`; existing MSC behavior is preserved.
   - [x] T7.4: Fix the MTP missing-log case: MTP backends return plain `anyhow` messages such as `"WPD: path component '.scrobbler.log' not found"` or `"libmtp: path component '.scrobbler.log' not found"`, which do not downcast to `std::io::ErrorKind::NotFound`. A missing `.scrobbler.log` on MTP must return an empty successful `ScrobblerResult`, not an error.
   - [x] T7.5: Add a unit test with a mock `DeviceIO` that returns an MTP-style not-found error for `.scrobbler.log`; assert `total_entries == 0`, all counters are `0`, and `errors.is_empty()`.
-  - [x] T7.6: Run `cargo test` in `jellyfinsync-daemon/` and confirm scrobbler, DeviceIO, and existing daemon tests pass.
+  - [x] T7.6: Run `cargo test` in `hifimule-daemon/` and confirm scrobbler, DeviceIO, and existing daemon tests pass.
 
 ### Review Findings
 
-- [x] [Review][Patch] Regression test does not use a WPD/libmtp-style not-found error [jellyfinsync-daemon/src/scrobbler.rs:410]
+- [x] [Review][Patch] Regression test does not use a WPD/libmtp-style not-found error [hifimule-daemon/src/scrobbler.rs:410]
 
 ### Historical Completed Scope
 
@@ -86,7 +86,7 @@ so that **my on-the-go listening is reflected on my Jellyfin server**.
     - Returns `Ok(())` on HTTP 2xx, `Err` on any other status
     - Note: Jellyfin returns 200 with `UserItemDataDto` body — parse and discard; we only care about success/failure
 
-- [x] **T3: Create `jellyfinsync-daemon/src/scrobbler.rs` module** (AC: #1, #2, #3, #4, #7)
+- [x] **T3: Create `hifimule-daemon/src/scrobbler.rs` module** (AC: #1, #2, #3, #4, #7)
   - [x] T3.1: Define `ScrobblerEntry` struct:
     ```rust
     #[derive(Debug, Clone)]
@@ -176,7 +176,7 @@ so that **my on-the-go listening is reflected on my Jellyfin server**.
     - Return the `ScrobblerResult` serialized to JSON
 
 - [x] **T6: Verification** (AC: all)
-  - [x] T6.1: `cargo test` in `jellyfinsync-daemon/` — all existing tests pass + new scrobbler unit tests pass (88 tests total, up from 82)
+  - [x] T6.1: `cargo test` in `hifimule-daemon/` — all existing tests pass + new scrobbler unit tests pass (88 tests total, up from 82)
   - [ ] T6.2: Manual — Connect device WITH `.scrobbler.log` → logs show "[Scrobbler]" output with result stats
   - [ ] T6.3: Manual — Connect device WITHOUT `.scrobbler.log` → no scrobbler errors, daemon continues normally
   - [ ] T6.4: Manual — RPC call `scrobbler_get_last_result` → returns result object or null
@@ -277,18 +277,18 @@ Field order: artist, album, title, track_number, duration_seconds, rating, unix_
 - `rating`: "L" = Listened (played ≥ 50% through), "S" = Skipped
 - `musicbrainz_track_id`: may be empty string
 - `track_number`: may be empty string (parse as `Option<u32>`)
-- The file is READ-ONLY — JellyfinSync MUST NOT modify or delete it (Rockbox manages its own file)
+- The file is READ-ONLY — HifiMule MUST NOT modify or delete it (Rockbox manages its own file)
 
 ### Source Tree Components to Touch
 
 **Active files to MODIFY for this ready-for-dev refresh:**
-1. [jellyfinsync-daemon/src/scrobbler.rs](jellyfinsync-daemon/src/scrobbler.rs) — Normalize MTP-style not-found errors for `.scrobbler.log`; add a unit test with mock `DeviceIO`.
+1. [hifimule-daemon/src/scrobbler.rs](hifimule-daemon/src/scrobbler.rs) — Normalize MTP-style not-found errors for `.scrobbler.log`; add a unit test with mock `DeviceIO`.
 
 **Files already modified by the historical 5.1 implementation:**
-2. [jellyfinsync-daemon/src/db.rs](jellyfinsync-daemon/src/db.rs) — `scrobble_history` table + `record_scrobble()` + `get_scrobble_count()`.
-3. [jellyfinsync-daemon/src/api.rs](jellyfinsync-daemon/src/api.rs) — `search_audio_items()` + `report_item_played()`.
-4. [jellyfinsync-daemon/src/main.rs](jellyfinsync-daemon/src/main.rs) — `mod scrobbler`, shared scrobbler result state, device detection hook passing `DeviceIO`.
-5. [jellyfinsync-daemon/src/rpc.rs](jellyfinsync-daemon/src/rpc.rs) — `scrobbler_get_last_result`.
+2. [hifimule-daemon/src/db.rs](hifimule-daemon/src/db.rs) — `scrobble_history` table + `record_scrobble()` + `get_scrobble_count()`.
+3. [hifimule-daemon/src/api.rs](hifimule-daemon/src/api.rs) — `search_audio_items()` + `report_item_played()`.
+4. [hifimule-daemon/src/main.rs](hifimule-daemon/src/main.rs) — `mod scrobbler`, shared scrobbler result state, device detection hook passing `DeviceIO`.
+5. [hifimule-daemon/src/rpc.rs](hifimule-daemon/src/rpc.rs) — `scrobbler_get_last_result`.
 
 **Files NOT to create or modify:**
 - Do NOT modify `device/mod.rs` — keep device detection clean; hooks go in `main.rs` event loop
@@ -299,14 +299,14 @@ Field order: artist, album, title, track_number, duration_seconds, rating, unix_
 ### Testing Standards Summary
 
 - **Unit tests**: Add `#[cfg(test)] mod tests` block inside `scrobbler.rs` — test the parser with inline log content
-- **Cargo test**: Run `cargo test` in `jellyfinsync-daemon/` — all 82+ existing tests must continue to pass
+- **Cargo test**: Run `cargo test` in `hifimule-daemon/` — all 82+ existing tests must continue to pass
 - **No mockito required for unit tests**: Parser tests don't need network mocking
 - **Integration test for API**: Not required for this story — manual verification is sufficient (same standard as Story 4.5)
 
 ### Project Structure Notes
 
 **Alignment with Unified Structure:**
-- New `scrobbler.rs` follows the existing flat module layout in `jellyfinsync-daemon/src/` (same level as `sync.rs`, `db.rs`, `api.rs`)
+- New `scrobbler.rs` follows the existing flat module layout in `hifimule-daemon/src/` (same level as `sync.rs`, `db.rs`, `api.rs`)
 - `ScrobblerResult` follows the established camelCase serde pattern (`SyncOperation`, `DeviceRootFoldersResponse`, etc.)
 - Background task pattern (`tokio::spawn` in main.rs device event loop) follows the existing device observer spawn pattern
 - `record_scrobble()` follows the `upsert_device_mapping()` UPSERT pattern in `db.rs`
@@ -350,14 +350,14 @@ Recent commits (`ddd3ac3 Review 4.5`, `bc25880 Fix sync`, `8c794c4 Dev for 4.5`)
 - [Source: architecture.md#api--communication-patterns] — "Direct utilization of the Jellyfin Progressive Sync API for scrobbling and playback reporting"
 - [Source: architecture.md#naming-patterns] — camelCase for all JSON-RPC fields
 - [Source: architecture.md#process-patterns] — `anyhow` for binary-level error management
-- [jellyfinsync-daemon/src/db.rs:42](jellyfinsync-daemon/src/db.rs#L42) — `Database::init()` where new table goes
-- [jellyfinsync-daemon/src/db.rs:78](jellyfinsync-daemon/src/db.rs#L78) — `upsert_device_mapping()` pattern for `record_scrobble()`
-- [jellyfinsync-daemon/src/api.rs:107](jellyfinsync-daemon/src/api.rs#L107) — `JellyfinClient` impl block — add new methods here
-- [jellyfinsync-daemon/src/api.rs:170](jellyfinsync-daemon/src/api.rs#L170) — `get_items()` method pattern to follow for `search_audio_items()`
-- [jellyfinsync-daemon/src/rpc.rs:63](jellyfinsync-daemon/src/rpc.rs#L63) — `AppState` struct definition — add `last_scrobbler_result` field
-- [jellyfinsync-daemon/src/rpc.rs:107](jellyfinsync-daemon/src/rpc.rs#L107) — RPC method match table — add `scrobbler_get_last_result` arm
-- [jellyfinsync-daemon/src/main.rs:81](jellyfinsync-daemon/src/main.rs#L81) — Device event channel — spawn scrobbler after DeviceEvent::Detected
-- [jellyfinsync-daemon/src/main.rs:92](jellyfinsync-daemon/src/main.rs#L92) — `rpc::run_server()` call — pass shared scrobbler result Arc here
+- [hifimule-daemon/src/db.rs:42](hifimule-daemon/src/db.rs#L42) — `Database::init()` where new table goes
+- [hifimule-daemon/src/db.rs:78](hifimule-daemon/src/db.rs#L78) — `upsert_device_mapping()` pattern for `record_scrobble()`
+- [hifimule-daemon/src/api.rs:107](hifimule-daemon/src/api.rs#L107) — `JellyfinClient` impl block — add new methods here
+- [hifimule-daemon/src/api.rs:170](hifimule-daemon/src/api.rs#L170) — `get_items()` method pattern to follow for `search_audio_items()`
+- [hifimule-daemon/src/rpc.rs:63](hifimule-daemon/src/rpc.rs#L63) — `AppState` struct definition — add `last_scrobbler_result` field
+- [hifimule-daemon/src/rpc.rs:107](hifimule-daemon/src/rpc.rs#L107) — RPC method match table — add `scrobbler_get_last_result` arm
+- [hifimule-daemon/src/main.rs:81](hifimule-daemon/src/main.rs#L81) — Device event channel — spawn scrobbler after DeviceEvent::Detected
+- [hifimule-daemon/src/main.rs:92](hifimule-daemon/src/main.rs#L92) — `rpc::run_server()` call — pass shared scrobbler result Arc here
 
 ## Dev Agent Record
 
@@ -372,7 +372,7 @@ None — implementation was straightforward with no runtime debugging required.
 ### Completion Notes List
 
 - **T7 (scrobbler.rs, 2026-05-03)**: Added `is_missing_scrobbler_log_error()` to normalize `.scrobbler.log` not-found responses from both MSC `std::io::ErrorKind::NotFound` and MTP-style `anyhow` messages containing `.scrobbler.log` + `not found`. Genuine read and UTF-8 failures still populate `errors`.
-- **T7 verification (2026-05-03)**: Added `test_process_device_mtp_style_missing_log_is_empty_success()` using a test `DeviceIO` that returns a WPD-style `"path component '.scrobbler.log' not found"` error; confirmed the missing MTP log returns `total_entries == 0`, all counters `0`, `total_scrobbled == 0`, and `errors.is_empty()`. Ran `cargo test` in `jellyfinsync-daemon/` — 184 tests passed. Ran `rustfmt --edition 2021 --check jellyfinsync-daemon/src/scrobbler.rs`.
+- **T7 verification (2026-05-03)**: Added `test_process_device_mtp_style_missing_log_is_empty_success()` using a test `DeviceIO` that returns a WPD-style `"path component '.scrobbler.log' not found"` error; confirmed the missing MTP log returns `total_entries == 0`, all counters `0`, `total_scrobbled == 0`, and `errors.is_empty()`. Ran `cargo test` in `hifimule-daemon/` — 184 tests passed. Ran `rustfmt --edition 2021 --check hifimule-daemon/src/scrobbler.rs`.
 - **T1 (db.rs)**: Added `scrobble_history` table with `submitted_at` timestamp and `idx_scrobble_unique` index. Added `record_scrobble()` using `INSERT OR IGNORE` for Story 5.2 dedup foundation. Added `get_scrobble_count()`. 2 new unit tests added.
 - **T2 (api.rs)**: Added `search_audio_items()` with URL encoding via private `url_encode()` helper (no extra crate needed). Added `report_item_played()` for `POST /UserPlayedItems/{itemId}?userId={userId}`. Added `artists: Option<Vec<String>>` field to `JellyfinItem`.
 - **T3 (scrobbler.rs)**: New module with `ScrobblerEntry`, `ScrobblerResult` (camelCase serde), `parse_scrobbler_log()`, and `process_device_scrobbles()`. Non-fatal per-entry error collection pattern used throughout. Added `total_scrobbled: i64` to `ScrobblerResult` (calls `get_scrobble_count()` after processing). 6 unit tests: 3 parser + 3 process_device paths.
@@ -401,11 +401,11 @@ Review found and fixed the following issues:
 
 ### File List
 
-- `jellyfinsync-daemon/src/scrobbler.rs` (created)
-- `jellyfinsync-daemon/src/db.rs` (modified)
-- `jellyfinsync-daemon/src/api.rs` (modified)
-- `jellyfinsync-daemon/src/main.rs` (modified)
-- `jellyfinsync-daemon/src/rpc.rs` (modified)
+- `hifimule-daemon/src/scrobbler.rs` (created)
+- `hifimule-daemon/src/db.rs` (modified)
+- `hifimule-daemon/src/api.rs` (modified)
+- `hifimule-daemon/src/main.rs` (modified)
+- `hifimule-daemon/src/rpc.rs` (modified)
 - `_bmad-output/implementation-artifacts/5-1-rockbox-scrobbler-bridge.md` (modified)
 - `_bmad-output/implementation-artifacts/sprint-status.yaml` (modified)
 

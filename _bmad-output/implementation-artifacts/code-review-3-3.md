@@ -9,7 +9,7 @@
 **Issues Found:** 1 High, 1 Medium, 2 Low
 
 ## 🔴 CRITICAL ISSUES
-- **[High] Logic Error**: `jellyfinsync-daemon/src/api.rs:308` hardcodes `IncludeItemTypes=Audio` when recursively fetching child items for containers. Use of `MUSIC_ITEM_TYPES` const (which includes `MusicVideo`) is ignored here. If a user syncs a Playlist containing Music Videos, their size will be calculated as 0, leading to potential "Disk Full" errors—explicitly violating the story's core value proposition.
+- **[High] Logic Error**: `hifimule-daemon/src/api.rs:308` hardcodes `IncludeItemTypes=Audio` when recursively fetching child items for containers. Use of `MUSIC_ITEM_TYPES` const (which includes `MusicVideo`) is ignored here. If a user syncs a Playlist containing Music Videos, their size will be calculated as 0, leading to potential "Disk Full" errors—explicitly violating the story's core value proposition.
 
 ## 🟡 MEDIUM ISSUES
 - **[Medium] Data Integrity/Migration**: Existing items in the `BasketStore` (saved in `localStorage`) will not have the `sizeBytes` field. `getTotalSizeBytes` handles this safely (`|| 0`), but users with existing baskets will see "0 MB" total size until they remove and re-add items. The `BasketStore` should ideally backfill this data or `MediaCard` should trigger a refresh for items with missing size data.

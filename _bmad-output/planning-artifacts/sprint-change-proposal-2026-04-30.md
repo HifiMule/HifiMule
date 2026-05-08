@@ -1,6 +1,6 @@
 # Sprint Change Proposal — MTP Device Support
 **Date:** 2026-04-30
-**Project:** JellyfinSync
+**Project:** HifiMule
 **Author:** Alexi
 
 ---
@@ -8,7 +8,7 @@
 ## 1. Issue Summary
 
 **Problem Statement:**
-Garmin watches (and any device using MTP — Media Transfer Protocol) are invisible to JellyfinSync on Windows. When connected, they appear in Windows Explorer as portable devices under "This PC" but receive no drive letter. The daemon's current detection pipeline fires on `WM_DEVICECHANGE` for MSC drive arrivals only, and the entire sync engine assumes `std::fs` writes to a mounted filesystem path. MTP devices expose a virtual filesystem via the Windows Portable Devices (WPD) COM API — a completely different IO model.
+Garmin watches (and any device using MTP — Media Transfer Protocol) are invisible to HifiMule on Windows. When connected, they appear in Windows Explorer as portable devices under "This PC" but receive no drive letter. The daemon's current detection pipeline fires on `WM_DEVICECHANGE` for MSC drive arrivals only, and the entire sync engine assumes `std::fs` writes to a mounted filesystem path. MTP devices expose a virtual filesystem via the Windows Portable Devices (WPD) COM API — a completely different IO model.
 
 **Discovery context:**
 Surfaced during manual testing of the auto-sync flow on Windows with a Garmin watch (Sarah's "Pre-Run Dash" user journey). The daemon produced no device-detected event.
@@ -201,11 +201,11 @@ Story 2.10.
 CHANGE in Story 2.6 Acceptance Criteria:
 
 OLD:
-**Then** the daemon writes an initial `.jellyfinsync.json` to the device
+**Then** the daemon writes an initial `.hifimule.json` to the device
   using the atomic Write-Temp-Rename pattern...
 
 NEW:
-**Then** the daemon writes an initial `.jellyfinsync.json` to the device
+**Then** the daemon writes an initial `.hifimule.json` to the device
   via `device_io.write_with_verify()`...
 
 ADD to Technical Notes:
@@ -232,7 +232,7 @@ So that it appears in the device hub without requiring manual steps.
   `GUID_DEVINTERFACE_WPD`.
 **And** it enumerates the device via `IPortableDeviceManager` to retrieve
   its device ID and friendly name.
-**And** it checks for a `.jellyfinsync.json` object in the device root
+**And** it checks for a `.hifimule.json` object in the device root
   storage.
 **And** it fires a `on_device_detected` or `on_device_unrecognized` event
   (identical behavior to MSC Story 2.2).
@@ -241,7 +241,7 @@ So that it appears in the device hub without requiring manual steps.
 **When** an MTP device is connected
 **Then** the daemon receives a `udev` USB event.
 **And** `libmtp` enumerates the device and retrieves its serial/device ID.
-**And** it checks for `.jellyfinsync.json` and fires the appropriate event.
+**And** it checks for `.hifimule.json` and fires the appropriate event.
 
 **Given** the daemon is running on macOS
 **When** an MTP device is connected
@@ -281,7 +281,7 @@ without duplicated IO logic.
 
 **Acceptance Criteria:**
 
-**Given** the `DeviceIO` trait is defined in `jellyfinsync-daemon`
+**Given** the `DeviceIO` trait is defined in `hifimule-daemon`
 **When** any sync, manifest, or scrobble operation targets a device
 **Then** it calls methods on `Arc<dyn DeviceIO>` exclusively — no direct
   `std::fs` calls with a device path anywhere outside `MscBackend`.

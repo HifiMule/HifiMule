@@ -13,17 +13,17 @@ so that **I don't accidentally mark them for deletion and can trust the sync too
 ## Acceptance Criteria
 
 1. **Device Folder Enumeration**: Given a connected device with both managed and unmanaged folders, When the UI displays the "Device State" panel, Then ALL top-level folders on the device root are listed with their names and types (managed vs unmanaged). (AC: #1)
-2. **Unmanaged Folder Shielding**: Given unmanaged folders exist on the device (e.g., `Notes/`, `Podcasts/`, `Recordings/`), When they appear in the Device State panel, Then they are visually marked with a **shield/lock icon** and a "Protected" label, clearly indicating they cannot be modified by JellyfinSync. (AC: #2)
-3. **Managed Folder Identification**: Given the `.jellyfinsync.json` manifest tracks a `managed_paths` array, When folders on the device match those paths, Then they are shown with an unlocked/sync icon and labeled as "Managed by JellyfinSync". (AC: #3)
+2. **Unmanaged Folder Shielding**: Given unmanaged folders exist on the device (e.g., `Notes/`, `Podcasts/`, `Recordings/`), When they appear in the Device State panel, Then they are visually marked with a **shield/lock icon** and a "Protected" label, clearly indicating they cannot be modified by HifiMule. (AC: #2)
+3. **Managed Folder Identification**: Given the `.hifimule.json` manifest tracks a `managed_paths` array, When folders on the device match those paths, Then they are shown with an unlocked/sync icon and labeled as "Managed by HifiMule". (AC: #3)
 4. **No Modification of Unmanaged Content**: The daemon MUST NOT expose any RPC method or UI affordance that allows deletion, renaming, or modification of unmanaged folders or their contents. The shielding is read-only and absolute. (AC: #4)
-5. **Empty Device / No Manifest State**: Given a device with no `.jellyfinsync.json` manifest (fresh device), When viewing Device State, Then ALL folders are shown as "Unmanaged / Protected" and a message indicates "No managed sync zone configured yet — folders will be created on first sync." (AC: #5)
+5. **Empty Device / No Manifest State**: Given a device with no `.hifimule.json` manifest (fresh device), When viewing Device State, Then ALL folders are shown as "Unmanaged / Protected" and a message indicates "No managed sync zone configured yet — folders will be created on first sync." (AC: #5)
 6. **Integration with BasketSidebar**: The Device State panel MUST be accessible from the BasketSidebar (e.g., as an expandable section or toggle) so users can review device folder protection status while curating their sync basket. (AC: #6)
 
 ## Tasks / Subtasks
 
 - [x] **T1: Daemon - Extend Manifest with Managed Paths** (AC: #3, #5)
   - [x] T1.1: Add `managed_paths: Vec<String>` field to `DeviceManifest` struct in `device/mod.rs` with `#[serde(default)]` for backward compatibility with existing manifests that lack this field.
-  - [x] T1.2: When reading `.jellyfinsync.json`, deserialize `managed_paths` (defaults to empty vec if absent). This field will be populated by Epic 4's sync engine when it creates folders.
+  - [x] T1.2: When reading `.hifimule.json`, deserialize `managed_paths` (defaults to empty vec if absent). This field will be populated by Epic 4's sync engine when it creates folders.
 - [x] **T2: Daemon - Device Folder Listing RPC** (AC: #1, #2, #3)
   - [x] T2.1: Add a new RPC method `device_list_root_folders()` that uses `std::fs::read_dir` on the current device path to enumerate top-level directories (skip files, hidden entries, and system folders like `System Volume Information`).
   - [x] T2.2: For each folder, return `{ name: String, path: String, isManaged: bool }` where `isManaged` is `true` if the folder path exists in the manifest's `managed_paths` array.
@@ -64,7 +64,7 @@ so that **I don't accidentally mark them for deletion and can trust the sync too
 
 - **Manifest `managed_paths` Design:**
   - Add as `managed_paths: Vec<String>` with `#[serde(default)]` so existing manifests deserialize without error.
-  - Paths are relative to device root (e.g., `"Music"`, `"Music/JellyfinSync"`).
+  - Paths are relative to device root (e.g., `"Music"`, `"Music/HifiMule"`).
   - Comparison is case-insensitive on Windows, case-sensitive on Unix (use `eq_ignore_ascii_case` on Windows target).
   - This field will remain EMPTY for now — it will be populated by Epic 4's sync engine when it creates managed directories. For Story 3.4, all folders will appear as "Protected" unless a manifest explicitly lists managed paths.
 
@@ -112,14 +112,14 @@ Code conventions from recent commits: modifications follow existing patterns, te
 - **Files to CREATE:**
   - None expected. All changes are modifications to existing files.
 - **Files to MODIFY:**
-  - `jellyfinsync-daemon/src/device/mod.rs`: Add `managed_paths` to `DeviceManifest`, add `list_root_folders()` method to `DeviceManager`, add system folder exclusion list.
-  - `jellyfinsync-daemon/src/rpc.rs`: Add `device_list_root_folders` RPC handler with `DeviceFolderInfo` response struct.
-  - `jellyfinsync-ui/src/components/BasketSidebar.ts`: Add `renderDeviceFoldersPanel()` function, integrate into sidebar layout between capacity bar and sync button, add collapsible toggle.
-  - `jellyfinsync-ui/src/styles.css`: Add styles for `.device-folders-panel`, `.folder-item`, `.folder-managed`, `.folder-protected`, shield icon styling.
+  - `hifimule-daemon/src/device/mod.rs`: Add `managed_paths` to `DeviceManifest`, add `list_root_folders()` method to `DeviceManager`, add system folder exclusion list.
+  - `hifimule-daemon/src/rpc.rs`: Add `device_list_root_folders` RPC handler with `DeviceFolderInfo` response struct.
+  - `hifimule-ui/src/components/BasketSidebar.ts`: Add `renderDeviceFoldersPanel()` function, integrate into sidebar layout between capacity bar and sync button, add collapsible toggle.
+  - `hifimule-ui/src/styles.css`: Add styles for `.device-folders-panel`, `.folder-item`, `.folder-managed`, `.folder-protected`, shield icon styling.
 - **Files for REFERENCE (do not modify):**
-  - `jellyfinsync-ui/src/state/basket.ts`: EventTarget pattern reference.
-  - `jellyfinsync-ui/src/rpc.ts`: RPC client wrapper pattern.
-  - `jellyfinsync-ui/src/library.ts`: Navigation and item structure patterns.
+  - `hifimule-ui/src/state/basket.ts`: EventTarget pattern reference.
+  - `hifimule-ui/src/rpc.ts`: RPC client wrapper pattern.
+  - `hifimule-ui/src/library.ts`: Navigation and item structure patterns.
 
 ### References
 
@@ -150,12 +150,12 @@ Claude Opus 4.6
 
 ### File List
 
-- `jellyfinsync-daemon/src/device/mod.rs` (Modified)
-- `jellyfinsync-daemon/src/rpc.rs` (Modified)
-- `jellyfinsync-daemon/src/device/tests.rs` (Modified)
-- `jellyfinsync-daemon/src/tests.rs` (Modified)
-- `jellyfinsync-ui/src/components/BasketSidebar.ts` (Modified)
-- `jellyfinsync-ui/src/styles.css` (Modified)
+- `hifimule-daemon/src/device/mod.rs` (Modified)
+- `hifimule-daemon/src/rpc.rs` (Modified)
+- `hifimule-daemon/src/device/tests.rs` (Modified)
+- `hifimule-daemon/src/tests.rs` (Modified)
+- `hifimule-ui/src/components/BasketSidebar.ts` (Modified)
+- `hifimule-ui/src/styles.css` (Modified)
 
 ### Senior Developer Review (AI)
 
@@ -172,4 +172,4 @@ Claude Opus 4.6
 
 **Not fixed (M4 — design note):** AC #5 "no manifest" fresh device scenario is architecturally unreachable because `run_observer` only sends `DeviceEvent::Detected` when a manifest exists. The code defensively handles the case, but it can never be triggered through the current device flow. This is a pre-existing design gap — recommend addressing in Epic 4 when the sync engine creates manifests on fresh devices.
 
-**Low findings (not fixed — cosmetic):** L1: "Managed" vs "Managed by JellyfinSync" label. L2: Summary count order reversed. L3: Banner wording slightly differs from AC. L4: Plain divs used instead of Shoelace `<sl-tree>`. L5: Fixed (duplicate file_name call).
+**Low findings (not fixed — cosmetic):** L1: "Managed" vs "Managed by HifiMule" label. L2: Summary count order reversed. L3: Banner wording slightly differs from AC. L4: Plain divs used instead of Shoelace `<sl-tree>`. L5: Fixed (duplicate file_name call).

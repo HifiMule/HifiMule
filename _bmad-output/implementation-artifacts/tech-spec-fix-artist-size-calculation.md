@@ -5,7 +5,7 @@ created: '2026-03-01'
 status: 'Completed'
 stepsCompleted: [1, 2, 3, 4]
 tech_stack: ['Rust (daemon)', 'TypeScript (UI)', 'reqwest', 'mockito', 'serde_json', 'tokio']
-files_to_modify: ['jellyfinsync-daemon/src/api.rs']
+files_to_modify: ['hifimule-daemon/src/api.rs']
 code_patterns: ['CONTAINER_TYPES constant dispatch', 'async/await futures::future::join_all', 'mockito server mocking for tests']
 test_patterns: ['#[tokio::test] async', 'mockito::Server::new_async()', 'server.mock(...).with_body(...).create_async()']
 ---
@@ -22,12 +22,12 @@ When a user selects a `MusicArtist` item and adds it to the basket, the displaye
 
 ### Solution
 
-Add `"MusicArtist"` to the `CONTAINER_TYPES` constant in `jellyfinsync-daemon/src/api.rs`. The existing container branch in `get_single_item_size()` already calls `get_child_items_with_sizes()` with `Recursive=true`, which traverses Artist → Albums → Tracks in a single Jellyfin API call. No structural changes are needed beyond adding the type string.
+Add `"MusicArtist"` to the `CONTAINER_TYPES` constant in `hifimule-daemon/src/api.rs`. The existing container branch in `get_single_item_size()` already calls `get_child_items_with_sizes()` with `Recursive=true`, which traverses Artist → Albums → Tracks in a single Jellyfin API call. No structural changes are needed beyond adding the type string.
 
 ### Scope
 
 **In Scope:**
-- Size calculation for `MusicArtist` items in `jellyfinsync-daemon/src/api.rs`
+- Size calculation for `MusicArtist` items in `hifimule-daemon/src/api.rs`
 - New unit test covering the artist-as-container scenario
 
 **Out of Scope:**
@@ -39,18 +39,18 @@ Add `"MusicArtist"` to the `CONTAINER_TYPES` constant in `jellyfinsync-daemon/sr
 
 ### Codebase Patterns
 
-- **Container dispatch via `CONTAINER_TYPES` constant** ([api.rs:8](jellyfinsync-daemon/src/api.rs#L8)): A `&[&str]` slice checked with `.contains()` determines whether an item is fetched recursively (container) or read directly (leaf). This is the single authoritative branching point for size calculation.
-- **`get_child_items_with_sizes()` already uses `Recursive=true`** ([api.rs:378](jellyfinsync-daemon/src/api.rs#L378)): The Jellyfin API call is `GET /Items?userId={uid}&ParentId={id}&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true`. The `Recursive=true` parameter makes Jellyfin flatten the Artist → Albums → Tracks hierarchy automatically, returning all leaf audio items. No extra recursion is needed in Rust.
-- **Tests use `mockito` with `Server::new_async()`**: Container tests mock two endpoints — the item-details call (`/Items/{id}?userId={uid}&Fields=MediaSources`) and the children call (`/Items?userId={uid}&ParentId=...&Recursive=true`). See `test_get_item_sizes_album_container` ([api.rs:1093](jellyfinsync-daemon/src/api.rs#L1093)) as the direct template.
+- **Container dispatch via `CONTAINER_TYPES` constant** ([api.rs:8](hifimule-daemon/src/api.rs#L8)): A `&[&str]` slice checked with `.contains()` determines whether an item is fetched recursively (container) or read directly (leaf). This is the single authoritative branching point for size calculation.
+- **`get_child_items_with_sizes()` already uses `Recursive=true`** ([api.rs:378](hifimule-daemon/src/api.rs#L378)): The Jellyfin API call is `GET /Items?userId={uid}&ParentId={id}&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true`. The `Recursive=true` parameter makes Jellyfin flatten the Artist → Albums → Tracks hierarchy automatically, returning all leaf audio items. No extra recursion is needed in Rust.
+- **Tests use `mockito` with `Server::new_async()`**: Container tests mock two endpoints — the item-details call (`/Items/{id}?userId={uid}&Fields=MediaSources`) and the children call (`/Items?userId={uid}&ParentId=...&Recursive=true`). See `test_get_item_sizes_album_container` ([api.rs:1093](hifimule-daemon/src/api.rs#L1093)) as the direct template.
 - **Async parallelism via `futures::future::join_all`**: `get_item_sizes()` fires all size lookups concurrently; each lookup is self-contained.
 
 ### Files to Reference
 
 | File | Purpose |
 | ---- | ------- |
-| [jellyfinsync-daemon/src/api.rs](jellyfinsync-daemon/src/api.rs) | **Primary change target.** `CONTAINER_TYPES` (line 8), `get_single_item_size()` (line 429), `get_child_items_with_sizes()` (line 361), existing tests (line 1067+) |
-| [jellyfinsync-daemon/src/rpc.rs](jellyfinsync-daemon/src/rpc.rs) | RPC handler `handle_jellyfin_get_item_sizes()` (line 561) — read-only reference, no changes needed |
-| [jellyfinsync-ui/src/state/basket.ts](jellyfinsync-ui/src/state/basket.ts) | `getTotalSizeBytes()` — read-only reference, no changes needed |
+| [hifimule-daemon/src/api.rs](hifimule-daemon/src/api.rs) | **Primary change target.** `CONTAINER_TYPES` (line 8), `get_single_item_size()` (line 429), `get_child_items_with_sizes()` (line 361), existing tests (line 1067+) |
+| [hifimule-daemon/src/rpc.rs](hifimule-daemon/src/rpc.rs) | RPC handler `handle_jellyfin_get_item_sizes()` (line 561) — read-only reference, no changes needed |
+| [hifimule-ui/src/state/basket.ts](hifimule-ui/src/state/basket.ts) | `getTotalSizeBytes()` — read-only reference, no changes needed |
 
 ### Technical Decisions
 
@@ -62,7 +62,7 @@ Add `"MusicArtist"` to the `CONTAINER_TYPES` constant in `jellyfinsync-daemon/sr
 ### Tasks
 
 - [x] Task 1: Add `"MusicArtist"` to `CONTAINER_TYPES`
-  - File: `jellyfinsync-daemon/src/api.rs`
+  - File: `hifimule-daemon/src/api.rs`
   - Action: Change line 8 from:
     ```rust
     const CONTAINER_TYPES: &[&str] = &["MusicAlbum", "Playlist"];
@@ -74,7 +74,7 @@ Add `"MusicArtist"` to the `CONTAINER_TYPES` constant in `jellyfinsync-daemon/sr
   - Notes: This is the entire production code change. No other files require modification.
 
 - [x] Task 2: Add unit test `test_get_item_sizes_artist_container`
-  - File: `jellyfinsync-daemon/src/api.rs` (inside `#[cfg(test)] mod tests`, after `test_get_item_sizes_album_container`)
+  - File: `hifimule-daemon/src/api.rs` (inside `#[cfg(test)] mod tests`, after `test_get_item_sizes_album_container`)
   - Action: Add a new `#[tokio::test]` following the exact pattern of `test_get_item_sizes_album_container` (line 1093). Mock two endpoints:
     1. `GET /Items/artist1?userId=user1&Fields=MediaSources` → responds with `{"Id": "artist1", "Name": "Test Artist", "Type": "MusicArtist"}` (no `MediaSources`)
     2. `GET /Items?userId=user1&ParentId=artist1&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true` → responds with two Audio tracks with sizes (e.g., 3 000 000 and 4 000 000 bytes)

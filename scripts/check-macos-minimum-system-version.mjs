@@ -4,7 +4,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const configPath = resolve("jellyfinsync-ui", "src-tauri", "tauri.conf.json");
+const configPath = resolve("hifimule-ui", "src-tauri", "tauri.conf.json");
 const config = JSON.parse(readFileSync(configPath, "utf-8"));
 const minimumSystemVersion = config.bundle?.macOS?.minimumSystemVersion;
 

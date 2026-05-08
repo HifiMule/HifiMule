@@ -1,4 +1,4 @@
-# smoke-windows.ps1 — Windows MSI smoke test for JellyfinSync
+# smoke-windows.ps1 — Windows MSI smoke test for HifiMule
 # Runs from the directory containing the .msi installer artifact.
 #
 # Steps:
@@ -25,9 +25,9 @@ $Platform = "windows"
 
 function Get-InstallDir {
     $registryPaths = @(
-        "HKLM:\SOFTWARE\JellyfinSync",
-        "HKLM:\SOFTWARE\WOW6432Node\JellyfinSync",
-        "HKCU:\SOFTWARE\JellyfinSync"
+        "HKLM:\SOFTWARE\HifiMule",
+        "HKLM:\SOFTWARE\WOW6432Node\HifiMule",
+        "HKCU:\SOFTWARE\HifiMule"
     )
     foreach ($path in $registryPaths) {
         $value = Get-ItemProperty -Path $path -Name "InstallDir" -ErrorAction SilentlyContinue
@@ -37,8 +37,8 @@ function Get-InstallDir {
     }
 
     $fallbacks = @(
-        "C:\Program Files\JellyfinSync",
-        "C:\Program Files (x86)\JellyfinSync"
+        "C:\Program Files\HifiMule",
+        "C:\Program Files (x86)\HifiMule"
     )
     foreach ($path in $fallbacks) {
         if (Test-Path $path) {
@@ -65,12 +65,12 @@ if ($proc.ExitCode -ne 0) {
 Write-Host "  Install OK"
 
 # --- STEP 2: Launch ---
-Write-Step "STEP 2: Launching JellyfinSync ..."
+Write-Step "STEP 2: Launching HifiMule ..."
 $installDir = Get-InstallDir
 if (-not $installDir) {
     Fail $Platform "launch" "Install directory not found in registry or common install locations"
 }
-$exe = Get-ChildItem $installDir -Filter "jellyfinsync.exe" -Recurse -ErrorAction SilentlyContinue |
+$exe = Get-ChildItem $installDir -Filter "hifimule.exe" -Recurse -ErrorAction SilentlyContinue |
        Select-Object -First 1
 if (-not $exe) {
     # Fallback: find any .exe in install dir

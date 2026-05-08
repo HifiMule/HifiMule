@@ -46,7 +46,7 @@ So that I can fill my device without manually browsing and selecting every album
 ## Tasks / Subtasks
 
 - [x] Task 1: Implement priority ranking algorithm in daemon (AC: #1)
-  - [x] 1.1 Create `auto_fill` module in daemon (`jellyfinsync-daemon/src/auto_fill.rs`)
+  - [x] 1.1 Create `auto_fill` module in daemon (`hifimule-daemon/src/auto_fill.rs`)
   - [x] 1.2 Implement Jellyfin API query to fetch all music tracks with `IsFavorite`, `PlayCount`, `DateCreated` fields
   - [x] 1.3 Implement priority sorting: favorites first → play count desc → creation date desc
   - [x] 1.4 Implement capacity-aware truncation using cumulative `sizeBytes` against device free space or `maxFillBytes`
@@ -60,7 +60,7 @@ So that I can fill my device without manually browsing and selecting every album
   - [x] 2.5 Subtract manual selection sizes from available capacity before running algorithm
 
 - [x] Task 3: Persist auto-fill and auto-sync preferences per device (AC: #1, #3, #4)
-  - [x] 3.1 Add `auto_fill_enabled`, `max_fill_bytes`, and `auto_sync_on_connect` fields to device profile in manifest `.jellyfinsync.json`
+  - [x] 3.1 Add `auto_fill_enabled`, `max_fill_bytes`, and `auto_sync_on_connect` fields to device profile in manifest `.hifimule.json`
   - [x] 3.2 Add `sync.setAutoFill` RPC method: `{ deviceId, autoFillEnabled, maxFillBytes?, autoSyncOnConnect }`
   - [x] 3.3 Use Write-Temp-Rename pattern for manifest updates (existing pattern)
 
@@ -95,20 +95,20 @@ So that I can fill my device without manually browsing and selecting every album
 
 - **IPC Pattern**: JSON-RPC 2.0 over localhost HTTP. Use existing `rpc_proxy` Tauri command for all RPC calls from UI (required in release builds due to mixed-content blocking)
 - **Serialization**: All JSON-RPC payloads use `camelCase`. Rust structs must use `#[serde(rename_all = "camelCase")]`
-- **Manifest Updates**: Use Write-Temp-Rename pattern for all `.jellyfinsync.json` writes (see existing pattern in `device/mod.rs`)
+- **Manifest Updates**: Use Write-Temp-Rename pattern for all `.hifimule.json` writes (see existing pattern in `device/mod.rs`)
 - **Process Model**: Auto-fill algorithm runs daemon-side. UI only sends RPC requests and renders results
 
 ### Existing Code to Reuse (DO NOT Reinvent)
 
 | What | Where | How to Reuse |
 |------|-------|-------------|
-| Basket state management | `jellyfinsync-ui/src/state/basket.ts` | Extend `BasketItem` interface, use existing `add()`, `remove()`, `getTotalSizeBytes()` |
-| Basket sidebar UI | `jellyfinsync-ui/src/components/BasketSidebar.ts` | Add toggle/slider to header, modify item rendering for badges |
+| Basket state management | `hifimule-ui/src/state/basket.ts` | Extend `BasketItem` interface, use existing `add()`, `remove()`, `getTotalSizeBytes()` |
+| Basket sidebar UI | `hifimule-ui/src/components/BasketSidebar.ts` | Add toggle/slider to header, modify item rendering for badges |
 | Storage projection | `BasketSidebar.ts` lines 59-127 | `getCapacityZone()` and `renderCapacityBar()` already work — just ensure they see auto-fill items |
-| RPC dispatch | `jellyfinsync-daemon/src/rpc.rs` | Register new methods in existing match dispatch |
-| Jellyfin API queries | `jellyfinsync-daemon/src/api.rs` | Use existing `MUSIC_ITEM_TYPES` constant and `fetch_items` patterns from Story 3.5 |
-| Device manifest I/O | `jellyfinsync-daemon/src/device/mod.rs` | Use existing `BasketItem` struct and manifest read/write |
-| Daemon-to-UI proxy | `jellyfinsync-ui/src/rpc.ts` | Use existing `rpcCall()` function for all daemon communication |
+| RPC dispatch | `hifimule-daemon/src/rpc.rs` | Register new methods in existing match dispatch |
+| Jellyfin API queries | `hifimule-daemon/src/api.rs` | Use existing `MUSIC_ITEM_TYPES` constant and `fetch_items` patterns from Story 3.5 |
+| Device manifest I/O | `hifimule-daemon/src/device/mod.rs` | Use existing `BasketItem` struct and manifest read/write |
+| Daemon-to-UI proxy | `hifimule-ui/src/rpc.ts` | Use existing `rpcCall()` function for all daemon communication |
 | Item size fetching | RPC `jellyfin_get_item_sizes` | Already fetches `sizeBytes` for basket items |
 
 ### Jellyfin API Details
@@ -140,7 +140,7 @@ Output: Ranked list truncated to capacity
 
 ### Device Profile Manifest Extension
 
-Add to `.jellyfinsync.json` optional `autoFill` block:
+Add to `.hifimule.json` optional `autoFill` block:
 ```json
 {
   "autoFill": {
@@ -157,7 +157,7 @@ Add to `.jellyfinsync.json` optional `autoFill` block:
 
 ### Project Structure Notes
 
-- New daemon module: `jellyfinsync-daemon/src/auto_fill.rs` — add `mod auto_fill;` to `main.rs`
+- New daemon module: `hifimule-daemon/src/auto_fill.rs` — add `mod auto_fill;` to `main.rs`
 - No new UI files needed — extend existing `BasketSidebar.ts` and `basket.ts`
 - Rust tests: co-located `#[cfg(test)] mod tests` in `auto_fill.rs`
 - TypeScript: no separate test file needed unless complex logic is added to UI
@@ -189,7 +189,7 @@ claude-sonnet-4-6
 
 ### Completion Notes List
 
-- **Task 1**: Created `jellyfinsync-daemon/src/auto_fill.rs` with `rank_and_truncate()` pure function (unit-testable without network) and `run_auto_fill()` async wrapper. Extended `JellyfinItem` in `api.rs` with optional `user_data: Option<JellyfinUserData>` and `date_created: Option<String>`. Added `get_audio_tracks_for_autofill()` to `JellyfinClient` that paginates in 500-item batches with `IncludeItemTypes=Audio&Recursive=true&Fields=MediaSources,UserData,DateCreated`. Added 6 unit tests covering all sort keys, capacity truncation, exclude list, empty library, and zero-capacity edge cases.
+- **Task 1**: Created `hifimule-daemon/src/auto_fill.rs` with `rank_and_truncate()` pure function (unit-testable without network) and `run_auto_fill()` async wrapper. Extended `JellyfinItem` in `api.rs` with optional `user_data: Option<JellyfinUserData>` and `date_created: Option<String>`. Added `get_audio_tracks_for_autofill()` to `JellyfinClient` that paginates in 500-item batches with `IncludeItemTypes=Audio&Recursive=true&Fields=MediaSources,UserData,DateCreated`. Added 6 unit tests covering all sort keys, capacity truncation, exclude list, empty library, and zero-capacity edge cases.
 - **Task 2**: Registered `basket.autoFill` in `rpc.rs` dispatch. Handler resolves `maxFillBytes` from params or falls back to device free space, calls `auto_fill::run_auto_fill`, returns ranked `AutoFillItem` list with `priorityReason`.
 - **Task 3**: Added `AutoFillPrefs { enabled: bool, max_bytes: Option<u64> }` struct with `#[serde(rename_all = "camelCase")]` and `Default` to `device/mod.rs`. Added `auto_fill: AutoFillPrefs` field to `DeviceManifest`. Added `save_auto_fill_prefs()` to `DeviceManager`. Added `sync.setAutoFill` RPC handler that persists prefs to manifest AND updates `auto_sync_on_connect` in both manifest and DB. Updated `get_daemon_state` to expose `autoFill` object to UI.
 - **Task 4**: Added `autoFillEnabled`, `autoFillMaxBytes`, `autoSyncOnConnect`, `autoFillDebounceTimer` state fields to `BasketSidebar`. Added `renderAutoFillControls()` rendering Auto-Fill toggle, conditional GB slider (visible only when enabled), and Auto-Sync toggle with helper text. Added `bindAutoFillEvents()` for `sl-change` events with 500ms debounce on slider. On device connect, reads saved prefs from daemon state and re-triggers auto-fill if enabled.
@@ -200,16 +200,16 @@ claude-sonnet-4-6
 
 ### File List
 
-- `jellyfinsync-daemon/src/auto_fill.rs` — NEW: auto-fill priority ranking module with unit tests
-- `jellyfinsync-daemon/src/api.rs` — MODIFIED: extended `JellyfinItem` with `user_data`/`date_created`; added `JellyfinUserData` struct; added `get_audio_tracks_for_autofill()` method
-- `jellyfinsync-daemon/src/device/mod.rs` — MODIFIED: added `AutoFillPrefs` struct; added `auto_fill` field to `DeviceManifest`; added `save_auto_fill_prefs()` to `DeviceManager`
-- `jellyfinsync-daemon/src/rpc.rs` — MODIFIED: registered `basket.autoFill` and `sync.setAutoFill` in dispatch; added `handle_basket_auto_fill()` and `handle_sync_set_auto_fill()` handlers; updated `get_daemon_state` to expose `autoFill` prefs; fixed all `DeviceManifest` test literals
-- `jellyfinsync-daemon/src/main.rs` — MODIFIED: added `mod auto_fill;`; updated TODO comment
-- `jellyfinsync-daemon/src/device/tests.rs` — MODIFIED: added `auto_fill` field to all `DeviceManifest` test literals
-- `jellyfinsync-daemon/src/sync.rs` — MODIFIED: added `auto_fill` field to `DeviceManifest` test literal; added `user_data`/`date_created` to `JellyfinItem` test literals
-- `jellyfinsync-daemon/src/tests.rs` — MODIFIED: added `auto_fill` field to `DeviceManifest` test literals
-- `jellyfinsync-ui/src/state/basket.ts` — MODIFIED: extended `BasketItem` with `autoFilled`/`priorityReason`; added `replaceAutoFilled()`, `getManualItemIds()`, `getManualSizeBytes()`
-- `jellyfinsync-ui/src/components/BasketSidebar.ts` — MODIFIED: added auto-fill state fields; added `triggerAutoFill()`, `scheduleAutoFill()`, `persistAutoFillPrefs()`, `renderAutoFillControls()`, `bindAutoFillEvents()`, `renderPriorityLabel()`; updated `render()` to include controls; updated `renderItem()` with badges; loads prefs on device connect
+- `hifimule-daemon/src/auto_fill.rs` — NEW: auto-fill priority ranking module with unit tests
+- `hifimule-daemon/src/api.rs` — MODIFIED: extended `JellyfinItem` with `user_data`/`date_created`; added `JellyfinUserData` struct; added `get_audio_tracks_for_autofill()` method
+- `hifimule-daemon/src/device/mod.rs` — MODIFIED: added `AutoFillPrefs` struct; added `auto_fill` field to `DeviceManifest`; added `save_auto_fill_prefs()` to `DeviceManager`
+- `hifimule-daemon/src/rpc.rs` — MODIFIED: registered `basket.autoFill` and `sync.setAutoFill` in dispatch; added `handle_basket_auto_fill()` and `handle_sync_set_auto_fill()` handlers; updated `get_daemon_state` to expose `autoFill` prefs; fixed all `DeviceManifest` test literals
+- `hifimule-daemon/src/main.rs` — MODIFIED: added `mod auto_fill;`; updated TODO comment
+- `hifimule-daemon/src/device/tests.rs` — MODIFIED: added `auto_fill` field to all `DeviceManifest` test literals
+- `hifimule-daemon/src/sync.rs` — MODIFIED: added `auto_fill` field to `DeviceManifest` test literal; added `user_data`/`date_created` to `JellyfinItem` test literals
+- `hifimule-daemon/src/tests.rs` — MODIFIED: added `auto_fill` field to `DeviceManifest` test literals
+- `hifimule-ui/src/state/basket.ts` — MODIFIED: extended `BasketItem` with `autoFilled`/`priorityReason`; added `replaceAutoFilled()`, `getManualItemIds()`, `getManualSizeBytes()`
+- `hifimule-ui/src/components/BasketSidebar.ts` — MODIFIED: added auto-fill state fields; added `triggerAutoFill()`, `scheduleAutoFill()`, `persistAutoFillPrefs()`, `renderAutoFillControls()`, `bindAutoFillEvents()`, `renderPriorityLabel()`; updated `render()` to include controls; updated `renderItem()` with badges; loads prefs on device connect
 
 ### Change Log
 

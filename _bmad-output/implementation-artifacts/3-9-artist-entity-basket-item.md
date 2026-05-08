@@ -44,7 +44,7 @@ so that any new albums or tracks added to that artist in Jellyfin are automatica
   - [x] 1.1 In `renderItem()`, add check before the generic card path: `if (item.type === 'MusicArtist') return this.renderArtistCard(item);`
   - [x] 1.2 Add `private renderArtistCard(item: BasketItem): string` — returns HTML with `.basket-item-artist` class, artist icon, name, "~N tracks · ~X MB" meta, and `×` remove button (same `remove-item-btn` pattern as other cards)
 
-- [x] Task 2: Add CSS for `.basket-item-artist` in `jellyfinsync-ui/src/styles.css` (AC: #2)
+- [x] Task 2: Add CSS for `.basket-item-artist` in `hifimule-ui/src/styles.css` (AC: #2)
   - [x] 2.1 Add `.basket-item-artist` class with a distinct artist-style (e.g. `sl-icon name="music-note-list"` or `"person-fill"`, subtle tint to distinguish from albums/playlists) — closely mirror the `.basket-item-auto-fill-slot` pattern for consistency
 
 ## Dev Notes
@@ -175,20 +175,20 @@ The `MusicArtist` ID flows into this path automatically. "Newly added tracks" ar
 
 ### Project Structure Notes
 
-- UI changes only: `jellyfinsync-ui/src/components/BasketSidebar.ts` and `jellyfinsync-ui/src/styles.css`
+- UI changes only: `hifimule-ui/src/components/BasketSidebar.ts` and `hifimule-ui/src/styles.css`
 - No new files needed
 - No Rust changes
 
 ### References
 
 - [Source: _bmad-output/planning-artifacts/epics.md#Story 3.9 — full acceptance criteria and technical notes]
-- [Source: jellyfinsync-ui/src/components/MediaCard.ts:96-141 — basket toggle handler that already handles artists]
-- [Source: jellyfinsync-ui/src/components/BasketSidebar.ts:1000-1028 — renderItem() to modify]
-- [Source: jellyfinsync-ui/src/components/BasketSidebar.ts:982-998 — renderAutoFillSlotCard() to mirror]
-- [Source: jellyfinsync-ui/src/components/BasketSidebar.ts:52 — formatSize() utility]
-- [Source: jellyfinsync-daemon/src/api.rs:8 — CONTAINER_TYPES includes MusicArtist]
-- [Source: jellyfinsync-daemon/src/api.rs:421-491 — get_item_sizes / get_single_item_size handles MusicArtist]
-- [Source: jellyfinsync-daemon/src/rpc.rs:851-894 — handle_sync_calculate_delta container expansion]
+- [Source: hifimule-ui/src/components/MediaCard.ts:96-141 — basket toggle handler that already handles artists]
+- [Source: hifimule-ui/src/components/BasketSidebar.ts:1000-1028 — renderItem() to modify]
+- [Source: hifimule-ui/src/components/BasketSidebar.ts:982-998 — renderAutoFillSlotCard() to mirror]
+- [Source: hifimule-ui/src/components/BasketSidebar.ts:52 — formatSize() utility]
+- [Source: hifimule-daemon/src/api.rs:8 — CONTAINER_TYPES includes MusicArtist]
+- [Source: hifimule-daemon/src/api.rs:421-491 — get_item_sizes / get_single_item_size handles MusicArtist]
+- [Source: hifimule-daemon/src/rpc.rs:851-894 — handle_sync_calculate_delta container expansion]
 
 ## Dev Agent Record
 
@@ -208,8 +208,8 @@ claude-sonnet-4-6
 
 ### File List
 
-- `jellyfinsync-ui/src/components/BasketSidebar.ts`
-- `jellyfinsync-ui/src/styles.css`
+- `hifimule-ui/src/components/BasketSidebar.ts`
+- `hifimule-ui/src/styles.css`
 
 ## Change Log
 

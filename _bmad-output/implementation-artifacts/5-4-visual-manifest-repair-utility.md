@@ -14,7 +14,7 @@ so that I can recover my "Managed" status without a full wipe.
 
 1. **Side-by-side view**: Given a "Dirty" manifest that needs manual intervention, when I open the Repair UI, then the tool shows a side-by-side view of "Actual Files" on the device vs "Manifest Record".
 2. **Actionable Fixes**: The UI allows me to click "Re-link" or "Prune" to fix the state.
-3. **Prune Logic**: Clicking "Prune" on a missing file removes it from the `.jellyfinsync.json` manifest and saves the manifest.
+3. **Prune Logic**: Clicking "Prune" on a missing file removes it from the `.hifimule.json` manifest and saves the manifest.
 4. **Re-link Logic**: Clicking "Re-link" allows associating an orphaned file (on disk but not in manifest) with a missing manifest entry.
 5. **Clear Dirty Flag**: Once all discrepancies are resolved, the daemon must clear the "dirty" flag on the manifest and broadcast the updated device state.
 
@@ -48,7 +48,7 @@ so that I can recover my "Managed" status without a full wipe.
 
 ### Project Structure Notes
 
-- **Files to Modify**: `jellyfinsync-daemon/src/rpc.rs`, `jellyfinsync-daemon/src/device/mod.rs` (or similar for manifest management), `jellyfinsync-ui/src/main.ts` (or appropriate component logic).
+- **Files to Modify**: `hifimule-daemon/src/rpc.rs`, `hifimule-daemon/src/device/mod.rs` (or similar for manifest management), `hifimule-ui/src/main.ts` (or appropriate component logic).
 - Ensure all new UI code adheres to the "Vibrant Hub" Shoelace design system.
 
 ### References
@@ -82,12 +82,12 @@ All 102 tests pass (0 failures, 0 ignored).
 
 ### File List
 
-- `jellyfinsync-daemon/src/device/mod.rs` — Added `get_discrepancies()`, `prune_items()`, `relink_item()`, `clear_dirty_flag()` methods + `ManifestDiscrepancies`, `DiscrepancyItem` types
-- `jellyfinsync-daemon/src/device/tests.rs` — Added 6 new Story 5.4 tests
-- `jellyfinsync-daemon/src/rpc.rs` — Added 4 new RPC handler functions + dispatch entries
-- `jellyfinsync-ui/src/components/RepairModal.ts` — [NEW] Repair modal dialog component
-- `jellyfinsync-ui/src/components/BasketSidebar.ts` — Added dirty manifest detection, warning banner, repair modal integration
-- `jellyfinsync-ui/src/styles.css` — Added repair modal and dirty banner CSS styles
+- `hifimule-daemon/src/device/mod.rs` — Added `get_discrepancies()`, `prune_items()`, `relink_item()`, `clear_dirty_flag()` methods + `ManifestDiscrepancies`, `DiscrepancyItem` types
+- `hifimule-daemon/src/device/tests.rs` — Added 6 new Story 5.4 tests
+- `hifimule-daemon/src/rpc.rs` — Added 4 new RPC handler functions + dispatch entries
+- `hifimule-ui/src/components/RepairModal.ts` — [NEW] Repair modal dialog component
+- `hifimule-ui/src/components/BasketSidebar.ts` — Added dirty manifest detection, warning banner, repair modal integration
+- `hifimule-ui/src/styles.css` — Added repair modal and dirty banner CSS styles
 
 ### Change Log
 

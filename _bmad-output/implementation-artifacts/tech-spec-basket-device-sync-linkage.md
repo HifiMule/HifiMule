@@ -5,7 +5,7 @@ created: '2026-03-01T21:55:00+01:00'
 status: 'ready-for-dev'
 stepsCompleted: [1, 2, 3, 4]
 tech_stack: ['TypeScript', 'Rust', 'Tauri']
-files_to_modify: ['jellyfinsync-ui/src/state/basket.ts', 'jellyfinsync-ui/src/components/BasketSidebar.ts', 'jellyfinsync-daemon/src/rpc.rs', 'jellyfinsync-daemon/src/sync.rs', 'jellyfinsync-ui/src/styles.css']
+files_to_modify: ['hifimule-ui/src/state/basket.ts', 'hifimule-ui/src/components/BasketSidebar.ts', 'hifimule-daemon/src/rpc.rs', 'hifimule-daemon/src/sync.rs', 'hifimule-ui/src/styles.css']
 code_patterns: ['EventTarget store reactivity', 'JSON-RPC', 'Stateful dirty tracking', 'LocalStorage persistence']
 test_patterns: []
 ---
@@ -50,13 +50,13 @@ The synchronization process currently treats the media basket as a "batch of add
 
 | File | Purpose |
 | ---- | ------- |
-| `jellyfinsync-ui/src/state/basket.ts` | Basket state management. |
-| `jellyfinsync-ui/src/components/BasketSidebar.ts` | Main sidebar UI and sync trigger. |
-| `jellyfinsync-daemon/src/sync.rs` | Core sync logic. |
+| `hifimule-ui/src/state/basket.ts` | Basket state management. |
+| `hifimule-ui/src/components/BasketSidebar.ts` | Main sidebar UI and sync trigger. |
+| `hifimule-daemon/src/sync.rs` | Core sync logic. |
 
 ### Technical Decisions
 
-- **Sticky Dirty Flag**: The `dirty` flag will be saved to `localStorage` key `jellyfinsync_basket_dirty`.
+- **Sticky Dirty Flag**: The `dirty` flag will be saved to `localStorage` key `hifimule_basket_dirty`.
 - **Atomic Reset**: `resetDirty()` will only clear the flag if the specific items that were synced haven't changed since the sync started.
 - **Status Zone**: Reserve a permanent 32px height vertical space in the sidebar for "Status Messages" to avoid layout jumping.
 
@@ -65,22 +65,22 @@ The synchronization process currently treats the media basket as a "batch of add
 ### Tasks
 
 - [ ] Task 1: Persistent Dirty Flag in `BasketStore`
-  - File: `jellyfinsync-ui/src/state/basket.ts`
+  - File: `hifimule-ui/src/state/basket.ts`
   - Action: Update `BasketStore` to load/save `_dirty` from `localStorage`.
   - Action: Update `hydrateFromDaemon` to compare local items with daemon items; set `_dirty = true` if items differ.
 - [ ] Task 2: UI Status Zone and Banner
-  - File: `jellyfinsync-ui/src/styles.css`
+  - File: `hifimule-ui/src/styles.css`
   - Action: Add `.basket-status-zone` (fixed height) and `.sync-proposed-banner`. Use Shoelace color tokens.
 - [ ] Task 3: Render and Animate Banner
-  - File: `jellyfinsync-ui/src/components/BasketSidebar.ts`
+  - File: `hifimule-ui/src/components/BasketSidebar.ts`
   - Action: Update `render()` to use the new status zone. Show banner when `basketStore.isDirty()`.
 - [ ] Task 4: Fix Sync Trigger Logic & Empty Sync Logging
-  - File: `jellyfinsync-ui/src/components/BasketSidebar.ts`
+  - File: `hifimule-ui/src/components/BasketSidebar.ts`
   - Action: Enable "Start Sync" if `isDirty` or `items.length > 0`.
-  - File: `jellyfinsync-daemon/src/sync.rs`
+  - File: `hifimule-daemon/src/sync.rs`
   - Action: Add `info!("Executing empty sync to clear device managed paths")` when no items are selected.
 - [ ] Task 5: Race-Safe Sync Completion
-  - File: `jellyfinsync-ui/src/components/BasketSidebar.ts`
+  - File: `hifimule-ui/src/components/BasketSidebar.ts`
   - Action: Store a snapshot of item IDs when starting sync.
   - Action: In `handleSyncComplete`, only call `resetDirty()` if the current basket matches the snapshot and the sync was successful.
 

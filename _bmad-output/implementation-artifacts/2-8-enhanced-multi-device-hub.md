@@ -144,7 +144,7 @@ So that I have full, iTunes-style control over which device I'm working with at 
   - [x] Update all call sites of `bindDevicePickerEvents()` to `bindDeviceHubEvents()` (2 call sites: in the empty basket render path ~line 611 and in the non-empty basket render path post-render binding)
 
 - [x] **Frontend: CSS — device hub cards and locked state** (AC: #1, #2)
-  - [x] Add to `jellyfinsync-ui/src/styles.css`:
+  - [x] Add to `hifimule-ui/src/styles.css`:
     ```css
     /* Device Hub */
     .device-hub-panel {
@@ -207,7 +207,7 @@ So that I have full, iTunes-style control over which device I'm working with at 
 Story 2.7 is fully implemented. The following already exist and must be reused:
 
 - **`DeviceManager` (Rust)**: `connected_devices: HashMap<PathBuf, DeviceManifest>` + `selected_device_path: Option<PathBuf>`. All public API unchanged.
-- **RPCs (Rust)**: `device.list` and `device.select` are implemented in `jellyfinsync-daemon/src/rpc.rs`.
+- **RPCs (Rust)**: `device.list` and `device.select` are implemented in `hifimule-daemon/src/rpc.rs`.
 - **`get_daemon_state` response** already includes `connectedDevices` and `selectedDevicePath`.
 - **`BasketSidebar.ts`**: `connectedDevices` + `selectedDevicePath` instance vars, polling loop, `renderDevicePicker()` (to be refactored), `bindDevicePickerEvents()` (to be refactored), `deviceSwitchInFlight` guard, `basketStore.flushPendingSave()` before switching.
 
@@ -295,8 +295,8 @@ The epics spec says "The basket renders as empty with no storage projection bar.
 ### File Structure
 
 **Only these files change:**
-- `jellyfinsync-ui/src/components/BasketSidebar.ts` — all logic changes
-- `jellyfinsync-ui/src/styles.css` — new CSS for hub cards + locked state
+- `hifimule-ui/src/components/BasketSidebar.ts` — all logic changes
+- `hifimule-ui/src/styles.css` — new CSS for hub cards + locked state
 
 No Rust daemon files change. No other TypeScript files change.
 
@@ -339,8 +339,8 @@ _No blockers encountered._
 
 ### File List
 
-- `jellyfinsync-ui/src/components/BasketSidebar.ts`
-- `jellyfinsync-ui/src/styles.css`
+- `hifimule-ui/src/components/BasketSidebar.ts`
+- `hifimule-ui/src/styles.css`
 
 ## Change Log
 

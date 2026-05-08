@@ -1,4 +1,4 @@
-# JellyfinSync — Integration Architecture
+# HifiMule — Integration Architecture
 
 **Generated:** 2026-05-07 | **Scan depth:** Exhaustive
 
@@ -6,11 +6,11 @@
 
 ## Overview
 
-JellyfinSync consists of two cooperating processes that run on the same machine. They communicate over a local HTTP connection using JSON-RPC 2.0.
+HifiMule consists of two cooperating processes that run on the same machine. They communicate over a local HTTP connection using JSON-RPC 2.0.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Tauri 2 Desktop Shell (jellyfinsync-ui)                    │
+│  Tauri 2 Desktop Shell (hifimule-ui)                    │
 │  ┌───────────────────────────────────┐                      │
 │  │  WebView (TypeScript / Shoelace)  │                      │
 │  │  - library.ts                     │                      │
@@ -28,7 +28,7 @@ JellyfinSync consists of two cooperating processes that run on the same machine.
                                                      localhost:19140
                                                              │
 ┌────────────────────────────────────────────────────────────▼┐
-│  Daemon (jellyfinsync-daemon)                                │
+│  Daemon (hifimule-daemon)                                │
 │  ┌───────────────────────────────────────────────────────┐  │
 │  │  Axum HTTP Server (rpc.rs)                            │  │
 │  │  POST / → JSON-RPC 2.0 dispatch (34 methods)         │  │
@@ -187,11 +187,11 @@ Two concurrent polling loops run in background tasks:
 
 | Observer | Interval | Protocol |
 |----------|----------|----------|
-| MSC observer (`run_observer`) | 1 second | Scans OS mount points; checks for `.jellyfinsync.json` |
+| MSC observer (`run_observer`) | 1 second | Scans OS mount points; checks for `.hifimule.json` |
 | MTP observer (`run_mtp_observer`) | 3 seconds | Polls WPD (Windows) or libmtp (Unix) for connected MTP devices |
 
 When a device is detected:
-1. Check if a `.jellyfinsync.json` manifest exists at the device root
+1. Check if a `.hifimule.json` manifest exists at the device root
 2. If yes: load manifest → add to `connected_devices` HashMap → notify UI via `DaemonState`
 3. If no: add to `unrecognized_device` pending slot → UI shows "Initialize" banner
 
@@ -199,7 +199,7 @@ When a device is detected:
 
 ```
 <device-root>/
-└── .jellyfinsync.json      DeviceManifest — source of truth for sync state
+└── .hifimule.json      DeviceManifest — source of truth for sync state
 ```
 
 ### DeviceIO Abstraction

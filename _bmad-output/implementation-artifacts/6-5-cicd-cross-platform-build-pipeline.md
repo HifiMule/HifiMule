@@ -13,7 +13,7 @@ so that every release produces verified, downloadable artifacts without manual p
 ## Acceptance Criteria
 
 1. **Tag triggers pipeline**: Given a tagged release commit (e.g., `v0.1.0`) is pushed, the GitHub Actions workflow triggers automatically.
-2. **Parallel platform builds**: The workflow builds JellyfinSync on Windows, macOS, and Linux runners in parallel (matrix strategy).
+2. **Parallel platform builds**: The workflow builds HifiMule on Windows, macOS, and Linux runners in parallel (matrix strategy).
 3. **All installers produced**: Each build produces the platform-native installer — MSI (Windows), DMG (macOS), AppImage and .deb (Linux).
 4. **Artifacts uploaded to GitHub Release**: All artifacts are uploaded to a GitHub Release draft tied to the tag.
 5. **Failure is clear**: If any platform build fails, the workflow fails clearly with actionable output identifying which platform and step failed.
@@ -47,7 +47,7 @@ This story was originally implemented on 2026-04-06 and reopened by the 2026-04-
 - [x] **T4: Configure tauri-action for release upload** (AC: #4, #5)
   - [x] T4.1: Pass `tagName`, `releaseName`, `releaseBody`, `releaseDraft: true` to `tauri-apps/tauri-action`
   - [x] T4.2: Set `GITHUB_TOKEN` from `secrets.GITHUB_TOKEN` — no additional secrets needed for MVP (no code signing)
-  - [x] T4.3: Verify the action auto-discovers the Tauri project under `jellyfinsync-ui/` via `projectPath` parameter
+  - [x] T4.3: Verify the action auto-discovers the Tauri project under `hifimule-ui/` via `projectPath` parameter
 
 - [x] **T5: Verify no code signing configuration is needed** (AC: #3)
   - [x] T5.1: Confirm architecture.md: code signing (Windows Authenticode, macOS notarization) is deferred to post-MVP
@@ -73,7 +73,7 @@ This story was originally implemented on 2026-04-06 and reopened by the 2026-04-
 
 - **Trigger**: `push` event scoped to tags matching `v*` (e.g., `v0.1.0`, `v1.0.0`)
 - **Current implementation state**: `.github/workflows/release.yml` already exists and is the UPDATE target. It has `permissions: contents: write`, `fail-fast: false`, an include-matrix for `macos-latest`, `ubuntu-22.04`, and `windows-latest`, `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true`, pnpm + Node LTS setup, Rust stable setup, macOS universal daemon sidecar staging, non-macOS `node scripts/prepare-sidecar.mjs`, and `tauri-apps/tauri-action@v0`.
-- **Current missing dependency**: `jellyfinsync-daemon/build.rs` now calls `pkg_config::probe_library("libmtp")` for all Unix targets. Any Linux or macOS runner that builds `jellyfinsync-daemon` without libmtp available through `pkg-config` will fail before packaging.
+- **Current missing dependency**: `hifimule-daemon/build.rs` now calls `pkg_config::probe_library("libmtp")` for all Unix targets. Any Linux or macOS runner that builds `hifimule-daemon` without libmtp available through `pkg-config` will fail before packaging.
 - **Runner matrix**:
   | Platform | Runner | Installer Output |
   |----------|--------|-----------------|
@@ -90,7 +90,7 @@ This story was originally implemented on 2026-04-06 and reopened by the 2026-04-
 
 - Update only `.github/workflows/release.yml` unless verification proves another file is required.
 - Add `libmtp-dev` to the existing Ubuntu dependency install step, keeping the existing Tauri and `libxdo-dev` packages.
-- Add a macOS-only `brew install libmtp` step before `Stage daemon sidecars (macOS universal)`, because that step runs `cargo build --release -p jellyfinsync-daemon` twice and `build.rs` links libmtp on Unix.
+- Add a macOS-only `brew install libmtp` step before `Stage daemon sidecars (macOS universal)`, because that step runs `cargo build --release -p hifimule-daemon` twice and `build.rs` links libmtp on Unix.
 - Add `pkg-config --libs libmtp` verification on both Linux and macOS after installation. This should fail the platform job immediately with an actionable dependency error if libmtp is missing.
 - Do not change the Windows job for libmtp; Windows uses WPD through `windows-rs` and does not need the C library.
 - Preserve macOS universal sidecar behavior: the inline macOS block stages `aarch64-apple-darwin`, `x86_64-apple-darwin`, and `universal-apple-darwin`. Do not replace it with `prepare-sidecar.mjs`.
@@ -141,7 +141,7 @@ jobs:
 
       - name: Install frontend dependencies
         run: pnpm install
-        working-directory: jellyfinsync-ui
+        working-directory: hifimule-ui
 
       - name: Stage daemon sidecar
         run: node scripts/prepare-sidecar.mjs
@@ -152,27 +152,27 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'JellyfinSync ${{ github.ref_name }}'
+          releaseName: 'HifiMule ${{ github.ref_name }}'
           releaseBody: 'See the release notes for details.'
           releaseDraft: true
           prerelease: false
-          projectPath: jellyfinsync-ui
+          projectPath: hifimule-ui
 ```
 
-> **Note:** The above is a starting reference — adapt as needed based on actual project structure. If `pnpm install` is run from the workspace root (not `jellyfinsync-ui`), adjust `working-directory` accordingly. Check if a `pnpm-workspace.yaml` or `package.json` exists at the repo root.
+> **Note:** The above is a starting reference — adapt as needed based on actual project structure. If `pnpm install` is run from the workspace root (not `hifimule-ui`), adjust `working-directory` accordingly. Check if a `pnpm-workspace.yaml` or `package.json` exists at the repo root.
 
 ### prepare-sidecar.mjs — Pre-Build Requirement
 
 `scripts/prepare-sidecar.mjs` **must run before** `tauri-apps/tauri-action` on every runner:
 - It calls `rustc -vV` to detect the host target triple (requires Rust to be installed first)
-- It copies the compiled daemon binary to `jellyfinsync-ui/src-tauri/sidecars/jellyfinsync-daemon-{target-triple}`
+- It copies the compiled daemon binary to `hifimule-ui/src-tauri/sidecars/hifimule-daemon-{target-triple}`
 - The sidecar dir is gitignored — the workflow must stage it on every run
 
 **Problem**: On CI, the daemon binary must exist before `prepare-sidecar.mjs` runs. Either:
-1. `tauri-apps/tauri-action` builds the entire workspace (including `jellyfinsync-daemon`) automatically via `cargo tauri build`, OR
-2. The workflow must explicitly `cargo build --release -p jellyfinsync-daemon` before calling `prepare-sidecar.mjs`
+1. `tauri-apps/tauri-action` builds the entire workspace (including `hifimule-daemon`) automatically via `cargo tauri build`, OR
+2. The workflow must explicitly `cargo build --release -p hifimule-daemon` before calling `prepare-sidecar.mjs`
 
-**Resolution**: `cargo tauri build` is called by `tauri-apps/tauri-action` internally and builds the entire workspace. However, `prepare-sidecar.mjs` needs the daemon built first to copy it. The safest approach is to run `cargo build --release -p jellyfinsync-daemon` explicitly before `node scripts/prepare-sidecar.mjs`, then let `tauri-action` handle the Tauri build.
+**Resolution**: `cargo tauri build` is called by `tauri-apps/tauri-action` internally and builds the entire workspace. However, `prepare-sidecar.mjs` needs the daemon built first to copy it. The safest approach is to run `cargo build --release -p hifimule-daemon` explicitly before `node scripts/prepare-sidecar.mjs`, then let `tauri-action` handle the Tauri build.
 
 Alternatively: check if `tauri-action` supports a `beforeBuildCommand` to run preparation steps — use that if available to keep the workflow clean.
 
@@ -205,9 +205,9 @@ Existing workflow file present:
 
 ### tauri.conf.json — No Changes Expected
 
-The existing config (`jellyfinsync-ui/src-tauri/tauri.conf.json`) already has:
+The existing config (`hifimule-ui/src-tauri/tauri.conf.json`) already has:
 - `"targets": "all"` — produces all platform-native installers
-- `"externalBin": ["sidecars/jellyfinsync-daemon"]` — sidecar bundling configured
+- `"externalBin": ["sidecars/hifimule-daemon"]` — sidecar bundling configured
 - Correct `productName`, `identifier`, `version`, and icons
 
 No changes to `tauri.conf.json` are expected for this story.
@@ -256,13 +256,13 @@ Use `fail-fast: false` in the matrix strategy so that if one platform fails, the
 ### Project Structure Notes
 
 ```
-c:\Workspaces\JellyfinSync\
+c:\Workspaces\HifiMule\
 ├── .github/
 │   └── workflows/         ← UPDATE: release.yml exists
 ├── scripts/
 │   └── prepare-sidecar.mjs   ← MUST run before tauri build
-├── jellyfinsync-daemon/       ← daemon crate (built by cargo)
-├── jellyfinsync-ui/
+├── hifimule-daemon/       ← daemon crate (built by cargo)
+├── hifimule-ui/
 │   ├── src/                   ← Vanilla TypeScript + Shoelace
 │   ├── src-tauri/
 │   │   ├── tauri.conf.json    ← no changes expected
@@ -277,9 +277,9 @@ c:\Workspaces\JellyfinSync\
 | File | Action |
 |------|--------|
 | `.github/workflows/release.yml` | **UPDATE** — add Unix libmtp install/verification steps only |
-| `jellyfinsync-daemon/build.rs` | **READ/PRESERVE** — explains why Unix CI needs libmtp via `pkg-config` |
+| `hifimule-daemon/build.rs` | **READ/PRESERVE** — explains why Unix CI needs libmtp via `pkg-config` |
 | `scripts/prepare-sidecar.mjs` | **READ/PRESERVE** — non-macOS sidecar build path already works |
-| `jellyfinsync-ui/src-tauri/tauri.conf.json` | **READ/PRESERVE** — bundler sidecar config already exists |
+| `hifimule-ui/src-tauri/tauri.conf.json` | **READ/PRESERVE** — bundler sidecar config already exists |
 | All other files | No changes expected |
 
 ### Existing UPDATE File Behavior to Preserve
@@ -305,10 +305,10 @@ c:\Workspaces\JellyfinSync\
 - [Source: _bmad-output/implementation-artifacts/6-4-linux-packages-appimage-deb.md] — Previous story: Linux packaging, libxdo/FUSE/AppImage learnings
 - [Source: _bmad-output/implementation-artifacts/deferred-work.md] — Deferred packaging/CI risks
 - [Source: .github/workflows/release.yml] — Existing release workflow to update
-- [Source: jellyfinsync-daemon/build.rs] — Unix `pkg-config` libmtp probe
-- [Source: jellyfinsync-daemon/Cargo.toml] — `pkg-config` build dependency and Unix libc dependency
+- [Source: hifimule-daemon/build.rs] — Unix `pkg-config` libmtp probe
+- [Source: hifimule-daemon/Cargo.toml] — `pkg-config` build dependency and Unix libc dependency
 - [Source: scripts/prepare-sidecar.mjs] — Cross-platform sidecar build script for non-macOS runners
-- [Source: jellyfinsync-ui/src-tauri/tauri.conf.json] — Current Tauri sidecar/bundle config
+- [Source: hifimule-ui/src-tauri/tauri.conf.json] — Current Tauri sidecar/bundle config
 - [Source: https://github.com/actions/runner-images] — Current GitHub-hosted runner image labels
 - [Source: https://github.com/tauri-apps/tauri-action] — Current Tauri action usage examples
 - [Source: https://docs.github.com/actions/reference/workflows-and-actions/workflow-syntax] — GitHub Actions matrix, permissions, and workflow syntax
@@ -326,8 +326,8 @@ Claude Sonnet 4.6
 - **Windows intentionally unchanged for libmtp**: Confirmed the Windows matrix entry has no libmtp dependency step because Windows uses pure Rust `windows-rs` WPD bindings.
 - **Static validation passed**: Inspected the workflow after edit; CI runner execution remains pending for the updated libmtp dependency checks.
 - **T1-T5 complete**: Created `.github/workflows/release.yml` implementing all workflow structure, matrix strategy, toolchain setup, Linux dependencies, sidecar staging, and tauri-action release upload.
-- **`prepare-sidecar.mjs` handles daemon build internally**: The script calls `cargo build --release -p jellyfinsync-daemon` itself before copying the sidecar — no separate build step needed in the workflow.
-- **`pnpm install` scoped to `jellyfinsync-ui/`**: No root-level `package.json` or `pnpm-workspace.yaml` exists; pnpm install must run in `jellyfinsync-ui/` with `working-directory`.
+- **`prepare-sidecar.mjs` handles daemon build internally**: The script calls `cargo build --release -p hifimule-daemon` itself before copying the sidecar — no separate build step needed in the workflow.
+- **`pnpm install` scoped to `hifimule-ui/`**: No root-level `package.json` or `pnpm-workspace.yaml` exists; pnpm install must run in `hifimule-ui/` with `working-directory`.
 - **pnpm installed before setup-node**: `pnpm/action-setup@v4` runs first so `pnpm` is on PATH when `setup-node` resolves it.
 - **No pnpm-lock.yaml in repo**: Cache configuration omitted from `setup-node` to avoid a missing-file error; can be added once lock file is committed.
 - **No cache for node_modules** in pnpm-lock.yaml: lock file not present in repo; removed `cache: pnpm` from setup-node to prevent failure.

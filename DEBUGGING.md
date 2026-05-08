@@ -1,4 +1,4 @@
-# Debugging the Jellyfinsync Daemon
+# Debugging the HifiMule Daemon
 
 This guide provides several methods for debugging the `-daemon`.
 

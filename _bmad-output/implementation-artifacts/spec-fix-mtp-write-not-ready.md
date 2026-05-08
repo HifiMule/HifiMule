@@ -21,7 +21,7 @@ context: []
 - The dirty-marker strategy (write sentinel → write payload → delete sentinel) is preserved in `write_with_verify`; only the sentinel payload changes from `b""` to `b"\x00"`.
 - `ensure_dir_chain` and `find_child_object_id` keep their same logic; only their signature changes from `device: &IPortableDevice` to `content: &IPortableDeviceContent`.
 - Logging uses `crate::daemon_log!` (no new dependencies).
-- Only `jellyfinsync-daemon/src/device/mtp.rs` and `jellyfinsync-daemon/src/device_io.rs` are modified.
+- Only `hifimule-daemon/src/device/mtp.rs` and `hifimule-daemon/src/device_io.rs` are modified.
 
 **Ask First:**
 - If `read_file`, `delete_file`, or `list_files` also fail to compile after the content-threading refactor (they call helpers that now require a content ref), halt and ask before extending the refactor to those methods.
@@ -36,36 +36,36 @@ context: []
 | Scenario | Input / State | Expected Output / Behavior | Error Handling |
 |----------|--------------|---------------------------|----------------|
 | Write dirty marker (new design) | `write_with_verify(".json", bytes)` | `.json.dirty` created with 1 byte, `.json` written, `.json.dirty` deleted | Error on any step propagates |
-| `write_file` with empty parent (root write) | `path=".jellyfinsync.json.dirty"`, `data=b"\x00"` | Single `device.Content()` call; `CreateObjectWithPropertiesAndData` with `WPD_OBJECT_SIZE=1` | `?` on each WPD call; log identifies failing call |
+| `write_file` with empty parent (root write) | `path=".hifimule.json.dirty"`, `data=b"\x00"` | Single `device.Content()` call; `CreateObjectWithPropertiesAndData` with `WPD_OBJECT_SIZE=1` | `?` on each WPD call; log identifies failing call |
 | `write_file` with nested path | `path="Music/track.mp3"` | `ensure_dir_chain` creates `Music/` if missing; single content ref reused | Error propagates; intermediate dir creation logged |
 
 </frozen-after-approval>
 
 ## Code Map
 
-- `../../jellyfinsync-daemon/src/device_io.rs:246-252` — `MtpBackend::write_with_verify`; dirty sentinel written as `b""` here
-- `../../jellyfinsync-daemon/src/device/mtp.rs:574-648` — `WpdHandle::write_file`; calls `ensure_dir_chain` and `find_child_object_id`; gets `device.Content()` inline
-- `../../jellyfinsync-daemon/src/device/mtp.rs:396-451` — `ensure_dir_chain(device: &IPortableDevice, ...)`; gets its own `device.Content()` — to be refactored
-- `../../jellyfinsync-daemon/src/device/mtp.rs:310-363` — `find_child_object_id(device: &IPortableDevice, ...)`; gets its own `device.Content()` — to be refactored
+- `../../hifimule-daemon/src/device_io.rs:246-252` — `MtpBackend::write_with_verify`; dirty sentinel written as `b""` here
+- `../../hifimule-daemon/src/device/mtp.rs:574-648` — `WpdHandle::write_file`; calls `ensure_dir_chain` and `find_child_object_id`; gets `device.Content()` inline
+- `../../hifimule-daemon/src/device/mtp.rs:396-451` — `ensure_dir_chain(device: &IPortableDevice, ...)`; gets its own `device.Content()` — to be refactored
+- `../../hifimule-daemon/src/device/mtp.rs:310-363` — `find_child_object_id(device: &IPortableDevice, ...)`; gets its own `device.Content()` — to be refactored
 
 ## Tasks & Acceptance
 
 **Execution:**
 
-- [x] `jellyfinsync-daemon/src/device_io.rs` — In `MtpBackend::write_with_verify` (line ~248), change `self.write_file(&dirty_marker, b"").await?` to `self.write_file(&dirty_marker, b"\x00").await?`. One character change; no logic change.
+- [x] `hifimule-daemon/src/device_io.rs` — In `MtpBackend::write_with_verify` (line ~248), change `self.write_file(&dirty_marker, b"").await?` to `self.write_file(&dirty_marker, b"\x00").await?`. One character change; no logic change.
 
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` — Change `ensure_dir_chain` signature from `(device: &IPortableDevice, components: &[&str])` to `(content: &IPortableDeviceContent, components: &[&str])`. Remove the `let content = device.Content()?;` line at the top of the function body — the caller now passes `content` in. `IPortableDeviceContent` must be imported in scope (it already is via `windows::Win32::Devices::PortableDevices::*`).
+- [x] `hifimule-daemon/src/device/mtp.rs` — Change `ensure_dir_chain` signature from `(device: &IPortableDevice, components: &[&str])` to `(content: &IPortableDeviceContent, components: &[&str])`. Remove the `let content = device.Content()?;` line at the top of the function body — the caller now passes `content` in. `IPortableDeviceContent` must be imported in scope (it already is via `windows::Win32::Devices::PortableDevices::*`).
 
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` — Change `find_child_object_id` signature from `(device: &IPortableDevice, parent_id: &str, name: &str)` to `(content: &IPortableDeviceContent, parent_id: &str, name: &str)`. Remove `let content = device.Content()?;` from its body.
+- [x] `hifimule-daemon/src/device/mtp.rs` — Change `find_child_object_id` signature from `(device: &IPortableDevice, parent_id: &str, name: &str)` to `(content: &IPortableDeviceContent, parent_id: &str, name: &str)`. Remove `let content = device.Content()?;` from its body.
 
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` — Rewrite `write_file` call sites to use the single-content pattern. Before the `unsafe {}` block, add `let content = device.Content()?;`. Change `ensure_dir_chain(&device, parent_components)?` to `ensure_dir_chain(&content, parent_components)?`. Change `find_child_object_id(&device, &parent_id_str, filename)?` to `find_child_object_id(&content, &parent_id_str, filename)?`. The `content.Delete(...)` and `content.CreateObjectWithPropertiesAndData(...)` calls already use this same `content` and are unchanged.
+- [x] `hifimule-daemon/src/device/mtp.rs` — Rewrite `write_file` call sites to use the single-content pattern. Before the `unsafe {}` block, add `let content = device.Content()?;`. Change `ensure_dir_chain(&device, parent_components)?` to `ensure_dir_chain(&content, parent_components)?`. Change `find_child_object_id(&device, &parent_id_str, filename)?` to `find_child_object_id(&content, &parent_id_str, filename)?`. The `content.Delete(...)` and `content.CreateObjectWithPropertiesAndData(...)` calls already use this same `content` and are unchanged.
 
-- [x] `jellyfinsync-daemon/src/device/mtp.rs` — Add `daemon_log!` calls in `write_file` (inside the `unsafe {}` block, before each major WPD call): before `content.CreateObjectWithPropertiesAndData(...)`, log `"[WPD] write_file: CreateObjectWithPropertiesAndData path={} size={}"`. Before `data_stream.Commit(...)`, log `"[WPD] write_file: Commit"`. After each call returns `Ok(...)`, log `"[WPD] write_file: <call> OK"`. Use the pattern `crate::daemon_log!(...)`.
+- [x] `hifimule-daemon/src/device/mtp.rs` — Add `daemon_log!` calls in `write_file` (inside the `unsafe {}` block, before each major WPD call): before `content.CreateObjectWithPropertiesAndData(...)`, log `"[WPD] write_file: CreateObjectWithPropertiesAndData path={} size={}"`. Before `data_stream.Commit(...)`, log `"[WPD] write_file: Commit"`. After each call returns `Ok(...)`, log `"[WPD] write_file: <call> OK"`. Use the pattern `crate::daemon_log!(...)`.
 
 **Acceptance Criteria:**
 - Given an unrecognized Garmin MTP device is connected, when the user submits the Initialize form, then `write_with_verify` completes without `0x80070015` and the device transitions to recognized state.
-- Given `cargo build --manifest-path jellyfinsync-daemon/Cargo.toml`, then zero errors, zero new warnings.
-- Given `cargo test --manifest-path jellyfinsync-daemon/Cargo.toml`, then all existing tests pass (including `mtp_write_with_verify_dirty_marker_sequence`).
+- Given `cargo build --manifest-path hifimule-daemon/Cargo.toml`, then zero errors, zero new warnings.
+- Given `cargo test --manifest-path hifimule-daemon/Cargo.toml`, then all existing tests pass (including `mtp_write_with_verify_dirty_marker_sequence`).
 - Given any WPD call in `write_file` fails, then the `daemon_log!` immediately before it appears in the log, making the failing call identifiable without a debugger.
 
 ## Spec Change Log
@@ -81,29 +81,29 @@ context: []
 **Root cause fix — 1-byte dirty sentinel**
 
 - The change that unblocks initialization: `WPD_OBJECT_SIZE=0` workaround.
-  [`device_io.rs:249`](../../jellyfinsync-daemon/src/device_io.rs#L249)
+  [`device_io.rs:249`](../../hifimule-daemon/src/device_io.rs#L249)
 
 **Single content handle — write_file refactor**
 
 - Entry point: `write_file` acquires one `IPortableDeviceContent` for the whole call.
-  [`mtp.rs:581`](../../jellyfinsync-daemon/src/device/mtp.rs#L581)
+  [`mtp.rs:581`](../../hifimule-daemon/src/device/mtp.rs#L581)
 
 - `ensure_dir_chain` now takes caller-supplied content; no extra `device.Content()` inside.
-  [`mtp.rs:395`](../../jellyfinsync-daemon/src/device/mtp.rs#L395)
+  [`mtp.rs:395`](../../hifimule-daemon/src/device/mtp.rs#L395)
 
 - `find_child_object_id` likewise; removes the second redundant `device.Content()` call.
-  [`mtp.rs:310`](../../jellyfinsync-daemon/src/device/mtp.rs#L310)
+  [`mtp.rs:310`](../../hifimule-daemon/src/device/mtp.rs#L310)
 
 **Diagnostic logging**
 
 - Log before and after `CreateObjectWithPropertiesAndData` to pinpoint future failures.
-  [`mtp.rs:612`](../../jellyfinsync-daemon/src/device/mtp.rs#L612)
+  [`mtp.rs:612`](../../hifimule-daemon/src/device/mtp.rs#L612)
 
 - Log before and after `Commit` to distinguish stream-write vs. commit failures.
-  [`mtp.rs:643`](../../jellyfinsync-daemon/src/device/mtp.rs#L643)
+  [`mtp.rs:643`](../../hifimule-daemon/src/device/mtp.rs#L643)
 
 ## Verification
 
 **Commands:**
-- `rtk cargo build --manifest-path jellyfinsync-daemon/Cargo.toml` — expected: zero errors, zero new warnings
-- `rtk cargo test --manifest-path jellyfinsync-daemon/Cargo.toml` — expected: all tests pass
+- `rtk cargo build --manifest-path hifimule-daemon/Cargo.toml` — expected: zero errors, zero new warnings
+- `rtk cargo test --manifest-path hifimule-daemon/Cargo.toml` — expected: all tests pass

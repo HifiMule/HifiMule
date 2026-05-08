@@ -74,11 +74,11 @@
 
 ### Code Changes (Done ✅)
 
-**File:** `jellyfinsync-daemon/src/api.rs`
+**File:** `hifimule-daemon/src/api.rs`
 
 All 8 call sites patched: `get_views`, `get_items`, `get_item_details`, `get_items_by_ids`, `get_item_with_media_sources`, `get_child_items_with_sizes`, `search_audio_items`, `report_item_played`.
 
-**File:** `jellyfinsync-daemon/src/auto_fill.rs`
+**File:** `hifimule-daemon/src/auto_fill.rs`
 
 `run_auto_fill` paginated endpoint patched.
 

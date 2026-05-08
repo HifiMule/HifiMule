@@ -24,7 +24,7 @@ so that I can unplug and leave without checking the app.
 
 - [x] **T1: Add `notify-rust` dependency** (AC: #1)
   - [x] T1.1: In `Cargo.toml` (workspace), add: `notify-rust = "~4.12"`
-  - [x] T1.2: In `jellyfinsync-daemon/Cargo.toml`, add: `notify-rust.workspace = true`
+  - [x] T1.2: In `hifimule-daemon/Cargo.toml`, add: `notify-rust.workspace = true`
 
 - [x] **T2: Add `state_tx` to `AppState` and wire tray state transitions** (AC: #2)
   - [x] T2.1: In `rpc.rs`, add field to `AppState`:
@@ -94,7 +94,7 @@ so that I can unplug and leave without checking the app.
 
 - [x] **T5: Verification** (AC: all)
   - [x] T5.1: `cargo build` in workspace root — zero errors (confirms new dependency resolves and API compiles correctly).
-  - [x] T5.2: `cargo test` in `jellyfinsync-daemon/` — all existing 96 tests pass, zero regressions.
+  - [x] T5.2: `cargo test` in `hifimule-daemon/` — all existing 96 tests pass, zero regressions.
   - [ ] T5.3: Manual — run a sync, verify: (a) tray icon changes to Syncing during sync, (b) OS notification "Sync Complete. Ready to Run." appears on completion, (c) tray returns to Idle (green).
   - [ ] T5.4: Manual — simulate a sync failure (disconnect device mid-sync), verify: (a) no notification, (b) tray shows Error state.
 
@@ -129,7 +129,7 @@ notify_rust::Notification::new()
 ```
 Do NOT use `.body()`, `.icon()`, `.hint()`, or `.timeout()` — these have platform-specific behavior and some don't compile on Windows. The one-liner `summary`-only call is cross-platform and sufficient for this story.
 
-**Why not Tauri notification plugin?**: The notification is fired from the daemon process (`jellyfinsync-daemon`), not from the Tauri UI. Using `notify-rust` directly in the daemon is the correct pattern — no Tauri dependency needed.
+**Why not Tauri notification plugin?**: The notification is fired from the daemon process (`hifimule-daemon`), not from the Tauri UI. Using `notify-rust` directly in the daemon is the correct pattern — no Tauri dependency needed.
 
 ### `DaemonState` Tray Transitions for Sync (Story 5.3)
 
@@ -148,9 +148,9 @@ Note: `DaemonState::Syncing` already exists in `main.rs` and the event loop alre
 
 **Files to MODIFY (4 files):**
 1. [Cargo.toml](Cargo.toml) — Add `notify-rust = "~4.12"` to `[workspace.dependencies]`
-2. [jellyfinsync-daemon/Cargo.toml](jellyfinsync-daemon/Cargo.toml) — Add `notify-rust.workspace = true` to `[dependencies]`
-3. [jellyfinsync-daemon/src/rpc.rs](jellyfinsync-daemon/src/rpc.rs) — Add `state_tx` to `AppState`, update `run_server()` signature, add `send_sync_complete_notification()`, wire state sends + notification in `handle_sync_execute`
-4. [jellyfinsync-daemon/src/main.rs](jellyfinsync-daemon/src/main.rs) — Clone `state_tx` for RPC server, pass to `run_server()`
+2. [hifimule-daemon/Cargo.toml](hifimule-daemon/Cargo.toml) — Add `notify-rust.workspace = true` to `[dependencies]`
+3. [hifimule-daemon/src/rpc.rs](hifimule-daemon/src/rpc.rs) — Add `state_tx` to `AppState`, update `run_server()` signature, add `send_sync_complete_notification()`, wire state sends + notification in `handle_sync_execute`
+4. [hifimule-daemon/src/main.rs](hifimule-daemon/src/main.rs) — Clone `state_tx` for RPC server, pass to `run_server()`
 
 **Files NOT to modify:**
 - `sync.rs`, `db.rs`, `scrobbler.rs`, `api.rs`, `device/mod.rs`, `paths.rs` — no changes needed
@@ -250,15 +250,15 @@ No open technical debt affecting Story 5.3.
 - [Source: epics.md#epic-5-ecosystem-lifecycle--advanced-tools] — Epic 5 objectives (FR23: OS-Native Sync Notifications)
 - [Source: architecture.md#api--communication-patterns] — JSON-RPC 2.0, Request-Response-Event pattern
 - [Source: architecture.md#process-patterns] — Error handling: `anyhow` at binary level
-- [jellyfinsync-daemon/src/main.rs:28-35](jellyfinsync-daemon/src/main.rs#L28-L35) — `DaemonState` enum — `Syncing` and `Idle` variants already defined
-- [jellyfinsync-daemon/src/main.rs:40](jellyfinsync-daemon/src/main.rs#L40) — `state_tx` creation point
-- [jellyfinsync-daemon/src/main.rs:96-101](jellyfinsync-daemon/src/main.rs#L96-L101) — RPC server spawn — add `state_tx` clone and pass here
-- [jellyfinsync-daemon/src/main.rs:206-213](jellyfinsync-daemon/src/main.rs#L206-L213) — Existing Syncing/Idle tray handlers — no changes needed
-- [jellyfinsync-daemon/src/rpc.rs:54-63](jellyfinsync-daemon/src/rpc.rs#L54-L63) — `AppState` struct — add `state_tx` field
-- [jellyfinsync-daemon/src/rpc.rs:65-80](jellyfinsync-daemon/src/rpc.rs#L65-L80) — `run_server()` — add `state_tx` parameter
-- [jellyfinsync-daemon/src/rpc.rs:854-870](jellyfinsync-daemon/src/rpc.rs#L854-L870) — `handle_sync_execute` clones + spawn — add `state_tx` clone + Syncing send
-- [jellyfinsync-daemon/src/rpc.rs:873-895](jellyfinsync-daemon/src/rpc.rs#L873-L895) — Sync success arm — add notification + Idle send
-- [jellyfinsync-daemon/src/rpc.rs:897-909](jellyfinsync-daemon/src/rpc.rs#L897-L909) — Sync failure arm — add Error send
+- [hifimule-daemon/src/main.rs:28-35](hifimule-daemon/src/main.rs#L28-L35) — `DaemonState` enum — `Syncing` and `Idle` variants already defined
+- [hifimule-daemon/src/main.rs:40](hifimule-daemon/src/main.rs#L40) — `state_tx` creation point
+- [hifimule-daemon/src/main.rs:96-101](hifimule-daemon/src/main.rs#L96-L101) — RPC server spawn — add `state_tx` clone and pass here
+- [hifimule-daemon/src/main.rs:206-213](hifimule-daemon/src/main.rs#L206-L213) — Existing Syncing/Idle tray handlers — no changes needed
+- [hifimule-daemon/src/rpc.rs:54-63](hifimule-daemon/src/rpc.rs#L54-L63) — `AppState` struct — add `state_tx` field
+- [hifimule-daemon/src/rpc.rs:65-80](hifimule-daemon/src/rpc.rs#L65-L80) — `run_server()` — add `state_tx` parameter
+- [hifimule-daemon/src/rpc.rs:854-870](hifimule-daemon/src/rpc.rs#L854-L870) — `handle_sync_execute` clones + spawn — add `state_tx` clone + Syncing send
+- [hifimule-daemon/src/rpc.rs:873-895](hifimule-daemon/src/rpc.rs#L873-L895) — Sync success arm — add notification + Idle send
+- [hifimule-daemon/src/rpc.rs:897-909](hifimule-daemon/src/rpc.rs#L897-L909) — Sync failure arm — add Error send
 - [notify-rust docs](https://docs.rs/notify-rust/4.12.0/notify_rust/) — v4.12.0 API reference
 
 ## Dev Agent Record
@@ -286,9 +286,9 @@ Test constructors in rpc.rs needed `state_tx` added. Used `std::sync::mpsc::chan
 
 Cargo.lock
 Cargo.toml
-jellyfinsync-daemon/Cargo.toml
-jellyfinsync-daemon/src/main.rs
-jellyfinsync-daemon/src/rpc.rs
+hifimule-daemon/Cargo.toml
+hifimule-daemon/src/main.rs
+hifimule-daemon/src/rpc.rs
 
 ## Change Log
 
