@@ -193,7 +193,14 @@ jobs:
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           set -euo pipefail
-          APPIMAGE="$(find hifimule-ui/src-tauri/target/release/bundle -name '*.AppImage' -print -quit)"
+          TARGET_DIRS=()
+          for dir in target hifimule-ui/src-tauri/target; do
+            if [[ -d "$dir" ]]; then
+              TARGET_DIRS+=("$dir")
+            fi
+          done
+          test "${#TARGET_DIRS[@]}" -gt 0 || { echo "No Tauri target directory found"; exit 1; }
+          APPIMAGE="$(find "${TARGET_DIRS[@]}" -path '*/release/bundle/*' -name '*.AppImage' -print -quit)"
           test -n "$APPIMAGE" || { echo "AppImage artifact not found"; exit 1; }
           chmod +x "$APPIMAGE"
           rm -rf squashfs-root
@@ -210,7 +217,14 @@ jobs:
         if: matrix.platform == 'macos-latest'
         run: |
           set -euo pipefail
-          APP_DIR="$(find hifimule-ui/src-tauri/target -path '*.app' -type d -print -quit)"
+          TARGET_DIRS=()
+          for dir in target hifimule-ui/src-tauri/target; do
+            if [[ -d "$dir" ]]; then
+              TARGET_DIRS+=("$dir")
+            fi
+          done
+          test "${#TARGET_DIRS[@]}" -gt 0 || { echo "No Tauri target directory found"; exit 1; }
+          APP_DIR="$(find "${TARGET_DIRS[@]}" -path '*.app' -type d -print -quit)"
           test -n "$APP_DIR" || { echo ".app bundle not found"; exit 1; }
           test -n "$(find "$APP_DIR/Contents/Resources/bundled-libs" -name 'libmtp*.dylib' -print -quit)" || {
             echo "Bundled libmtp dylib not found in app resources"
