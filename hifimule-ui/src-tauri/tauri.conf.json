@@ -58,7 +58,7 @@
     "linux": {
       "appimage": {
         "files": {
-          "/usr/lib/x86_64-linux-gnu/libmtp.so.9": "usr/lib/libmtp.so.9"
+          "usr/lib/libmtp.so.9": "/usr/lib/x86_64-linux-gnu/libmtp.so.9"
         }
       },
       "deb": {

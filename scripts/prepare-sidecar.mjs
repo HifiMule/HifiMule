@@ -19,6 +19,11 @@ const projectRoot = resolve(__dirname, "..");
 const uiDir = join(projectRoot, "hifimule-ui");
 const sidecarsDir = join(projectRoot, "hifimule-ui", "src-tauri", "sidecars");
 
+if (process.env.HIFIMULE_SKIP_SIDECAR_PREP === "1") {
+  console.log("Skipping sidecar preparation because HIFIMULE_SKIP_SIDECAR_PREP=1");
+  process.exit(0);
+}
+
 // Get the current Rust target triple
 const rustcOutput = execSync("rustc -vV", { encoding: "utf-8" });
 const hostMatch = rustcOutput.match(/^host: (\S+)$/m);
