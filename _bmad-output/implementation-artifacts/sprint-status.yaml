@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-05-08  # Story 8.1 ready for dev
+last_updated: 2026-05-08  # Story 8.1 ready for review
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -110,7 +110,7 @@ development_status:
   epic-7-retrospective: done
 
   epic-8: in-progress
-  8-1-mediaprovider-trait-and-domain-models: ready-for-dev
+  8-1-mediaprovider-trait-and-domain-models: review
   8-2-jellyfinprovider-adapter: backlog
   8-3-subsonicprovider-adapter: backlog
   8-4-runtime-server-type-detection-factory: backlog

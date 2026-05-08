@@ -1,6 +1,6 @@
 # Story 8.1: MediaProvider Trait & Domain Models
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -24,35 +24,35 @@ so that the sync engine, auto-fill, and scrobble bridge never depend on server-s
 
 ## Tasks / Subtasks
 
-- [ ] Add daemon domain model module (AC: 2)
-  - [ ] Create `hifimule-daemon/src/domain/mod.rs` and `hifimule-daemon/src/domain/models.rs`.
-  - [ ] Add `mod domain;` to `hifimule-daemon/src/main.rs` beside the existing top-level modules.
-  - [ ] Define API-neutral structs/enums: `Library`, `Song`, `Album`, `Artist`, `Playlist`, `ArtistWithAlbums`, `AlbumWithTracks`, `PlaylistWithTracks`, `SearchResult`, `ChangeEvent`, `ItemRef`, and `ItemType`.
-  - [ ] Use `String` for every server-originated identifier, including library, artist, album, song, playlist, and item refs.
-  - [ ] Include `cover_art_id: Option<String>` on visible media entities that can render artwork.
+- [x] Add daemon domain model module (AC: 2)
+  - [x] Create `hifimule-daemon/src/domain/mod.rs` and `hifimule-daemon/src/domain/models.rs`.
+  - [x] Add `mod domain;` to `hifimule-daemon/src/main.rs` beside the existing top-level modules.
+  - [x] Define API-neutral structs/enums: `Library`, `Song`, `Album`, `Artist`, `Playlist`, `ArtistWithAlbums`, `AlbumWithTracks`, `PlaylistWithTracks`, `SearchResult`, `ChangeEvent`, `ItemRef`, and `ItemType`.
+  - [x] Use `String` for every server-originated identifier, including library, artist, album, song, playlist, and item refs.
+  - [x] Include `cover_art_id: Option<String>` on visible media entities that can render artwork.
 
-- [ ] Add explicit unit newtypes for DTO boundary conversions (AC: 2, 5)
-  - [ ] Add small newtypes/helpers for `JellyfinTicks`, `Seconds`, `Bps`, and `Kbps` in the domain layer or a tightly adjacent conversion module.
-  - [ ] Implement conversions that make Jellyfin ticks-to-seconds and bps-to-kbps explicit.
-  - [ ] Add tests for tick conversion, seconds passthrough, bps-to-kbps conversion, kbps passthrough, string ID preservation, and cover art ID preservation.
+- [x] Add explicit unit newtypes for DTO boundary conversions (AC: 2, 5)
+  - [x] Add small newtypes/helpers for `JellyfinTicks`, `Seconds`, `Bps`, and `Kbps` in the domain layer or a tightly adjacent conversion module.
+  - [x] Implement conversions that make Jellyfin ticks-to-seconds and bps-to-kbps explicit.
+  - [x] Add tests for tick conversion, seconds passthrough, bps-to-kbps conversion, kbps passthrough, string ID preservation, and cover art ID preservation.
 
-- [ ] Add provider contract module (AC: 1, 3)
-  - [ ] Create `hifimule-daemon/src/providers/mod.rs`.
-  - [ ] Add `mod providers;` to `hifimule-daemon/src/main.rs`.
-  - [ ] Define `MediaProvider` using `#[async_trait]` with `Send + Sync`.
-  - [ ] Define `ServerType`, `Capabilities`, `ProviderError`, `TranscodeProfile`, and any required provider-neutral credential/profile placeholders needed for the trait signature to compile.
-  - [ ] Include the full method surface from architecture: browse libraries/artists/albums/playlists, search, download URL, cover art URL, changes since, scrobble, server type, and capabilities.
-  - [ ] Return `url::Url` only if the crate is already present; otherwise use `String` URLs for this story and leave the `Url` crate decision for the adapter story to avoid adding an unplanned dependency.
+- [x] Add provider contract module (AC: 1, 3)
+  - [x] Create `hifimule-daemon/src/providers/mod.rs`.
+  - [x] Add `mod providers;` to `hifimule-daemon/src/main.rs`.
+  - [x] Define `MediaProvider` using `#[async_trait]` with `Send + Sync`.
+  - [x] Define `ServerType`, `Capabilities`, `ProviderError`, `TranscodeProfile`, and any required provider-neutral credential/profile placeholders needed for the trait signature to compile.
+  - [x] Include the full method surface from architecture: browse libraries/artists/albums/playlists, search, download URL, cover art URL, changes since, scrobble, server type, and capabilities.
+  - [x] Return `url::Url` only if the crate is already present; otherwise use `String` URLs for this story and leave the `Url` crate decision for the adapter story to avoid adding an unplanned dependency.
 
-- [ ] Keep current Jellyfin behavior intact (AC: 4)
-  - [ ] Do not move `hifimule-daemon/src/api.rs` in this story.
-  - [ ] Do not update `rpc.rs`, `sync.rs`, `auto_fill.rs`, `main.rs` call sites from `JellyfinClient` to `Arc<dyn MediaProvider>` yet, except for adding module declarations.
-  - [ ] Do not introduce `opensubsonic` in this story; Story 8.3 owns the Subsonic adapter dependency.
-  - [ ] Do not introduce `jellyfin-sdk` in this story; Story 8.2 owns the Jellyfin adapter decision.
+- [x] Keep current Jellyfin behavior intact (AC: 4)
+  - [x] Do not move `hifimule-daemon/src/api.rs` in this story.
+  - [x] Do not update `rpc.rs`, `sync.rs`, `auto_fill.rs`, `main.rs` call sites from `JellyfinClient` to `Arc<dyn MediaProvider>` yet, except for adding module declarations.
+  - [x] Do not introduce `opensubsonic` in this story; Story 8.3 owns the Subsonic adapter dependency.
+  - [x] Do not introduce `jellyfin-sdk` in this story; Story 8.2 owns the Jellyfin adapter decision.
 
-- [ ] Verify build and tests (AC: 5)
-  - [ ] Run `rtk cargo test -p hifimule-daemon`.
-  - [ ] If compile errors appear in existing unrelated tests, document them in the story's Dev Agent Record instead of broadening this story's scope.
+- [x] Verify build and tests (AC: 5)
+  - [x] Run `rtk cargo test -p hifimule-daemon`.
+  - [x] If compile errors appear in existing unrelated tests, document them in the story's Dev Agent Record instead of broadening this story's scope.
 
 ## Dev Notes
 
@@ -120,12 +120,29 @@ so that the sync engine, auto-fill, and scrobble bridge never depend on server-s
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+GPT-5 Codex
 
 ### Debug Log References
+
+- `rtk cargo test -p hifimule-daemon` - passed, 209 tests.
 
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
+- Added API-neutral daemon domain models with `String` server IDs, seconds/kbps units, and separate optional cover art references.
+- Added explicit DTO boundary conversion helpers for Jellyfin ticks, seconds, bps, and kbps with focused unit tests for normalization traps.
+- Added the `MediaProvider` async trait surface, provider capability/server metadata, scrobble placeholders, transcode profile placeholder, and shared `ProviderError`.
+- Preserved existing Jellyfin API/call-site behavior; only top-level module declarations were added in `main.rs`.
 
 ### File List
+
+- `hifimule-daemon/src/main.rs`
+- `hifimule-daemon/src/domain/mod.rs`
+- `hifimule-daemon/src/domain/models.rs`
+- `hifimule-daemon/src/providers/mod.rs`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `_bmad-output/implementation-artifacts/8-1-mediaprovider-trait-and-domain-models.md`
+
+### Change Log
+
+- 2026-05-08: Implemented MediaProvider trait/domain model foundation and moved story to review.
