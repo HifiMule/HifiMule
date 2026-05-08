@@ -383,7 +383,10 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
     let dirty = device.as_ref().map(|d| d.dirty).unwrap_or(false);
 
     // Include pending device path and friendly name for unrecognized devices awaiting initialization
-    let pending_device_snapshot = state.device_manager.get_unrecognized_device_snapshot().await;
+    let pending_device_snapshot = state
+        .device_manager
+        .get_unrecognized_device_snapshot()
+        .await;
     let pending_device_path = pending_device_snapshot
         .as_ref()
         .map(|s| s.path.to_string_lossy().to_string());

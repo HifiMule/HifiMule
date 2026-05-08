@@ -566,6 +566,8 @@ impl DeviceManager {
             vec![folder_path.to_string()]
         };
 
+        let storage_id = device_io.storage_id().await.unwrap_or(None);
+
         let manifest = DeviceManifest {
             device_id,
             name: Some(name).filter(|s| !s.is_empty()),
@@ -580,7 +582,7 @@ impl DeviceManager {
             auto_fill: AutoFillPrefs::default(),
             transcoding_profile_id, // stored in .jellyfinsync.json; read back on sync to apply transcoding
             playlists: vec![],
-            storage_id: None,
+            storage_id,
         };
         let manifest_bytes = serde_json::to_string_pretty(&manifest)?;
         device_io

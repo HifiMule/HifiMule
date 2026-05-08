@@ -1,6 +1,6 @@
 # Story 7.3: Device UI & Identity Polish
 
-Status: review
+Status: done
 
 ## Story
 
@@ -81,6 +81,10 @@ so that the UI never shows stale defaults, silent gaps, or confusing state for M
   - [x] Run `rtk cargo clippy -p jellyfinsync-daemon -- -D warnings` — no new warnings (32 pre-existing).
   - [x] Run `rtk tsc` in `jellyfinsync-ui/` — no TypeScript errors.
   - [x] Update story File List.
+
+### Review Findings
+
+- [x] [Review][Patch] Freshly initialized MTP manifests never get a storage ID [jellyfinsync-daemon/src/device/mod.rs:583]
 
 ## Dev Notes
 

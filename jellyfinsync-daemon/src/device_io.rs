@@ -23,6 +23,9 @@ pub trait DeviceIO: Send + Sync + std::fmt::Debug {
     async fn delete_file(&self, path: &str) -> Result<()>;
     async fn list_files(&self, path: &str) -> Result<Vec<FileEntry>>;
     async fn free_space(&self) -> Result<u64>;
+    async fn storage_id(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
     async fn ensure_dir(&self, path: &str) -> Result<()>;
     async fn cleanup_empty_subdirs(&self, path: &str) -> Result<()>;
     async fn take_warnings(&self) -> Vec<String> {
@@ -262,6 +265,9 @@ pub trait MtpHandle: Send + Sync {
     fn delete_file(&self, path: &str) -> Result<()>;
     fn list_files(&self, path: &str) -> Result<Vec<FileEntry>>;
     fn free_space(&self) -> Result<u64>;
+    fn storage_id(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
     fn take_warnings(&self) -> Vec<String> {
         Vec::new()
     }
@@ -333,6 +339,14 @@ impl DeviceIO for MtpBackend {
         tokio::task::spawn_blocking(move || handle.free_space())
             .await
             .map_err(|e| anyhow::anyhow!("MTP free_space task panicked: {}", e))?
+    }
+
+    async fn storage_id(&self) -> Result<Option<String>> {
+        let _guard = self.operation_lock.lock().await;
+        let handle = Arc::clone(&self.handle);
+        tokio::task::spawn_blocking(move || handle.storage_id())
+            .await
+            .map_err(|e| anyhow::anyhow!("MTP storage_id task panicked: {}", e))?
     }
 
     // MTP creates parent directories automatically when objects are created.

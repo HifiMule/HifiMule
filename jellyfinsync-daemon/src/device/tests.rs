@@ -1,4 +1,5 @@
 use super::*;
+use crate::device_io::DeviceIO;
 use serde_json;
 
 #[cfg(target_os = "windows")]
@@ -30,6 +31,63 @@ use tokio::time::{timeout, Duration};
 
 fn msc(dir: &std::path::Path) -> Arc<dyn crate::device_io::DeviceIO> {
     Arc::new(crate::device_io::MscBackend::new(dir.to_path_buf()))
+}
+
+#[derive(Debug)]
+struct StorageIdDeviceIo {
+    inner: crate::device_io::MscBackend,
+    storage_id: Option<String>,
+}
+
+impl StorageIdDeviceIo {
+    fn new(
+        root: &std::path::Path,
+        storage_id: Option<String>,
+    ) -> Arc<dyn crate::device_io::DeviceIO> {
+        Arc::new(Self {
+            inner: crate::device_io::MscBackend::new(root.to_path_buf()),
+            storage_id,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::device_io::DeviceIO for StorageIdDeviceIo {
+    async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
+        self.inner.read_file(path).await
+    }
+
+    async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
+        self.inner.write_file(path, data).await
+    }
+
+    async fn write_with_verify(&self, path: &str, data: &[u8]) -> Result<()> {
+        self.inner.write_with_verify(path, data).await
+    }
+
+    async fn delete_file(&self, path: &str) -> Result<()> {
+        self.inner.delete_file(path).await
+    }
+
+    async fn list_files(&self, path: &str) -> Result<Vec<crate::device_io::FileEntry>> {
+        self.inner.list_files(path).await
+    }
+
+    async fn free_space(&self) -> Result<u64> {
+        self.inner.free_space().await
+    }
+
+    async fn storage_id(&self) -> Result<Option<String>> {
+        Ok(self.storage_id.clone())
+    }
+
+    async fn ensure_dir(&self, path: &str) -> Result<()> {
+        self.inner.ensure_dir(path).await
+    }
+
+    async fn cleanup_empty_subdirs(&self, path: &str) -> Result<()> {
+        self.inner.cleanup_empty_subdirs(path).await
+    }
 }
 
 // ===== Story 4.4 Tests =====
@@ -1051,6 +1109,36 @@ async fn test_initialize_device_requires_unrecognized_path() {
 }
 
 #[tokio::test]
+async fn test_initialize_device_persists_storage_id_from_device_io() {
+    let dir = tempdir().unwrap();
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+    let device_io = StorageIdDeviceIo::new(dir.path(), Some("storage-123".to_string()));
+
+    manager
+        .handle_device_unrecognized(dir.path().to_path_buf(), Arc::clone(&device_io), None)
+        .await;
+
+    let manifest = manager
+        .initialize_device(
+            "Music",
+            None,
+            "My Device".to_string(),
+            None,
+            Arc::clone(&device_io),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(manifest.storage_id.as_deref(), Some("storage-123"));
+    let content = tokio::fs::read_to_string(dir.path().join(".jellyfinsync.json"))
+        .await
+        .unwrap();
+    let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
+    assert_eq!(loaded.storage_id.as_deref(), Some("storage-123"));
+}
+
+#[tokio::test]
 async fn test_initialize_device_rejects_path_traversal() {
     let dir = tempdir().unwrap();
     let db = Arc::new(crate::db::Database::memory().unwrap());
@@ -1806,13 +1894,19 @@ fn test_empty_device_name_falls_back_to_device_id() {
     let resolved = name_some_empty
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| device_id.clone());
-    assert_eq!(resolved, device_id, "empty name must fall back to device_id");
+    assert_eq!(
+        resolved, device_id,
+        "empty name must fall back to device_id"
+    );
 
     let name_none: Option<String> = None;
     let resolved_none = name_none
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| device_id.clone());
-    assert_eq!(resolved_none, device_id, "None name must fall back to device_id");
+    assert_eq!(
+        resolved_none, device_id,
+        "None name must fall back to device_id"
+    );
 
     let name_real: Option<String> = Some("My Garmin".to_string());
     let resolved_real = name_real
@@ -1848,8 +1942,10 @@ async fn test_cleanup_tmp_files_root_and_managed() {
     let count = cleanup_tmp_files(msc(dir.path()), &["Music".to_string()])
         .await
         .unwrap();
-    assert_eq!(count, 2, "both root and managed-path .tmp files must be deleted");
+    assert_eq!(
+        count, 2,
+        "both root and managed-path .tmp files must be deleted"
+    );
     assert!(!root_tmp.exists());
     assert!(!music_tmp.exists());
 }
-
