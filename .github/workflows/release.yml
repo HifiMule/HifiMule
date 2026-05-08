@@ -179,6 +179,7 @@ jobs:
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HIFIMULE_SKIP_SIDECAR_PREP: "1"
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'HifiMule ${{ github.ref_name }}'
