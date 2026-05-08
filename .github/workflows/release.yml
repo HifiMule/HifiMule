@@ -176,7 +176,7 @@ jobs:
       - name: Build and release
         id: build_and_release
         # action-v0.6.2 (latest reviewed for this hardening pass)
-        uses: tauri-apps/tauri-action@84b9d35
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
