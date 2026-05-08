@@ -8,10 +8,15 @@ pub struct ScrobblerEntry {
     pub artist: String,
     pub album: String,
     pub title: String,
+    // Parsed from source but not yet forwarded to any scrobbling backend.
+    // Retained for future API compatibility (e.g. ListenBrainz requires duration and MB ID).
+    #[allow(dead_code)]
     pub track_num: Option<u32>,
+    #[allow(dead_code)]
     pub duration_secs: u64,
     pub rating: String,
     pub timestamp_unix: i64,
+    #[allow(dead_code)]
     pub mb_track_id: Option<String>,
 }
 

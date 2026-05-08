@@ -635,35 +635,6 @@ impl JellyfinClient {
         Ok(())
     }
 
-    /// Downloads an item as a streaming response.
-    /// Returns a stream of bytes that can be written to disk incrementally.
-    pub async fn download_item_stream(
-        &self,
-        url: &str,
-        token: &str,
-        item_id: &str,
-    ) -> Result<impl futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>>>
-    {
-        CredentialManager::validate_url(url)?;
-        CredentialManager::validate_token(token)?;
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
-
-        let endpoint = format!("{}/Items/{}/Download", url.trim_end_matches('/'), item_id);
-
-        let response = self.client.get(&endpoint).headers(headers).send().await?;
-
-        if !response.status().is_success() {
-            return Err(anyhow!("Server returned status: {}", response.status()));
-        }
-
-        Ok(response.bytes_stream())
-    }
-
     /// Unified item stream resolver. If `transcoding_profile` is Some, calls
     /// POST /Items/{id}/PlaybackInfo to negotiate the stream URL. Falls back to
     /// /Items/{id}/Download if direct play is supported or PlaybackInfo returns no

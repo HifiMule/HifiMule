@@ -77,7 +77,6 @@ pub async fn run_auto_fill(
     // Capture total_record_count from the first page only; re-reading it each page
     // can cause premature termination or missed pages if the library changes mid-fetch.
     let mut total_record_count: Option<u32> = None;
-    let mut capacity_reached = false;
 
     'pages: loop {
         let endpoint = format!(
@@ -114,50 +113,10 @@ pub async fn run_auto_fill(
         let fetched = page.items.len() as u32;
         let total = *total_record_count.get_or_insert(page.total_record_count);
 
-        for track in page.items {
-            let size_bytes = track
-                .media_sources
-                .as_ref()
-                .and_then(|ms| ms.first())
-                .and_then(|ms| ms.size)
-                .and_then(|s| if s > 0 { Some(s as u64) } else { None })
-                .unwrap_or(0);
-
-            if size_bytes == 0 {
-                continue;
-            }
-
-            if cumulative_bytes + size_bytes > params.max_fill_bytes {
-                capacity_reached = true;
-                break;
-            }
-
-            let is_favorite = track
-                .user_data
-                .as_ref()
-                .map(|u| u.is_favorite)
-                .unwrap_or(false);
-            let play_count = track.user_data.as_ref().map(|u| u.play_count).unwrap_or(0);
-            let priority_reason = if is_favorite {
-                "favorite".to_string()
-            } else if play_count > 0 {
-                format!("playCount:{}", play_count)
-            } else {
-                "new".to_string()
-            };
-
-            cumulative_bytes += size_bytes;
-            result.push(AutoFillItem {
-                id: track.id,
-                name: track.name,
-                album: track.album,
-                artist: track
-                    .album_artist
-                    .or_else(|| track.artists.and_then(|a| a.into_iter().next())),
-                size_bytes,
-                priority_reason,
-            });
-        }
+        let remaining_budget = params.max_fill_bytes.saturating_sub(cumulative_bytes);
+        let (new_items, capacity_reached) = rank_and_truncate(page.items, remaining_budget);
+        cumulative_bytes += new_items.iter().map(|i| i.size_bytes).sum::<u64>();
+        result.extend(new_items);
 
         // Only use total as an exit condition when the server actually reported a
         // non-zero value. If total defaulted to 0 (server omitted the field), rely
@@ -180,8 +139,11 @@ pub async fn run_auto_fill(
 /// Capacity-truncation of a pre-sorted track list — extracted for unit-testability.
 /// Assumes tracks arrive in priority order (server-sorted). Stops at the first track
 /// that would exceed the remaining capacity budget.
-pub fn rank_and_truncate(tracks: Vec<JellyfinItem>, max_fill_bytes: u64) -> Vec<AutoFillItem> {
-    // Accumulate up to max_fill_bytes
+/// Returns `(items, capacity_reached)`.
+pub fn rank_and_truncate(
+    tracks: Vec<JellyfinItem>,
+    max_fill_bytes: u64,
+) -> (Vec<AutoFillItem>, bool) {
     let mut result = Vec::new();
     let mut cumulative_bytes: u64 = 0;
 
@@ -201,7 +163,7 @@ pub fn rank_and_truncate(tracks: Vec<JellyfinItem>, max_fill_bytes: u64) -> Vec<
         }
 
         if cumulative_bytes + size_bytes > max_fill_bytes {
-            break;
+            return (result, true);
         }
 
         let is_favorite = track
@@ -232,7 +194,7 @@ pub fn rank_and_truncate(tracks: Vec<JellyfinItem>, max_fill_bytes: u64) -> Vec<
         });
     }
 
-    result
+    (result, false)
 }
 
 #[cfg(test)]
@@ -281,14 +243,14 @@ mod tests {
             make_track("c", false, 5, "2024-01-01", 3_000_000),
         ];
         // Only 5MB available — all tracks are 3MB so only the first fits; others are skipped
-        let result = rank_and_truncate(tracks, 5_000_000);
+        let (result, _) = rank_and_truncate(tracks, 5_000_000);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "a");
     }
 
     #[test]
     fn test_empty_library() {
-        let result = rank_and_truncate(vec![], 10_000);
+        let (result, _) = rank_and_truncate(vec![], 10_000);
         assert!(result.is_empty());
     }
 
@@ -301,7 +263,7 @@ mod tests {
             size: Some(-1),
             container: None,
         }]);
-        let result = rank_and_truncate(vec![track], 10_000);
+        let (result, _) = rank_and_truncate(vec![track], 10_000);
         assert!(
             result.is_empty(),
             "tracks with negative size should be skipped"
@@ -313,7 +275,7 @@ mod tests {
         // Tracks with no media_sources (size = 0) must not inflate the fill set.
         let mut track = make_track("a", true, 0, "2024-01-01", 0);
         track.media_sources = None;
-        let result = rank_and_truncate(vec![track], 10_000);
+        let (result, _) = rank_and_truncate(vec![track], 10_000);
         assert!(
             result.is_empty(),
             "tracks with zero/unknown size should be skipped"
@@ -323,8 +285,9 @@ mod tests {
     #[test]
     fn test_zero_capacity_returns_empty() {
         let tracks = vec![make_track("a", true, 0, "2024-01-01", 1000)];
-        let result = rank_and_truncate(tracks, 0);
+        let (result, capacity_reached) = rank_and_truncate(tracks, 0);
         assert!(result.is_empty());
+        assert!(capacity_reached);
     }
 
     #[test]
@@ -336,12 +299,13 @@ mod tests {
             make_track("b", false, 0, "2024-01-01", 4_000_000), // 4MB — exceeds remaining 2MB → break
             make_track("c", false, 0, "2024-01-01", 500_000),   // 0.5MB — never reached
         ];
-        let result = rank_and_truncate(tracks, 3_000_000);
+        let (result, capacity_reached) = rank_and_truncate(tracks, 3_000_000);
         assert_eq!(
             result.len(),
             1,
             "only 'a' fits; break stops at 'b', 'c' never considered"
         );
         assert_eq!(result[0].id, "a");
+        assert!(capacity_reached);
     }
 }
