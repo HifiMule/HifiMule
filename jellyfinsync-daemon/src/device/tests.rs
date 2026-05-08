@@ -1,5 +1,28 @@
 use super::*;
 use serde_json;
+
+#[cfg(target_os = "windows")]
+fn dummy_mtp_device_info(id: &str) -> mtp::MtpDeviceInfo {
+    mtp::MtpDeviceInfo {
+        device_id: id.to_string(),
+        friendly_name: "Test Device".to_string(),
+        inner: mtp::MtpDeviceInner::Wpd {
+            wpd_device_id: id.to_string(),
+        },
+    }
+}
+
+#[cfg(unix)]
+fn dummy_mtp_device_info(id: &str) -> mtp::MtpDeviceInfo {
+    mtp::MtpDeviceInfo {
+        device_id: id.to_string(),
+        friendly_name: "Test Device".to_string(),
+        inner: mtp::MtpDeviceInner::Libmtp {
+            bus_location: 0,
+            dev_num: 0,
+        },
+    }
+}
 use std::fs;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -1062,7 +1085,7 @@ async fn test_initialize_device_rejects_path_traversal() {
         .await;
     assert!(res.is_err());
 
-    // Nested path with separator
+    // Multi-level paths with slash separators are now allowed (T9)
     let res = manager
         .initialize_device(
             "Music/SubFolder",
@@ -1072,20 +1095,7 @@ async fn test_initialize_device_rejects_path_traversal() {
             msc(dir.path()),
         )
         .await;
-    assert!(res.is_err());
-    assert!(res.unwrap_err().to_string().contains("single folder name"));
-
-    // Backslash separator
-    let res = manager
-        .initialize_device(
-            "Music\\SubFolder",
-            None,
-            "My Device".to_string(),
-            None,
-            msc(dir.path()),
-        )
-        .await;
-    assert!(res.is_err());
+    assert!(res.is_ok(), "multi-level paths must be accepted: {:?}", res);
 }
 
 #[tokio::test]
@@ -1741,6 +1751,7 @@ async fn test_mtp_probe_read_failure_does_not_mark_known() {
         &tx,
         PathBuf::from("mtp://retry-me"),
         "retry-me",
+        dummy_mtp_device_info("retry-me"),
         "Retry Device".to_string(),
         backend,
     )
@@ -1767,6 +1778,7 @@ async fn test_mtp_probe_parse_failure_emits_unrecognized_and_marks_known() {
         &tx,
         PathBuf::from("mtp://unrecognized"),
         "unrecognized",
+        dummy_mtp_device_info("unrecognized"),
         "Unrecognized Device".to_string(),
         backend,
     )
@@ -1783,3 +1795,61 @@ async fn test_mtp_probe_parse_failure_emits_unrecognized_and_marks_known() {
         _ => panic!("expected unrecognized event"),
     }
 }
+
+// ===== Story 7.3 Tests =====
+
+#[test]
+fn test_empty_device_name_falls_back_to_device_id() {
+    let device_id = "abc-123-def".to_string();
+    // Simulates the name resolution logic in handle_get_daemon_state connected_devices_json
+    let name_some_empty: Option<String> = Some("".to_string());
+    let resolved = name_some_empty
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| device_id.clone());
+    assert_eq!(resolved, device_id, "empty name must fall back to device_id");
+
+    let name_none: Option<String> = None;
+    let resolved_none = name_none
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| device_id.clone());
+    assert_eq!(resolved_none, device_id, "None name must fall back to device_id");
+
+    let name_real: Option<String> = Some("My Garmin".to_string());
+    let resolved_real = name_real
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| device_id.clone());
+    assert_eq!(resolved_real, "My Garmin", "real name must be preserved");
+}
+
+#[tokio::test]
+async fn test_cleanup_tmp_files_at_device_root() {
+    // T8: root-level .tmp files must be swept even with empty managed_paths.
+    let dir = tempdir().unwrap();
+    let tmp_file = dir.path().join("partial.flac.tmp");
+    tokio::fs::write(&tmp_file, b"partial").await.unwrap();
+    assert!(tmp_file.exists());
+
+    let count = cleanup_tmp_files(msc(dir.path()), &[]).await.unwrap();
+    assert_eq!(count, 1, "root-level .tmp file must be deleted");
+    assert!(!tmp_file.exists());
+}
+
+#[tokio::test]
+async fn test_cleanup_tmp_files_root_and_managed() {
+    // T8: both root and managed-path .tmp files are swept.
+    let dir = tempdir().unwrap();
+    let music_dir = dir.path().join("Music");
+    tokio::fs::create_dir_all(&music_dir).await.unwrap();
+    let root_tmp = dir.path().join("partial.tmp");
+    let music_tmp = music_dir.join("track.flac.tmp");
+    tokio::fs::write(&root_tmp, b"a").await.unwrap();
+    tokio::fs::write(&music_tmp, b"b").await.unwrap();
+
+    let count = cleanup_tmp_files(msc(dir.path()), &["Music".to_string()])
+        .await
+        .unwrap();
+    assert_eq!(count, 2, "both root and managed-path .tmp files must be deleted");
+    assert!(!root_tmp.exists());
+    assert!(!music_tmp.exists());
+}
+

@@ -7,12 +7,14 @@ import { rpcCall } from '../rpc';
 export class InitDeviceModal {
     private dialog: HTMLElement | null = null;
     private onComplete: (() => void) | null = null;
+    private _defaultName: string | undefined = undefined;
 
     constructor(_container: HTMLElement, onComplete?: () => void) {
         this.onComplete = onComplete || null;
     }
 
-    async open() {
+    async open(defaultName?: string) {
+        this._defaultName = defaultName;
         this.renderDialog();
         await this.showDialog();
         await this.loadCredentials();
@@ -118,7 +120,7 @@ export class InitDeviceModal {
                         id="init-device-name-input"
                         placeholder="My Device"
                         maxlength="40"
-                        value="My Device"
+                        value="${this.escapeHtml(this._defaultName ?? 'My Device')}"
                         clearable
                     ></sl-input>
                     <div style="font-size: 0.75rem; opacity: 0.55; margin-top: 0.3rem;">
@@ -210,7 +212,7 @@ export class InitDeviceModal {
             // Clone to drop any stale listeners from previous renders, then wire fresh ones
             const freshBtn = confirmBtn.cloneNode(true) as any;
             confirmBtn.replaceWith(freshBtn);
-            freshBtn.disabled = !(nameInput?.value ?? 'My Device').trim();
+            freshBtn.disabled = !(nameInput?.value ?? this._defaultName ?? 'My Device').trim();
             freshBtn.addEventListener('click', () => this.handleConfirm(userId, selectedIcon, nameInput));
             nameInput?.addEventListener('sl-input', () => {
                 freshBtn.disabled = !nameInput.value?.trim();
