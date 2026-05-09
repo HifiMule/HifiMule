@@ -1,6 +1,6 @@
 # Story 8.5: Subsonic URL Credential Sanitization
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -21,36 +21,36 @@ so that my server password and derived auth tokens are not exposed in applicatio
 
 ## Tasks / Subtasks
 
-- [ ] Add a public Subsonic URL sanitizer in the provider module (AC: 1, 2, 4)
-  - [ ] Implement `pub fn sanitize_subsonic_url(url: &Url) -> String` in `hifimule-daemon/src/providers/subsonic.rs`.
-  - [ ] Replace values for only the auth keys `u`, `p`, `t`, and `s` with `[REDACTED]`.
-  - [ ] Preserve non-secret query parameters and path/query parseability, including `id`, `format`, `maxBitRate`, `v`, `c`, and `f`.
-  - [ ] Keep the existing `sanitize_message` boundary behavior: single-character keys must match only at query/message separators, not inside words such as `status=ok`.
-  - [ ] Decide whether to keep `sanitize_message` as a message-level wrapper around `sanitize_subsonic_url` or leave it as a focused text sanitizer; do not maintain two divergent redaction algorithms without tests for both.
+- [x] Add a public Subsonic URL sanitizer in the provider module (AC: 1, 2, 4)
+  - [x] Implement `pub fn sanitize_subsonic_url(url: &Url) -> String` in `hifimule-daemon/src/providers/subsonic.rs`.
+  - [x] Replace values for only the auth keys `u`, `p`, `t`, and `s` with `[REDACTED]`.
+  - [x] Preserve non-secret query parameters and path/query parseability, including `id`, `format`, `maxBitRate`, `v`, `c`, and `f`.
+  - [x] Keep the existing `sanitize_message` boundary behavior: single-character keys must match only at query/message separators, not inside words such as `status=ok`.
+  - [x] Decide whether to keep `sanitize_message` as a message-level wrapper around `sanitize_subsonic_url` or leave it as a focused text sanitizer; do not maintain two divergent redaction algorithms without tests for both.
 
-- [ ] Apply the sanitizer to Subsonic provider URL/error surfaces (AC: 1, 3, 5)
-  - [ ] Audit `SubsonicClient::signed_url`, `get_envelope_url`, `map_reqwest_error`, `download_url`, `stream_url`, and `cover_art_url`.
-  - [ ] Ensure any future logging inside `providers/subsonic.rs` uses `sanitize_subsonic_url` before formatting a URL.
-  - [ ] Ensure `ProviderError::{Auth,Http,Deserialization,Other}` messages created from Subsonic failures cannot include raw `u`, `p`, `t`, `s`, raw password, or derived token/salt values.
-  - [ ] Do not remove signed auth parameters from returned runtime URLs; callers still need usable URLs for HTTP requests. Only logged/debug/error text is sanitized.
+- [x] Apply the sanitizer to Subsonic provider URL/error surfaces (AC: 1, 3, 5)
+  - [x] Audit `SubsonicClient::signed_url`, `get_envelope_url`, `map_reqwest_error`, `download_url`, `stream_url`, and `cover_art_url`.
+  - [x] Ensure any future logging inside `providers/subsonic.rs` uses `sanitize_subsonic_url` before formatting a URL.
+  - [x] Ensure `ProviderError::{Auth,Http,Deserialization,Other}` messages created from Subsonic failures cannot include raw `u`, `p`, `t`, `s`, raw password, or derived token/salt values.
+  - [x] Do not remove signed auth parameters from returned runtime URLs; callers still need usable URLs for HTTP requests. Only logged/debug/error text is sanitized.
 
-- [ ] Audit cross-module log and error paths that can receive Subsonic URLs (AC: 3, 5)
-  - [ ] Check `hifimule-daemon/src/sync.rs` around stream resolution and per-file `SyncFileError` construction; sanitize any URL-bearing error before storing it in operation status.
-  - [ ] Check `hifimule-daemon/src/rpc.rs` around `handle_server_connect`, `require_provider`, image proxy, and sync spawning paths; JSON-RPC errors must not leak auth query values.
-  - [ ] Check `hifimule-daemon/src/main.rs` daemon/auto-sync logging for propagated sync errors.
-  - [ ] Keep Jellyfin behavior compatible; do not convert this story into a provider-neutral sync migration.
+- [x] Audit cross-module log and error paths that can receive Subsonic URLs (AC: 3, 5)
+  - [x] Check `hifimule-daemon/src/sync.rs` around stream resolution and per-file `SyncFileError` construction; sanitize any URL-bearing error before storing it in operation status.
+  - [x] Check `hifimule-daemon/src/rpc.rs` around `handle_server_connect`, `require_provider`, image proxy, and sync spawning paths; JSON-RPC errors must not leak auth query values.
+  - [x] Check `hifimule-daemon/src/main.rs` daemon/auto-sync logging for propagated sync errors.
+  - [x] Keep Jellyfin behavior compatible; do not convert this story into a provider-neutral sync migration.
 
-- [ ] Add focused redaction tests (AC: 1-6)
-  - [ ] Unit-test `sanitize_subsonic_url` with a signed `/rest/download.view` URL containing `u`, `p`, `t`, `s`, `id`, `v`, `c`, and `f`.
-  - [ ] Unit-test `/rest/stream.view` with `format=mp3` and `maxBitRate=192`; verify bitrate/profile params survive unchanged.
-  - [ ] Unit-test `/rest/getCoverArt.view` with `id=cover1`; verify the artwork ID survives.
-  - [ ] Unit-test no false positives for `status=ok`, `type=json`, `artist=The Smiths`, and already-redacted values.
-  - [ ] Unit-test malformed/relative text inputs through `sanitize_message` if that helper remains responsible for non-URL error strings.
-  - [ ] Add provider/factory/RPC tests proving failed Subsonic connect and failed `server.connect` responses do not contain the supplied username, password, token, or salt.
+- [x] Add focused redaction tests (AC: 1-6)
+  - [x] Unit-test `sanitize_subsonic_url` with a signed `/rest/download.view` URL containing `u`, `p`, `t`, `s`, `id`, `v`, `c`, and `f`.
+  - [x] Unit-test `/rest/stream.view` with `format=mp3` and `maxBitRate=192`; verify bitrate/profile params survive unchanged.
+  - [x] Unit-test `/rest/getCoverArt.view` with `id=cover1`; verify the artwork ID survives.
+  - [x] Unit-test no false positives for `status=ok`, `type=json`, `artist=The Smiths`, and already-redacted values.
+  - [x] Unit-test malformed/relative text inputs through `sanitize_message` if that helper remains responsible for non-URL error strings.
+  - [x] Add provider/factory/RPC tests proving failed Subsonic connect and failed `server.connect` responses do not contain the supplied username, password, token, or salt.
 
-- [ ] Verify and update workflow state (AC: 6)
-  - [ ] Run focused daemon tests first, then `rtk cargo test -p hifimule-daemon`.
-  - [ ] Update this story's Dev Agent Record and File List when implementation is complete.
+- [x] Verify and update workflow state (AC: 6)
+  - [x] Run focused daemon tests first, then `rtk cargo test -p hifimule-daemon`.
+  - [x] Update this story's Dev Agent Record and File List when implementation is complete.
 
 ## Dev Notes
 
@@ -116,12 +116,34 @@ so that my server password and derived auth tokens are not exposed in applicatio
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+GPT-5 Codex
 
 ### Debug Log References
+
+- `rtk cargo test -p hifimule-daemon providers::subsonic providers:: rpc --no-fail-fast` could not run literally because Cargo accepts one test filter; split focused runs were used instead.
+- `rtk cargo test -p hifimule-daemon subsonic --no-fail-fast` - passed, 32 tests.
+- `rtk cargo test -p hifimule-daemon providers --no-fail-fast` - passed, 54 tests.
+- `rtk cargo test -p hifimule-daemon rpc --no-fail-fast` - passed, 35 tests.
+- `rtk cargo fmt --check` - passed after `rtk cargo fmt`.
+- `rtk cargo test -p hifimule-daemon` - passed, 271 tests.
 
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
+- Added `sanitize_subsonic_url(&Url)` to redact only `u`, `p`, `t`, and `s` query values while keeping non-secret parameters parseable.
+- Replaced Subsonic provider message redaction with `sanitize_subsonic_message`, using `[REDACTED]` and separator-guarded matching for auth keys and password text.
+- Sanitized Subsonic/auto `server.connect` JSON-RPC failure messages before returning them to callers.
+- Audited sync/main/RPC paths; sync remains Jellyfin-specific, and no provider-neutral migration was introduced.
+- Added sanitizer, provider factory, and RPC tests proving username, password, token, and salt values do not leak through formatted errors.
 
 ### File List
+
+- hifimule-daemon/src/providers/subsonic.rs
+- hifimule-daemon/src/providers/mod.rs
+- hifimule-daemon/src/rpc.rs
+- _bmad-output/implementation-artifacts/sprint-status.yaml
+- _bmad-output/implementation-artifacts/8-5-subsonic-url-credential-sanitization.md
+
+### Change Log
+
+- 2026-05-09: Implemented Subsonic URL/message credential sanitization and redaction coverage; story ready for review.

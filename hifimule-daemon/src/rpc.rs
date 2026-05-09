@@ -336,7 +336,12 @@ async fn handle_server_connect(
         .await
         .map_err(|error| JsonRpcError {
             code: ERR_CONNECTION_FAILED,
-            message: error.to_string(),
+            message: match hint {
+                ServerTypeHint::Auto | ServerTypeHint::Subsonic => {
+                    crate::providers::subsonic::sanitize_subsonic_message(&error.to_string())
+                }
+                ServerTypeHint::Jellyfin => error.to_string(),
+            },
             data: None,
         })?;
     let normalized_type = server_type_slug(provider.server_type())
@@ -2287,6 +2292,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_rpc_server_connect_subsonic_failure_redacts_credentials() {
+        let mut server = mockito::Server::new_async().await;
+        let _ping = server
+            .mock("GET", "/rest/ping.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"subsonic-response":{"status":"failed","version":"1.16.1","error":{"code":40,"message":"Bad auth u=rpc-user&p=rpc-password&t=rpc-token&s=rpc-salt"}}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+
+        let error = handle_server_connect(
+            &state,
+            Some(json!({
+                "url": server.url(),
+                "serverType": "subsonic",
+                "username": "rpc-user",
+                "password": "rpc-password"
+            })),
+        )
+        .await
+        .expect_err("server.connect should fail");
+
+        assert_eq!(error.code, ERR_CONNECTION_FAILED);
+        assert!(
+            !error.message.contains("rpc-user"),
+            "username leaked: {}",
+            error.message
+        );
+        assert!(
+            !error.message.contains("rpc-password"),
+            "password leaked: {}",
+            error.message
+        );
+        assert!(
+            !error.message.contains("rpc-token"),
+            "token leaked: {}",
+            error.message
+        );
+        assert!(
+            !error.message.contains("rpc-salt"),
+            "salt leaked: {}",
+            error.message
+        );
+        assert!(error.message.contains("[REDACTED]"));
+    }
+
+    #[tokio::test]
     async fn test_rpc_server_connect_subsonic_success_updates_state_and_db() {
         let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
         let mut server = mockito::Server::new_async().await;
@@ -2321,7 +2380,10 @@ mod tests {
         assert_eq!(result["serverType"], "openSubsonic");
 
         let provider_set = state.provider.read().await.is_some();
-        assert!(provider_set, "provider must be set after successful connect");
+        assert!(
+            provider_set,
+            "provider must be set after successful connect"
+        );
 
         let server_type = state.server_type.read().await.clone();
         assert_eq!(server_type.as_deref(), Some("openSubsonic"));

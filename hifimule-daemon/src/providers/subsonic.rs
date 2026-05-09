@@ -16,6 +16,8 @@ use uuid::Uuid;
 
 const CLIENT_NAME: &str = "hifimule";
 const API_VERSION: &str = "1.16.1";
+const REDACTED: &str = "[REDACTED]";
+const SUBSONIC_SECRET_QUERY_KEYS: &[&str] = &["u", "p", "t", "s"];
 
 #[derive(Clone)]
 pub struct SubsonicProvider {
@@ -449,7 +451,7 @@ impl SubsonicClient {
                 let message = error
                     .and_then(|error| error.get("message"))
                     .and_then(|message| message.as_str())
-                    .map(sanitize_message)
+                    .map(sanitize_subsonic_message)
                     .unwrap_or_else(|| "Subsonic API request failed".to_string());
                 return Err(match code {
                     Some(40 | 41) => ProviderError::Auth(message),
@@ -506,28 +508,52 @@ fn auth_token(password: &str, salt: &str) -> String {
 
 fn map_reqwest_error(error: reqwest::Error) -> ProviderError {
     if error.is_decode() {
-        ProviderError::Deserialization(error.to_string())
+        ProviderError::Deserialization(sanitize_subsonic_message(&error.to_string()))
     } else if let Some(status) = error.status() {
         match status.as_u16() {
-            401 | 403 => ProviderError::Auth(sanitize_message(&error.to_string())),
+            401 | 403 => ProviderError::Auth(sanitize_subsonic_message(&error.to_string())),
             404 => ProviderError::NotFound {
                 item_type: "item".to_string(),
                 id: "unknown".to_string(),
             },
             _ => ProviderError::Http {
                 status: Some(status.as_u16()),
-                message: sanitize_message(&error.to_string()),
+                message: sanitize_subsonic_message(&error.to_string()),
             },
         }
     } else {
         ProviderError::Http {
             status: None,
-            message: sanitize_message(&error.to_string()),
+            message: sanitize_subsonic_message(&error.to_string()),
         }
     }
 }
 
-fn sanitize_message(message: &str) -> String {
+pub fn sanitize_subsonic_url(url: &Url) -> String {
+    let mut sanitized = url.clone();
+    let pairs: Vec<(String, String)> = sanitized
+        .query_pairs()
+        .map(|(key, value)| {
+            let value = if SUBSONIC_SECRET_QUERY_KEYS.contains(&key.as_ref()) {
+                REDACTED.to_string()
+            } else {
+                value.into_owned()
+            };
+            (key.into_owned(), value)
+        })
+        .collect();
+
+    sanitized.set_query(None);
+    if !pairs.is_empty() {
+        let mut query = sanitized.query_pairs_mut();
+        for (key, value) in pairs {
+            query.append_pair(&key, &value);
+        }
+    }
+    sanitized.into()
+}
+
+pub(crate) fn sanitize_subsonic_message(message: &str) -> String {
     let mut sanitized = message.to_string();
     for key in ["password", "u", "p", "t", "s"] {
         let needle = format!("{key}=");
@@ -551,7 +577,7 @@ fn sanitize_message(message: &str) -> String {
                 .map(|offset| value_start + offset)
                 .unwrap_or_else(|| sanitized.len());
             rebuilt.push_str(&sanitized[cursor..value_start]);
-            rebuilt.push_str("[redacted]");
+            rebuilt.push_str(REDACTED);
             cursor = value_end;
         }
         rebuilt.push_str(&sanitized[cursor..]);
@@ -910,6 +936,12 @@ mod tests {
         ]
     }
 
+    fn query_value(url: &Url, key: &str) -> Option<String> {
+        url.query_pairs()
+            .find(|(candidate, _)| candidate == key)
+            .map(|(_, value)| value.into_owned())
+    }
+
     #[test]
     fn song_conversion_preserves_subsonic_units_and_optional_fields() {
         let song = song_from_dto(SongDto {
@@ -1220,6 +1252,90 @@ mod tests {
         assert!(!cover.contains(PASSWORD));
     }
 
+    #[test]
+    fn sanitize_subsonic_url_redacts_only_auth_query_values() {
+        let url = Url::parse(
+            "http://music.example/rest/download.view?u=arthur&p=raw-password&t=token-value&s=salt-value&id=song1&v=1.16.1&c=hifimule&f=json",
+        )
+        .expect("url");
+
+        let sanitized = sanitize_subsonic_url(&url);
+        let parsed = Url::parse(&sanitized).expect("sanitized url remains parseable");
+
+        for key in ["u", "p", "t", "s"] {
+            assert_eq!(query_value(&parsed, key).as_deref(), Some(REDACTED));
+        }
+        assert_eq!(query_value(&parsed, "id").as_deref(), Some("song1"));
+        assert_eq!(query_value(&parsed, "v").as_deref(), Some(API_VERSION));
+        assert_eq!(query_value(&parsed, "c").as_deref(), Some(CLIENT_NAME));
+        assert_eq!(query_value(&parsed, "f").as_deref(), Some("json"));
+        assert!(!sanitized.contains("arthur"));
+        assert!(!sanitized.contains("raw-password"));
+        assert!(!sanitized.contains("token-value"));
+        assert!(!sanitized.contains("salt-value"));
+    }
+
+    #[test]
+    fn sanitize_subsonic_url_preserves_stream_profile_parameters() {
+        let url = Url::parse(
+            "http://music.example/rest/stream.view?u=arthur&t=token-value&s=salt-value&id=song1&format=mp3&maxBitRate=192&v=1.16.1&c=hifimule&f=json",
+        )
+        .expect("url");
+
+        let sanitized = sanitize_subsonic_url(&url);
+        let parsed = Url::parse(&sanitized).expect("sanitized url remains parseable");
+
+        assert_eq!(query_value(&parsed, "format").as_deref(), Some("mp3"));
+        assert_eq!(query_value(&parsed, "maxBitRate").as_deref(), Some("192"));
+        assert_eq!(query_value(&parsed, "id").as_deref(), Some("song1"));
+        assert_eq!(query_value(&parsed, "t").as_deref(), Some(REDACTED));
+        assert_eq!(query_value(&parsed, "s").as_deref(), Some(REDACTED));
+    }
+
+    #[test]
+    fn sanitize_subsonic_url_preserves_cover_art_id() {
+        let url = Url::parse(
+            "http://music.example/rest/getCoverArt.view?u=arthur&t=token-value&s=salt-value&id=cover1&v=1.16.1&c=hifimule&f=json",
+        )
+        .expect("url");
+
+        let sanitized = sanitize_subsonic_url(&url);
+        let parsed = Url::parse(&sanitized).expect("sanitized url remains parseable");
+
+        assert_eq!(query_value(&parsed, "id").as_deref(), Some("cover1"));
+        assert_eq!(query_value(&parsed, "u").as_deref(), Some(REDACTED));
+    }
+
+    #[test]
+    fn sanitize_subsonic_message_avoids_mid_word_false_positives() {
+        let message = "status=ok type=json artist=The Smiths already u=[REDACTED] ?t=token&s=salt";
+
+        let sanitized = sanitize_subsonic_message(message);
+
+        assert!(sanitized.contains("status=ok"));
+        assert!(sanitized.contains("type=json"));
+        assert!(sanitized.contains("artist=The Smiths"));
+        assert!(sanitized.contains("u=[REDACTED]"));
+        assert!(sanitized.contains("?t=[REDACTED]&s=[REDACTED]"));
+        assert!(!sanitized.contains("token"));
+        assert!(!sanitized.contains("salt"));
+    }
+
+    #[test]
+    fn sanitize_subsonic_message_handles_malformed_relative_text() {
+        let message =
+            "failed relative/rest/download.view?u=arthur&p=raw-password&t=token&s=salt id=song1";
+
+        let sanitized = sanitize_subsonic_message(message);
+
+        assert!(sanitized.contains("relative/rest/download.view?u=[REDACTED]"));
+        assert!(sanitized.contains("id=song1"));
+        assert!(!sanitized.contains("arthur"));
+        assert!(!sanitized.contains("raw-password"));
+        assert!(!sanitized.contains("token"));
+        assert!(!sanitized.contains("salt"));
+    }
+
     #[tokio::test]
     async fn changes_since_sends_epoch_milliseconds_to_get_indexes() {
         let mut server = Server::new_async().await;
@@ -1433,7 +1549,7 @@ mod tests {
                 credential: CredentialKind::Token("secret-token".to_string()),
             }
         );
-        let sanitized = sanitize_message(
+        let sanitized = sanitize_subsonic_message(
             "failed u=alexis p=raw-password t=token-value s=salt-value password=raw-password",
         );
 
