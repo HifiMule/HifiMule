@@ -11,6 +11,29 @@ use thiserror::Error;
 pub mod jellyfin;
 pub mod subsonic;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderChangeContext {
+    #[serde(default)]
+    pub synced_songs: Vec<ProviderSyncedSong>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSyncedSong {
+    pub song_id: String,
+    #[serde(default)]
+    pub album_id: Option<String>,
+    #[serde(default)]
+    pub size: Option<u64>,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub suffix: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
 #[async_trait]
 pub trait MediaProvider: Send + Sync {
     async fn list_libraries(&self) -> Result<Vec<Library>, ProviderError>;
@@ -37,7 +60,16 @@ pub trait MediaProvider: Send + Sync {
 
     async fn cover_art_url(&self, cover_art_id: &str) -> Result<String, ProviderError>;
 
-    async fn changes_since(&self, token: Option<&str>) -> Result<Vec<ChangeEvent>, ProviderError>;
+    async fn changes_since(&self, token: Option<&str>) -> Result<Vec<ChangeEvent>, ProviderError> {
+        self.changes_since_with_context(token, &ProviderChangeContext::default())
+            .await
+    }
+
+    async fn changes_since_with_context(
+        &self,
+        token: Option<&str>,
+        context: &ProviderChangeContext,
+    ) -> Result<Vec<ChangeEvent>, ProviderError>;
 
     async fn scrobble(&self, request: ScrobbleRequest) -> Result<(), ProviderError>;
 

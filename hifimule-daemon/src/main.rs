@@ -558,6 +558,9 @@ async fn run_auto_sync(
                             artist: item.artist,
                             size_bytes: item.size_bytes,
                             etag: None,
+                            provider_album_id: None,
+                            provider_content_type: None,
+                            provider_suffix: None,
                         });
                     }
                 }
@@ -809,6 +812,12 @@ fn to_desired_item(item: api::JellyfinItem) -> sync::DesiredItem {
         .and_then(|s| s.size)
         .unwrap_or(0)
         .max(0) as u64;
+    let provider_suffix = item
+        .media_sources
+        .as_ref()
+        .and_then(|sources| sources.first())
+        .and_then(|source| source.container.clone())
+        .or_else(|| item.container.clone());
     sync::DesiredItem {
         jellyfin_id: item.id,
         name: item.name,
@@ -816,6 +825,9 @@ fn to_desired_item(item: api::JellyfinItem) -> sync::DesiredItem {
         artist: item.album_artist,
         size_bytes,
         etag: item.etag,
+        provider_album_id: item.album_id,
+        provider_content_type: None,
+        provider_suffix,
     }
 }
 

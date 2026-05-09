@@ -53,6 +53,9 @@ pub struct DesiredItem {
     pub artist: Option<String>,
     pub size_bytes: u64,
     pub etag: Option<String>,
+    pub provider_album_id: Option<String>,
+    pub provider_content_type: Option<String>,
+    pub provider_suffix: Option<String>,
 }
 
 /// An item to be added to the device.
@@ -65,6 +68,12 @@ pub struct SyncAddItem {
     pub artist: Option<String>,
     pub size_bytes: u64,
     pub etag: Option<String>,
+    #[serde(default)]
+    pub provider_album_id: Option<String>,
+    #[serde(default)]
+    pub provider_content_type: Option<String>,
+    #[serde(default)]
+    pub provider_suffix: Option<String>,
 }
 
 /// An item to be deleted from the device.
@@ -88,6 +97,12 @@ pub struct SyncIdChangeItem {
     pub artist: Option<String>,
     pub size_bytes: u64,
     pub etag: Option<String>,
+    #[serde(default)]
+    pub provider_album_id: Option<String>,
+    #[serde(default)]
+    pub provider_content_type: Option<String>,
+    #[serde(default)]
+    pub provider_suffix: Option<String>,
     /// Preserved from the old manifest entry — set if the filename was previously truncated.
     #[serde(default)]
     pub original_name: Option<String>,
@@ -675,6 +690,9 @@ pub async fn execute_sync(
                     synced_at,
                     original_name: construction.original_name,
                     etag: add_item.etag.clone(),
+                    provider_album_id: add_item.provider_album_id.clone(),
+                    provider_content_type: add_item.provider_content_type.clone(),
+                    provider_suffix: add_item.provider_suffix.clone(),
                 });
 
                 // Update operation progress and cumulative bytes
@@ -804,6 +822,9 @@ pub async fn execute_sync(
             synced_at,
             original_name: id_change.original_name.clone(), // Preserved from old manifest (AC #4)
             etag: id_change.etag.clone(),
+            provider_album_id: id_change.provider_album_id.clone(),
+            provider_content_type: id_change.provider_content_type.clone(),
+            provider_suffix: id_change.provider_suffix.clone(),
         });
 
         // Update operation progress and cumulative bytes (an ID change is instantly completed)
@@ -1184,6 +1205,9 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
             artist: i.artist.clone(),
             size_bytes: i.size_bytes,
             etag: i.etag.clone(),
+            provider_album_id: i.provider_album_id.clone(),
+            provider_content_type: i.provider_content_type.clone(),
+            provider_suffix: i.provider_suffix.clone(),
         })
         .collect();
 
@@ -1256,6 +1280,9 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
                     artist: add.artist.clone(),
                     size_bytes: add.size_bytes,
                     etag: add.etag.clone(),
+                    provider_album_id: add.provider_album_id.clone(),
+                    provider_content_type: add.provider_content_type.clone(),
+                    provider_suffix: add.provider_suffix.clone(),
                     original_name: preserved_original_name,
                 });
             }
@@ -1331,6 +1358,9 @@ mod tests {
             synced_at: "2026-02-15T10:00:00Z".to_string(),
             original_name: None,
             etag: Some("test-etag".to_string()),
+            provider_album_id: None,
+            provider_content_type: None,
+            provider_suffix: None,
         }
     }
 
@@ -1380,6 +1410,9 @@ mod tests {
             artist: artist.map(|s| s.to_string()),
             size_bytes: 10_000_000,
             etag: Some("test-etag".to_string()),
+            provider_album_id: None,
+            provider_content_type: None,
+            provider_suffix: None,
         }
     }
 
@@ -1893,6 +1926,9 @@ mod tests {
             synced_at: "2026-01-01".to_string(),
             original_name: Some("Very Long Original Track Name".to_string()),
             etag: None,
+            provider_album_id: None,
+            provider_content_type: None,
+            provider_suffix: None,
         };
 
         let value = serde_json::to_value(&item).unwrap();
@@ -1923,6 +1959,9 @@ mod tests {
             synced_at: "2026-04-01T00:00:00Z".to_string(),
             original_name: None,
             etag: None,
+            provider_album_id: None,
+            provider_content_type: None,
+            provider_suffix: None,
         }
     }
 

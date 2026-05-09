@@ -480,6 +480,9 @@ async fn test_write_manifest_creates_files() {
             synced_at: "2026-02-15T10:00:00Z".to_string(),
             original_name: None,
             etag: None,
+            provider_album_id: None,
+            provider_content_type: None,
+            provider_suffix: None,
         }],
         dirty: false,
         pending_item_ids: vec![],
@@ -548,6 +551,9 @@ async fn test_write_manifest_overwrites_existing() {
             synced_at: "2026-02-15T13:00:00Z".to_string(),
             original_name: None,
             etag: None,
+            provider_album_id: None,
+            provider_content_type: None,
+            provider_suffix: None,
         }],
         dirty: false,
         pending_item_ids: vec![],
@@ -594,6 +600,9 @@ async fn test_get_discrepancies_missing_file() {
             synced_at: "2026-02-28T10:00:00Z".to_string(),
             original_name: None,
             etag: None,
+            provider_album_id: None,
+            provider_content_type: None,
+            provider_suffix: None,
         }],
         dirty: true,
         pending_item_ids: vec![],
@@ -698,6 +707,9 @@ async fn test_get_discrepancies_no_issues() {
             synced_at: "2026-02-28T10:00:00Z".to_string(),
             original_name: None,
             etag: None,
+            provider_album_id: None,
+            provider_content_type: None,
+            provider_suffix: None,
         }],
         dirty: false,
         pending_item_ids: vec![],
@@ -745,6 +757,9 @@ async fn test_prune_items() {
                 synced_at: "2026-02-28T10:00:00Z".to_string(),
                 original_name: None,
                 etag: None,
+                provider_album_id: None,
+                provider_content_type: None,
+                provider_suffix: None,
             },
             SyncedItem {
                 jellyfin_id: "item-2".to_string(),
@@ -756,6 +771,9 @@ async fn test_prune_items() {
                 synced_at: "2026-02-28T10:00:00Z".to_string(),
                 original_name: None,
                 etag: None,
+                provider_album_id: None,
+                provider_content_type: None,
+                provider_suffix: None,
             },
         ],
         dirty: true,
@@ -811,6 +829,9 @@ async fn test_relink_item() {
             synced_at: "2026-02-28T10:00:00Z".to_string(),
             original_name: None,
             etag: None,
+            provider_album_id: None,
+            provider_content_type: None,
+            provider_suffix: None,
         }],
         dirty: true,
         pending_item_ids: vec![],
@@ -2055,4 +2076,82 @@ async fn test_cleanup_tmp_files_root_and_managed() {
     );
     assert!(!root_tmp.exists());
     assert!(!music_tmp.exists());
+}
+
+// ===== Story 8.6 Tests =====
+
+#[test]
+fn test_synced_item_provider_metadata_defaults_for_old_manifests() {
+    let json = r#"{
+        "jellyfinId": "song1",
+        "name": "Track",
+        "album": "Album",
+        "artist": "Artist",
+        "localPath": "Music/Artist/Album/Track.mp3",
+        "sizeBytes": 1234,
+        "syncedAt": "2026-05-09T10:00:00Z",
+        "etag": "v1"
+    }"#;
+
+    let item: SyncedItem = serde_json::from_str(json).expect("old synced item");
+
+    assert_eq!(item.jellyfin_id, "song1");
+    assert_eq!(item.provider_album_id, None);
+    assert_eq!(item.provider_content_type, None);
+    assert_eq!(item.provider_suffix, None);
+}
+
+#[test]
+fn test_synced_item_provider_metadata_serializes_camel_case_and_builds_context() {
+    let item = SyncedItem {
+        jellyfin_id: "song1".to_string(),
+        name: "Track".to_string(),
+        album: Some("Album".to_string()),
+        artist: Some("Artist".to_string()),
+        local_path: "Music/Artist/Album/Track.mp3".to_string(),
+        size_bytes: 1234,
+        synced_at: "2026-05-09T10:00:00Z".to_string(),
+        original_name: None,
+        etag: Some("v1".to_string()),
+        provider_album_id: Some("album1".to_string()),
+        provider_content_type: Some("audio/mpeg".to_string()),
+        provider_suffix: Some("mp3".to_string()),
+    };
+    let value = serde_json::to_value(&item).expect("synced item json");
+
+    assert_eq!(value["providerAlbumId"].as_str(), Some("album1"));
+    assert_eq!(value["providerContentType"].as_str(), Some("audio/mpeg"));
+    assert_eq!(value["providerSuffix"].as_str(), Some("mp3"));
+    assert!(value.get("provider_album_id").is_none());
+
+    let mut manifest = DeviceManifest {
+        device_id: "dev1".to_string(),
+        name: None,
+        icon: None,
+        version: "1.1".to_string(),
+        managed_paths: vec!["Music".to_string()],
+        synced_items: vec![item],
+        dirty: false,
+        pending_item_ids: vec![],
+        basket_items: vec![],
+        auto_sync_on_connect: false,
+        auto_fill: crate::device::AutoFillPrefs::default(),
+        transcoding_profile_id: None,
+        playlists: vec![],
+        storage_id: None,
+    };
+    let context = manifest.provider_change_context();
+
+    assert_eq!(context.synced_songs.len(), 1);
+    assert_eq!(context.synced_songs[0].song_id, "song1");
+    assert_eq!(context.synced_songs[0].album_id.as_deref(), Some("album1"));
+    assert_eq!(context.synced_songs[0].size, Some(1234));
+    assert_eq!(
+        context.synced_songs[0].content_type.as_deref(),
+        Some("audio/mpeg")
+    );
+    assert_eq!(context.synced_songs[0].suffix.as_deref(), Some("mp3"));
+
+    manifest.synced_items.clear();
+    assert!(manifest.provider_change_context().synced_songs.is_empty());
 }

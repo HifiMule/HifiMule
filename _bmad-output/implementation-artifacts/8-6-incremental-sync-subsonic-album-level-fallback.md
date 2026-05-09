@@ -1,6 +1,6 @@
 # Story 8.6: Incremental Sync - Subsonic Album-Level Fallback
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -22,50 +22,50 @@ so that a new track added to an album I have synced is picked up on the next inc
 
 ## Tasks / Subtasks
 
-- [ ] Extend Subsonic client support for paged full-library song enumeration (AC: 2, 3)
-  - [ ] Replace or overload the local `SubsonicClient::search3(&self, query: &str)` wrapper so it can pass `songCount` and `songOffset` query params while preserving existing browse/search behavior.
-  - [ ] Add `SubsonicProvider` helper code that treats `None`, empty token, and `"0"` as initial/full dump and calls `search3` with `query=""`, `songCount=500`, `songOffset=0,500,...`.
-  - [ ] Emit `ChangeEvent { item: ItemRef { id: song.id, item_type: ItemType::Song }, change_type: ChangeType::Created, version: computed_version }` for every full-dump song.
-  - [ ] Preserve existing `search(query)` public behavior for UI search; do not make normal user search return every song.
+- [x] Extend Subsonic client support for paged full-library song enumeration (AC: 2, 3)
+  - [x] Replace or overload the local `SubsonicClient::search3(&self, query: &str)` wrapper so it can pass `songCount` and `songOffset` query params while preserving existing browse/search behavior.
+  - [x] Add `SubsonicProvider` helper code that treats `None`, empty token, and `"0"` as initial/full dump and calls `search3` with `query=""`, `songCount=500`, `songOffset=0,500,...`.
+  - [x] Emit `ChangeEvent { item: ItemRef { id: song.id, item_type: ItemType::Song }, change_type: ChangeType::Created, version: computed_version }` for every full-dump song.
+  - [x] Preserve existing `search(query)` public behavior for UI search; do not make normal user search return every song.
 
-- [ ] Introduce a minimal change-detection context without broad sync migration (AC: 1, 5, 7)
-  - [ ] Add an explicit provider-neutral context type in `hifimule-daemon/src/providers/mod.rs` or an adjacent module, carrying only data needed for fallback: synced song ID, album ID when known, size, content type, suffix, and any existing version/etag.
-  - [ ] Update the `MediaProvider` trait and both provider implementations deliberately if the chosen API is `changes_since(token, context)`. Jellyfin may ignore the context, but tests must prove its existing `minDateLastSaved` behavior is unchanged.
-  - [ ] If a separate helper is chosen instead of changing the trait, keep it provider-owned and explicit; do not use process globals, `AppState` back references, or hidden reads of the current device from inside `SubsonicProvider`.
-  - [ ] Update only the RPC/sync caller path needed to pass the current manifest snapshot into change detection. Do not migrate streaming/download execution in this story.
+- [x] Introduce a minimal change-detection context without broad sync migration (AC: 1, 5, 7)
+  - [x] Add an explicit provider-neutral context type in `hifimule-daemon/src/providers/mod.rs` or an adjacent module, carrying only data needed for fallback: synced song ID, album ID when known, size, content type, suffix, and any existing version/etag.
+  - [x] Update the `MediaProvider` trait and both provider implementations deliberately if the chosen API is `changes_since(token, context)`. Jellyfin may ignore the context, but tests must prove its existing `minDateLastSaved` behavior is unchanged.
+  - [x] If a separate helper is chosen instead of changing the trait, keep it provider-owned and explicit; do not use process globals, `AppState` back references, or hidden reads of the current device from inside `SubsonicProvider`.
+  - [x] Update only the RPC/sync caller path needed to pass the current manifest snapshot into change detection. Do not migrate streaming/download execution in this story.
 
-- [ ] Implement album-level fallback inside `providers/subsonic.rs` only (AC: 1, 4, 5)
-  - [ ] Keep Subsonic-specific fallback mechanics inside the Subsonic provider/client layer; outside callers should provide context and process returned `ChangeEvent`s, not call `getAlbum` directly.
-  - [ ] For non-initial numeric tokens, keep calling `getIndexes` with `ifModifiedSince` as epoch milliseconds first.
-  - [ ] When `getIndexes` returns changed artists, continue emitting conservative artist-level updates as today unless a stronger album mapping is available.
-  - [ ] When `getIndexes` returns no changed artists, re-fetch albums known from the supplied change context and compare their fresh track IDs and metadata to the context snapshot.
-  - [ ] Add a provider-local comparison helper that detects added, removed, and updated songs without depending on query parameter ordering or response ordering.
+- [x] Implement album-level fallback inside `providers/subsonic.rs` only (AC: 1, 4, 5)
+  - [x] Keep Subsonic-specific fallback mechanics inside the Subsonic provider/client layer; outside callers should provide context and process returned `ChangeEvent`s, not call `getAlbum` directly.
+  - [x] For non-initial numeric tokens, keep calling `getIndexes` with `ifModifiedSince` as epoch milliseconds first.
+  - [x] When `getIndexes` returns changed artists, continue emitting conservative artist-level updates as today unless a stronger album mapping is available.
+  - [x] When `getIndexes` returns no changed artists, re-fetch albums known from the supplied change context and compare their fresh track IDs and metadata to the context snapshot.
+  - [x] Add a provider-local comparison helper that detects added, removed, and updated songs without depending on query parameter ordering or response ordering.
 
-- [ ] Add a backward-compatible source for album fallback inputs (AC: 1, 5)
-  - [ ] Audit `SyncedItem` in `hifimule-daemon/src/device/mod.rs`; it currently has `jellyfin_id`, `name`, `album`, `artist`, `local_path`, `size_bytes`, `synced_at`, `original_name`, and `etag`, but no album ID.
-  - [ ] Add manifest fields only with `#[serde(default)]` so old `.hifimule.json` files keep deserializing. Prefer explicit provider-neutral names for new fields, e.g. `provider_album_id`, `provider_content_type`, `provider_suffix`, or a compact metadata struct if it fits existing style.
-  - [ ] Update sync writes in `hifimule-daemon/src/sync.rs` or the provider-to-sync mapping path only if needed to persist those fields for future syncs; preserve all existing Jellyfin semantics and JSON compatibility.
-  - [ ] If current runtime paths cannot populate album IDs for pre-existing manifest rows, implement a focused fallback that can derive candidate album IDs through Subsonic `search3`/`getAlbum` data, and document/test the limitation for old manifests.
-  - [ ] Do not rename `jellyfin_id` in this story; it is a legacy field name used broadly as the provider item ID.
+- [x] Add a backward-compatible source for album fallback inputs (AC: 1, 5)
+  - [x] Audit `SyncedItem` in `hifimule-daemon/src/device/mod.rs`; it currently has `jellyfin_id`, `name`, `album`, `artist`, `local_path`, `size_bytes`, `synced_at`, `original_name`, and `etag`, but no album ID.
+  - [x] Add manifest fields only with `#[serde(default)]` so old `.hifimule.json` files keep deserializing. Prefer explicit provider-neutral names for new fields, e.g. `provider_album_id`, `provider_content_type`, `provider_suffix`, or a compact metadata struct if it fits existing style.
+  - [x] Update sync writes in `hifimule-daemon/src/sync.rs` or the provider-to-sync mapping path only if needed to persist those fields for future syncs; preserve all existing Jellyfin semantics and JSON compatibility.
+  - [x] If current runtime paths cannot populate album IDs for pre-existing manifest rows, implement a focused fallback that can derive candidate album IDs through Subsonic `search3`/`getAlbum` data, and document/test the limitation for old manifests.
+  - [x] Do not rename `jellyfin_id` in this story; it is a legacy field name used broadly as the provider item ID.
 
-- [ ] Compute stable Subsonic change versions (AC: 4)
-  - [ ] Add a small helper that builds `ChangeEvent.version` from available Subsonic song fields: at minimum `id`, `size`, `contentType`, and `suffix`; include a deterministic separator/format.
-  - [ ] Treat missing metadata conservatively: if ID is new, emit `Created`; if an existing ID lacks metadata needed for version comparison, do not invent false updates.
-  - [ ] Preserve Subsonic unit rules from Story 8.3: duration is seconds, bitrate is kbps, IDs are `String`, and `coverArt` is distinct from item ID.
+- [x] Compute stable Subsonic change versions (AC: 4)
+  - [x] Add a small helper that builds `ChangeEvent.version` from available Subsonic song fields: at minimum `id`, `size`, `contentType`, and `suffix`; include a deterministic separator/format.
+  - [x] Treat missing metadata conservatively: if ID is new, emit `Created`; if an existing ID lacks metadata needed for version comparison, do not invent false updates.
+  - [x] Preserve Subsonic unit rules from Story 8.3: duration is seconds, bitrate is kbps, IDs are `String`, and `coverArt` is distinct from item ID.
 
-- [ ] Protect security and boundaries (AC: 6, 7)
-  - [ ] Reuse `sanitize_subsonic_url()` / `sanitize_subsonic_message()` for any new logging or provider errors that can include Subsonic URLs.
-  - [ ] Do not add `opensubsonic`, `wiremock`, `insta`, or a new sync database layer for this story; the existing hand-rolled client and `mockito` tests are the current project pattern.
-  - [ ] Do not migrate `execute_sync()` to provider-neutral streaming unless the minimum manifest metadata path absolutely requires a small compatibility change.
-  - [ ] Do not change UI copy, Tauri routes, `server.connect`, or browse RPC contracts.
+- [x] Protect security and boundaries (AC: 6, 7)
+  - [x] Reuse `sanitize_subsonic_url()` / `sanitize_subsonic_message()` for any new logging or provider errors that can include Subsonic URLs.
+  - [x] Do not add `opensubsonic`, `wiremock`, `insta`, or a new sync database layer for this story; the existing hand-rolled client and `mockito` tests are the current project pattern.
+  - [x] Do not migrate `execute_sync()` to provider-neutral streaming unless the minimum manifest metadata path absolutely requires a small compatibility change.
+  - [x] Do not change UI copy, Tauri routes, `server.connect`, or browse RPC contracts.
 
-- [ ] Add focused tests and verification (AC: 1-7)
-  - [ ] Add `providers::subsonic` tests for initial full dump: first page 500 songs, second page fewer than 500, all emitted as song `Created` changes.
-  - [ ] Add a test proving `changes_since(Some("0"))` uses `search3` and does not call `getIndexes`.
-  - [ ] Add a test where `getIndexes` returns no artists, existing manifest album data is re-fetched via `getAlbum`, and a new song ID emits `ChangeType::Created`.
-  - [ ] Add tests for removed song IDs and metadata-only updates using `size`, `contentType`, and `suffix`.
-  - [ ] Add manifest serialization/deserialization tests proving new fields default cleanly on old manifests and serialize in the existing camelCase style where applicable.
-  - [ ] Run `rtk cargo test -p hifimule-daemon subsonic --no-fail-fast`, `rtk cargo test -p hifimule-daemon sync --no-fail-fast`, and `rtk cargo test -p hifimule-daemon`.
+- [x] Add focused tests and verification (AC: 1-7)
+  - [x] Add `providers::subsonic` tests for initial full dump: first page 500 songs, second page fewer than 500, all emitted as song `Created` changes.
+  - [x] Add a test proving `changes_since(Some("0"))` uses `search3` and does not call `getIndexes`.
+  - [x] Add a test where `getIndexes` returns no artists, existing manifest album data is re-fetched via `getAlbum`, and a new song ID emits `ChangeType::Created`.
+  - [x] Add tests for removed song IDs and metadata-only updates using `size`, `contentType`, and `suffix`.
+  - [x] Add manifest serialization/deserialization tests proving new fields default cleanly on old manifests and serialize in the existing camelCase style where applicable.
+  - [x] Run `rtk cargo test -p hifimule-daemon subsonic --no-fail-fast`, `rtk cargo test -p hifimule-daemon sync --no-fail-fast`, and `rtk cargo test -p hifimule-daemon`.
 
 ## Dev Notes
 
@@ -136,15 +136,36 @@ so that a new track added to an album I have synced is picked up on the next inc
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+GPT-5 Codex
 
 ### Debug Log References
+
+- 2026-05-09: `rtk cargo test -p hifimule-daemon subsonic --no-fail-fast` — 35 passed, 241 filtered out.
+- 2026-05-09: `rtk cargo test -p hifimule-daemon sync --no-fail-fast` — 56 passed, 220 filtered out.
+- 2026-05-09: `rtk cargo test -p hifimule-daemon` — 276 passed.
 
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
+- Implemented backward-compatible `MediaProvider::changes_since_with_context()` and provider-neutral `ProviderChangeContext`; existing `changes_since(token)` remains a no-context wrapper.
+- Implemented Subsonic full-library initial dump via paged `search3?query=&songCount=500&songOffset={n}`, preserving normal UI `search(query)` behavior.
+- Implemented Subsonic album fallback that runs only after `getIndexes(ifModifiedSince)` returns no changed artists, re-fetches known context albums via `getAlbum`, and emits song-level `Created`, `Updated`, and `Deleted` changes.
+- Added deterministic Subsonic song versions from `id`, `size`, `contentType`, and `suffix`, with conservative behavior when metadata is missing.
+- Added defaulted provider metadata fields to `SyncedItem`, sync desired/add/id-change plumbing, manifest-to-change-context conversion, and compatibility tests for old manifests.
 
 ### File List
 
 - _bmad-output/implementation-artifacts/8-6-incremental-sync-subsonic-album-level-fallback.md
 - _bmad-output/implementation-artifacts/sprint-status.yaml
+- hifimule-daemon/src/device/mod.rs
+- hifimule-daemon/src/device/tests.rs
+- hifimule-daemon/src/main.rs
+- hifimule-daemon/src/providers/jellyfin.rs
+- hifimule-daemon/src/providers/mod.rs
+- hifimule-daemon/src/providers/subsonic.rs
+- hifimule-daemon/src/rpc.rs
+- hifimule-daemon/src/sync.rs
+
+### Change Log
+
+- 2026-05-09: Implemented Story 8.6 Subsonic incremental sync album-level fallback and moved story to review.

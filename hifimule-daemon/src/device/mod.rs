@@ -1,5 +1,6 @@
 pub mod mtp;
 
+use crate::providers::{ProviderChangeContext, ProviderSyncedSong};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -21,6 +22,12 @@ pub struct SyncedItem {
     pub original_name: Option<String>,
     #[serde(default)]
     pub etag: Option<String>,
+    #[serde(default)]
+    pub provider_album_id: Option<String>,
+    #[serde(default)]
+    pub provider_content_type: Option<String>,
+    #[serde(default)]
+    pub provider_suffix: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -79,6 +86,25 @@ pub struct DeviceManifest {
     /// enumeration under DEVICE and use this ID directly. Backward-compatible via serde(default).
     #[serde(default)]
     pub storage_id: Option<String>,
+}
+
+impl DeviceManifest {
+    pub fn provider_change_context(&self) -> ProviderChangeContext {
+        ProviderChangeContext {
+            synced_songs: self
+                .synced_items
+                .iter()
+                .map(|item| ProviderSyncedSong {
+                    song_id: item.jellyfin_id.clone(),
+                    album_id: item.provider_album_id.clone(),
+                    size: Some(item.size_bytes),
+                    content_type: item.provider_content_type.clone(),
+                    suffix: item.provider_suffix.clone(),
+                    version: item.etag.clone(),
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
