@@ -2,6 +2,14 @@
 
 All previously deferred items have been incorporated into Epic 7 stories (7.1–7.4) in `_bmad-output/planning-artifacts/epics.md`.
 
+## Deferred from: code review of 8-1-mediaprovider-trait-and-domain-models (2026-05-09)
+
+- **`changes_since` token is untyped `Option<&str>`** — no newtype or enum prevents arbitrary strings; a dedicated `ChangeCursor` newtype would enforce a single contract. Story 8.4 owns connection/token semantics.
+- **`ChangeEvent.version` name may mislead implementors** — "version" reads as a content version, not a sync cursor/position marker; consider renaming to `sync_cursor` or `change_token` in story 8.2 when change event semantics are fully defined.
+- **`search` lacks pagination/limit parameters** — trait-level `search(query: &str)` forces every implementation to silently truncate or return everything; add `limit`/`offset` or a `SearchOptions` struct in a future story.
+- **`#[non_exhaustive]` missing on public enums** — `ItemType`, `ChangeType`, `ServerType`, `ScrobbleSubmission` are all public enums; adding a variant later is a breaking change for any downstream match arms. Add `#[non_exhaustive]` when the domain module stabilizes.
+- **`ProviderError::Http.status` is raw `u16` with no range validation** — an implementor can set `status: Some(99)` without compile-time rejection; consider `http::StatusCode` or a validated newtype when the `http` crate is added to the workspace.
+
 ## Deferred from: code review of 7-4-packaging-and-cicd-hardening (2026-05-08)
 
 - **`copy_brew_dylib` basename collision** — two dylibs from different Homebrew prefix paths with identical basenames overwrite each other in `LIB_DIR`; install_name_tool rewrites may miss the dropped copy. Unlikely for libmtp's typical transitive deps but not impossible.
