@@ -1,6 +1,6 @@
 # Story 8.1: MediaProvider Trait & Domain Models
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -115,6 +115,16 @@ so that the sync engine, auto-fill, and scrobble bridge never depend on server-s
 - [Source: _bmad-output/planning-artifacts/architecture.md#Library-Browsing-Multi-Provider-RPC-Contract]
 - [Source: _bmad-output/planning-artifacts/research/technical-compare-jellyfin-navidrome-subsonic-opensubsonic-api-research-2026-05-08.md#Async-Architecture]
 - [Source: _bmad-output/planning-artifacts/sprint-change-proposal-2026-05-08.md#Technical-Impact]
+
+### Review Findings
+
+- [x] [Review][Decision] ProviderCredentials credential model: replaced flat `token`/`password` fields with `enum CredentialKind { Token(String), Password { username, password } }` — compile-time mutual exclusion enforced.
+- [x] [Review][Patch] ProviderCredentials leaks password via Debug and Serialize [`providers/mod.rs:66-72`] — removed Serialize/Deserialize derives, implemented redacted Debug for both `CredentialKind` and `ProviderCredentials`.
+- [x] [Review][Defer] `changes_since` token is untyped `Option<&str>` [`providers/mod.rs:35`] — deferred, story 8.4 owns connection/token semantics
+- [x] [Review][Defer] `ChangeEvent.version` name may mislead implementors [`domain/models.rs:86`] — deferred, story 8.2 owns change event semantics
+- [x] [Review][Defer] `search` lacks pagination/limit parameters [`providers/mod.rs:25`] — deferred, future enhancement
+- [x] [Review][Defer] `#[non_exhaustive]` missing on public enums — deferred, future-proofing when domain module stabilizes
+- [x] [Review][Defer] `ProviderError::Http.status` is raw `u16` with no range validation [`providers/mod.rs:89`] — deferred, revisit when `http` crate is added
 
 ## Dev Agent Record
 

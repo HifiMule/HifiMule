@@ -4,6 +4,7 @@ use crate::domain::models::{
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use thiserror::Error;
 
 #[async_trait]
@@ -63,12 +64,36 @@ pub struct TranscodeProfile {
     pub max_bitrate_kbps: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq)]
+pub enum CredentialKind {
+    Token(String),
+    Password { username: String, password: String },
+}
+
+impl fmt::Debug for CredentialKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CredentialKind::Token(_) => write!(f, "Token([redacted])"),
+            CredentialKind::Password { username, .. } => {
+                write!(f, "Password {{ username: {:?}, password: [redacted] }}", username)
+            }
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct ProviderCredentials {
     pub server_url: String,
-    pub username: Option<String>,
-    pub token: Option<String>,
-    pub password: Option<String>,
+    pub credential: CredentialKind,
+}
+
+impl fmt::Debug for ProviderCredentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProviderCredentials")
+            .field("server_url", &self.server_url)
+            .field("credential", &self.credential)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
