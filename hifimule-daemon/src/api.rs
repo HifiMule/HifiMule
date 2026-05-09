@@ -459,14 +459,49 @@ impl JellyfinClient {
             format!("userId={}", user_id),
             "Fields=MediaSources".to_string(),
         ];
-        if let Some(token) = min_date_last_saved {
-            query_params.push(format!("minDateLastSaved={}", url_encode(token)));
+        if let Some(date_str) = min_date_last_saved {
+            query_params.push(format!("minDateLastSaved={}", url_encode(date_str)));
         }
 
         let endpoint = format!(
             "{}/Items?{}",
             url.trim_end_matches('/'),
             query_params.join("&")
+        );
+
+        let response = self.client.get(&endpoint).headers(headers).send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+
+        if !status.is_success() {
+            return Err(anyhow!("Server returned status: {}", status));
+        }
+
+        let items_response = serde_json::from_str::<JellyfinItemsResponse>(&text)?;
+        Ok(items_response)
+    }
+
+    pub async fn get_albums_by_artist(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        artist_id: &str,
+    ) -> Result<JellyfinItemsResponse> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let endpoint = format!(
+            "{}/Items?userId={}&AlbumArtistIds={}&IncludeItemTypes=MusicAlbum&Recursive=true",
+            url.trim_end_matches('/'),
+            user_id,
+            artist_id
         );
 
         let response = self.client.get(&endpoint).headers(headers).send().await?;
@@ -647,7 +682,7 @@ impl JellyfinClient {
 
         let encoded_title = url_encode(title);
         let endpoint = format!(
-            "{}/Items?userId={}&SearchTerm={}&IncludeItemTypes=Audio&Limit=10&Fields=Id,Name,Album,AlbumArtist,Artists",
+            "{}/Items?userId={}&SearchTerm={}&IncludeItemTypes=Audio&Limit=10&Fields=Id,Name,Album,AlbumArtist,Artists,AlbumId",
             url.trim_end_matches('/'),
             user_id,
             encoded_title
