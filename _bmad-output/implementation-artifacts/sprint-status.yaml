@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-05-09  # Story 8.6 review complete, patches applied, done
+last_updated: 2026-05-09  # Deferred-work backlog closed; all listed epics/stories done
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
