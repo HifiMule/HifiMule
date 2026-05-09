@@ -2,7 +2,7 @@
 name = "hifimule-ui"
 version.workspace = true
 description = "HifiMule UI"
-authors = ["Alexis"]
+authors = ["HifiMule"]
 edition.workspace = true
 rust-version.workspace = true
 build = "build.rs"

@@ -15,7 +15,7 @@ so that I can install HifiMule on both Debian-based systems and any Linux distro
 1. **AppImage launches without installation**: Given a successful `cargo tauri build` on Linux, when I run the AppImage, then HifiMule launches without requiring installation.
 2. **Deb installs with desktop entry**: When I install the .deb package, HifiMule is installed with a desktop entry and can be launched from the application menu.
 3. **Daemon sidecar included**: Both formats include the daemon sidecar binary (`hifimule-daemon-{target-triple}`).
-4. **App metadata correct**: The .deb package shows the correct product name ("HifiMule"), identifier (`com.alexi.hifimule`), and icon.
+4. **App metadata correct**: The .deb package shows the correct product name ("HifiMule"), identifier (`hifimule.github.io`), and icon.
 5. **Sidecar launches**: HifiMule launches the daemon sidecar correctly and the daemon responds to a health-check at `localhost:19140`.
 6. **No root required**: The app runs without requiring root/sudo privileges (NFR9 sandbox compliance).
 
@@ -182,7 +182,7 @@ The post-MVP daemon auto-start via systemd is explicitly excluded. The existing 
 - `cargo tauri build` is confirmed working and produces platform-native installers — same pipeline applies to Linux
 - `bundle.externalBin: ["sidecars/hifimule-daemon"]` already set — sidecar bundling works
 - `.png` icons already at `hifimule-ui/src-tauri/icons/` and listed in `bundle.icon` — Linux icon is ready
-- `productName` = "HifiMule", `identifier` = "com.alexi.hifimule" already configured
+- `productName` = "HifiMule", `identifier` = "hifimule.github.io" already configured
 - Daemon sidecar spawned via `app.shell().sidecar("hifimule-daemon")` in `lib.rs` `setup()` — same mechanism works unchanged on Linux
 - **123 tests pass** — do not regress this
 - `prepare-sidecar.mjs` already cross-platform (Windows/macOS verified) — Linux should work without changes

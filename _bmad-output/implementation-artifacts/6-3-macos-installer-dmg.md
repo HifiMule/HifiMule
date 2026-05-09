@@ -15,7 +15,7 @@ so that I can install HifiMule following standard macOS conventions.
 1. **DMG generated**: Given a successful `cargo tauri build` on macOS, when I open the generated DMG, then I see the HifiMule app bundle with a drag-to-Applications prompt.
 2. **No root required**: The app runs without requiring root/sudo privileges (macOS sandbox compliance — NFR9).
 3. **Daemon sidecar embedded**: The daemon sidecar is embedded within the .app bundle (under `Contents/MacOS/`).
-4. **App metadata correct**: The .app bundle shows the correct product name ("HifiMule"), identifier (`com.alexi.hifimule`), and icon.
+4. **App metadata correct**: The .app bundle shows the correct product name ("HifiMule"), identifier (`hifimule.github.io`), and icon.
 5. **Sidecar launches**: HifiMule.app launches the daemon sidecar correctly on open and the daemon responds to a health-check at `localhost:19140`.
 
 ## Tasks / Subtasks
@@ -36,7 +36,7 @@ so that I can install HifiMule following standard macOS conventions.
   - [x] T3.3: App launched from bundle via `open` command without any sudo/admin prompt. Ran in user session.
   - [x] T3.4: Daemon sidecar present inside bundle: `HifiMule.app/Contents/MacOS/hifimule-daemon` (Tauri strips target triple when bundling — correct behavior).
   - [x] T3.5: `hifimule-ui` and `hifimule-daemon` both launched. Daemon responded at `localhost:19140` with HTTP 405 on GET (POST-only JSON-RPC — correct).
-  - [x] T3.6: `CFBundleName: HifiMule` in Info.plist, `icon.icns` in `Contents/Resources/`. Bundle identifier `com.alexi.hifimule`.
+  - [x] T3.6: `CFBundleName: HifiMule` in Info.plist, `icon.icns` in `Contents/Resources/`. Bundle identifier `hifimule.github.io`.
 
 - [x] **T4: Validate Sandbox Compliance** (AC: #2)
   - [x] T4.1: App launched via `open` with no sudo — processes ran in user session with user privileges.
@@ -105,7 +105,7 @@ The `dirs` crate resolves the platform-appropriate data directory transparently 
 ### Post-MVP: launchd Agent — NOT in scope for 6.3
 
 The post-MVP daemon auto-start via launchd is explicitly excluded from this story. The existing sidecar spawn in `lib.rs` `setup()` hook is the MVP mechanism. The launchd approach (tracking in the epic) would require:
-- Installing `~/Library/LaunchAgents/com.alexi.hifimule.daemon.plist` on first launch
+- Installing `~/Library/LaunchAgents/hifimule.github.io.daemon.plist` on first launch
 - UI switching to health-check detection → `launchctl load` fallback
 - Cleanup on app removal
 
@@ -114,7 +114,7 @@ The post-MVP daemon auto-start via launchd is explicitly excluded from this stor
 - `cargo tauri build` is confirmed working and produces platform-native installers
 - `bundle.externalBin: ["sidecars/hifimule-daemon"]` already set — sidecar bundling is configured, no changes needed for DMG sidecar inclusion
 - `icon.icns` already at `hifimule-ui/src-tauri/icons/icon.icns` and listed in `bundle.icon` — DMG/app icon is ready
-- `productName` = "HifiMule", `identifier` = "com.alexi.hifimule" already configured
+- `productName` = "HifiMule", `identifier` = "hifimule.github.io" already configured
 - Daemon sidecar spawned via `app.shell().sidecar("hifimule-daemon")` in `lib.rs` `setup()` — same mechanism works unchanged on macOS
 - **123 tests pass** — do not regress this
 - WiX fragments and NSIS hooks are Windows-only — no macOS equivalent needed

@@ -1,7 +1,7 @@
 # Sprint Change Proposal — MTP Device Support
 **Date:** 2026-04-30
 **Project:** HifiMule
-**Author:** Alexi
+**Author:** Alexis
 
 ---
 

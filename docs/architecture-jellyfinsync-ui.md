@@ -207,7 +207,7 @@ initLibraryView()
 {
   "productName": "HifiMule",
   "version": "0.2.0",
-  "identifier": "com.alexi.hifimule",
+  "identifier": "hifimule.github.io",
   "bundle": {
     "externalBin": ["sidecars/hifimule-daemon"],
     "windows": {

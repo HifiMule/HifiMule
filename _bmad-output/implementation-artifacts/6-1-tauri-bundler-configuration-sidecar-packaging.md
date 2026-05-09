@@ -25,7 +25,7 @@ so that a single installer delivers both the UI and the headless engine as a coh
   - [x] T1.2: Verify the sidecar binary name follows Tauri v2's naming convention: `<binary-name>-<target-triple>[.exe]`
 - [x] **T2: Update App Metadata in `tauri.conf.json`** (AC: #3)
   - [x] T2.1: Change `productName` from `"hifimule-ui"` to `"HifiMule"`
-  - [x] T2.2: Update `identifier` from `"com.alexi.hifimule-ui"` to `"com.alexi.hifimule"`
+  - [x] T2.2: Update `identifier` from `"hifimule.github.io-ui"` to `"hifimule.github.io"`
   - [x] T2.3: Verify icon paths in `bundle.icon` array resolve correctly
 - [x] **T3: Update UI Daemon Launch to Use Sidecar API** (AC: #2)
   - [x] T3.1: Replace any direct `Command::new()` or manual process spawn of the daemon with Tauri's `tauri::api::process::Command::new_sidecar("hifimule-daemon")` (or equivalent Tauri v2 sidecar API)
@@ -53,7 +53,7 @@ so that a single installer delivers both the UI and the headless engine as a coh
 
 - `tauri.conf.json` currently has NO sidecar configuration — `bundle.externalBin` is absent
 - `productName` is `"hifimule-ui"` — must become `"HifiMule"` for proper installer naming
-- `identifier` is `"com.alexi.hifimule-ui"` — should be `"com.alexi.hifimule"`
+- `identifier` is `"hifimule.github.io-ui"` — should be `"hifimule.github.io"`
 - The daemon binary name is `hifimule-daemon` (defined in `hifimule-daemon/Cargo.toml` `[[bin]]`)
 - Current `beforeBuildCommand` only runs `npm run build` (frontend) — needs to also build the daemon binary
 - The UI Cargo.toml (`hifimule-ui/src-tauri/Cargo.toml`) does NOT include `tauri-plugin-shell` — it needs to be added with the `sidecar` feature
@@ -123,7 +123,7 @@ Claude Opus 4.6
 ### Completion Notes List
 
 - **T1:** Added `bundle.externalBin: ["sidecars/hifimule-daemon"]` to `tauri.conf.json`. Tauri automatically appends the target triple and `.exe` suffix.
-- **T2:** Updated `productName` to `"HifiMule"` and `identifier` to `"com.alexi.hifimule"`. Verified all icon paths resolve correctly.
+- **T2:** Updated `productName` to `"HifiMule"` and `identifier` to `"hifimule.github.io"`. Verified all icon paths resolve correctly.
 - **T3:** Added `tauri-plugin-shell` dependency, registered plugin in `lib.rs`, added sidecar spawn in `setup()` hook using `app.shell().sidecar("hifimule-daemon")`. Added `shell:allow-spawn` and `shell:allow-execute` permissions to capabilities.
 - **T4:** Created `scripts/prepare-sidecar.mjs` — cross-platform Node.js script that builds the daemon in release mode and copies the binary to `src-tauri/sidecars/` with the correct target-triple naming. Updated `beforeBuildCommand` to run this script after frontend build. Added `sidecars/` to `.gitignore`.
 - **T5:** `cargo tauri build` produces both MSI (4.5 MB) and NSIS (3.3 MB) installers. All 122 existing tests pass with zero regressions.
