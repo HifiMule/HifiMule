@@ -9,6 +9,7 @@ use tokio::time::{sleep, Duration};
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncedItem {
+    #[serde(rename = "providerItemId")]
     pub jellyfin_id: String,
     pub name: String,
     #[serde(default)]

@@ -195,6 +195,7 @@ pub struct PathConstructionResult {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncedItem {
+    #[serde(rename = "providerItemId")]
     pub jellyfin_id: String,
     pub name: String,                          // The (potentially truncated) local name
     #[serde(default)]

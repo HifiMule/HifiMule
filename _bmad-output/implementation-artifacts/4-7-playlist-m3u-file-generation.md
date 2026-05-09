@@ -30,7 +30,7 @@ so that my DAP or Rockbox player can natively load and play the playlist in the 
 
 10. **Manifest tracking**: After M3U generation, `manifest.playlists` is updated with a `PlaylistManifestEntry` for each written playlist: `jellyfinId`, `filename`, `trackCount`, `trackIds` (Vec of track jellyfin IDs in order), `lastModified` (ISO 8601 timestamp). (AC: #10)
 
-11. **Track not yet synced**: If a playlist track's `jellyfin_id` is not found in the manifest `synced_items` (e.g., it failed to download), that track is omitted from the `.m3u` with a log entry. The remaining tracks are still written. (AC: #11)
+11. **Track not yet synced**: If a playlist track's provider item ID is not found in the manifest `synced_items` (`providerItemId` in `.hifimule.json`; internal Rust field `jellyfin_id`), that track is omitted from the `.m3u` with a log entry. The remaining tracks are still written. (AC: #11)
 
 ## Tasks / Subtasks
 

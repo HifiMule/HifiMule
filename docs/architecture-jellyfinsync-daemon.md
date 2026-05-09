@@ -176,9 +176,9 @@ pub fn calculate_delta(desired: &[DesiredItem], manifest: &DeviceManifest) -> Sy
 ```
 
 Produces three lists:
-- **`adds`**: items in `desired` not present in `synced_items` by `jellyfin_id`
+- **`adds`**: items in `desired` not present in `synced_items` by provider item ID (`providerItemId` in the manifest; legacy internal name `jellyfin_id`)
 - **`deletes`**: items in `synced_items` not in `desired`
-- **`id_changes`**: items present by metadata match (name+artist+album) but with changed `jellyfin_id` (server re-scanned library)
+- **`id_changes`**: items present by metadata match (name+artist+album) but with changed provider item ID (server re-scanned library)
 
 ID-change detection prevents unnecessary re-downloads when Jellyfin regenerates item IDs.
 

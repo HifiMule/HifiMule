@@ -93,7 +93,7 @@ export class InitDeviceModal {
             body.innerHTML = `
                 <div class="init-device-no-login">
                     <sl-icon name="person-x" style="font-size: 2.5rem; opacity: 0.6;"></sl-icon>
-                    <p>Connect to Jellyfin first before initializing a device.</p>
+                    <p>Connect to a media server first before initializing a device.</p>
                 </div>
             `;
             return;

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::device::DeviceManifest;
+use crate::providers::{MediaProvider, TranscodeProfile};
 
 /// Returns the current UTC time as an ISO 8601 / RFC 3339 string.
 ///
@@ -353,6 +354,65 @@ fn construct_file_path_with_extension(
                 // We have to return what we have and let the OS error out, or return our own error.
                 return Err(anyhow::anyhow!("Resulting path is too long for Windows MAX_PATH ({}), even after minimal truncation: {}", WINDOWS_MAX_PATH, path.display()));
             }
+        }
+
+        return Ok(PathConstructionResult {
+            path,
+            original_name,
+        });
+    }
+}
+
+fn construct_desired_file_path(
+    managed_path: &Path,
+    item: &SyncAddItem,
+    extension_override: Option<&str>,
+) -> Result<PathConstructionResult> {
+    let artist = item.artist.as_deref().unwrap_or("Unknown Artist");
+    let album = item.album.as_deref().unwrap_or("Unknown Album");
+    let track_name = &item.name;
+    let extension = extension_override
+        .or(item.provider_suffix.as_deref())
+        .unwrap_or("mp3");
+
+    let artist_clean = sanitize_path_component(artist);
+    let album_clean = sanitize_path_component(album);
+    let track_name_clean = sanitize_path_component(track_name);
+    let mut current_max_component = MAX_PATH_COMPONENT_LEN;
+
+    loop {
+        let artist_final = truncate_component(&artist_clean, current_max_component);
+        let album_final = truncate_component(&album_clean, current_max_component);
+        let filename_base = format!("00 - {}", track_name_clean);
+        let filename_candidate = format!("{}.{}", filename_base, extension);
+        let (filename, original_name) =
+            if filename_candidate.chars().count() > current_max_component {
+                let truncated = truncate_filename(&filename_base, extension, current_max_component);
+                (truncated, Some(item.name.clone()))
+            } else {
+                (filename_candidate, None)
+            };
+        let path = managed_path
+            .join(&artist_final)
+            .join(&album_final)
+            .join(&filename);
+        let approx_abs_len = match path.canonicalize() {
+            Ok(p) => p.to_string_lossy().chars().count(),
+            Err(_) => match std::env::current_dir() {
+                Ok(cwd) => cwd.join(&path).to_string_lossy().chars().count(),
+                Err(_) => path.to_string_lossy().chars().count() + 30,
+            },
+        };
+        if approx_abs_len > WINDOWS_MAX_PATH {
+            if current_max_component > 30 {
+                current_max_component = (current_max_component * 3) / 4;
+                continue;
+            }
+            return Err(anyhow::anyhow!(
+                "Resulting path is too long for Windows MAX_PATH ({}), even after minimal truncation: {}",
+                WINDOWS_MAX_PATH,
+                path.display()
+            ));
         }
 
         return Ok(PathConstructionResult {
@@ -874,6 +934,304 @@ pub async fn execute_sync(
             }
 
             // Persist the updated playlists array back through the device manager.
+            let updated_playlists = manifest_snapshot.playlists;
+            if let Err(e) = device_manager
+                .update_manifest(|m| {
+                    m.playlists = updated_playlists;
+                })
+                .await
+            {
+                eprintln!("[M3U] Failed to persist manifest after M3U update: {}", e);
+            }
+        }
+    }
+
+    let mut device_warnings = device_io.take_warnings().await;
+    if let Err(e) = device_io.end_sync_job().await {
+        device_warnings.push(format!(
+            "[DeviceIO] Failed to end device sync job cleanly: {}",
+            e
+        ));
+    }
+    if !device_warnings.is_empty() {
+        if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
+            operation.warnings.append(&mut device_warnings);
+            operation_manager
+                .update_operation(&operation_id, operation)
+                .await;
+        }
+    }
+
+    Ok((synced_items, errors))
+}
+
+pub async fn execute_provider_sync(
+    delta: &SyncDelta,
+    device_path: &Path,
+    provider: Arc<dyn MediaProvider>,
+    operation_manager: Arc<SyncOperationManager>,
+    operation_id: String,
+    device_manager: Arc<crate::device::DeviceManager>,
+    device_io: Arc<dyn crate::device_io::DeviceIO>,
+) -> Result<(Vec<crate::device::SyncedItem>, Vec<SyncFileError>)> {
+    let mut synced_items = Vec::new();
+    let mut errors = Vec::new();
+    if let Err(e) = device_io.begin_sync_job().await {
+        errors.push(SyncFileError {
+            jellyfin_id: String::new(),
+            filename: String::new(),
+            error_message: format!("Failed to begin device sync job: {}", e),
+        });
+    }
+
+    let total_job_bytes: u64 = delta.adds.iter().map(|a| a.size_bytes).sum::<u64>()
+        + delta.id_changes.iter().map(|c| c.size_bytes).sum::<u64>();
+    if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
+        operation.total_bytes = total_job_bytes;
+        operation_manager
+            .update_operation(&operation_id, operation)
+            .await;
+    }
+
+    let completed_bytes_arc = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let managed_path = {
+        let snapshot = device_manager.get_current_device().await;
+        let subfolder = snapshot
+            .as_ref()
+            .and_then(|m| m.managed_paths.first())
+            .map(|s| s.as_str())
+            .unwrap_or("Music");
+        device_path.join(subfolder)
+    };
+
+    for add_item in delta.adds.iter() {
+        let preferred_audio_container = device_io.preferred_audio_container();
+        let construction =
+            match construct_desired_file_path(&managed_path, add_item, preferred_audio_container) {
+                Ok(result) => result,
+                Err(e) => {
+                    errors.push(SyncFileError {
+                        jellyfin_id: add_item.jellyfin_id.clone(),
+                        filename: add_item.name.clone(),
+                        error_message: format!("Failed to construct file path: {}", e),
+                    });
+                    continue;
+                }
+            };
+
+        let profile = preferred_audio_container.map(|container| TranscodeProfile {
+            container: Some(container.to_string()),
+            audio_codec: Some(container.to_string()),
+            max_bitrate_kbps: Some(if container.eq_ignore_ascii_case("mp3") {
+                320
+            } else {
+                256
+            }),
+        });
+        let url = match provider
+            .download_url(&add_item.jellyfin_id, profile.as_ref())
+            .await
+        {
+            Ok(url) => url,
+            Err(e) => {
+                errors.push(SyncFileError {
+                    jellyfin_id: add_item.jellyfin_id.clone(),
+                    filename: add_item.name.clone(),
+                    error_message: format!("Failed to get stream: {}", e),
+                });
+                continue;
+            }
+        };
+        let response = match reqwest::Client::new().get(url).send().await {
+            Ok(response) => response,
+            Err(e) => {
+                errors.push(SyncFileError {
+                    jellyfin_id: add_item.jellyfin_id.clone(),
+                    filename: add_item.name.clone(),
+                    error_message: format!("Failed to open stream: {}", e),
+                });
+                continue;
+            }
+        };
+        if !response.status().is_success() {
+            errors.push(SyncFileError {
+                jellyfin_id: add_item.jellyfin_id.clone(),
+                filename: add_item.name.clone(),
+                error_message: format!("Stream returned status {}", response.status()),
+            });
+            continue;
+        }
+
+        let file_name = add_item.name.clone();
+        let total_size = add_item.size_bytes;
+        let op_manager = operation_manager.clone();
+        let op_id = operation_id.clone();
+        let last_reported = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let progress_callback = Arc::new(move |bytes_written: u64, total: u64| {
+            let last = last_reported.load(std::sync::atomic::Ordering::Relaxed);
+            if bytes_written.saturating_sub(last) < 256 * 1024 && bytes_written < total {
+                return;
+            }
+            last_reported.store(bytes_written, std::sync::atomic::Ordering::Relaxed);
+            let op_manager_inner = op_manager.clone();
+            let op_id_inner = op_id.clone();
+            let file_name_inner = file_name.clone();
+            tokio::spawn(async move {
+                if let Some(mut operation) = op_manager_inner.get_operation(&op_id_inner).await {
+                    operation.current_file = Some(file_name_inner);
+                    operation.bytes_current = bytes_written;
+                    operation.bytes_total = total;
+                    op_manager_inner
+                        .update_operation(&op_id_inner, operation)
+                        .await;
+                }
+            });
+        }) as ProgressCallback;
+
+        let buffer =
+            match buffer_stream(response.bytes_stream(), total_size, progress_callback).await {
+                Ok(buffer) => buffer,
+                Err(e) => {
+                    errors.push(SyncFileError {
+                        jellyfin_id: add_item.jellyfin_id.clone(),
+                        filename: add_item.name.clone(),
+                        error_message: format!("Failed to buffer stream: {}", e),
+                    });
+                    continue;
+                }
+            };
+        let rel_path = construction
+            .path
+            .strip_prefix(device_path)
+            .unwrap_or(&construction.path)
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        match device_io.write_with_verify(&rel_path, &buffer).await {
+            Ok(_) => {
+                let synced_at = now_iso8601();
+                synced_items.push(crate::device::SyncedItem {
+                    jellyfin_id: add_item.jellyfin_id.clone(),
+                    name: add_item.name.clone(),
+                    album: add_item.album.clone(),
+                    artist: add_item.artist.clone(),
+                    local_path: rel_path.clone(),
+                    size_bytes: add_item.size_bytes,
+                    synced_at,
+                    original_name: construction.original_name,
+                    etag: add_item.etag.clone(),
+                    provider_album_id: add_item.provider_album_id.clone(),
+                    provider_content_type: add_item.provider_content_type.clone(),
+                    provider_suffix: add_item.provider_suffix.clone(),
+                });
+                completed_bytes_arc
+                    .fetch_add(add_item.size_bytes, std::sync::atomic::Ordering::Relaxed);
+                let cumulative = completed_bytes_arc.load(std::sync::atomic::Ordering::Relaxed);
+                if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
+                    operation.files_completed += 1;
+                    operation.bytes_transferred = cumulative;
+                    operation_manager
+                        .update_operation(&operation_id, operation)
+                        .await;
+                }
+                let synced_item = synced_items.last().unwrap().clone();
+                if let Err(e) = device_manager
+                    .update_manifest(|m| {
+                        m.synced_items.push(synced_item);
+                    })
+                    .await
+                {
+                    eprintln!("[Sync] Warning: per-file manifest write failed: {}", e);
+                }
+            }
+            Err(e) => {
+                errors.push(SyncFileError {
+                    jellyfin_id: add_item.jellyfin_id.clone(),
+                    filename: add_item.name.clone(),
+                    error_message: format!("Failed to write file: {}", e),
+                });
+            }
+        }
+    }
+
+    for delete_item in &delta.deletes {
+        match device_io.delete_file(&delete_item.local_path).await {
+            Ok(_) => {
+                if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
+                    operation.files_completed += 1;
+                    operation_manager
+                        .update_operation(&operation_id, operation)
+                        .await;
+                }
+                let id_to_remove = delete_item.jellyfin_id.clone();
+                if let Err(e) = device_manager
+                    .update_manifest(|m| {
+                        m.synced_items.retain(|i| i.jellyfin_id != id_to_remove);
+                    })
+                    .await
+                {
+                    eprintln!("[Sync] Warning: per-delete manifest write failed: {}", e);
+                }
+            }
+            Err(e) => errors.push(SyncFileError {
+                jellyfin_id: delete_item.jellyfin_id.clone(),
+                filename: delete_item.name.clone(),
+                error_message: format!("Failed to delete file: {}", e),
+            }),
+        }
+    }
+
+    let managed_subfolder = managed_path
+        .strip_prefix(device_path)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    if let Err(e) = device_io.cleanup_empty_subdirs(&managed_subfolder).await {
+        eprintln!("[Sync] Warning: directory cleanup failed: {}", e);
+    }
+
+    for id_change in &delta.id_changes {
+        let synced_at = now_iso8601();
+        synced_items.push(crate::device::SyncedItem {
+            jellyfin_id: id_change.new_jellyfin_id.clone(),
+            name: id_change.name.clone(),
+            album: id_change.album.clone(),
+            artist: id_change.artist.clone(),
+            local_path: id_change.old_local_path.clone(),
+            size_bytes: id_change.size_bytes,
+            synced_at,
+            original_name: id_change.original_name.clone(),
+            etag: id_change.etag.clone(),
+            provider_album_id: id_change.provider_album_id.clone(),
+            provider_content_type: id_change.provider_content_type.clone(),
+            provider_suffix: id_change.provider_suffix.clone(),
+        });
+        let synced_item = synced_items.last().unwrap().clone();
+        let id_to_remove = id_change.old_jellyfin_id.clone();
+        if let Err(e) = device_manager
+            .update_manifest(|m| {
+                m.synced_items.retain(|i| i.jellyfin_id != id_to_remove);
+                m.synced_items.push(synced_item);
+            })
+            .await
+        {
+            eprintln!("[Sync] Warning: per-ID-change manifest write failed: {}", e);
+        }
+    }
+
+    if let Some(mut manifest_snapshot) = device_manager.get_current_device().await {
+        if !delta.playlists.is_empty() || !manifest_snapshot.playlists.is_empty() {
+            let warnings = generate_m3u_files(
+                &delta.playlists,
+                device_path,
+                &managed_path,
+                &manifest_snapshot.synced_items.clone(),
+                &mut manifest_snapshot,
+                Arc::clone(&device_io),
+            )
+            .await;
+            for warning in &warnings {
+                eprintln!("{}", warning);
+            }
             let updated_playlists = manifest_snapshot.playlists;
             if let Err(e) = device_manager
                 .update_manifest(|m| {

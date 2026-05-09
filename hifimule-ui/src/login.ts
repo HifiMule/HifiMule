@@ -15,11 +15,11 @@ export function initLoginView(onLoginSuccess: () => void) {
         <div class="login-container">
             <sl-card class="login-card">
                 <div slot="header">
-                    <h3>Connect to Jellyfin</h3>
+                    <h3>Connect to Media Server</h3>
                 </div>
                 
                 <form id="login-form" class="login-form">
-                    <sl-input name="url" label="Server URL" placeholder="http://localhost:8096" required></sl-input>
+                    <sl-input name="url" label="Server URL" placeholder="http://localhost:4533 or http://localhost:8096" required></sl-input>
                     <br>
                     <sl-input name="username" label="Username" required></sl-input>
                     <br>
@@ -50,8 +50,8 @@ export function initLoginView(onLoginSuccess: () => void) {
         if (errorEl) errorEl.style.display = 'none';
 
         try {
-            await rpcCall('login', { url, username, password });
-            console.log('Login successful');
+            await rpcCall('server.connect', { url, serverType: 'auto', username, password });
+            console.log('Server connection successful');
             onLoginSuccess();
         } catch (err: any) {
             console.error('Login failed', err);

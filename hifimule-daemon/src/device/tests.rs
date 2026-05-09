@@ -432,7 +432,7 @@ fn test_manifest_with_synced_items_deserialization() {
         "managed_paths": ["Music"],
         "synced_items": [
             {
-                "jellyfinId": "item-1",
+                "providerItemId": "item-1",
                 "name": "Track One",
                 "album": "Album A",
                 "artist": "Artist X",
@@ -504,6 +504,14 @@ async fn test_write_manifest_creates_files() {
 
     // Verify content can be read back
     let content = fs::read_to_string(&manifest_path).unwrap();
+    assert!(
+        content.contains("\"providerItemId\""),
+        "new manifests must use provider-neutral item IDs"
+    );
+    assert!(
+        !content.contains("\"jellyfinId\""),
+        "new manifests must not write the Jellyfin-specific synced item key"
+    );
     let loaded: DeviceManifest = serde_json::from_str(&content).unwrap();
     assert_eq!(loaded.device_id, "test-device");
     assert_eq!(loaded.synced_items.len(), 1);
@@ -2083,7 +2091,7 @@ async fn test_cleanup_tmp_files_root_and_managed() {
 #[test]
 fn test_synced_item_provider_metadata_defaults_for_old_manifests() {
     let json = r#"{
-        "jellyfinId": "song1",
+        "providerItemId": "song1",
         "name": "Track",
         "album": "Album",
         "artist": "Artist",
@@ -2093,7 +2101,8 @@ fn test_synced_item_provider_metadata_defaults_for_old_manifests() {
         "etag": "v1"
     }"#;
 
-    let item: SyncedItem = serde_json::from_str(json).expect("old synced item");
+    let item: SyncedItem =
+        serde_json::from_str(json).expect("synced item with provider-neutral item id");
 
     assert_eq!(item.jellyfin_id, "song1");
     assert_eq!(item.provider_album_id, None);
@@ -2119,6 +2128,8 @@ fn test_synced_item_provider_metadata_serializes_camel_case_and_builds_context()
     };
     let value = serde_json::to_value(&item).expect("synced item json");
 
+    assert_eq!(value["providerItemId"].as_str(), Some("song1"));
+    assert!(value.get("jellyfinId").is_none());
     assert_eq!(value["providerAlbumId"].as_str(), Some("album1"));
     assert_eq!(value["providerContentType"].as_str(), Some("audio/mpeg"));
     assert_eq!(value["providerSuffix"].as_str(), Some("mp3"));

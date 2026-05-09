@@ -1,7 +1,8 @@
 use crate::api::{CredentialManager, JellyfinClient};
-use crate::domain::models::{ChangeType, ItemType};
+use crate::domain::models::{Album, Artist, ChangeType, ItemType, Library, Playlist, Song};
 use crate::providers::{
-    server_type_slug, CredentialKind, MediaProvider, ProviderCredentials, ServerTypeHint,
+    server_type_slug, CredentialKind, MediaProvider, ProviderCredentials, ServerType,
+    ServerTypeHint,
 };
 use axum::{
     extract::{Path, State},
@@ -31,6 +32,7 @@ const ERR_CONNECTION_FAILED: i32 = -1;
 #[allow(dead_code)] // Reserved for future use
 const ERR_INVALID_CREDENTIALS: i32 = -2;
 const ERR_STORAGE_ERROR: i32 = -3;
+const JELLYFIN_TICKS_PER_SECOND: u64 = 10_000_000;
 
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
@@ -77,6 +79,94 @@ fn send_sync_complete_notification() {
     {
         eprintln!("[Notification] Failed to show OS notification: {}", e);
     }
+}
+
+fn get_subsonic_server_secret(preferred_server_type: &str) -> anyhow::Result<String> {
+    let mut candidates = vec![preferred_server_type];
+    for fallback in ["openSubsonic", "subsonic"] {
+        if !candidates.contains(&fallback) {
+            candidates.push(fallback);
+        }
+    }
+
+    let mut last_error = None;
+    for candidate in candidates {
+        match CredentialManager::get_server_secret(candidate) {
+            Ok(secret) => return Ok(secret),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No Subsonic server secret candidates")))
+}
+
+fn get_subsonic_server_secret_candidates(preferred_server_type: &str) -> Vec<String> {
+    let mut aliases = vec![preferred_server_type];
+    for fallback in ["openSubsonic", "subsonic"] {
+        if !aliases.contains(&fallback) {
+            aliases.push(fallback);
+        }
+    }
+
+    let mut secrets = Vec::new();
+    for alias in aliases {
+        if let Ok(secret) = CredentialManager::get_server_secret(alias) {
+            if !secrets.contains(&secret) {
+                secrets.push(secret);
+            }
+        }
+    }
+    secrets
+}
+
+fn save_subsonic_server_secret_aliases(secret: &str) -> Result<(), JsonRpcError> {
+    for alias in ["subsonic", "openSubsonic"] {
+        CredentialManager::save_server_secret(alias, secret).map_err(|error| JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: error.to_string(),
+            data: None,
+        })?;
+    }
+    Ok(())
+}
+
+async fn reconnect_subsonic_provider_from_config(
+    state: &AppState,
+) -> Option<Arc<dyn MediaProvider>> {
+    let config = state.db.get_server_config().ok().flatten()?;
+    if !matches!(config.server_type.as_str(), "subsonic" | "openSubsonic") {
+        return None;
+    }
+
+    for password in get_subsonic_server_secret_candidates(&config.server_type) {
+        let credentials = ProviderCredentials {
+            server_url: config.url.clone(),
+            credential: CredentialKind::Password {
+                username: config.username.clone(),
+                password: password.clone(),
+            },
+        };
+        let Ok(provider) =
+            crate::providers::connect(&config.url, &credentials, ServerTypeHint::Subsonic).await
+        else {
+            continue;
+        };
+        let normalized_type = server_type_slug(provider.server_type())?.to_string();
+        let version = provider.server_version().map(str::to_string);
+        let _ = save_subsonic_server_secret_aliases(&password);
+        let _ = state.db.upsert_server_config(
+            &config.url,
+            &normalized_type,
+            &config.username,
+            version.as_deref(),
+        );
+        *state.provider.write().await = Some(provider.clone());
+        *state.server_type.write().await = Some(normalized_type);
+        *state.server_version.write().await = version;
+        *state.last_connection_check.lock().await = None;
+        return Some(provider);
+    }
+
+    None
 }
 
 pub async fn run_server(
@@ -155,7 +245,7 @@ async fn restore_provider_from_config(state: &AppState) {
             })
         }
         "subsonic" | "openSubsonic" => {
-            let secret = CredentialManager::get_server_secret(&config.server_type).ok();
+            let secret = get_subsonic_server_secret(&config.server_type).ok();
             if let Some(password) = secret {
                 let credentials = ProviderCredentials {
                     server_url: config.url.clone(),
@@ -196,7 +286,7 @@ async fn handler(
         "server.connect" => handle_server_connect(&state, payload.params).await,
         "login" => handle_login(&state, payload.params).await,
         "save_credentials" => handle_save_credentials(payload.params).await,
-        "get_credentials" => handle_get_credentials().await,
+        "get_credentials" => handle_get_credentials(&state).await,
         "set_device_profile" => handle_set_device_profile(&state, payload.params).await,
         "get_daemon_state" => handle_get_daemon_state(&state).await,
         "jellyfin_get_views" => handle_jellyfin_get_views(&state, payload.params).await,
@@ -393,6 +483,12 @@ async fn handle_server_connect(
                 data: None,
             }
         })?;
+        if matches!(
+            provider.server_type(),
+            crate::providers::ServerType::Subsonic | crate::providers::ServerType::OpenSubsonic
+        ) {
+            save_subsonic_server_secret_aliases(&secret)?;
+        }
     }
     state
         .db
@@ -440,49 +536,16 @@ async fn handle_login(state: &AppState, params: Option<Value>) -> Result<Value, 
         data: None,
     })?;
 
-    let url = params["url"].as_str().ok_or(JsonRpcError {
+    let mut params = params.as_object().cloned().ok_or(JsonRpcError {
         code: ERR_INVALID_PARAMS,
-        message: "Missing url".to_string(),
+        message: "Invalid params".to_string(),
         data: None,
     })?;
+    params
+        .entry("serverType".to_string())
+        .or_insert_with(|| Value::String("auto".to_string()));
 
-    let username = params["username"].as_str().ok_or(JsonRpcError {
-        code: ERR_INVALID_PARAMS,
-        message: "Missing username".to_string(),
-        data: None,
-    })?;
-
-    let password = params["password"].as_str().ok_or(JsonRpcError {
-        code: ERR_INVALID_PARAMS,
-        message: "Missing password".to_string(),
-        data: None,
-    })?;
-
-    match state
-        .jellyfin_client
-        .authenticate_by_name(url, username, password)
-        .await
-    {
-        Ok(result) => {
-            if let Err(e) = CredentialManager::save_credentials(
-                url,
-                &result.access_token,
-                Some(&result.user.id),
-            ) {
-                return Err(JsonRpcError {
-                    code: ERR_STORAGE_ERROR,
-                    message: e.to_string(),
-                    data: None,
-                });
-            }
-            Ok(serde_json::to_value(result).unwrap())
-        }
-        Err(e) => Err(JsonRpcError {
-            code: ERR_INVALID_CREDENTIALS,
-            message: e.to_string(),
-            data: None,
-        }),
-    }
+    handle_server_connect(state, Some(Value::Object(params))).await
 }
 
 async fn handle_save_credentials(params: Option<Value>) -> Result<Value, JsonRpcError> {
@@ -516,7 +579,7 @@ async fn handle_save_credentials(params: Option<Value>) -> Result<Value, JsonRpc
     }
 }
 
-async fn handle_get_credentials() -> Result<Value, JsonRpcError> {
+async fn handle_get_credentials(state: &AppState) -> Result<Value, JsonRpcError> {
     match CredentialManager::get_credentials() {
         Ok((url, token, user_id)) => Ok(serde_json::json!({
             "url": url,
@@ -530,6 +593,15 @@ async fn handle_get_credentials() -> Result<Value, JsonRpcError> {
             // All other errors (I/O failure, corrupted config, keyring access denied) are
             // real storage faults and should be surfaced so they can be diagnosed.
             if msg.starts_with("No config file found") || msg.contains("No token found") {
+                if let Ok(Some(config)) = state.db.get_server_config() {
+                    return Ok(serde_json::json!({
+                        "url": config.url,
+                        "token": null,
+                        "userId": config.username,
+                        "serverType": config.server_type,
+                        "serverVersion": config.server_version,
+                    }));
+                }
                 Ok(Value::Null)
             } else {
                 Err(JsonRpcError {
@@ -737,10 +809,482 @@ async fn check_server_connection_cached(state: &AppState) -> bool {
     is_connected
 }
 
+fn provider_error_to_rpc(error: crate::providers::ProviderError) -> JsonRpcError {
+    JsonRpcError {
+        code: ERR_CONNECTION_FAILED,
+        message: crate::providers::subsonic::sanitize_subsonic_message(&error.to_string()),
+        data: None,
+    }
+}
+
+async fn active_non_jellyfin_provider(state: &AppState) -> Option<Arc<dyn MediaProvider>> {
+    let provider = state.provider.read().await.clone()?;
+    if provider.server_type() == ServerType::Jellyfin {
+        None
+    } else {
+        Some(provider)
+    }
+}
+
+fn legacy_view_from_library(library: &Library) -> Value {
+    serde_json::json!({
+        "Id": library.id,
+        "Name": library.name,
+        "Type": "CollectionFolder",
+        "CollectionType": "music",
+    })
+}
+
+fn ticks_from_seconds(seconds: Option<u32>) -> Option<u64> {
+    seconds.map(|value| u64::from(value) * JELLYFIN_TICKS_PER_SECOND)
+}
+
+fn legacy_artist_item(artist: &Artist) -> Value {
+    serde_json::json!({
+        "Id": artist.id,
+        "Name": artist.name,
+        "Type": "MusicArtist",
+        "ImageId": artist.cover_art_id,
+        "RecursiveItemCount": artist.album_count.or(artist.song_count),
+    })
+}
+
+fn legacy_album_item(album: &Album) -> Value {
+    serde_json::json!({
+        "Id": album.id,
+        "Name": album.title,
+        "Type": "MusicAlbum",
+        "AlbumArtist": album.artist_name,
+        "ProductionYear": album.year,
+        "ImageId": album.cover_art_id,
+        "RecursiveItemCount": album.song_count,
+        "CumulativeRunTimeTicks": ticks_from_seconds(album.duration_seconds),
+    })
+}
+
+fn legacy_playlist_item(playlist: &Playlist) -> Value {
+    serde_json::json!({
+        "Id": playlist.id,
+        "Name": playlist.name,
+        "Type": "Playlist",
+        "ImageId": playlist.cover_art_id,
+        "RecursiveItemCount": playlist.song_count,
+        "CumulativeRunTimeTicks": ticks_from_seconds(playlist.duration_seconds),
+    })
+}
+
+fn legacy_song_item(song: &Song) -> Value {
+    serde_json::json!({
+        "Id": song.id,
+        "Name": song.title,
+        "Type": "Audio",
+        "Album": song.album_title,
+        "AlbumArtist": song.artist_name,
+        "IndexNumber": song.track_number,
+        "ParentIndexNumber": song.disc_number,
+        "ParentId": song.album_id,
+        "AlbumId": song.album_id,
+        "ImageId": song.cover_art_id,
+        "RunTimeTicks": ticks_from_seconds(Some(song.duration_seconds)),
+        "Bitrate": song.bitrate_kbps,
+    })
+}
+
+fn legacy_item_count_from_value(item: &Value) -> Value {
+    let id = item.get("Id").and_then(Value::as_str).unwrap_or_default();
+    serde_json::json!({
+        "id": id,
+        "recursiveItemCount": item
+            .get("RecursiveItemCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        "cumulativeRunTimeTicks": item
+            .get("CumulativeRunTimeTicks")
+            .and_then(Value::as_u64)
+            .or_else(|| item.get("RunTimeTicks").and_then(Value::as_u64))
+            .unwrap_or(0),
+    })
+}
+
+async fn provider_legacy_item_value(
+    provider: Arc<dyn MediaProvider>,
+    item_id: &str,
+) -> Result<Value, JsonRpcError> {
+    if let Ok(artist) = provider.get_artist(item_id).await {
+        return Ok(legacy_artist_item(&artist.artist));
+    }
+    if let Ok(album) = provider.get_album(item_id).await {
+        return Ok(legacy_album_item(&album.album));
+    }
+    if let Ok(playlist) = provider.get_playlist(item_id).await {
+        return Ok(legacy_playlist_item(&playlist.playlist));
+    }
+    Err(JsonRpcError {
+        code: ERR_CONNECTION_FAILED,
+        message: "Provider item not found".to_string(),
+        data: None,
+    })
+}
+
+async fn provider_legacy_item_size(
+    provider: Arc<dyn MediaProvider>,
+    item_id: &str,
+) -> Result<Value, JsonRpcError> {
+    if let Ok(album) = provider.get_album(item_id).await {
+        let total = album
+            .tracks
+            .iter()
+            .map(|track| provider_track_size(track))
+            .sum::<u64>();
+        return Ok(serde_json::json!({
+            "id": item_id,
+            "totalSizeBytes": total,
+        }));
+    }
+    if let Ok(playlist) = provider.get_playlist(item_id).await {
+        let total = playlist
+            .tracks
+            .iter()
+            .map(|track| provider_track_size(track))
+            .sum::<u64>();
+        return Ok(serde_json::json!({
+            "id": item_id,
+            "totalSizeBytes": total,
+        }));
+    }
+    if let Ok(artist) = provider.get_artist(item_id).await {
+        let mut total = 0_u64;
+        for album in artist.albums {
+            if let Ok(album) = provider.get_album(&album.id).await {
+                total += album
+                    .tracks
+                    .iter()
+                    .map(|track| provider_track_size(track))
+                    .sum::<u64>();
+            }
+        }
+        return Ok(serde_json::json!({
+            "id": item_id,
+            "totalSizeBytes": total,
+        }));
+    }
+    Ok(serde_json::json!({
+        "id": item_id,
+        "totalSizeBytes": 0,
+    }))
+}
+
+async fn provider_legacy_item_count(
+    provider: Arc<dyn MediaProvider>,
+    item_id: &str,
+) -> Result<Value, JsonRpcError> {
+    if let Ok(album) = provider.get_album(item_id).await {
+        let duration = album
+            .tracks
+            .iter()
+            .map(|track| u64::from(track.duration_seconds))
+            .sum::<u64>();
+        return Ok(serde_json::json!({
+            "id": item_id,
+            "recursiveItemCount": album.tracks.len() as u64,
+            "cumulativeRunTimeTicks": duration * JELLYFIN_TICKS_PER_SECOND,
+        }));
+    }
+    if let Ok(playlist) = provider.get_playlist(item_id).await {
+        let duration = playlist
+            .tracks
+            .iter()
+            .map(|track| u64::from(track.duration_seconds))
+            .sum::<u64>();
+        return Ok(serde_json::json!({
+            "id": item_id,
+            "recursiveItemCount": playlist.tracks.len() as u64,
+            "cumulativeRunTimeTicks": duration * JELLYFIN_TICKS_PER_SECOND,
+        }));
+    }
+    let item = provider_legacy_item_value(provider, item_id).await?;
+    Ok(legacy_item_count_from_value(&item))
+}
+
+fn provider_track_size(track: &Song) -> u64 {
+    track
+        .bitrate_kbps
+        .map(|kbps| (u64::from(kbps) * 1_000 / 8) * u64::from(track.duration_seconds))
+        .unwrap_or(0)
+}
+
+fn provider_song_to_desired_item(song: &Song) -> crate::sync::DesiredItem {
+    crate::sync::DesiredItem {
+        jellyfin_id: song.id.clone(),
+        name: song.title.clone(),
+        album: song.album_title.clone(),
+        artist: song.artist_name.clone(),
+        size_bytes: provider_track_size(song),
+        etag: None,
+        provider_album_id: song.album_id.clone(),
+        provider_content_type: None,
+        provider_suffix: None,
+    }
+}
+
+async fn provider_sync_items_for_id(
+    provider: Arc<dyn MediaProvider>,
+    item_id: &str,
+) -> Result<
+    (
+        Vec<crate::sync::DesiredItem>,
+        Option<crate::sync::PlaylistSyncItem>,
+    ),
+    JsonRpcError,
+> {
+    if let Ok(album) = provider.get_album(item_id).await {
+        return Ok((
+            album
+                .tracks
+                .iter()
+                .map(provider_song_to_desired_item)
+                .collect(),
+            None,
+        ));
+    }
+
+    if let Ok(playlist) = provider.get_playlist(item_id).await {
+        let tracks = playlist
+            .tracks
+            .iter()
+            .map(provider_song_to_desired_item)
+            .collect::<Vec<_>>();
+        let playlist_item = crate::sync::PlaylistSyncItem {
+            jellyfin_id: playlist.playlist.id.clone(),
+            name: playlist.playlist.name.clone(),
+            tracks: playlist
+                .tracks
+                .iter()
+                .map(|track| crate::sync::PlaylistTrackInfo {
+                    jellyfin_id: track.id.clone(),
+                    artist: track.artist_name.clone(),
+                    run_time_seconds: i64::from(track.duration_seconds),
+                })
+                .collect(),
+        };
+        return Ok((tracks, Some(playlist_item)));
+    }
+
+    if let Ok(artist) = provider.get_artist(item_id).await {
+        let mut tracks = Vec::new();
+        for album in artist.albums {
+            let album = provider
+                .get_album(&album.id)
+                .await
+                .map_err(provider_error_to_rpc)?;
+            tracks.extend(album.tracks.iter().map(provider_song_to_desired_item));
+        }
+        return Ok((tracks, None));
+    }
+
+    Err(JsonRpcError {
+        code: ERR_CONNECTION_FAILED,
+        message: format!("Sync aborted: Failed to fetch item {item_id}: Not found"),
+        data: None,
+    })
+}
+
+async fn provider_calculate_delta(
+    _state: &AppState,
+    provider: Arc<dyn MediaProvider>,
+    item_ids: &[String],
+    manifest: &crate::device::DeviceManifest,
+    params: &Value,
+) -> Result<Value, JsonRpcError> {
+    if params
+        .get("autoFill")
+        .and_then(|auto_fill| auto_fill.get("enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: "Auto-fill sync is not available for Subsonic servers yet".to_string(),
+            data: None,
+        });
+    }
+
+    let mut desired_items = Vec::new();
+    let mut playlist_sync_items = Vec::new();
+    let mut seen_ids = HashSet::new();
+
+    for item_id in item_ids {
+        let (tracks, playlist) = provider_sync_items_for_id(provider.clone(), item_id).await?;
+        if let Some(playlist) = playlist {
+            playlist_sync_items.push(playlist);
+        }
+        for item in tracks {
+            if seen_ids.insert(item.jellyfin_id.clone()) {
+                desired_items.push(item);
+            }
+        }
+    }
+
+    let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
+    delta.playlists = playlist_sync_items;
+    Ok(serde_json::to_value(delta).unwrap())
+}
+
+fn paginate_values(mut items: Vec<Value>, start_index: u32, limit: u32) -> Value {
+    let total = items.len() as u32;
+    let start = start_index.min(total) as usize;
+    let end = (start + limit as usize).min(items.len());
+    let page = items.drain(start..end).collect::<Vec<_>>();
+    serde_json::json!({
+        "Items": page,
+        "TotalRecordCount": total,
+        "StartIndex": start_index,
+    })
+}
+
+fn apply_name_filter(
+    items: Vec<Value>,
+    name_starts_with: Option<&str>,
+    name_less_than: Option<&str>,
+) -> Vec<Value> {
+    items
+        .into_iter()
+        .filter(|item| {
+            let Some(name) = item.get("Name").and_then(|name| name.as_str()) else {
+                return true;
+            };
+            if let Some(prefix) = name_starts_with {
+                return name
+                    .chars()
+                    .next()
+                    .map(|ch| ch.eq_ignore_ascii_case(&prefix.chars().next().unwrap()))
+                    .unwrap_or(false);
+            }
+            if name_less_than == Some("A") {
+                return name
+                    .chars()
+                    .next()
+                    .map(|ch| !ch.is_ascii_alphabetic())
+                    .unwrap_or(true);
+            }
+            true
+        })
+        .collect()
+}
+
+async fn provider_items_response(
+    provider: Arc<dyn MediaProvider>,
+    parent_id: Option<&str>,
+    start_index: u32,
+    limit: u32,
+    name_starts_with: Option<&str>,
+    name_less_than: Option<&str>,
+) -> Result<Value, JsonRpcError> {
+    let parent_id = parent_id.filter(|id| !id.is_empty());
+    let mut items = if parent_id.is_none() || parent_id == Some("all") {
+        provider
+            .list_artists(parent_id)
+            .await
+            .map_err(provider_error_to_rpc)?
+            .iter()
+            .map(legacy_artist_item)
+            .collect::<Vec<_>>()
+    } else {
+        let id = parent_id.unwrap();
+        if let Ok(artist) = provider.get_artist(id).await {
+            artist
+                .albums
+                .iter()
+                .map(legacy_album_item)
+                .collect::<Vec<_>>()
+        } else if let Ok(album) = provider.get_album(id).await {
+            album
+                .tracks
+                .iter()
+                .map(legacy_song_item)
+                .collect::<Vec<_>>()
+        } else if let Ok(playlist) = provider.get_playlist(id).await {
+            playlist
+                .tracks
+                .iter()
+                .map(legacy_song_item)
+                .collect::<Vec<_>>()
+        } else {
+            return Err(JsonRpcError {
+                code: ERR_CONNECTION_FAILED,
+                message: "Provider item not found".to_string(),
+                data: None,
+            });
+        }
+    };
+    items = apply_name_filter(items, name_starts_with, name_less_than);
+    Ok(paginate_values(items, start_index, limit))
+}
+
+fn is_auth_rpc_error(error: &JsonRpcError) -> bool {
+    error.message.contains("authentication failed") || error.message.contains("Wrong username")
+}
+
+async fn provider_items_response_with_auth_retry(
+    state: &AppState,
+    provider: Arc<dyn MediaProvider>,
+    parent_id: Option<&str>,
+    start_index: u32,
+    limit: u32,
+    name_starts_with: Option<&str>,
+    name_less_than: Option<&str>,
+) -> Result<Value, JsonRpcError> {
+    match provider_items_response(
+        provider,
+        parent_id,
+        start_index,
+        limit,
+        name_starts_with,
+        name_less_than,
+    )
+    .await
+    {
+        Ok(response) => Ok(response),
+        Err(error) if is_auth_rpc_error(&error) => {
+            if let Some(provider) = reconnect_subsonic_provider_from_config(state).await {
+                provider_items_response(
+                    provider,
+                    parent_id,
+                    start_index,
+                    limit,
+                    name_starts_with,
+                    name_less_than,
+                )
+                .await
+            } else {
+                Err(error)
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn provider_item_details(
+    provider: Arc<dyn MediaProvider>,
+    item_id: &str,
+) -> Result<Value, JsonRpcError> {
+    provider_legacy_item_value(provider, item_id).await
+}
+
 async fn handle_jellyfin_get_views(
     state: &AppState,
     _params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
+    if let Some(provider) = active_non_jellyfin_provider(state).await {
+        let libraries = provider
+            .list_libraries()
+            .await
+            .map_err(provider_error_to_rpc)?;
+        return Ok(Value::Array(
+            libraries.iter().map(legacy_view_from_library).collect(),
+        ));
+    }
+
     let (url, token, user_id) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
         code: ERR_STORAGE_ERROR,
         message: format!("Failed to get credentials: {}", e),
@@ -767,14 +1311,6 @@ async fn handle_jellyfin_get_items(
     state: &AppState,
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
-    let (url, token, user_id) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
-        code: ERR_STORAGE_ERROR,
-        message: format!("Failed to get credentials: {}", e),
-        data: None,
-    })?;
-
-    let user_id = user_id.unwrap_or_else(|| "Me".to_string());
-
     let params = params.unwrap_or(serde_json::json!({}));
     let parent_id = params["parentId"].as_str();
     let include_item_types = params["includeItemTypes"].as_str();
@@ -786,6 +1322,28 @@ async fn handle_jellyfin_get_items(
     let name_less_than = params["nameLessThan"]
         .as_str()
         .filter(|s| s.len() == 1 && s.chars().all(|c| c.is_ascii_alphabetic()));
+
+    if let Some(provider) = active_non_jellyfin_provider(state).await {
+        let response = provider_items_response_with_auth_retry(
+            state,
+            provider,
+            parent_id,
+            start_index.unwrap_or(0),
+            limit.unwrap_or(50),
+            name_starts_with,
+            name_less_than,
+        )
+        .await?;
+        return Ok(response);
+    }
+
+    let (url, token, user_id) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
+        code: ERR_STORAGE_ERROR,
+        message: format!("Failed to get credentials: {}", e),
+        data: None,
+    })?;
+
+    let user_id = user_id.unwrap_or_else(|| "Me".to_string());
 
     match state
         .jellyfin_client
@@ -827,6 +1385,10 @@ async fn handle_jellyfin_get_item_details(
         data: None,
     })?;
 
+    if let Some(provider) = active_non_jellyfin_provider(state).await {
+        return provider_item_details(provider, item_id).await;
+    }
+
     let (url, token, user_id) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
         code: ERR_STORAGE_ERROR,
         message: format!("Failed to get credentials: {}", e),
@@ -864,6 +1426,16 @@ async fn handle_jellyfin_get_item_counts(
         message: "Missing or invalid itemIds list".to_string(),
         data: None,
     })?;
+
+    if let Some(provider) = active_non_jellyfin_provider(state).await {
+        let mut results = Vec::new();
+        for id in ids.iter().filter_map(Value::as_str) {
+            if let Ok(count) = provider_legacy_item_count(provider.clone(), id).await {
+                results.push(count);
+            }
+        }
+        return Ok(Value::Array(results));
+    }
 
     let (url, token, user_id) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
         code: ERR_STORAGE_ERROR,
@@ -918,6 +1490,14 @@ async fn handle_jellyfin_get_item_sizes(
         message: "Missing or invalid itemIds list".to_string(),
         data: None,
     })?;
+
+    if let Some(provider) = active_non_jellyfin_provider(state).await {
+        let mut results = Vec::new();
+        for id in ids.iter().filter_map(Value::as_str) {
+            results.push(provider_legacy_item_size(provider.clone(), id).await?);
+        }
+        return Ok(Value::Array(results));
+    }
 
     let (url, token, user_id) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
         code: ERR_STORAGE_ERROR,
@@ -1037,6 +1617,10 @@ async fn handle_sync_calculate_delta(
             message: "No device connected".to_string(),
             data: None,
         })?;
+
+    if let Some(provider) = active_non_jellyfin_provider(state).await {
+        return provider_calculate_delta(state, provider, &item_ids, &manifest, &params).await;
+    }
 
     // Fetch item details from Jellyfin for each desired ID
     let (url, token, user_id) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
@@ -1392,14 +1976,6 @@ async fn handle_sync_execute(
             data: None,
         })?;
 
-    // Get credentials
-    let (url, token, user_id) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
-        code: ERR_STORAGE_ERROR,
-        message: format!("Failed to get credentials: {}", e),
-        data: None,
-    })?;
-    let user_id = user_id.unwrap_or_else(|| "Me".to_string());
-
     // Generate unique operation ID
     let operation_id = uuid::Uuid::new_v4().to_string();
 
@@ -1426,6 +2002,91 @@ async fn handle_sync_execute(
             data: None,
         });
     }
+
+    if let Some(provider) = active_non_jellyfin_provider(state).await {
+        let op_manager = state.sync_operation_manager.clone();
+        let op_id = operation_id.clone();
+        let device_manager = state.device_manager.clone();
+        let state_tx = state.state_tx.clone();
+        let _ = state_tx.send(crate::DaemonState::Syncing);
+
+        tokio::spawn(async move {
+            let (_sync_manifest, device_io) = match device_manager.get_manifest_and_io().await {
+                Some(pair) => pair,
+                None => {
+                    eprintln!("[Sync] No device available — cannot execute sync");
+                    if let Some(mut operation) = op_manager.get_operation(&op_id).await {
+                        operation.status = crate::sync::SyncStatus::Failed;
+                        op_manager.update_operation(&op_id, operation).await;
+                    }
+                    let _ = state_tx.send(crate::DaemonState::Error);
+                    return;
+                }
+            };
+
+            let result = crate::sync::execute_provider_sync(
+                &delta,
+                &device_path,
+                provider,
+                op_manager.clone(),
+                op_id.clone(),
+                device_manager.clone(),
+                device_io,
+            )
+            .await;
+
+            match result {
+                Ok((_synced_items, errors)) => {
+                    if let Err(e) = device_manager
+                        .update_manifest(|m| {
+                            m.dirty = false;
+                            m.pending_item_ids = vec![];
+                        })
+                        .await
+                    {
+                        eprintln!("Failed to clear dirty flag on final manifest: {}", e);
+                    }
+                    if let Some(mut operation) = op_manager.get_operation(&op_id).await {
+                        operation.status = if errors.is_empty() {
+                            crate::sync::SyncStatus::Complete
+                        } else {
+                            crate::sync::SyncStatus::Failed
+                        };
+                        operation.errors = errors.clone();
+                        op_manager.update_operation(&op_id, operation).await;
+                    }
+                    if errors.is_empty() {
+                        let _ = tokio::task::spawn_blocking(send_sync_complete_notification);
+                    }
+                    let _ = state_tx.send(crate::DaemonState::Idle);
+                }
+                Err(e) => {
+                    if let Some(mut operation) = op_manager.get_operation(&op_id).await {
+                        operation.status = crate::sync::SyncStatus::Failed;
+                        operation.errors.push(crate::sync::SyncFileError {
+                            jellyfin_id: String::new(),
+                            filename: String::from("sync_execute"),
+                            error_message: e.to_string(),
+                        });
+                        op_manager.update_operation(&op_id, operation).await;
+                    }
+                    let _ = state_tx.send(crate::DaemonState::Error);
+                }
+            }
+        });
+
+        return Ok(serde_json::json!({
+            "operationId": operation_id
+        }));
+    }
+
+    // Get credentials
+    let (url, token, user_id) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
+        code: ERR_STORAGE_ERROR,
+        message: format!("Failed to get credentials: {}", e),
+        data: None,
+    })?;
+    let user_id = user_id.unwrap_or_else(|| "Me".to_string());
 
     // Spawn background task to execute sync
     let jellyfin_client = state.jellyfin_client.clone();
@@ -1616,30 +2277,43 @@ async fn handle_proxy_image(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    if let Some(provider) = active_non_jellyfin_provider(&state).await {
+        let image_url = match provider.cover_art_url(&id).await {
+            Ok(url) => url,
+            Err(_) => return http::StatusCode::NOT_FOUND.into_response(),
+        };
+        let response = match reqwest::Client::new().get(image_url).send().await {
+            Ok(response) => response,
+            Err(_) => return http::StatusCode::BAD_GATEWAY.into_response(),
+        };
+        return proxy_http_image_response(response).await;
+    }
+
     let (url, token, _) = match CredentialManager::get_credentials() {
         Ok(creds) => creds,
         Err(_) => return http::StatusCode::UNAUTHORIZED.into_response(),
     };
 
     match state.jellyfin_client.get_image(&url, &token, &id).await {
-        Ok(resp) => {
-            let status = http::StatusCode::from_u16(resp.status().as_u16())
-                .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
-            let mut builder = axum::response::Response::builder().status(status);
-
-            if let Some(ct) = resp.headers().get(reqwest::header::CONTENT_TYPE) {
-                builder = builder.header(http::header::CONTENT_TYPE, ct);
-            }
-
-            // Buffer the body
-            match resp.bytes().await {
-                Ok(bytes) => builder
-                    .body(axum::body::Body::from(bytes))
-                    .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR.into_response()),
-                Err(_) => http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-            }
-        }
+        Ok(resp) => proxy_http_image_response(resp).await,
         Err(_) => http::StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn proxy_http_image_response(resp: reqwest::Response) -> axum::response::Response {
+    let status = http::StatusCode::from_u16(resp.status().as_u16())
+        .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
+    let mut builder = axum::response::Response::builder().status(status);
+
+    if let Some(ct) = resp.headers().get(reqwest::header::CONTENT_TYPE) {
+        builder = builder.header(http::header::CONTENT_TYPE, ct);
+    }
+
+    match resp.bytes().await {
+        Ok(bytes) => builder
+            .body(axum::body::Body::from(bytes))
+            .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        Err(_) => http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -2517,6 +3191,509 @@ mod tests {
         assert_eq!(config.server_type, "openSubsonic");
         assert_eq!(config.username, "user");
         assert_eq!(config.url, server.url());
+    }
+
+    #[tokio::test]
+    async fn test_rpc_login_uses_auto_detection_for_subsonic() {
+        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let mut server = mockito::Server::new_async().await;
+        let _ping = server
+            .mock("GET", "/rest/ping.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let _jellyfin_auth = server
+            .mock("POST", "/Users/AuthenticateByName")
+            .expect(0)
+            .create_async()
+            .await;
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db.clone());
+
+        let result = handle_login(
+            &state,
+            Some(json!({
+                "url": server.url(),
+                "username": "subsonic-user",
+                "password": "subsonic-password"
+            })),
+        )
+        .await
+        .expect("legacy login should use server auto-detection");
+
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["serverType"], "subsonic");
+        assert!(
+            state.provider.read().await.is_some(),
+            "login must install the detected provider"
+        );
+
+        let config = db.get_server_config().unwrap().unwrap();
+        assert_eq!(config.server_type, "subsonic");
+        assert_eq!(config.username, "subsonic-user");
+    }
+
+    #[tokio::test]
+    async fn test_legacy_library_rpcs_use_active_subsonic_provider_without_config_file() {
+        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
+
+        let mut server = mockito::Server::new_async().await;
+        let _ping = server
+            .mock("GET", "/rest/ping.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let _artists = server
+            .mock("GET", "/rest/getArtists.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"subsonic-response":{"status":"ok","version":"1.16.1","artists":{"index":[{"name":"A","artist":[{"id":"artist1","name":"Artist One","albumCount":2,"coverArt":"cover1"}]}]}}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        handle_server_connect(
+            &state,
+            Some(json!({
+                "url": server.url(),
+                "serverType": "subsonic",
+                "username": "subsonic-user",
+                "password": "subsonic-password"
+            })),
+        )
+        .await
+        .expect("connect");
+
+        let views = handle_jellyfin_get_views(&state, None)
+            .await
+            .expect("views should come from active provider");
+        assert_eq!(views[0]["Id"], "all");
+        assert_eq!(views[0]["CollectionType"], "music");
+
+        let items = handle_jellyfin_get_items(
+            &state,
+            Some(json!({
+                "parentId": "all",
+                "startIndex": 0,
+                "limit": 50
+            })),
+        )
+        .await
+        .expect("items should come from active provider");
+        assert_eq!(items["Items"][0]["Id"], "artist1");
+        assert_eq!(items["Items"][0]["Type"], "MusicArtist");
+        assert_eq!(items["Items"][0]["ImageId"], "cover1");
+        assert_eq!(items["TotalRecordCount"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_legacy_jellyfin_items_keep_parent_folder_browse_path() {
+        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+        CredentialManager::set_config_path(config_path);
+
+        let mut server = mockito::Server::new_async().await;
+        let token = "jellyfin-token-12345";
+        CredentialManager::save_credentials(&server.url(), token, Some("user1")).unwrap();
+
+        let _items = server
+            .mock(
+                "GET",
+                "/Items?userId=user1&ParentId=music-folder&IncludeItemTypes=MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo&StartIndex=0&Limit=50",
+            )
+            .match_header("X-Emby-Token", token)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"Items":[{"Id":"artist1","Name":"Artist One","Type":"MusicArtist"}],"TotalRecordCount":1,"StartIndex":0}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        *state.provider.write().await = Some(Arc::new(
+            crate::providers::jellyfin::JellyfinProvider::new_with_version(
+                JellyfinClient::new(),
+                server.url(),
+                token,
+                "user1",
+                Some("10.9.0".to_string()),
+            ),
+        ));
+        *state.server_type.write().await = Some("jellyfin".to_string());
+
+        let items = handle_jellyfin_get_items(
+            &state,
+            Some(json!({
+                "parentId": "music-folder",
+                "includeItemTypes": "MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo",
+                "startIndex": 0,
+                "limit": 50
+            })),
+        )
+        .await
+        .expect("jellyfin items should use original Jellyfin browse RPC");
+
+        assert_eq!(items["Items"][0]["Id"], "artist1");
+        assert_eq!(items["Items"][0]["Type"], "MusicArtist");
+    }
+
+    #[tokio::test]
+    async fn test_proxy_image_uses_active_subsonic_provider_cover_art_url() {
+        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
+
+        let mut server = mockito::Server::new_async().await;
+        let _ping = server
+            .mock("GET", "/rest/ping.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let _cover = server
+            .mock("GET", "/rest/getCoverArt.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "image/jpeg")
+            .with_body(vec![1_u8, 2, 3, 4])
+            .expect(1)
+            .create_async()
+            .await;
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        handle_server_connect(
+            &state,
+            Some(json!({
+                "url": server.url(),
+                "serverType": "subsonic",
+                "username": "subsonic-user",
+                "password": "subsonic-password"
+            })),
+        )
+        .await
+        .expect("connect");
+
+        let response = handle_proxy_image(
+            axum::extract::State(state),
+            axum::extract::Path("cover1".to_string()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), http::StatusCode::OK);
+        assert_eq!(
+            response.headers().get(http::header::CONTENT_TYPE).unwrap(),
+            "image/jpeg"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_legacy_metadata_rpcs_use_active_subsonic_provider_for_basket_add() {
+        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
+
+        let mut server = mockito::Server::new_async().await;
+        let _ping = server
+            .mock("GET", "/rest/ping.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let _album_for_count = server
+            .mock("GET", "/rest/getAlbum.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"subsonic-response":{"status":"ok","version":"1.16.1","album":{"id":"album1","name":"Album One","song":[{"id":"song1","title":"Track One","duration":120,"bitRate":320},{"id":"song2","title":"Track Two","duration":60,"bitRate":160}]}}}"#,
+            )
+            .expect(2)
+            .create_async()
+            .await;
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        handle_server_connect(
+            &state,
+            Some(json!({
+                "url": server.url(),
+                "serverType": "subsonic",
+                "username": "subsonic-user",
+                "password": "subsonic-password"
+            })),
+        )
+        .await
+        .expect("connect");
+
+        let counts = handle_jellyfin_get_item_counts(
+            &state,
+            Some(json!({
+                "itemIds": ["album1"]
+            })),
+        )
+        .await
+        .expect("counts should come from provider");
+        assert_eq!(counts[0]["id"], "album1");
+        assert_eq!(counts[0]["recursiveItemCount"], 2);
+        assert_eq!(
+            counts[0]["cumulativeRunTimeTicks"],
+            180 * JELLYFIN_TICKS_PER_SECOND
+        );
+
+        let sizes = handle_jellyfin_get_item_sizes(
+            &state,
+            Some(json!({
+                "itemIds": ["album1"]
+            })),
+        )
+        .await
+        .expect("sizes should come from provider");
+        assert_eq!(sizes[0]["id"], "album1");
+        assert_eq!(sizes[0]["totalSizeBytes"], 6_000_000);
+    }
+
+    #[tokio::test]
+    async fn test_get_credentials_falls_back_to_server_config_for_subsonic_device_init() {
+        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        db.upsert_server_config(
+            "http://subsonic.example",
+            "subsonic",
+            "subsonic-user",
+            Some("1.16.1"),
+        )
+        .unwrap();
+        let state = make_test_state(db);
+
+        let result = handle_get_credentials(&state)
+            .await
+            .expect("server config identity should be returned");
+
+        assert_eq!(result["url"], "http://subsonic.example");
+        assert_eq!(result["token"], Value::Null);
+        assert_eq!(result["userId"], "subsonic-user");
+        assert_eq!(result["serverType"], "subsonic");
+        assert_eq!(result["serverVersion"], "1.16.1");
+    }
+
+    #[tokio::test]
+    async fn test_sync_calculate_delta_uses_active_subsonic_provider_without_config_file() {
+        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
+
+        let mut server = mockito::Server::new_async().await;
+        let _ping = server
+            .mock("GET", "/rest/ping.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let _album = server
+            .mock("GET", "/rest/getAlbum.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"subsonic-response":{"status":"ok","version":"1.16.1","album":{"id":"album1","name":"Album One","song":[{"id":"song1","title":"Track One","album":"Album One","artist":"Artist One","albumId":"album1","duration":120,"bitRate":320}]}}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        handle_server_connect(
+            &state,
+            Some(json!({
+                "url": server.url(),
+                "serverType": "subsonic",
+                "username": "subsonic-user",
+                "password": "subsonic-password"
+            })),
+        )
+        .await
+        .expect("connect");
+
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = crate::device::DeviceManifest {
+            device_id: "subsonic-sync-dev".to_string(),
+            name: Some("Sync Dev".to_string()),
+            icon: None,
+            version: "1.1".to_string(),
+            managed_paths: vec!["Music".to_string()],
+            synced_items: vec![],
+            dirty: false,
+            pending_item_ids: vec![],
+            basket_items: vec![],
+            auto_sync_on_connect: false,
+            auto_fill: crate::device::AutoFillPrefs::default(),
+            transcoding_profile_id: None,
+            playlists: vec![],
+            storage_id: None,
+        };
+        state
+            .device_manager
+            .handle_device_detected(
+                dir.path().to_path_buf(),
+                manifest,
+                std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())),
+            )
+            .await
+            .unwrap();
+
+        let delta = handle_sync_calculate_delta(
+            &state,
+            Some(json!({
+                "itemIds": ["album1"]
+            })),
+        )
+        .await
+        .expect("Subsonic delta should use active provider");
+
+        assert_eq!(delta["adds"][0]["jellyfinId"], "song1");
+        assert_eq!(delta["adds"][0]["name"], "Track One");
+        assert_eq!(delta["adds"][0]["providerAlbumId"], "album1");
+    }
+
+    #[tokio::test]
+    async fn test_sync_execute_uses_active_subsonic_provider_without_config_file() {
+        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
+
+        let mut server = mockito::Server::new_async().await;
+        let _ping = server
+            .mock("GET", "/rest/ping.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let _download = server
+            .mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "audio/mpeg")
+            .with_body(vec![1_u8, 2, 3, 4])
+            .expect(1)
+            .create_async()
+            .await;
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        handle_server_connect(
+            &state,
+            Some(json!({
+                "url": server.url(),
+                "serverType": "subsonic",
+                "username": "subsonic-user",
+                "password": "subsonic-password"
+            })),
+        )
+        .await
+        .expect("connect");
+
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = crate::device::DeviceManifest {
+            device_id: "subsonic-exec-dev".to_string(),
+            name: Some("Exec Dev".to_string()),
+            icon: None,
+            version: "1.1".to_string(),
+            managed_paths: vec!["Music".to_string()],
+            synced_items: vec![],
+            dirty: false,
+            pending_item_ids: vec![],
+            basket_items: vec![],
+            auto_sync_on_connect: false,
+            auto_fill: crate::device::AutoFillPrefs::default(),
+            transcoding_profile_id: None,
+            playlists: vec![],
+            storage_id: None,
+        };
+        state
+            .device_manager
+            .handle_device_detected(
+                dir.path().to_path_buf(),
+                manifest,
+                std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())),
+            )
+            .await
+            .unwrap();
+
+        let delta = json!({
+            "adds": [{
+                "jellyfinId": "song1",
+                "name": "Track One",
+                "album": "Album One",
+                "artist": "Artist One",
+                "sizeBytes": 4,
+                "etag": null,
+                "providerAlbumId": "album1",
+                "providerContentType": "audio/mpeg",
+                "providerSuffix": "mp3"
+            }],
+            "deletes": [],
+            "idChanges": [],
+            "unchanged": 0,
+            "playlists": []
+        });
+
+        let result = handle_sync_execute(&state, Some(json!({ "delta": delta })))
+            .await
+            .expect("Subsonic execute should use active provider");
+
+        assert!(result["operationId"].as_str().is_some());
+        for _ in 0..20 {
+            let operation = state
+                .sync_operation_manager
+                .get_operation(result["operationId"].as_str().unwrap())
+                .await
+                .expect("operation");
+            if operation.status != crate::sync::SyncStatus::Running {
+                assert_eq!(operation.status, crate::sync::SyncStatus::Complete);
+                assert!(operation.errors.is_empty(), "{:?}", operation.errors);
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("sync operation did not complete");
     }
 
     #[tokio::test]

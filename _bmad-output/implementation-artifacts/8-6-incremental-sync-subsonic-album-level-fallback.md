@@ -46,7 +46,7 @@ so that a new track added to an album I have synced is picked up on the next inc
   - [x] Add manifest fields only with `#[serde(default)]` so old `.hifimule.json` files keep deserializing. Prefer explicit provider-neutral names for new fields, e.g. `provider_album_id`, `provider_content_type`, `provider_suffix`, or a compact metadata struct if it fits existing style.
   - [x] Update sync writes in `hifimule-daemon/src/sync.rs` or the provider-to-sync mapping path only if needed to persist those fields for future syncs; preserve all existing Jellyfin semantics and JSON compatibility.
   - [x] If current runtime paths cannot populate album IDs for pre-existing manifest rows, implement a focused fallback that can derive candidate album IDs through Subsonic `search3`/`getAlbum` data, and document/test the limitation for old manifests.
-  - [x] Do not rename `jellyfin_id` in this story; it is a legacy field name used broadly as the provider item ID.
+  - [x] Rename the serialized `.hifimule.json` synced-item ID to provider-neutral `providerItemId`.
 
 - [x] Compute stable Subsonic change versions (AC: 4)
   - [x] Add a small helper that builds `ChangeEvent.version` from available Subsonic song fields: at minimum `id`, `size`, `contentType`, and `suffix`; include a deterministic separator/format.
@@ -76,7 +76,7 @@ so that a new track added to an album I have synced is picked up on the next inc
 - `Search3Dto` already includes `song`, and `song_from_dto` already maps Subsonic song DTOs into domain `Song`. Reuse these conversion paths instead of adding a second DTO model. [Source: hifimule-daemon/src/providers/subsonic.rs]
 - `MediaProvider::changes_since` currently accepts only `Option<&str>`, so it cannot see the device manifest. The album fallback requirement needs either a deliberate trait/context change across providers or an explicit provider-owned helper called from a place that already has the manifest. Do not implement a fake fallback that has no manifest input. [Source: hifimule-daemon/src/providers/mod.rs]
 - `ChangeEvent` uses `item: ItemRef`, `change_type: ChangeType::{Created, Updated, Deleted}`, and `version: Option<String>`. Use these exact variants; do not introduce new event enums. [Source: hifimule-daemon/src/domain/models.rs]
-- Device manifests store synced track state in `DeviceManifest.synced_items`. `SyncedItem.jellyfin_id` is the legacy provider item ID field; it has no album ID today, so album fallback needs a backward-compatible manifest metadata strategy. [Source: hifimule-daemon/src/device/mod.rs]
+- Device manifests store synced track state in `DeviceManifest.synced_items`. The Rust field is still internally named `SyncedItem.jellyfin_id`, but the `.hifimule.json` key is provider-neutral `providerItemId`. [Source: hifimule-daemon/src/device/mod.rs]
 - `calculate_delta()` compares desired provider item IDs to manifest `synced_items` and treats metadata-equal ID changes as `id_changes`. If this story adds metadata fields, keep existing delta semantics and tests intact. [Source: hifimule-daemon/src/sync.rs]
 
 ### Architecture Compliance
@@ -152,6 +152,7 @@ GPT-5 Codex
 - Implemented Subsonic album fallback that runs only after `getIndexes(ifModifiedSince)` returns no changed artists, re-fetches known context albums via `getAlbum`, and emits song-level `Created`, `Updated`, and `Deleted` changes.
 - Added deterministic Subsonic song versions from `id`, `size`, `contentType`, and `suffix`, with conservative behavior when metadata is missing.
 - Added defaulted provider metadata fields to `SyncedItem`, sync desired/add/id-change plumbing, manifest-to-change-context conversion, and compatibility tests for old manifests.
+- Renamed the serialized synced-item manifest ID to `providerItemId`.
 
 ### File List
 
@@ -159,6 +160,8 @@ GPT-5 Codex
 - _bmad-output/implementation-artifacts/sprint-status.yaml
 - hifimule-daemon/src/device/mod.rs
 - hifimule-daemon/src/device/tests.rs
+- docs/architecture-jellyfinsync-daemon.md
+- docs/data-models-jellyfinsync-daemon.md
 - hifimule-daemon/src/main.rs
 - hifimule-daemon/src/providers/jellyfin.rs
 - hifimule-daemon/src/providers/mod.rs
@@ -200,3 +203,4 @@ GPT-5 Codex
 - 2026-05-09: Applied code-review patch set for Story 8.6; daemon tests pass, UI build blocked by missing Node/npm on PATH.
 - 2026-05-09: Continued review remediation by carrying auto-fill provider album metadata into auto-sync desired items.
 - 2026-05-09: Closed content-type source decision conservatively: no synthetic manifest content type, compare only known values.
+- 2026-05-09: Renamed serialized manifest synced-item IDs from `jellyfinId` to provider-neutral `providerItemId`.
