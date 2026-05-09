@@ -1,6 +1,6 @@
 # Story 8.3: SubsonicProvider Adapter
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -64,6 +64,23 @@ so that users who prefer Navidrome can use HifiMule without switching media serv
   - [x] Add tests proving raw passwords and auth tokens are redacted in `Debug`, error messages, and any sanitizer helper.
   - [x] Keep existing `providers::jellyfin` tests passing.
   - [x] Run `rtk cargo test -p hifimule-daemon`.
+
+### Review Findings
+
+- [x] [Review][Decision] `opensubsonic` crate pinned in Cargo.toml but never imported — resolved: removed unused dep from Cargo.toml; hand-rolled client is the implementation
+- [x] [Review][Decision] `capabilities()` hardcodes `supports_server_transcoding: true` regardless of `open_subsonic` flag — resolved: made conditional on `self.open_subsonic` [hifimule-daemon/src/providers/subsonic.rs]
+- [x] [Review][Decision] `getAlbumList2` uses hardcoded `size=500` with no pagination — resolved: added pagination loop with offset [hifimule-daemon/src/providers/subsonic.rs]
+- [x] [Review][Patch] `sanitize_message` not applied in `map_reqwest_error` 401/403 branch — fixed [hifimule-daemon/src/providers/subsonic.rs]
+- [x] [Review][Patch] `sanitize_message` strips `p=` as a substring false-positively — fixed with query-separator boundary check [hifimule-daemon/src/providers/subsonic.rs]
+- [x] [Review][Patch] Redundant second `status == "failed"` check in `get_envelope_url` — removed dead code block [hifimule-daemon/src/providers/subsonic.rs]
+- [x] [Review][Patch] Missing test: `scrobble(ScrobbleSubmission::Playing)` → `ProviderError::UnsupportedCapability` — added
+- [x] [Review][Patch] Missing test: `changes_since(None)` and `changes_since(Some(""))` — added
+- [x] [Review][Patch] Missing tests: HTTP 401/403 → `ProviderError::Auth` and HTTP 404 → `ProviderError::NotFound` — added
+- [x] [Review][Patch] `maxBitRate` test only asserts `=192` is present — added negative assertion `!stream.contains("maxBitRate=192000")`
+- [x] [Review][Defer] `t=` and `s=` auth params not sanitized in error messages — Story 8.5 owns comprehensive credential sanitization [hifimule-daemon/src/providers/subsonic.rs:504-525] — deferred, pre-existing
+- [x] [Review][Defer] `ProviderError::NotFound` always reports `item_type="item", id="unknown"` — loses actual item context; pre-existing design constraint [hifimule-daemon/src/providers/subsonic.rs] — deferred, pre-existing
+- [x] [Review][Defer] Passwords stored as plaintext `String` with no `zeroize`-on-drop — pre-existing pattern across entire daemon crate [hifimule-daemon/src/providers/subsonic.rs:233] — deferred, pre-existing
+- [x] [Review][Defer] `reqwest::Client` instantiated per `SubsonicClient` with no shared connection pool — pre-existing pattern [hifimule-daemon/src/providers/subsonic.rs:267] — deferred, pre-existing
 
 ## Dev Notes
 

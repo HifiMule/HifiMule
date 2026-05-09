@@ -219,7 +219,7 @@ impl MediaProvider for SubsonicProvider {
         Capabilities {
             open_subsonic: self.open_subsonic,
             supports_changes_since: true,
-            supports_server_transcoding: true,
+            supports_server_transcoding: self.open_subsonic,
         }
     }
 }
@@ -286,11 +286,32 @@ impl SubsonicClient {
     }
 
     async fn get_album_list2(&self) -> Result<AlbumList2Body, ProviderError> {
-        self.get(
-            "getAlbumList2",
-            &[("type", "alphabeticalByName"), ("size", "500")],
-        )
-        .await
+        const PAGE_SIZE: usize = 500;
+        let mut all_albums = Vec::new();
+        let mut offset = 0usize;
+        loop {
+            let size_str = PAGE_SIZE.to_string();
+            let offset_str = offset.to_string();
+            let page: AlbumList2Body = self
+                .get(
+                    "getAlbumList2",
+                    &[
+                        ("type", "alphabeticalByName"),
+                        ("size", &size_str),
+                        ("offset", &offset_str),
+                    ],
+                )
+                .await?;
+            let count = page.album_list2.album.len();
+            all_albums.extend(page.album_list2.album);
+            if count < PAGE_SIZE {
+                break;
+            }
+            offset += PAGE_SIZE;
+        }
+        Ok(AlbumList2Body {
+            album_list2: AlbumListDto { album: all_albums },
+        })
     }
 
     async fn get_album(&self, id: &str) -> Result<AlbumWithSongsBody, ProviderError> {
@@ -422,25 +443,6 @@ impl SubsonicClient {
 
         let envelope: SubsonicEnvelope<T> = serde_json::from_value(value)
             .map_err(|error| ProviderError::Deserialization(error.to_string()))?;
-        if envelope.response.status.eq_ignore_ascii_case("failed") {
-            let message = envelope
-                .response
-                .error
-                .as_ref()
-                .map(|error| sanitize_message(&error.message))
-                .unwrap_or_else(|| "Subsonic API request failed".to_string());
-            return Err(match envelope.response.error.and_then(|error| error.code) {
-                Some(40 | 41) => ProviderError::Auth(message),
-                Some(70) => ProviderError::NotFound {
-                    item_type: "item".to_string(),
-                    id: "unknown".to_string(),
-                },
-                _ => ProviderError::Http {
-                    status: None,
-                    message,
-                },
-            });
-        }
 
         Ok(envelope)
     }
@@ -483,14 +485,14 @@ fn map_reqwest_error(error: reqwest::Error) -> ProviderError {
         ProviderError::Deserialization(error.to_string())
     } else if let Some(status) = error.status() {
         match status.as_u16() {
-            401 | 403 => ProviderError::Auth(error.to_string()),
+            401 | 403 => ProviderError::Auth(sanitize_message(&error.to_string())),
             404 => ProviderError::NotFound {
                 item_type: "item".to_string(),
                 id: "unknown".to_string(),
             },
             _ => ProviderError::Http {
                 status: Some(status.as_u16()),
-                message: error.to_string(),
+                message: sanitize_message(&error.to_string()),
             },
         }
     } else {
@@ -509,6 +511,15 @@ fn sanitize_message(message: &str) -> String {
         let mut cursor = 0;
         while let Some(relative_start) = sanitized[cursor..].find(&needle) {
             let start = cursor + relative_start;
+            let preceded_by_separator = start == 0 || matches!(
+                sanitized[..start].chars().last(),
+                Some('?' | '&' | ' ' | '\t' | '\n')
+            );
+            if !preceded_by_separator {
+                rebuilt.push_str(&sanitized[cursor..start + needle.len()]);
+                cursor = start + needle.len();
+                continue;
+            }
             let value_start = start + needle.len();
             let value_end = sanitized[value_start..]
                 .find(|ch: char| ch == '&' || ch.is_whitespace())
@@ -1168,6 +1179,7 @@ mod tests {
         assert!(cover.contains("/rest/getCoverArt.view"));
         assert!(stream.contains("format=mp3"));
         assert!(stream.contains("maxBitRate=192"));
+        assert!(!stream.contains("maxBitRate=192000"), "maxBitRate must be kbps, not bps");
         assert!(!download.contains(PASSWORD));
         assert!(!stream.contains(PASSWORD));
         assert!(!cover.contains(PASSWORD));
@@ -1290,6 +1302,86 @@ mod tests {
             })
             .await
             .expect("scrobble");
+    }
+
+    #[tokio::test]
+    async fn scrobble_playing_returns_unsupported_capability() {
+        let provider = SubsonicProvider::from_client_for_tests(
+            SubsonicClient::new("http://localhost", USERNAME, PASSWORD).expect("client"),
+            false,
+        );
+
+        let result = provider
+            .scrobble(ScrobbleRequest {
+                song_id: "song1".to_string(),
+                submission: ScrobbleSubmission::Playing,
+                position_seconds: None,
+                played_at_unix_seconds: None,
+            })
+            .await;
+
+        assert!(matches!(result, Err(ProviderError::UnsupportedCapability(_))));
+    }
+
+    #[tokio::test]
+    async fn changes_since_none_calls_get_indexes_without_if_modified_since() {
+        let mut server = Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/rest/getIndexes.view")
+            .match_query(Matcher::AllOf(auth_matchers()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(r#""indexes":{"index":[]}"#))
+            .expect(2)
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        let changes_none = provider.changes_since(None).await.expect("changes(None)");
+        let changes_empty = provider.changes_since(Some("")).await.expect("changes(empty)");
+
+        assert!(changes_none.is_empty());
+        assert!(changes_empty.is_empty());
+    }
+
+    #[tokio::test]
+    async fn maps_http_error_status_codes_to_provider_errors() {
+        let mut server = Server::new_async().await;
+        let _auth_mock = server
+            .mock("GET", "/rest/getArtists.view")
+            .match_query(Matcher::AllOf(auth_matchers()))
+            .with_status(401)
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        let auth_result = provider.list_artists(None).await;
+
+        assert!(
+            matches!(auth_result, Err(ProviderError::Auth(_))),
+            "HTTP 401 should map to Auth error, got: {auth_result:?}"
+        );
+
+        let mut server2 = Server::new_async().await;
+        let _not_found_mock = server2
+            .mock("GET", "/rest/getAlbum.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "missing".into()));
+                matchers
+            }))
+            .with_status(404)
+            .create_async()
+            .await;
+        let client2 = SubsonicClient::new(server2.url(), USERNAME, PASSWORD).expect("client");
+        let provider2 = SubsonicProvider::from_client_for_tests(client2, true);
+
+        let not_found_result = provider2.get_album("missing").await;
+
+        assert!(
+            matches!(not_found_result, Err(ProviderError::NotFound { .. })),
+            "HTTP 404 should map to NotFound error, got: {not_found_result:?}"
+        );
     }
 
     #[tokio::test]

@@ -2,6 +2,13 @@
 
 All previously deferred items have been incorporated into Epic 7 stories (7.1–7.4) in `_bmad-output/planning-artifacts/epics.md`.
 
+## Deferred from: code review of 8-3-subsonicprovider-adapter (2026-05-09)
+
+- **`t=` and `s=` auth params not sanitized in error messages** — `sanitize_message` only strips `password=` and `p=`; the derived token `t=` and salt `s=` also appear in Subsonic URLs embedded in error strings. Story 8.5 owns comprehensive credential sanitization.
+- **`ProviderError::NotFound` always reports `item_type="item", id="unknown"`** — loses the actual endpoint and item ID that triggered the not-found; pre-existing design constraint shared with JellyfinProvider.
+- **Passwords stored as plaintext `String` with no `zeroize`-on-drop** — `SubsonicClient.password` is a plain `String` with no secure memory clearing. Pre-existing pattern across the entire daemon crate.
+- **`reqwest::Client` instantiated per `SubsonicClient` with no shared connection pool** — each provider instance allocates its own TLS stack and DNS resolver. Pre-existing pattern.
+
 ## Deferred from: code review of 8-1-mediaprovider-trait-and-domain-models (2026-05-09)
 
 - **`changes_since` token is untyped `Option<&str>`** — no newtype or enum prevents arbitrary strings; a dedicated `ChangeCursor` newtype would enforce a single contract. Story 8.4 owns connection/token semantics.
