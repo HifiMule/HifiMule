@@ -476,6 +476,42 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn factory_subsonic_failure_does_not_leak_credentials() {
+        let mut server = Server::new_async().await;
+        let _ping = server
+            .mock("GET", "/rest/ping.view")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"subsonic-response":{"status":"failed","version":"1.16.1","error":{"code":40,"message":"Bad auth u=alexis&p=secret-password&t=token-value&s=salt-value"}}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let result = connect(
+            &server.url(),
+            &password_credentials(server.url()),
+            ServerTypeHint::Subsonic,
+        )
+        .await;
+
+        let message = match result {
+            Ok(_) => panic!("connect should fail"),
+            Err(error) => error.to_string(),
+        };
+        assert!(!message.contains("alexis"), "username leaked: {message}");
+        assert!(
+            !message.contains("secret-password"),
+            "password leaked: {message}"
+        );
+        assert!(!message.contains("token-value"), "token leaked: {message}");
+        assert!(!message.contains("salt-value"), "salt leaked: {message}");
+        assert!(message.contains("[REDACTED]"));
+    }
+
     #[test]
     fn sanitize_secret_message_redacts_query_params_only() {
         assert_eq!(
@@ -510,18 +546,16 @@ mod tests {
             .await;
 
         let creds = password_credentials(server.url());
-        let result = connect(
-            &server.url(),
-            &creds,
-            ServerTypeHint::Jellyfin,
-        )
-        .await;
+        let result = connect(&server.url(), &creds, ServerTypeHint::Jellyfin).await;
 
         match result {
             Ok(_) => panic!("expected a connection error"),
             Err(e) => {
                 let msg = e.to_string();
-                assert!(!msg.contains("secret-password"), "password must not appear in error: {msg}");
+                assert!(
+                    !msg.contains("secret-password"),
+                    "password must not appear in error: {msg}"
+                );
             }
         }
     }
