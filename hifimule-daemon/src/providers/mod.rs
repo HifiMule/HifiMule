@@ -11,6 +11,8 @@ use thiserror::Error;
 pub mod jellyfin;
 pub mod subsonic;
 
+pub const SUBSONIC_PLAYLISTS_LIBRARY_ID: &str = "playlists";
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderChangeContext {

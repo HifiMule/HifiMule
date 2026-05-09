@@ -15,3 +15,7 @@ Closure rationale:
 - Packaging, signing, smoke-test, and provider-hardening caveats that remain valid as product considerations are documented in PRD/architecture/story context, not tracked as active deferred implementation work.
 
 If future review findings need follow-up, add them as new story scope or reopen this file with a dated "Deferred from" section.
+
+## Deferred from: spec-fix-subsonic-playlist-browse (2026-05-09)
+
+- **Latent unwrap() in `provider_items_response` else branch** (`hifimule-daemon/src/rpc.rs`): The `else` branch unconditionally calls `parent_id.unwrap()` after the known-sentinel guards. If a future change adds a new sentinel ID and misses the guard, the code silently calls `get_artist(sentinel)` on the upstream server instead of panicking. Pre-existing pattern; not introduced by this change. Future hardening: add an explicit guard or replace the `unwrap()` with a handled error return for unrecognized IDs.

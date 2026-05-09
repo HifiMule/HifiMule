@@ -2,7 +2,7 @@ use crate::api::{CredentialManager, JellyfinClient};
 use crate::domain::models::{Album, Artist, ChangeType, ItemType, Library, Playlist, Song};
 use crate::providers::{
     server_type_slug, CredentialKind, MediaProvider, ProviderCredentials, ServerType,
-    ServerTypeHint,
+    ServerTypeHint, SUBSONIC_PLAYLISTS_LIBRARY_ID,
 };
 use axum::{
     extract::{Path, State},
@@ -827,11 +827,16 @@ async fn active_non_jellyfin_provider(state: &AppState) -> Option<Arc<dyn MediaP
 }
 
 fn legacy_view_from_library(library: &Library) -> Value {
+    let collection_type = if library.id == SUBSONIC_PLAYLISTS_LIBRARY_ID {
+        SUBSONIC_PLAYLISTS_LIBRARY_ID
+    } else {
+        "music"
+    };
     serde_json::json!({
         "Id": library.id,
         "Name": library.name,
         "Type": "CollectionFolder",
-        "CollectionType": "music",
+        "CollectionType": collection_type,
     })
 }
 
@@ -1188,6 +1193,14 @@ async fn provider_items_response(
             .map_err(provider_error_to_rpc)?
             .iter()
             .map(legacy_artist_item)
+            .collect::<Vec<_>>()
+    } else if parent_id == Some(SUBSONIC_PLAYLISTS_LIBRARY_ID) {
+        provider
+            .list_playlists()
+            .await
+            .map_err(provider_error_to_rpc)?
+            .iter()
+            .map(legacy_playlist_item)
             .collect::<Vec<_>>()
     } else {
         let id = parent_id.unwrap();
@@ -3283,8 +3296,13 @@ mod tests {
         let views = handle_jellyfin_get_views(&state, None)
             .await
             .expect("views should come from active provider");
-        assert_eq!(views[0]["Id"], "all");
-        assert_eq!(views[0]["CollectionType"], "music");
+        let all_view = views
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["Id"] == "all")
+            .expect("should have 'all' view");
+        assert_eq!(all_view["CollectionType"], "music");
 
         let items = handle_jellyfin_get_items(
             &state,
@@ -5375,5 +5393,254 @@ mod tests {
             "ok",
             "daemon.health result must be {{ data: {{ status: ok }} }}"
         );
+    }
+
+    #[tokio::test]
+    async fn subsonic_get_views_returns_playlists_collection_with_correct_collection_type() {
+        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
+
+        let mut server = mockito::Server::new_async().await;
+        let _ping = server
+            .mock("GET", "/rest/ping.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        handle_server_connect(
+            &state,
+            Some(json!({
+                "url": server.url(),
+                "serverType": "subsonic",
+                "username": "subsonic-user",
+                "password": "subsonic-password"
+            })),
+        )
+        .await
+        .expect("connect");
+
+        let views = handle_jellyfin_get_views(&state, None)
+            .await
+            .expect("views should come from active subsonic provider");
+
+        assert_eq!(views.as_array().unwrap().len(), 2, "should have two views");
+
+        let all_view = views
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["Id"] == "all")
+            .expect("should have 'all' view");
+        assert_eq!(all_view["CollectionType"], "music");
+        assert_eq!(all_view["Type"], "CollectionFolder");
+
+        let playlists_view = views
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["Id"] == "playlists")
+            .expect("should have 'playlists' view");
+        assert_eq!(playlists_view["CollectionType"], "playlists");
+        assert_eq!(playlists_view["Type"], "CollectionFolder");
+        assert_eq!(playlists_view["Name"], "Playlists");
+    }
+
+    #[tokio::test]
+    async fn subsonic_get_items_playlists_returns_playlist_type_items() {
+        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
+
+        let mut server = mockito::Server::new_async().await;
+        let _ping = server
+            .mock("GET", "/rest/ping.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let _playlists = server
+            .mock("GET", "/rest/getPlaylists.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"subsonic-response":{"status":"ok","version":"1.16.1","playlists":{"playlist":[{"id":"pl1","name":"Road Trip","songCount":3,"duration":180,"coverArt":"pl-cover"}]}}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        handle_server_connect(
+            &state,
+            Some(json!({
+                "url": server.url(),
+                "serverType": "subsonic",
+                "username": "subsonic-user",
+                "password": "subsonic-password"
+            })),
+        )
+        .await
+        .expect("connect");
+
+        let items = handle_jellyfin_get_items(
+            &state,
+            Some(json!({
+                "parentId": "playlists",
+                "startIndex": 0,
+                "limit": 50
+            })),
+        )
+        .await
+        .expect("items should come from active provider");
+
+        assert_eq!(items["TotalRecordCount"], 1);
+        assert_eq!(items["Items"][0]["Id"], "pl1");
+        assert_eq!(items["Items"][0]["Name"], "Road Trip");
+        assert_eq!(items["Items"][0]["Type"], "Playlist");
+        assert_eq!(items["Items"][0]["ImageId"], "pl-cover");
+    }
+
+    #[tokio::test]
+    async fn subsonic_get_items_playlist_id_returns_tracks() {
+        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
+
+        let mut server = mockito::Server::new_async().await;
+        let _ping = server
+            .mock("GET", "/rest/ping.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        // get_artist will fail for "pl1", get_album will fail, then get_playlist succeeds
+        let _get_artist = server
+            .mock("GET", "/rest/getArtist.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"subsonic-response":{"status":"failed","version":"1.16.1","error":{"code":70,"message":"Not found"}}}"#,
+            )
+            .create_async()
+            .await;
+        let _get_album = server
+            .mock("GET", "/rest/getAlbum.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"subsonic-response":{"status":"failed","version":"1.16.1","error":{"code":70,"message":"Not found"}}}"#,
+            )
+            .create_async()
+            .await;
+        let _get_playlist = server
+            .mock("GET", "/rest/getPlaylist.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"subsonic-response":{"status":"ok","version":"1.16.1","playlist":{"id":"pl1","name":"Road Trip","songCount":1,"duration":60,"entry":[{"id":"song1","title":"Track One","duration":60}]}}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        handle_server_connect(
+            &state,
+            Some(json!({
+                "url": server.url(),
+                "serverType": "subsonic",
+                "username": "subsonic-user",
+                "password": "subsonic-password"
+            })),
+        )
+        .await
+        .expect("connect");
+
+        let items = handle_jellyfin_get_items(
+            &state,
+            Some(json!({
+                "parentId": "pl1",
+                "startIndex": 0,
+                "limit": 50
+            })),
+        )
+        .await
+        .expect("items should come from active provider");
+
+        assert_eq!(items["TotalRecordCount"], 1);
+        assert_eq!(items["Items"][0]["Id"], "song1");
+        assert_eq!(items["Items"][0]["Name"], "Track One");
+        assert_eq!(items["Items"][0]["Type"], "Audio");
+    }
+
+    #[tokio::test]
+    async fn jellyfin_get_views_is_unchanged_for_jellyfin_provider() {
+        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+        CredentialManager::set_config_path(config_path);
+
+        let mut server = mockito::Server::new_async().await;
+        let token = "jellyfin-token-abc";
+        CredentialManager::save_credentials(&server.url(), token, Some("user1")).unwrap();
+
+        let _views = server
+            .mock("GET", "/UserViews")
+            .match_query(mockito::Matcher::UrlEncoded("userId".into(), "user1".into()))
+            .match_header("X-Emby-Token", token)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"Items":[{"Id":"lib1","Name":"Music","Type":"CollectionFolder","CollectionType":"music"}],"TotalRecordCount":1}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        // Jellyfin provider is set so active_non_jellyfin_provider returns None,
+        // causing handle_jellyfin_get_views to fall through to the JellyfinClient path.
+        *state.provider.write().await = Some(Arc::new(
+            crate::providers::jellyfin::JellyfinProvider::new_with_version(
+                JellyfinClient::new(),
+                server.url(),
+                token,
+                "user1",
+                Some("10.9.0".to_string()),
+            ),
+        ));
+        *state.server_type.write().await = Some("jellyfin".to_string());
+
+        let views = handle_jellyfin_get_views(&state, None)
+            .await
+            .expect("jellyfin views should come from Jellyfin API");
+
+        assert_eq!(
+            views.as_array().unwrap().len(),
+            1,
+            "jellyfin views should not add synthetic playlists library"
+        );
+        assert_eq!(views[0]["Id"], "lib1");
+        assert_eq!(views[0]["CollectionType"], "music");
     }
 }

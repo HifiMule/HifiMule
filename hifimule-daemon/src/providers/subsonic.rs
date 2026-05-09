@@ -5,7 +5,7 @@ use crate::domain::models::{
 use crate::providers::{
     Capabilities, CredentialKind, MediaProvider, ProviderChangeContext, ProviderChangeMetadata,
     ProviderCredentials, ProviderError, ProviderSyncedSong, ScrobbleRequest, ScrobbleSubmission,
-    ServerType, TranscodeProfile,
+    ServerType, TranscodeProfile, SUBSONIC_PLAYLISTS_LIBRARY_ID,
 };
 use async_trait::async_trait;
 use md5::{Digest, Md5};
@@ -149,12 +149,20 @@ impl SubsonicProvider {
 #[async_trait]
 impl MediaProvider for SubsonicProvider {
     async fn list_libraries(&self) -> Result<Vec<Library>, ProviderError> {
-        Ok(vec![Library {
-            id: "all".to_string(),
-            name: "All Music".to_string(),
-            item_type: ItemType::Library,
-            cover_art_id: None,
-        }])
+        Ok(vec![
+            Library {
+                id: "all".to_string(),
+                name: "All Music".to_string(),
+                item_type: ItemType::Library,
+                cover_art_id: None,
+            },
+            Library {
+                id: SUBSONIC_PLAYLISTS_LIBRARY_ID.to_string(),
+                name: "Playlists".to_string(),
+                item_type: ItemType::Library,
+                cover_art_id: None,
+            },
+        ])
     }
 
     async fn list_artists(&self, _library_id: Option<&str>) -> Result<Vec<Artist>, ProviderError> {
@@ -1411,11 +1419,15 @@ mod tests {
 
         let libraries = provider.list_libraries().await.expect("libraries");
 
-        assert_eq!(libraries.len(), 1);
+        assert_eq!(libraries.len(), 2);
         assert_eq!(libraries[0].id, "all");
         assert_eq!(libraries[0].name, "All Music");
         assert_eq!(libraries[0].item_type, ItemType::Library);
         assert_eq!(libraries[0].cover_art_id, None);
+        assert_eq!(libraries[1].id, "playlists");
+        assert_eq!(libraries[1].name, "Playlists");
+        assert_eq!(libraries[1].item_type, ItemType::Library);
+        assert_eq!(libraries[1].cover_art_id, None);
     }
 
     #[tokio::test]
