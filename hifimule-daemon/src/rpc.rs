@@ -291,6 +291,7 @@ async fn handle_test_connection(
     }
 }
 
+#[allow(dead_code)]
 pub async fn require_provider(state: &AppState) -> Result<Arc<dyn MediaProvider>, JsonRpcError> {
     state.provider.read().await.clone().ok_or(JsonRpcError {
         code: ERR_CONNECTION_FAILED,

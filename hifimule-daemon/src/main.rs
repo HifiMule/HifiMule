@@ -57,8 +57,12 @@ mod auto_fill;
 mod db;
 mod device;
 pub mod device_io;
+// Provider catalog models are part of the multi-provider contract, even while
+// the current daemon binary only uses the sync-facing subset.
+#[allow(dead_code)]
 mod domain;
 mod paths;
+#[allow(dead_code)]
 mod providers;
 mod rpc;
 mod scrobbler;

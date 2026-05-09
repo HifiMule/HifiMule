@@ -481,6 +481,7 @@ impl JellyfinClient {
         Ok(items_response)
     }
 
+    #[allow(dead_code)]
     pub async fn get_albums_by_artist(
         &self,
         url: &str,
