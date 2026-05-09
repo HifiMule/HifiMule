@@ -336,12 +336,7 @@ async fn handle_server_connect(
         .await
         .map_err(|error| JsonRpcError {
             code: ERR_CONNECTION_FAILED,
-            message: match hint {
-                ServerTypeHint::Auto | ServerTypeHint::Subsonic => {
-                    crate::providers::subsonic::sanitize_subsonic_message(&error.to_string())
-                }
-                ServerTypeHint::Jellyfin => error.to_string(),
-            },
+            message: crate::providers::subsonic::sanitize_subsonic_message(&error.to_string()),
             data: None,
         })?;
     let normalized_type = server_type_slug(provider.server_type())

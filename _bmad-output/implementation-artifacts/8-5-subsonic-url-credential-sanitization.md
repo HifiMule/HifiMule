@@ -1,6 +1,6 @@
 # Story 8.5: Subsonic URL Credential Sanitization
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -147,3 +147,19 @@ GPT-5 Codex
 ### Change Log
 
 - 2026-05-09: Implemented Subsonic URL/message credential sanitization and redaction coverage; story ready for review.
+
+### Review Findings
+
+- [x] [Review][Patch] `sanitize_subsonic_url` has zero production callsites — added `tracing::debug!` in `signed_url` using `sanitize_subsonic_url` before converting to `String`; added `tracing = "0.1"` to Cargo.toml. [hifimule-daemon/src/providers/subsonic.rs:498]
+- [x] [Review][Patch] RPC-level sanitization inconsistent across `ServerTypeHint` variants — removed the match block; `sanitize_subsonic_message` now applied to all hints uniformly at the RPC boundary. [hifimule-daemon/src/rpc.rs:339]
+- [x] [Review][Dismiss] `require_provider` error path audited and clean — returns only the hard-coded string "No active media provider"; no credential exposure possible. [hifimule-daemon/src/rpc.rs:292]
+- [x] [Review][Patch] Double-encoding of query values in `sanitize_subsonic_url` — rewrote to operate on the raw query string using `split('&')` / `split_once('=')` rather than the decode/re-encode `query_pairs()` round-trip. [hifimule-daemon/src/providers/subsonic.rs:532]
+- [x] [Review][Patch] `sanitize_subsonic_message` does not reuse `SUBSONIC_SECRET_QUERY_KEYS` — updated constant to include `"password"` and changed `sanitize_subsonic_message` to iterate over `SUBSONIC_SECRET_QUERY_KEYS`. [hifimule-daemon/src/providers/subsonic.rs:554]
+- [x] [Review][Patch] `sanitize_subsonic_url` is `pub` instead of `pub(crate)` — changed to `pub(crate)`. [hifimule-daemon/src/providers/subsonic.rs:532]
+- [x] [Review][Defer] `sync.rs` `SyncFileError` audit evidence absent — sync is Jellyfin-specific; no Subsonic URLs flow through it today. [hifimule-daemon/src/sync.rs] — deferred, pre-existing
+- [x] [Review][Defer] `main.rs` daemon logging audit evidence absent — no known Subsonic URL exposure in current logging paths. [hifimule-daemon/src/main.rs] — deferred, pre-existing
+- [x] [Review][Defer] `rpc.rs` image proxy path not patched — pre-existing path unchanged by this diff; any leak there pre-dates this story. [hifimule-daemon/src/rpc.rs] — deferred, pre-existing
+- [x] [Review][Defer] `rpc.rs` sync spawning path not patched — same as above. [hifimule-daemon/src/rpc.rs] — deferred, pre-existing
+- [x] [Review][Defer] `sanitize_subsonic_url` does not strip URL authority credentials (`user:pass@host`) — Subsonic REST does not use authority-embedded credentials; theoretical edge case. [hifimule-daemon/src/providers/subsonic.rs] — deferred, pre-existing
+- [x] [Review][Defer] Percent-encoded credentials not matched by `sanitize_subsonic_message` — scanner requires literal `key=` bytes; double-encoded forms (e.g. `password%3Dxxx`) are missed. Narrow edge case, no current path produces such strings. — deferred, pre-existing
+- [x] [Review][Defer] `sanitize_subsonic_message` applied to `Deserialization` errors — deserialization errors are unlikely to contain credentials but are now silently mangled, reducing debuggability. Pre-existing trade-off decision. — deferred, pre-existing
