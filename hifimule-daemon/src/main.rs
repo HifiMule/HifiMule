@@ -558,9 +558,9 @@ async fn run_auto_sync(
                             artist: item.artist,
                             size_bytes: item.size_bytes,
                             etag: None,
-                            provider_album_id: None,
+                            provider_album_id: item.provider_album_id,
                             provider_content_type: None,
-                            provider_suffix: None,
+                            provider_suffix: item.provider_suffix,
                         });
                     }
                 }

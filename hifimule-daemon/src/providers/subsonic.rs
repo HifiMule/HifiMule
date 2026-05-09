@@ -3,9 +3,9 @@ use crate::domain::models::{
     Kbps, Library, Playlist, PlaylistWithTracks, SearchResult, Seconds, Song,
 };
 use crate::providers::{
-    Capabilities, CredentialKind, MediaProvider, ProviderChangeContext, ProviderCredentials,
-    ProviderError, ProviderSyncedSong, ScrobbleRequest, ScrobbleSubmission, ServerType,
-    TranscodeProfile,
+    Capabilities, CredentialKind, MediaProvider, ProviderChangeContext, ProviderChangeMetadata,
+    ProviderCredentials, ProviderError, ProviderSyncedSong, ScrobbleRequest, ScrobbleSubmission,
+    ServerType, TranscodeProfile,
 };
 use async_trait::async_trait;
 use md5::{Digest, Md5};
@@ -20,6 +20,10 @@ const API_VERSION: &str = "1.16.1";
 const REDACTED: &str = "[REDACTED]";
 const SUBSONIC_SECRET_QUERY_KEYS: &[&str] = &["password", "u", "p", "t", "s"];
 const SONG_CHANGE_PAGE_SIZE: usize = 500;
+#[cfg(not(test))]
+const MAX_SONG_DUMP_PAGES: usize = 2000;
+#[cfg(test)]
+const MAX_SONG_DUMP_PAGES: usize = 2;
 
 #[derive(Clone)]
 pub struct SubsonicProvider {
@@ -75,6 +79,7 @@ impl SubsonicProvider {
     async fn full_song_dump_changes(&self) -> Result<Vec<ChangeEvent>, ProviderError> {
         let mut changes = Vec::new();
         let mut offset = 0usize;
+        let mut pages_fetched = 0usize;
         loop {
             let page = self
                 .client
@@ -83,8 +88,14 @@ impl SubsonicProvider {
             let songs = page.search_result3.song;
             let count = songs.len();
             changes.extend(songs.into_iter().map(song_created_event));
+            pages_fetched += 1;
             if count < SONG_CHANGE_PAGE_SIZE {
                 break;
+            }
+            if pages_fetched >= MAX_SONG_DUMP_PAGES {
+                return Err(ProviderError::UnsupportedCapability(format!(
+                    "Subsonic full-library dump exceeded {MAX_SONG_DUMP_PAGES} pages without a partial page"
+                )));
             }
             offset += SONG_CHANGE_PAGE_SIZE;
         }
@@ -110,6 +121,28 @@ impl SubsonicProvider {
             changes.extend(album_song_changes(&expected, &album.album.song));
         }
         Ok(changes)
+    }
+
+    fn change_metadata_from_version(version: Option<&str>) -> Option<ProviderChangeMetadata> {
+        let version = version?;
+        let payload = version.strip_prefix("subsonic:")?;
+        let parts: Vec<&str> = payload.splitn(5, '|').collect();
+        if parts.len() != 5 {
+            return None;
+        }
+        let clean = |value: &str| {
+            if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        };
+        Some(ProviderChangeMetadata {
+            album_id: clean(parts[1]),
+            size: parts[2].parse::<u64>().ok(),
+            content_type: clean(parts[3]),
+            suffix: clean(parts[4]),
+        })
     }
 }
 
@@ -280,6 +313,10 @@ impl MediaProvider for SubsonicProvider {
                 "Subsonic now-playing scrobble is not implemented by this adapter".to_string(),
             )),
         }
+    }
+
+    fn change_metadata(&self, event: &ChangeEvent) -> Option<ProviderChangeMetadata> {
+        Self::change_metadata_from_version(event.version.as_deref())
     }
 
     fn server_type(&self) -> ServerType {
@@ -763,15 +800,15 @@ fn song_metadata_changed(expected: &ProviderSyncedSong, actual: &SongDto) -> boo
     let mut compared = false;
     let mut changed = false;
 
-    if expected.size.is_some() || actual.size.is_some() {
+    if expected.size.is_some() && actual.size.is_some() {
         compared = true;
         changed |= expected.size != actual.size;
     }
-    if expected.content_type.is_some() || actual.content_type.is_some() {
+    if expected.content_type.is_some() && actual.content_type.is_some() {
         compared = true;
         changed |= expected.content_type.as_deref() != actual.content_type.as_deref();
     }
-    if expected.suffix.is_some() || actual.suffix.is_some() {
+    if expected.suffix.is_some() && actual.suffix.is_some() {
         compared = true;
         changed |= expected.suffix.as_deref() != actual.suffix.as_deref();
     }
@@ -826,10 +863,10 @@ fn album_song_changes(expected: &[&ProviderSyncedSong], actual: &[SongDto]) -> V
 }
 
 fn subsonic_song_version(song: &SongDto) -> Option<String> {
-    match (&song.size, &song.content_type, &song.suffix) {
-        (Some(size), Some(content_type), Some(suffix)) => Some(format!(
-            "subsonic:{}|{}|{}|{}",
-            song.id, size, content_type, suffix
+    match (&song.album_id, &song.size, &song.content_type, &song.suffix) {
+        (Some(album_id), Some(size), Some(content_type), Some(suffix)) => Some(format!(
+            "subsonic:{}|{}|{}|{}|{}",
+            song.id, album_id, size, content_type, suffix
         )),
         _ => None,
     }
@@ -1605,8 +1642,43 @@ mod tests {
         assert_eq!(changes[0].change_type, ChangeType::Created);
         assert_eq!(
             changes[0].version.as_deref(),
-            Some("subsonic:song0|1000|audio/mpeg|mp3")
+            Some("subsonic:song0|album1|1000|audio/mpeg|mp3")
         );
+    }
+
+    #[tokio::test]
+    async fn changes_since_initial_full_dump_errors_when_page_cap_is_hit() {
+        let mut server = Server::new_async().await;
+        for offset in [0, 500] {
+            let songs = (offset..offset + 500)
+                .map(|idx| format!(r#"{{"id":"song{idx}","title":"Track {idx}"}}"#))
+                .collect::<Vec<_>>()
+                .join(",");
+            let _page = server
+                .mock("GET", "/rest/search3.view")
+                .match_query(Matcher::AllOf({
+                    let mut matchers = auth_matchers();
+                    matchers.push(Matcher::UrlEncoded("query".into(), "".into()));
+                    matchers.push(Matcher::UrlEncoded("songCount".into(), "500".into()));
+                    matchers.push(Matcher::UrlEncoded("songOffset".into(), offset.to_string()));
+                    matchers
+                }))
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(&ok(&format!(r#""searchResult3":{{"song":[{songs}]}}"#)))
+                .expect(1)
+                .create_async()
+                .await;
+        }
+        let provider = provider(&server).await;
+
+        let result = provider.changes_since(None).await;
+
+        assert!(matches!(
+            result,
+            Err(ProviderError::UnsupportedCapability(message))
+                if message.contains("full-library dump exceeded")
+        ));
     }
 
     #[tokio::test]
@@ -1713,6 +1785,112 @@ mod tests {
         assert!(changes
             .iter()
             .any(|change| change.item.id == "song3" && change.change_type == ChangeType::Created));
+    }
+
+    #[tokio::test]
+    async fn changes_since_album_fallback_propagates_album_fetch_errors() {
+        let mut server = Server::new_async().await;
+        let _indexes = server
+            .mock("GET", "/rest/getIndexes.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded(
+                    "ifModifiedSince".into(),
+                    "1710000000000".into(),
+                ));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(r#""indexes":{"index":[]}"#))
+            .expect(1)
+            .create_async()
+            .await;
+        let _album = server
+            .mock("GET", "/rest/getAlbum.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "album1".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"subsonic-response":{"status":"failed","version":"1.16.1","error":{"code":70,"message":"Album missing"}}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+        let context = ProviderChangeContext {
+            synced_songs: vec![ProviderSyncedSong {
+                song_id: "song1".to_string(),
+                album_id: Some("album1".to_string()),
+                size: Some(1000),
+                content_type: Some("audio/mpeg".to_string()),
+                suffix: Some("mp3".to_string()),
+                version: Some("old-v1".to_string()),
+            }],
+        };
+
+        let result = provider
+            .changes_since_with_context(Some("1710000000000"), &context)
+            .await;
+
+        assert!(matches!(result, Err(ProviderError::NotFound { .. })));
+    }
+
+    #[test]
+    fn album_song_changes_ignores_missing_legacy_metadata_when_actual_has_metadata() {
+        let expected = ProviderSyncedSong {
+            song_id: "song1".to_string(),
+            album_id: Some("album1".to_string()),
+            size: None,
+            content_type: None,
+            suffix: None,
+            version: Some("old-v1".to_string()),
+        };
+        let actual = SongDto {
+            id: "song1".to_string(),
+            title: "Track".to_string(),
+            album: None,
+            artist: None,
+            album_id: Some("album1".to_string()),
+            artist_id: None,
+            duration: None,
+            bit_rate: None,
+            track: None,
+            disc_number: None,
+            cover_art: None,
+            size: Some(1000),
+            content_type: Some("audio/mpeg".to_string()),
+            suffix: Some("mp3".to_string()),
+            artists: None,
+        };
+
+        let changes = album_song_changes(&[&expected], &[actual]);
+
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn change_metadata_from_version_filters_empty_fields() {
+        let metadata = SubsonicProvider::change_metadata_from_version(Some(
+            "subsonic:song1|album1|3000|audio/flac|flac",
+        ))
+        .expect("metadata");
+
+        assert_eq!(metadata.album_id.as_deref(), Some("album1"));
+        assert_eq!(metadata.size, Some(3000));
+        assert_eq!(metadata.content_type.as_deref(), Some("audio/flac"));
+        assert_eq!(metadata.suffix.as_deref(), Some("flac"));
+
+        let sparse = SubsonicProvider::change_metadata_from_version(Some("subsonic:song1||||"))
+            .expect("sparse metadata");
+        assert_eq!(sparse.album_id, None);
+        assert_eq!(sparse.size, None);
+        assert_eq!(sparse.content_type, None);
+        assert_eq!(sparse.suffix, None);
     }
 
     #[tokio::test]

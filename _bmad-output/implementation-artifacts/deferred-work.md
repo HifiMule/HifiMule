@@ -2,6 +2,14 @@
 
 All previously deferred items have been incorporated into Epic 7 stories (7.1–7.4) in `_bmad-output/planning-artifacts/epics.md`.
 
+## Deferred from: code review of 8-6-incremental-sync-subsonic-album-level-fallback (2026-05-09)
+
+- **Songs without `album_id` excluded from fallback** — songs whose `provider_album_id` is `None` are silently skipped in `album_fallback_changes`; their deletions and metadata changes are invisible in the incremental fallback path. Acknowledged per spec ("document the limitation for old manifests"). [`hifimule-daemon/src/providers/subsonic.rs`]
+- **Songs moved between albums not detected** — when a song's album changes on the server, the context groups by old album_id; old album emits Deleted but the new album is not in context so the song is never re-created. Architectural limitation of ID-based grouping. [`hifimule-daemon/src/providers/subsonic.rs`]
+- **No integration test through full sync engine path** — album fallback tests call `changes_since_with_context` directly on the provider; no test exercises the manifest → `provider_change_context()` → incremental sync → events pipeline. Follow-up after showstopper patch lands. [`hifimule-daemon/src/providers/subsonic.rs`]
+- **Serial `getAlbum` calls in `album_fallback_changes`** — O(n) round trips with no concurrency; performance concern for large synced libraries. [`hifimule-daemon/src/providers/subsonic.rs`]
+- **`getIndexes.lastModified` not used as next token** — server-authoritative timestamp ignored; token derived from wall-clock time; clock skew can cause fallback bypass when it should run. Pre-existing pattern. [`hifimule-daemon/src/providers/subsonic.rs`]
+
 ## Deferred from: code review of 8-5-subsonic-url-credential-sanitization (2026-05-09)
 
 - **`sync.rs` `SyncFileError` audit evidence absent** — sync is Jellyfin-specific so no Subsonic URLs flow through it today; revisit if sync becomes provider-neutral.

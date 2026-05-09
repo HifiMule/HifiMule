@@ -145,6 +145,7 @@ export class BasketSidebar {
     private syncErrorMessages: string[] | null = null;
     private isDirtyManifest: boolean = false;
     private lastHydratedDeviceId: string | null = null;
+    private serverType: string | null = null;
     private syncSnapshotIds: string[] = [];
     // Auto-fill state
     private autoFillEnabled: boolean = false;
@@ -190,6 +191,7 @@ export class BasketSidebar {
 
         if (daemonStateResult.status === 'fulfilled' && daemonStateResult.value) {
             const state = daemonStateResult.value as any;
+            this.serverType = state.serverType ?? null;
             // Sync multi-device state so the hub renders correctly on every refreshAndRender,
             // not just during the 2s polling cycle.
             this.connectedDevices = state.connectedDevices ?? this.connectedDevices;
@@ -416,6 +418,7 @@ export class BasketSidebar {
                 const hasPendingDevice = newPendingPath !== null;
 
                 const currentDevice = daemonStateResult?.currentDevice;
+                this.serverType = daemonStateResult?.serverType ?? null;
                 const isNewDevice = currentDevice?.deviceId && currentDevice.deviceId !== this.lastHydratedDeviceId;
                 const deviceDisconnected = !currentDevice && this.lastHydratedDeviceId !== null;
                 const activeOperationId = daemonStateResult?.activeOperationId ?? null;
@@ -795,7 +798,8 @@ export class BasketSidebar {
         this.syncSnapshotIds = [...manualIds].sort();
 
         // Build delta request params
-        const deltaParams: Record<string, unknown> = { itemIds: manualIds };
+        const syncItemIds = await this.itemIdsWithIncrementalChanges(manualIds);
+        const deltaParams: Record<string, unknown> = { itemIds: syncItemIds };
         if (autoFillSlot) {
             // Recompute fill budget fresh from current storage state — the slot's
             // sizeBytes may be stale (e.g. set to 0 when storageInfo was null).
@@ -806,7 +810,7 @@ export class BasketSidebar {
             deltaParams.autoFill = {
                 enabled: true,
                 maxBytes: maxFillBytes > 0 ? maxFillBytes : undefined,
-                excludeItemIds: manualIds,
+                excludeItemIds: syncItemIds,
             };
         }
 
@@ -831,6 +835,42 @@ export class BasketSidebar {
             this.currentOperation = null;
             this.showError(`Failed to start sync: ${(err as Error).message}`);
         }
+    }
+
+    private isSubsonicServer(): boolean {
+        return this.serverType === 'subsonic' || this.serverType === 'openSubsonic';
+    }
+
+    private syncTokenStorageKey(): string | null {
+        return this.lastHydratedDeviceId
+            ? `hifimule-subsonic-sync-token:${this.lastHydratedDeviceId}`
+            : null;
+    }
+
+    private async itemIdsWithIncrementalChanges(manualIds: string[]): Promise<string[]> {
+        if (!this.isSubsonicServer()) return manualIds;
+        const key = this.syncTokenStorageKey();
+        if (!key) return manualIds;
+        const syncToken = localStorage.getItem(key);
+        if (!syncToken) return manualIds;
+
+        const changes = await rpcCall('sync_detect_changes', { syncToken }) as Array<{
+            id?: string;
+            itemType?: string;
+            changeType?: string;
+        }>;
+        const merged = new Set(manualIds);
+        for (const change of changes) {
+            if (
+                change.itemType === 'song'
+                && (change.changeType === 'created' || change.changeType === 'updated')
+                && typeof change.id === 'string'
+                && change.id.length > 0
+            ) {
+                merged.add(change.id);
+            }
+        }
+        return Array.from(merged);
     }
 
     private startPolling() {
@@ -1002,6 +1042,10 @@ export class BasketSidebar {
         this.showSyncComplete = true;
         this.syncErrorMessages = null;
         this.etaText = 'Calculating\u2026';
+        const tokenKey = this.syncTokenStorageKey();
+        if (this.isSubsonicServer() && tokenKey) {
+            localStorage.setItem(tokenKey, Date.now().toString());
+        }
 
         // Reset dirty if current items match snapshot (no mid-sync changes)
         const currentIds = basketStore.getItems().filter(i => i.id !== AUTO_FILL_SLOT_ID).map(i => i.id).sort();

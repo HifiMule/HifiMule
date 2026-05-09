@@ -1,4 +1,5 @@
 use crate::api::{CredentialManager, JellyfinClient};
+use crate::domain::models::{ChangeType, ItemType};
 use crate::providers::{
     server_type_slug, CredentialKind, MediaProvider, ProviderCredentials, ServerTypeHint,
 };
@@ -209,6 +210,7 @@ async fn handler(
         "device_list_root_folders" => handle_device_list_root_folders(&state).await,
         "sync_get_device_status_map" => handle_sync_get_device_status_map(&state).await,
         "sync_calculate_delta" => handle_sync_calculate_delta(&state, payload.params).await,
+        "sync_detect_changes" => handle_sync_detect_changes(&state, payload.params).await,
         "sync_execute" => handle_sync_execute(&state, payload.params).await,
         "sync_get_operation_status" => {
             handle_sync_get_operation_status(&state, payload.params).await
@@ -1235,6 +1237,121 @@ async fn handle_sync_calculate_delta(
     delta.playlists = playlist_sync_items;
 
     Ok(serde_json::to_value(delta).unwrap())
+}
+
+async fn handle_sync_detect_changes(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    if !params.is_object() || !params.get("syncToken").is_some() {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing syncToken".to_string(),
+            data: None,
+        });
+    }
+    let token = match params.get("syncToken") {
+        Some(Value::Null) => None,
+        Some(Value::String(token)) => Some(token.clone()),
+        _ => {
+            return Err(JsonRpcError {
+                code: ERR_INVALID_PARAMS,
+                message: "syncToken must be a string or null".to_string(),
+                data: None,
+            })
+        }
+    };
+
+    let manifest = state
+        .device_manager
+        .get_current_device()
+        .await
+        .ok_or(JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: "No device connected".to_string(),
+            data: None,
+        })?;
+
+    let provider = state.provider.read().await.clone().ok_or(JsonRpcError {
+        code: ERR_CONNECTION_FAILED,
+        message: "No provider connected".to_string(),
+        data: None,
+    })?;
+
+    let context = manifest.provider_change_context();
+    let changes = provider
+        .changes_since_with_context(token.as_deref(), &context)
+        .await
+        .map_err(|e| JsonRpcError {
+            code: ERR_INTERNAL_ERROR,
+            message: format!("Change detection failed: {}", e),
+            data: None,
+        })?;
+
+    // Enrich each change with metadata parsed from the Subsonic version string
+    // ("subsonic:{id}|{size}|{contentType}|{suffix}"), so callers can populate
+    // provider_content_type/provider_suffix in SyncAddItems without extra API calls.
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct DetectedChange {
+        id: String,
+        item_type: String,
+        change_type: String,
+        version: Option<String>,
+        provider_album_id: Option<String>,
+        provider_size: Option<u64>,
+        provider_content_type: Option<String>,
+        provider_suffix: Option<String>,
+    }
+
+    fn item_type_wire(item_type: ItemType) -> &'static str {
+        match item_type {
+            ItemType::Library => "library",
+            ItemType::Artist => "artist",
+            ItemType::Album => "album",
+            ItemType::Song => "song",
+            ItemType::Playlist => "playlist",
+        }
+    }
+
+    fn change_type_wire(change_type: ChangeType) -> &'static str {
+        match change_type {
+            ChangeType::Created => "created",
+            ChangeType::Updated => "updated",
+            ChangeType::Deleted => "deleted",
+        }
+    }
+
+    let enriched: Vec<DetectedChange> = changes
+        .into_iter()
+        .map(|event| {
+            let metadata = match event.change_type {
+                ChangeType::Created | ChangeType::Updated => provider.change_metadata(&event),
+                ChangeType::Deleted => None,
+            };
+            DetectedChange {
+                id: event.item.id,
+                item_type: item_type_wire(event.item.item_type).to_string(),
+                change_type: change_type_wire(event.change_type).to_string(),
+                version: event.version,
+                provider_album_id: metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.album_id.clone()),
+                provider_size: metadata.as_ref().and_then(|metadata| metadata.size),
+                provider_content_type: metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.content_type.clone()),
+                provider_suffix: metadata.and_then(|metadata| metadata.suffix),
+            }
+        })
+        .collect();
+
+    Ok(serde_json::to_value(enriched).unwrap())
 }
 
 async fn handle_sync_execute(
@@ -2777,6 +2894,133 @@ mod tests {
             response.0.error.as_ref().unwrap().code,
             ERR_CONNECTION_FAILED
         );
+    }
+
+    #[tokio::test]
+    async fn test_rpc_sync_detect_changes_validates_sync_token_params() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+
+        for params in [None, Some(json!({})), Some(json!({ "syncToken": 123 }))] {
+            let error = handle_sync_detect_changes(&state, params)
+                .await
+                .expect_err("invalid params should be rejected before device/provider access");
+            assert_eq!(error.code, ERR_INVALID_PARAMS);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rpc_sync_detect_changes_returns_stable_wire_fields_and_metadata() {
+        let mut server = mockito::Server::new_async().await;
+        let _indexes = server
+            .mock("GET", "/rest/getIndexes.view")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("u".into(), "rpc-user".into()),
+                mockito::Matcher::UrlEncoded("v".into(), "1.16.1".into()),
+                mockito::Matcher::UrlEncoded("c".into(), "hifimule".into()),
+                mockito::Matcher::UrlEncoded("f".into(), "json".into()),
+                mockito::Matcher::UrlEncoded("ifModifiedSince".into(), "1710000000000".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"subsonic-response":{"status":"ok","version":"1.16.1","openSubsonic":true,"indexes":{"index":[]}}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let _album = server
+            .mock("GET", "/rest/getAlbum.view")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("u".into(), "rpc-user".into()),
+                mockito::Matcher::UrlEncoded("v".into(), "1.16.1".into()),
+                mockito::Matcher::UrlEncoded("c".into(), "hifimule".into()),
+                mockito::Matcher::UrlEncoded("f".into(), "json".into()),
+                mockito::Matcher::UrlEncoded("id".into(), "album1".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"subsonic-response":{"status":"ok","version":"1.16.1","openSubsonic":true,"album":{"id":"album1","name":"Album","song":[{"id":"song1","title":"Existing","albumId":"album1","size":1000,"contentType":"audio/mpeg","suffix":"mp3"},{"id":"song2","title":"New","albumId":"album1","size":3000,"contentType":"audio/flac","suffix":"flac"}]}}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let provider = crate::providers::subsonic::SubsonicProvider::from_stored_config(
+            ProviderCredentials {
+                server_url: server.url(),
+                credential: CredentialKind::Password {
+                    username: "rpc-user".to_string(),
+                    password: "rpc-pass".to_string(),
+                },
+            },
+            true,
+            Some("1.16.1".to_string()),
+        )
+        .expect("provider");
+        state
+            .provider
+            .write()
+            .await
+            .replace(Arc::new(provider) as Arc<dyn MediaProvider>);
+
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = crate::device::DeviceManifest {
+            device_id: "detect-dev".to_string(),
+            name: Some("Detect".to_string()),
+            icon: None,
+            version: "1.1".to_string(),
+            managed_paths: vec!["Music".to_string()],
+            synced_items: vec![crate::device::SyncedItem {
+                jellyfin_id: "song1".to_string(),
+                name: "Existing".to_string(),
+                album: Some("Album".to_string()),
+                artist: None,
+                local_path: "Music/existing.mp3".to_string(),
+                size_bytes: 1000,
+                synced_at: "2026-02-15T10:00:00Z".to_string(),
+                original_name: None,
+                etag: Some("old-v1".to_string()),
+                provider_album_id: Some("album1".to_string()),
+                provider_content_type: Some("audio/mpeg".to_string()),
+                provider_suffix: Some("mp3".to_string()),
+            }],
+            dirty: false,
+            pending_item_ids: vec![],
+            basket_items: vec![],
+            auto_sync_on_connect: false,
+            auto_fill: crate::device::AutoFillPrefs::default(),
+            transcoding_profile_id: None,
+            playlists: vec![],
+            storage_id: None,
+        };
+        state
+            .device_manager
+            .handle_device_detected(
+                dir.path().to_path_buf(),
+                manifest,
+                Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())),
+            )
+            .await
+            .unwrap();
+
+        let result =
+            handle_sync_detect_changes(&state, Some(json!({ "syncToken": "1710000000000" })))
+                .await
+                .expect("changes");
+        let changes = result.as_array().expect("changes array");
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0]["id"], "song2");
+        assert_eq!(changes[0]["itemType"], "song");
+        assert_eq!(changes[0]["changeType"], "created");
+        assert_eq!(changes[0]["providerAlbumId"], "album1");
+        assert_eq!(changes[0]["providerSize"], 3000);
+        assert_eq!(changes[0]["providerContentType"], "audio/flac");
+        assert_eq!(changes[0]["providerSuffix"], "flac");
     }
 
     #[tokio::test]
