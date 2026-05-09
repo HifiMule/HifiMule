@@ -1,6 +1,6 @@
 # Story 8.4: Runtime Server-Type Detection Factory
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -23,48 +23,48 @@ so that I do not need to manually specify "Jellyfin" or "Navidrome" during setup
 
 ## Tasks / Subtasks
 
-- [ ] Add shared provider factory types and connection entry point (AC: 1, 2, 3, 4, 7)
-  - [ ] Add `ServerTypeHint::{Auto, Jellyfin, Subsonic}` in `hifimule-daemon/src/providers/mod.rs`; do not add parallel enums elsewhere.
-  - [ ] Add `pub async fn connect(url: &str, creds: &ProviderCredentials, hint: ServerTypeHint) -> Result<Arc<dyn MediaProvider>, ProviderError>`.
-  - [ ] For `Auto`, attempt Subsonic first by constructing `SubsonicProvider::connect(...)`; classify `ServerType::OpenSubsonic` from the provider's cached ping result and `ServerType::Subsonic` otherwise.
-  - [ ] If Subsonic fails in `Auto`, attempt Jellyfin detection via `/System/Info`, then construct `JellyfinProvider` using the existing `JellyfinClient` and authenticated Jellyfin token.
-  - [ ] For explicit hints, skip unrelated probes entirely: `Jellyfin` must not ping Subsonic; `Subsonic` must not call Jellyfin.
-  - [ ] Map "all detection paths failed" to a focused provider/RPC error message: `Unknown server type at this URL`.
+- [x] Add shared provider factory types and connection entry point (AC: 1, 2, 3, 4, 7)
+  - [x] Add `ServerTypeHint::{Auto, Jellyfin, Subsonic}` in `hifimule-daemon/src/providers/mod.rs`; do not add parallel enums elsewhere.
+  - [x] Add `pub async fn connect(url: &str, creds: &ProviderCredentials, hint: ServerTypeHint) -> Result<Arc<dyn MediaProvider>, ProviderError>`.
+  - [x] For `Auto`, attempt Subsonic first by constructing `SubsonicProvider::connect(...)`; classify `ServerType::OpenSubsonic` from the provider's cached ping result and `ServerType::Subsonic` otherwise.
+  - [x] If Subsonic fails in `Auto`, attempt Jellyfin detection via `/System/Info`, then construct `JellyfinProvider` using the existing `JellyfinClient` and authenticated Jellyfin token.
+  - [x] For explicit hints, skip unrelated probes entirely: `Jellyfin` must not ping Subsonic; `Subsonic` must not call Jellyfin.
+  - [x] Map "all detection paths failed" to a focused provider/RPC error message: `Unknown server type at this URL`.
 
-- [ ] Update server connection RPC and credential flow (AC: 1, 4, 5, 7)
-  - [ ] Add `server.connect` to `hifimule-daemon/src/rpc.rs` with params `{ url, serverType, username, password }`.
-  - [ ] Keep the existing `login` RPC compatible by delegating to `server.connect` with `serverType: "auto"` or by retaining it as a Jellyfin-compatible wrapper; do not silently remove current UI callers.
-  - [ ] For Jellyfin, authenticate with `JellyfinClient::authenticate_by_name`, store the access token in keyring, and construct `JellyfinProvider` from the returned token and user ID.
-  - [ ] For Subsonic/OpenSubsonic, store the password in keyring, construct `SubsonicProvider` with `CredentialKind::Password`, and never store the raw password in SQLite or JSON config.
-  - [ ] Return `{ ok: true, serverType, serverVersion }` on success and JSON-RPC errors with existing error codes on failure.
+- [x] Update server connection RPC and credential flow (AC: 1, 4, 5, 7)
+  - [x] Add `server.connect` to `hifimule-daemon/src/rpc.rs` with params `{ url, serverType, username, password }`.
+  - [x] Keep the existing `login` RPC compatible by delegating to `server.connect` with `serverType: "auto"` or by retaining it as a Jellyfin-compatible wrapper; do not silently remove current UI callers.
+  - [x] For Jellyfin, authenticate with `JellyfinClient::authenticate_by_name`, store the access token in keyring, and construct `JellyfinProvider` from the returned token and user ID.
+  - [x] For Subsonic/OpenSubsonic, store the password in keyring, construct `SubsonicProvider` with `CredentialKind::Password`, and never store the raw password in SQLite or JSON config.
+  - [x] Return `{ ok: true, serverType, serverVersion }` on success and JSON-RPC errors with existing error codes on failure.
 
-- [ ] Add active provider lifecycle to daemon state (AC: 2, 3, 5)
-  - [ ] Add `provider: Arc<tokio::sync::RwLock<Option<Arc<dyn MediaProvider>>>>` to `AppState`.
-  - [ ] Add a shared `require_provider(&AppState) -> Result<Arc<dyn MediaProvider>, JsonRpcError>` helper that clones the provider under a read lock and releases the lock before async provider calls.
-  - [ ] On successful `server.connect`, acquire the write lock and replace the active provider; the old provider should be dropped naturally when outstanding `Arc` clones finish.
-  - [ ] Add lightweight state fields for active `server_type` and `server_version`, or derive them from persisted config plus active provider where practical.
-  - [ ] Invalidate `last_connection_check` when the provider is replaced so `serverConnected` does not report stale Jellyfin-only status.
+- [x] Add active provider lifecycle to daemon state (AC: 2, 3, 5)
+  - [x] Add `provider: Arc<tokio::sync::RwLock<Option<Arc<dyn MediaProvider>>>>` to `AppState`.
+  - [x] Add a shared `require_provider(&AppState) -> Result<Arc<dyn MediaProvider>, JsonRpcError>` helper that clones the provider under a read lock and releases the lock before async provider calls.
+  - [x] On successful `server.connect`, acquire the write lock and replace the active provider; the old provider should be dropped naturally when outstanding `Arc` clones finish.
+  - [x] Add lightweight state fields for active `server_type` and `server_version`, or derive them from persisted config plus active provider where practical.
+  - [x] Invalidate `last_connection_check` when the provider is replaced so `serverConnected` does not report stale Jellyfin-only status.
 
-- [ ] Persist server configuration and restore on startup (AC: 5, 6)
-  - [ ] Add `server_config` table and migrations in `hifimule-daemon/src/db.rs`:
+- [x] Persist server configuration and restore on startup (AC: 5, 6)
+  - [x] Add `server_config` table and migrations in `hifimule-daemon/src/db.rs`:
     `id INTEGER PRIMARY KEY CHECK (id = 1)`, `url TEXT NOT NULL`, `server_type TEXT NOT NULL`, `username TEXT NOT NULL`, `server_version TEXT`, `updated_at INTEGER NOT NULL`.
-  - [ ] Add typed helpers such as `upsert_server_config`, `get_server_config`, and tests using `Database::memory()`.
-  - [ ] Replace or extend the current `CredentialManager` config JSON behavior so URL/user metadata does not remain Jellyfin-only; preserve backward compatibility with existing `config.json` where possible.
-  - [ ] On daemon startup, if `server_config` exists, fetch credentials from keyring and restore `AppState.provider` before serving RPC requests, or clearly mark the daemon disconnected if credentials are unavailable.
-  - [ ] Do not persist credentials in SQLite; only URL/type/username/version belong in database config.
+  - [x] Add typed helpers such as `upsert_server_config`, `get_server_config`, and tests using `Database::memory()`.
+  - [x] Replace or extend the current `CredentialManager` config JSON behavior so URL/user metadata does not remain Jellyfin-only; preserve backward compatibility with existing `config.json` where possible.
+  - [x] On daemon startup, if `server_config` exists, fetch credentials from keyring and restore `AppState.provider` before serving RPC requests, or clearly mark the daemon disconnected if credentials are unavailable.
+  - [x] Do not persist credentials in SQLite; only URL/type/username/version belong in database config.
 
-- [ ] Surface provider state through daemon state and image routing (AC: 3, 5)
-  - [ ] Extend `get_daemon_state` to include `serverType` and `serverVersion` while preserving all existing device fields.
-  - [ ] Keep existing `/jellyfin/image/{id}` route working for current UI code.
-  - [ ] If adding provider-aware image proxy support in this story, route through `provider.cover_art_url()` and sanitize Subsonic URLs before logs; otherwise document that full UI browse/image migration remains out of scope.
+- [x] Surface provider state through daemon state and image routing (AC: 3, 5)
+  - [x] Extend `get_daemon_state` to include `serverType` and `serverVersion` while preserving all existing device fields.
+  - [x] Keep existing `/jellyfin/image/{id}` route working for current UI code.
+  - [x] If adding provider-aware image proxy support in this story, route through `provider.cover_art_url()` and sanitize Subsonic URLs before logs; otherwise document that full UI browse/image migration remains out of scope.
 
-- [ ] Add focused tests and verification (AC: 1-8)
-  - [ ] Factory tests: auto detects OpenSubsonic ping, classic Subsonic ping, Jellyfin fallback, explicit Jellyfin skips Subsonic, explicit Subsonic skips Jellyfin, all-fail returns unknown-type error.
-  - [ ] RPC tests: `server.connect` accepts all three `serverType` values, returns normalized `serverType`, replaces the active provider, and rejects invalid params.
-  - [ ] Persistence tests: `server_config` round-trips URL/type/username/version and migration is idempotent.
-  - [ ] Credential tests: Subsonic password and Jellyfin token are redacted in debug/error paths and are not written to database config.
-  - [ ] State tests: `get_daemon_state` includes `serverType`/`serverVersion` before and after provider replacement.
-  - [ ] Run `rtk cargo test -p hifimule-daemon`.
+- [x] Add focused tests and verification (AC: 1-8)
+  - [x] Factory tests: auto detects OpenSubsonic ping, classic Subsonic ping, Jellyfin fallback, explicit Jellyfin skips Subsonic, explicit Subsonic skips Jellyfin, all-fail returns unknown-type error.
+  - [x] RPC tests: `server.connect` accepts all three `serverType` values, returns normalized `serverType`, replaces the active provider, and rejects invalid params.
+  - [x] Persistence tests: `server_config` round-trips URL/type/username/version and migration is idempotent.
+  - [x] Credential tests: Subsonic password and Jellyfin token are redacted in debug/error paths and are not written to database config.
+  - [x] State tests: `get_daemon_state` includes `serverType`/`serverVersion` before and after provider replacement.
+  - [x] Run `rtk cargo test -p hifimule-daemon`.
 
 ## Dev Notes
 
@@ -136,15 +136,35 @@ so that I do not need to manually specify "Jellyfin" or "Navidrome" during setup
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+GPT-5 Codex
 
 ### Debug Log References
+
+- `rtk cargo test -p hifimule-daemon providers:: --no-fail-fast` - 46 provider tests passed.
+- `rtk cargo test -p hifimule-daemon --no-fail-fast` - 257 tests passed.
+- `rtk cargo test -p hifimule-daemon` - 257 tests passed.
 
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
+- Implemented provider factory runtime detection with Subsonic/OpenSubsonic-first auto detection, Jellyfin fallback, explicit hint skipping, normalized server type slugs, and focused unknown-type errors.
+- Added active provider lifecycle to RPC state, `server.connect`, provider-aware daemon state fields, startup restore from persisted server config, and cache invalidation on provider replacement.
+- Added `server_config` SQLite persistence, generalized keyring secret helpers, Subsonic/Jellyfin version reporting, and tightened Subsonic query-secret redaction for `u`, `p`, `t`, and `s`.
+- Preserved existing Jellyfin login, credentials, image proxy, sync, and browse compatibility while adding the provider-neutral connection path.
 
 ### File List
 
 - `_bmad-output/implementation-artifacts/8-4-runtime-server-type-detection-factory.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `hifimule-daemon/src/api.rs`
+- `hifimule-daemon/src/db.rs`
+- `hifimule-daemon/src/paths.rs`
+- `hifimule-daemon/src/providers/jellyfin.rs`
+- `hifimule-daemon/src/providers/mod.rs`
+- `hifimule-daemon/src/providers/subsonic.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-daemon/src/tests.rs`
+
+### Change Log
+
+- 2026-05-09: Implemented runtime server-type detection factory, `server.connect`, active provider state, server config persistence, startup restore, daemon state fields, redaction hardening, and focused tests.

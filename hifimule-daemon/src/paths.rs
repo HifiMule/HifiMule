@@ -2,6 +2,15 @@ use anyhow::{anyhow, Result};
 use std::path::PathBuf;
 
 pub fn get_app_data_dir() -> Result<PathBuf> {
+    if let Ok(override_path) = std::env::var("HIFIMULE_APP_DATA_DIR") {
+        let path = PathBuf::from(override_path);
+        if !path.exists() {
+            std::fs::create_dir_all(&path)
+                .map_err(|e| anyhow!("Failed to create application data directory: {}", e))?;
+        }
+        return Ok(path);
+    }
+
     let mut path = PathBuf::new();
 
     #[cfg(target_os = "windows")]
