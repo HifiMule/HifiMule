@@ -5,25 +5,25 @@
 <h1 align="center">HifiMule</h1>
 
 <p align="center">
-  Sync your Jellyfin media library to portable devices — DAPs, iPods with Rockbox, USB players, and more.
+  Sync your open source media server library to portable devices — DAPs, iPods with Rockbox, USB players, and more.
 </p>
 
 ---
 
-HifiMule is a desktop application that bridges your [Jellyfin](https://jellyfin.org/) media server and legacy mass-storage MP3 players. Browse your library, pick what you want, and sync it to your device with delta transfers and resume support.
+HifiMule is a desktop application that bridges open source media servers and legacy mass-storage MP3 players. It supports [Jellyfin](https://jellyfin.org/) and Subsonic-compatible servers such as [Navidrome](https://www.navidrome.org/). Browse your library, pick what you want, and sync it to your device with delta transfers and resume support.
 
 ## Features
 
-- **Library browsing** — Navigate views, collections, and albums directly from your Jellyfin server
+- **Library browsing** — Navigate views, collections, and albums directly from your media server
 - **Selective sync** — Add items to a sync basket and transfer only what you choose
 - **Delta sync** — Compares local and remote state; downloads only what's changed
 - **Resumable transfers** — Interrupted syncs pick up where they left off
 - **Device management** — Initialize devices, inspect storage, configure sync profiles
 - **Manifest tracking** — A `.hifimule.json` manifest on-device tracks synced files with repair and prune tools
-- **Scrobble bridge** — Reads Rockbox `.scrobbler.log` files and reports playback history back to Jellyfin
+- **Scrobble bridge** — Reads Rockbox `.scrobbler.log` files and reports playback history back to your media server
 - **System tray daemon** — Runs in the background with status indicators (idle, syncing, error)
 - **Hardware-aware** — Validates path lengths and filename character sets for legacy devices
-- **Secure credentials** — Stores Jellyfin tokens in the OS keyring, never on disk
+- **Secure credentials** — Stores server credentials in the OS keyring, never on disk
 
 ## Disclaimer
 
@@ -33,10 +33,10 @@ This software was developed with the assistance of AI and the BMAD Method. As an
 ## Architecture
 
 ```
-┌─────────────┐      JSON-RPC 2.0       ┌─────────────────┐      HTTP      ┌─────────────────┐
-│  Tauri UI   │ ◄──────────────────────►│  Rust Daemon    │ ◄────────────► │ Jellyfin Server │
-│  (Desktop)  │    127.0.0.1:19140      │  (System Tray)  │                │                 │
-└─────────────┘                         └─────────────────┘                └─────────────────┘
+┌─────────────┐      JSON-RPC 2.0       ┌─────────────────┐      HTTP      ┌─────────────────────────┐
+│  Tauri UI   │ ◄──────────────────────►│  Rust Daemon    │ ◄────────────► │ Jellyfin / Navidrome    │
+│  (Desktop)  │    127.0.0.1:19140      │  (System Tray)  │                │ (Subsonic-compatible)   │
+└─────────────┘                         └─────────────────┘                └─────────────────────────┘
 ```
 
 Two-process design: the daemon handles all sync, API, and device operations while the UI is a detachable Tauri window. The daemon continues working even if the UI is closed, with an idle memory footprint under 10 MB.
@@ -123,21 +123,23 @@ HifiMule/
 
 ## How It Works
 
-1. **Connect** — Point HifiMule at your Jellyfin server and log in
+1. **Connect** — Point HifiMule at your media server (Jellyfin, Navidrome, or any Subsonic-compatible server) and log in
 2. **Browse** — Navigate your library views, collections, and albums
 3. **Select** — Add items to the sync basket
 4. **Plug in** — Connect your portable device and select the target folder
 5. **Sync** — HifiMule calculates deltas and transfers only what's needed
-6. **Listen** — Play music on your device; scrobble logs sync back to Jellyfin
+6. **Listen** — Play music on your device; scrobble logs sync back to your media server
 
 ## Contributing
 
 Contributions are welcome! Please open an issue to discuss changes before submitting a PR.
 As I'm mostly using Windows as the development platform for HifiMule, I'm looking for feedback from Linux or Mac users.
+I'm also looking for feedback from owners of various devices, as my collection is quite limited.
 
 ## Acknowledgements
 
-- [Jellyfin](https://jellyfin.org/) — The free software media system
+- [Jellyfin](https://jellyfin.org/) — Free software media server
+- [Navidrome](https://www.navidrome.org/) — Open source music server, Subsonic-compatible
 - [Tauri](https://tauri.app/) — Build desktop apps with web tech and Rust
 - [Shoelace](https://shoelace.style/) — Web component library
 - [BMAD Method](https://github.com/bmad-code-org/BMAD-METHOD) - Breakthrough Method for Agile Ai Driven Development
