@@ -8,6 +8,7 @@ export interface JellyfinItem {
     Id: string;
     Name: string;
     Type: string;
+    ImageId?: string;
     AlbumArtist?: string;
     ProductionYear?: number;
 }
@@ -16,6 +17,7 @@ export interface JellyfinView {
     Id: string;
     Name: string;
     Type: string;
+    ImageId?: string;
     CollectionType?: string;
 }
 
@@ -64,14 +66,15 @@ export class MediaCard {
 
         // Load image asynchronously via Tauri proxy
         const cardImage = card.querySelector('.card-image') as HTMLElement;
-        getImageUrl(item.Id, 300, 90).then(dataUrl => {
+        const imageId = item.ImageId || item.Id;
+        getImageUrl(imageId, 300, 90).then(dataUrl => {
             if (cardImage) {
                 cardImage.style.backgroundImage = `url('${dataUrl}')`;
                 const skeleton = card.querySelector('.image-skeleton') as HTMLElement;
                 if (skeleton) skeleton.style.display = 'none';
             }
         }).catch(err => {
-            console.warn(`Failed to load image for ${item.Id}:`, err);
+            console.warn(`Failed to load image for ${imageId}:`, err);
             const skeleton = card.querySelector('.image-skeleton') as HTMLElement;
             if (skeleton) skeleton.style.display = 'none';
         });

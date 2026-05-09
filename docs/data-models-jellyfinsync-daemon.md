@@ -35,7 +35,7 @@ Represents a single file that has been successfully synced to the device.
 
 ```rust
 pub struct SyncedItem {
-    pub jellyfin_id: String,       // Jellyfin item ID
+    pub jellyfin_id: String,       // provider item ID; serialized in .hifimule.json as providerItemId
     pub name: String,              // track title
     pub album: Option<String>,
     pub artist: Option<String>,
@@ -45,6 +45,7 @@ pub struct SyncedItem {
 ```
 
 `local_path` is relative to the device root (e.g., `"Music/Artist/Album/01 - Track.mp3"`).
+The synced-item ID is written as `providerItemId` in `.hifimule.json`.
 
 ---
 

@@ -17,13 +17,13 @@ so that **only necessary changes are made to the disk, preserving the hardware's
 3. **Server ID Change Detection**: The engine MUST detect if a Jellyfin server has reassigned IDs for existing local files (e.g., after a library re-scan) by comparing item metadata (name, album, artist) as a secondary match when IDs don't align. (AC: #3)
 4. **Atomic Manifest Updates**: All manifest writes MUST use the "Write-Temp-Rename" pattern: write to `.hifimule.json.tmp`, call `sync_all`, then atomically rename to `.hifimule.json`. (AC: #4)
 5. **RPC Integration**: A new `sync_calculate_delta` RPC method MUST accept a list of desired item IDs from the UI basket and return the computed `{ adds: [...], deletes: [...], unchanged: count }` delta. (AC: #5)
-6. **Device Status Map**: The existing `sync_get_device_status_map` stub MUST be replaced with a real implementation that reads `synced_items` from the current device manifest and returns the list of synced Jellyfin item IDs. (AC: #6)
+6. **Device Status Map**: The existing `sync_get_device_status_map` stub MUST be replaced with a real implementation that reads `synced_items` from the current device manifest and returns the list of synced provider item IDs. (AC: #6)
 
 ## Tasks / Subtasks
 
 - [x] **T1: Extend DeviceManifest struct** (AC: #1, #4)
   - [x] T1.1: Add `synced_items: Vec<SyncedItem>` field to `DeviceManifest` in `hifimule-daemon/src/device/mod.rs`
-  - [x] T1.2: Define `SyncedItem` struct with fields: `jellyfin_id: String`, `name: String`, `album: Option<String>`, `artist: Option<String>`, `local_path: String`, `size_bytes: u64`, `synced_at: String`
+  - [x] T1.2: Define `SyncedItem` struct with fields: `jellyfin_id: String` serialized in `.hifimule.json` as `providerItemId`, `name: String`, `album: Option<String>`, `artist: Option<String>`, `local_path: String`, `size_bytes: u64`, `synced_at: String`
   - [x] T1.3: Ensure `#[serde(default)]` on `synced_items` for backward compatibility with existing manifests
   - [x] T1.4: Implement atomic manifest write function using Write-Temp-Rename pattern (`write_manifest(path, manifest)`)
 
@@ -90,7 +90,7 @@ To:
   "managed_paths": ["Music"],
   "synced_items": [
     {
-      "jellyfinId": "item-uuid-1",
+      "providerItemId": "item-uuid-1",
       "name": "Track Name",
       "album": "Album Name",
       "artist": "Artist Name",
@@ -106,7 +106,7 @@ To:
 
 ```
 fn calculate_delta(desired, manifest):
-    current_ids = set(manifest.synced_items.map(|i| i.jellyfin_id))
+    current_ids = set(manifest.synced_items.map(|i| i.jellyfin_id)) // providerItemId in manifest JSON
     desired_ids = set(desired.map(|i| i.id))
 
     adds = desired.filter(|i| !current_ids.contains(i.id))

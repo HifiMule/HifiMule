@@ -831,7 +831,7 @@ So that my DAP or Rockbox player can natively load and play the playlist in the 
 **Given** a playlist was in the previous sync but is absent from the current basket
 **Then** its `.m3u` file is deleted and its entry removed from `manifest.playlists`.
 
-**Given** a playlist track's `jellyfin_id` is not found in `manifest.synced_items` (e.g. download failed)
+**Given** a playlist track's provider item ID is not found in `manifest.synced_items` (`providerItemId` in `.hifimule.json`; internal Rust field `jellyfin_id`)
 **Then** that track is omitted from the `.m3u` with a log entry; remaining tracks are still written.
 
 **Technical Notes:**
