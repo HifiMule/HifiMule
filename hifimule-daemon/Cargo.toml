@@ -30,6 +30,8 @@ futures = "0.3"
 async-trait = "0.1"
 uuid = { version = "1.0", features = ["v4"] }
 bytes = "1.0"
+md-5 = "0.10"
+opensubsonic = "=0.3.0"
 windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Devices_DeviceAndDriverInstallation"] }
 notify-rust.workspace = true
 

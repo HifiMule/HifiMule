@@ -8,6 +8,7 @@ use std::fmt;
 use thiserror::Error;
 
 pub mod jellyfin;
+pub mod subsonic;
 
 #[async_trait]
 pub trait MediaProvider: Send + Sync {
