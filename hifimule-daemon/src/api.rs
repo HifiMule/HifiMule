@@ -929,6 +929,26 @@ impl CredentialManager {
         Ok(())
     }
 
+    pub fn save_server_secret(server_type: &str, secret: &str) -> Result<()> {
+        if secret.trim().is_empty() {
+            return Err(anyhow!("Secret cannot be empty"));
+        }
+        let entry = keyring::Entry::new(KEYRING_SERVICE, &format!("{KEYRING_USER}-{server_type}"))
+            .map_err(|e| anyhow!("Failed to access keyring: {}", e))?;
+        entry
+            .set_password(secret)
+            .map_err(|e| anyhow!("Failed to save server secret to keyring: {}", e))?;
+        Ok(())
+    }
+
+    pub fn get_server_secret(server_type: &str) -> Result<String> {
+        let entry = keyring::Entry::new(KEYRING_SERVICE, &format!("{KEYRING_USER}-{server_type}"))
+            .map_err(|e| anyhow!("Failed to access keyring: {}", e))?;
+        entry
+            .get_password()
+            .map_err(|e| anyhow!("No server secret found in keyring: {}", e))
+    }
+
     pub fn get_credentials() -> Result<(String, String, Option<String>)> {
         let path = Self::get_config_path()?;
         if !path.exists() {

@@ -15,6 +15,15 @@ pub struct DeviceMapping {
     pub transcoding_profile_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerConfig {
+    pub url: String,
+    pub server_type: String,
+    pub username: String,
+    pub server_version: Option<String>,
+    pub updated_at: i64,
+}
+
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
 }
@@ -98,7 +107,66 @@ impl Database {
             [],
         )
         .map_err(|e| anyhow!("Failed to create scrobble unique index: {}", e))?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS server_config (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                url TEXT NOT NULL,
+                server_type TEXT NOT NULL,
+                username TEXT NOT NULL,
+                server_version TEXT,
+                updated_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .map_err(|e| anyhow!("Failed to create server_config table: {}", e))?;
         Ok(())
+    }
+
+    pub fn upsert_server_config(
+        &self,
+        url: &str,
+        server_type: &str,
+        username: &str,
+        server_version: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let updated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| anyhow!("Failed to calculate timestamp: {}", e))?
+            .as_secs() as i64;
+        conn.execute(
+            "INSERT INTO server_config (id, url, server_type, username, server_version, updated_at)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET
+                url = excluded.url,
+                server_type = excluded.server_type,
+                username = excluded.username,
+                server_version = excluded.server_version,
+                updated_at = excluded.updated_at",
+            params![url, server_type, username, server_version, updated_at],
+        )
+        .map_err(|e| anyhow!("Failed to upsert server config: {}", e))?;
+        Ok(())
+    }
+
+    pub fn get_server_config(&self) -> Result<Option<ServerConfig>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT url, server_type, username, server_version, updated_at
+             FROM server_config WHERE id = 1",
+        )?;
+        let mut rows = stmt.query([])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(ServerConfig {
+                url: row.get(0)?,
+                server_type: row.get(1)?,
+                username: row.get(2)?,
+                server_version: row.get(3)?,
+                updated_at: row.get(4)?,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn get_device_mapping(&self, id: &str) -> Result<Option<DeviceMapping>> {
@@ -408,5 +476,33 @@ mod tests {
         let db = Database::memory().unwrap();
         let result = db.set_auto_sync_on_connect("nonexistent", true);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_server_config_round_trips_and_updates() {
+        let db = Database::memory().unwrap();
+
+        assert_eq!(db.get_server_config().unwrap(), None);
+
+        db.upsert_server_config(
+            "http://music.example",
+            "openSubsonic",
+            "alexis",
+            Some("1.16.1"),
+        )
+        .unwrap();
+        let config = db.get_server_config().unwrap().unwrap();
+        assert_eq!(config.url, "http://music.example");
+        assert_eq!(config.server_type, "openSubsonic");
+        assert_eq!(config.username, "alexis");
+        assert_eq!(config.server_version.as_deref(), Some("1.16.1"));
+
+        db.upsert_server_config("http://jellyfin.example", "jellyfin", "user-id", None)
+            .unwrap();
+        let config = db.get_server_config().unwrap().unwrap();
+        assert_eq!(config.url, "http://jellyfin.example");
+        assert_eq!(config.server_type, "jellyfin");
+        assert_eq!(config.username, "user-id");
+        assert_eq!(config.server_version, None);
     }
 }

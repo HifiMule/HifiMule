@@ -8,7 +8,6 @@ use crate::providers::{
     Capabilities, MediaProvider, ProviderError, ScrobbleRequest, ScrobbleSubmission, ServerType,
     TranscodeProfile,
 };
-use anyhow::anyhow;
 use async_trait::async_trait;
 
 const ARTIST_TYPES: &str = "MusicArtist";
@@ -22,6 +21,7 @@ pub struct JellyfinProvider {
     server_url: String,
     token: String,
     user_id: String,
+    server_version: Option<String>,
 }
 
 impl JellyfinProvider {
@@ -36,6 +36,23 @@ impl JellyfinProvider {
             server_url: server_url.into(),
             token: token.into(),
             user_id: user_id.into(),
+            server_version: None,
+        }
+    }
+
+    pub fn new_with_version(
+        client: JellyfinClient,
+        server_url: impl Into<String>,
+        token: impl Into<String>,
+        user_id: impl Into<String>,
+        server_version: Option<String>,
+    ) -> Self {
+        Self {
+            client,
+            server_url: server_url.into(),
+            token: token.into(),
+            user_id: user_id.into(),
+            server_version,
         }
     }
 
@@ -310,6 +327,10 @@ impl MediaProvider for JellyfinProvider {
         ServerType::Jellyfin
     }
 
+    fn server_version(&self) -> Option<&str> {
+        self.server_version.as_deref()
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             open_subsonic: false,
@@ -462,9 +483,11 @@ fn transcode_profile_to_device_profile(profile: &TranscodeProfile) -> serde_json
 
 fn status_from_message(message: &str) -> Option<u16> {
     message.split("status: ").nth(1).and_then(|tail| {
-        tail.split_whitespace()
-            .next()
-            .and_then(|s| s.trim_end_matches(|c: char| !c.is_ascii_digit()).parse::<u16>().ok())
+        tail.split_whitespace().next().and_then(|s| {
+            s.trim_end_matches(|c: char| !c.is_ascii_digit())
+                .parse::<u16>()
+                .ok()
+        })
     })
 }
 
@@ -903,7 +926,9 @@ mod tests {
 
         let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
 
-        let result = provider.changes_since(Some("not-a-valid-iso-timestamp")).await;
+        let result = provider
+            .changes_since(Some("not-a-valid-iso-timestamp"))
+            .await;
 
         assert!(
             matches!(result, Err(ProviderError::Deserialization(_))),

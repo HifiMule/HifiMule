@@ -21,6 +21,7 @@ const API_VERSION: &str = "1.16.1";
 pub struct SubsonicProvider {
     client: SubsonicClient,
     open_subsonic: bool,
+    server_version: Option<String>,
 }
 
 impl fmt::Debug for SubsonicProvider {
@@ -28,6 +29,7 @@ impl fmt::Debug for SubsonicProvider {
         f.debug_struct("SubsonicProvider")
             .field("client", &self.client)
             .field("open_subsonic", &self.open_subsonic)
+            .field("server_version", &self.server_version)
             .finish()
     }
 }
@@ -35,11 +37,12 @@ impl fmt::Debug for SubsonicProvider {
 impl SubsonicProvider {
     pub async fn connect(credentials: ProviderCredentials) -> Result<Self, ProviderError> {
         let client = SubsonicClient::from_credentials(credentials)?;
-        let open_subsonic = client.ping().await?;
+        let ping = client.ping().await?;
 
         Ok(Self {
             client,
-            open_subsonic,
+            open_subsonic: ping.open_subsonic,
+            server_version: ping.server_version,
         })
     }
 
@@ -48,6 +51,7 @@ impl SubsonicProvider {
         Self {
             client,
             open_subsonic,
+            server_version: None,
         }
     }
 }
@@ -215,6 +219,10 @@ impl MediaProvider for SubsonicProvider {
         }
     }
 
+    fn server_version(&self) -> Option<&str> {
+        self.server_version.as_deref()
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             open_subsonic: self.open_subsonic,
@@ -272,9 +280,12 @@ impl SubsonicClient {
         })
     }
 
-    async fn ping(&self) -> Result<bool, ProviderError> {
+    async fn ping(&self) -> Result<PingResult, ProviderError> {
         let envelope: SubsonicEnvelope<NoBody> = self.get_envelope("ping", &[]).await?;
-        Ok(envelope.response.open_subsonic.unwrap_or(false))
+        Ok(PingResult {
+            open_subsonic: envelope.response.open_subsonic.unwrap_or(false),
+            server_version: envelope.response.server_version,
+        })
     }
 
     async fn get_artists(&self) -> Result<ArtistsBody, ProviderError> {
@@ -505,16 +516,17 @@ fn map_reqwest_error(error: reqwest::Error) -> ProviderError {
 
 fn sanitize_message(message: &str) -> String {
     let mut sanitized = message.to_string();
-    for key in ["password", "p"] {
+    for key in ["password", "u", "p", "t", "s"] {
         let needle = format!("{key}=");
         let mut rebuilt = String::with_capacity(sanitized.len());
         let mut cursor = 0;
         while let Some(relative_start) = sanitized[cursor..].find(&needle) {
             let start = cursor + relative_start;
-            let preceded_by_separator = start == 0 || matches!(
-                sanitized[..start].chars().last(),
-                Some('?' | '&' | ' ' | '\t' | '\n')
-            );
+            let preceded_by_separator = start == 0
+                || matches!(
+                    sanitized[..start].chars().last(),
+                    Some('?' | '&' | ' ' | '\t' | '\n')
+                );
             if !preceded_by_separator {
                 rebuilt.push_str(&sanitized[cursor..start + needle.len()]);
                 cursor = start + needle.len();
@@ -646,12 +658,19 @@ struct SubsonicEnvelope<T> {
 #[serde(bound(deserialize = "T: Deserialize<'de> + Default"))]
 struct SubsonicResponse<T> {
     status: String,
+    #[serde(default, rename = "version")]
+    server_version: Option<String>,
     #[serde(rename = "openSubsonic")]
     open_subsonic: Option<bool>,
     error: Option<ApiErrorDto>,
     #[serde(default)]
     #[serde(flatten)]
     body: T,
+}
+
+struct PingResult {
+    open_subsonic: bool,
+    server_version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1179,7 +1198,10 @@ mod tests {
         assert!(cover.contains("/rest/getCoverArt.view"));
         assert!(stream.contains("format=mp3"));
         assert!(stream.contains("maxBitRate=192"));
-        assert!(!stream.contains("maxBitRate=192000"), "maxBitRate must be kbps, not bps");
+        assert!(
+            !stream.contains("maxBitRate=192000"),
+            "maxBitRate must be kbps, not bps"
+        );
         assert!(!download.contains(PASSWORD));
         assert!(!stream.contains(PASSWORD));
         assert!(!cover.contains(PASSWORD));
@@ -1269,10 +1291,7 @@ mod tests {
 
         let malformed = json_provider.list_artists(None).await;
 
-        assert!(matches!(
-            malformed,
-            Err(ProviderError::Deserialization(_))
-        ));
+        assert!(matches!(malformed, Err(ProviderError::Deserialization(_))));
     }
 
     #[tokio::test]
@@ -1320,7 +1339,10 @@ mod tests {
             })
             .await;
 
-        assert!(matches!(result, Err(ProviderError::UnsupportedCapability(_))));
+        assert!(matches!(
+            result,
+            Err(ProviderError::UnsupportedCapability(_))
+        ));
     }
 
     #[tokio::test]
@@ -1338,7 +1360,10 @@ mod tests {
         let provider = provider(&server).await;
 
         let changes_none = provider.changes_since(None).await.expect("changes(None)");
-        let changes_empty = provider.changes_since(Some("")).await.expect("changes(empty)");
+        let changes_empty = provider
+            .changes_since(Some(""))
+            .await
+            .expect("changes(empty)");
 
         assert!(changes_none.is_empty());
         assert!(changes_empty.is_empty());
@@ -1395,11 +1420,16 @@ mod tests {
                 credential: CredentialKind::Token("secret-token".to_string()),
             }
         );
-        let sanitized = sanitize_message("failed p=raw-password password=raw-password");
+        let sanitized = sanitize_message(
+            "failed u=alexis p=raw-password t=token-value s=salt-value password=raw-password",
+        );
 
         assert!(!debug.contains(PASSWORD));
         assert!(!credential_debug.contains("secret-token"));
         assert!(!sanitized.contains(PASSWORD));
+        assert!(!sanitized.contains("alexis"));
+        assert!(!sanitized.contains("token-value"));
+        assert!(!sanitized.contains("salt-value"));
         assert!(debug.contains("[redacted]"));
     }
 }

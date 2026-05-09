@@ -5,6 +5,7 @@ use crate::domain::models::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::Arc;
 use thiserror::Error;
 
 pub mod jellyfin;
@@ -42,7 +43,19 @@ pub trait MediaProvider: Send + Sync {
 
     fn server_type(&self) -> ServerType;
 
+    fn server_version(&self) -> Option<&str> {
+        None
+    }
+
     fn capabilities(&self) -> Capabilities;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ServerTypeHint {
+    Auto,
+    Jellyfin,
+    Subsonic,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,4 +152,313 @@ pub enum ProviderError {
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+pub async fn connect(
+    url: &str,
+    creds: &ProviderCredentials,
+    hint: ServerTypeHint,
+) -> Result<Arc<dyn MediaProvider>, ProviderError> {
+    match hint {
+        ServerTypeHint::Auto => {
+            if let Ok(provider) = connect_subsonic(url, creds).await {
+                return Ok(provider);
+            }
+            connect_jellyfin(url, creds)
+                .await
+                .map_err(|_| unknown_type_error())
+        }
+        ServerTypeHint::Jellyfin => connect_jellyfin(url, creds).await,
+        ServerTypeHint::Subsonic => connect_subsonic(url, creds).await,
+    }
+}
+
+pub fn server_type_slug(server_type: ServerType) -> Option<&'static str> {
+    match server_type {
+        ServerType::Jellyfin => Some("jellyfin"),
+        ServerType::Subsonic => Some("subsonic"),
+        ServerType::OpenSubsonic => Some("openSubsonic"),
+        ServerType::Unknown => None,
+    }
+}
+
+fn unknown_type_error() -> ProviderError {
+    ProviderError::UnsupportedCapability("Unknown server type at this URL".to_string())
+}
+
+async fn connect_subsonic(
+    url: &str,
+    creds: &ProviderCredentials,
+) -> Result<Arc<dyn MediaProvider>, ProviderError> {
+    let mut creds = creds.clone();
+    creds.server_url = url.to_string();
+    let provider = subsonic::SubsonicProvider::connect(creds).await?;
+    Ok(Arc::new(provider))
+}
+
+async fn connect_jellyfin(
+    url: &str,
+    creds: &ProviderCredentials,
+) -> Result<Arc<dyn MediaProvider>, ProviderError> {
+    let crate::providers::CredentialKind::Password { username, password } = &creds.credential
+    else {
+        return Err(ProviderError::UnsupportedCapability(
+            "Jellyfin connection requires username and password".to_string(),
+        ));
+    };
+
+    let client = crate::api::JellyfinClient::new();
+    let auth = client
+        .authenticate_by_name(url, username, password)
+        .await
+        .map_err(|error| ProviderError::Auth(sanitize_secret_message(&error.to_string())))?;
+    let info = client
+        .test_connection(url, &auth.access_token)
+        .await
+        .map_err(|error| ProviderError::Http {
+            status: None,
+            message: sanitize_secret_message(&error.to_string()),
+        })?;
+    let provider = jellyfin::JellyfinProvider::new_with_version(
+        client,
+        url,
+        auth.access_token,
+        auth.user.id,
+        Some(info.version),
+    );
+    Ok(Arc::new(provider))
+}
+
+fn sanitize_secret_message(message: &str) -> String {
+    let mut sanitized = message.to_string();
+    for key in ["password", "pw", "token", "api_key", "u", "p", "t", "s"] {
+        let needle = format!("{key}=");
+        while let Some(start) = sanitized.find(&needle) {
+            let value_start = start + needle.len();
+            let value_end = sanitized[value_start..]
+                .find(|ch: char| ch == '&' || ch.is_whitespace())
+                .map(|offset| value_start + offset)
+                .unwrap_or_else(|| sanitized.len());
+            sanitized.replace_range(value_start..value_end, "[redacted]");
+        }
+    }
+    sanitized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mockito::{Matcher, Server};
+
+    fn password_credentials(url: String) -> ProviderCredentials {
+        ProviderCredentials {
+            server_url: url,
+            credential: CredentialKind::Password {
+                username: "alexis".to_string(),
+                password: "secret-password".to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn factory_auto_detects_open_subsonic_first() {
+        let mut server = Server::new_async().await;
+        let _ping = server
+            .mock("GET", "/rest/ping.view")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"subsonic-response":{"status":"ok","version":"1.16.1","openSubsonic":true}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let _jellyfin = server
+            .mock("POST", "/Users/AuthenticateByName")
+            .expect(0)
+            .create_async()
+            .await;
+
+        let provider = connect(
+            &server.url(),
+            &password_credentials(server.url()),
+            ServerTypeHint::Auto,
+        )
+        .await
+        .expect("provider");
+
+        assert_eq!(provider.server_type(), ServerType::OpenSubsonic);
+        assert_eq!(provider.server_version(), Some("1.16.1"));
+    }
+
+    #[tokio::test]
+    async fn factory_auto_detects_classic_subsonic_without_open_flag() {
+        let mut server = Server::new_async().await;
+        let _ping = server
+            .mock("GET", "/rest/ping.view")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let provider = connect(
+            &server.url(),
+            &password_credentials(server.url()),
+            ServerTypeHint::Auto,
+        )
+        .await
+        .expect("provider");
+
+        assert_eq!(provider.server_type(), ServerType::Subsonic);
+        assert_eq!(provider.server_version(), Some("1.16.1"));
+    }
+
+    #[tokio::test]
+    async fn factory_auto_falls_back_to_jellyfin_after_subsonic_failure() {
+        let mut server = Server::new_async().await;
+        let _ping = server
+            .mock("GET", "/rest/ping.view")
+            .match_query(Matcher::Any)
+            .with_status(404)
+            .expect(1)
+            .create_async()
+            .await;
+        let _auth = server
+            .mock("POST", "/Users/AuthenticateByName")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"AccessToken":"jellyfin-token-12345","User":{"Id":"user1","Name":"Alexis"}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let _info = server
+            .mock("GET", "/System/Info")
+            .match_header("X-Emby-Token", "jellyfin-token-12345")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ServerName":"Jellyfin","Version":"10.9.0","Id":"server1"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let provider = connect(
+            &server.url(),
+            &password_credentials(server.url()),
+            ServerTypeHint::Auto,
+        )
+        .await
+        .expect("provider");
+
+        assert_eq!(provider.server_type(), ServerType::Jellyfin);
+        assert_eq!(provider.server_version(), Some("10.9.0"));
+    }
+
+    #[tokio::test]
+    async fn factory_explicit_hints_skip_unrelated_probe_paths() {
+        let mut jellyfin = Server::new_async().await;
+        let _subsonic_should_not_run = jellyfin
+            .mock("GET", "/rest/ping.view")
+            .expect(0)
+            .create_async()
+            .await;
+        let _auth = jellyfin
+            .mock("POST", "/Users/AuthenticateByName")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"AccessToken":"jellyfin-token-12345","User":{"Id":"user1","Name":"Alexis"}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let _info = jellyfin
+            .mock("GET", "/System/Info")
+            .match_header("X-Emby-Token", "jellyfin-token-12345")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ServerName":"Jellyfin","Version":"10.9.0","Id":"server1"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let provider = connect(
+            &jellyfin.url(),
+            &password_credentials(jellyfin.url()),
+            ServerTypeHint::Jellyfin,
+        )
+        .await
+        .expect("jellyfin provider");
+        assert_eq!(provider.server_type(), ServerType::Jellyfin);
+
+        let mut subsonic = Server::new_async().await;
+        let _jellyfin_should_not_run = subsonic
+            .mock("POST", "/Users/AuthenticateByName")
+            .expect(0)
+            .create_async()
+            .await;
+        let _ping = subsonic
+            .mock("GET", "/rest/ping.view")
+            .match_query(Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let provider = connect(
+            &subsonic.url(),
+            &password_credentials(subsonic.url()),
+            ServerTypeHint::Subsonic,
+        )
+        .await
+        .expect("subsonic provider");
+        assert_eq!(provider.server_type(), ServerType::Subsonic);
+    }
+
+    #[tokio::test]
+    async fn factory_auto_all_fail_returns_unknown_type_error() {
+        let mut server = Server::new_async().await;
+        let _ping = server
+            .mock("GET", "/rest/ping.view")
+            .match_query(Matcher::Any)
+            .with_status(404)
+            .expect(1)
+            .create_async()
+            .await;
+        let _auth = server
+            .mock("POST", "/Users/AuthenticateByName")
+            .with_status(404)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let result = connect(
+            &server.url(),
+            &password_credentials(server.url()),
+            ServerTypeHint::Auto,
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(ProviderError::UnsupportedCapability(ref message)) if message == "Unknown server type at this URL")
+        );
+    }
+
+    #[test]
+    fn server_type_slugs_are_ui_contract_values() {
+        assert_eq!(server_type_slug(ServerType::Jellyfin), Some("jellyfin"));
+        assert_eq!(server_type_slug(ServerType::Subsonic), Some("subsonic"));
+        assert_eq!(
+            server_type_slug(ServerType::OpenSubsonic),
+            Some("openSubsonic")
+        );
+        assert_eq!(server_type_slug(ServerType::Unknown), None);
+    }
 }

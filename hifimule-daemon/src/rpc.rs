@@ -1,4 +1,7 @@
 use crate::api::{CredentialManager, JellyfinClient};
+use crate::providers::{
+    server_type_slug, CredentialKind, MediaProvider, ProviderCredentials, ServerTypeHint,
+};
 use axum::{
     extract::{Path, State},
     response::IntoResponse,
@@ -54,6 +57,9 @@ pub struct JsonRpcError {
 
 pub struct AppState {
     pub jellyfin_client: JellyfinClient,
+    pub provider: Arc<tokio::sync::RwLock<Option<Arc<dyn MediaProvider>>>>,
+    pub server_type: Arc<tokio::sync::RwLock<Option<String>>>,
+    pub server_version: Arc<tokio::sync::RwLock<Option<String>>>,
     pub db: Arc<crate::db::Database>,
     pub device_manager: Arc<crate::device::DeviceManager>,
     pub last_connection_check: Arc<tokio::sync::Mutex<Option<(std::time::Instant, bool)>>>,
@@ -82,6 +88,9 @@ pub async fn run_server(
 ) {
     let state = Arc::new(AppState {
         jellyfin_client: JellyfinClient::new(),
+        provider: Arc::new(tokio::sync::RwLock::new(None)),
+        server_type: Arc::new(tokio::sync::RwLock::new(None)),
+        server_version: Arc::new(tokio::sync::RwLock::new(None)),
         db,
         device_manager,
         last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -90,6 +99,7 @@ pub async fn run_server(
         last_scrobbler_result,
         state_tx,
     });
+    restore_provider_from_config(&state).await;
 
     let app = Router::new()
         .route("/", post(handler))
@@ -120,12 +130,60 @@ pub async fn run_server(
     axum::serve(listener, app).await.unwrap();
 }
 
+async fn restore_provider_from_config(state: &AppState) {
+    let Ok(Some(config)) = state.db.get_server_config() else {
+        return;
+    };
+
+    let provider: Option<Arc<dyn MediaProvider>> = match config.server_type.as_str() {
+        "jellyfin" => CredentialManager::get_server_secret("jellyfin")
+            .ok()
+            .map(|token| {
+                Arc::new(
+                    crate::providers::jellyfin::JellyfinProvider::new_with_version(
+                        JellyfinClient::new(),
+                        config.url.clone(),
+                        token,
+                        config.username.clone(),
+                        config.server_version.clone(),
+                    ),
+                ) as Arc<dyn MediaProvider>
+            }),
+        "subsonic" | "openSubsonic" => {
+            let secret = CredentialManager::get_server_secret(&config.server_type).ok();
+            if let Some(password) = secret {
+                let credentials = ProviderCredentials {
+                    server_url: config.url.clone(),
+                    credential: CredentialKind::Password {
+                        username: config.username.clone(),
+                        password,
+                    },
+                };
+                crate::providers::connect(&config.url, &credentials, ServerTypeHint::Subsonic)
+                    .await
+                    .ok()
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+
+    if let Some(provider) = provider {
+        *state.provider.write().await = Some(provider);
+        *state.server_type.write().await = Some(config.server_type);
+        *state.server_version.write().await = config.server_version;
+        *state.last_connection_check.lock().await = None;
+    }
+}
+
 async fn handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
     let result = match payload.method.as_str() {
         "test_connection" => handle_test_connection(&state, payload.params).await,
+        "server.connect" => handle_server_connect(&state, payload.params).await,
         "login" => handle_login(&state, payload.params).await,
         "save_credentials" => handle_save_credentials(payload.params).await,
         "get_credentials" => handle_get_credentials().await,
@@ -217,6 +275,139 @@ async fn handle_test_connection(
         Err(e) => Err(JsonRpcError {
             code: ERR_CONNECTION_FAILED,
             message: e.to_string(),
+            data: None,
+        }),
+    }
+}
+
+pub async fn require_provider(state: &AppState) -> Result<Arc<dyn MediaProvider>, JsonRpcError> {
+    state.provider.read().await.clone().ok_or(JsonRpcError {
+        code: ERR_CONNECTION_FAILED,
+        message: "No active media provider".to_string(),
+        data: None,
+    })
+}
+
+async fn handle_server_connect(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Invalid params".to_string(),
+        data: None,
+    })?;
+
+    let url = params["url"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing url".to_string(),
+        data: None,
+    })?;
+    let server_type = params["serverType"].as_str().unwrap_or("auto");
+    let username = params["username"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing username".to_string(),
+        data: None,
+    })?;
+    let password = params["password"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing password".to_string(),
+        data: None,
+    })?;
+
+    let hint = parse_server_type_hint(server_type)?;
+    let credentials = ProviderCredentials {
+        server_url: url.to_string(),
+        credential: CredentialKind::Password {
+            username: username.to_string(),
+            password: password.to_string(),
+        },
+    };
+    let provider = crate::providers::connect(url, &credentials, hint)
+        .await
+        .map_err(|error| JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: error.to_string(),
+            data: None,
+        })?;
+    let normalized_type = server_type_slug(provider.server_type())
+        .ok_or(JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: "Unknown server type at this URL".to_string(),
+            data: None,
+        })?
+        .to_string();
+    let version = provider.server_version().map(str::to_string);
+
+    let mut persisted_username = username.to_string();
+    let secret = match provider.server_type() {
+        crate::providers::ServerType::Jellyfin => {
+            let auth = state
+                .jellyfin_client
+                .authenticate_by_name(url, username, password)
+                .await
+                .map_err(|error| JsonRpcError {
+                    code: ERR_INVALID_CREDENTIALS,
+                    message: error.to_string(),
+                    data: None,
+                })?;
+            persisted_username = auth.user.id.clone();
+            CredentialManager::save_credentials(url, &auth.access_token, Some(&auth.user.id))
+                .map_err(|error| JsonRpcError {
+                    code: ERR_STORAGE_ERROR,
+                    message: error.to_string(),
+                    data: None,
+                })?;
+            auth.access_token
+        }
+        crate::providers::ServerType::Subsonic | crate::providers::ServerType::OpenSubsonic => {
+            password.to_string()
+        }
+        crate::providers::ServerType::Unknown => String::new(),
+    };
+    if !secret.is_empty() {
+        CredentialManager::save_server_secret(&normalized_type, &secret).map_err(|error| {
+            JsonRpcError {
+                code: ERR_STORAGE_ERROR,
+                message: error.to_string(),
+                data: None,
+            }
+        })?;
+    }
+    state
+        .db
+        .upsert_server_config(
+            url,
+            &normalized_type,
+            &persisted_username,
+            version.as_deref(),
+        )
+        .map_err(|error| JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: error.to_string(),
+            data: None,
+        })?;
+
+    *state.provider.write().await = Some(provider);
+    *state.server_type.write().await = Some(normalized_type.clone());
+    *state.server_version.write().await = version.clone();
+    *state.last_connection_check.lock().await = None;
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "serverType": normalized_type,
+        "serverVersion": version,
+    }))
+}
+
+fn parse_server_type_hint(value: &str) -> Result<ServerTypeHint, JsonRpcError> {
+    match value {
+        "auto" => Ok(ServerTypeHint::Auto),
+        "jellyfin" => Ok(ServerTypeHint::Jellyfin),
+        "subsonic" => Ok(ServerTypeHint::Subsonic),
+        _ => Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Invalid serverType".to_string(),
             data: None,
         }),
     }
@@ -405,6 +596,8 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
     });
 
     let active_operation_id = state.sync_operation_manager.get_active_operation_id().await;
+    let server_type = state.server_type.read().await.clone();
+    let server_version = state.server_version.read().await.clone();
 
     let (connected_devices_snapshot, selected_path_buf) =
         state.device_manager.get_multi_device_snapshot().await;
@@ -429,6 +622,8 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         "currentDevice": device,
         "deviceMapping": mapping,
         "serverConnected": server_connected,
+        "serverType": server_type,
+        "serverVersion": server_version,
         "dirtyManifest": dirty,
         "pendingDevicePath": pending_device_path,
         "pendingDeviceFriendlyName": pending_device_friendly_name,
@@ -489,6 +684,10 @@ async fn handle_manifest_save_basket(
 
 async fn check_server_connection_cached(state: &AppState) -> bool {
     const CACHE_DURATION_SECS: u64 = 5;
+
+    if state.provider.read().await.is_some() {
+        return true;
+    }
 
     let mut cache = state.last_connection_check.lock().await;
 
@@ -2020,12 +2219,35 @@ mod tests {
     use crate::api::CREDENTIAL_TEST_MUTEX;
     use serde_json::json;
 
+    #[test]
+    fn test_parse_server_type_hint_accepts_supported_values() {
+        assert_eq!(
+            parse_server_type_hint("auto").unwrap(),
+            ServerTypeHint::Auto
+        );
+        assert_eq!(
+            parse_server_type_hint("jellyfin").unwrap(),
+            ServerTypeHint::Jellyfin
+        );
+        assert_eq!(
+            parse_server_type_hint("subsonic").unwrap(),
+            ServerTypeHint::Subsonic
+        );
+        assert_eq!(
+            parse_server_type_hint("navidrome").unwrap_err().code,
+            ERR_INVALID_PARAMS
+        );
+    }
+
     #[tokio::test]
     async fn test_rpc_test_connection_params() {
         let db = Arc::new(crate::db::Database::memory().unwrap());
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -2052,6 +2274,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -2079,6 +2304,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db: db.clone(),
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -2116,6 +2344,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db: db.clone(),
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -2157,6 +2388,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db: db.clone(),
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -2211,6 +2445,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db: db.clone(),
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -2254,6 +2491,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db: db.clone(),
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -2292,6 +2532,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db: db.clone(),
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -2322,6 +2565,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db: db.clone(),
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -2395,6 +2641,9 @@ mod tests {
 
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db: db.clone(),
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -2419,6 +2668,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -2466,6 +2718,9 @@ mod tests {
 
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -2518,6 +2773,9 @@ mod tests {
 
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -2542,6 +2800,9 @@ mod tests {
         // No device — dirtyManifest should be false
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db: db.clone(),
             device_manager: device_manager.clone(),
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -2586,6 +2847,9 @@ mod tests {
 
         let state2 = AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -2610,6 +2874,9 @@ mod tests {
         // No unrecognized device → pendingDevicePath should be null
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db: db.clone(),
             device_manager: device_manager.clone(),
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -2717,6 +2984,9 @@ mod tests {
 
         let state = Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -2809,6 +3079,9 @@ mod tests {
 
         let state = Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -2855,6 +3128,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -2886,6 +3162,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -2919,6 +3198,9 @@ mod tests {
 
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db: db.clone(),
             device_manager: device_manager.clone(),
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -2979,6 +3261,9 @@ mod tests {
 
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db: db.clone(),
             device_manager: device_manager.clone(),
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -3057,6 +3342,9 @@ mod tests {
 
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db: db.clone(),
             device_manager: device_manager.clone(),
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -3146,6 +3434,9 @@ mod tests {
 
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -3170,6 +3461,9 @@ mod tests {
         // No running operation → activeOperationId should be null
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db: db.clone(),
             device_manager: device_manager.clone(),
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -3184,6 +3478,25 @@ mod tests {
             serde_json::Value::Null,
             "No running operation → activeOperationId must be null"
         );
+        assert_eq!(result["serverType"], serde_json::Value::Null);
+        assert_eq!(result["serverVersion"], serde_json::Value::Null);
+
+        *state.provider.write().await = Some(Arc::new(
+            crate::providers::jellyfin::JellyfinProvider::new_with_version(
+                JellyfinClient::new(),
+                "http://localhost",
+                "jellyfin-token-12345",
+                "user1",
+                Some("10.9.0".to_string()),
+            ),
+        ));
+        *state.server_type.write().await = Some("jellyfin".to_string());
+        *state.server_version.write().await = Some("10.9.0".to_string());
+
+        let result = handle_get_daemon_state(&state).await.unwrap();
+        assert_eq!(result["serverConnected"], true);
+        assert_eq!(result["serverType"], "jellyfin");
+        assert_eq!(result["serverVersion"], "10.9.0");
 
         // Running operation → activeOperationId should be the operation UUID
         let manager = Arc::new(crate::sync::SyncOperationManager::new());
@@ -3192,6 +3505,9 @@ mod tests {
 
         let state2 = AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -3215,6 +3531,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -3375,6 +3694,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
