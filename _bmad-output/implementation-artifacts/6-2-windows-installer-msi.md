@@ -40,13 +40,13 @@ so that I can install HifiMule like any other desktop application on my Windows 
   - [x] T3.1: Verify Start Menu shortcut is created under `Start Menu\Programs\HifiMule\`
   - [x] T3.2: Launch HifiMule from Start Menu shortcut and confirm the UI window appears
   - [x] T3.3: Verify the daemon sidecar starts (check `localhost:19140` responds to health check)
-  - [x] T3.4: Verify `System.AppUserModel.ID` is set to `com.alexi.hifimule` on shortcuts for proper taskbar grouping
+  - [x] T3.4: Verify `System.AppUserModel.ID` is set to `hifimule.github.io` on shortcuts for proper taskbar grouping
 
 - [x] **T4: Validate Clean Uninstallation** (AC: #3, #8)
   - [x] T4.1: Uninstall via Add/Remove Programs (`msiexec /x`)
   - [x] T4.2: Verify all files removed from `C:\Program Files\HifiMule\` (including daemon sidecar)
   - [x] T4.3: Verify Start Menu shortcuts are removed
-  - [x] T4.4: Verify registry entries under `HKCU\Software\alexi\HifiMule` are cleaned up
+  - [x] T4.4: Verify registry entries under `HKCU\Software\HifiMule\HifiMule` are cleaned up
   - [x] T4.5: Verify the `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\HifiMule` key is removed
   - [x] T4.6: Verify `%APPDATA%\HifiMule\` app data is NOT deleted by default (user data preservation)
 
@@ -80,7 +80,7 @@ so that I can install HifiMule like any other desktop application on my Windows 
 | UpgradeCode | `44585dad-44ac-5c08-ad8d-e5a7a7dfcb10` | Must remain stable for MSI upgrade support |
 | InstallScope | `perMachine` | Installs to Program Files (requires elevation) |
 | Install Dir | `ProgramFiles64Folder\HifiMule` | Standard x64 location |
-| Manufacturer | `alexi` | Displays in Add/Remove Programs |
+| Manufacturer | `HifiMule` | Displays in Add/Remove Programs |
 | Shortcuts | Start Menu + Desktop | With `System.AppUserModel.ID` |
 
 ### WiX Startup Fragment Design
@@ -117,7 +117,7 @@ Key points:
 - `prepare-sidecar.mjs` handles daemon binary preparation
 - Sidecar launched in `lib.rs` `setup()` hook via `app.shell().sidecar("hifimule-daemon")`
 - 122+ tests pass
-- `productName` = "HifiMule", `identifier` = "com.alexi.hifimule"
+- `productName` = "HifiMule", `identifier` = "hifimule.github.io"
 
 ### Git Intelligence
 
