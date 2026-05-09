@@ -10,6 +10,12 @@ All previously deferred items have been incorporated into Epic 7 stories (7.1–
 - **`#[non_exhaustive]` missing on public enums** — `ItemType`, `ChangeType`, `ServerType`, `ScrobbleSubmission` are all public enums; adding a variant later is a breaking change for any downstream match arms. Add `#[non_exhaustive]` when the domain module stabilizes.
 - **`ProviderError::Http.status` is raw `u16` with no range validation** — an implementor can set `status: Some(99)` without compile-time rejection; consider `http::StatusCode` or a validated newtype when the `http` crate is added to the workspace.
 
+## Deferred from: code review of 8-2-jellyfinprovider-adapter (2026-05-09)
+
+- **`download_url` without profile returns unauthenticated URL** — `JellyfinProvider::download_url(None)` constructs `/Items/{id}/Download` with no token. Jellyfin requires auth on this endpoint. Deferred because sync.rs still uses JellyfinClient directly; Story 8.4 owns provider integration and must resolve the auth header contract.
+- **Token stored as plain `String` without `CredentialKind` wrapper** — `JellyfinProvider` stores the auth token as a raw `String` field rather than using the `CredentialKind::Token` type from Story 8.1. No Debug impl exists so no actual leak, but diverges from the established security pattern. Story 8.4 owns the constructor interface and full provider lifecycle.
+- **`user_id` not url-encoded in `get_items_changed_since`** — Consistent with the rest of `JellyfinClient` which also inserts `userId` raw. Jellyfin UUIDs (hex + hyphens) do not require URL encoding in practice. Pre-existing pattern.
+
 ## Deferred from: code review of 7-4-packaging-and-cicd-hardening (2026-05-08)
 
 - **`copy_brew_dylib` basename collision** — two dylibs from different Homebrew prefix paths with identical basenames overwrite each other in `LIB_DIR`; install_name_tool rewrites may miss the dropped copy. Unlikely for libmtp's typical transitive deps but not impossible.

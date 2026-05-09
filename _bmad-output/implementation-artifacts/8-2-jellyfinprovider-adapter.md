@@ -1,6 +1,6 @@
 # Story 8.2: JellyfinProvider Adapter
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -60,6 +60,23 @@ so that no existing functionality regresses and all callers can move toward the 
   - [x] Add mockito-backed adapter tests for list libraries, list albums/get album tracks, search, cover art URL, scrobble/report played, and `minDateLastSaved`.
   - [x] Keep or update existing `api.rs` tests so current HTTP request shapes are still covered.
   - [x] Run `rtk cargo test -p hifimule-daemon`.
+
+### Review Findings
+
+- [x] [Review][Patch] `get_artist` uses `ParentId=<artist_id>` — Jellyfin returns 0 albums; must use `AlbumArtistIds=<artist_id>&IncludeItemTypes=MusicAlbum&Recursive=true` [hifimule-daemon/src/providers/jellyfin.rs:135-153]
+- [x] [Review][Patch] `transcode_profile_to_device_profile` missing `TranscodingProfiles` and `DirectPlayProfiles` arrays — transcoding silently falls through to direct play [hifimule-daemon/src/providers/jellyfin.rs:448-455]
+- [x] [Review][Patch] `song_from_item`: `album_id.or(parent_id)` fallback incorrect for search results — search endpoint never populates `AlbumId`, so `parent_id` (library folder) is always used as album ID [hifimule-daemon/src/providers/jellyfin.rs:409]
+- [x] [Review][Patch] `status_from_message` extracts any first 3-digit decimal run from error string — can return IP octets or path components instead of HTTP status code [hifimule-daemon/src/providers/jellyfin.rs:457-467]
+- [x] [Review][Patch] `map_error` uses substring matching on "401"/"403"/"404" — misclassifies errors whose text coincidentally contains those digits (e.g., item IDs, path components) [hifimule-daemon/src/providers/jellyfin.rs:42-70]
+- [x] [Review][Patch] `map_not_found` re-wraps error via `anyhow!(message)` — discards original error chain and causes data loss [hifimule-daemon/src/providers/jellyfin.rs:72-82]
+- [x] [Review][Patch] Variable shadowing in `get_items_changed_since`: `if let Some(token) = min_date_last_saved` reuses name `token`, obscuring intent and creating a refactor trap [hifimule-daemon/src/api.rs:468]
+- [x] [Review][Patch] No tests for `list_artists` or `get_artist` — AC1/AC6 violation [hifimule-daemon/src/providers/jellyfin.rs]
+- [x] [Review][Patch] No error-mapping tests (401→Auth, 404→NotFound, malformed JSON→Deserialization) — AC6 violation [hifimule-daemon/src/providers/jellyfin.rs]
+- [x] [Review][Patch] No invalid/malformed token test for `changes_since` — AC3 constraint violation [hifimule-daemon/src/providers/jellyfin.rs]
+- [x] [Review][Patch] No test for `scrobble(ScrobbleSubmission::Playing)` returning `UnsupportedCapability` — AC6 violation [hifimule-daemon/src/providers/jellyfin.rs]
+- [x] [Review][Defer] `download_url` without profile returns unauthenticated URL — Story 8.4 owns provider integration; sync.rs still uses JellyfinClient directly [hifimule-daemon/src/providers/jellyfin.rs:271-276] — deferred, Story 8.4 scope
+- [x] [Review][Defer] Token stored as plain `String` without `CredentialKind` wrapper — Story 8.4 owns constructor interface and provider lifecycle [hifimule-daemon/src/providers/jellyfin.rs:20-25] — deferred, Story 8.4 scope
+- [x] [Review][Defer] `user_id` not url-encoded in `get_items_changed_since` — pre-existing pattern across all JellyfinClient methods; Jellyfin UUIDs are hex+hyphen so no encoding needed in practice [hifimule-daemon/src/api.rs:458] — deferred, pre-existing
 
 ## Dev Notes
 

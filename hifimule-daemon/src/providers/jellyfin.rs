@@ -41,43 +41,47 @@ impl JellyfinProvider {
 
     fn map_error(error: anyhow::Error) -> ProviderError {
         let message = error.to_string();
-        if message.contains("401")
-            || message.contains("403")
-            || message.contains("Authentication failed")
-        {
-            ProviderError::Auth(message)
-        } else if message.contains("404") {
-            ProviderError::NotFound {
-                item_type: "item".to_string(),
-                id: "unknown".to_string(),
-            }
-        } else if message.contains("expected")
+
+        if message.contains("Authentication failed") {
+            return ProviderError::Auth(message);
+        }
+
+        if let Some(status) = status_from_message(&message) {
+            return match status {
+                401 | 403 => ProviderError::Auth(message),
+                404 => ProviderError::NotFound {
+                    item_type: "item".to_string(),
+                    id: "unknown".to_string(),
+                },
+                _ => ProviderError::Http {
+                    status: Some(status),
+                    message,
+                },
+            };
+        }
+
+        if message.contains("expected")
             || message.contains("invalid type")
             || message.contains("missing field")
             || message.contains("EOF")
+            || message.contains("at line ")
+            || message.contains("trailing characters")
         {
-            ProviderError::Deserialization(message)
-        } else if message.contains("Server returned status:")
-            || message.contains("Stream returned status:")
-        {
-            ProviderError::Http {
-                status: status_from_message(&message),
-                message,
-            }
-        } else {
-            ProviderError::Other(error)
+            return ProviderError::Deserialization(message);
         }
+
+        ProviderError::Other(error)
     }
 
     fn map_not_found(error: anyhow::Error, item_type: &str, id: &str) -> ProviderError {
         let message = error.to_string();
-        if message.contains("404") {
+        if let Some(404) = status_from_message(&message) {
             ProviderError::NotFound {
                 item_type: item_type.to_string(),
                 id: id.to_string(),
             }
         } else {
-            Self::map_error(anyhow!(message))
+            Self::map_error(error)
         }
     }
 
@@ -134,17 +138,7 @@ impl MediaProvider for JellyfinProvider {
             .map_err(|err| Self::map_not_found(err, "artist", artist_id))?;
         let albums = self
             .client
-            .get_items(
-                self.url(),
-                self.token(),
-                self.user_id(),
-                Some(artist_id),
-                Some(ALBUM_TYPES),
-                None,
-                None,
-                None,
-                None,
-            )
+            .get_albums_by_artist(self.url(), self.token(), self.user_id(), artist_id)
             .await
             .map_err(Self::map_error)?
             .items
@@ -406,7 +400,7 @@ pub(crate) fn song_from_item(item: JellyfinItem) -> Song {
                 .cloned()
                 .or(item.album_artist.clone())
         }),
-        album_id: item.album_id.or(item.parent_id),
+        album_id: item.album_id,
         album_title: item.album,
         duration_seconds: item
             .run_time_ticks
@@ -446,24 +440,32 @@ fn cover_art_id(item: &JellyfinItem) -> Option<String> {
 }
 
 fn transcode_profile_to_device_profile(profile: &TranscodeProfile) -> serde_json::Value {
+    let container = profile.container.as_deref().unwrap_or("mp3");
+    let audio_codec = profile.audio_codec.as_deref().unwrap_or(container);
     serde_json::json!({
         "MaxStreamingBitrate": profile.max_bitrate_kbps.map(|kbps| kbps * 1_000),
         "MusicStreamingTranscodingBitrate": profile.max_bitrate_kbps.map(|kbps| kbps * 1_000),
-        "Container": profile.container,
-        "AudioCodec": profile.audio_codec,
+        "DirectPlayProfiles": [],
+        "TranscodingProfiles": [
+            {
+                "Container": container,
+                "Type": "Audio",
+                "AudioCodec": audio_codec,
+                "Protocol": "http",
+                "EstimateContentLength": true,
+                "EnableMpegtsM2TsMode": false
+            }
+        ],
+        "CodecProfiles": []
     })
 }
 
 fn status_from_message(message: &str) -> Option<u16> {
-    message
-        .split(|c: char| !c.is_ascii_digit())
-        .find_map(|part| {
-            if part.len() == 3 {
-                part.parse::<u16>().ok()
-            } else {
-                None
-            }
-        })
+    message.split("status: ").nth(1).and_then(|tail| {
+        tail.split_whitespace()
+            .next()
+            .and_then(|s| s.trim_end_matches(|c: char| !c.is_ascii_digit()).parse::<u16>().ok())
+    })
 }
 
 #[cfg(test)]
@@ -670,7 +672,7 @@ mod tests {
                 Matcher::UrlEncoded("SearchTerm".into(), "Track".into()),
                 Matcher::UrlEncoded("IncludeItemTypes".into(), "Audio".into()),
                 Matcher::UrlEncoded("Limit".into(), "10".into()),
-                Matcher::UrlEncoded("Fields".into(), "Id,Name,Album,AlbumArtist,Artists".into()),
+                Matcher::UrlEncoded("Fields".into(), "Id,Name,Album,AlbumArtist,Artists,AlbumId".into()),
             ]))
             .match_header("X-Emby-Token", TOKEN)
             .with_status(200)
@@ -883,5 +885,188 @@ mod tests {
         let changes = provider.changes_since(None).await.expect("changes");
 
         assert!(changes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn provider_changes_since_invalid_token_returns_error() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _mock = server
+            .mock("GET", "/Items")
+            .match_query(Matcher::Any)
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("not valid json{{{")
+            .create_async()
+            .await;
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+
+        let result = provider.changes_since(Some("not-a-valid-iso-timestamp")).await;
+
+        assert!(
+            matches!(result, Err(ProviderError::Deserialization(_))),
+            "invalid response body should map to Deserialization error, got: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_list_artists_returns_artist_list() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _mock = server
+            .mock("GET", "/Items")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("userId".into(), USER_ID.into()),
+                Matcher::UrlEncoded("IncludeItemTypes".into(), "MusicArtist".into()),
+            ]))
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Items":[{"Id":"artist1","Name":"The Beatles","Type":"MusicArtist","RecursiveItemCount":13}],"TotalRecordCount":1,"StartIndex":0}"#)
+            .create_async()
+            .await;
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+
+        let artists = provider.list_artists(None).await.expect("artists");
+
+        assert_eq!(artists.len(), 1);
+        assert_eq!(artists[0].id, "artist1");
+        assert_eq!(artists[0].name, "The Beatles");
+        assert_eq!(artists[0].album_count, Some(13));
+    }
+
+    #[tokio::test]
+    async fn provider_get_artist_uses_album_artist_ids_query() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _artist = server
+            .mock("GET", "/Items/artist1")
+            .match_query(Matcher::UrlEncoded("userId".into(), USER_ID.into()))
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Id":"artist1","Name":"The Beatles","Type":"MusicArtist","RecursiveItemCount":13}"#)
+            .create_async()
+            .await;
+        let _albums = server
+            .mock("GET", "/Items")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("userId".into(), USER_ID.into()),
+                Matcher::UrlEncoded("AlbumArtistIds".into(), "artist1".into()),
+                Matcher::UrlEncoded("IncludeItemTypes".into(), "MusicAlbum".into()),
+                Matcher::UrlEncoded("Recursive".into(), "true".into()),
+            ]))
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Items":[{"Id":"album1","Name":"Abbey Road","Type":"MusicAlbum","ProductionYear":1969}],"TotalRecordCount":1,"StartIndex":0}"#)
+            .create_async()
+            .await;
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+
+        let artist = provider.get_artist("artist1").await.expect("artist");
+
+        assert_eq!(artist.artist.id, "artist1");
+        assert_eq!(artist.albums.len(), 1);
+        assert_eq!(artist.albums[0].id, "album1");
+    }
+
+    #[tokio::test]
+    async fn provider_maps_401_to_auth_error() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _mock = server
+            .mock("GET", "/UserViews")
+            .match_query(Matcher::Any)
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(401)
+            .with_body("Unauthorized")
+            .create_async()
+            .await;
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+
+        let result = provider.list_libraries().await;
+
+        assert!(
+            matches!(result, Err(ProviderError::Auth(_))),
+            "HTTP 401 should map to ProviderError::Auth, got: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_maps_404_to_not_found_error() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _mock = server
+            .mock("GET", "/Items/missing-id")
+            .match_query(Matcher::Any)
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(404)
+            .with_body("Not Found")
+            .create_async()
+            .await;
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+
+        let result = provider.get_album("missing-id").await;
+
+        assert!(
+            matches!(result, Err(ProviderError::NotFound { .. })),
+            "HTTP 404 should map to ProviderError::NotFound, got: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_maps_malformed_json_to_deserialization_error() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _mock = server
+            .mock("GET", "/UserViews")
+            .match_query(Matcher::Any)
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("{not valid json}")
+            .create_async()
+            .await;
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+
+        let result = provider.list_libraries().await;
+
+        assert!(
+            matches!(result, Err(ProviderError::Deserialization(_))),
+            "malformed JSON should map to ProviderError::Deserialization, got: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_scrobble_playing_returns_unsupported_capability() {
+        let provider =
+            JellyfinProvider::new(JellyfinClient::new(), "http://localhost", TOKEN, USER_ID);
+
+        let result = provider
+            .scrobble(crate::providers::ScrobbleRequest {
+                song_id: "song1".to_string(),
+                submission: ScrobbleSubmission::Playing,
+                position_seconds: None,
+                played_at_unix_seconds: None,
+            })
+            .await;
+
+        assert!(
+            matches!(result, Err(ProviderError::UnsupportedCapability(_))),
+            "ScrobbleSubmission::Playing should return UnsupportedCapability, got: {:?}",
+            result
+        );
     }
 }
