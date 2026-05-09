@@ -46,6 +46,19 @@ impl SubsonicProvider {
         })
     }
 
+    pub fn from_stored_config(
+        credentials: ProviderCredentials,
+        open_subsonic: bool,
+        server_version: Option<String>,
+    ) -> Result<Self, ProviderError> {
+        let client = SubsonicClient::from_credentials(credentials)?;
+        Ok(Self {
+            client,
+            open_subsonic,
+            server_version,
+        })
+    }
+
     #[cfg(test)]
     fn from_client_for_tests(client: SubsonicClient, open_subsonic: bool) -> Self {
         Self {

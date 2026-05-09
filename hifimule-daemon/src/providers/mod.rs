@@ -47,6 +47,14 @@ pub trait MediaProvider: Send + Sync {
         None
     }
 
+    fn access_token(&self) -> Option<&str> {
+        None
+    }
+
+    fn provider_user_id(&self) -> Option<&str> {
+        None
+    }
+
     fn capabilities(&self) -> Capabilities;
 }
 
@@ -233,14 +241,31 @@ fn sanitize_secret_message(message: &str) -> String {
     let mut sanitized = message.to_string();
     for key in ["password", "pw", "token", "api_key", "u", "p", "t", "s"] {
         let needle = format!("{key}=");
-        while let Some(start) = sanitized.find(&needle) {
-            let value_start = start + needle.len();
-            let value_end = sanitized[value_start..]
+        let mut rebuilt = String::with_capacity(sanitized.len());
+        let mut cursor = 0;
+        while let Some(relative_start) = sanitized[cursor..].find(&needle) {
+            let start = cursor + relative_start;
+            let preceded_by_separator = start == 0
+                || matches!(
+                    sanitized[..start].chars().last(),
+                    Some('?' | '&' | ' ' | '\t' | '\n')
+                );
+            if !preceded_by_separator {
+                rebuilt.push_str(&sanitized[cursor..start + needle.len()]);
+                cursor = start + needle.len();
+                continue;
+            }
+            rebuilt.push_str(&sanitized[cursor..start + needle.len()]);
+            cursor = start + needle.len();
+            let value_end = sanitized[cursor..]
                 .find(|ch: char| ch == '&' || ch.is_whitespace())
-                .map(|offset| value_start + offset)
-                .unwrap_or_else(|| sanitized.len());
-            sanitized.replace_range(value_start..value_end, "[redacted]");
+                .map(|offset| cursor + offset)
+                .unwrap_or(sanitized.len());
+            rebuilt.push_str("[redacted]");
+            cursor = value_end;
         }
+        rebuilt.push_str(&sanitized[cursor..]);
+        sanitized = rebuilt;
     }
     sanitized
 }
@@ -449,6 +474,56 @@ mod tests {
         assert!(
             matches!(result, Err(ProviderError::UnsupportedCapability(ref message)) if message == "Unknown server type at this URL")
         );
+    }
+
+    #[test]
+    fn sanitize_secret_message_redacts_query_params_only() {
+        assert_eq!(
+            sanitize_secret_message("status=ok type=json"),
+            "status=ok type=json",
+            "mid-word keys must not be redacted"
+        );
+        assert_eq!(
+            sanitize_secret_message("error ?p=secret&t=token123 rest"),
+            "error ?p=[redacted]&t=[redacted] rest"
+        );
+        assert_eq!(
+            sanitize_secret_message("password=raw-pass"),
+            "password=[redacted]"
+        );
+        assert_eq!(
+            sanitize_secret_message("msg token=abc end"),
+            "msg token=[redacted] end"
+        );
+    }
+
+    #[tokio::test]
+    async fn factory_jellyfin_auth_failure_does_not_leak_password() {
+        let mut server = Server::new_async().await;
+        let _auth = server
+            .mock("POST", "/Users/AuthenticateByName")
+            .with_status(401)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"message":"Invalid username or password"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let creds = password_credentials(server.url());
+        let result = connect(
+            &server.url(),
+            &creds,
+            ServerTypeHint::Jellyfin,
+        )
+        .await;
+
+        match result {
+            Ok(_) => panic!("expected a connection error"),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(!msg.contains("secret-password"), "password must not appear in error: {msg}");
+            }
+        }
     }
 
     #[test]

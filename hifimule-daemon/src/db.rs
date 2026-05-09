@@ -40,6 +40,11 @@ impl Database {
     }
 
     #[cfg(test)]
+    pub fn init_for_test(&self) -> Result<()> {
+        self.init()
+    }
+
+    #[cfg(test)]
     pub fn memory() -> Result<Self> {
         let conn = Connection::open_in_memory()
             .map_err(|e| anyhow!("Failed to open in-memory database: {}", e))?;
@@ -476,6 +481,17 @@ mod tests {
         let db = Database::memory().unwrap();
         let result = db.set_auto_sync_on_connect("nonexistent", true);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_db_init_idempotent() {
+        let db = Database::memory().unwrap();
+        // Second call to init must not fail — all DDL uses CREATE TABLE IF NOT EXISTS.
+        db.init_for_test().unwrap();
+        // Operations still work after re-init.
+        db.upsert_server_config("http://x", "jellyfin", "u", None)
+            .unwrap();
+        assert!(db.get_server_config().unwrap().is_some());
     }
 
     #[test]

@@ -136,9 +136,12 @@ async fn restore_provider_from_config(state: &AppState) {
     };
 
     let provider: Option<Arc<dyn MediaProvider>> = match config.server_type.as_str() {
-        "jellyfin" => CredentialManager::get_server_secret("jellyfin")
-            .ok()
-            .map(|token| {
+        "jellyfin" => {
+            // Fall back to legacy keyring key for users who connected via the old `login` RPC.
+            let token = CredentialManager::get_server_secret("jellyfin")
+                .or_else(|_| CredentialManager::get_credentials().map(|(_, t, _)| t))
+                .ok();
+            token.map(|token| {
                 Arc::new(
                     crate::providers::jellyfin::JellyfinProvider::new_with_version(
                         JellyfinClient::new(),
@@ -148,7 +151,8 @@ async fn restore_provider_from_config(state: &AppState) {
                         config.server_version.clone(),
                     ),
                 ) as Arc<dyn MediaProvider>
-            }),
+            })
+        }
         "subsonic" | "openSubsonic" => {
             let secret = CredentialManager::get_server_secret(&config.server_type).ok();
             if let Some(password) = secret {
@@ -159,9 +163,14 @@ async fn restore_provider_from_config(state: &AppState) {
                         password,
                     },
                 };
-                crate::providers::connect(&config.url, &credentials, ServerTypeHint::Subsonic)
-                    .await
-                    .ok()
+                let open_subsonic = config.server_type == "openSubsonic";
+                crate::providers::subsonic::SubsonicProvider::from_stored_config(
+                    credentials,
+                    open_subsonic,
+                    config.server_version.clone(),
+                )
+                .ok()
+                .map(|p| Arc::new(p) as Arc<dyn MediaProvider>)
             } else {
                 None
             }
@@ -342,23 +351,31 @@ async fn handle_server_connect(
     let mut persisted_username = username.to_string();
     let secret = match provider.server_type() {
         crate::providers::ServerType::Jellyfin => {
-            let auth = state
-                .jellyfin_client
-                .authenticate_by_name(url, username, password)
-                .await
-                .map_err(|error| JsonRpcError {
-                    code: ERR_INVALID_CREDENTIALS,
-                    message: error.to_string(),
+            let token = provider
+                .access_token()
+                .ok_or(JsonRpcError {
+                    code: ERR_CONNECTION_FAILED,
+                    message: "Jellyfin provider missing access token".to_string(),
                     data: None,
-                })?;
-            persisted_username = auth.user.id.clone();
-            CredentialManager::save_credentials(url, &auth.access_token, Some(&auth.user.id))
-                .map_err(|error| JsonRpcError {
+                })?
+                .to_string();
+            let user_id = provider
+                .provider_user_id()
+                .ok_or(JsonRpcError {
+                    code: ERR_CONNECTION_FAILED,
+                    message: "Jellyfin provider missing user ID".to_string(),
+                    data: None,
+                })?
+                .to_string();
+            persisted_username = user_id.clone();
+            CredentialManager::save_credentials(url, &token, Some(&user_id)).map_err(|error| {
+                JsonRpcError {
                     code: ERR_STORAGE_ERROR,
                     message: error.to_string(),
                     data: None,
-                })?;
-            auth.access_token
+                }
+            })?;
+            token
         }
         crate::providers::ServerType::Subsonic | crate::providers::ServerType::OpenSubsonic => {
             password.to_string()
@@ -2218,6 +2235,140 @@ mod tests {
     use super::*;
     use crate::api::CREDENTIAL_TEST_MUTEX;
     use serde_json::json;
+
+    fn make_test_state(db: Arc<crate::db::Database>) -> Arc<AppState> {
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        Arc::new(AppState {
+            jellyfin_client: JellyfinClient::new(),
+            provider: Arc::new(tokio::sync::RwLock::new(None)),
+            server_type: Arc::new(tokio::sync::RwLock::new(None)),
+            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            db,
+            device_manager,
+            last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
+            size_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
+            last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
+            state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+        })
+    }
+
+    #[tokio::test]
+    async fn test_rpc_server_connect_missing_params() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+
+        let result = handle_server_connect(&state, None).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, ERR_INVALID_PARAMS);
+
+        let result = handle_server_connect(&state, Some(json!({ "url": "http://x" }))).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, ERR_INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn test_rpc_server_connect_invalid_server_type() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+
+        let result = handle_server_connect(
+            &state,
+            Some(json!({
+                "url": "http://example",
+                "serverType": "navidrome",
+                "username": "user",
+                "password": "pass"
+            })),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, ERR_INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn test_rpc_server_connect_subsonic_success_updates_state_and_db() {
+        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let mut server = mockito::Server::new_async().await;
+        let _ping = server
+            .mock("GET", "/rest/ping.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"subsonic-response":{"status":"ok","version":"1.16.1","openSubsonic":true}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db.clone());
+
+        let result = handle_server_connect(
+            &state,
+            Some(json!({
+                "url": server.url(),
+                "serverType": "subsonic",
+                "username": "user",
+                "password": "pass"
+            })),
+        )
+        .await
+        .expect("server.connect should succeed");
+
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["serverType"], "openSubsonic");
+
+        let provider_set = state.provider.read().await.is_some();
+        assert!(provider_set, "provider must be set after successful connect");
+
+        let server_type = state.server_type.read().await.clone();
+        assert_eq!(server_type.as_deref(), Some("openSubsonic"));
+
+        let config = db.get_server_config().unwrap().unwrap();
+        assert_eq!(config.server_type, "openSubsonic");
+        assert_eq!(config.username, "user");
+        assert_eq!(config.url, server.url());
+    }
+
+    #[tokio::test]
+    async fn test_rpc_server_connect_replaces_existing_provider() {
+        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let mut server = mockito::Server::new_async().await;
+        let _ping = server
+            .mock("GET", "/rest/ping.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .expect(2)
+            .create_async()
+            .await;
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+
+        handle_server_connect(
+            &state,
+            Some(json!({ "url": server.url(), "serverType": "subsonic", "username": "u1", "password": "p1" })),
+        )
+        .await
+        .unwrap();
+
+        let _lock_cache = state.last_connection_check.lock().await;
+        drop(_lock_cache);
+
+        handle_server_connect(
+            &state,
+            Some(json!({ "url": server.url(), "serverType": "subsonic", "username": "u2", "password": "p2" })),
+        )
+        .await
+        .unwrap();
+
+        let server_type = state.server_type.read().await.clone();
+        assert_eq!(server_type.as_deref(), Some("subsonic"));
+    }
 
     #[test]
     fn test_parse_server_type_hint_accepts_supported_values() {
