@@ -2,6 +2,16 @@
 
 All previously deferred items have been incorporated into Epic 7 stories (7.1–7.4) in `_bmad-output/planning-artifacts/epics.md`.
 
+## Deferred from: code review of 8-5-subsonic-url-credential-sanitization (2026-05-09)
+
+- **`sync.rs` `SyncFileError` audit evidence absent** — sync is Jellyfin-specific so no Subsonic URLs flow through it today; revisit if sync becomes provider-neutral.
+- **`main.rs` daemon logging audit evidence absent** — no known Subsonic URL exposure in current logging paths; revisit when tracing is added to daemon startup.
+- **`rpc.rs` image proxy path not patched** — pre-existing path unchanged by this diff; if `cover_art_url()` result ever appears in an error propagated through the image proxy, it would leak credentials.
+- **`rpc.rs` sync spawning path not patched** — same concern as image proxy; no current evidence of URL exposure.
+- **`sanitize_subsonic_url` does not strip URL authority credentials (`user:pass@host`)** — Subsonic REST does not use authority-embedded credentials today; handle if a future client variant does.
+- **Percent-encoded credentials not matched by `sanitize_subsonic_message`** — scanner requires literal `key=` bytes; double-encoded forms (e.g. `password%3Dxxx`) are missed. Narrow edge case with no current path producing such strings.
+- **`sanitize_subsonic_message` applied to `Deserialization` errors** — deserialization errors unlikely to contain credentials but are now silently mangled; consider whitelisting error types that go through sanitization.
+
 ## Deferred from: code review of 8-4-runtime-server-type-detection-factory (2026-05-09)
 
 - **Auto mode discards Subsonic and Jellyfin error details** — on all-fail, caller gets only "Unknown server type at this URL" with no indication of whether failures were network, auth, or protocol errors. Pre-existing design choice per AC 1; consider richer diagnostics in Story 8.6+. [`providers/mod.rs:163`]

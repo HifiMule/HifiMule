@@ -17,7 +17,7 @@ use uuid::Uuid;
 const CLIENT_NAME: &str = "hifimule";
 const API_VERSION: &str = "1.16.1";
 const REDACTED: &str = "[REDACTED]";
-const SUBSONIC_SECRET_QUERY_KEYS: &[&str] = &["u", "p", "t", "s"];
+const SUBSONIC_SECRET_QUERY_KEYS: &[&str] = &["password", "u", "p", "t", "s"];
 
 #[derive(Clone)]
 pub struct SubsonicProvider {
@@ -495,6 +495,7 @@ impl SubsonicClient {
             }
         }
 
+        tracing::debug!(url = %sanitize_subsonic_url(&url), "Subsonic request");
         Ok(url.into())
     }
 }
@@ -529,33 +530,28 @@ fn map_reqwest_error(error: reqwest::Error) -> ProviderError {
     }
 }
 
-pub fn sanitize_subsonic_url(url: &Url) -> String {
-    let mut sanitized = url.clone();
-    let pairs: Vec<(String, String)> = sanitized
-        .query_pairs()
-        .map(|(key, value)| {
-            let value = if SUBSONIC_SECRET_QUERY_KEYS.contains(&key.as_ref()) {
-                REDACTED.to_string()
-            } else {
-                value.into_owned()
-            };
-            (key.into_owned(), value)
+pub(crate) fn sanitize_subsonic_url(url: &Url) -> String {
+    let Some(query) = url.query() else {
+        return url.to_string();
+    };
+    let new_query = query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((key, _)) if SUBSONIC_SECRET_QUERY_KEYS.contains(&key) => {
+                format!("{key}={REDACTED}")
+            }
+            _ => pair.to_string(),
         })
-        .collect();
-
-    sanitized.set_query(None);
-    if !pairs.is_empty() {
-        let mut query = sanitized.query_pairs_mut();
-        for (key, value) in pairs {
-            query.append_pair(&key, &value);
-        }
-    }
+        .collect::<Vec<_>>()
+        .join("&");
+    let mut sanitized = url.clone();
+    sanitized.set_query(Some(&new_query));
     sanitized.into()
 }
 
 pub(crate) fn sanitize_subsonic_message(message: &str) -> String {
     let mut sanitized = message.to_string();
-    for key in ["password", "u", "p", "t", "s"] {
+    for key in SUBSONIC_SECRET_QUERY_KEYS {
         let needle = format!("{key}=");
         let mut rebuilt = String::with_capacity(sanitized.len());
         let mut cursor = 0;
