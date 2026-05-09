@@ -331,6 +331,14 @@ impl MediaProvider for JellyfinProvider {
         self.server_version.as_deref()
     }
 
+    fn access_token(&self) -> Option<&str> {
+        Some(&self.token)
+    }
+
+    fn provider_user_id(&self) -> Option<&str> {
+        Some(&self.user_id)
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             open_subsonic: false,

@@ -2,6 +2,13 @@
 
 All previously deferred items have been incorporated into Epic 7 stories (7.1–7.4) in `_bmad-output/planning-artifacts/epics.md`.
 
+## Deferred from: code review of 8-4-runtime-server-type-detection-factory (2026-05-09)
+
+- **Auto mode discards Subsonic and Jellyfin error details** — on all-fail, caller gets only "Unknown server type at this URL" with no indication of whether failures were network, auth, or protocol errors. Pre-existing design choice per AC 1; consider richer diagnostics in Story 8.6+. [`providers/mod.rs:163`]
+- **`check_server_connection_cached` falls back to Jellyfin-only credentials check when no provider loaded** — ignores Subsonic servers for connectivity status when the provider is None. Pre-existing behavior not introduced by this story.
+- **Three separate `RwLock`s for `provider`/`server_type`/`server_version` allow inconsistent intermediate reads** — a reader can observe `server_type = "jellyfin"` while `provider` is `None`. Pre-existing architectural pattern; fix requires a composite lock or deriving server_type from the provider directly. [`rpc.rs:60`]
+- **`restore_provider_from_config` sets `state.server_type` from raw DB string instead of provider's `server_type()`** — harmless today since DB strings are written by `server_type_slug`, but could drift if the DB was written by an older schema version. [`rpc.rs:174`]
+
 ## Deferred from: code review of 8-3-subsonicprovider-adapter (2026-05-09)
 
 - **`t=` and `s=` auth params not sanitized in error messages** — `sanitize_message` only strips `password=` and `p=`; the derived token `t=` and salt `s=` also appear in Subsonic URLs embedded in error strings. Story 8.5 owns comprehensive credential sanitization.

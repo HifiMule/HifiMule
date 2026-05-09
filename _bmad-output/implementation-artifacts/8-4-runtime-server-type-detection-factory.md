@@ -1,6 +1,6 @@
 # Story 8.4: Runtime Server-Type Detection Factory
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -131,6 +131,21 @@ so that I do not need to manually specify "Jellyfin" or "Navidrome" during setup
 - [Source: hifimule-daemon/src/rpc.rs]
 - [Source: hifimule-daemon/src/db.rs]
 - [Source: hifimule-daemon/src/api.rs]
+
+### Review Findings
+
+- [x] [Review][Patch] Double Jellyfin auth in `handle_server_connect` — `authenticate_by_name` is called twice: once inside `connect_jellyfin` (factory) and again at `rpc.rs:347` to get the token for keyring storage. The provider holds the first auth's token; the keyring stores the second. Fix: return the auth result (token + user_id) from `connect_jellyfin`, or add a `connect_jellyfin_with_token` variant so the RPC layer authenticates once and passes the token in. Also store the username (not the UUID `auth.user.id`) in `persisted_username` for display purposes. [`hifimule-daemon/src/rpc.rs:343`]
+- [x] [Review][Patch] `sanitize_secret_message` in `providers/mod.rs` lacks `preceded_by_separator` guard — single-char keys (`u`, `p`, `t`, `s`) will match mid-word (e.g. `"status="` matches `s=`), causing over-redaction of diagnostic messages and an **infinite loop** when the replacement `[redacted]` is re-found in the next `while` iteration. Copy the `preceded_by_separator` pattern from `subsonic.rs::sanitize_message`. [`hifimule-daemon/src/providers/mod.rs:232`]
+- [x] [Review][Patch] Keyring key collision breaks restore for users previously logged in via `login` RPC — `login` writes the token to the legacy `"jellyfin-token"` keyring key; `restore_provider_from_config` reads from `"jellyfin-token-jellyfin"`. A user who logged in before this story will get a keyring miss on restart and start in a disconnected state even though a valid token exists. Fix: in `restore_provider_from_config`, fall back to `get_credentials()` legacy key if `get_server_secret("jellyfin")` fails, or update `handle_login` to also call `save_server_secret("jellyfin", &token)`. [`hifimule-daemon/src/rpc.rs:133`, `hifimule-daemon/src/api.rs:944`]
+- [x] [Review][Patch] `restore_provider_from_config` re-pings Subsonic on every daemon restart — AC 6 requires restoring from persistent config; the current implementation calls `providers::connect(…, Subsonic)` which performs a live `GET /rest/ping.view`. If the server is offline at startup, the provider is silently not restored (violating AC 6). Fix: add a `SubsonicProvider::from_stored_config(url, username, password, open_subsonic: bool, server_version: Option<String>)` constructor (mirroring the Jellyfin restore path) and use it instead of re-connecting. [`hifimule-daemon/src/rpc.rs:152`]
+- [x] [Review][Patch] No RPC-level tests for `handle_server_connect` — AC 8 and story spec explicitly require "RPC tests: `server.connect` accepts all three `serverType` values, returns normalized `serverType`, replaces the active provider, and rejects invalid params." `test_parse_server_type_hint_accepts_supported_values` only tests the parsing helper; no test calls `handle_server_connect` end-to-end with a mock server. [`hifimule-daemon/src/rpc.rs`]
+- [x] [Review][Patch] No credential-redaction test for `handle_server_connect` / factory error paths — AC 7 and Required Tests: "Credential tests: Subsonic password and Jellyfin token are redacted in debug/error paths." Only `subsonic.rs` has internal redaction tests. No test asserts that `JsonRpcError.message` from a failed `server.connect` (Jellyfin or Subsonic path) does not leak raw passwords or tokens. [`hifimule-daemon/src/providers/mod.rs`, `hifimule-daemon/src/rpc.rs`]
+- [x] [Review][Patch] No persistence idempotency test for `db.init()` — AC 8 / Required Tests: "Persistence tests: migration is idempotent." Call `db.init()` a second time on an already-initialized in-memory DB and assert no error (all `CREATE TABLE IF NOT EXISTS` statements should be safe). [`hifimule-daemon/src/db.rs`]
+
+- [x] [Review][Defer] Auto mode discards Subsonic and Jellyfin error details — on all-fail, caller gets only "Unknown server type at this URL" with no indication of whether errors were network, auth, or protocol failures. Pre-existing design choice per AC 1; consider improving diagnostics in Story 8.6+. [`hifimule-daemon/src/providers/mod.rs:163`] — deferred, pre-existing
+- [x] [Review][Defer] `check_server_connection_cached` falls back to Jellyfin-only credentials check when `state.provider` is None — ignores Subsonic servers entirely for connectivity status when no provider is loaded. Pre-existing behavior not introduced by this story. [`hifimule-daemon/src/rpc.rs`] — deferred, pre-existing
+- [x] [Review][Defer] Three separate `RwLock`s for `provider`/`server_type`/`server_version` allow inconsistent intermediate reads — a reader can observe `server_type = "jellyfin"` while `provider` is `None`. Pre-existing architectural pattern; fix requires a composite lock. [`hifimule-daemon/src/rpc.rs:60`] — deferred, pre-existing
+- [x] [Review][Defer] `restore_provider_from_config` populates `state.server_type` from the raw DB string instead of deriving it from the restored provider's `server_type()` — harmless today since DB strings are written by `server_type_slug`, but could drift if DB was written by an older version. [`hifimule-daemon/src/rpc.rs:174`] — deferred, pre-existing
 
 ## Dev Agent Record
 
