@@ -57,6 +57,15 @@ pub struct MediaSource {
     #[serde(default)]
     pub size: Option<i64>,
     pub container: Option<String>,
+    #[serde(default)]
+    pub bitrate: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "PascalCase")]
+pub struct NameIdPair {
+    pub name: String,
+    pub id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -75,6 +84,14 @@ pub struct JellyfinItem {
     #[serde(default)]
     pub index_number: Option<u32>,
     #[serde(default)]
+    pub parent_index_number: Option<u32>,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub album_id: Option<String>,
+    #[serde(default)]
+    pub artist_items: Option<Vec<NameIdPair>>,
+    #[serde(default)]
     pub container: Option<String>,
     #[serde(default)]
     pub production_year: Option<u32>,
@@ -85,7 +102,11 @@ pub struct JellyfinItem {
     #[serde(default)]
     pub run_time_ticks: Option<u64>,
     #[serde(default)]
+    pub bitrate: Option<u32>,
+    #[serde(default)]
     pub media_sources: Option<Vec<MediaSource>>,
+    #[serde(default)]
+    pub image_tags: Option<std::collections::HashMap<String, String>>,
     #[serde(default)]
     pub etag: Option<String>,
     // Auto-fill priority fields
@@ -418,6 +439,48 @@ impl JellyfinClient {
         Ok(items_response.items)
     }
 
+    pub async fn get_items_changed_since(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        min_date_last_saved: Option<&str>,
+    ) -> Result<JellyfinItemsResponse> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let mut query_params = vec![
+            format!("userId={}", user_id),
+            "Fields=MediaSources".to_string(),
+        ];
+        if let Some(token) = min_date_last_saved {
+            query_params.push(format!("minDateLastSaved={}", url_encode(token)));
+        }
+
+        let endpoint = format!(
+            "{}/Items?{}",
+            url.trim_end_matches('/'),
+            query_params.join("&")
+        );
+
+        let response = self.client.get(&endpoint).headers(headers).send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+
+        if !status.is_success() {
+            return Err(anyhow!("Server returned status: {}", status));
+        }
+
+        let items_response = serde_json::from_str::<JellyfinItemsResponse>(&text)?;
+        Ok(items_response)
+    }
+
     /// Get total size in bytes for each item. For containers (Albums, Playlists, Artists),
     /// recursively fetches child items and sums their MediaSources sizes.
     pub async fn get_item_sizes(
@@ -685,7 +748,7 @@ impl JellyfinClient {
     /// Returns the URL to stream from:
     ///   - TranscodingUrl from PlaybackInfo if server must transcode
     ///   - /Items/{id}/Download if direct play is supported or no transcoding URL
-    async fn resolve_stream_url(
+    pub async fn resolve_stream_url(
         &self,
         base_url: &str,
         token: &str,

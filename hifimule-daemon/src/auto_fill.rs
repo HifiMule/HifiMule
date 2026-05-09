@@ -217,15 +217,22 @@ mod tests {
             album_artist: None,
             artists: None,
             index_number: None,
+            parent_index_number: None,
+            parent_id: None,
+            album_id: None,
+            artist_items: None,
             container: None,
             production_year: None,
             recursive_item_count: None,
             cumulative_run_time_ticks: None,
             run_time_ticks: None,
+            bitrate: None,
             media_sources: Some(vec![MediaSource {
                 size: Some(size_bytes),
                 container: None,
+                bitrate: None,
             }]),
+            image_tags: None,
             etag: None,
             user_data: Some(JellyfinUserData {
                 is_favorite,
@@ -262,6 +269,7 @@ mod tests {
         track.media_sources = Some(vec![MediaSource {
             size: Some(-1),
             container: None,
+            bitrate: None,
         }]);
         let (result, _) = rank_and_truncate(vec![track], 10_000);
         assert!(

@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
 
+pub mod jellyfin;
+
 #[async_trait]
 pub trait MediaProvider: Send + Sync {
     async fn list_libraries(&self) -> Result<Vec<Library>, ProviderError>;
@@ -75,7 +77,11 @@ impl fmt::Debug for CredentialKind {
         match self {
             CredentialKind::Token(_) => write!(f, "Token([redacted])"),
             CredentialKind::Password { username, .. } => {
-                write!(f, "Password {{ username: {:?}, password: [redacted] }}", username)
+                write!(
+                    f,
+                    "Password {{ username: {:?}, password: [redacted] }}",
+                    username
+                )
             }
         }
     }
