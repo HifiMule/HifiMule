@@ -1052,6 +1052,12 @@ async fn handle_sync_calculate_delta(
             .and_then(|sources| sources.first())
             .and_then(|s| s.size)
             .unwrap_or(0) as u64;
+        let provider_suffix = item
+            .media_sources
+            .as_ref()
+            .and_then(|sources| sources.first())
+            .and_then(|source| source.container.clone())
+            .or_else(|| item.container.clone());
         crate::sync::DesiredItem {
             jellyfin_id: item.id,
             name: item.name,
@@ -1059,6 +1065,9 @@ async fn handle_sync_calculate_delta(
             artist: item.album_artist,
             size_bytes,
             etag: item.etag,
+            provider_album_id: item.album_id,
+            provider_content_type: None,
+            provider_suffix,
         }
     };
 
@@ -1204,6 +1213,9 @@ async fn handle_sync_calculate_delta(
                                 artist: item.artist,
                                 size_bytes: item.size_bytes,
                                 etag: None,
+                                provider_album_id: None,
+                                provider_content_type: None,
+                                provider_suffix: None,
                             });
                         }
                     }
@@ -2813,6 +2825,9 @@ mod tests {
                     synced_at: "2026-02-15T10:00:00Z".to_string(),
                     original_name: None,
                     etag: Some("etag-a".to_string()),
+                    provider_album_id: None,
+                    provider_content_type: None,
+                    provider_suffix: None,
                 },
                 crate::device::SyncedItem {
                     jellyfin_id: "item-b".to_string(),
@@ -2824,6 +2839,9 @@ mod tests {
                     synced_at: "2026-02-15T10:00:00Z".to_string(),
                     original_name: None,
                     etag: Some("etag-b".to_string()),
+                    provider_album_id: None,
+                    provider_content_type: None,
+                    provider_suffix: None,
                 },
             ],
             dirty: false,

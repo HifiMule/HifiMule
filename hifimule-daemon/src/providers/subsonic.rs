@@ -3,21 +3,23 @@ use crate::domain::models::{
     Kbps, Library, Playlist, PlaylistWithTracks, SearchResult, Seconds, Song,
 };
 use crate::providers::{
-    Capabilities, CredentialKind, MediaProvider, ProviderCredentials, ProviderError,
-    ScrobbleRequest, ScrobbleSubmission, ServerType, TranscodeProfile,
+    Capabilities, CredentialKind, MediaProvider, ProviderChangeContext, ProviderCredentials,
+    ProviderError, ProviderSyncedSong, ScrobbleRequest, ScrobbleSubmission, ServerType,
+    TranscodeProfile,
 };
 use async_trait::async_trait;
 use md5::{Digest, Md5};
 use reqwest::Url;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
-use std::fmt;
+use std::{collections::HashMap, fmt};
 use uuid::Uuid;
 
 const CLIENT_NAME: &str = "hifimule";
 const API_VERSION: &str = "1.16.1";
 const REDACTED: &str = "[REDACTED]";
 const SUBSONIC_SECRET_QUERY_KEYS: &[&str] = &["password", "u", "p", "t", "s"];
+const SONG_CHANGE_PAGE_SIZE: usize = 500;
 
 #[derive(Clone)]
 pub struct SubsonicProvider {
@@ -68,6 +70,46 @@ impl SubsonicProvider {
             open_subsonic,
             server_version: None,
         }
+    }
+
+    async fn full_song_dump_changes(&self) -> Result<Vec<ChangeEvent>, ProviderError> {
+        let mut changes = Vec::new();
+        let mut offset = 0usize;
+        loop {
+            let page = self
+                .client
+                .search3_paged("", Some(SONG_CHANGE_PAGE_SIZE), Some(offset))
+                .await?;
+            let songs = page.search_result3.song;
+            let count = songs.len();
+            changes.extend(songs.into_iter().map(song_created_event));
+            if count < SONG_CHANGE_PAGE_SIZE {
+                break;
+            }
+            offset += SONG_CHANGE_PAGE_SIZE;
+        }
+        Ok(changes)
+    }
+
+    async fn album_fallback_changes(
+        &self,
+        context: &ProviderChangeContext,
+    ) -> Result<Vec<ChangeEvent>, ProviderError> {
+        let mut by_album: HashMap<String, Vec<&ProviderSyncedSong>> = HashMap::new();
+        for song in &context.synced_songs {
+            if let Some(album_id) = song.album_id.as_deref().filter(|id| !id.is_empty()) {
+                by_album.entry(album_id.to_string()).or_default().push(song);
+            }
+        }
+
+        let mut changes = Vec::new();
+        let mut albums: Vec<_> = by_album.into_iter().collect();
+        albums.sort_by(|left, right| left.0.cmp(&right.0));
+        for (album_id, expected) in albums {
+            let album = self.client.get_album(&album_id).await?;
+            changes.extend(album_song_changes(&expected, &album.album.song));
+        }
+        Ok(changes)
     }
 }
 
@@ -187,18 +229,26 @@ impl MediaProvider for SubsonicProvider {
         self.client.cover_art_url(cover_art_id)
     }
 
-    async fn changes_since(&self, token: Option<&str>) -> Result<Vec<ChangeEvent>, ProviderError> {
-        let if_modified_since = match token.map(str::trim).filter(|token| !token.is_empty()) {
-            Some(token) => Some(token.parse::<i64>().map_err(|_| {
+    async fn changes_since_with_context(
+        &self,
+        token: Option<&str>,
+        context: &ProviderChangeContext,
+    ) -> Result<Vec<ChangeEvent>, ProviderError> {
+        let token = token.map(str::trim).filter(|token| !token.is_empty());
+        if matches!(token, None | Some("0")) {
+            return self.full_song_dump_changes().await;
+        }
+
+        let if_modified_since = match token {
+            Some(token) => token.parse::<i64>().map_err(|_| {
                 ProviderError::UnsupportedCapability(
                     "Subsonic changes_since token must be epoch milliseconds".to_string(),
                 )
-            })?),
-            None => None,
+            })?,
+            None => unreachable!("initial tokens are handled before numeric parsing"),
         };
-        let indexes = self.client.get_indexes(if_modified_since).await?;
-
-        Ok(indexes
+        let indexes = self.client.get_indexes(Some(if_modified_since)).await?;
+        let index_changes: Vec<ChangeEvent> = indexes
             .indexes
             .index
             .into_iter()
@@ -211,7 +261,13 @@ impl MediaProvider for SubsonicProvider {
                 change_type: ChangeType::Updated,
                 version: None,
             })
-            .collect())
+            .collect();
+
+        if index_changes.is_empty() {
+            self.album_fallback_changes(context).await
+        } else {
+            Ok(index_changes)
+        }
     }
 
     async fn scrobble(&self, request: ScrobbleRequest) -> Result<(), ProviderError> {
@@ -353,7 +409,25 @@ impl SubsonicClient {
     }
 
     async fn search3(&self, query: &str) -> Result<Search3Body, ProviderError> {
-        self.get("search3", &[("query", query)]).await
+        self.search3_paged(query, None, None).await
+    }
+
+    async fn search3_paged(
+        &self,
+        query: &str,
+        song_count: Option<usize>,
+        song_offset: Option<usize>,
+    ) -> Result<Search3Body, ProviderError> {
+        let song_count = song_count.map(|value| value.to_string());
+        let song_offset = song_offset.map(|value| value.to_string());
+        let mut params = vec![("query", query)];
+        if let Some(value) = song_count.as_deref() {
+            params.push(("songCount", value));
+        }
+        if let Some(value) = song_offset.as_deref() {
+            params.push(("songOffset", value));
+        }
+        self.get("search3", &params).await
     }
 
     async fn get_indexes(
@@ -674,6 +748,93 @@ fn song_from_dto(song: SongDto) -> Song {
     }
 }
 
+fn song_created_event(song: SongDto) -> ChangeEvent {
+    ChangeEvent {
+        item: ItemRef {
+            id: song.id.clone(),
+            item_type: ItemType::Song,
+        },
+        change_type: ChangeType::Created,
+        version: subsonic_song_version(&song),
+    }
+}
+
+fn song_metadata_changed(expected: &ProviderSyncedSong, actual: &SongDto) -> bool {
+    let mut compared = false;
+    let mut changed = false;
+
+    if expected.size.is_some() || actual.size.is_some() {
+        compared = true;
+        changed |= expected.size != actual.size;
+    }
+    if expected.content_type.is_some() || actual.content_type.is_some() {
+        compared = true;
+        changed |= expected.content_type.as_deref() != actual.content_type.as_deref();
+    }
+    if expected.suffix.is_some() || actual.suffix.is_some() {
+        compared = true;
+        changed |= expected.suffix.as_deref() != actual.suffix.as_deref();
+    }
+
+    compared && changed
+}
+
+fn album_song_changes(expected: &[&ProviderSyncedSong], actual: &[SongDto]) -> Vec<ChangeEvent> {
+    let expected_by_id: HashMap<&str, &ProviderSyncedSong> = expected
+        .iter()
+        .map(|song| (song.song_id.as_str(), *song))
+        .collect();
+    let actual_by_id: HashMap<&str, &SongDto> =
+        actual.iter().map(|song| (song.id.as_str(), song)).collect();
+    let mut changes = Vec::new();
+
+    let mut actual_songs: Vec<&SongDto> = actual.iter().collect();
+    actual_songs.sort_by(|left, right| left.id.cmp(&right.id));
+    for song in actual_songs {
+        match expected_by_id.get(song.id.as_str()) {
+            None => changes.push(song_created_event(song.clone())),
+            Some(expected) if song_metadata_changed(expected, song) => changes.push(ChangeEvent {
+                item: ItemRef {
+                    id: song.id.clone(),
+                    item_type: ItemType::Song,
+                },
+                change_type: ChangeType::Updated,
+                version: subsonic_song_version(song),
+            }),
+            Some(_) => {}
+        }
+    }
+
+    let mut removed: Vec<&ProviderSyncedSong> = expected
+        .iter()
+        .copied()
+        .filter(|song| !actual_by_id.contains_key(song.song_id.as_str()))
+        .collect();
+    removed.sort_by(|left, right| left.song_id.cmp(&right.song_id));
+    for song in removed {
+        changes.push(ChangeEvent {
+            item: ItemRef {
+                id: song.song_id.clone(),
+                item_type: ItemType::Song,
+            },
+            change_type: ChangeType::Deleted,
+            version: song.version.clone(),
+        });
+    }
+
+    changes
+}
+
+fn subsonic_song_version(song: &SongDto) -> Option<String> {
+    match (&song.size, &song.content_type, &song.suffix) {
+        (Some(size), Some(content_type), Some(suffix)) => Some(format!(
+            "subsonic:{}|{}|{}|{}",
+            song.id, size, content_type, suffix
+        )),
+        _ => None,
+    }
+}
+
 fn non_negative_i32(value: Option<i32>) -> Option<u32> {
     value.and_then(|value| u32::try_from(value).ok())
 }
@@ -888,6 +1049,10 @@ struct SongDto {
     disc_number: Option<i32>,
     #[serde(rename = "coverArt")]
     cover_art: Option<String>,
+    size: Option<u64>,
+    #[serde(rename = "contentType")]
+    content_type: Option<String>,
+    suffix: Option<String>,
     #[serde(default)]
     artists: Option<Vec<ArtistDto>>,
 }
@@ -952,6 +1117,9 @@ mod tests {
             track: Some(7),
             disc_number: Some(2),
             cover_art: Some("cover-id".to_string()),
+            size: Some(1_234),
+            content_type: Some("audio/flac".to_string()),
+            suffix: Some("flac".to_string()),
             artists: None,
         });
 
@@ -978,6 +1146,9 @@ mod tests {
             track: None,
             disc_number: None,
             cover_art: None,
+            size: None,
+            content_type: None,
+            suffix: None,
             artists: None,
         });
 
@@ -1366,6 +1537,185 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn changes_since_initial_full_dump_pages_search3_songs() {
+        let mut server = Server::new_async().await;
+        let first_page_songs = (0..500)
+            .map(|idx| {
+                format!(
+                    r#"{{"id":"song{idx}","title":"Track {idx}","albumId":"album1","size":{size},"contentType":"audio/mpeg","suffix":"mp3"}}"#,
+                    size = 1_000 + idx
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let second_page_songs = (500..503)
+            .map(|idx| {
+                format!(
+                    r#"{{"id":"song{idx}","title":"Track {idx}","albumId":"album1","size":{size},"contentType":"audio/mpeg","suffix":"mp3"}}"#,
+                    size = 1_000 + idx
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let _first = server
+            .mock("GET", "/rest/search3.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("query".into(), "".into()));
+                matchers.push(Matcher::UrlEncoded("songCount".into(), "500".into()));
+                matchers.push(Matcher::UrlEncoded("songOffset".into(), "0".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(&format!(
+                r#""searchResult3":{{"song":[{first_page_songs}]}}"#
+            )))
+            .expect(1)
+            .create_async()
+            .await;
+        let _second = server
+            .mock("GET", "/rest/search3.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("query".into(), "".into()));
+                matchers.push(Matcher::UrlEncoded("songCount".into(), "500".into()));
+                matchers.push(Matcher::UrlEncoded("songOffset".into(), "500".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(&format!(
+                r#""searchResult3":{{"song":[{second_page_songs}]}}"#
+            )))
+            .expect(1)
+            .create_async()
+            .await;
+        let _indexes = server
+            .mock("GET", "/rest/getIndexes.view")
+            .expect(0)
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        let changes = provider.changes_since(None).await.expect("changes");
+
+        assert_eq!(changes.len(), 503);
+        assert_eq!(changes[0].item.item_type, ItemType::Song);
+        assert_eq!(changes[0].change_type, ChangeType::Created);
+        assert_eq!(
+            changes[0].version.as_deref(),
+            Some("subsonic:song0|1000|audio/mpeg|mp3")
+        );
+    }
+
+    #[tokio::test]
+    async fn changes_since_zero_uses_search3_not_get_indexes() {
+        let mut server = Server::new_async().await;
+        let _search = server
+            .mock("GET", "/rest/search3.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("query".into(), "".into()));
+                matchers.push(Matcher::UrlEncoded("songCount".into(), "500".into()));
+                matchers.push(Matcher::UrlEncoded("songOffset".into(), "0".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(
+                r#""searchResult3":{"song":[{"id":"song1","title":"Track","albumId":"album1"}]}"#,
+            ))
+            .expect(1)
+            .create_async()
+            .await;
+        let _indexes = server
+            .mock("GET", "/rest/getIndexes.view")
+            .expect(0)
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        let changes = provider.changes_since(Some("0")).await.expect("changes");
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].item.id, "song1");
+    }
+
+    #[tokio::test]
+    async fn changes_since_album_fallback_detects_created_deleted_and_metadata_updates() {
+        let mut server = Server::new_async().await;
+        let _indexes = server
+            .mock("GET", "/rest/getIndexes.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded(
+                    "ifModifiedSince".into(),
+                    "1710000000000".into(),
+                ));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(r#""indexes":{"index":[]}"#))
+            .expect(1)
+            .create_async()
+            .await;
+        let _album = server
+            .mock("GET", "/rest/getAlbum.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "album1".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(
+                r#""album":{"id":"album1","name":"Album","song":[{"id":"song1","title":"Existing","albumId":"album1","size":1200,"contentType":"audio/mpeg","suffix":"mp3"},{"id":"song3","title":"New","albumId":"album1","size":3000,"contentType":"audio/flac","suffix":"flac"}]}"#,
+            ))
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+        let context = ProviderChangeContext {
+            synced_songs: vec![
+                ProviderSyncedSong {
+                    song_id: "song1".to_string(),
+                    album_id: Some("album1".to_string()),
+                    size: Some(1000),
+                    content_type: Some("audio/mpeg".to_string()),
+                    suffix: Some("mp3".to_string()),
+                    version: Some("old-v1".to_string()),
+                },
+                ProviderSyncedSong {
+                    song_id: "song2".to_string(),
+                    album_id: Some("album1".to_string()),
+                    size: Some(2000),
+                    content_type: Some("audio/mpeg".to_string()),
+                    suffix: Some("mp3".to_string()),
+                    version: Some("old-v2".to_string()),
+                },
+            ],
+        };
+
+        let changes = provider
+            .changes_since_with_context(Some("1710000000000"), &context)
+            .await
+            .expect("changes");
+
+        assert_eq!(changes.len(), 3);
+        assert!(changes
+            .iter()
+            .any(|change| change.item.id == "song1" && change.change_type == ChangeType::Updated));
+        assert!(changes
+            .iter()
+            .any(|change| change.item.id == "song2" && change.change_type == ChangeType::Deleted));
+        assert!(changes
+            .iter()
+            .any(|change| change.item.id == "song3" && change.change_type == ChangeType::Created));
+    }
+
+    #[tokio::test]
     async fn malformed_changes_token_returns_focused_error() {
         let provider = SubsonicProvider::from_client_for_tests(
             SubsonicClient::new("http://localhost", USERNAME, PASSWORD).expect("client"),
@@ -1471,26 +1821,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changes_since_none_calls_get_indexes_without_if_modified_since() {
+    async fn changes_since_empty_token_uses_initial_search3_dump() {
         let mut server = Server::new_async().await;
         let _mock = server
-            .mock("GET", "/rest/getIndexes.view")
-            .match_query(Matcher::AllOf(auth_matchers()))
+            .mock("GET", "/rest/search3.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("query".into(), "".into()));
+                matchers.push(Matcher::UrlEncoded("songCount".into(), "500".into()));
+                matchers.push(Matcher::UrlEncoded("songOffset".into(), "0".into()));
+                matchers
+            }))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(&ok(r#""indexes":{"index":[]}"#))
-            .expect(2)
+            .with_body(&ok(r#""searchResult3":{"song":[]}"#))
+            .expect(1)
             .create_async()
             .await;
         let provider = provider(&server).await;
 
-        let changes_none = provider.changes_since(None).await.expect("changes(None)");
         let changes_empty = provider
             .changes_since(Some(""))
             .await
             .expect("changes(empty)");
 
-        assert!(changes_none.is_empty());
         assert!(changes_empty.is_empty());
     }
 

@@ -5,8 +5,8 @@ use crate::domain::models::{
     Song,
 };
 use crate::providers::{
-    Capabilities, MediaProvider, ProviderError, ScrobbleRequest, ScrobbleSubmission, ServerType,
-    TranscodeProfile,
+    Capabilities, MediaProvider, ProviderChangeContext, ProviderError, ScrobbleRequest,
+    ScrobbleSubmission, ServerType, TranscodeProfile,
 };
 use async_trait::async_trait;
 
@@ -295,7 +295,11 @@ impl MediaProvider for JellyfinProvider {
         ))
     }
 
-    async fn changes_since(&self, token: Option<&str>) -> Result<Vec<ChangeEvent>, ProviderError> {
+    async fn changes_since_with_context(
+        &self,
+        token: Option<&str>,
+        _context: &ProviderChangeContext,
+    ) -> Result<Vec<ChangeEvent>, ProviderError> {
         let response = self
             .client
             .get_items_changed_since(self.url(), self.token(), self.user_id(), token)
