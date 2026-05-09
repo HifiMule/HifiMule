@@ -1,6 +1,6 @@
 # Story 8.2: JellyfinProvider Adapter
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -21,45 +21,45 @@ so that no existing functionality regresses and all callers can move toward the 
 
 ## Tasks / Subtasks
 
-- [ ] Add `JellyfinProvider` adapter module (AC: 1, 5)
-  - [ ] Create `hifimule-daemon/src/providers/jellyfin.rs` and export it from `hifimule-daemon/src/providers/mod.rs`.
-  - [ ] Wrap the existing `JellyfinClient`; do not duplicate HTTP request logic in a second client.
-  - [ ] Store the provider's server URL, token credential, and user ID in the provider instance or an adjacent constructor type.
-  - [ ] Return `ServerType::Jellyfin` and `Capabilities { open_subsonic: false, supports_changes_since: true, supports_server_transcoding: true }`.
+- [x] Add `JellyfinProvider` adapter module (AC: 1, 5)
+  - [x] Create `hifimule-daemon/src/providers/jellyfin.rs` and export it from `hifimule-daemon/src/providers/mod.rs`.
+  - [x] Wrap the existing `JellyfinClient`; do not duplicate HTTP request logic in a second client.
+  - [x] Store the provider's server URL, token credential, and user ID in the provider instance or an adjacent constructor type.
+  - [x] Return `ServerType::Jellyfin` and `Capabilities { open_subsonic: false, supports_changes_since: true, supports_server_transcoding: true }`.
 
-- [ ] Map existing Jellyfin calls to the `MediaProvider` trait (AC: 1, 2)
-  - [ ] `list_libraries()` should reuse `JellyfinClient::get_views()` and map music collection views into domain `Library`.
-  - [ ] `list_artists(library_id)` should reuse or extend `get_items()` with `IncludeItemTypes=MusicArtist`; preserve alphabetical quick-nav behavior if a trait signature amendment for `letter` is introduced.
-  - [ ] `list_albums(library_id)` and `get_album(album_id)` should reuse or extend `get_items()` / `get_child_items_with_sizes()` so album tracks are returned as domain `Song` values.
-  - [ ] `get_artist(artist_id)` should return a domain `ArtistWithAlbums`; if existing `/Items?ParentId={artist}` behavior is insufficient, extend `JellyfinClient` with the minimal Jellyfin query needed instead of doing ad hoc HTTP in the provider.
-  - [ ] `search(query)` should wrap `search_audio_items()` initially and map song results; add artist/album search only if the existing API surface already supports it safely.
-  - [ ] `download_url()` should resolve the same effective Jellyfin download/stream endpoint used by existing sync, including `PlaybackInfo` transcoding fallback when a `TranscodeProfile` is supplied.
-  - [ ] `cover_art_url()` should produce the Jellyfin primary image URL used by `image_proxy`; do not let UI code build Jellyfin URLs itself.
-  - [ ] `scrobble()` should preserve current `report_item_played()` semantics for the `Played` submission path.
+- [x] Map existing Jellyfin calls to the `MediaProvider` trait (AC: 1, 2)
+  - [x] `list_libraries()` should reuse `JellyfinClient::get_views()` and map music collection views into domain `Library`.
+  - [x] `list_artists(library_id)` should reuse or extend `get_items()` with `IncludeItemTypes=MusicArtist`; preserve alphabetical quick-nav behavior if a trait signature amendment for `letter` is introduced.
+  - [x] `list_albums(library_id)` and `get_album(album_id)` should reuse or extend `get_items()` / `get_child_items_with_sizes()` so album tracks are returned as domain `Song` values.
+  - [x] `get_artist(artist_id)` should return a domain `ArtistWithAlbums`; if existing `/Items?ParentId={artist}` behavior is insufficient, extend `JellyfinClient` with the minimal Jellyfin query needed instead of doing ad hoc HTTP in the provider.
+  - [x] `search(query)` should wrap `search_audio_items()` initially and map song results; add artist/album search only if the existing API surface already supports it safely.
+  - [x] `download_url()` should resolve the same effective Jellyfin download/stream endpoint used by existing sync, including `PlaybackInfo` transcoding fallback when a `TranscodeProfile` is supplied.
+  - [x] `cover_art_url()` should produce the Jellyfin primary image URL used by `image_proxy`; do not let UI code build Jellyfin URLs itself.
+  - [x] `scrobble()` should preserve current `report_item_played()` semantics for the `Played` submission path.
 
-- [ ] Add Jellyfin DTO-to-domain conversion helpers (AC: 2)
-  - [ ] Implement focused conversion functions or `TryFrom` impls for `JellyfinView -> Library`, `JellyfinItem -> Artist`, `JellyfinItem -> Album`, and `JellyfinItem -> Song`.
-  - [ ] Use Story 8.1 newtypes/helpers (`JellyfinTicks`, `Seconds`, `Bps`, `Kbps`) for duration and bitrate conversion.
-  - [ ] Preserve optional fields instead of inventing placeholder values; missing Jellyfin size, bitrate, track number, artist ID, or cover art should remain `None`.
-  - [ ] Translate adapter failures into `ProviderError` variants; do not bubble raw `anyhow` text when a specific HTTP/auth/not-found/deserialization variant is available.
+- [x] Add Jellyfin DTO-to-domain conversion helpers (AC: 2)
+  - [x] Implement focused conversion functions or `TryFrom` impls for `JellyfinView -> Library`, `JellyfinItem -> Artist`, `JellyfinItem -> Album`, and `JellyfinItem -> Song`.
+  - [x] Use Story 8.1 newtypes/helpers (`JellyfinTicks`, `Seconds`, `Bps`, `Kbps`) for duration and bitrate conversion.
+  - [x] Preserve optional fields instead of inventing placeholder values; missing Jellyfin size, bitrate, track number, artist ID, or cover art should remain `None`.
+  - [x] Translate adapter failures into `ProviderError` variants; do not bubble raw `anyhow` text when a specific HTTP/auth/not-found/deserialization variant is available.
 
-- [ ] Implement Jellyfin incremental changes (AC: 3)
-  - [ ] Extend `JellyfinClient::get_items()` or add a minimal method for `/Items?minDateLastSaved={ISO}` with `Fields=MediaSources`.
-  - [ ] Treat the current `MediaProvider::changes_since(token: Option<&str>)` token as an ISO timestamp string for Jellyfin in this story; document invalid or missing token behavior in tests.
-  - [ ] Map returned Jellyfin item types into `ItemType::{Song, Album, Artist, Playlist}` and `ChangeType::Updated` unless a reliable created/deleted signal exists.
-  - [ ] Do not add Subsonic fallback behavior here; Story 8.3 and 8.6 own Subsonic incremental semantics.
+- [x] Implement Jellyfin incremental changes (AC: 3)
+  - [x] Extend `JellyfinClient::get_items()` or add a minimal method for `/Items?minDateLastSaved={ISO}` with `Fields=MediaSources`.
+  - [x] Treat the current `MediaProvider::changes_since(token: Option<&str>)` token as an ISO timestamp string for Jellyfin in this story; document invalid or missing token behavior in tests.
+  - [x] Map returned Jellyfin item types into `ItemType::{Song, Album, Artist, Playlist}` and `ChangeType::Updated` unless a reliable created/deleted signal exists.
+  - [x] Do not add Subsonic fallback behavior here; Story 8.3 and 8.6 own Subsonic incremental semantics.
 
-- [ ] Migrate low-risk call sites or add compatibility seams (AC: 4, 5)
-  - [ ] Keep existing JSON-RPC method names such as `jellyfin_get_items` stable unless a compatibility wrapper is added.
-  - [ ] Prefer updating internal helpers to call `JellyfinProvider` where behavior is already 1:1 with the trait.
-  - [ ] Defer wholesale `AppState.provider: Arc<RwLock<Option<Arc<dyn MediaProvider>>>>` replacement to Story 8.4 unless it is required for compilation.
-  - [ ] Preserve current sync streaming behavior in `sync.rs`; if `download_url()` only returns a URL, ensure the code still uses the same auth headers and streaming body path as before.
+- [x] Migrate low-risk call sites or add compatibility seams (AC: 4, 5)
+  - [x] Keep existing JSON-RPC method names such as `jellyfin_get_items` stable unless a compatibility wrapper is added.
+  - [x] Prefer updating internal helpers to call `JellyfinProvider` where behavior is already 1:1 with the trait.
+  - [x] Defer wholesale `AppState.provider: Arc<RwLock<Option<Arc<dyn MediaProvider>>>>` replacement to Story 8.4 unless it is required for compilation.
+  - [x] Preserve current sync streaming behavior in `sync.rs`; if `download_url()` only returns a URL, ensure the code still uses the same auth headers and streaming body path as before.
 
-- [ ] Test and verify (AC: 2, 3, 4, 6)
-  - [ ] Add unit tests for every Jellyfin DTO-to-domain conversion, including ticks-to-seconds, bps-to-kbps, UUID string passthrough, missing optional fields, and cover art ID preservation.
-  - [ ] Add mockito-backed adapter tests for list libraries, list albums/get album tracks, search, cover art URL, scrobble/report played, and `minDateLastSaved`.
-  - [ ] Keep or update existing `api.rs` tests so current HTTP request shapes are still covered.
-  - [ ] Run `rtk cargo test -p hifimule-daemon`.
+- [x] Test and verify (AC: 2, 3, 4, 6)
+  - [x] Add unit tests for every Jellyfin DTO-to-domain conversion, including ticks-to-seconds, bps-to-kbps, UUID string passthrough, missing optional fields, and cover art ID preservation.
+  - [x] Add mockito-backed adapter tests for list libraries, list albums/get album tracks, search, cover art URL, scrobble/report played, and `minDateLastSaved`.
+  - [x] Keep or update existing `api.rs` tests so current HTTP request shapes are still covered.
+  - [x] Run `rtk cargo test -p hifimule-daemon`.
 
 ## Dev Notes
 
@@ -134,12 +134,34 @@ so that no existing functionality regresses and all callers can move toward the 
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+GPT-5 Codex
 
 ### Debug Log References
+
+- 2026-05-09: Started Story 8.2 implementation; sprint status moved to in-progress.
+- 2026-05-09: Added failing Jellyfin adapter/conversion tests, then implemented adapter against existing `JellyfinClient`.
+- 2026-05-09: Ran `rtk cargo test -p hifimule-daemon providers::jellyfin` after adapter implementation; provider-focused tests passed.
+- 2026-05-09: Ran `rtk cargo fmt -p hifimule-daemon`.
+- 2026-05-09: Ran `rtk cargo test -p hifimule-daemon`; 223 tests passed.
 
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
+- Implemented `JellyfinProvider` as a `MediaProvider` wrapper around the existing `JellyfinClient`, including Jellyfin capabilities, constructor state, browse/search/download/artwork/scrobble/change methods, and DTO-to-domain conversion helpers.
+- Extended the Jellyfin DTO/client surface only where needed for adapter normalization and incremental changes: optional artist/album/image/bitrate fields, public stream URL resolution, and `/Items?minDateLastSaved={ISO}` support.
+- Kept existing JSON-RPC names and sync streaming path stable; wholesale provider lifecycle replacement remains deferred to Story 8.4.
+- Added conversion and mockito-backed adapter tests covering libraries, albums/tracks, playlists, search, cover art URL, scrobble played submission, download URL/transcoding resolution, and changes since.
 
 ### File List
+
+- _bmad-output/implementation-artifacts/8-2-jellyfinprovider-adapter.md
+- _bmad-output/implementation-artifacts/sprint-status.yaml
+- hifimule-daemon/src/api.rs
+- hifimule-daemon/src/auto_fill.rs
+- hifimule-daemon/src/providers/mod.rs
+- hifimule-daemon/src/providers/jellyfin.rs
+- hifimule-daemon/src/sync.rs
+
+### Change Log
+
+- 2026-05-09: Added JellyfinProvider adapter and Jellyfin DTO/domain normalization tests; daemon test suite passes.
