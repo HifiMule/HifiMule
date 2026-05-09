@@ -34,6 +34,19 @@ pub struct ProviderSyncedSong {
     pub version: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderChangeMetadata {
+    #[serde(default)]
+    pub album_id: Option<String>,
+    #[serde(default)]
+    pub size: Option<u64>,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub suffix: Option<String>,
+}
+
 #[async_trait]
 pub trait MediaProvider: Send + Sync {
     async fn list_libraries(&self) -> Result<Vec<Library>, ProviderError>;
@@ -72,6 +85,10 @@ pub trait MediaProvider: Send + Sync {
     ) -> Result<Vec<ChangeEvent>, ProviderError>;
 
     async fn scrobble(&self, request: ScrobbleRequest) -> Result<(), ProviderError>;
+
+    fn change_metadata(&self, _event: &ChangeEvent) -> Option<ProviderChangeMetadata> {
+        None
+    }
 
     fn server_type(&self) -> ServerType;
 

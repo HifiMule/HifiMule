@@ -20,6 +20,10 @@ pub struct AutoFillItem {
     pub album: Option<String>,
     #[serde(default)]
     pub artist: Option<String>,
+    #[serde(default)]
+    pub provider_album_id: Option<String>,
+    #[serde(default)]
+    pub provider_suffix: Option<String>,
     pub size_bytes: u64,
     pub priority_reason: String,
 }
@@ -189,6 +193,13 @@ pub fn rank_and_truncate(
             artist: track
                 .album_artist
                 .or_else(|| track.artists.and_then(|a| a.into_iter().next())),
+            provider_album_id: track.album_id,
+            provider_suffix: track
+                .media_sources
+                .as_ref()
+                .and_then(|sources| sources.first())
+                .and_then(|source| source.container.clone())
+                .or(track.container),
             size_bytes,
             priority_reason,
         });
@@ -253,6 +264,24 @@ mod tests {
         let (result, _) = rank_and_truncate(tracks, 5_000_000);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "a");
+    }
+
+    #[test]
+    fn test_rank_and_truncate_preserves_provider_album_metadata() {
+        let mut track = make_track("a", true, 0, "2024-01-01", 3_000_000);
+        track.album_id = Some("album1".to_string());
+        track.container = Some("fallback-container".to_string());
+        track.media_sources = Some(vec![MediaSource {
+            size: Some(3_000_000),
+            container: Some("mp3".to_string()),
+            bitrate: None,
+        }]);
+
+        let (result, _) = rank_and_truncate(vec![track], 5_000_000);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].provider_album_id.as_deref(), Some("album1"));
+        assert_eq!(result[0].provider_suffix.as_deref(), Some("mp3"));
     }
 
     #[test]

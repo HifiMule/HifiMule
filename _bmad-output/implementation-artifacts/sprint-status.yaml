@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-05-09  # Story 8.6 ready for review
+last_updated: 2026-05-09  # Story 8.6 review complete, patches applied, done
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -109,10 +109,10 @@ development_status:
   7-4-packaging-and-cicd-hardening: done
   epic-7-retrospective: done
 
-  epic-8: in-progress
+  epic-8: done
   8-1-mediaprovider-trait-and-domain-models: done
   8-2-jellyfinprovider-adapter: done
   8-3-subsonicprovider-adapter: done
   8-4-runtime-server-type-detection-factory: done
   8-5-subsonic-url-credential-sanitization: done
-  8-6-incremental-sync-subsonic-album-level-fallback: review
+  8-6-incremental-sync-subsonic-album-level-fallback: done

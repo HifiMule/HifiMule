@@ -97,7 +97,11 @@ impl DeviceManifest {
                 .map(|item| ProviderSyncedSong {
                     song_id: item.jellyfin_id.clone(),
                     album_id: item.provider_album_id.clone(),
-                    size: Some(item.size_bytes),
+                    size: item
+                        .provider_content_type
+                        .as_ref()
+                        .zip(item.provider_suffix.as_ref())
+                        .map(|_| item.size_bytes),
                     content_type: item.provider_content_type.clone(),
                     suffix: item.provider_suffix.clone(),
                     version: item.etag.clone(),
