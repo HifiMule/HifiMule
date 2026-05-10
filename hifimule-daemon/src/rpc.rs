@@ -4697,7 +4697,7 @@ mod tests {
                 Matcher::UrlEncoded("Recursive".into(), "true".into()),
             ]))
             .with_status(200)
-            .with_body(r#"{"Items":[{"Id":"track-1","Name":"Track 1","Type":"Audio","Album":"Album A","AlbumArtist":"Artist A","MediaSources":[{"Size":12345}],"Etag":"track-etag"}],"TotalRecordCount":1,"StartIndex":0}"#)
+            .with_body(r#"{"Items":[{"Id":"track-1","Name":"Track 1","Type":"Audio","Album":"Album A","AlbumArtist":"Artist A","RunTimeTicks":2100000000,"MediaSources":[{"Size":12345}],"Etag":"track-etag"}],"TotalRecordCount":1,"StartIndex":0}"#)
             .create_async()
             .await;
 
@@ -4768,6 +4768,16 @@ mod tests {
         assert_eq!(delta.adds[0].jellyfin_id, "track-1");
         assert_eq!(delta.adds[0].name, "Track 1");
         assert_eq!(delta.adds[0].size_bytes, 12345);
+        assert_eq!(delta.playlists.len(), 1);
+        assert_eq!(delta.playlists[0].jellyfin_id, "playlist-1");
+        assert_eq!(delta.playlists[0].name, "Road Trip");
+        assert_eq!(delta.playlists[0].tracks.len(), 1);
+        assert_eq!(delta.playlists[0].tracks[0].jellyfin_id, "track-1");
+        assert_eq!(
+            delta.playlists[0].tracks[0].artist.as_deref(),
+            Some("Artist A")
+        );
+        assert_eq!(delta.playlists[0].tracks[0].run_time_seconds, 210);
     }
 
     #[tokio::test]

@@ -1309,6 +1309,19 @@ fn extract_display_name(rel_path: &str) -> &str {
         .unwrap_or(rel_path)
 }
 
+async fn device_file_exists(device_io: &dyn crate::device_io::DeviceIO, rel_path: &str) -> bool {
+    let parent = rel_path
+        .rsplit_once('/')
+        .map(|(parent, _)| parent)
+        .unwrap_or("");
+
+    device_io
+        .list_files(parent)
+        .await
+        .map(|files| files.iter().any(|file| file.path == rel_path))
+        .unwrap_or(false)
+}
+
 /// Generates, regenerates, or cleans up .m3u files for playlists in the sync basket.
 ///
 /// Called once per sync run, after all file transfers complete.
@@ -1440,6 +1453,12 @@ async fn generate_m3u_files(
             .map(|(t, _)| t.jellyfin_id.clone())
             .collect();
 
+        let rel_m3u = if managed_subfolder.is_empty() {
+            m3u_filename.clone()
+        } else {
+            format!("{}/{}", managed_subfolder, m3u_filename)
+        };
+
         // Determine if regeneration is needed (filename or resolved track list changed)
         let (needs_write, old_filename_opt) = match manifest
             .playlists
@@ -1454,8 +1473,14 @@ async fn generate_m3u_files(
         };
 
         if !needs_write {
-            println!("[M3U] Playlist unchanged, skipping: {}", m3u_filename);
-            continue;
+            if device_file_exists(device_io.as_ref(), &rel_m3u).await {
+                println!("[M3U] Playlist unchanged, skipping: {}", m3u_filename);
+                continue;
+            }
+            println!(
+                "[M3U] Playlist manifest unchanged but file missing, rewriting: {}",
+                m3u_filename
+            );
         }
 
         // Build M3U content
@@ -1481,11 +1506,6 @@ async fn generate_m3u_files(
         let content = lines.join("\n") + "\n";
 
         // Write via device IO abstraction (handles Write-Temp-Rename internally)
-        let rel_m3u = if managed_subfolder.is_empty() {
-            m3u_filename.clone()
-        } else {
-            format!("{}/{}", managed_subfolder, m3u_filename)
-        };
         match device_io
             .write_with_verify(&rel_m3u, content.as_bytes())
             .await
@@ -2490,6 +2510,62 @@ mod tests {
             mtime1, mtime2,
             "File must not be rewritten if track list unchanged"
         );
+    }
+
+    #[tokio::test]
+    async fn test_generate_m3u_rewrites_when_manifest_unchanged_but_file_missing() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let device_path = tmp_dir.path();
+        let managed_path = device_path.join("Music");
+        tokio::fs::create_dir_all(&managed_path).await.unwrap();
+
+        let playlist_items = vec![PlaylistSyncItem {
+            jellyfin_id: "pl1".to_string(),
+            name: "Stable Playlist".to_string(),
+            tracks: vec![PlaylistTrackInfo {
+                jellyfin_id: "t1".to_string(),
+                artist: Some("Artist".to_string()),
+                run_time_seconds: 120,
+            }],
+        }];
+        let all_synced = vec![make_playlist_synced_item("t1", "Music/A/B/01 - Song.flac")];
+
+        let mut manifest = empty_manifest();
+        manifest
+            .playlists
+            .push(crate::device::PlaylistManifestEntry {
+                jellyfin_id: "pl1".to_string(),
+                filename: "Stable Playlist.m3u".to_string(),
+                track_count: 1,
+                track_ids: vec!["t1".to_string()],
+                last_modified: "2026-01-01T00:00:00Z".to_string(),
+            });
+        let device_io: std::sync::Arc<dyn crate::device_io::DeviceIO> =
+            std::sync::Arc::new(crate::device_io::MscBackend::new(device_path.to_path_buf()));
+
+        let m3u_path = managed_path.join("Stable Playlist.m3u");
+        assert!(
+            !m3u_path.exists(),
+            "test setup should start with a missing M3U file"
+        );
+
+        let warnings = generate_m3u_files(
+            &playlist_items,
+            device_path,
+            &managed_path,
+            &all_synced,
+            &mut manifest,
+            device_io,
+        )
+        .await;
+
+        assert!(warnings.is_empty(), "No warnings expected: {:?}", warnings);
+        assert!(m3u_path.exists(), "Missing M3U file should be rewritten");
+        let content = tokio::fs::read_to_string(&m3u_path).await.unwrap();
+        assert!(content.contains("#EXTINF:120,Artist - 01 - Song"));
+        assert!(content.contains("A/B/01 - Song.flac"));
+        assert_eq!(manifest.playlists.len(), 1);
+        assert_eq!(manifest.playlists[0].track_ids, vec!["t1"]);
     }
 
     #[tokio::test]
