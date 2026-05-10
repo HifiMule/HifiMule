@@ -174,6 +174,13 @@ impl Database {
         }
     }
 
+    pub fn clear_server_config(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM server_config WHERE id = 1", [])
+            .map_err(|e| anyhow!("Failed to clear server config: {}", e))?;
+        Ok(())
+    }
+
     pub fn get_device_mapping(&self, id: &str) -> Result<Option<DeviceMapping>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(

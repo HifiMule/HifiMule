@@ -1472,6 +1472,7 @@ async fn test_save_basket_roundtrip() {
         id: "basket-1".to_string(),
         name: "Basket Playlist".to_string(),
         item_type: "Playlist".to_string(),
+        server_id: None,
         artist: None,
         child_count: 5,
         size_ticks: 1000,

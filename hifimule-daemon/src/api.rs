@@ -950,6 +950,26 @@ impl CredentialManager {
             .map_err(|e| anyhow!("No server secret found in keyring: {}", e))
     }
 
+    pub fn clear_credentials() -> Result<()> {
+        let path = Self::get_config_path()?;
+        if path.exists() {
+            fs::remove_file(&path).map_err(|e| anyhow!("Failed to remove config file: {}", e))?;
+        }
+
+        let legacy_entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
+            .map_err(|e| anyhow!("Failed to access keyring: {}", e))?;
+        let _ = legacy_entry.delete_password();
+
+        for server_type in ["jellyfin", "subsonic", "openSubsonic"] {
+            let entry =
+                keyring::Entry::new(KEYRING_SERVICE, &format!("{KEYRING_USER}-{server_type}"))
+                    .map_err(|e| anyhow!("Failed to access keyring: {}", e))?;
+            let _ = entry.delete_password();
+        }
+
+        Ok(())
+    }
+
     pub fn get_credentials() -> Result<(String, String, Option<String>)> {
         let path = Self::get_config_path()?;
         if !path.exists() {
