@@ -260,43 +260,33 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                                 }
                             }
 
-                            // Auto-sync trigger: check if device has auto_sync_on_connect enabled
+                            // Auto-sync trigger: the connected manifest is the source of truth.
+                            // SQLite may be stale or absent when the UI has not opened yet.
                             if auto_sync_enabled && (has_basket || auto_fill_enabled) {
-                                // Check DB mapping also has auto_sync enabled
-                                let device = device_manager.get_current_device().await;
-                                let device_id = device.as_ref().map(|d| d.device_id.clone());
-                                let db_enabled = device_id
-                                    .as_ref()
-                                    .and_then(|id| db.get_device_mapping(id).ok().flatten())
-                                    .map(|m| m.auto_sync_on_connect)
-                                    .unwrap_or(false);
+                                let has_active_sync = som_events.has_active_operation().await;
 
-                                if db_enabled {
-                                    let has_active_sync = som_events.has_active_operation().await;
+                                if !has_active_sync {
+                                    if let Ok((url, token, user_id)) =
+                                        api::CredentialManager::get_credentials()
+                                    {
+                                        let user_id = user_id.unwrap_or_else(|| "Me".to_string());
+                                        let client = Arc::clone(&jellyfin_client);
+                                        let dm = Arc::clone(&device_manager);
+                                        let som = Arc::clone(&som_events);
+                                        let state_tx_sync = state_tx_clone.clone();
+                                        let device_path = path.clone();
 
-                                    if !has_active_sync {
-                                        if let Ok((url, token, user_id)) =
-                                            api::CredentialManager::get_credentials()
-                                        {
-                                            let user_id = user_id.unwrap_or_else(|| "Me".to_string());
-                                            let client = Arc::clone(&jellyfin_client);
-                                            let dm = Arc::clone(&device_manager);
-                                            let som = Arc::clone(&som_events);
-                                            let state_tx_sync = state_tx_clone.clone();
-                                            let device_path = path.clone();
-
-                                            tokio::spawn(async move {
-                                                daemon_log!("[AutoSync] Starting auto-sync for device");
-                                                if let Err(e) = run_auto_sync(
-                                                    client, dm, som, state_tx_sync,
-                                                    device_path, url, token, user_id,
-                                                ).await {
-                                                    daemon_log!("[AutoSync] Failed: {}", e);
-                                                }
-                                            });
-                                        } else {
-                                            daemon_log!("[AutoSync] Skipped: no credentials available");
-                                        }
+                                        tokio::spawn(async move {
+                                            daemon_log!("[AutoSync] Starting auto-sync for device");
+                                            if let Err(e) = run_auto_sync(
+                                                client, dm, som, state_tx_sync,
+                                                device_path, url, token, user_id,
+                                            ).await {
+                                                daemon_log!("[AutoSync] Failed: {}", e);
+                                            }
+                                        });
+                                    } else {
+                                        daemon_log!("[AutoSync] Skipped: no credentials available");
                                     }
                                 }
                             } else if auto_sync_enabled && !has_basket && !auto_fill_enabled {

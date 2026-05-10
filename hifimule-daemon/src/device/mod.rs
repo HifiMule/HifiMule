@@ -293,6 +293,17 @@ impl DeviceManager {
                     .db
                     .get_device_mapping(&dirty_manifest.device_id)
                     .unwrap_or(None);
+                if mapping.is_some() {
+                    if let Err(e) = self.db.set_auto_sync_on_connect(
+                        &dirty_manifest.device_id,
+                        dirty_manifest.auto_sync_on_connect,
+                    ) {
+                        daemon_log!(
+                            "[Device] Failed to sync auto_sync_on_connect from manifest: {}",
+                            e
+                        );
+                    }
+                }
                 return if let Some(m) = mapping {
                     if let Some(profile_id) = m.jellyfin_user_id {
                         Ok(crate::DaemonState::DeviceRecognized { name, profile_id })
@@ -331,6 +342,17 @@ impl DeviceManager {
             .db
             .get_device_mapping(&manifest.device_id)
             .unwrap_or(None);
+        if mapping.is_some() {
+            if let Err(e) = self
+                .db
+                .set_auto_sync_on_connect(&manifest.device_id, manifest.auto_sync_on_connect)
+            {
+                daemon_log!(
+                    "[Device] Failed to sync auto_sync_on_connect from manifest: {}",
+                    e
+                );
+            }
+        }
 
         if let Some(m) = mapping {
             if let Some(profile_id) = m.jellyfin_user_id {

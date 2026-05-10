@@ -736,9 +736,10 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         .map(|s| s.path.to_string_lossy().to_string());
     let pending_device_friendly_name = pending_device_snapshot.and_then(|s| s.friendly_name);
 
-    let auto_sync_on_connect = mapping
+    let auto_sync_on_connect = device
         .as_ref()
-        .map(|m| m.auto_sync_on_connect)
+        .map(|d| d.auto_sync_on_connect)
+        .or_else(|| mapping.as_ref().map(|m| m.auto_sync_on_connect))
         .unwrap_or(false);
 
     let auto_fill = device.as_ref().map(|d| {
@@ -5152,7 +5153,6 @@ mod tests {
         let device_id = "auto-state-test";
         db.upsert_device_mapping(device_id, Some("Test"), Some("user-1"), None)
             .unwrap();
-        db.set_auto_sync_on_connect(device_id, true).unwrap();
 
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
 

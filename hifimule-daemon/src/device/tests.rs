@@ -1495,6 +1495,51 @@ async fn test_save_basket_roundtrip() {
 
 // ===== Story 2.3b Tests: Auto-Sync on Connect =====
 
+#[tokio::test]
+async fn test_handle_device_detected_syncs_auto_sync_manifest_to_db() {
+    let dir = tempdir().unwrap();
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let device_id = "dev-auto-sync-detect";
+    db.upsert_device_mapping(device_id, Some("Auto Sync Device"), Some("user-1"), None)
+        .unwrap();
+    assert!(
+        !db.get_device_mapping(device_id)
+            .unwrap()
+            .unwrap()
+            .auto_sync_on_connect
+    );
+
+    let manager = DeviceManager::new(db.clone());
+    let manifest = DeviceManifest {
+        device_id: device_id.to_string(),
+        name: Some("Auto Sync Device".to_string()),
+        icon: None,
+        version: "1.0".to_string(),
+        managed_paths: vec![],
+        synced_items: vec![],
+        dirty: false,
+        pending_item_ids: vec![],
+        basket_items: vec![],
+        auto_sync_on_connect: true,
+        auto_fill: crate::device::AutoFillPrefs::default(),
+        transcoding_profile_id: None,
+        playlists: vec![],
+        storage_id: None,
+    };
+    write_manifest(msc(dir.path()), &manifest).await.unwrap();
+
+    manager
+        .handle_device_detected(dir.path().to_path_buf(), manifest, msc(dir.path()))
+        .await
+        .unwrap();
+
+    let mapping = db.get_device_mapping(device_id).unwrap().unwrap();
+    assert!(
+        mapping.auto_sync_on_connect,
+        "device detection must copy manifest auto_sync_on_connect into SQLite so UI state and auto-sync gating agree"
+    );
+}
+
 #[test]
 fn test_auto_sync_on_connect_serde_default() {
     let json = r#"{"device_id": "dev-1", "name": "iPod", "version": "1.0"}"#;
