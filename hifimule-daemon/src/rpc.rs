@@ -325,6 +325,7 @@ async fn handler(
         }
         "device.list" => handle_device_list(&state).await,
         "device.select" => handle_device_select(&state, payload.params).await,
+        "server.probe" => handle_server_probe(payload.params).await,
         "daemon.health" => Ok(serde_json::json!({ "data": { "status": "ok" } })),
         _ => Err(JsonRpcError {
             code: ERR_METHOD_NOT_FOUND,
@@ -347,6 +348,21 @@ async fn handler(
             id: payload.id,
         }),
     }
+}
+
+async fn handle_server_probe(params: Option<Value>) -> Result<Value, JsonRpcError> {
+    let url = params
+        .as_ref()
+        .and_then(|p| p["url"].as_str())
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing url".to_string(),
+            data: None,
+        })?;
+
+    let server_type = crate::providers::probe_url(url).await;
+    let slug = server_type_slug(server_type);
+    Ok(serde_json::json!({ "serverType": slug }))
 }
 
 async fn handle_test_connection(

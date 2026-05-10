@@ -1,13 +1,18 @@
 import { rpcCall } from './rpc';
 
+type BadgeSpec = { label: string; variant: string };
+
+function serverTypeBadge(type: string | null): BadgeSpec | null {
+    switch (type) {
+        case 'jellyfin':     return { label: 'Jellyfin',     variant: 'primary' };
+        case 'openSubsonic': return { label: 'OpenSubsonic', variant: 'success' };
+        case 'subsonic':     return { label: 'Subsonic',     variant: 'neutral' };
+        default:             return null;
+    }
+}
+
 export function initLoginView(onLoginSuccess: () => void) {
     console.log('Initializing Login View');
-    // Actually, index.html has specific slots. We might need a main container.
-    // index.html has <div class="app-container"> wrapping <sl-split-panel>.
-    // We should probably replace the content of app-container or have a separate login container.
-    // Let's assume we target formatting the body or a root div.
-
-    // For now, let's target document.body or a specific #main-view
     const root = document.querySelector('.app-container');
     if (!root) return;
 
@@ -17,15 +22,18 @@ export function initLoginView(onLoginSuccess: () => void) {
                 <div slot="header">
                     <h3>Connect to Media Server</h3>
                 </div>
-                
+
                 <form id="login-form" class="login-form">
-                    <sl-input name="url" label="Server URL" placeholder="http://localhost:4533 or http://localhost:8096" required></sl-input>
+                    <div style="position: relative;">
+                        <sl-input name="url" label="Server URL" placeholder="http://localhost:4533 or http://localhost:8096" required></sl-input>
+                        <div id="server-type-indicator" style="min-height: 1.5rem; margin-top: 0.4rem;"></div>
+                    </div>
                     <br>
                     <sl-input name="username" label="Username" required></sl-input>
                     <br>
                     <sl-input name="password" type="password" label="Password" required password-toggle></sl-input>
                     <br>
-                    
+
                     <div id="login-error" class="error-text" style="display: none; color: var(--sl-color-danger-500); margin-bottom: 1rem;"></div>
 
                     <sl-button type="submit" variant="primary" style="width: 100%;">Connect</sl-button>
@@ -35,6 +43,31 @@ export function initLoginView(onLoginSuccess: () => void) {
     `;
 
     const form = document.getElementById('login-form') as HTMLFormElement;
+    const indicator = document.getElementById('server-type-indicator')!;
+    const urlInput = form.querySelector('sl-input[name="url"]') as HTMLElement & { value: string };
+
+    let probeTimer: ReturnType<typeof setTimeout> | null = null;
+
+    urlInput.addEventListener('sl-input', () => {
+        if (probeTimer) clearTimeout(probeTimer);
+        const url = urlInput.value.trim();
+        if (!url.startsWith('http')) {
+            indicator.innerHTML = '';
+            return;
+        }
+        probeTimer = setTimeout(async () => {
+            try {
+                const result = await rpcCall('server.probe', { url });
+                const badge = serverTypeBadge(result?.serverType ?? null);
+                indicator.innerHTML = badge
+                    ? `<sl-badge variant="${badge.variant}" pill>${badge.label}</sl-badge>`
+                    : '';
+            } catch {
+                indicator.innerHTML = '';
+            }
+        }, 600);
+    });
+
     form.addEventListener('submit', async (e) => {
         e.preventDefault();
         const formData = new FormData(form);
@@ -42,7 +75,6 @@ export function initLoginView(onLoginSuccess: () => void) {
         const username = formData.get('username') as string;
         const password = formData.get('password') as string;
 
-        // Shoelace button has a 'loading' property
         const btn = form.querySelector('sl-button') as HTMLElement & { loading: boolean };
         const errorEl = document.getElementById('login-error');
 
