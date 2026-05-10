@@ -1,7 +1,7 @@
 pub mod mtp;
 
 use crate::providers::{ProviderChangeContext, ProviderSyncedSong};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::time::{sleep, Duration};
@@ -604,10 +604,18 @@ impl DeviceManager {
             .ok_or_else(|| anyhow::anyhow!("No unrecognized device connected"))?;
         let device_root = pending.path;
         let device_io = pending.io;
+        let device_class = device_class_from_path(&device_root);
+        let device_path = device_root.to_string_lossy().to_string();
 
         // Liveness probe: detect stale IO from a device that disconnected and reconnected
         // between the Unrecognized event and the user completing initialization.
-        if device_io.list_files("").await.is_err() {
+        if let Err(e) = device_io.list_files("").await {
+            daemon_log!(
+                "[DeviceInit] Root liveness probe failed device_path={} class={:?} error={:#}",
+                device_path,
+                device_class,
+                e
+            );
             return Err(anyhow::anyhow!(
                 "Device no longer accessible — reconnect the device and try again"
             ));
@@ -618,11 +626,27 @@ impl DeviceManager {
         let managed_paths = if folder_path.is_empty() {
             vec![]
         } else {
-            device_io.ensure_dir(folder_path).await?;
+            device_io.ensure_dir(folder_path).await.with_context(|| {
+                format!(
+                    "Failed to create managed folder '{}' on device {}",
+                    folder_path, device_path
+                )
+            })?;
             vec![folder_path.to_string()]
         };
 
-        let storage_id = device_io.storage_id().await.unwrap_or(None);
+        let storage_id = match device_io.storage_id().await {
+            Ok(id) => id,
+            Err(e) => {
+                daemon_log!(
+                    "[DeviceInit] storage_id lookup failed device_path={} class={:?} error={:#}",
+                    device_path,
+                    device_class,
+                    e
+                );
+                None
+            }
+        };
 
         let manifest = DeviceManifest {
             device_id,
@@ -641,9 +665,33 @@ impl DeviceManager {
             storage_id,
         };
         let manifest_bytes = serde_json::to_string_pretty(&manifest)?;
-        device_io
+        daemon_log!(
+            "[DeviceInit] Writing manifest path=.hifimule.json device_path={} class={:?} managed_paths={:?} storage_id={:?} bytes={}",
+            device_path,
+            device_class,
+            manifest.managed_paths,
+            manifest.storage_id,
+            manifest_bytes.len()
+        );
+        if let Err(e) = device_io
             .write_with_verify(".hifimule.json", manifest_bytes.as_bytes())
-            .await?;
+            .await
+        {
+            daemon_log!(
+                "[DeviceInit] Manifest write failed path=.hifimule.json device_path={} class={:?} managed_paths={:?} storage_id={:?} error={:#}",
+                device_path,
+                device_class,
+                manifest.managed_paths,
+                manifest.storage_id,
+                e
+            );
+            return Err(e).with_context(|| {
+                format!(
+                    "Failed to write .hifimule.json on device {} via {:?}",
+                    device_path, device_class
+                )
+            });
+        }
 
         {
             let mut state = self.state.write().await;
@@ -651,7 +699,7 @@ impl DeviceManager {
                 device_root.clone(),
                 ConnectedDevice {
                     manifest: manifest.clone(),
-                    device_class: device_class_from_path(&device_root),
+                    device_class,
                     device_io,
                 },
             );
@@ -1502,7 +1550,13 @@ async fn emit_mtp_probe_event(
                 .is_ok()
             }
             Err(e) => {
-                daemon_log!("[MTP] Manifest parse error on {}: {}", dev_id, e);
+                daemon_log!(
+                    "[MTP] Manifest parse error during probe path=.hifimule.json device_id={} friendly_name={} synthetic_path={} error={:#}; treating device as unrecognized",
+                    dev_id,
+                    friendly_name,
+                    synthetic_path.display(),
+                    e
+                );
                 tx.send(DeviceEvent::Unrecognized {
                     path: synthetic_path,
                     device_io: backend_arc,
@@ -1513,8 +1567,14 @@ async fn emit_mtp_probe_event(
             }
         },
         Err(e) => {
-            daemon_log!("[MTP] Manifest read failed on {}: {}", dev_id, e);
             if is_missing_manifest_error(&e) {
+                daemon_log!(
+                    "[MTP] Manifest missing during probe path=.hifimule.json device_id={} friendly_name={} synthetic_path={} error={:#}; treating device as unrecognized",
+                    dev_id,
+                    friendly_name,
+                    synthetic_path.display(),
+                    e
+                );
                 tx.send(DeviceEvent::Unrecognized {
                     path: synthetic_path,
                     device_io: backend_arc,
@@ -1523,6 +1583,13 @@ async fn emit_mtp_probe_event(
                 .await
                 .is_ok()
             } else {
+                daemon_log!(
+                    "[MTP] Manifest read failed during probe path=.hifimule.json device_id={} friendly_name={} synthetic_path={} error={:#}; suppressing device event until next poll",
+                    dev_id,
+                    friendly_name,
+                    synthetic_path.display(),
+                    e
+                );
                 false
             }
         }
