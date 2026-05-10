@@ -511,6 +511,7 @@ async fn run_auto_sync(
         .ok_or_else(|| anyhow::anyhow!("No device connected"))?;
 
     let mut desired_items = Vec::new();
+    let mut playlist_sync_items: Vec<sync::PlaylistSyncItem> = Vec::new();
 
     if manifest.basket_items.is_empty() {
         if manifest.auto_fill.enabled {
@@ -592,6 +593,9 @@ async fn run_auto_sync(
                             desired_items.push(to_desired_item(item));
                         } else {
                             // Expand container item (album/playlist)
+                            let is_playlist = item.item_type == "Playlist";
+                            let playlist_id = item.id.clone();
+                            let playlist_name = item.name.clone();
                             let expand_result = tokio::time::timeout(
                                 API_TIMEOUT,
                                 jellyfin_client
@@ -601,6 +605,27 @@ async fn run_auto_sync(
 
                             match expand_result {
                                 Ok(Ok(children)) => {
+                                    if is_playlist {
+                                        let tracks: Vec<sync::PlaylistTrackInfo> = children
+                                            .iter()
+                                            .filter(|c| is_downloadable(&c.item_type))
+                                            .map(|c| sync::PlaylistTrackInfo {
+                                                jellyfin_id: c.id.clone(),
+                                                artist: c.album_artist.clone(),
+                                                run_time_seconds: c
+                                                    .run_time_ticks
+                                                    .map(|t| (t / 10_000_000) as i64)
+                                                    .unwrap_or(-1),
+                                            })
+                                            .collect();
+                                        if !tracks.is_empty() {
+                                            playlist_sync_items.push(sync::PlaylistSyncItem {
+                                                jellyfin_id: playlist_id,
+                                                name: playlist_name,
+                                                tracks,
+                                            });
+                                        }
+                                    }
                                     for child in children {
                                         if is_downloadable(&child.item_type) {
                                             desired_items.push(to_desired_item(child));
@@ -634,7 +659,8 @@ async fn run_auto_sync(
         return Ok(());
     }
 
-    let delta = sync::calculate_delta(&desired_items, &manifest);
+    let mut delta = sync::calculate_delta(&desired_items, &manifest);
+    delta.playlists = playlist_sync_items;
     let total_files = delta.adds.len() + delta.deletes.len();
 
     if total_files == 0 && delta.id_changes.is_empty() {
