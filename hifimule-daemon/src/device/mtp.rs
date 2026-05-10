@@ -76,6 +76,16 @@ pub mod windows_wpd {
         FILEOPERATION_FLAGS, KF_FLAG_DEFAULT, SHCONTF_FOLDERS, SHCONTF_NONFOLDERS, SHGDN_NORMAL,
     };
 
+    const ERROR_FILE_NOT_FOUND_HRESULT: i32 = 0x80070002u32 as i32;
+    const ERROR_GEN_FAILURE_HRESULT: i32 = 0x8007001Fu32 as i32;
+
+    fn is_retryable_wpd_open_error(error: &windows::core::Error) -> bool {
+        matches!(
+            error.code().0,
+            ERROR_FILE_NOT_FOUND_HRESULT | ERROR_GEN_FAILURE_HRESULT
+        )
+    }
+
     // WPD_OBJECT_ORIGINAL_FILE_NAME = {EF6B490D-5CD8-437A-AFFC-DA8B60EE4A3C}, pid=12
     const WPD_OBJECT_ORIGINAL_FILE_NAME: PROPERTYKEY = PROPERTYKEY {
         fmtid: windows::core::GUID::from_values(
@@ -277,17 +287,45 @@ pub mod windows_wpd {
             crate::daemon_log!("[WPD] session(): opening device {}", self.device_id);
             let com = CoInitGuard::init()?;
             unsafe {
-                let device: IPortableDevice =
-                    CoCreateInstance(&PortableDevice, None, CLSCTX_INPROC_SERVER)?;
-                let client_info: IPortableDeviceValues =
-                    CoCreateInstance(&PortableDeviceValues, None, CLSCTX_INPROC_SERVER)?;
                 let id_hstr = HSTRING::from(self.device_id.as_str());
-                if let Err(e) = device.Open(PCWSTR(id_hstr.as_ptr()), &client_info) {
-                    crate::daemon_log!("[WPD] session(): device.Open() failed: {:?}", e);
-                    return Err(e.into());
+                let mut last_error: Option<windows::core::Error> = None;
+                for attempt in 1..=4 {
+                    let device: IPortableDevice =
+                        CoCreateInstance(&PortableDevice, None, CLSCTX_INPROC_SERVER)?;
+                    let client_info: IPortableDeviceValues =
+                        CoCreateInstance(&PortableDeviceValues, None, CLSCTX_INPROC_SERVER)?;
+                    match device.Open(PCWSTR(id_hstr.as_ptr()), &client_info) {
+                        Ok(()) => {
+                            if attempt > 1 {
+                                crate::daemon_log!(
+                                    "[WPD] session(): device.Open() succeeded on attempt {}",
+                                    attempt
+                                );
+                            } else {
+                                crate::daemon_log!("[WPD] session(): device.Open() succeeded");
+                            }
+                            return Ok((com, device));
+                        }
+                        Err(e) if is_retryable_wpd_open_error(&e) && attempt < 4 => {
+                            crate::daemon_log!(
+                                "[WPD] session(): device.Open() transient failure on attempt {}: {:?}; retrying",
+                                attempt,
+                                e
+                            );
+                            last_error = Some(e);
+                            std::thread::sleep(std::time::Duration::from_millis(
+                                200 * attempt as u64,
+                            ));
+                        }
+                        Err(e) => {
+                            crate::daemon_log!("[WPD] session(): device.Open() failed: {:?}", e);
+                            return Err(e.into());
+                        }
+                    }
                 }
-                crate::daemon_log!("[WPD] session(): device.Open() succeeded");
-                Ok((com, device))
+                let e = last_error.expect("WPD session retry loop must record a retryable failure");
+                crate::daemon_log!("[WPD] session(): device.Open() failed: {:?}", e);
+                Err(e.into())
             }
         }
 
