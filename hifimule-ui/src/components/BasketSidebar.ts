@@ -171,6 +171,17 @@ export class BasketSidebar {
         this.refreshAndRender();
     }
 
+    private getCurrentDeviceId(currentDevice: any): string | null {
+        return currentDevice?.deviceId ?? currentDevice?.device_id ?? null;
+    }
+
+    private getAutoSyncOnConnect(state: any): boolean {
+        return state?.autoSyncOnConnect
+            ?? state?.currentDevice?.autoSyncOnConnect
+            ?? state?.currentDevice?.auto_sync_on_connect
+            ?? false;
+    }
+
     private async refreshAndRender() {
         if (this.isSyncing || this.showSyncComplete || this.syncErrorMessages !== null) {
             this.render();
@@ -206,12 +217,13 @@ export class BasketSidebar {
                 this.selectedDevicePath = state.selectedDevicePath;
             }
             const currentDevice = state.currentDevice;
-            if (currentDevice?.deviceId && currentDevice.deviceId !== this.lastHydratedDeviceId) {
-                this.lastHydratedDeviceId = currentDevice.deviceId;
+            const currentDeviceId = this.getCurrentDeviceId(currentDevice);
+            if (currentDeviceId && currentDeviceId !== this.lastHydratedDeviceId) {
+                this.lastHydratedDeviceId = currentDeviceId;
                 // Load saved auto-fill preferences from manifest
                 this.autoFillEnabled = state.autoFill?.enabled ?? false;
                 this.autoFillMaxBytes = state.autoFill?.maxBytes ?? null;
-                this.autoSyncOnConnect = state.autoSyncOnConnect ?? false;
+                this.autoSyncOnConnect = this.getAutoSyncOnConnect(state);
                 // Await basket hydration before triggering auto-fill so that
                 // getManualItemIds() and getManualSizeBytes() see the correct state (P1).
                 try {
@@ -225,6 +237,10 @@ export class BasketSidebar {
                 if (this.autoFillEnabled && !basketStore.has(AUTO_FILL_SLOT_ID)) {
                     this.insertAutoFillSlot();
                 }
+            } else if (currentDeviceId) {
+                this.autoFillEnabled = state.autoFill?.enabled ?? false;
+                this.autoFillMaxBytes = state.autoFill?.maxBytes ?? null;
+                this.autoSyncOnConnect = this.getAutoSyncOnConnect(state);
             } else if (!currentDevice) {
                 if (this.lastHydratedDeviceId !== null) {
                     basketStore.clearForDevice();
@@ -300,6 +316,7 @@ export class BasketSidebar {
     private bindAutoFillEvents() {
         const autoFillToggle = this.container.querySelector('#auto-fill-toggle');
         if (autoFillToggle) {
+            (autoFillToggle as any).checked = this.autoFillEnabled;
             autoFillToggle.addEventListener('sl-change', (e: Event) => {
                 this.autoFillEnabled = (e.target as HTMLInputElement).checked;
                 this.persistAutoFillPrefs();
@@ -326,6 +343,7 @@ export class BasketSidebar {
 
         const autoSyncToggle = this.container.querySelector('#auto-sync-toggle');
         if (autoSyncToggle) {
+            (autoSyncToggle as any).checked = this.autoSyncOnConnect;
             autoSyncToggle.addEventListener('sl-change', (e: Event) => {
                 this.autoSyncOnConnect = (e.target as HTMLInputElement).checked;
                 this.persistAutoFillPrefs();
@@ -424,7 +442,8 @@ export class BasketSidebar {
                 this.serverType = daemonStateResult?.serverType ?? null;
                 this.currentServerId = daemonStateResult?.currentServer?.serverId ?? null;
                 basketStore.setActiveServerId(this.currentServerId);
-                const isNewDevice = currentDevice?.deviceId && currentDevice.deviceId !== this.lastHydratedDeviceId;
+                const currentDeviceId = this.getCurrentDeviceId(currentDevice);
+                const isNewDevice = currentDeviceId && currentDeviceId !== this.lastHydratedDeviceId;
                 const deviceDisconnected = !currentDevice && this.lastHydratedDeviceId !== null;
                 const activeOperationId = daemonStateResult?.activeOperationId ?? null;
 
@@ -438,13 +457,19 @@ export class BasketSidebar {
                         : this.selectedDevicePath;
                 const deviceCountChanged = newConnectedDevices.length !== this.connectedDevices.length;
                 const selectedDeviceChanged = newSelectedDevicePath !== this.selectedDevicePath;
+                const autoPrefsChanged = currentDevice
+                    && (
+                        (daemonStateResult?.autoFill?.enabled ?? false) !== this.autoFillEnabled
+                        || (daemonStateResult?.autoFill?.maxBytes ?? null) !== this.autoFillMaxBytes
+                        || this.getAutoSyncOnConnect(daemonStateResult) !== this.autoSyncOnConnect
+                    );
                 this.connectedDevices = newConnectedDevices;
                 this.selectedDevicePath = newSelectedDevicePath;
                 this.pendingDeviceFriendlyName = daemonStateResult?.pendingDeviceFriendlyName ?? undefined;
 
-                if (newDirty !== this.isDirtyManifest || hasPendingDevice !== hadPendingDevice || isNewDevice || deviceDisconnected || activeOperationId || deviceCountChanged || selectedDeviceChanged) {
+                if (newDirty !== this.isDirtyManifest || hasPendingDevice !== hadPendingDevice || isNewDevice || deviceDisconnected || activeOperationId || deviceCountChanged || selectedDeviceChanged || autoPrefsChanged) {
                     this.isDirtyManifest = newDirty;
-                    if (isNewDevice || deviceDisconnected || activeOperationId || deviceCountChanged || selectedDeviceChanged) {
+                    if (isNewDevice || deviceDisconnected || activeOperationId || deviceCountChanged || selectedDeviceChanged || autoPrefsChanged) {
                         // Let refreshAndRender handle the hydration/attach logic reliably on state change (F5)
                         await this.refreshAndRender();
                     } else {
