@@ -146,6 +146,7 @@ export class BasketSidebar {
     private isDirtyManifest: boolean = false;
     private lastHydratedDeviceId: string | null = null;
     private serverType: string | null = null;
+    private currentServerId: string | null = null;
     private syncSnapshotIds: string[] = [];
     // Auto-fill state
     private autoFillEnabled: boolean = false;
@@ -192,6 +193,8 @@ export class BasketSidebar {
         if (daemonStateResult.status === 'fulfilled' && daemonStateResult.value) {
             const state = daemonStateResult.value as any;
             this.serverType = state.serverType ?? null;
+            this.currentServerId = state.currentServer?.serverId ?? null;
+            basketStore.setActiveServerId(this.currentServerId);
             // Sync multi-device state so the hub renders correctly on every refreshAndRender,
             // not just during the 2s polling cycle.
             this.connectedDevices = state.connectedDevices ?? this.connectedDevices;
@@ -419,6 +422,8 @@ export class BasketSidebar {
 
                 const currentDevice = daemonStateResult?.currentDevice;
                 this.serverType = daemonStateResult?.serverType ?? null;
+                this.currentServerId = daemonStateResult?.currentServer?.serverId ?? null;
+                basketStore.setActiveServerId(this.currentServerId);
                 const isNewDevice = currentDevice?.deviceId && currentDevice.deviceId !== this.lastHydratedDeviceId;
                 const deviceDisconnected = !currentDevice && this.lastHydratedDeviceId !== null;
                 const activeOperationId = daemonStateResult?.activeOperationId ?? null;

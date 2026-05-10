@@ -5,6 +5,32 @@ import { Window } from '@tauri-apps/api/window';
 
 let activeBasketSidebar: any = null;
 
+type CurrentServer = {
+    serverId: string;
+    url: string;
+    username: string;
+    serverType: string;
+    serverVersion?: string | null;
+} | null;
+
+function serverTypeLabel(type?: string | null): string {
+    switch (type) {
+        case 'jellyfin': return 'Jellyfin';
+        case 'openSubsonic': return 'OpenSubsonic';
+        case 'subsonic': return 'Subsonic';
+        default: return 'Server';
+    }
+}
+
+function serverBadgeVariant(type?: string | null): string {
+    switch (type) {
+        case 'jellyfin': return 'primary';
+        case 'openSubsonic': return 'success';
+        case 'subsonic': return 'neutral';
+        default: return 'neutral';
+    }
+}
+
 async function init() {
     console.log("init() called, path:", window.location.pathname);
 
@@ -32,7 +58,7 @@ async function init() {
 
     try {
         const state = await rpcCall('get_daemon_state');
-        renderMainLayout();
+        renderMainLayout(state.currentServer ?? null);
 
         if (state.serverConnected) {
             console.log("Server connected, loading library view");
@@ -45,32 +71,56 @@ async function init() {
 
             initLoginView(() => {
                 console.log("Login success callback triggered");
-                renderMainLayout();
-                import('./library').then(({ initLibraryView }) => initLibraryView());
+                rpcCall('get_daemon_state').then((newState) => {
+                    renderMainLayout(newState.currentServer ?? null);
+                    import('./library').then(({ initLibraryView }) => initLibraryView());
+                });
             });
         }
     } catch (e) {
         console.error("Failed to check daemon state", e);
-        renderMainLayout();
+        renderMainLayout(null);
         // Fallback to login
         const { initLoginView } = await import('./login');
         initLoginView(() => {
-            renderMainLayout();
-            import('./library').then(({ initLibraryView }) => initLibraryView());
+            rpcCall('get_daemon_state').then((newState) => {
+                renderMainLayout(newState.currentServer ?? null);
+                import('./library').then(({ initLibraryView }) => initLibraryView());
+            });
         });
     }
 }
 
-function renderMainLayout() {
+function renderMainLayout(currentServer: CurrentServer = null) {
     const root = document.querySelector('.app-container');
     if (!root) return;
+    import('./state/basket').then(({ basketStore }) => {
+        basketStore.setActiveServerId(currentServer?.serverId ?? null);
+    });
+
+    const serverLabel = serverTypeLabel(currentServer?.serverType);
+    const serverVersion = currentServer?.serverVersion ? ` ${currentServer.serverVersion}` : '';
+    const serverHint = currentServer
+        ? `
+            <div class="server-connection-chip">
+              <sl-badge variant="${serverBadgeVariant(currentServer.serverType)}" pill>${serverLabel}</sl-badge>
+              <span title="${currentServer.url}">${currentServer.username} @ ${currentServer.url}${serverVersion}</span>
+              <sl-icon-button id="logout-btn" name="box-arrow-right" label="Log out"></sl-icon-button>
+            </div>
+        `
+        : '';
 
     root.innerHTML = `
     <sl-split-panel position="70" class="split-panel">
       <div slot="start" class="library-view">
         <header>
-          <h1>Library</h1>
-          <p>Select media to sync to your device.</p>
+          <div class="library-header-row">
+            <div>
+              <h1>Library</h1>
+              <p>Select media to sync to your device.</p>
+            </div>
+            ${serverHint}
+          </div>
         </header>
 
         <div id="library-content" class="content">
@@ -83,6 +133,29 @@ function renderMainLayout() {
       </div>
     </sl-split-panel>
     `;
+
+    document.getElementById('logout-btn')?.addEventListener('click', async () => {
+        const { rpcCall } = await import('./rpc');
+        const { basketStore } = await import('./state/basket');
+        try {
+            await rpcCall('server.logout');
+            basketStore.setActiveServerId(null);
+            basketStore.clearLocalOnly();
+            if (activeBasketSidebar) {
+                activeBasketSidebar.destroy();
+                activeBasketSidebar = null;
+            }
+            const { initLoginView } = await import('./login');
+            initLoginView(() => {
+                rpcCall('get_daemon_state').then((newState) => {
+                    renderMainLayout(newState.currentServer ?? null);
+                    import('./library').then(({ initLibraryView }) => initLibraryView());
+                });
+            });
+        } catch (error) {
+            console.error('Logout failed', error);
+        }
+    });
 
     // Initialize Basket Sidebar
     import('./components/BasketSidebar').then(({ BasketSidebar }) => {

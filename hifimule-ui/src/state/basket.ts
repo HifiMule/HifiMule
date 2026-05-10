@@ -9,6 +9,7 @@ export interface BasketItem {
     id: string;
     name: string;
     type: string;
+    serverId?: string;
     artist?: string;
     childCount: number;
     sizeTicks: number; // cumulativeRunTimeTicks used for duration display
@@ -21,6 +22,7 @@ class BasketStore extends EventTarget {
     private items: Map<string, BasketItem> = new Map();
     private _syncingFromDaemon: boolean = false;
     private _dirty: boolean = false;
+    private activeServerId: string | null = null;
 
     constructor() {
         super();
@@ -45,6 +47,41 @@ class BasketStore extends EventTarget {
         }, 1000);
     }
 
+    public setActiveServerId(serverId: string | null) {
+        if (this.activeServerId === serverId) return;
+        this.activeServerId = serverId;
+        this.removeItemsFromOtherServers();
+    }
+
+    public getActiveServerId(): string | null {
+        return this.activeServerId;
+    }
+
+    private removeItemsFromOtherServers() {
+        if (!this.activeServerId) {
+            if (this.items.size > 0) {
+                this.items.clear();
+                this._dirty = false;
+                this.saveToLocalStorage();
+                this.notify();
+            }
+            return;
+        }
+
+        let changed = false;
+        for (const [id, item] of this.items) {
+            if (item.serverId !== this.activeServerId) {
+                this.items.delete(id);
+                changed = true;
+            }
+        }
+        if (changed) {
+            this._dirty = false;
+            this.saveToLocalStorage();
+            this.notify();
+        }
+    }
+
     /** Immediately flush any pending debounced basket save to the daemon.
      * Must be called before switching devices so the current device's basket
      * is persisted before the selection changes. */
@@ -67,7 +104,9 @@ class BasketStore extends EventTarget {
         // restored from a stale persisted state.
         this.items.clear();
         for (const item of items) {
-            if (item.id !== AUTO_FILL_SLOT_ID) this.items.set(item.id, item);
+            if (item.id !== AUTO_FILL_SLOT_ID && (!this.activeServerId || item.serverId === this.activeServerId)) {
+                this.items.set(item.id, item);
+            }
         }
         this._dirty = false;
         this.saveToLocalStorage();
@@ -77,6 +116,17 @@ class BasketStore extends EventTarget {
 
     public clearForDevice() {
         this.items.clear();
+        this.saveToLocalStorage();
+        this.notify();
+    }
+
+    public clearLocalOnly() {
+        if (this.saveTimeout !== null) {
+            window.clearTimeout(this.saveTimeout);
+            this.saveTimeout = null;
+        }
+        this.items.clear();
+        this._dirty = false;
         this.saveToLocalStorage();
         this.notify();
     }
@@ -157,6 +207,11 @@ class BasketStore extends EventTarget {
     }
 
     public add(item: BasketItem) {
+        if (!this.activeServerId) {
+            window.dispatchEvent(new CustomEvent('toast', { detail: { type: 'error', message: 'Connect to a server before adding items' } }));
+            return;
+        }
+        item.serverId = this.activeServerId;
         this.items.set(item.id, item);
         this._dirty = true;
         this.saveToLocalStorage();

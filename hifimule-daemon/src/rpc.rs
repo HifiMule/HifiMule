@@ -284,6 +284,7 @@ async fn handler(
     let result = match payload.method.as_str() {
         "test_connection" => handle_test_connection(&state, payload.params).await,
         "server.connect" => handle_server_connect(&state, payload.params).await,
+        "server.logout" => handle_server_logout(&state).await,
         "login" => handle_login(&state, payload.params).await,
         "save_credentials" => handle_save_credentials(payload.params).await,
         "get_credentials" => handle_get_credentials(&state).await,
@@ -363,6 +364,33 @@ async fn handle_server_probe(params: Option<Value>) -> Result<Value, JsonRpcErro
     let server_type = crate::providers::probe_url(url).await;
     let slug = server_type_slug(server_type);
     Ok(serde_json::json!({ "serverType": slug }))
+}
+
+fn normalized_server_url(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_ascii_lowercase()
+}
+
+fn server_config_id(config: &crate::db::ServerConfig) -> String {
+    format!(
+        "{}|{}|{}",
+        config.server_type,
+        normalized_server_url(&config.url),
+        config.username
+    )
+}
+
+fn current_server_config(
+    state: &AppState,
+) -> Result<Option<crate::db::ServerConfig>, JsonRpcError> {
+    state.db.get_server_config().map_err(|error| JsonRpcError {
+        code: ERR_STORAGE_ERROR,
+        message: error.to_string(),
+        data: None,
+    })
+}
+
+fn current_server_id(state: &AppState) -> Result<Option<String>, JsonRpcError> {
+    Ok(current_server_config(state)?.as_ref().map(server_config_id))
 }
 
 async fn handle_test_connection(
@@ -457,7 +485,6 @@ async fn handle_server_connect(
         .to_string();
     let version = provider.server_version().map(str::to_string);
 
-    let mut persisted_username = username.to_string();
     let secret = match provider.server_type() {
         crate::providers::ServerType::Jellyfin => {
             let token = provider
@@ -476,7 +503,6 @@ async fn handle_server_connect(
                     data: None,
                 })?
                 .to_string();
-            persisted_username = user_id.clone();
             CredentialManager::save_credentials(url, &token, Some(&user_id)).map_err(|error| {
                 JsonRpcError {
                     code: ERR_STORAGE_ERROR,
@@ -508,12 +534,7 @@ async fn handle_server_connect(
     }
     state
         .db
-        .upsert_server_config(
-            url,
-            &normalized_type,
-            &persisted_username,
-            version.as_deref(),
-        )
+        .upsert_server_config(url, &normalized_type, username, version.as_deref())
         .map_err(|error| JsonRpcError {
             code: ERR_STORAGE_ERROR,
             message: error.to_string(),
@@ -530,6 +551,30 @@ async fn handle_server_connect(
         "serverType": normalized_type,
         "serverVersion": version,
     }))
+}
+
+async fn handle_server_logout(state: &AppState) -> Result<Value, JsonRpcError> {
+    *state.provider.write().await = None;
+    *state.server_type.write().await = None;
+    *state.server_version.write().await = None;
+    *state.last_connection_check.lock().await = None;
+
+    state
+        .db
+        .clear_server_config()
+        .map_err(|error| JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: error.to_string(),
+            data: None,
+        })?;
+
+    CredentialManager::clear_credentials().map_err(|error| JsonRpcError {
+        code: ERR_STORAGE_ERROR,
+        message: error.to_string(),
+        data: None,
+    })?;
+
+    Ok(serde_json::json!({ "ok": true }))
 }
 
 fn parse_server_type_hint(value: &str) -> Result<ServerTypeHint, JsonRpcError> {
@@ -706,6 +751,16 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
     let active_operation_id = state.sync_operation_manager.get_active_operation_id().await;
     let server_type = state.server_type.read().await.clone();
     let server_version = state.server_version.read().await.clone();
+    let server_config = current_server_config(state)?;
+    let current_server = server_config.as_ref().map(|config| {
+        serde_json::json!({
+            "serverId": server_config_id(config),
+            "url": config.url,
+            "username": config.username,
+            "serverType": config.server_type,
+            "serverVersion": config.server_version,
+        })
+    });
 
     let (connected_devices_snapshot, selected_path_buf) =
         state.device_manager.get_multi_device_snapshot().await;
@@ -732,6 +787,7 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         "serverConnected": server_connected,
         "serverType": server_type,
         "serverVersion": server_version,
+        "currentServer": current_server,
         "dirtyManifest": dirty,
         "pendingDevicePath": pending_device_path,
         "pendingDeviceFriendlyName": pending_device_friendly_name,
@@ -745,12 +801,17 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
 
 async fn handle_manifest_get_basket(state: &AppState) -> Result<Value, JsonRpcError> {
     let device = state.device_manager.get_current_device().await;
-    let basket_items = device
+    let active_server_id = current_server_id(state)?;
+    let mut basket_items = device
         .as_ref()
         .map(|d| d.basket_items.clone())
         .unwrap_or_default();
+    if let Some(active_server_id) = active_server_id.as_deref() {
+        basket_items.retain(|item| item.server_id.as_deref() == Some(active_server_id));
+    }
     Ok(serde_json::json!({
-        "basketItems": basket_items
+        "basketItems": basket_items,
+        "serverId": active_server_id,
     }))
 }
 
@@ -779,6 +840,14 @@ async fn handle_manifest_save_basket(
             message: format!("Invalid basketItems format: {}", e),
             data: None,
         })?;
+    let active_server_id = current_server_id(state)?;
+    let items: Vec<_> = match active_server_id.as_deref() {
+        Some(server_id) => items
+            .into_iter()
+            .filter(|item| item.server_id.as_deref() == Some(server_id))
+            .collect(),
+        None => Vec::new(),
+    };
 
     match state.device_manager.save_basket(items).await {
         Ok(_) => Ok(Value::Bool(true)),

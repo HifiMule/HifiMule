@@ -39,6 +39,8 @@ pub struct BasketItem {
     #[serde(rename = "type")]
     pub item_type: String,
     #[serde(default)]
+    pub server_id: Option<String>,
+    #[serde(default)]
     pub artist: Option<String>,
     pub child_count: u32,
     pub size_ticks: i64,

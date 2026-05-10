@@ -33,6 +33,37 @@ body {
   overflow-y: auto;
 }
 
+.library-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.library-header-row h1 {
+  margin-bottom: 0.25rem;
+}
+
+.server-connection-chip {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: min(460px, 48vw);
+  padding: 0.35rem 0.45rem 0.35rem 0.6rem;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--sl-border-radius-medium);
+  background: rgba(15, 23, 42, 0.45);
+  font-size: 0.78rem;
+  color: var(--sl-color-neutral-300);
+}
+
+.server-connection-chip span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .basket-view {
   padding: 1.5rem;
   background: rgba(15, 23, 42, 0.8);
