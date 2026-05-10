@@ -608,6 +608,7 @@ impl DeviceManager {
         let device_path = device_root.to_string_lossy().to_string();
 
         // Liveness probe: detect stale IO from a device that disconnected and reconnected
+<<<<<<< HEAD
         // between the Unrecognized event and the user completing initialization.
         if let Err(e) = device_io.list_files("").await {
             daemon_log!(
@@ -620,6 +621,40 @@ impl DeviceManager {
                 "Device no longer accessible — reconnect the device and try again"
             ));
         }
+=======
+        // between the Unrecognized event and the user completing initialization. For MTP,
+        // avoid list_files("") because WPD recursively walks the whole phone storage.
+        let probed_storage_id = match device_class {
+            DeviceClass::Mtp => match device_io.storage_id().await {
+                Ok(id) => id,
+                Err(e) => {
+                    daemon_log!(
+                        "[DeviceInit] MTP storage-root probe failed device_path={} class={:?} error={:#}",
+                        device_path,
+                        device_class,
+                        e
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Device no longer accessible — reconnect the device and try again"
+                    ));
+                }
+            },
+            DeviceClass::Msc => {
+                if let Err(e) = device_io.list_files("").await {
+                    daemon_log!(
+                        "[DeviceInit] Root liveness probe failed device_path={} class={:?} error={:#}",
+                        device_path,
+                        device_class,
+                        e
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Device no longer accessible — reconnect the device and try again"
+                    ));
+                }
+                None
+            }
+        };
+>>>>>>> 31d81fe (Improve mtp support)
 
         let device_id = uuid::Uuid::new_v4().to_string();
 
@@ -635,6 +670,7 @@ impl DeviceManager {
             vec![folder_path.to_string()]
         };
 
+<<<<<<< HEAD
         let storage_id = match device_io.storage_id().await {
             Ok(id) => id,
             Err(e) => {
@@ -646,6 +682,22 @@ impl DeviceManager {
                 );
                 None
             }
+=======
+        let storage_id = match device_class {
+            DeviceClass::Mtp => probed_storage_id,
+            DeviceClass::Msc => match device_io.storage_id().await {
+                Ok(id) => id,
+                Err(e) => {
+                    daemon_log!(
+                        "[DeviceInit] storage_id lookup failed device_path={} class={:?} error={:#}",
+                        device_path,
+                        device_class,
+                        e
+                    );
+                    None
+                }
+            },
+>>>>>>> 31d81fe (Improve mtp support)
         };
 
         let manifest = DeviceManifest {
