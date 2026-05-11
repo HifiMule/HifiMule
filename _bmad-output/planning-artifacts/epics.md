@@ -1102,6 +1102,43 @@ So that I can catch packaging regressions before releasing.
 **Then** MTP device IO is verified by unit tests in `device_io.rs` (mock `MtpBackend` returning fixture data).
 **And** the smoke test explicitly notes: "MTP end-to-end detection requires manual hardware verification on each platform."
 
+### Story 6.7: macOS Daemon as launchd User Agent
+
+As a Convenience Seeker (Sarah),
+I want the HifiMule daemon to start automatically when I log in on macOS,
+So that auto-sync fires when I connect my device even if I haven't opened the app.
+
+**Acceptance Criteria:**
+
+**Given** HifiMule is installed to /Applications on macOS
+**When** the UI is launched for the first time (or after an upgrade where the plist is absent)
+**Then** the UI writes a launchd user agent `.plist` to `~/Library/LaunchAgents/com.hifimule.daemon.plist`, templated with the resolved absolute path to the bundled daemon binary.
+**And** the UI runs `launchctl load ~/Library/LaunchAgents/com.hifimule.daemon.plist` so the agent is active immediately.
+**And** subsequent user logins start the daemon automatically with no UI interaction required.
+
+**Given** the UI launches and the daemon is already running (started by launchd)
+**When** the UI performs its health-check on port 19140
+**Then** the UI attaches to the running daemon (status = "startup") without spawning a sidecar.
+**And** when the UI window is closed or exits, the daemon is NOT killed (only a sidecar-spawned child held in `DaemonProcess` is killed on exit).
+
+**Given** the user toggles "Launch on Startup" OFF in Settings
+**When** the UI calls the `settings.setLaunchOnStartup(false)` RPC
+**Then** the UI backend runs `launchctl unload` on the plist.
+**And** the daemon continues running for the current session.
+**When** the user toggles "Launch on Startup" ON
+**Then** the UI backend reinstalls and `launchctl load`s the plist.
+
+**Technical Notes:**
+- `.plist` template is embedded in `lib.rs` as a string constant; the `{DAEMON_PATH}` placeholder is replaced at runtime with the path found by scanning `current_exe().parent()` for an entry whose name starts with `"hifimule-daemon-"` (same scan used for quarantine clearance in spec-fix-macos-daemon-launch).
+- LaunchAgents dir is created with `create_dir_all` if absent.
+- `launchctl` invocations use `std::process::Command` — no elevated privileges.
+- `RunEvent::Exit` kill block in `lib.rs`: already gated on `daemon_proc.take()` returning `Some` — no change needed; a launchd-owned daemon was never stored in `DaemonProcess`, so it won't be killed.
+- New RPC `settings.setLaunchOnStartup(enabled: bool)` handled in the UI Rust backend (not the daemon), gated `#[cfg(target_os = "macos")]`.
+- `service.rs` and Windows logic are untouched.
+- Mirror of the Windows startup application pattern already shipped in `startup-fragment.wxs`.
+
+**Status:** backlog
+
 ## Epic 7: Technical Hardening & Deferred Fixes
 
 Address the accumulated technical debt and deferred code-review findings from Epics 2–6. Items are grouped by impact area; stories can be worked in parallel where team capacity allows.
