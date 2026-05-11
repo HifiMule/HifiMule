@@ -351,7 +351,12 @@ fn run_interactive() -> Result<()> {
     let (shutdown, state_rx) = start_daemon_core()?;
 
     // 3. Setup Tray Icon and Event Loop on the main thread
-    let event_loop = EventLoopBuilder::new().build();
+    let mut event_loop = EventLoopBuilder::new().build();
+    #[cfg(target_os = "macos")]
+    {
+        use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
+        event_loop.set_activation_policy(ActivationPolicy::Accessory);
+    }
 
     // Load icons from assets (embedded using include_bytes!)
     // Use Arc to avoid cloning large icon data in the event loop
