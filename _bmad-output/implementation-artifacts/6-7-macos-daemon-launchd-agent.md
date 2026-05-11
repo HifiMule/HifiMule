@@ -1,6 +1,6 @@
 # Story 6.7: macOS Daemon as launchd User Agent
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -19,22 +19,22 @@ So that auto-sync fires when I connect my device even if I haven't opened the ap
 
 ## Tasks / Subtasks
 
-- [ ] **T1: Extract `resolve_daemon_binary_path()` helper** (AC: #1, #6)
-  - [ ] T1.1: Add `#[cfg(target_os = "macos")] fn resolve_daemon_binary_path() -> Option<std::path::PathBuf>` before `check_daemon_health()` in `lib.rs`
-  - [ ] T1.2: Refactor the existing quarantine-clearance block (lib.rs:276–296) to call `resolve_daemon_binary_path()` instead of inlining the scan — do NOT change the quarantine logic, just extract the path resolution
+- [x] **T1: Extract `resolve_daemon_binary_path()` helper** (AC: #1, #6)
+  - [x] T1.1: Add `#[cfg(target_os = "macos")] fn resolve_daemon_binary_path() -> Option<std::path::PathBuf>` before `check_daemon_health()` in `lib.rs`
+  - [x] T1.2: Refactor the existing quarantine-clearance block (lib.rs:276–296) to call `resolve_daemon_binary_path()` instead of inlining the scan — do NOT change the quarantine logic, just extract the path resolution
 
-- [ ] **T2: Add launchd plist constant and helper functions** (AC: #1, #5, #6)
-  - [ ] T2.1: Add `#[cfg(target_os = "macos")] const LAUNCHD_PLIST_TEMPLATE: &str` (plist XML — see Dev Notes below for exact template)
-  - [ ] T2.2: Add `#[cfg(target_os = "macos")] fn launchd_plist_path() -> Option<std::path::PathBuf>` — returns `~/Library/LaunchAgents/com.hifimule.daemon.plist` via `$HOME`
-  - [ ] T2.3: Add `#[cfg(target_os = "macos")] fn install_launchd_plist() -> Result<(), String>` — resolve daemon path, fill template, create LaunchAgents dir, write plist, run `launchctl load`
-  - [ ] T2.4: Add `#[cfg(target_os = "macos")] fn unload_and_remove_launchd_plist() -> Result<(), String>` — run `launchctl unload` (if plist exists), then delete plist file
+- [x] **T2: Add launchd plist constant and helper functions** (AC: #1, #5, #6)
+  - [x] T2.1: Add `#[cfg(target_os = "macos")] const LAUNCHD_PLIST_TEMPLATE: &str` (plist XML — see Dev Notes below for exact template)
+  - [x] T2.2: Add `#[cfg(target_os = "macos")] fn launchd_plist_path() -> Option<std::path::PathBuf>` — returns `~/Library/LaunchAgents/com.hifimule.daemon.plist` via `$HOME`
+  - [x] T2.3: Add `#[cfg(target_os = "macos")] fn install_launchd_plist() -> Result<(), String>` — resolve daemon path, fill template, create LaunchAgents dir, write plist, run `launchctl load`
+  - [x] T2.4: Add `#[cfg(target_os = "macos")] fn unload_and_remove_launchd_plist() -> Result<(), String>` — run `launchctl unload` (if plist exists), then delete plist file
 
-- [ ] **T3: Auto-install plist on first launch** (AC: #1, #2)
-  - [ ] T3.1: In `run()` → `setup()` closure, after the `app.manage(...)` calls (lib.rs:225–226) and before the background thread spawn (lib.rs:230), add a `#[cfg(target_os = "macos")]` block that checks `launchd_plist_path().map_or(false, |p| !p.exists())` and calls `install_launchd_plist()` if true, logging success or failure via `ui_log`
+- [x] **T3: Auto-install plist on first launch** (AC: #1, #2)
+  - [x] T3.1: In `run()` → `setup()` closure, after the `app.manage(...)` calls and before the background thread spawn, add a `#[cfg(target_os = "macos")]` block that checks `launchd_plist_path().is_some_and(|p| !p.exists())` and calls `install_launchd_plist()` if true, logging success or failure via `ui_log`
 
-- [ ] **T4: Add `settings_set_launch_on_startup` Tauri command** (AC: #5, #6)
-  - [ ] T4.1: Add `#[tauri::command] async fn settings_set_launch_on_startup(enabled: bool) -> Result<(), String>` — macOS: `enabled=true` calls `install_launchd_plist()`, `enabled=false` calls `unload_and_remove_launchd_plist()`; non-macOS: `let _ = enabled; Ok(())`
-  - [ ] T4.2: Register in `invoke_handler!` at lib.rs:223: add `settings_set_launch_on_startup` to the existing list
+- [x] **T4: Add `settings_set_launch_on_startup` Tauri command** (AC: #5, #6)
+  - [x] T4.1: Add `#[tauri::command] async fn settings_set_launch_on_startup(enabled: bool) -> Result<(), String>` — macOS: `enabled=true` calls `install_launchd_plist()`, `enabled=false` calls `unload_and_remove_launchd_plist()`; non-macOS: `let _ = enabled; Ok(())`
+  - [x] T4.2: Register in `invoke_handler!`: added `settings_set_launch_on_startup` to the existing list
 
 ## Dev Notes
 
@@ -307,6 +307,21 @@ Claude Sonnet 4.6
 
 ### Debug Log References
 
+- T3.1 used `is_some_and` instead of `map_or(false, ...)` per clippy lint `unnecessary_map_or` (-D warnings enforcement)
+
 ### Completion Notes List
 
+- T1: Added `resolve_daemon_binary_path()` (macOS-only) before `check_daemon_health()`. Refactored the quarantine clearance block from an inline dir-scan to a single call to the new helper — logic unchanged, just extracted.
+- T2: Added `LAUNCHD_PLIST_TEMPLATE` constant, `launchd_plist_path()`, `install_launchd_plist()`, and `unload_and_remove_launchd_plist()` between `check_daemon_health()` and `try_start_service()`. All four are `#[cfg(target_os = "macos")]`.
+- T3: Added auto-install block in `setup()` after the two `app.manage()` calls, before the background thread spawn. Uses `is_some_and` for plist existence check (clippy-clean).
+- T4: Added `settings_set_launch_on_startup` async Tauri command (macOS calls helpers; non-macOS stub with `let _ = enabled`). Registered in `invoke_handler!`.
+- Validations: `cargo check` ✅, `cargo test` ✅ (0 tests, no regressions), `cargo clippy -- -D warnings` ✅
+- ACs #3 and #4 confirmed satisfied by existing code with no changes needed (as specified).
+
 ### File List
+
+- `hifimule-ui/src-tauri/src/lib.rs`
+
+## Change Log
+
+- 2026-05-11: Implemented macOS launchd user agent — added `resolve_daemon_binary_path()` helper, plist constant, `launchd_plist_path()` / `install_launchd_plist()` / `unload_and_remove_launchd_plist()` helpers, auto-install block in `setup()`, and `settings_set_launch_on_startup` Tauri command. All changes in `hifimule-ui/src-tauri/src/lib.rs`.

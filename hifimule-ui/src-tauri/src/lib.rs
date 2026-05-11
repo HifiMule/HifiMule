@@ -18,6 +18,18 @@ fn get_sidecar_status(state: tauri::State<'_, SidecarStatus>) -> String {
     state.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+#[cfg(target_os = "macos")]
+fn resolve_daemon_binary_path() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        if entry.file_name().to_string_lossy().starts_with("hifimule-daemon") {
+            return Some(entry.path());
+        }
+    }
+    None
+}
+
 /// Check if the daemon is already running by sending a health-check RPC call.
 fn check_daemon_health() -> bool {
     let client = reqwest::blocking::Client::builder()
@@ -41,6 +53,86 @@ fn check_daemon_health() -> bool {
         Ok(resp) => resp.status().is_success(),
         Err(_) => false,
     }
+}
+
+#[cfg(target_os = "macos")]
+const LAUNCHD_PLIST_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.hifimule.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{DAEMON_PATH}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/tmp/hifimule-daemon-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/hifimule-daemon-stderr.log</string>
+</dict>
+</plist>"#;
+
+#[cfg(target_os = "macos")]
+fn launchd_plist_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(std::path::Path::new(&home).join("Library/LaunchAgents/com.hifimule.daemon.plist"))
+}
+
+#[cfg(target_os = "macos")]
+fn install_launchd_plist() -> Result<(), String> {
+    let daemon_path = resolve_daemon_binary_path()
+        .ok_or_else(|| "Cannot resolve daemon binary path for plist".to_string())?;
+    let daemon_path_str = daemon_path
+        .to_str()
+        .ok_or_else(|| "Daemon path is not valid UTF-8".to_string())?;
+    let plist_content = LAUNCHD_PLIST_TEMPLATE.replace("{DAEMON_PATH}", daemon_path_str);
+    let plist_path = launchd_plist_path()
+        .ok_or_else(|| "Cannot resolve LaunchAgents path (HOME not set?)".to_string())?;
+    let launch_agents = plist_path
+        .parent()
+        .ok_or_else(|| "Cannot get LaunchAgents parent dir".to_string())?;
+    std::fs::create_dir_all(launch_agents)
+        .map_err(|e| format!("Cannot create LaunchAgents dir: {}", e))?;
+    std::fs::write(&plist_path, plist_content)
+        .map_err(|e| format!("Cannot write plist: {}", e))?;
+    let output = std::process::Command::new("launchctl")
+        .args(["load", plist_path.to_str().unwrap_or("")])
+        .output()
+        .map_err(|e| format!("launchctl load failed to execute: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "launchctl load exited {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn unload_and_remove_launchd_plist() -> Result<(), String> {
+    let plist_path = launchd_plist_path()
+        .ok_or_else(|| "Cannot resolve LaunchAgents path".to_string())?;
+    if plist_path.exists() {
+        let output = std::process::Command::new("launchctl")
+            .args(["unload", plist_path.to_str().unwrap_or("")])
+            .output()
+            .map_err(|e| format!("launchctl unload failed to execute: {}", e))?;
+        if !output.status.success() {
+            ui_log(&format!(
+                "launchctl unload warning (may already be unloaded): {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        std::fs::remove_file(&plist_path)
+            .map_err(|e| format!("Cannot remove plist: {}", e))?;
+    }
+    Ok(())
 }
 
 /// Attempt to start the daemon Windows Service via `sc start`.
@@ -155,6 +247,23 @@ async fn rpc_proxy(method: String, params: serde_json::Value) -> Result<serde_js
         .unwrap_or(serde_json::Value::Null))
 }
 
+#[tauri::command]
+async fn settings_set_launch_on_startup(enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        if enabled {
+            install_launchd_plist()
+        } else {
+            unload_and_remove_launchd_plist()
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = enabled;
+        Ok(())
+    }
+}
+
 const LOG_MAX_BYTES: u64 = 1_048_576; // 1 MB
 
 /// Simple file-based log for release mode where stdout/stderr are unavailable.
@@ -220,10 +329,22 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![get_sidecar_status, rpc_proxy, image_proxy])
+        .invoke_handler(tauri::generate_handler![get_sidecar_status, rpc_proxy, image_proxy, settings_set_launch_on_startup])
         .setup(|app| {
             app.manage(DaemonProcess(Mutex::new(None)));
             app.manage(SidecarStatus(Mutex::new("starting".to_string())));
+
+            // macOS: install launchd user agent on first launch (or after upgrade removes plist)
+            #[cfg(target_os = "macos")]
+            {
+                let plist_missing = launchd_plist_path().is_some_and(|p| !p.exists());
+                if plist_missing {
+                    match install_launchd_plist() {
+                        Ok(()) => ui_log("launchd plist installed and loaded"),
+                        Err(e) => ui_log(&format!("launchd plist install failed: {}", e)),
+                    }
+                }
+            }
 
             // Perform daemon detection off the main thread to avoid blocking UI startup
             let app_handle = app.handle().clone();
@@ -273,26 +394,12 @@ pub fn run() {
                 // hifimule-daemon-universal-apple-darwin), so scan the directory rather
                 // than joining a plain name that does not exist.
                 #[cfg(target_os = "macos")]
-                {
-                    if let Ok(exe) = std::env::current_exe() {
-                        if let Some(dir) = exe.parent() {
-                            if let Ok(entries) = std::fs::read_dir(dir) {
-                                for entry in entries.flatten() {
-                                    let name = entry.file_name();
-                                    let name_str = name.to_string_lossy();
-                                    if name_str.starts_with("hifimule-daemon-") {
-                                        let sp = entry.path();
-                                        ui_log(&format!("Resolving macOS sidecar at {:?}", sp));
-                                        let _ = std::process::Command::new("xattr")
-                                            .args(["-d", "com.apple.quarantine"])
-                                            .arg(&sp)
-                                            .output();
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                if let Some(sp) = resolve_daemon_binary_path() {
+                    ui_log(&format!("Resolving macOS sidecar at {:?}", sp));
+                    let _ = std::process::Command::new("xattr")
+                        .args(["-d", "com.apple.quarantine"])
+                        .arg(&sp)
+                        .output();
                 }
 
                 match app_handle.shell().sidecar("hifimule-daemon") {
