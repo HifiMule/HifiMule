@@ -3,6 +3,11 @@
 Status: open
 Last updated: 2026-05-11
 
+## Deferred from: hide daemon Dock icon (2026-05-11)
+
+- **`ActivationPolicy::Accessory` prevents in-process windows from receiving keyboard focus** [`hifimule-daemon/src/main.rs`] — With the Accessory policy active, any future in-process `NSWindow` (e.g., a settings dialog) will not be able to receive keyboard focus by default. The current code opens no windows; if one is ever added, the policy must be promoted to `Regular` at runtime via `set_activation_policy_at_runtime` before the window opens.
+- **`ControlFlow::Poll` + `try_recv` busy-loop** [`hifimule-daemon/src/main.rs`] — The event loop unconditionally sets `ControlFlow::Poll` on every cycle, spinning at full CPU speed even when idle. This burns battery on macOS. Fix: use `ControlFlow::WaitUntil` or wake the event loop from the background thread via a user event.
+
 ## Deferred from: code review of 6-7-macos-daemon-launchd-agent (2026-05-11)
 
 - **First match from unordered `read_dir`, no executable-type check** [`lib.rs:25`] — `resolve_daemon_binary_path` returns the first directory entry that starts with `"hifimule-daemon"` without verifying it is an executable regular file. If debug symbols, code-signature files, or multiple sidecar variants exist in the same directory, a non-executable file may be selected non-deterministically. Pre-existing pattern extracted from the original quarantine block.
