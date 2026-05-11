@@ -1533,8 +1533,16 @@ fn is_missing_manifest_error(error: &anyhow::Error) -> bool {
     }
 
     let message = error.to_string().to_ascii_lowercase();
-    message.contains(".hifimule.json")
+    if message.contains(".hifimule.json")
         && (message.contains("not found") || message.contains("no such file"))
+    {
+        return true;
+    }
+
+    // A zombie manifest (object exists in MTP listings but is unreadable due to a
+    // failed partial send) should also be treated as missing so the device appears
+    // as unrecognized and can be re-initialized rather than being suppressed forever.
+    message.contains("libmtp read_file failed")
 }
 
 async fn emit_mtp_probe_event(

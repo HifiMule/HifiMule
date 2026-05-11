@@ -1572,6 +1572,46 @@ pub mod libmtp {
             }
             Ok(parent_id)
         }
+
+        // Like path_to_object_id_raw but also returns the storage_id of the found leaf object.
+        // For an empty path (root) returns (LIBMTP_FILES_AND_FOLDERS_ROOT, 0).
+        unsafe fn path_to_object_and_storage_raw(
+            dev: *mut LIBMTP_MtpDevice_t,
+            path: &str,
+        ) -> Result<(u32, u32)> {
+            let components = super::split_path_components(path);
+            if components.is_empty() {
+                return Ok((LIBMTP_FILES_AND_FOLDERS_ROOT, 0));
+            }
+            let mut parent_id = LIBMTP_FILES_AND_FOLDERS_ROOT;
+            let mut storage_id: u32 = 0;
+            for component in &components {
+                let files = LIBMTP_Get_Files_And_Folders(dev, 0, parent_id);
+                if files.is_null() {
+                    return Err(anyhow::anyhow!(
+                        "libmtp: path component '{}' not found",
+                        component
+                    ));
+                }
+                let mut found: Option<(u32, u32)> = None;
+                let mut cur = files;
+                while !cur.is_null() {
+                    let fname = std::ffi::CStr::from_ptr((*cur).filename).to_string_lossy();
+                    if found.is_none() && fname.eq_ignore_ascii_case(component) {
+                        found = Some(((*cur).item_id, (*cur).storage_id));
+                    }
+                    let next = (*cur).next;
+                    LIBMTP_destroy_file_t(cur);
+                    cur = next;
+                }
+                let (item_id, sid) = found.ok_or_else(|| {
+                    anyhow::anyhow!("libmtp: path component '{}' not found", component)
+                })?;
+                parent_id = item_id;
+                storage_id = sid;
+            }
+            Ok((parent_id, storage_id))
+        }
     }
 
     impl MtpHandle for LibmtpHandle {
@@ -1610,8 +1650,19 @@ pub mod libmtp {
             let parent_path = components[..components.len() - 1].join("/");
             let parent_id = unsafe { Self::path_to_object_id_raw(dev, &parent_path)? };
             // LIBMTP_Send_File_From_File only creates new objects; overwrite requires
-            // delete-then-create. Ignore delete failures — the send will surface any real error.
-            if let Ok(existing_id) = unsafe { Self::path_to_object_id_raw(dev, path) } {
+            // delete-then-create. Also capture storage_id from the existing object so
+            // the send targets the correct storage (storage_id=0 is unreliable for root-level files).
+            let mut storage_id: u32 = 0;
+            if let Ok((existing_id, existing_storage)) =
+                unsafe { Self::path_to_object_and_storage_raw(dev, path) }
+            {
+                storage_id = existing_storage;
+                crate::daemon_log!(
+                    "[libmtp] write_file: overwrite '{}' id={} storage_id={} - deleting",
+                    path,
+                    existing_id,
+                    storage_id
+                );
                 let del_rc = unsafe { LIBMTP_Delete_Object(dev, existing_id) };
                 if del_rc != LIBMTP_ERROR_NONE {
                     crate::daemon_log!(
@@ -1628,7 +1679,7 @@ pub mod libmtp {
             let mut file_meta = LIBMTP_File_t {
                 item_id: 0,
                 parent_id,
-                storage_id: 0,
+                storage_id,
                 filename: fname_cstr.as_ptr() as *mut _,
                 filesize: data.len() as u64,
                 modificationdate: 0,
@@ -1647,6 +1698,13 @@ pub mod libmtp {
             drop(guard);
             let _ = std::fs::remove_file(&tmp);
             if rc != LIBMTP_ERROR_NONE {
+                crate::daemon_log!(
+                    "[libmtp] write_file: send '{}' failed rc={} parent_id={} storage_id={}",
+                    path,
+                    rc,
+                    parent_id,
+                    storage_id
+                );
                 return Err(anyhow::anyhow!("libmtp write_file failed: rc={}", rc));
             }
             Ok(())
