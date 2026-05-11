@@ -90,7 +90,11 @@ fn install_launchd_plist() -> Result<(), String> {
     let daemon_path_str = daemon_path
         .to_str()
         .ok_or_else(|| "Daemon path is not valid UTF-8".to_string())?;
-    let plist_content = LAUNCHD_PLIST_TEMPLATE.replace("{DAEMON_PATH}", daemon_path_str);
+    let daemon_path_escaped = daemon_path_str
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    let plist_content = LAUNCHD_PLIST_TEMPLATE.replace("{DAEMON_PATH}", &daemon_path_escaped);
     let plist_path = launchd_plist_path()
         .ok_or_else(|| "Cannot resolve LaunchAgents path (HOME not set?)".to_string())?;
     let launch_agents = plist_path
@@ -100,8 +104,11 @@ fn install_launchd_plist() -> Result<(), String> {
         .map_err(|e| format!("Cannot create LaunchAgents dir: {}", e))?;
     std::fs::write(&plist_path, plist_content)
         .map_err(|e| format!("Cannot write plist: {}", e))?;
+    let plist_str = plist_path
+        .to_str()
+        .ok_or_else(|| "Plist path is not valid UTF-8".to_string())?;
     let output = std::process::Command::new("launchctl")
-        .args(["load", plist_path.to_str().unwrap_or("")])
+        .args(["load", plist_str])
         .output()
         .map_err(|e| format!("launchctl load failed to execute: {}", e))?;
     if !output.status.success() {
@@ -119,15 +126,19 @@ fn unload_and_remove_launchd_plist() -> Result<(), String> {
     let plist_path = launchd_plist_path()
         .ok_or_else(|| "Cannot resolve LaunchAgents path".to_string())?;
     if plist_path.exists() {
-        let output = std::process::Command::new("launchctl")
-            .args(["unload", plist_path.to_str().unwrap_or("")])
+        let plist_str = plist_path
+            .to_str()
+            .ok_or_else(|| "Plist path is not valid UTF-8".to_string())?;
+        match std::process::Command::new("launchctl")
+            .args(["unload", plist_str])
             .output()
-            .map_err(|e| format!("launchctl unload failed to execute: {}", e))?;
-        if !output.status.success() {
-            ui_log(&format!(
+        {
+            Err(e) => ui_log(&format!("launchctl unload warning (failed to execute): {}", e)),
+            Ok(output) if !output.status.success() => ui_log(&format!(
                 "launchctl unload warning (may already be unloaded): {}",
                 String::from_utf8_lossy(&output.stderr)
-            ));
+            )),
+            Ok(_) => {}
         }
         std::fs::remove_file(&plist_path)
             .map_err(|e| format!("Cannot remove plist: {}", e))?;
