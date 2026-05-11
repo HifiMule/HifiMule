@@ -20,6 +20,10 @@ If future review findings need follow-up, add them as new story scope or reopen 
 
 - **Latent unwrap() in `provider_items_response` else branch** (`hifimule-daemon/src/rpc.rs`): The `else` branch unconditionally calls `parent_id.unwrap()` after the known-sentinel guards. If a future change adds a new sentinel ID and misses the guard, the code silently calls `get_artist(sentinel)` on the upstream server instead of panicking. Pre-existing pattern; not introduced by this change. Future hardening: add an explicit guard or replace the `unwrap()` with a handled error return for unrecognized IDs.
 
+## Deferred from: spec-fix-macos-readonly-volume-filter (2026-05-11)
+
+- **No "device is read-only" UI message for NTFS/write-protected volumes** (`hifimule-daemon/src/device/mod.rs`): The `is_readonly_mount` filter correctly drops all read-only volumes (DMGs, NTFS mounts, hardware write-protected media). However, a user with an NTFS-formatted DAP will see nothing rather than "device is read-only / incompatible". NTFS is a pre-existing incompatibility on macOS (no built-in write driver), so the old behavior — "unrecognized device" → init fails with write error — was also bad UX. A proper fix would detect the read-only condition and emit a `DeviceEvent::Incompatible` variant (or similar) so the UI can show an actionable message.
+
 ## Deferred from: spec-fix-macos-daemon-launch (2026-05-11)
 
 - **TOCTOU race on `ui_log` truncation** (`hifimule-ui/src-tauri/src/lib.rs`): The truncation pattern (check size → truncate → append) across both Windows and macOS log branches has no lock. Concurrent `ui_log` calls (main thread, background spawn thread, async daemon-output task) can interleave truncation and append. Pre-existing issue in the Windows branch, now duplicated for macOS. Low impact in practice (log corruption, not a correctness bug), but a future hardening pass should centralise logging behind a `Mutex`-protected writer or a dedicated logging thread.

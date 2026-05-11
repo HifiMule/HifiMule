@@ -1653,6 +1653,20 @@ fn get_mounts() -> Vec<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
+fn is_readonly_mount(path: &Path) -> bool {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
+        return false;
+    }
+    (stat.f_flag & libc::ST_RDONLY) != 0
+}
+
+#[cfg(target_os = "macos")]
 fn get_mounts() -> Vec<PathBuf> {
     use std::os::unix::fs::MetadataExt;
     let mut mounts = Vec::new();
@@ -1674,6 +1688,11 @@ fn get_mounts() -> Vec<PathBuf> {
                 continue;
             }
             if is_mount_point(&path) {
+                // Skip read-only volumes (e.g., mounted DMG files) — they cannot
+                // be initialized and would trigger a spurious "unrecognized device" prompt.
+                if is_readonly_mount(&path) {
+                    continue;
+                }
                 mounts.push(path);
             }
         }
