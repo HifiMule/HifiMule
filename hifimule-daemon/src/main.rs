@@ -6,6 +6,7 @@ use std::sync::{
     mpsc, Arc,
 };
 use std::thread;
+use std::time::{Duration, Instant};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem},
@@ -391,7 +392,9 @@ fn run_interactive() -> Result<()> {
     // 4. Run the event loop
     // This will block the main thread
     event_loop.run(move |_event, _, control_flow| {
-        *control_flow = ControlFlow::Poll;
+        // WaitUntil lets the OS sleep this thread until a native event arrives or the
+        // deadline expires. ControlFlow::Poll would spin at 100% CPU when idle.
+        *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250));
 
         // Handle state updates from tokio thread
         if let Ok(state) = state_rx.try_recv() {
