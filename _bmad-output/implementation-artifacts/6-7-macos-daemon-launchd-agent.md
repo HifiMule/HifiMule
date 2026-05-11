@@ -1,6 +1,6 @@
 # Story 6.7: macOS Daemon as launchd User Agent
 
-Status: review
+Status: done
 
 ## Story
 
@@ -35,6 +35,17 @@ So that auto-sync fires when I connect my device even if I haven't opened the ap
 - [x] **T4: Add `settings_set_launch_on_startup` Tauri command** (AC: #5, #6)
   - [x] T4.1: Add `#[tauri::command] async fn settings_set_launch_on_startup(enabled: bool) -> Result<(), String>` — macOS: `enabled=true` calls `install_launchd_plist()`, `enabled=false` calls `unload_and_remove_launchd_plist()`; non-macOS: `let _ = enabled; Ok(())`
   - [x] T4.2: Register in `invoke_handler!`: added `settings_set_launch_on_startup` to the existing list
+
+### Review Findings
+
+- [x] [Review][Patch] ~~Missing trailing dash in `resolve_daemon_binary_path` filter~~ — REVERTED: Tauri strips the target-triple suffix at bundle time; the deployed binary is `hifimule-daemon` (no dash), so `starts_with("hifimule-daemon")` is correct. The spec note about `hifimule-daemon-universal-apple-darwin` describes the pre-bundle filename only.
+- [x] [Review][Patch] `unwrap_or("")` passes empty string to `launchctl` — if plist path is non-UTF-8, launchctl receives `""` and may silently succeed (no-op) while the function returns `Ok(())` [`hifimule-ui/src-tauri/src/lib.rs:104`, `lib.rs:123`]
+- [x] [Review][Patch] `launchctl unload` I/O error causes early return before plist deletion — spec requires deletion to always proceed; the `?` on `.output()` at line 125 exits early if `launchctl` binary is missing/unusable, leaving the plist file in place [`hifimule-ui/src-tauri/src/lib.rs:125`]
+- [x] [Review][Patch] `{DAEMON_PATH}` not XML-escaped in plist template — raw string substitution breaks plist XML if path contains `&`, `<`, or `>` (legal in macOS bundle names, e.g. `Foo & Bar.app`) [`hifimule-ui/src-tauri/src/lib.rs:93`]
+- [x] [Review][Defer] First match from unordered `read_dir`, no executable-type check [`hifimule-ui/src-tauri/src/lib.rs:25`] — deferred, pre-existing
+- [x] [Review][Defer] `launchctl load` fails when label already loaded (plist-deletion race after external cleanup) [`hifimule-ui/src-tauri/src/lib.rs:103`] — deferred, pre-existing
+- [x] [Review][Defer] Plist always deleted after failed unload → silent re-enable on next app launch [`hifimule-ui/src-tauri/src/lib.rs:132`] — deferred, pre-existing
+- [x] [Review][Defer] Stale plist when app bundle is moved to a different directory — no path-change detection on subsequent launches [`hifimule-ui/src-tauri/src/lib.rs:338`] — deferred, pre-existing
 
 ## Dev Notes
 

@@ -1,5 +1,17 @@
 # Deferred Work
 
+Status: open
+Last updated: 2026-05-11
+
+## Deferred from: code review of 6-7-macos-daemon-launchd-agent (2026-05-11)
+
+- **First match from unordered `read_dir`, no executable-type check** [`lib.rs:25`] — `resolve_daemon_binary_path` returns the first directory entry that starts with `"hifimule-daemon"` without verifying it is an executable regular file. If debug symbols, code-signature files, or multiple sidecar variants exist in the same directory, a non-executable file may be selected non-deterministically. Pre-existing pattern extracted from the original quarantine block.
+- **`launchctl load` fails when label already loaded** [`lib.rs:103`] — If the plist file is deleted externally while the daemon label is still registered in launchd, the next app launch rewrites the plist and calls `launchctl load` again, which returns a non-zero exit code on macOS 12+ for an already-loaded label, causing a logged error even though the daemon is functioning correctly.
+- **Plist always deleted after failed unload → silent re-enable on next launch** [`lib.rs:132`] — If `launchctl unload` fails for a substantive reason (not just "already unloaded"), the plist is still deleted. On the next launch, `plist_missing` is true and `install_launchd_plist` re-registers the daemon — effectively re-enabling auto-start without user action.
+- **Stale plist when app bundle is moved** [`lib.rs:338`] — Moving the `.app` to a different directory leaves the existing plist pointing at the old binary path. Since the plist file still exists, the auto-install block skips reinstallation, and the daemon silently fails to start at login until the user toggles the setting off and on.
+
+---
+
 Status: closed
 Closed: 2026-05-09
 
