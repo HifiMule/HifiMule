@@ -1609,6 +1609,18 @@ pub mod libmtp {
                 .ok_or_else(|| anyhow::anyhow!("Empty path"))?;
             let parent_path = components[..components.len() - 1].join("/");
             let parent_id = unsafe { Self::path_to_object_id_raw(dev, &parent_path)? };
+            // LIBMTP_Send_File_From_File only creates new objects; overwrite requires
+            // delete-then-create. Ignore delete failures — the send will surface any real error.
+            if let Ok(existing_id) = unsafe { Self::path_to_object_id_raw(dev, path) } {
+                let del_rc = unsafe { LIBMTP_Delete_Object(dev, existing_id) };
+                if del_rc != LIBMTP_ERROR_NONE {
+                    crate::daemon_log!(
+                        "[libmtp] write_file: pre-delete of '{}' failed rc={} (proceeding)",
+                        path,
+                        del_rc
+                    );
+                }
+            }
             let tmp = temp_path();
             std::fs::write(&tmp, data)?;
             let tmp_cstr = std::ffi::CString::new(tmp.to_string_lossy().as_bytes())?;
