@@ -1441,6 +1441,8 @@ pub mod libmtp {
         next: *mut LIBMTP_File_t,
     }
 
+    include!(concat!(env!("OUT_DIR"), "/libmtp_constants.rs")); // LIBMTP_FILETYPE_UNKNOWN
+
     const LIBMTP_FILES_AND_FOLDERS_ROOT: u32 = 0xFFFF_FFFF;
     const LIBMTP_ERROR_NONE: c_int = 0;
 
@@ -1475,7 +1477,20 @@ pub mod libmtp {
             data: *const libc::c_void,
         ) -> c_int;
         fn LIBMTP_Delete_Object(device: *mut LIBMTP_MtpDevice_t, object_id: u32) -> c_int;
+        // Enumerates device storages and populates device->storage linked list.
+        // Must be called after LIBMTP_Open_Raw_Device_Uncached, which skips this step.
+        // LIBMTP_Get_Files_And_Folders with storage_id=0 iterates device->storage and
+        // returns null if the list is empty — calling this first makes it work correctly.
+        fn LIBMTP_Get_Storage(device: *mut LIBMTP_MtpDevice_t, sortby: c_int) -> c_int;
+        fn LIBMTP_Create_Folder(
+            device: *mut LIBMTP_MtpDevice_t,
+            name: *mut c_char,
+            parent_id: u32,
+            storage_id: u32,
+        ) -> u32;
     }
+
+    const LIBMTP_STORAGE_SORTBY_NOTSORTED: c_int = 0;
 
     pub struct LibmtpHandle {
         // libmtp is not thread-safe. The Mutex must be held for the full duration of every
@@ -1530,6 +1545,17 @@ pub mod libmtp {
                         bus_location,
                         dev_num
                     ));
+                }
+                // LIBMTP_Open_Raw_Device_Uncached skips storage enumeration, leaving
+                // device->storage as NULL. LIBMTP_Get_Files_And_Folders(storage_id=0, ...)
+                // iterates device->storage and returns null if it's empty, making all root-level
+                // file operations fail silently. Call LIBMTP_Get_Storage here to populate it.
+                let storage_rc = LIBMTP_Get_Storage(device, LIBMTP_STORAGE_SORTBY_NOTSORTED);
+                if storage_rc != 0 {
+                    crate::daemon_log!(
+                        "[libmtp] open: LIBMTP_Get_Storage failed rc={} — root enumeration may not work",
+                        storage_rc
+                    );
                 }
                 Ok(Self {
                     device: Arc::new(Mutex::new(device)),
@@ -1612,6 +1638,90 @@ pub mod libmtp {
             }
             Ok((parent_id, storage_id))
         }
+
+        // Walks path components, creating missing directories with LIBMTP_Create_Folder.
+        // Returns (leaf_object_id, storage_id). For an empty path returns (ROOT, 0).
+        // storage_id is propagated from found objects; for root-level creates where the
+        // root is otherwise empty, falls back to root_storage_id_raw.
+        unsafe fn ensure_path_raw(
+            dev: *mut LIBMTP_MtpDevice_t,
+            path: &str,
+        ) -> Result<(u32, u32)> {
+            let components = super::split_path_components(path);
+            if components.is_empty() {
+                return Ok((LIBMTP_FILES_AND_FOLDERS_ROOT, 0));
+            }
+            let mut parent_id = LIBMTP_FILES_AND_FOLDERS_ROOT;
+            let mut storage_id: u32 = 0;
+            for component in &components {
+                let files = LIBMTP_Get_Files_And_Folders(dev, 0, parent_id);
+                let mut found: Option<(u32, u32)> = None;
+                if !files.is_null() {
+                    let mut cur = files;
+                    while !cur.is_null() {
+                        let fname = std::ffi::CStr::from_ptr((*cur).filename).to_string_lossy();
+                        if found.is_none() && fname.eq_ignore_ascii_case(component) {
+                            found = Some(((*cur).item_id, (*cur).storage_id));
+                        }
+                        let next = (*cur).next;
+                        LIBMTP_destroy_file_t(cur);
+                        cur = next;
+                    }
+                }
+                if let Some((item_id, sid)) = found {
+                    parent_id = item_id;
+                    storage_id = sid;
+                } else {
+                    let create_storage = if parent_id == LIBMTP_FILES_AND_FOLDERS_ROOT {
+                        Self::root_storage_id_raw(dev)
+                    } else {
+                        storage_id
+                    };
+                    let name_cstr = std::ffi::CString::new(component.as_bytes())?;
+                    let new_id = LIBMTP_Create_Folder(
+                        dev,
+                        name_cstr.as_ptr() as *mut _,
+                        parent_id,
+                        create_storage,
+                    );
+                    if new_id == 0 {
+                        return Err(anyhow::anyhow!(
+                            "libmtp: failed to create directory '{}'",
+                            component
+                        ));
+                    }
+                    crate::daemon_log!(
+                        "[libmtp] ensure_path: created '{}' id={} parent={} storage={}",
+                        component,
+                        new_id,
+                        parent_id,
+                        create_storage
+                    );
+                    parent_id = new_id;
+                    storage_id = create_storage;
+                }
+            }
+            Ok((parent_id, storage_id))
+        }
+
+        // Returns the storage_id of the first object found at the device root.
+        // Used to infer the correct storage when creating root-level files where
+        // storage_id=0 is ambiguous (Samsung and other Android devices reject it).
+        // Returns 0 if the root is empty (no children found).
+        unsafe fn root_storage_id_raw(dev: *mut LIBMTP_MtpDevice_t) -> u32 {
+            let files = LIBMTP_Get_Files_And_Folders(dev, 0, LIBMTP_FILES_AND_FOLDERS_ROOT);
+            if files.is_null() {
+                return 0;
+            }
+            let storage_id = (*files).storage_id;
+            let mut cur = files;
+            while !cur.is_null() {
+                let next = (*cur).next;
+                LIBMTP_destroy_file_t(cur);
+                cur = next;
+            }
+            storage_id
+        }
     }
 
     impl MtpHandle for LibmtpHandle {
@@ -1648,11 +1758,14 @@ pub mod libmtp {
                 .last()
                 .ok_or_else(|| anyhow::anyhow!("Empty path"))?;
             let parent_path = components[..components.len() - 1].join("/");
-            let parent_id = unsafe { Self::path_to_object_id_raw(dev, &parent_path)? };
+            // ensure_path_raw creates any missing parent directories and returns the
+            // parent object ID with its storage_id — avoiding the need for a separate
+            // root_storage_id_raw fallback for non-root writes.
+            let (parent_id, mut storage_id) =
+                unsafe { Self::ensure_path_raw(dev, &parent_path)? };
             // LIBMTP_Send_File_From_File only creates new objects; overwrite requires
             // delete-then-create. Also capture storage_id from the existing object so
             // the send targets the correct storage (storage_id=0 is unreliable for root-level files).
-            let mut storage_id: u32 = 0;
             if let Ok((existing_id, existing_storage)) =
                 unsafe { Self::path_to_object_and_storage_raw(dev, path) }
             {
@@ -1672,6 +1785,16 @@ pub mod libmtp {
                     );
                 }
             }
+            // For root-level new files, storage_id=0 is ambiguous — the device cannot
+            // determine which physical storage to use. Discover it from an existing root child.
+            if storage_id == 0 && parent_id == LIBMTP_FILES_AND_FOLDERS_ROOT {
+                storage_id = unsafe { Self::root_storage_id_raw(dev) };
+                crate::daemon_log!(
+                    "[libmtp] write_file: inferred root storage_id={} for '{}'",
+                    storage_id,
+                    path
+                );
+            }
             let tmp = temp_path();
             std::fs::write(&tmp, data)?;
             let tmp_cstr = std::ffi::CString::new(tmp.to_string_lossy().as_bytes())?;
@@ -1683,7 +1806,7 @@ pub mod libmtp {
                 filename: fname_cstr.as_ptr() as *mut _,
                 filesize: data.len() as u64,
                 modificationdate: 0,
-                filetype: 0,
+                filetype: LIBMTP_FILETYPE_UNKNOWN,
                 next: std::ptr::null_mut(),
             };
             let rc = unsafe {
