@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-05-11  # Added Story 6.7 (macOS launchd agent) — Sprint Change Proposal 2026-05-11
+last_updated: 2026-05-11  # Story 6.7 created and set to ready-for-dev
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -100,7 +100,7 @@ development_status:
   6-4-linux-packages-appimage-deb: done
   6-5-cicd-cross-platform-build-pipeline: done
   6-6-installation-smoke-tests: done
-  6-7-macos-daemon-launchd-agent: backlog
+  6-7-macos-daemon-launchd-agent: ready-for-dev
   epic-6-retrospective: done
 
   epic-7: done
