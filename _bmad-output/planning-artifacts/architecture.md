@@ -207,6 +207,10 @@ unrecognized_device_path: Option<PathBuf>            // device awaiting initiali
 - **Daemon Bundling:** The `hifimule-daemon` binary is included as a Tauri sidecar, bundled alongside the UI.
 - **CI/CD:** GitHub Actions matrix build targeting Windows, Linux, and macOS with artifact upload to GitHub Releases.
 - **Code Signing:** Platform-specific signing (Windows Authenticode, macOS notarization) deferred to post-MVP unless required for distribution.
+- **Daemon Lifecycle — Windows:** The WiX installer registers `hifimule-daemon.exe` as a startup application via `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (`startup-fragment.wxs`). The daemon starts in the user's interactive session at login, giving it full access to the system tray and OS keyring. The UI health-checks port 19140 on launch; if the daemon is already running, no sidecar is spawned and the exit handler does not kill it.
+- **Daemon Lifecycle — macOS:** On first launch, the UI writes a launchd user agent `.plist` to `~/Library/LaunchAgents/com.hifimule.daemon.plist` and loads it via `launchctl load`. The daemon then starts automatically at each login in the user's session. The UI health-checks port 19140; if already running (launchd-owned), no sidecar is spawned and the exit handler does not kill the process. The UI RPC `settings.setLaunchOnStartup(bool)` calls `launchctl load/unload` to toggle the agent.
+- **Daemon Lifecycle — Linux:** Sidecar model only. systemd user-unit support is deferred (Story 6.4 note preserved).
+- **Note — Windows Service:** `service.rs` contains Windows Service scaffolding (`--install-service` / `--service` flags) but is not used by the production installer. The startup application model is sufficient and keeps the daemon in the user session where tray and keyring access work correctly.
 
 ### Format Patterns
 
