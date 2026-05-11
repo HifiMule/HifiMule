@@ -100,7 +100,7 @@ development_status:
   6-4-linux-packages-appimage-deb: done
   6-5-cicd-cross-platform-build-pipeline: done
   6-6-installation-smoke-tests: done
-  6-7-macos-daemon-launchd-agent: ready-for-dev
+  6-7-macos-daemon-launchd-agent: review
   epic-6-retrospective: done
 
   epic-7: done
