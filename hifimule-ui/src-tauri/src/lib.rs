@@ -163,12 +163,16 @@ fn ui_log(msg: &str) {
     // Always try println (works in debug mode)
     println!("{}", msg);
 
-    // Also write to file for release mode
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    #[cfg(target_os = "windows")]
     if let Ok(appdata) = std::env::var("APPDATA") {
         let log_dir = std::path::Path::new(&appdata).join("HifiMule");
         let _ = std::fs::create_dir_all(&log_dir);
         let log_path = log_dir.join("ui.log");
-        // Truncate if over 1 MB
         if let Ok(meta) = std::fs::metadata(&log_path) {
             if meta.len() > LOG_MAX_BYTES {
                 let _ = std::fs::write(&log_path, "--- log truncated ---\n");
@@ -180,10 +184,27 @@ fn ui_log(msg: &str) {
             .open(&log_path)
         {
             use std::io::Write;
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
+            let _ = writeln!(f, "[{}] {}", timestamp, msg);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    if let Ok(home) = std::env::var("HOME") {
+        let log_dir = std::path::Path::new(&home)
+            .join("Library/Application Support/HifiMule");
+        let _ = std::fs::create_dir_all(&log_dir);
+        let log_path = log_dir.join("ui.log");
+        if let Ok(meta) = std::fs::metadata(&log_path) {
+            if meta.len() > LOG_MAX_BYTES {
+                let _ = std::fs::write(&log_path, "--- log truncated ---\n");
+            }
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            use std::io::Write;
             let _ = writeln!(f, "[{}] {}", timestamp, msg);
         }
     }
@@ -244,6 +265,36 @@ pub fn run() {
                 // Note: spawn_sidecar needs the App, but we're on a background thread.
                 // Use the app_handle to get state and spawn via shell.
                 ui_log("Spawning sidecar from background thread");
+
+                // On macOS, Gatekeeper bypass only clears com.apple.quarantine on the
+                // top-level bundle directory, not recursively. Strip it from the sidecar
+                // binary explicitly so macOS allows programmatic spawning.
+                // Tauri bundles sidecars with a target-triple suffix (e.g.
+                // hifimule-daemon-universal-apple-darwin), so scan the directory rather
+                // than joining a plain name that does not exist.
+                #[cfg(target_os = "macos")]
+                {
+                    if let Ok(exe) = std::env::current_exe() {
+                        if let Some(dir) = exe.parent() {
+                            if let Ok(entries) = std::fs::read_dir(dir) {
+                                for entry in entries.flatten() {
+                                    let name = entry.file_name();
+                                    let name_str = name.to_string_lossy();
+                                    if name_str.starts_with("hifimule-daemon-") {
+                                        let sp = entry.path();
+                                        ui_log(&format!("Resolving macOS sidecar at {:?}", sp));
+                                        let _ = std::process::Command::new("xattr")
+                                            .args(["-d", "com.apple.quarantine"])
+                                            .arg(&sp)
+                                            .output();
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 match app_handle.shell().sidecar("hifimule-daemon") {
                     Ok(sidecar) => {
                         ui_log("Sidecar command created, spawning...");
