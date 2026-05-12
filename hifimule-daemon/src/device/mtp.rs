@@ -1898,12 +1898,25 @@ pub mod libmtp {
             let result = raws
                 .iter()
                 .map(|r| {
-                    let vendor = std::ffi::CStr::from_ptr(r.device_entry.vendor)
-                        .to_string_lossy()
-                        .into_owned();
-                    let product = std::ffi::CStr::from_ptr(r.device_entry.product)
-                        .to_string_lossy()
-                        .into_owned();
+                    // libmtp sets vendor/product to NULL for devices not in its device table.
+                    // Guard against the null dereference that would otherwise cause SIGSEGV.
+                    let vendor = if r.device_entry.vendor.is_null() {
+                        "Unknown".to_owned()
+                    } else {
+                        std::ffi::CStr::from_ptr(r.device_entry.vendor)
+                            .to_string_lossy()
+                            .into_owned()
+                    };
+                    let product = if r.device_entry.product.is_null() {
+                        format!(
+                            "USB Device ({:04x}:{:04x})",
+                            r.device_entry.vendor_id, r.device_entry.product_id
+                        )
+                    } else {
+                        std::ffi::CStr::from_ptr(r.device_entry.product)
+                            .to_string_lossy()
+                            .into_owned()
+                    };
                     let device_id = format!("{}:{}", r.bus_location, r.devnum);
                     MtpDeviceInfo {
                         device_id: device_id.clone(),

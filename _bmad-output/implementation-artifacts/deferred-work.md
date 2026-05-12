@@ -3,6 +3,11 @@
 Status: open
 Last updated: 2026-05-11
 
+## Deferred from: fix unknown MTP device crash (2026-05-12)
+
+- **`LIBMTP_File_t.filename` null-dereference in file traversal** [`hifimule-daemon/src/device/mtp.rs:1587, 1625, 1662`] — Three call sites in `path_to_object_id_raw`, `path_to_object_and_storage_raw`, and `ensure_path_raw` dereference `(*cur).filename` via `CStr::from_ptr` without checking for null. libmtp documents that `filename` can be NULL for unnamed objects on some Android MTP implementations. Would cause SIGSEGV during any directory walk if a device returns a null-named entry. Fix: check `(*cur).filename.is_null()` and skip/substitute the entry.
+- **`device_id.clone()` pointless allocation** [`hifimule-daemon/src/device/mtp.rs:1920`] — `format!("{}:{}", r.bus_location, r.devnum)` is immediately cloned and the original moved into the struct, allocating an extra unused `String`. Trivial to remove.
+
 ## Deferred from: hide daemon Dock icon (2026-05-11)
 
 - **`ActivationPolicy::Accessory` prevents in-process windows from receiving keyboard focus** [`hifimule-daemon/src/main.rs`] — With the Accessory policy active, any future in-process `NSWindow` (e.g., a settings dialog) will not be able to receive keyboard focus by default. The current code opens no windows; if one is ever added, the policy must be promoted to `Regular` at runtime via `set_activation_policy_at_runtime` before the window opens.
