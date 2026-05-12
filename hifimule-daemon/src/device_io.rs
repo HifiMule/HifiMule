@@ -37,6 +37,10 @@ pub trait DeviceIO: Send + Sync + std::fmt::Debug {
     fn preferred_audio_container(&self) -> Option<&'static str> {
         None
     }
+    async fn load_folder_hints(&self, _hints: std::collections::HashMap<String, u32>) {}
+    async fn drain_folder_hints(&self) -> std::collections::HashMap<String, u32> {
+        std::collections::HashMap::new()
+    }
 }
 
 // ─── MSC Backend ────────────────────────────────────────────────────────────
@@ -277,6 +281,14 @@ pub trait MtpHandle: Send + Sync {
     fn preferred_audio_container(&self) -> Option<&'static str> {
         None
     }
+    /// Load previously cached MTP folder IDs into the handle for the upcoming sync job.
+    /// Only meaningful on libmtp; other backends ignore this via the default no-op.
+    fn load_folder_hints(&self, _hints: std::collections::HashMap<String, u32>) {}
+    /// Drain all folder IDs discovered or used during the sync job, clearing the cache.
+    /// Returns a map of device-relative path → LIBMTP folder object ID.
+    fn drain_folder_hints(&self) -> std::collections::HashMap<String, u32> {
+        std::collections::HashMap::new()
+    }
 }
 
 #[async_trait]
@@ -377,6 +389,25 @@ impl DeviceIO for MtpBackend {
 
     fn preferred_audio_container(&self) -> Option<&'static str> {
         self.handle.preferred_audio_container()
+    }
+
+    // operation_lock is intentionally NOT acquired for load_folder_hints /
+    // drain_folder_hints. These methods only touch an in-memory Mutex<HashMap>
+    // inside LibmtpHandle, not the device pointer. The inner Mutex provides the
+    // necessary synchronization. Acquiring operation_lock would risk deadlock if
+    // either method is ever called while a device operation is in flight.
+    async fn load_folder_hints(&self, hints: std::collections::HashMap<String, u32>) {
+        let handle = Arc::clone(&self.handle);
+        tokio::task::spawn_blocking(move || handle.load_folder_hints(hints))
+            .await
+            .ok();
+    }
+
+    async fn drain_folder_hints(&self) -> std::collections::HashMap<String, u32> {
+        let handle = Arc::clone(&self.handle);
+        tokio::task::spawn_blocking(move || handle.drain_folder_hints())
+            .await
+            .unwrap_or_default()
     }
 }
 

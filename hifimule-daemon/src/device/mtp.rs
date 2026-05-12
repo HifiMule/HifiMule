@@ -1441,6 +1441,16 @@ pub mod libmtp {
         next: *mut LIBMTP_File_t,
     }
 
+    #[repr(C)]
+    struct LIBMTP_folder_t {
+        folder_id: u32,
+        parent_id: u32,
+        storage_id: u32,
+        name: *mut c_char,
+        sibling: *mut LIBMTP_folder_t,
+        child: *mut LIBMTP_folder_t,
+    }
+
     include!(concat!(env!("OUT_DIR"), "/libmtp_constants.rs")); // LIBMTP_FILETYPE_UNKNOWN
 
     const LIBMTP_FILES_AND_FOLDERS_ROOT: u32 = 0xFFFF_FFFF;
@@ -1488,6 +1498,10 @@ pub mod libmtp {
             parent_id: u32,
             storage_id: u32,
         ) -> u32;
+        // Returns a tree of all folders across all storages. Used as a fallback when
+        // LIBMTP_Get_Files_And_Folders omits folder objects (a known quirk on some devices).
+        fn LIBMTP_Get_Folder_List(device: *mut LIBMTP_MtpDevice_t) -> *mut LIBMTP_folder_t;
+        fn LIBMTP_destroy_folder_t(folder: *mut LIBMTP_folder_t);
     }
 
     const LIBMTP_STORAGE_SORTBY_NOTSORTED: c_int = 0;
@@ -1496,6 +1510,11 @@ pub mod libmtp {
         // libmtp is not thread-safe. The Mutex must be held for the full duration of every
         // FFI call — do NOT copy the raw pointer out and drop the guard before calling FFI.
         device: Arc<Mutex<*mut LIBMTP_MtpDevice_t>>,
+        // Folder IDs loaded from the manifest before sync and populated by ensure_path_raw
+        // when new folders are created. Persisted back to the manifest after sync so that
+        // devices (e.g. Garmin smartwatches) that hide sub-folders from MTP enumeration
+        // can still resolve known directories on subsequent syncs without re-creating them.
+        folder_hints: Mutex<std::collections::HashMap<String, u32>>,
     }
 
     unsafe impl Send for LibmtpHandle {}
@@ -1559,6 +1578,7 @@ pub mod libmtp {
                 }
                 Ok(Self {
                     device: Arc::new(Mutex::new(device)),
+                    folder_hints: Mutex::new(std::collections::HashMap::new()),
                 })
             }
         }
@@ -1639,13 +1659,123 @@ pub mod libmtp {
             Ok((parent_id, storage_id))
         }
 
+        // Searches a LIBMTP_folder_t tree for a folder whose parent_id matches
+        // `target_parent` and whose name matches `name` (case-insensitive ASCII).
+        // Siblings are iterated (not recursed) to keep stack depth bounded by nesting
+        // depth, not sibling count. Returns (folder_id, storage_id) of the first match.
+        unsafe fn search_folder_tree(
+            mut node: *mut LIBMTP_folder_t,
+            target_parent: u32,
+            name: &str,
+        ) -> Option<(u32, u32)> {
+            while !node.is_null() {
+                if (*node).parent_id == target_parent && !(*node).name.is_null() {
+                    let node_name = std::ffi::CStr::from_ptr((*node).name).to_string_lossy();
+                    if node_name.eq_ignore_ascii_case(name) {
+                        return Some(((*node).folder_id, (*node).storage_id));
+                    }
+                }
+                if let Some(found) =
+                    Self::search_folder_tree((*node).child, target_parent, name)
+                {
+                    return Some(found);
+                }
+                node = (*node).sibling;
+            }
+            None
+        }
+
+        // Fallback for devices that omit folder objects from LIBMTP_Get_Files_And_Folders.
+        // Fetches the full folder tree and searches for a folder named `name` at `parent_id`.
+        // Returns (folder_id, storage_id) if found.
+        unsafe fn find_folder_in_list(
+            dev: *mut LIBMTP_MtpDevice_t,
+            parent_id: u32,
+            name: &str,
+        ) -> Option<(u32, u32)> {
+            let root = LIBMTP_Get_Folder_List(dev);
+            if root.is_null() {
+                return None;
+            }
+            // Root-level folders in LIBMTP_folder_t use parent_id=0 (PTP_GOH_ROOT),
+            // while ensure_path_raw tracks root as LIBMTP_FILES_AND_FOLDERS_ROOT (0xFFFF_FFFF).
+            let search_parent = if parent_id == LIBMTP_FILES_AND_FOLDERS_ROOT {
+                0
+            } else {
+                parent_id
+            };
+            let result = Self::search_folder_tree(root, search_parent, name);
+            LIBMTP_destroy_folder_t(root);
+            result
+        }
+
+        // Last-resort fallback: enumerate ALL objects on device using
+        // LIBMTP_Get_Files_And_Folders with LIBMTP_FILES_AND_FOLDERS_ROOT (PTP "all objects")
+        // and match by parent_id + name. Some devices store sub-folders as non-association PTP
+        // objects that are invisible to LIBMTP_Get_Folder_List's association-only query and to
+        // parent-filtered LIBMTP_Get_Files_And_Folders, but visible in the flat all-objects dump.
+        // NOTE: Garmin smartwatches do NOT support a true all-objects dump; their
+        // GetObjectHandles(0xFFFFFFFF) returns only root-level items, so this fallback cannot
+        // recover hidden sub-folders on those devices. The folder_hints cache (persisted in the
+        // manifest via load_folder_hints/drain_folder_hints) handles the Garmin case instead.
+        unsafe fn find_folder_in_all_objects(
+            dev: *mut LIBMTP_MtpDevice_t,
+            parent_id: u32,
+            storage_id: u32,
+            name: &str,
+        ) -> Option<(u32, u32)> {
+            let target_parent = if parent_id == LIBMTP_FILES_AND_FOLDERS_ROOT {
+                0
+            } else {
+                parent_id
+            };
+            // Try with the specific storage first (storage=0 may behave as root-only on
+            // some devices, while the explicit storage ID triggers a flat all-objects dump).
+            for &scan_storage in &[storage_id, 0u32] {
+                let files =
+                    LIBMTP_Get_Files_And_Folders(dev, scan_storage, LIBMTP_FILES_AND_FOLDERS_ROOT);
+                if files.is_null() {
+                    continue;
+                }
+                let mut cur = files;
+                let mut result = None;
+                while !cur.is_null() {
+                    if result.is_none()
+                        && !(*cur).filename.is_null()
+                        && (*cur).parent_id == target_parent
+                    {
+                        let fname =
+                            std::ffi::CStr::from_ptr((*cur).filename).to_string_lossy();
+                        if fname.eq_ignore_ascii_case(name) {
+                            result = Some(((*cur).item_id, (*cur).storage_id));
+                        }
+                    }
+                    let next = (*cur).next;
+                    LIBMTP_destroy_file_t(cur);
+                    cur = next;
+                }
+                if result.is_some() {
+                    return result;
+                }
+            }
+            None
+        }
+
         // Walks path components, creating missing directories with LIBMTP_Create_Folder.
         // Returns (leaf_object_id, storage_id). For an empty path returns (ROOT, 0).
         // storage_id is propagated from found objects; for root-level creates where the
         // root is otherwise empty, falls back to root_storage_id_raw.
+        //
+        // hints: previously-cached folder IDs (path → object_id). Used when enumeration
+        //        does not return a folder that is known to exist (e.g. Garmin devices that
+        //        hide sub-folder association objects from GetObjectHandles responses).
+        // discovered: output map populated with the IDs of any folders newly created by
+        //        this call. Callers merge this into their persistent hint store.
         unsafe fn ensure_path_raw(
             dev: *mut LIBMTP_MtpDevice_t,
             path: &str,
+            hints: &std::collections::HashMap<String, u32>,
+            discovered: &mut std::collections::HashMap<String, u32>,
         ) -> Result<(u32, u32)> {
             let components = super::split_path_components(path);
             if components.is_empty() {
@@ -1653,7 +1783,13 @@ pub mod libmtp {
             }
             let mut parent_id = LIBMTP_FILES_AND_FOLDERS_ROOT;
             let mut storage_id: u32 = 0;
+            let mut acc_path = String::new();
             for component in &components {
+                if !acc_path.is_empty() {
+                    acc_path.push('/');
+                }
+                acc_path.push_str(component);
+
                 let files = LIBMTP_Get_Files_And_Folders(dev, 0, parent_id);
                 let mut found: Option<(u32, u32)> = None;
                 if !files.is_null() {
@@ -1672,6 +1808,21 @@ pub mod libmtp {
                     parent_id = item_id;
                     storage_id = sid;
                 } else {
+                    // Check hint cache before attempting to create. Devices that hide
+                    // existing sub-folders from MTP enumeration (e.g. Garmin smartwatches)
+                    // will never return the folder via LIBMTP_Get_Files_And_Folders even
+                    // though it exists; the cached ID lets us skip the doomed create attempt.
+                    if let Some(&hint_id) = hints.get(&acc_path) {
+                        crate::daemon_log!(
+                            "[libmtp] ensure_path: '{}' not visible via enumeration, using cached id={}",
+                            component,
+                            hint_id
+                        );
+                        parent_id = hint_id;
+                        // storage_id propagates from the parent component (same physical storage).
+                        continue;
+                    }
+
                     let create_storage = if parent_id == LIBMTP_FILES_AND_FOLDERS_ROOT {
                         Self::root_storage_id_raw(dev)
                     } else {
@@ -1685,6 +1836,30 @@ pub mod libmtp {
                         create_storage,
                     );
                     if new_id == 0 {
+                        // Create failed. Some devices (e.g. smartwatches) omit folder
+                        // objects from LIBMTP_Get_Files_And_Folders, so an already-existing
+                        // folder appears missing and the create fails. Try two fallbacks to
+                        // recover the existing folder's ID.
+                        if let Some((existing_id, existing_storage)) =
+                            Self::find_folder_in_list(dev, parent_id, component)
+                                .or_else(|| {
+                                    Self::find_folder_in_all_objects(
+                                        dev,
+                                        parent_id,
+                                        storage_id,
+                                        component,
+                                    )
+                                })
+                        {
+                            crate::daemon_log!(
+                                "[libmtp] ensure_path: '{}' already exists as id={} (recovered via fallback)",
+                                component,
+                                existing_id
+                            );
+                            parent_id = existing_id;
+                            storage_id = existing_storage;
+                            continue;
+                        }
                         return Err(anyhow::anyhow!(
                             "libmtp: failed to create directory '{}'",
                             component
@@ -1697,6 +1872,7 @@ pub mod libmtp {
                         parent_id,
                         create_storage
                     );
+                    discovered.insert(acc_path.clone(), new_id);
                     parent_id = new_id;
                     storage_id = create_storage;
                 }
@@ -1725,6 +1901,19 @@ pub mod libmtp {
     }
 
     impl MtpHandle for LibmtpHandle {
+        fn load_folder_hints(&self, hints: std::collections::HashMap<String, u32>) {
+            if let Ok(mut guard) = self.folder_hints.lock() {
+                *guard = hints;
+            }
+        }
+
+        fn drain_folder_hints(&self) -> std::collections::HashMap<String, u32> {
+            self.folder_hints
+                .lock()
+                .map(|mut g| std::mem::take(&mut *g))
+                .unwrap_or_default()
+        }
+
         fn read_file(&self, path: &str) -> Result<Vec<u8>> {
             let guard = self.device.lock().unwrap();
             let dev = *guard;
@@ -1758,11 +1947,25 @@ pub mod libmtp {
                 .last()
                 .ok_or_else(|| anyhow::anyhow!("Empty path"))?;
             let parent_path = components[..components.len() - 1].join("/");
+            // Snapshot hints without holding the hints lock during FFI.
+            let hints = self
+                .folder_hints
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            let mut discovered = std::collections::HashMap::new();
             // ensure_path_raw creates any missing parent directories and returns the
             // parent object ID with its storage_id — avoiding the need for a separate
             // root_storage_id_raw fallback for non-root writes.
             let (parent_id, mut storage_id) =
-                unsafe { Self::ensure_path_raw(dev, &parent_path)? };
+                unsafe { Self::ensure_path_raw(dev, &parent_path, &hints, &mut discovered)? };
+            // Merge newly created folder IDs back so subsequent writes in the same sync
+            // job also benefit from the cache.
+            if !discovered.is_empty() {
+                if let Ok(mut h) = self.folder_hints.lock() {
+                    h.extend(discovered);
+                }
+            }
             // LIBMTP_Send_File_From_File only creates new objects; overwrite requires
             // delete-then-create. Also capture storage_id from the existing object so
             // the send targets the correct storage (storage_id=0 is unreliable for root-level files).
