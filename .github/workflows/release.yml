@@ -169,6 +169,16 @@ jobs:
             fi
           done
 
+      - name: Re-sign binaries after install_name_tool
+        if: matrix.platform == 'macos-latest'
+        run: |
+          find hifimule-ui/src-tauri/bundled-libs -name '*.dylib' -print0 | while IFS= read -r -d '' dylib; do
+            codesign --force --sign - "$dylib"
+          done
+          find hifimule-ui/src-tauri/sidecars -type f -name 'hifimule-daemon-*apple-darwin' -print0 | while IFS= read -r -d '' sidecar; do
+            codesign --force --sign - "$sidecar"
+          done
+
       - name: Check macOS minimum system version reminder
         if: matrix.platform == 'macos-latest'
         run: node scripts/check-macos-minimum-system-version.mjs
