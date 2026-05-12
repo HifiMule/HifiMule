@@ -1,4 +1,13 @@
 fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "macos" {
+        // Embed Info.plist so macOS reads LSUIElement=true at process launch,
+        // suppressing the Dock icon before NSApplication is even initialised.
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        println!("cargo:rustc-link-arg=-sectcreate");
+        println!("cargo:rustc-link-arg=__TEXT");
+        println!("cargo:rustc-link-arg=__info_plist");
+        println!("cargo:rustc-link-arg={manifest_dir}/Info.plist");
+    }
     if std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "windows" {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("../hifimule-ui/src-tauri/icons/icon.ico");
