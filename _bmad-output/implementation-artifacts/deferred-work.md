@@ -1,7 +1,13 @@
 # Deferred Work
 
 Status: open
-Last updated: 2026-05-11
+Last updated: 2026-05-12
+
+## Deferred from: fix MTP create-folder existing-dir (2026-05-12)
+
+- **`find_folder_in_list` leaks folder tree on panic** [`hifimule-daemon/src/device/mtp.rs`] — `LIBMTP_Get_Folder_List` allocates a tree that is freed by `LIBMTP_destroy_folder_t` at the end of `find_folder_in_list`. If `search_folder_tree` panics before that call (e.g. from an allocation failure inside `to_string_lossy`), the tree is leaked. Low impact: a panic in unsafe FFI context crashes the daemon regardless; a drop guard (`scopeguard::defer`) would be the clean fix.
+- **Folder hint cache does not propagate `storage_id` when hint is consumed** [`hifimule-daemon/src/device/mtp.rs`] — `ensure_path_raw` updates `parent_id` from the hint but leaves `storage_id` at its previous value. For the reported Garmin case this is safe (root-level folders ARE visible, so `storage_id` is always set before any hint is consumed). For a hypothetical device where every path component is hint-resolved, the storage for any new child folder would fall back to `root_storage_id_raw` (one extra MTP round-trip, not a crash). Fix: extend the hint map value to `(folder_id, storage_id)` if a device with all-hint paths is ever encountered.
+- **Stale folder hint IDs after manual folder deletion** [`hifimule-daemon/src/device/mtp.rs`, `hifimule-daemon/src/sync.rs`] — If the user deletes a device directory externally (e.g. via Garmin Connect), the corresponding `folder_ids` entry in `.hifimule.json` becomes a dangling MTP object ID. The next sync will resolve the path via the stale hint and `LIBMTP_Send_File_From_File` will fail with an MTP error. Recovery requires clearing `folder_ids` from the manifest or deleting `.hifimule.json`. Note: factory reset clears `.hifimule.json` automatically, so hints are purged. Fix: validate hint IDs at sync start (one `LIBMTP_Get_Files_And_Folders` call per hinted path component), or retry with folder creation when a hint-directed write fails.
 
 ## Deferred from: fix unknown MTP device crash (2026-05-12)
 

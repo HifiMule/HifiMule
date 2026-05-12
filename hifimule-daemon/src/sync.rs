@@ -566,8 +566,17 @@ pub async fn execute_sync(
     let completed_bytes_arc = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     // Determine managed path from the device manifest's first managed_paths entry.
+    // Also extract any cached folder IDs and prime the device IO layer so that
+    // devices which hide sub-folders from MTP enumeration can still resolve them.
     let managed_path = {
         let snapshot = device_manager.get_current_device().await;
+        let folder_ids = snapshot
+            .as_ref()
+            .map(|m| m.folder_ids.clone())
+            .unwrap_or_default();
+        if !folder_ids.is_empty() {
+            device_io.load_folder_hints(folder_ids).await;
+        }
         let subfolder = snapshot
             .as_ref()
             .and_then(|m| m.managed_paths.first())
@@ -946,6 +955,20 @@ pub async fn execute_sync(
         }
     }
 
+    // Persist any folder IDs created or used during this sync so that devices
+    // which hide sub-folder objects from MTP enumeration work on subsequent syncs.
+    let new_folder_ids = device_io.drain_folder_hints().await;
+    if !new_folder_ids.is_empty() {
+        if let Err(e) = device_manager
+            .update_manifest(|m| {
+                m.folder_ids.extend(new_folder_ids);
+            })
+            .await
+        {
+            eprintln!("[Sync] Warning: failed to persist folder ID cache: {}", e);
+        }
+    }
+
     let mut device_warnings = device_io.take_warnings().await;
     if let Err(e) = device_io.end_sync_job().await {
         device_warnings.push(format!(
@@ -996,6 +1019,13 @@ pub async fn execute_provider_sync(
     let completed_bytes_arc = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let managed_path = {
         let snapshot = device_manager.get_current_device().await;
+        let folder_ids = snapshot
+            .as_ref()
+            .map(|m| m.folder_ids.clone())
+            .unwrap_or_default();
+        if !folder_ids.is_empty() {
+            device_io.load_folder_hints(folder_ids).await;
+        }
         let subfolder = snapshot
             .as_ref()
             .and_then(|m| m.managed_paths.first())
@@ -1241,6 +1271,18 @@ pub async fn execute_provider_sync(
             {
                 eprintln!("[M3U] Failed to persist manifest after M3U update: {}", e);
             }
+        }
+    }
+
+    let new_folder_ids = device_io.drain_folder_hints().await;
+    if !new_folder_ids.is_empty() {
+        if let Err(e) = device_manager
+            .update_manifest(|m| {
+                m.folder_ids.extend(new_folder_ids);
+            })
+            .await
+        {
+            eprintln!("[Sync] Warning: failed to persist folder ID cache: {}", e);
         }
     }
 

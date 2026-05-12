@@ -89,6 +89,11 @@ pub struct DeviceManifest {
     /// enumeration under DEVICE and use this ID directly. Backward-compatible via serde(default).
     #[serde(default)]
     pub storage_id: Option<String>,
+    /// MTP folder object IDs cached across syncs for devices (e.g. Garmin smartwatches) that
+    /// omit sub-folder objects from MTP enumeration results. Maps device-relative path to
+    /// LIBMTP folder object ID. Backward-compatible via serde(default).
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub folder_ids: std::collections::HashMap<String, u32>,
 }
 
 impl DeviceManifest {
@@ -686,6 +691,7 @@ impl DeviceManager {
             transcoding_profile_id, // stored in .hifimule.json; read back on sync to apply transcoding
             playlists: vec![],
             storage_id,
+            folder_ids: std::collections::HashMap::new(),
         };
         let manifest_bytes = serde_json::to_string_pretty(&manifest)?;
         daemon_log!(
