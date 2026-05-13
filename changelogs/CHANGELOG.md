@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.5.4 — 2026-05-13
+
+HifiMule now syncs music to Garmin smartwatches (Forerunner, Fenix, Venu, Vivoactive). A bundled device profile selects the right audio format automatically — MP3 and AAC pass through directly, everything else is transcoded to MP3 320 kbps. A crash that could occur when connecting unrecognised MTP devices is fixed, and macOS notification delivery is now reliable. Release builds are code-signed, which removes the Gatekeeper prompt on macOS 13+.
+
 ## v0.5.1 — 2026-05-11
 
 HifiMule now runs on macOS. The daemon starts automatically at login, MTP devices (phones, DAPs) connect and sync reliably via libmtp, and the app no longer shows a Dock icon. Read-only volumes such as mounted disk images are silently skipped and will no longer trigger the "unrecognized device" prompt.
