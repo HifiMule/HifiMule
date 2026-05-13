@@ -357,6 +357,11 @@ fn run_interactive() -> Result<()> {
     {
         use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
         event_loop.set_activation_policy(ActivationPolicy::Accessory);
+
+        // Pre-set the notification bundle ID so mac-notification-sys doesn't
+        // run an AppleScript lookup for "use_default", which causes macOS to
+        // show a "Choose Application" dialog at the end of a sync.
+        let _ = mac_notification_sys::set_application("hifimule.github.io");
     }
 
     // Load icons from assets (embedded using include_bytes!)

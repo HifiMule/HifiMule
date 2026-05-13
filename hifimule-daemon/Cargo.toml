@@ -50,6 +50,9 @@ windows = { version = "0.58", features = [
     "implement",
 ] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+mac-notification-sys.workspace = true
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
