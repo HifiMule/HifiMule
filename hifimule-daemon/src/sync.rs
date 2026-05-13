@@ -645,11 +645,28 @@ pub async fn execute_sync(
             transcoding_profile.as_ref()
         };
 
+        // Determine the output extension: forced container takes priority, then the
+        // target container from the transcoding profile (e.g. "mp3" from a database
+        // profile). Without this, a profile that transcodes m4a→mp3 would still write
+        // the file with a .m4a extension (the source container), causing MTP write
+        // failures on devices that don't support m4a.
+        let profile_container = stream_profile.and_then(|p| {
+            p["TranscodingProfiles"]
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|tp| tp["Container"].as_str())
+        });
+        let extension_override = preferred_audio_container.or(profile_container);
+        eprintln!(
+            "[Sync] item={} extension_override={:?} (preferred_audio_container={:?}, profile_container={:?})",
+            add_item.jellyfin_id, extension_override, preferred_audio_container, profile_container
+        );
+
         // Construct target path (includes legacy hardware path length validation)
         let construction = match construct_file_path_with_extension(
             &managed_path,
             &item,
-            preferred_audio_container,
+            extension_override,
         ) {
             Ok(result) => result,
             Err(e) => {
@@ -746,6 +763,23 @@ pub async fn execute_sync(
 
         match write_result {
             Ok(_) => {
+                // For backends that do not verify internally (MSC), confirm the file
+                // actually landed before marking it synced. Backends like MTP already
+                // verify via LIBMTP_Get_Filemetadata (direct object-ID lookup) inside
+                // write_with_verify, so the list_files enumeration check is skipped —
+                // some devices (e.g. Garmin) hide files from enumeration even after a
+                // successful write.
+                if !device_io.write_verifies_internally()
+                    && !device_file_exists(device_io.as_ref(), &rel_path).await
+                {
+                    errors.push(SyncFileError {
+                        jellyfin_id: add_item.jellyfin_id.clone(),
+                        filename: add_item.name.clone(),
+                        error_message: "File reported as written but not found on device after transfer".to_string(),
+                    });
+                    continue;
+                }
+
                 // Successfully synced - add to synced items
                 let synced_at = now_iso8601();
 

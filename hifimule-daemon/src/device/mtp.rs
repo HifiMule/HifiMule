@@ -1451,9 +1451,25 @@ pub mod libmtp {
         child: *mut LIBMTP_folder_t,
     }
 
-    include!(concat!(env!("OUT_DIR"), "/libmtp_constants.rs")); // LIBMTP_FILETYPE_UNKNOWN
+    include!(concat!(env!("OUT_DIR"), "/libmtp_constants.rs")); // LIBMTP_FILETYPE_* constants
 
     const LIBMTP_FILES_AND_FOLDERS_ROOT: u32 = 0xFFFF_FFFF;
+
+    fn filetype_for_extension(ext: &str) -> u32 {
+        match ext.to_ascii_lowercase().as_str() {
+            "mp3"  => LIBMTP_FILETYPE_MP3,
+            "mp2"  => LIBMTP_FILETYPE_MP2,
+            "wav"  => LIBMTP_FILETYPE_WAV,
+            "ogg"  => LIBMTP_FILETYPE_OGG,
+            "flac" => LIBMTP_FILETYPE_FLAC,
+            "aac"  => LIBMTP_FILETYPE_AAC,
+            "m4a"  => LIBMTP_FILETYPE_M4A,
+            "mp4"  => LIBMTP_FILETYPE_MP4,
+            "wma"  => LIBMTP_FILETYPE_WMA,
+            "m3u" | "m3u8" => LIBMTP_FILETYPE_PLAYLIST,
+            _      => LIBMTP_FILETYPE_UNKNOWN,
+        }
+    }
     const LIBMTP_ERROR_NONE: c_int = 0;
 
     extern "C" {
@@ -1487,6 +1503,12 @@ pub mod libmtp {
             data: *const libc::c_void,
         ) -> c_int;
         fn LIBMTP_Delete_Object(device: *mut LIBMTP_MtpDevice_t, object_id: u32) -> c_int;
+        // Returns file metadata by object ID (direct lookup, bypasses enumeration).
+        // Returns NULL if the object does not exist. Caller must free with LIBMTP_destroy_file_t.
+        fn LIBMTP_Get_Filemetadata(
+            device: *mut LIBMTP_MtpDevice_t,
+            fileid: u32,
+        ) -> *mut LIBMTP_File_t;
         // Enumerates device storages and populates device->storage linked list.
         // Must be called after LIBMTP_Open_Raw_Device_Uncached, which skips this step.
         // LIBMTP_Get_Files_And_Folders with storage_id=0 iterates device->storage and
@@ -2002,6 +2024,15 @@ pub mod libmtp {
             std::fs::write(&tmp, data)?;
             let tmp_cstr = std::ffi::CString::new(tmp.to_string_lossy().as_bytes())?;
             let fname_cstr = std::ffi::CString::new(*filename)?;
+            let ext = std::path::Path::new(filename)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            let filetype = filetype_for_extension(ext);
+            crate::daemon_log!(
+                "[libmtp] write_file: '{}' ext='{}' filetype={}",
+                path, ext, filetype
+            );
             let mut file_meta = LIBMTP_File_t {
                 item_id: 0,
                 parent_id,
@@ -2009,7 +2040,7 @@ pub mod libmtp {
                 filename: fname_cstr.as_ptr() as *mut _,
                 filesize: data.len() as u64,
                 modificationdate: 0,
-                filetype: LIBMTP_FILETYPE_UNKNOWN,
+                filetype,
                 next: std::ptr::null_mut(),
             };
             let rc = unsafe {
@@ -2021,9 +2052,9 @@ pub mod libmtp {
                     std::ptr::null(),
                 )
             };
-            drop(guard);
             let _ = std::fs::remove_file(&tmp);
             if rc != LIBMTP_ERROR_NONE {
+                drop(guard);
                 crate::daemon_log!(
                     "[libmtp] write_file: send '{}' failed rc={} parent_id={} storage_id={}",
                     path,
@@ -2033,6 +2064,30 @@ pub mod libmtp {
                 );
                 return Err(anyhow::anyhow!("libmtp write_file failed: rc={}", rc));
             }
+            // Verify the object actually exists on the device using its assigned item_id.
+            // Some devices (e.g. Garmin watches) hide files from LIBMTP_Get_Files_And_Folders
+            // enumeration but are reachable via direct object-ID lookup. This catches the case
+            // where the device accepts the transfer and reports success but silently discards it.
+            let assigned_id = file_meta.item_id;
+            let meta_ptr = unsafe { LIBMTP_Get_Filemetadata(dev, assigned_id) };
+            drop(guard);
+            if meta_ptr.is_null() {
+                crate::daemon_log!(
+                    "[libmtp] write_file: '{}' sent OK (item_id={}) but LIBMTP_Get_Filemetadata returned NULL — device silently discarded transfer",
+                    path,
+                    assigned_id
+                );
+                return Err(anyhow::anyhow!(
+                    "libmtp write_file: file not found on device after transfer (item_id={})",
+                    assigned_id
+                ));
+            }
+            unsafe { LIBMTP_destroy_file_t(meta_ptr) };
+            crate::daemon_log!(
+                "[libmtp] write_file: '{}' confirmed on device (item_id={})",
+                path,
+                assigned_id
+            );
             Ok(())
         }
 
