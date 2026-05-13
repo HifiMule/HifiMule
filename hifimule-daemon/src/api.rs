@@ -938,10 +938,37 @@ pub(crate) static CONFIG_FILE_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 #[cfg(test)]
 pub(crate) static CREDENTIAL_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
-const KEYRING_SERVICE: &str = "hifimule-daemon";
-const KEYRING_USER: &str = "jellyfin-token";
+const KEYRING_SERVICE: &str = "hifimule.github.io";
+const KEYRING_SECRETS_ACCOUNT: &str = "secrets";
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct Secrets {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    token: Option<String>,
+    #[serde(default)]
+    server_secrets: std::collections::HashMap<String, String>,
+}
 
 impl CredentialManager {
+    fn load_secrets() -> Result<Secrets> {
+        let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_SECRETS_ACCOUNT)
+            .map_err(|e| anyhow!("Failed to access keyring: {}", e))?;
+        match entry.get_password() {
+            Ok(json) => serde_json::from_str(&json)
+                .map_err(|e| anyhow!("Failed to parse secrets blob: {}", e)),
+            Err(_) => Ok(Secrets::default()),
+        }
+    }
+
+    fn save_secrets(secrets: &Secrets) -> Result<()> {
+        let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_SECRETS_ACCOUNT)
+            .map_err(|e| anyhow!("Failed to access keyring: {}", e))?;
+        let json = serde_json::to_string(secrets)?;
+        entry
+            .set_password(&json)
+            .map_err(|e| anyhow!("Failed to save secrets to keyring: {}", e))
+    }
+
     #[cfg(test)]
     pub fn set_config_path(path: PathBuf) {
         let mut p = CONFIG_FILE_PATH.lock().unwrap();
@@ -990,11 +1017,9 @@ impl CredentialManager {
         let path = Self::get_config_path()?;
         fs::write(&path, json).map_err(|e| anyhow!("Failed to write config file: {}", e))?;
 
-        let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
-            .map_err(|e| anyhow!("Failed to access keyring: {}", e))?;
-        entry
-            .set_password(token)
-            .map_err(|e| anyhow!("Failed to save token to keyring: {}", e))?;
+        let mut secrets = Self::load_secrets().unwrap_or_default();
+        secrets.token = Some(token.to_string());
+        Self::save_secrets(&secrets)?;
 
         Ok(())
     }
@@ -1003,20 +1028,20 @@ impl CredentialManager {
         if secret.trim().is_empty() {
             return Err(anyhow!("Secret cannot be empty"));
         }
-        let entry = keyring::Entry::new(KEYRING_SERVICE, &format!("{KEYRING_USER}-{server_type}"))
-            .map_err(|e| anyhow!("Failed to access keyring: {}", e))?;
-        entry
-            .set_password(secret)
-            .map_err(|e| anyhow!("Failed to save server secret to keyring: {}", e))?;
-        Ok(())
+        let mut secrets = Self::load_secrets().unwrap_or_default();
+        secrets
+            .server_secrets
+            .insert(server_type.to_string(), secret.to_string());
+        Self::save_secrets(&secrets)
     }
 
     pub fn get_server_secret(server_type: &str) -> Result<String> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, &format!("{KEYRING_USER}-{server_type}"))
-            .map_err(|e| anyhow!("Failed to access keyring: {}", e))?;
-        entry
-            .get_password()
-            .map_err(|e| anyhow!("No server secret found in keyring: {}", e))
+        let secrets = Self::load_secrets()?;
+        secrets
+            .server_secrets
+            .get(server_type)
+            .cloned()
+            .ok_or_else(|| anyhow!("No server secret found in keyring: {}", server_type))
     }
 
     pub fn clear_credentials() -> Result<()> {
@@ -1025,14 +1050,7 @@ impl CredentialManager {
             fs::remove_file(&path).map_err(|e| anyhow!("Failed to remove config file: {}", e))?;
         }
 
-        let legacy_entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
-            .map_err(|e| anyhow!("Failed to access keyring: {}", e))?;
-        let _ = legacy_entry.delete_password();
-
-        for server_type in ["jellyfin", "subsonic", "openSubsonic"] {
-            let entry =
-                keyring::Entry::new(KEYRING_SERVICE, &format!("{KEYRING_USER}-{server_type}"))
-                    .map_err(|e| anyhow!("Failed to access keyring: {}", e))?;
+        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_SECRETS_ACCOUNT) {
             let _ = entry.delete_password();
         }
 
@@ -1049,11 +1067,10 @@ impl CredentialManager {
         let config: Config = serde_json::from_str(&content)
             .map_err(|e| anyhow!("Failed to parse config file: {}", e))?;
 
-        let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
-            .map_err(|e| anyhow!("Failed to access keyring: {}", e))?;
-        let token = entry
-            .get_password()
-            .map_err(|e| anyhow!("No token found in keyring: {}", e))?;
+        let secrets = Self::load_secrets()?;
+        let token = secrets
+            .token
+            .ok_or_else(|| anyhow!("No token found in keyring"))?;
 
         Ok((config.url, token, config.user_id))
     }
