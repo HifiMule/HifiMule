@@ -1877,6 +1877,7 @@ dependencies = [
  "image",
  "keyring",
  "libc",
+ "mac-notification-sys",
  "md-5",
  "mockito",
  "notify-rust",

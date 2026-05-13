@@ -26,6 +26,7 @@ axum = "~0.8"
 tower-http = { version = "~0.6", features = ["cors"] }
 http = "~1.1"
 notify-rust = { version = "~4.12", default-features = false, features = ["z"] }
+mac-notification-sys = "0.6"
 
 [profile.release]
 lto = true
