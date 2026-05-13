@@ -37,6 +37,13 @@ pub trait DeviceIO: Send + Sync + std::fmt::Debug {
     fn preferred_audio_container(&self) -> Option<&'static str> {
         None
     }
+    /// Returns true if write_with_verify already confirms the file exists on the device
+    /// (e.g. via a direct object-ID lookup), so the caller can skip a redundant list_files
+    /// existence check. Devices that hide files from enumeration (e.g. some Garmin watches)
+    /// should return true here and do internal verification instead.
+    fn write_verifies_internally(&self) -> bool {
+        false
+    }
     async fn load_folder_hints(&self, _hints: std::collections::HashMap<String, u32>) {}
     async fn drain_folder_hints(&self) -> std::collections::HashMap<String, u32> {
         std::collections::HashMap::new()
@@ -389,6 +396,10 @@ impl DeviceIO for MtpBackend {
 
     fn preferred_audio_container(&self) -> Option<&'static str> {
         self.handle.preferred_audio_container()
+    }
+
+    fn write_verifies_internally(&self) -> bool {
+        true
     }
 
     // operation_lock is intentionally NOT acquired for load_folder_hints /

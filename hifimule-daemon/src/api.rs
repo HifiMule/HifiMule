@@ -829,22 +829,81 @@ impl JellyfinClient {
 
         let json: serde_json::Value = response.json().await?;
 
+        eprintln!("[StreamUrl] item={} PlaybackInfo response: {}", item_id, json);
+
         if let Some(source) = json["MediaSources"].as_array().and_then(|a| a.first()) {
             let supports_direct_play = source["SupportsDirectPlay"].as_bool().unwrap_or(false);
-            if !supports_direct_play {
-                if let Some(transcode_path) = source["TranscodingUrl"].as_str() {
-                    // TranscodingUrl is a path (e.g. "/Videos/abc/stream.mp3?...")
-                    // Prepend the base URL to form the full URL
-                    return Ok(format!(
-                        "{}{}",
-                        base_url.trim_end_matches('/'),
-                        transcode_path
-                    ));
-                }
+            let transcode_url = source["TranscodingUrl"].as_str();
+            eprintln!(
+                "[StreamUrl] item={} SupportsDirectPlay={} TranscodingUrl={:?}",
+                item_id, supports_direct_play, transcode_url
+            );
+
+            // Always prefer TranscodingUrl when present. Jellyfin can return
+            // SupportsDirectPlay=true even with an empty DirectPlayProfiles list,
+            // but still include a TranscodingUrl — always honour it when it's there.
+            if let Some(transcode_path) = transcode_url {
+                let full_url = format!("{}{}", base_url.trim_end_matches('/'), transcode_path);
+                eprintln!("[StreamUrl] item={} → case 1: using TranscodingUrl: {}", item_id, full_url);
+                return Ok(full_url);
             }
+
+            if supports_direct_play {
+                let profile_forbids_direct_play = device_profile["DirectPlayProfiles"]
+                    .as_array()
+                    .map(|a| a.is_empty())
+                    .unwrap_or(false);
+                eprintln!(
+                    "[StreamUrl] item={} profile_forbids_direct_play={}",
+                    item_id, profile_forbids_direct_play
+                );
+
+                if !profile_forbids_direct_play {
+                    let url = format!("{}/Items/{}/Download", base_url.trim_end_matches('/'), item_id);
+                    eprintln!("[StreamUrl] item={} → case 2: direct play allowed by profile, using Download: {}", item_id, url);
+                    return Ok(url);
+                }
+                eprintln!("[StreamUrl] item={} → case 3: profile forbids direct play but Jellyfin gave SupportsDirectPlay=true with no TranscodingUrl — falling through to forced stream", item_id);
+            } else {
+                eprintln!("[StreamUrl] item={} → SupportsDirectPlay=false with no TranscodingUrl (unexpected) — falling through to forced stream", item_id);
+            }
+        } else {
+            eprintln!("[StreamUrl] item={} → no MediaSources in PlaybackInfo response — falling through to forced stream", item_id);
         }
 
-        // Direct play supported or no TranscodingUrl — use Download endpoint
+        // PlaybackInfo gave no usable URL. If the profile targets a specific container,
+        // use the Jellyfin audio stream endpoint to force server-side transcoding rather
+        // than silently serving the original file via /Download.
+        if let Some(container) = device_profile["TranscodingProfiles"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|p| p["Container"].as_str())
+        {
+            let bitrate_kbps = device_profile["MusicStreamingTranscodingBitrate"]
+                .as_u64()
+                .unwrap_or(320000)
+                / 1000;
+            let codec = device_profile["TranscodingProfiles"]
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|p| p["AudioCodec"].as_str())
+                .unwrap_or(container);
+            let url = format!(
+                "{}/Audio/{}/stream.{}?userId={}&audioCodec={}&audioBitRate={}&static=false",
+                base_url.trim_end_matches('/'),
+                item_id,
+                container,
+                user_id,
+                codec,
+                bitrate_kbps,
+            );
+            eprintln!("[StreamUrl] item={} → case 4: forced audio stream endpoint: {}", item_id, url);
+            return Ok(url);
+        }
+
+        eprintln!("[StreamUrl] item={} → case 5 (last resort): no TranscodingProfiles in profile — falling back to Download", item_id);
+
+        // Last resort: direct download.
         Ok(format!(
             "{}/Items/{}/Download",
             base_url.trim_end_matches('/'),
