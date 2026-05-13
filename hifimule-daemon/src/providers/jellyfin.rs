@@ -277,6 +277,7 @@ impl MediaProvider for JellyfinProvider {
             self.client
                 .resolve_stream_url(self.url(), self.token(), self.user_id(), song_id, &profile)
                 .await
+                .map(|(url, _is_transcoded)| url)
                 .map_err(Self::map_error)
         } else {
             Ok(format!(

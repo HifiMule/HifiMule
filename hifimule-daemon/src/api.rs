@@ -741,6 +741,8 @@ impl JellyfinClient {
     ///
     /// Both code paths call `response.bytes_stream()` on a `reqwest::Response`,
     /// so the return type is a single concrete impl Stream (no type erasure needed).
+    /// Returns the byte stream and whether the server is actually transcoding the content.
+    /// `is_transcoded = false` means the original file bytes are served (direct play/download).
     pub async fn get_item_stream(
         &self,
         base_url: &str,
@@ -748,8 +750,10 @@ impl JellyfinClient {
         user_id: &str,
         item_id: &str,
         transcoding_profile: Option<&serde_json::Value>,
-    ) -> Result<impl futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>>>
-    {
+    ) -> Result<(
+        impl futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>>,
+        bool,
+    )> {
         CredentialManager::validate_url(base_url)?;
         CredentialManager::validate_token(token)?;
 
@@ -760,14 +764,17 @@ impl JellyfinClient {
         );
 
         // Resolve the URL to stream from
-        let stream_url = if let Some(profile) = transcoding_profile {
+        let (stream_url, is_transcoded) = if let Some(profile) = transcoding_profile {
             self.resolve_stream_url(base_url, token, user_id, item_id, profile)
                 .await?
         } else {
-            format!(
-                "{}/Items/{}/Download",
-                base_url.trim_end_matches('/'),
-                item_id
+            (
+                format!(
+                    "{}/Items/{}/Download",
+                    base_url.trim_end_matches('/'),
+                    item_id
+                ),
+                false,
             )
         };
 
@@ -777,13 +784,13 @@ impl JellyfinClient {
             return Err(anyhow!("Stream returned status: {}", response.status()));
         }
 
-        Ok(response.bytes_stream())
+        Ok((response.bytes_stream(), is_transcoded))
     }
 
     /// Calls POST /Items/{itemId}/PlaybackInfo with the given DeviceProfile.
-    /// Returns the URL to stream from:
-    ///   - TranscodingUrl from PlaybackInfo if server must transcode
-    ///   - /Items/{id}/Download if direct play is supported or no transcoding URL
+    /// Returns `(url, is_transcoded)` where `is_transcoded` is true when the server will
+    /// transcode the content (TranscodingUrl or forced audio stream endpoint), and false
+    /// for direct-play downloads where the original file bytes are served unchanged.
     pub async fn resolve_stream_url(
         &self,
         base_url: &str,
@@ -791,7 +798,7 @@ impl JellyfinClient {
         user_id: &str,
         item_id: &str,
         device_profile: &serde_json::Value,
-    ) -> Result<String> {
+    ) -> Result<(String, bool)> {
         let endpoint = format!(
             "{}/Items/{}/PlaybackInfo?userId={}",
             base_url.trim_end_matches('/'),
@@ -845,7 +852,7 @@ impl JellyfinClient {
             if let Some(transcode_path) = transcode_url {
                 let full_url = format!("{}{}", base_url.trim_end_matches('/'), transcode_path);
                 eprintln!("[StreamUrl] item={} → case 1: using TranscodingUrl: {}", item_id, full_url);
-                return Ok(full_url);
+                return Ok((full_url, true));
             }
 
             if supports_direct_play {
@@ -861,7 +868,7 @@ impl JellyfinClient {
                 if !profile_forbids_direct_play {
                     let url = format!("{}/Items/{}/Download", base_url.trim_end_matches('/'), item_id);
                     eprintln!("[StreamUrl] item={} → case 2: direct play allowed by profile, using Download: {}", item_id, url);
-                    return Ok(url);
+                    return Ok((url, false));
                 }
                 eprintln!("[StreamUrl] item={} → case 3: profile forbids direct play but Jellyfin gave SupportsDirectPlay=true with no TranscodingUrl — falling through to forced stream", item_id);
             } else {
@@ -898,16 +905,19 @@ impl JellyfinClient {
                 bitrate_kbps,
             );
             eprintln!("[StreamUrl] item={} → case 4: forced audio stream endpoint: {}", item_id, url);
-            return Ok(url);
+            return Ok((url, true));
         }
 
         eprintln!("[StreamUrl] item={} → case 5 (last resort): no TranscodingProfiles in profile — falling back to Download", item_id);
 
         // Last resort: direct download.
-        Ok(format!(
-            "{}/Items/{}/Download",
-            base_url.trim_end_matches('/'),
-            item_id
+        Ok((
+            format!(
+                "{}/Items/{}/Download",
+                base_url.trim_end_matches('/'),
+                item_id
+            ),
+            false,
         ))
     }
 }

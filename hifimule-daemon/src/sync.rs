@@ -645,21 +645,48 @@ pub async fn execute_sync(
             transcoding_profile.as_ref()
         };
 
-        // Determine the output extension: forced container takes priority, then the
-        // target container from the transcoding profile (e.g. "mp3" from a database
-        // profile). Without this, a profile that transcodes m4a→mp3 would still write
-        // the file with a .m4a extension (the source container), causing MTP write
-        // failures on devices that don't support m4a.
-        let profile_container = stream_profile.and_then(|p| {
-            p["TranscodingProfiles"]
-                .as_array()
-                .and_then(|a| a.first())
-                .and_then(|tp| tp["Container"].as_str())
-        });
+        // Resolve stream via PlaybackInfo if a profile is set, else direct /Download.
+        // is_transcoded tells us whether the server actually transcodes the content,
+        // which determines whether the profile's target container applies as the file extension.
+        let stream_result = jellyfin_client
+            .get_item_stream(
+                jellyfin_url,
+                jellyfin_token,
+                jellyfin_user_id,
+                &add_item.jellyfin_id,
+                stream_profile,
+            )
+            .await;
+
+        let (stream, is_transcoded) = match stream_result {
+            Ok(result) => result,
+            Err(e) => {
+                errors.push(SyncFileError {
+                    jellyfin_id: add_item.jellyfin_id.clone(),
+                    filename: add_item.name.clone(),
+                    error_message: format!("Failed to get stream: {}", e),
+                });
+                continue;
+            }
+        };
+
+        // Determine the output extension. The transcoding profile's target container only
+        // applies when the server is actually transcoding — for direct-play downloads the
+        // original file format is served unchanged, so the source extension must be used.
+        let profile_container = if is_transcoded {
+            stream_profile.and_then(|p| {
+                p["TranscodingProfiles"]
+                    .as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|tp| tp["Container"].as_str())
+            })
+        } else {
+            None
+        };
         let extension_override = preferred_audio_container.or(profile_container);
         eprintln!(
-            "[Sync] item={} extension_override={:?} (preferred_audio_container={:?}, profile_container={:?})",
-            add_item.jellyfin_id, extension_override, preferred_audio_container, profile_container
+            "[Sync] item={} extension_override={:?} (preferred_audio_container={:?}, profile_container={:?}, is_transcoded={})",
+            add_item.jellyfin_id, extension_override, preferred_audio_container, profile_container, is_transcoded
         );
 
         // Construct target path (includes legacy hardware path length validation)
@@ -679,29 +706,6 @@ pub async fn execute_sync(
             }
         };
         let target_path = construction.path;
-
-        // Resolve stream via PlaybackInfo if a profile is set, else direct /Download
-        let stream_result = jellyfin_client
-            .get_item_stream(
-                jellyfin_url,
-                jellyfin_token,
-                jellyfin_user_id,
-                &add_item.jellyfin_id,
-                stream_profile,
-            )
-            .await;
-
-        let stream = match stream_result {
-            Ok(stream) => stream,
-            Err(e) => {
-                errors.push(SyncFileError {
-                    jellyfin_id: add_item.jellyfin_id.clone(),
-                    filename: add_item.name.clone(),
-                    error_message: format!("Failed to get stream: {}", e),
-                });
-                continue;
-            }
-        };
 
         // Create progress callback for this file
         let op_manager = operation_manager.clone();
