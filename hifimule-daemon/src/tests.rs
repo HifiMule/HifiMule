@@ -72,6 +72,7 @@ async fn test_device_recognition_integration() {
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
+        ..Default::default()
     };
 
     let state = manager
@@ -149,6 +150,7 @@ async fn test_device_detection_auto_sync_enabled() {
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
+        ..Default::default()
     };
 
     // Verify manifest has auto_sync enabled
@@ -216,6 +218,7 @@ async fn test_device_detection_auto_sync_disabled() {
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
+        ..Default::default()
     };
 
     // Verify auto_sync is disabled

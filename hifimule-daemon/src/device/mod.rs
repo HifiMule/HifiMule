@@ -57,7 +57,7 @@ pub struct PlaylistManifestEntry {
     pub last_modified: String,  // ISO 8601 timestamp
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct DeviceManifest {
     pub device_id: String,
     #[serde(default)]
