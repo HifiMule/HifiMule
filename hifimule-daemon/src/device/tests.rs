@@ -169,6 +169,7 @@ async fn test_dirty_manifest_roundtrip() {
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
+        ..Default::default()
     };
     write_manifest(msc(dir.path()), &manifest).await.unwrap();
     let content = tokio::fs::read_to_string(dir.path().join(".hifimule.json"))
@@ -492,6 +493,7 @@ async fn test_write_manifest_creates_files() {
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
+        ..Default::default()
     };
 
     write_manifest(msc(root), &manifest).await.unwrap();
@@ -539,6 +541,7 @@ async fn test_write_manifest_overwrites_existing() {
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
+        ..Default::default()
     };
     write_manifest(msc(root), &manifest1).await.unwrap();
 
@@ -571,6 +574,7 @@ async fn test_write_manifest_overwrites_existing() {
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
+        ..Default::default()
     };
     write_manifest(msc(root), &manifest2).await.unwrap();
 
@@ -620,6 +624,7 @@ async fn test_get_discrepancies_missing_file() {
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
+        ..Default::default()
     };
     write_manifest(msc(root), &manifest).await.unwrap();
 
@@ -666,6 +671,7 @@ async fn test_get_discrepancies_orphaned_file() {
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
+        ..Default::default()
     };
     write_manifest(msc(root), &manifest).await.unwrap();
 
@@ -727,6 +733,7 @@ async fn test_get_discrepancies_no_issues() {
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
+        ..Default::default()
     };
     write_manifest(msc(root), &manifest).await.unwrap();
 
@@ -792,6 +799,7 @@ async fn test_prune_items() {
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
+        ..Default::default()
     };
     write_manifest(msc(root), &manifest).await.unwrap();
 
@@ -849,6 +857,7 @@ async fn test_relink_item() {
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
+        ..Default::default()
     };
     write_manifest(msc(root), &manifest).await.unwrap();
 
@@ -896,6 +905,7 @@ async fn test_relink_item_path_traversal() {
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
+        ..Default::default()
     };
     write_manifest(msc(root), &manifest).await.unwrap();
 
@@ -931,6 +941,7 @@ async fn test_clear_dirty_flag() {
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
+        ..Default::default()
     };
     write_manifest(msc(root), &manifest).await.unwrap();
 
@@ -1460,6 +1471,7 @@ async fn test_save_basket_roundtrip() {
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
+        ..Default::default()
     };
     write_manifest(msc(dir.path()), &manifest).await.unwrap();
 
@@ -1525,6 +1537,7 @@ async fn test_handle_device_detected_syncs_auto_sync_manifest_to_db() {
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
+        ..Default::default()
     };
     write_manifest(msc(dir.path()), &manifest).await.unwrap();
 
@@ -1568,6 +1581,7 @@ async fn test_auto_sync_on_connect_roundtrip() {
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
+        ..Default::default()
     };
     write_manifest(msc(dir.path()), &manifest).await.unwrap();
 
@@ -1614,6 +1628,7 @@ fn make_manifest(device_id: &str, name: &str) -> DeviceManifest {
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
+        ..Default::default()
     }
 }
 
@@ -2196,6 +2211,7 @@ fn test_synced_item_provider_metadata_serializes_camel_case_and_builds_context()
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
+        ..Default::default()
     };
     let context = manifest.provider_change_context();
 

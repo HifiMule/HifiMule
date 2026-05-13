@@ -3669,6 +3669,7 @@ mod tests {
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
+            ..Default::default()
         };
         state
             .device_manager
@@ -3750,6 +3751,7 @@ mod tests {
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
+            ..Default::default()
         };
         state
             .device_manager
@@ -4278,6 +4280,7 @@ mod tests {
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
+            ..Default::default()
         };
         state
             .device_manager
@@ -4378,6 +4381,7 @@ mod tests {
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
+            ..Default::default()
         };
 
         device_manager
@@ -4458,6 +4462,7 @@ mod tests {
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
+            ..Default::default()
         };
         device_manager
             .handle_device_detected(
@@ -4513,6 +4518,7 @@ mod tests {
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
+            ..Default::default()
         };
         device_manager
             .handle_device_detected(
@@ -4585,6 +4591,7 @@ mod tests {
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
+            ..Default::default()
         };
         device_manager
             .handle_device_detected(
@@ -4726,6 +4733,7 @@ mod tests {
                     transcoding_profile_id: None,
                     playlists: vec![],
                     storage_id: None,
+                    ..Default::default()
                 },
                 std::sync::Arc::new(crate::device_io::MscBackend::new(std::path::PathBuf::from(
                     "/tmp/dev",
@@ -4827,6 +4835,7 @@ mod tests {
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
+            ..Default::default()
         };
         device_manager
             .handle_device_detected(
@@ -5086,6 +5095,7 @@ mod tests {
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
+            ..Default::default()
         };
         crate::device::write_manifest(
             std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())),
@@ -5181,6 +5191,7 @@ mod tests {
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
+            ..Default::default()
         };
         device_manager
             .handle_device_detected(
@@ -5330,6 +5341,7 @@ mod tests {
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
+            ..Default::default()
         };
         let manifest2 = crate::device::DeviceManifest {
             device_id: "dev-list-2".to_string(),
@@ -5346,6 +5358,7 @@ mod tests {
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
+            ..Default::default()
         };
 
         state
@@ -5408,6 +5421,7 @@ mod tests {
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
+            ..Default::default()
         };
 
         state

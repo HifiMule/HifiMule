@@ -1429,6 +1429,8 @@ pub mod libmtp {
         _opaque: [u8; 0],
     }
 
+
+
     #[repr(C)]
     struct LIBMTP_File_t {
         item_id: u32,
@@ -1509,10 +1511,6 @@ pub mod libmtp {
             device: *mut LIBMTP_MtpDevice_t,
             fileid: u32,
         ) -> *mut LIBMTP_File_t;
-        // Enumerates device storages and populates device->storage linked list.
-        // Must be called after LIBMTP_Open_Raw_Device_Uncached, which skips this step.
-        // LIBMTP_Get_Files_And_Folders with storage_id=0 iterates device->storage and
-        // returns null if the list is empty — calling this first makes it work correctly.
         fn LIBMTP_Get_Storage(device: *mut LIBMTP_MtpDevice_t, sortby: c_int) -> c_int;
         fn LIBMTP_Create_Folder(
             device: *mut LIBMTP_MtpDevice_t,
@@ -1520,8 +1518,8 @@ pub mod libmtp {
             parent_id: u32,
             storage_id: u32,
         ) -> u32;
-        // Returns a tree of all folders across all storages. Used as a fallback when
-        // LIBMTP_Get_Files_And_Folders omits folder objects (a known quirk on some devices).
+        // Returns a tree of all folders across all storages. Used by find_folder_in_list
+        // to search for an existing folder by name+parent when per-parent enumeration misses it.
         fn LIBMTP_Get_Folder_List(device: *mut LIBMTP_MtpDevice_t) -> *mut LIBMTP_folder_t;
         fn LIBMTP_destroy_folder_t(folder: *mut LIBMTP_folder_t);
     }
@@ -1532,10 +1530,9 @@ pub mod libmtp {
         // libmtp is not thread-safe. The Mutex must be held for the full duration of every
         // FFI call — do NOT copy the raw pointer out and drop the guard before calling FFI.
         device: Arc<Mutex<*mut LIBMTP_MtpDevice_t>>,
-        // Folder IDs loaded from the manifest before sync and populated by ensure_path_raw
-        // when new folders are created. Persisted back to the manifest after sync so that
-        // devices (e.g. Garmin smartwatches) that hide sub-folders from MTP enumeration
-        // can still resolve known directories on subsequent syncs without re-creating them.
+        // Folder IDs primed via LIBMTP_Get_Folder_List_For_Storage at open time and extended
+        // by ensure_path_raw when new folders are created. Replaced fresh each open — not
+        // persisted to the manifest.
         folder_hints: Mutex<std::collections::HashMap<String, u32>>,
     }
 
@@ -1587,10 +1584,8 @@ pub mod libmtp {
                         dev_num
                     ));
                 }
-                // LIBMTP_Open_Raw_Device_Uncached skips storage enumeration, leaving
-                // device->storage as NULL. LIBMTP_Get_Files_And_Folders(storage_id=0, ...)
-                // iterates device->storage and returns null if it's empty, making all root-level
-                // file operations fail silently. Call LIBMTP_Get_Storage here to populate it.
+                // Uncached open skips storage enumeration; populate it now so that
+                // Get_Files_And_Folders with storage_id=0 resolves correctly.
                 let storage_rc = LIBMTP_Get_Storage(device, LIBMTP_STORAGE_SORTBY_NOTSORTED);
                 if storage_rc != 0 {
                     crate::daemon_log!(
@@ -1598,10 +1593,13 @@ pub mod libmtp {
                         storage_rc
                     );
                 }
-                Ok(Self {
+                let handle = Self {
                     device: Arc::new(Mutex::new(device)),
                     folder_hints: Mutex::new(std::collections::HashMap::new()),
-                })
+                };
+                // Prime immediately while the connection is fresh.
+                handle.prime_folder_hints();
+                Ok(handle)
             }
         }
 
@@ -1738,8 +1736,8 @@ pub mod libmtp {
         // parent-filtered LIBMTP_Get_Files_And_Folders, but visible in the flat all-objects dump.
         // NOTE: Garmin smartwatches do NOT support a true all-objects dump; their
         // GetObjectHandles(0xFFFFFFFF) returns only root-level items, so this fallback cannot
-        // recover hidden sub-folders on those devices. The folder_hints cache (persisted in the
-        // manifest via load_folder_hints/drain_folder_hints) handles the Garmin case instead.
+        // recover hidden sub-folders on those devices. The folder_hints cache (primed via BFS in
+        // prime_folder_hints at open time) handles the Garmin case.
         unsafe fn find_folder_in_all_objects(
             dev: *mut LIBMTP_MtpDevice_t,
             parent_id: u32,
@@ -1902,6 +1900,11 @@ pub mod libmtp {
             Ok((parent_id, storage_id))
         }
 
+        // Recursively walks a LIBMTP_folder_t tree (child/sibling linked structure) and inserts
+        // every folder into `out` as a device-relative path (e.g. "Music/Artist") → folder_id.
+        // Called with parent_path="" for the root siblings returned by LIBMTP_Get_Folder_List_For_Storage.
+        // Nodes with a null or empty name are skipped entirely (including their subtrees)
+        // because a valid path cannot be constructed without a name component.
         // Returns the storage_id of the first object found at the device root.
         // Used to infer the correct storage when creating root-level files where
         // storage_id=0 is ambiguous (Samsung and other Android devices reject it).
@@ -1919,6 +1922,71 @@ pub mod libmtp {
                 cur = next;
             }
             storage_id
+        }
+
+        // Primes folder_hints via BFS using per-parent LIBMTP_Get_Files_And_Folders.
+        // Garmin firmware only exposes sub-folder contents when queried with a specific parent ID;
+        // all-parent queries (storage_id, ALL_PARENTS) return only the root level. This BFS mirrors
+        // the per-parent enumeration that ensure_path_raw already uses for path traversal.
+        fn prime_folder_hints(&self) {
+            let map = {
+                let guard = self.device.lock().unwrap();
+                let dev = *guard;
+                let mut map = std::collections::HashMap::new();
+                unsafe {
+                    // (folder_id, storage_id, device-relative path)
+                    let mut queue: std::collections::VecDeque<(u32, u32, String)> =
+                        Default::default();
+
+                    // Seed: root-level items (storage=0, parent=ROOT)
+                    let mut cur =
+                        LIBMTP_Get_Files_And_Folders(dev, 0, LIBMTP_FILES_AND_FOLDERS_ROOT);
+                    while !cur.is_null() {
+                        let next = (*cur).next;
+                        if (*cur).filetype == LIBMTP_FILETYPE_FOLDER && !(*cur).filename.is_null() {
+                            let name =
+                                std::ffi::CStr::from_ptr((*cur).filename).to_string_lossy();
+                            if !name.is_empty() {
+                                map.insert(name.to_string(), (*cur).item_id);
+                                queue.push_back((
+                                    (*cur).item_id,
+                                    (*cur).storage_id,
+                                    name.to_string(),
+                                ));
+                            }
+                        }
+                        LIBMTP_destroy_file_t(cur);
+                        cur = next;
+                    }
+
+                    // BFS: for each folder, enumerate its children
+                    while let Some((folder_id, storage_id, folder_path)) = queue.pop_front() {
+                        let mut cur =
+                            LIBMTP_Get_Files_And_Folders(dev, storage_id, folder_id);
+                        while !cur.is_null() {
+                            let next = (*cur).next;
+                            if (*cur).filetype == LIBMTP_FILETYPE_FOLDER
+                                && !(*cur).filename.is_null()
+                            {
+                                let name =
+                                    std::ffi::CStr::from_ptr((*cur).filename).to_string_lossy();
+                                if !name.is_empty() {
+                                    let path = format!("{}/{}", folder_path, name);
+                                    map.insert(path.clone(), (*cur).item_id);
+                                    queue.push_back(((*cur).item_id, (*cur).storage_id, path));
+                                }
+                            }
+                            LIBMTP_destroy_file_t(cur);
+                            cur = next;
+                        }
+                    }
+                }
+                map
+            };
+            crate::daemon_log!("[libmtp] prime_folder_hints: found {} folders", map.len());
+            if let Ok(mut guard) = self.folder_hints.lock() {
+                *guard = map;
+            }
         }
     }
 
