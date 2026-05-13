@@ -79,6 +79,33 @@
         ],
         "CodecProfiles": []
       }
+    },
+    {
+      "id": "garmin-music",
+      "name": "Garmin Music Watch",
+      "description": "For Garmin watches with music storage (Forerunner, Fenix, Venu, Vivoactive). Passes through MP3 and AAC/M4A directly; transcodes FLAC, OGG, and other formats to MP3 320 kbps.",
+      "deviceProfile": {
+        "Name": "HifiMule-Garmin",
+        "MaxStreamingBitrate": 320000,
+        "MusicStreamingTranscodingBitrate": 320000,
+        "MaxAudioChannels": 2,
+        "MaxAudioSampleRate": 48000,
+        "DirectPlayProfiles": [
+          { "Container": "mp3", "Type": "Audio", "AudioCodec": "mp3" },
+          { "Container": "mp4", "Type": "Audio", "AudioCodec": "aac" }
+        ],
+        "TranscodingProfiles": [
+          {
+            "Container": "mp3",
+            "Type": "Audio",
+            "AudioCodec": "mp3",
+            "Protocol": "http",
+            "EstimateContentLength": true,
+            "EnableMpegtsM2TsMode": false
+          }
+        ],
+        "CodecProfiles": []
+      }
     }
   ]
 }
