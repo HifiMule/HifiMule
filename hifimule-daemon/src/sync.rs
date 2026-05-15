@@ -911,7 +911,12 @@ pub async fn execute_sync(
         }
 
         // Delete file via device IO abstraction (relative path, backend handles resolution)
-        match device_io.delete_file(&delete_item.local_path).await {
+        let delete_result = device_io.delete_file(&delete_item.local_path).await;
+        // Treat "not found" as idempotent success: the file is already absent, which is
+        // the goal of deletion. This handles duplicate manifest entries (e.g. same path
+        // added via basket and playlist) and re-runs after a failed manifest update.
+        let already_absent = matches!(&delete_result, Err(e) if e.to_string().contains("not found"));
+        match delete_result {
             Ok(_) => {
                 // Successfully deleted
                 if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
@@ -922,6 +927,19 @@ pub async fn execute_sync(
                 }
 
                 // Per-delete manifest update for dirty-resume support (Story 4.4)
+                let id_to_remove = delete_item.jellyfin_id.clone();
+                if let Err(e) = device_manager
+                    .update_manifest(|m| {
+                        m.synced_items.retain(|i| i.jellyfin_id != id_to_remove);
+                    })
+                    .await
+                {
+                    eprintln!("[Sync] Warning: per-delete manifest write failed: {}", e);
+                }
+            }
+            Err(_) if already_absent => {
+                // File was not on device (already deleted or never written).
+                // Remove the manifest entry so this item is not retried on the next sync.
                 let id_to_remove = delete_item.jellyfin_id.clone();
                 if let Err(e) = device_manager
                     .update_manifest(|m| {
