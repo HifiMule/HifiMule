@@ -1530,6 +1530,8 @@ pub mod libmtp {
         // libmtp is not thread-safe. The Mutex must be held for the full duration of every
         // FFI call — do NOT copy the raw pointer out and drop the guard before calling FFI.
         device: Arc<Mutex<*mut LIBMTP_MtpDevice_t>>,
+        bus_location: u32,
+        dev_num: u8,
         // Folder IDs primed via LIBMTP_Get_Folder_List_For_Storage at open time and extended
         // by ensure_path_raw when new folders are created. Replaced fresh each open — not
         // persisted to the manifest.
@@ -1595,6 +1597,8 @@ pub mod libmtp {
                 }
                 let handle = Self {
                     device: Arc::new(Mutex::new(device)),
+                    bus_location,
+                    dev_num,
                     folder_hints: Mutex::new(std::collections::HashMap::new()),
                 };
                 // Prime immediately while the connection is fresh.
@@ -2016,6 +2020,7 @@ pub mod libmtp {
         // all-parent queries (storage_id, ALL_PARENTS) return only the root level. This BFS mirrors
         // the per-parent enumeration that ensure_path_raw already uses for path traversal.
         fn prime_folder_hints(&self) {
+            crate::daemon_log!("[libmtp] prime_folder_hints: reading device {}:{} folders", self.bus_location, self.dev_num);
             let map = {
                 let guard = self.device.lock().unwrap();
                 let dev = *guard;
