@@ -548,8 +548,21 @@ impl DeviceManager {
         // the snapshot written to disk is always consistent with the in-memory state.
         let device_io = std::sync::Arc::clone(&connected.device_io);
         let manifest_snapshot = connected.manifest.clone();
+        let is_mtp = connected.device_class == DeviceClass::Mtp;
         drop(state);
-        crate::device::write_manifest(device_io, &manifest_snapshot).await?;
+        if is_mtp {
+            // For MTP devices the local cache is authoritative: on-device writes are
+            // best-effort only (Garmin and similar devices have unreliable MTP write support).
+            let _ = crate::device::write_manifest(device_io, &manifest_snapshot).await;
+            if let Ok(local_path) =
+                crate::paths::get_local_mtp_manifest_path(&manifest_snapshot.device_id)
+            {
+                let json = serde_json::to_string_pretty(&manifest_snapshot)?;
+                std::fs::write(&local_path, json)?;
+            }
+        } else {
+            crate::device::write_manifest(device_io, &manifest_snapshot).await?;
+        }
         Ok(())
     }
 
@@ -1559,6 +1572,44 @@ async fn emit_mtp_probe_event(
     friendly_name: String,
     backend_arc: std::sync::Arc<dyn crate::device_io::DeviceIO>,
 ) -> bool {
+    // Prefer the local manifest cache for MTP devices — it is the authoritative store
+    // (updated by update_manifest on every successful sync), so it survives device
+    // reconnects and daemon restarts without depending on an MTP write succeeding.
+    let local_manifest: Option<DeviceManifest> =
+        crate::paths::get_local_mtp_manifest_path(dev_id)
+            .ok()
+            .and_then(|p| std::fs::read_to_string(&p).ok())
+            .and_then(|s| serde_json::from_str(&s).ok());
+
+    if let Some(manifest) = local_manifest {
+        daemon_log!(
+            "[MTP] Using local manifest cache for device_id={} friendly_name={}",
+            dev_id,
+            friendly_name
+        );
+        let final_io: std::sync::Arc<dyn crate::device_io::DeviceIO> =
+            if let Some(storage_id) = manifest.storage_id.clone() {
+                match tokio::task::spawn_blocking(move || {
+                    mtp::create_mtp_backend(&dev_info, Some(storage_id))
+                })
+                .await
+                {
+                    Ok(Ok(storage_backend)) => std::sync::Arc::new(storage_backend),
+                    _ => backend_arc,
+                }
+            } else {
+                backend_arc
+            };
+        return tx
+            .send(DeviceEvent::Detected {
+                path: synthetic_path,
+                manifest,
+                device_io: final_io,
+            })
+            .await
+            .is_ok();
+    }
+
     match backend_arc.read_file(".hifimule.json").await {
         Ok(data) => match serde_json::from_slice::<DeviceManifest>(&data) {
             Ok(manifest) => {

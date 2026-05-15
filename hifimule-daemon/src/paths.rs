@@ -58,3 +58,13 @@ pub fn get_app_data_dir() -> Result<PathBuf> {
 pub fn get_device_profiles_path() -> Result<PathBuf> {
     Ok(get_app_data_dir()?.join("device-profiles.json"))
 }
+
+/// Returns the local filesystem path for the cached MTP device manifest.
+/// MTP writes are unreliable on some devices (e.g. Garmin); the local cache
+/// is the authoritative manifest store and is preferred over the on-device copy.
+pub fn get_local_mtp_manifest_path(device_id: &str) -> Result<PathBuf> {
+    let dir = get_app_data_dir()?.join("manifests");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| anyhow!("Failed to create manifests directory: {}", e))?;
+    Ok(dir.join(format!("{}.json", device_id)))
+}
