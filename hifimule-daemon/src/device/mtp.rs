@@ -1589,12 +1589,18 @@ pub mod libmtp {
                 }
                 // Uncached open skips storage enumeration; populate it now so that
                 // Get_Files_And_Folders with storage_id=0 resolves correctly.
+                // Failure here means the device did not grant MTP access (e.g. Android in
+                // charge-only mode) — treat as a hard error so the observer skips this device
+                // entirely rather than proposing an initialization that will fail.
                 let storage_rc = LIBMTP_Get_Storage(device, LIBMTP_STORAGE_SORTBY_NOTSORTED);
                 if storage_rc != 0 {
-                    crate::daemon_log!(
-                        "[libmtp] open: LIBMTP_Get_Storage failed rc={} — root enumeration may not work",
+                    LIBMTP_Release_Device(device);
+                    return Err(anyhow::anyhow!(
+                        "MTP storage not accessible on {}:{} (rc={}) — device may not have MTP enabled",
+                        bus_location,
+                        dev_num,
                         storage_rc
-                    );
+                    ));
                 }
                 let handle = Self {
                     device: Arc::new(Mutex::new(device)),
