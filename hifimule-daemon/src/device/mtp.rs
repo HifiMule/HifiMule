@@ -1532,10 +1532,11 @@ pub mod libmtp {
         device: Arc<Mutex<*mut LIBMTP_MtpDevice_t>>,
         bus_location: u32,
         dev_num: u8,
-        // Folder IDs primed via LIBMTP_Get_Folder_List_For_Storage at open time and extended
-        // by ensure_path_raw when new folders are created. Replaced fresh each open — not
-        // persisted to the manifest.
+        // Folder IDs populated lazily on the first path-not-found miss in ensure_path_raw, and
+        // extended when new folders are created. Replaced fresh each open — not persisted to the
+        // manifest. None = BFS not yet attempted; Some = BFS ran (map may be empty for flat devices).
         folder_hints: Mutex<std::collections::HashMap<String, u32>>,
+        hints_primed: std::sync::atomic::AtomicBool,
     }
 
     unsafe impl Send for LibmtpHandle {}
@@ -1600,9 +1601,8 @@ pub mod libmtp {
                     bus_location,
                     dev_num,
                     folder_hints: Mutex::new(std::collections::HashMap::new()),
+                    hints_primed: std::sync::atomic::AtomicBool::new(false),
                 };
-                // Prime immediately while the connection is fresh.
-                handle.prime_folder_hints();
                 Ok(handle)
             }
         }
@@ -1712,8 +1712,8 @@ pub mod libmtp {
                     }
                 } else {
                     // For intermediate folder components, fall back to hints cache.
-                    // Garmin hides sub-folder objects from enumeration; prime_folder_hints()
-                    // pre-discovers them via per-parent BFS at device-open time.
+                    // Garmin hides sub-folder objects from enumeration; ensure_path_raw lazily
+                    // BFS-primes the hints cache on first miss so it can resolve the hidden ID.
                     let is_last_component = idx + 1 == components.len();
                     if !is_last_component {
                         if let Some(&hint_id) = hints.get(&acc_path) {
@@ -1827,8 +1827,8 @@ pub mod libmtp {
         // parent-filtered LIBMTP_Get_Files_And_Folders, but visible in the flat all-objects dump.
         // NOTE: Garmin smartwatches do NOT support a true all-objects dump; their
         // GetObjectHandles(0xFFFFFFFF) returns only root-level items, so this fallback cannot
-        // recover hidden sub-folders on those devices. The folder_hints cache (primed via BFS in
-        // prime_folder_hints at open time) handles the Garmin case.
+        // recover hidden sub-folders on those devices. The folder_hints cache (lazily BFS-primed
+        // on the first path-not-found miss in ensure_path_raw) handles the Garmin case.
         unsafe fn find_folder_in_all_objects(
             dev: *mut LIBMTP_MtpDevice_t,
             parent_id: u32,
@@ -1885,7 +1885,12 @@ pub mod libmtp {
         unsafe fn ensure_path_raw(
             dev: *mut LIBMTP_MtpDevice_t,
             path: &str,
-            hints: &std::collections::HashMap<String, u32>,
+            hints: &mut std::collections::HashMap<String, u32>,
+            // When true and hints is still empty, perform a one-shot BFS on the first miss so
+            // that devices hiding sub-folders from normal enumeration (e.g. Garmin) don't
+            // require an upfront full-device scan at open time.
+            can_lazy_prime: bool,
+            lazy_primed: &mut bool,
             discovered: &mut std::collections::HashMap<String, u32>,
         ) -> Result<(u32, u32)> {
             let components = super::split_path_components(path);
@@ -1932,6 +1937,47 @@ pub mod libmtp {
                         parent_id = hint_id;
                         // storage_id propagates from the parent component (same physical storage).
                         continue;
+                    }
+                    // Hints not yet built and we are allowed to do so: BFS-prime now so that
+                    // Garmin-style hidden folders are discoverable without paying the cost on
+                    // every device open (large storage like a smartphone would scan thousands
+                    // of folders unnecessarily).
+                    //
+                    // Scope the BFS to the subtree rooted at the last *successfully resolved*
+                    // folder (parent_id). This avoids scanning unrelated top-level trees
+                    // (Photos, Downloads, …) when the music folder simply has no sub-folders
+                    // yet (e.g. first sync to an empty device).
+                    if can_lazy_prime && !*lazy_primed {
+                        *lazy_primed = true;
+                        // Derive the device-relative path of the parent we're scanning from.
+                        // acc_path includes the failing component, so strip it off.
+                        let parent_path_prefix =
+                            &acc_path[..acc_path.len().saturating_sub(component.len() + 1)];
+                        crate::daemon_log!(
+                            "[libmtp] ensure_path: '{}' not found — lazy-priming hints under '{}'",
+                            component,
+                            if parent_path_prefix.is_empty() { "<root>" } else { parent_path_prefix }
+                        );
+                        let primed = Self::build_folder_hints_raw(
+                            dev,
+                            parent_id,
+                            storage_id,
+                            parent_path_prefix,
+                        );
+                        crate::daemon_log!(
+                            "[libmtp] ensure_path: lazy-prime complete, {} hints loaded",
+                            primed.len()
+                        );
+                        hints.extend(primed);
+                        if let Some(&hint_id) = hints.get(&acc_path) {
+                            crate::daemon_log!(
+                                "[libmtp] ensure_path: '{}' resolved via lazy hints id={}",
+                                component,
+                                hint_id
+                            );
+                            parent_id = hint_id;
+                            continue;
+                        }
                     }
 
                     let create_storage = if parent_id == LIBMTP_FILES_AND_FOLDERS_ROOT {
@@ -2015,75 +2061,75 @@ pub mod libmtp {
             storage_id
         }
 
-        // Primes folder_hints via BFS using per-parent LIBMTP_Get_Files_And_Folders.
+        // BFS over a folder subtree using per-parent LIBMTP_Get_Files_And_Folders.
         // Garmin firmware only exposes sub-folder contents when queried with a specific parent ID;
         // all-parent queries (storage_id, ALL_PARENTS) return only the root level. This BFS mirrors
         // the per-parent enumeration that ensure_path_raw already uses for path traversal.
-        fn prime_folder_hints(&self) {
-            crate::daemon_log!("[libmtp] prime_folder_hints: reading device {}:{} folders", self.bus_location, self.dev_num);
-            let map = {
-                let guard = self.device.lock().unwrap();
-                let dev = *guard;
-                let mut map = std::collections::HashMap::new();
-                unsafe {
-                    // (folder_id, storage_id, device-relative path)
-                    let mut queue: std::collections::VecDeque<(u32, u32, String)> =
-                        Default::default();
+        //
+        // `root_folder_id`  — start BFS here; pass LIBMTP_FILES_AND_FOLDERS_ROOT for a full scan.
+        // `root_storage_id` — storage to use when querying root's direct children; 0 = all storages.
+        // `path_prefix`     — prepend to all discovered paths (e.g. "Music" when rooted there).
+        //
+        // Callers must already hold the device Mutex and pass the raw pointer.
+        unsafe fn build_folder_hints_raw(
+            dev: *mut LIBMTP_MtpDevice_t,
+            root_folder_id: u32,
+            root_storage_id: u32,
+            path_prefix: &str,
+        ) -> std::collections::HashMap<String, u32> {
+            let mut map = std::collections::HashMap::new();
+            // (folder_id, storage_id, device-relative path)
+            let mut queue: std::collections::VecDeque<(u32, u32, String)> = Default::default();
 
-                    // Seed: root-level items (storage=0, parent=ROOT)
-                    let mut cur =
-                        LIBMTP_Get_Files_And_Folders(dev, 0, LIBMTP_FILES_AND_FOLDERS_ROOT);
-                    while !cur.is_null() {
-                        let next = (*cur).next;
-                        if (*cur).filetype == LIBMTP_FILETYPE_FOLDER && !(*cur).filename.is_null() {
-                            let name =
-                                std::ffi::CStr::from_ptr((*cur).filename).to_string_lossy();
-                            if !name.is_empty() {
-                                map.insert(name.to_string(), (*cur).item_id);
-                                queue.push_back((
-                                    (*cur).item_id,
-                                    (*cur).storage_id,
-                                    name.to_string(),
-                                ));
-                            }
-                        }
-                        LIBMTP_destroy_file_t(cur);
-                        cur = next;
-                    }
-
-                    // BFS: for each folder, enumerate its children
-                    while let Some((folder_id, storage_id, folder_path)) = queue.pop_front() {
-                        let mut cur =
-                            LIBMTP_Get_Files_And_Folders(dev, storage_id, folder_id);
-                        while !cur.is_null() {
-                            let next = (*cur).next;
-                            if (*cur).filetype == LIBMTP_FILETYPE_FOLDER
-                                && !(*cur).filename.is_null()
-                            {
-                                let name =
-                                    std::ffi::CStr::from_ptr((*cur).filename).to_string_lossy();
-                                if !name.is_empty() {
-                                    let path = format!("{}/{}", folder_path, name);
-                                    map.insert(path.clone(), (*cur).item_id);
-                                    queue.push_back(((*cur).item_id, (*cur).storage_id, path));
-                                }
-                            }
-                            LIBMTP_destroy_file_t(cur);
-                            cur = next;
-                        }
+            // Seed: direct children of root_folder_id
+            let mut cur = LIBMTP_Get_Files_And_Folders(dev, root_storage_id, root_folder_id);
+            while !cur.is_null() {
+                let next = (*cur).next;
+                if (*cur).filetype == LIBMTP_FILETYPE_FOLDER && !(*cur).filename.is_null() {
+                    let name = std::ffi::CStr::from_ptr((*cur).filename).to_string_lossy();
+                    if !name.is_empty() {
+                        let child_path = if path_prefix.is_empty() {
+                            name.to_string()
+                        } else {
+                            format!("{}/{}", path_prefix, name)
+                        };
+                        map.insert(child_path.clone(), (*cur).item_id);
+                        queue.push_back(((*cur).item_id, (*cur).storage_id, child_path));
                     }
                 }
-                map
-            };
-            crate::daemon_log!("[libmtp] prime_folder_hints: found {} folders", map.len());
-            if let Ok(mut guard) = self.folder_hints.lock() {
-                *guard = map;
+                LIBMTP_destroy_file_t(cur);
+                cur = next;
             }
+
+            // BFS: for each folder, enumerate its children
+            while let Some((folder_id, storage_id, folder_path)) = queue.pop_front() {
+                let mut cur = LIBMTP_Get_Files_And_Folders(dev, storage_id, folder_id);
+                while !cur.is_null() {
+                    let next = (*cur).next;
+                    if (*cur).filetype == LIBMTP_FILETYPE_FOLDER && !(*cur).filename.is_null() {
+                        let name = std::ffi::CStr::from_ptr((*cur).filename).to_string_lossy();
+                        if !name.is_empty() {
+                            let path = format!("{}/{}", folder_path, name);
+                            map.insert(path.clone(), (*cur).item_id);
+                            queue.push_back(((*cur).item_id, (*cur).storage_id, path));
+                        }
+                    }
+                    LIBMTP_destroy_file_t(cur);
+                    cur = next;
+                }
+            }
+            map
         }
     }
 
     impl MtpHandle for LibmtpHandle {
         fn load_folder_hints(&self, hints: std::collections::HashMap<String, u32>) {
+            // Treat externally loaded hints as equivalent to having run the BFS — no need
+            // to lazy-prime again on the first path miss.
+            if !hints.is_empty() {
+                self.hints_primed
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             if let Ok(mut guard) = self.folder_hints.lock() {
                 *guard = hints;
             }
@@ -2130,20 +2176,40 @@ pub mod libmtp {
                 .ok_or_else(|| anyhow::anyhow!("Empty path"))?;
             let parent_path = components[..components.len() - 1].join("/");
             // Snapshot hints without holding the hints lock during FFI.
-            let hints = self
+            let mut hints = self
                 .folder_hints
                 .lock()
                 .map(|g| g.clone())
                 .unwrap_or_default();
+            // Only allow lazy BFS priming if it hasn't happened yet for this device handle.
+            // Using SeqCst for safety; the MTP device lock serialises actual FFI calls anyway.
+            let can_lazy_prime = !self
+                .hints_primed
+                .load(std::sync::atomic::Ordering::SeqCst);
+            let mut lazy_primed = false;
             let mut discovered = std::collections::HashMap::new();
             // ensure_path_raw creates any missing parent directories and returns the
             // parent object ID with its storage_id — avoiding the need for a separate
             // root_storage_id_raw fallback for non-root writes.
-            let (parent_id, mut storage_id) =
-                unsafe { Self::ensure_path_raw(dev, &parent_path, &hints, &mut discovered)? };
-            // Merge newly created folder IDs back so subsequent writes in the same sync
-            // job also benefit from the cache.
-            if !discovered.is_empty() {
+            let (parent_id, mut storage_id) = unsafe {
+                Self::ensure_path_raw(
+                    dev,
+                    &parent_path,
+                    &mut hints,
+                    can_lazy_prime,
+                    &mut lazy_primed,
+                    &mut discovered,
+                )?
+            };
+            // Persist any lazy-primed and newly discovered folder IDs.
+            if lazy_primed {
+                self.hints_primed
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                hints.extend(discovered);
+                if let Ok(mut h) = self.folder_hints.lock() {
+                    *h = hints;
+                }
+            } else if !discovered.is_empty() {
                 if let Ok(mut h) = self.folder_hints.lock() {
                     h.extend(discovered);
                 }
