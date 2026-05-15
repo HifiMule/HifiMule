@@ -30,6 +30,11 @@ Last updated: 2026-05-12
 - **Plist always deleted after failed unload → silent re-enable on next launch** [`lib.rs:132`] — If `launchctl unload` fails for a substantive reason (not just "already unloaded"), the plist is still deleted. On the next launch, `plist_missing` is true and `install_launchd_plist` re-registers the daemon — effectively re-enabling auto-start without user action.
 - **Stale plist when app bundle is moved** [`lib.rs:338`] — Moving the `.app` to a different directory leaves the existing plist pointing at the old binary path. Since the plist file still exists, the auto-install block skips reinstallation, and the daemon silently fails to start at login until the user toggles the setting off and on.
 
+## Deferred from: avoid keychain access in tests (2026-05-15)
+
+- **`CONFIG_FILE_PATH` not reset by `clear_credentials`** [`hifimule-daemon/src/api.rs`] — `clear_credentials` removes the on-disk config file and clears `TEST_SECRETS` in test mode, but does not reset the `CONFIG_FILE_PATH` static. If a test sets a custom path and calls `clear_credentials`, subsequent tests still inherit the custom path. Fix: reset `CONFIG_FILE_PATH` to `None` inside `clear_credentials` (or `credential_test_lock`).
+- **`save_credentials` silently overwrites all `server_secrets` on keyring read error** [`hifimule-daemon/src/api.rs:1041`] — `Self::load_secrets().unwrap_or_default()` means a corrupt or temporarily inaccessible keyring entry causes all stored `server_secrets` to be silently discarded on the next `save_credentials` call. In tests this is harmless (panics on lock poisoning instead). In production it could wipe legitimate server secrets. Fix: propagate the error instead of silently defaulting, or log a warning and require explicit confirmation.
+
 ---
 
 Status: closed

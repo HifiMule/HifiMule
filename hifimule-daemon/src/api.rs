@@ -937,11 +937,24 @@ pub struct CredentialManager;
 pub(crate) static CONFIG_FILE_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 #[cfg(test)]
 pub(crate) static CREDENTIAL_TEST_MUTEX: Mutex<()> = Mutex::new(());
+#[cfg(test)]
+static TEST_SECRETS: Mutex<Option<Secrets>> = Mutex::new(None);
 
+/// Acquires the credential test mutex and resets the in-memory secrets store,
+/// ensuring each test starts with a clean credential state.
+#[cfg(test)]
+pub(crate) fn credential_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    let guard = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+    *TEST_SECRETS.lock().unwrap() = None;
+    guard
+}
+
+#[cfg(not(test))]
 const KEYRING_SERVICE: &str = "hifimule.github.io";
+#[cfg(not(test))]
 const KEYRING_SECRETS_ACCOUNT: &str = "secrets";
 
-#[derive(serde::Serialize, serde::Deserialize, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
 struct Secrets {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     token: Option<String>,
@@ -951,22 +964,39 @@ struct Secrets {
 
 impl CredentialManager {
     fn load_secrets() -> Result<Secrets> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_SECRETS_ACCOUNT)
-            .map_err(|e| anyhow!("Failed to access keyring: {}", e))?;
-        match entry.get_password() {
-            Ok(json) => serde_json::from_str(&json)
-                .map_err(|e| anyhow!("Failed to parse secrets blob: {}", e)),
-            Err(_) => Ok(Secrets::default()),
+        #[cfg(not(test))]
+        {
+            let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_SECRETS_ACCOUNT)
+                .map_err(|e| anyhow!("Failed to access keyring: {}", e))?;
+            return match entry.get_password() {
+                Ok(json) => serde_json::from_str(&json)
+                    .map_err(|e| anyhow!("Failed to parse secrets blob: {}", e)),
+                Err(_) => Ok(Secrets::default()),
+            };
+        }
+        #[cfg(test)]
+        {
+            let guard = TEST_SECRETS.lock().unwrap();
+            Ok(guard.clone().unwrap_or_default())
         }
     }
 
     fn save_secrets(secrets: &Secrets) -> Result<()> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_SECRETS_ACCOUNT)
-            .map_err(|e| anyhow!("Failed to access keyring: {}", e))?;
-        let json = serde_json::to_string(secrets)?;
-        entry
-            .set_password(&json)
-            .map_err(|e| anyhow!("Failed to save secrets to keyring: {}", e))
+        #[cfg(not(test))]
+        {
+            let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_SECRETS_ACCOUNT)
+                .map_err(|e| anyhow!("Failed to access keyring: {}", e))?;
+            let json = serde_json::to_string(secrets)?;
+            return entry
+                .set_password(&json)
+                .map_err(|e| anyhow!("Failed to save secrets to keyring: {}", e));
+        }
+        #[cfg(test)]
+        {
+            let mut guard = TEST_SECRETS.lock().unwrap();
+            *guard = Some(secrets.clone());
+            Ok(())
+        }
     }
 
     #[cfg(test)]
@@ -1050,11 +1080,25 @@ impl CredentialManager {
             fs::remove_file(&path).map_err(|e| anyhow!("Failed to remove config file: {}", e))?;
         }
 
+        #[cfg(not(test))]
         if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_SECRETS_ACCOUNT) {
             let _ = entry.delete_password();
         }
 
+        #[cfg(test)]
+        {
+            let mut guard = TEST_SECRETS.lock().unwrap();
+            *guard = None;
+        }
+
         Ok(())
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub fn clear_test_secrets() {
+        let mut guard = TEST_SECRETS.lock().unwrap();
+        *guard = None;
     }
 
     pub fn get_credentials() -> Result<(String, String, Option<String>)> {
@@ -1603,7 +1647,7 @@ mod tests {
 
     #[test]
     fn test_file_storage() {
-        let _guard = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let _guard = credential_test_lock();
 
         let test_url = "http://localhost:8096";
         let test_token = "test-token-1234567890";
