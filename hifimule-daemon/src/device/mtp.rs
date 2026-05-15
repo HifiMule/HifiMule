@@ -1639,6 +1639,93 @@ pub mod libmtp {
             Ok(parent_id)
         }
 
+        // Searches for a direct child of `parent_id` named `name` (case-insensitive).
+        // Tries storage_id=0 first (all storages), then the given storage_id if non-zero,
+        // because some devices (e.g. Garmin) only return sub-folder contents when the
+        // specific storage is supplied. Returns (item_id, storage_id) of the first match.
+        unsafe fn find_child_object(
+            dev: *mut LIBMTP_MtpDevice_t,
+            storage_id: u32,
+            parent_id: u32,
+            name: &str,
+        ) -> Option<(u32, u32)> {
+            let mut scan_storages = vec![0u32];
+            if storage_id != 0 {
+                scan_storages.push(storage_id);
+            }
+            for scan in scan_storages {
+                let files = LIBMTP_Get_Files_And_Folders(dev, scan, parent_id);
+                if files.is_null() {
+                    continue;
+                }
+                let mut found: Option<(u32, u32)> = None;
+                let mut cur = files;
+                while !cur.is_null() {
+                    if found.is_none() && !(*cur).filename.is_null() {
+                        let fname =
+                            std::ffi::CStr::from_ptr((*cur).filename).to_string_lossy();
+                        if fname.eq_ignore_ascii_case(name) {
+                            found = Some(((*cur).item_id, (*cur).storage_id));
+                        }
+                    }
+                    let next = (*cur).next;
+                    LIBMTP_destroy_file_t(cur);
+                    cur = next;
+                }
+                if found.is_some() {
+                    return found;
+                }
+            }
+            None
+        }
+
+        // Like path_to_object_id_raw but propagates storage_id through the traversal
+        // and falls back to the hints cache for intermediate folder components that are
+        // invisible to MTP enumeration (e.g. Garmin sub-folders).
+        unsafe fn path_to_object_id_with_hints_raw(
+            dev: *mut LIBMTP_MtpDevice_t,
+            path: &str,
+            hints: &std::collections::HashMap<String, u32>,
+        ) -> Result<u32> {
+            let components = super::split_path_components(path);
+            if components.is_empty() {
+                return Ok(LIBMTP_FILES_AND_FOLDERS_ROOT);
+            }
+            let mut parent_id = LIBMTP_FILES_AND_FOLDERS_ROOT;
+            let mut storage_id: u32 = 0;
+            let mut acc_path = String::new();
+            for (idx, component) in components.iter().enumerate() {
+                if !acc_path.is_empty() {
+                    acc_path.push('/');
+                }
+                acc_path.push_str(component);
+                if let Some((item_id, sid)) =
+                    Self::find_child_object(dev, storage_id, parent_id, component)
+                {
+                    parent_id = item_id;
+                    if sid != 0 {
+                        storage_id = sid;
+                    }
+                } else {
+                    // For intermediate folder components, fall back to hints cache.
+                    // Garmin hides sub-folder objects from enumeration; prime_folder_hints()
+                    // pre-discovers them via per-parent BFS at device-open time.
+                    let is_last_component = idx + 1 == components.len();
+                    if !is_last_component {
+                        if let Some(&hint_id) = hints.get(&acc_path) {
+                            parent_id = hint_id;
+                            continue;
+                        }
+                    }
+                    return Err(anyhow::anyhow!(
+                        "libmtp: path component '{}' not found",
+                        component
+                    ));
+                }
+            }
+            Ok(parent_id)
+        }
+
         // Like path_to_object_id_raw but also returns the storage_id of the found leaf object.
         // For an empty path (root) returns (LIBMTP_FILES_AND_FOLDERS_ROOT, 0).
         unsafe fn path_to_object_and_storage_raw(
@@ -2160,9 +2247,15 @@ pub mod libmtp {
         }
 
         fn delete_file(&self, path: &str) -> Result<()> {
+            let hints = self
+                .folder_hints
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_default();
             let guard = self.device.lock().unwrap();
             let dev = *guard;
-            let obj_id = unsafe { Self::path_to_object_id_raw(dev, path)? };
+            let obj_id =
+                unsafe { Self::path_to_object_id_with_hints_raw(dev, path, &hints)? };
             let rc = unsafe { LIBMTP_Delete_Object(dev, obj_id) };
             drop(guard);
             if rc != LIBMTP_ERROR_NONE {
