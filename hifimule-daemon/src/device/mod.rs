@@ -1480,6 +1480,7 @@ pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
 
 pub async fn run_mtp_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
     let mut known_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut liveness_tick: u32 = 0;
 
     loop {
         let devices = tokio::task::spawn_blocking(mtp::enumerate_mtp_devices)
@@ -1537,6 +1538,38 @@ pub async fn run_mtp_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
             let synthetic_path = PathBuf::from(format!("mtp://{}", id));
             let _ = tx.send(DeviceEvent::Removed(synthetic_path)).await;
             known_ids.remove(id);
+        }
+
+        // Liveness probe for known devices (~every 16 s). Handles the case where Android
+        // disables MTP without triggering a USB re-enumerate, so the device stays in the
+        // enumeration list but storage is no longer accessible.
+        liveness_tick = liveness_tick.wrapping_add(1);
+        if liveness_tick % 8 == 0 {
+            for dev in &devices {
+                let dev_id = dev.device_id.clone();
+                if !known_ids.contains(&dev_id) {
+                    continue;
+                }
+                let dev_clone = dev.clone();
+                let probe =
+                    tokio::task::spawn_blocking(move || mtp::create_mtp_backend(&dev_clone, None))
+                        .await
+                        .unwrap_or_else(|e| Err(anyhow::anyhow!("probe panicked: {}", e)));
+                if let Err(e) = probe {
+                    // Only "MTP storage not accessible" means the phone disabled MTP.
+                    // Other errors (e.g. device busy during an active sync) are ignored.
+                    if e.to_string().contains("MTP storage not accessible") {
+                        daemon_log!(
+                            "[MTP] Device {} lost storage access — treating as disconnected",
+                            dev_id
+                        );
+                        let synthetic_path = PathBuf::from(format!("mtp://{}", dev_id));
+                        let _ = tx.send(DeviceEvent::Removed(synthetic_path)).await;
+                        known_ids.remove(&dev_id);
+                    }
+                }
+                // Ok(_) → storage still accessible; drop the handle immediately.
+            }
         }
 
         sleep(Duration::from_secs(2)).await;
