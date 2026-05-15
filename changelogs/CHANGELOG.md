@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.5.5 — 2026-05-15
+
+Deletes now work correctly when syncing to Garmin smartwatches and other MTP devices — tracks and playlists removed from the basket are actually removed from the device. Android phones connected in charge-only (USB charging) mode no longer show a broken Initialize button; the app waits silently until the user switches to file-transfer mode. Connecting to devices with large music libraries (smartphones) is faster because the folder scan is now triggered on demand instead of upfront.
+
 ## v0.5.4 — 2026-05-13
 
 HifiMule now syncs music to Garmin smartwatches (Forerunner, Fenix, Venu, Vivoactive). A bundled device profile selects the right audio format automatically — MP3 and AAC pass through directly, everything else is transcoded to MP3 320 kbps. A crash that could occur when connecting unrecognised MTP devices is fixed, and macOS notification delivery is now reliable. Release builds are code-signed, which removes the Gatekeeper prompt on macOS 13+.
