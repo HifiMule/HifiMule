@@ -3136,7 +3136,7 @@ async fn handle_device_select(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::CREDENTIAL_TEST_MUTEX;
+    use crate::api::credential_test_lock;
     use serde_json::json;
 
     fn make_test_state(db: Arc<crate::db::Database>) -> Arc<AppState> {
@@ -3245,7 +3245,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rpc_server_connect_subsonic_success_updates_state_and_db() {
-        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let _lock = credential_test_lock();
         let mut server = mockito::Server::new_async().await;
         let _ping = server
             .mock("GET", "/rest/ping.view")
@@ -3294,7 +3294,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rpc_login_uses_auto_detection_for_subsonic() {
-        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let _lock = credential_test_lock();
         let mut server = mockito::Server::new_async().await;
         let _ping = server
             .mock("GET", "/rest/ping.view")
@@ -3339,7 +3339,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_legacy_library_rpcs_use_active_subsonic_provider_without_config_file() {
-        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let _lock = credential_test_lock();
         let temp_dir = tempfile::tempdir().unwrap();
         CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
 
@@ -3408,7 +3408,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_legacy_jellyfin_items_keep_parent_folder_browse_path() {
-        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let _lock = credential_test_lock();
         let temp_dir = tempfile::tempdir().unwrap();
         let config_path = temp_dir.path().join("config.json");
         CredentialManager::set_config_path(config_path);
@@ -3463,7 +3463,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_proxy_image_uses_active_subsonic_provider_cover_art_url() {
-        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let _lock = credential_test_lock();
         let temp_dir = tempfile::tempdir().unwrap();
         CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
 
@@ -3517,7 +3517,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_legacy_metadata_rpcs_use_active_subsonic_provider_for_basket_add() {
-        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let _lock = credential_test_lock();
         let temp_dir = tempfile::tempdir().unwrap();
         CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
 
@@ -3586,7 +3586,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_credentials_falls_back_to_server_config_for_subsonic_device_init() {
-        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let _lock = credential_test_lock();
         let temp_dir = tempfile::tempdir().unwrap();
         CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
 
@@ -3613,7 +3613,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_calculate_delta_uses_active_subsonic_provider_without_config_file() {
-        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let _lock = credential_test_lock();
         let temp_dir = tempfile::tempdir().unwrap();
         CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
 
@@ -3697,7 +3697,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_execute_uses_active_subsonic_provider_without_config_file() {
-        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let _lock = credential_test_lock();
         let temp_dir = tempfile::tempdir().unwrap();
         CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
 
@@ -3804,7 +3804,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rpc_server_connect_replaces_existing_provider() {
-        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let _lock = credential_test_lock();
         let mut server = mockito::Server::new_async().await;
         let _ping = server
             .mock("GET", "/rest/ping.view")
@@ -4674,7 +4674,7 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_sync_calculate_delta_expands_playlist_to_tracks() {
         use mockito::{Matcher, Server};
-        let _credentials_guard = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let _credentials_guard = credential_test_lock();
 
         let mut server = Server::new_async().await;
         let url = server.url();
@@ -4791,7 +4791,7 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_sync_calculate_delta_partial_failure() {
         use mockito::Server;
-        let _credentials_guard = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let _credentials_guard = credential_test_lock();
         let mut server = Server::new_async().await;
         let url = server.url();
         let token = "test-token";
@@ -5506,7 +5506,7 @@ mod tests {
 
     #[tokio::test]
     async fn subsonic_get_views_returns_playlists_collection_with_correct_collection_type() {
-        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let _lock = credential_test_lock();
         let temp_dir = tempfile::tempdir().unwrap();
         CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
 
@@ -5563,7 +5563,7 @@ mod tests {
 
     #[tokio::test]
     async fn subsonic_get_items_playlists_returns_playlist_type_items() {
-        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let _lock = credential_test_lock();
         let temp_dir = tempfile::tempdir().unwrap();
         CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
 
@@ -5623,7 +5623,7 @@ mod tests {
 
     #[tokio::test]
     async fn subsonic_get_items_playlist_id_returns_tracks() {
-        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let _lock = credential_test_lock();
         let temp_dir = tempfile::tempdir().unwrap();
         CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
 
@@ -5703,7 +5703,7 @@ mod tests {
 
     #[tokio::test]
     async fn jellyfin_get_views_is_unchanged_for_jellyfin_provider() {
-        let _lock = CREDENTIAL_TEST_MUTEX.lock().unwrap();
+        let _lock = credential_test_lock();
         let temp_dir = tempfile::tempdir().unwrap();
         let config_path = temp_dir.path().join("config.json");
         CredentialManager::set_config_path(config_path);
