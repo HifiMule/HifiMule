@@ -829,40 +829,85 @@ pub async fn execute_sync(
     }
 
     // Process deletes
+    //
+    // Managed zone check strategy:
+    // - MSC: canonicalize() both paths to real absolute filesystem paths, then prefix-check.
+    // - MTP: device_path is a synthetic "mtp://…" URI that doesn't exist on the local
+    //   filesystem — canonicalize() always fails and would silently skip every delete.
+    //   Use a string-prefix check on the relative local_path instead.
+    let is_mtp = device_path
+        .to_string_lossy()
+        .starts_with("mtp://");
+    // Option<String>: None = strip_prefix failed (malformed managed_path) → fail-safe reject all.
+    // Some("") = whole device root is managed → all paths are valid.
+    // Some("Music") = only paths under "Music/" are valid.
+    let managed_subfolder_for_delete: Option<String> = managed_path
+        .strip_prefix(device_path)
+        .ok()
+        .map(|p| {
+            p.to_string_lossy()
+                .replace('\\', "/")
+                .trim_end_matches('/')
+                .to_string()
+        });
+
     for delete_item in &delta.deletes {
-        let file_path = device_path.join(&delete_item.local_path);
-
         // Verify file is in managed zone (security check)
-        // Resolve absolute paths to prevent directory traversal attacks (e.g. local_path = "../../../etc/passwd")
-        let absolute_file_path = match file_path.canonicalize() {
-            Ok(path) => path,
-            Err(_) => {
-                // If it doesn't exist, we can't canonicalize it, but that also means there's nothing to delete.
-                // Just skip it.
-                continue;
+        if is_mtp {
+            match &managed_subfolder_for_delete {
+                None => {
+                    // managed_path is not rooted at device_path — config error, fail safe.
+                    errors.push(SyncFileError {
+                        jellyfin_id: delete_item.jellyfin_id.clone(),
+                        filename: delete_item.name.clone(),
+                        error_message: "Failed to resolve managed subfolder - refusing to delete"
+                            .to_string(),
+                    });
+                    continue;
+                }
+                Some(subfolder) if !subfolder.is_empty() => {
+                    let local_norm = delete_item.local_path.replace('\\', "/");
+                    if !local_norm.starts_with(&format!("{}/", subfolder)) {
+                        errors.push(SyncFileError {
+                            jellyfin_id: delete_item.jellyfin_id.clone(),
+                            filename: delete_item.name.clone(),
+                            error_message: "File is not in managed zone - refusing to delete"
+                                .to_string(),
+                        });
+                        continue;
+                    }
+                }
+                Some(_) => {} // Empty subfolder = whole device is managed, all paths are valid
             }
-        };
-
-        // We also need to canonicalize the managed_path for a robust prefix check
-        let absolute_managed_path = match managed_path.canonicalize() {
-            Ok(path) => path,
-            Err(e) => {
+        } else {
+            // MSC path: resolve real filesystem paths to prevent directory traversal attacks.
+            let file_path = device_path.join(&delete_item.local_path);
+            let absolute_file_path = match file_path.canonicalize() {
+                Ok(path) => path,
+                Err(_) => {
+                    // File doesn't exist on disk — nothing to delete.
+                    continue;
+                }
+            };
+            let absolute_managed_path = match managed_path.canonicalize() {
+                Ok(path) => path,
+                Err(e) => {
+                    errors.push(SyncFileError {
+                        jellyfin_id: delete_item.jellyfin_id.clone(),
+                        filename: delete_item.name.clone(),
+                        error_message: format!("Failed to resolve managed path: {}", e),
+                    });
+                    continue;
+                }
+            };
+            if !absolute_file_path.starts_with(&absolute_managed_path) {
                 errors.push(SyncFileError {
                     jellyfin_id: delete_item.jellyfin_id.clone(),
                     filename: delete_item.name.clone(),
-                    error_message: format!("Failed to resolve managed path: {}", e),
+                    error_message: "File is not in managed zone - refusing to delete".to_string(),
                 });
                 continue;
             }
-        };
-
-        if !absolute_file_path.starts_with(&absolute_managed_path) {
-            errors.push(SyncFileError {
-                jellyfin_id: delete_item.jellyfin_id.clone(),
-                filename: delete_item.name.clone(),
-                error_message: "File is not in managed zone - refusing to delete".to_string(),
-            });
-            continue;
         }
 
         // Delete file via device IO abstraction (relative path, backend handles resolution)
