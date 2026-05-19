@@ -219,6 +219,7 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                             let has_basket = !manifest.basket_items.is_empty();
                             let auto_fill_enabled = manifest.auto_fill.enabled;
                             let manifest_device_id = manifest.device_id.clone();
+                            let scrobble_manifest = Arc::new(manifest.clone());
                             match device_manager.handle_device_detected(path.clone(), manifest, device_io).await {
                                 Ok(new_state) => {
                                     let _ = state_tx_clone.send(new_state);
@@ -239,10 +240,12 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                                         let client_scrobble = Arc::clone(&jellyfin_client);
                                         let scrobbler_result_clone = Arc::clone(&last_scrobbler_result);
                                         let scrobble_device_id = manifest_device_id.clone();
+                                        let scrobble_manifest = Arc::clone(&scrobble_manifest);
                                         tokio::spawn(async move {
                                             let result = scrobbler::process_device_scrobbles(
                                                 scrobble_device_io,
                                                 scrobble_device_id,
+                                                Some(scrobble_manifest),
                                                 db_scrobble,
                                                 client_scrobble,
                                                 &url,

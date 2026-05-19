@@ -1,5 +1,6 @@
 use crate::api::JellyfinClient;
 use crate::db::Database;
+use crate::device::DeviceManifest;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -22,6 +23,7 @@ pub struct ScrobblerEntry {
     pub timestamp_unix: i64,
     #[allow(dead_code)]
     pub mb_track_id: Option<String>,
+    pub source_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +87,7 @@ pub fn parse_scrobbler_log(content: &str) -> Vec<ScrobblerEntry> {
             rating,
             timestamp_unix,
             mb_track_id,
+            source_path: None,
         });
     }
 
@@ -120,6 +123,7 @@ fn parse_playback_log_line(line: &str) -> Option<ScrobblerEntry> {
         rating: rating.to_string(),
         timestamp_unix,
         mb_track_id: None,
+        source_path: Some(normalize_scrobble_path(path)),
     })
 }
 
@@ -143,6 +147,14 @@ fn parse_track_info_from_path(path: &str) -> Option<(String, String, String)> {
     }
 
     Some((artist.to_string(), album.to_string(), title.to_string()))
+}
+
+fn normalize_scrobble_path(path: &str) -> String {
+    path.replace('\\', "/")
+        .split('/')
+        .filter(|part| !part.is_empty() && !part.starts_with('<'))
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn strip_audio_extension(file_name: &str) -> &str {
@@ -201,6 +213,7 @@ async fn read_scrobbler_log(
 pub async fn process_device_scrobbles(
     device_io: Arc<dyn crate::device_io::DeviceIO>,
     device_id: String,
+    manifest: Option<Arc<DeviceManifest>>,
     db: Arc<Database>,
     client: Arc<JellyfinClient>,
     url: &str,
@@ -292,54 +305,34 @@ pub async fn process_device_scrobbles(
             }
         }
 
-        // Search Jellyfin for matching track
-        let search_result = client
-            .search_audio_items(url, token, user_id, &entry.title)
-            .await;
-
-        let candidates = match search_result {
-            Ok(items) => items,
-            Err(e) => {
-                errors.push(format!(
-                    "Search failed for '{}' by '{}': {}",
-                    entry.title, entry.artist, e
-                ));
-                failed += 1;
-                continue;
-            }
-        };
-
-        // Filter by album match (case-insensitive)
-        let album_lower = entry.album.to_lowercase();
-        let matched = candidates.into_iter().find(|item| {
-            let album_match = item
-                .album
-                .as_ref()
-                .map(|a| a.to_lowercase() == album_lower)
-                .unwrap_or(false);
-            let album_artist_match = item
-                .album_artist
-                .as_ref()
-                .map(|a| a.to_lowercase() == entry.artist.to_lowercase())
-                .unwrap_or(false);
-            album_match || album_artist_match
-        });
-
-        let item = match matched {
-            Some(i) => i,
+        let item_id = match find_manifest_item_id(manifest.as_deref(), entry) {
+            Some(id) => id,
             None => {
-                unmatched += 1;
-                println!(
-                    "[Scrobbler] No match for '{}' by '{}' on album '{}'",
-                    entry.title, entry.artist, entry.album
-                );
-                continue;
+                match find_jellyfin_item_id(client.as_ref(), url, token, user_id, entry).await {
+                    Ok(Some(id)) => id,
+                    Ok(None) => {
+                        unmatched += 1;
+                        println!(
+                            "[Scrobbler] No match for '{}' by '{}' on album '{}'",
+                            entry.title, entry.artist, entry.album
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        errors.push(format!(
+                            "Search failed for '{}' by '{}': {}",
+                            entry.title, entry.artist, e
+                        ));
+                        failed += 1;
+                        continue;
+                    }
+                }
             }
         };
 
         // Submit to Jellyfin
         if let Err(e) = client
-            .report_item_played(url, token, user_id, &item.id)
+            .report_item_played(url, token, user_id, &item_id)
             .await
         {
             errors.push(format!(
@@ -385,6 +378,51 @@ pub async fn process_device_scrobbles(
         device_id,
         total_scrobbled,
     }
+}
+
+fn find_manifest_item_id(
+    manifest: Option<&DeviceManifest>,
+    entry: &ScrobblerEntry,
+) -> Option<String> {
+    let source_path = entry.source_path.as_ref()?;
+    let source_path = normalize_scrobble_path(source_path);
+
+    manifest?
+        .synced_items
+        .iter()
+        .find(|item| normalize_scrobble_path(&item.local_path).eq_ignore_ascii_case(&source_path))
+        .map(|item| item.jellyfin_id.clone())
+}
+
+async fn find_jellyfin_item_id(
+    client: &JellyfinClient,
+    url: &str,
+    token: &str,
+    user_id: &str,
+    entry: &ScrobblerEntry,
+) -> anyhow::Result<Option<String>> {
+    let candidates = client
+        .search_audio_items(url, token, user_id, &entry.title)
+        .await?;
+
+    let album_lower = entry.album.to_lowercase();
+    let artist_lower = entry.artist.to_lowercase();
+    Ok(candidates
+        .into_iter()
+        .find(|item| {
+            let album_match = item
+                .album
+                .as_ref()
+                .map(|a| a.to_lowercase() == album_lower)
+                .unwrap_or(false);
+            let album_artist_match = item
+                .album_artist
+                .as_ref()
+                .map(|a| a.to_lowercase() == artist_lower)
+                .unwrap_or(false);
+            album_match || album_artist_match
+        })
+        .map(|item| item.id))
 }
 
 #[cfg(test)]
@@ -440,6 +478,38 @@ Led Zeppelin\tLed Zeppelin IV\tStairway to Heaven\t4\t482\tL\t1706752800\tsome-m
         assert_eq!(entries[1].title, "Ride Cowboy Ride");
         assert_eq!(entries[1].rating, "S");
         assert_eq!(entries[1].timestamp_unix, 1779229622);
+    }
+
+    #[test]
+    fn test_manifest_match_uses_playback_log_path() {
+        let entries = parse_scrobbler_log(
+            "1779229621:219508:285518:/<microSD0>/Music/BON JOVI/New Jersey (28PD-498)/09 - Stick To Your Guns.mp3\n",
+        );
+        let manifest = DeviceManifest {
+            device_id: "test-device-id".to_string(),
+            version: "1.0".to_string(),
+            synced_items: vec![crate::device::SyncedItem {
+                jellyfin_id: "6aff97688560276ce460ff2187ff8a6f".to_string(),
+                name: "Stick To Your Guns".to_string(),
+                album: Some("New Jersey (28PD-498)".to_string()),
+                artist: Some("BON JOVI".to_string()),
+                local_path: "Music/BON JOVI/New Jersey (28PD-498)/09 - Stick To Your Guns.mp3"
+                    .to_string(),
+                size_bytes: 11_540_179,
+                synced_at: "2026-05-19T19:09:05Z".to_string(),
+                original_name: None,
+                etag: None,
+                provider_album_id: Some("c5b1d7c3ba73c24813a80690e0b4a28c".to_string()),
+                provider_content_type: None,
+                provider_suffix: Some("mp3".to_string()),
+            }],
+            ..DeviceManifest::default()
+        };
+
+        assert_eq!(
+            find_manifest_item_id(Some(&manifest), &entries[0]),
+            Some("6aff97688560276ce460ff2187ff8a6f".to_string())
+        );
     }
 
     #[test]
@@ -522,6 +592,7 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
         let result = process_device_scrobbles(
             device_io,
             "test-device-id".to_string(),
+            None,
             db,
             client,
             "http://localhost:8096",
@@ -546,6 +617,7 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
         let result = process_device_scrobbles(
             device_io,
             "test-mtp-device-id".to_string(),
+            None,
             db,
             client,
             "http://localhost:8096",
@@ -578,6 +650,7 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
         let result = process_device_scrobbles(
             device_io,
             "test-device-id".to_string(),
+            None,
             db,
             client,
             "http://localhost:8096",
@@ -624,6 +697,7 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
         let result = process_device_scrobbles(
             device_io,
             device_id,
+            None,
             db,
             client,
             "http://localhost:8096",
@@ -635,6 +709,71 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
         assert_eq!(result.total_entries, 1);
         assert_eq!(result.skipped_duplicate, 1);
         assert_eq!(result.submitted, 0);
+        assert_eq!(result.failed, 0);
+        assert!(result.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_process_device_submits_manifest_match() {
+        let mut server = mockito::Server::new_async().await;
+        let item_id = "6aff97688560276ce460ff2187ff8a6f";
+        let _played = server
+            .mock("POST", format!("/UserPlayedItems/{}", item_id).as_str())
+            .match_query(mockito::Matcher::UrlEncoded(
+                "userId".to_string(),
+                "user-placeholder".to_string(),
+            ))
+            .with_status(204)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let playback_dir = temp_dir.path().join(".rockbox");
+        std::fs::create_dir(&playback_dir).unwrap();
+        std::fs::write(
+            playback_dir.join("playback.log"),
+            b"1779229621:219508:285518:/<microSD0>/Music/BON JOVI/New Jersey (28PD-498)/09 - Stick To Your Guns.mp3\n",
+        )
+        .unwrap();
+
+        let manifest = Arc::new(DeviceManifest {
+            device_id: "test-device-id".to_string(),
+            version: "1.0".to_string(),
+            synced_items: vec![crate::device::SyncedItem {
+                jellyfin_id: item_id.to_string(),
+                name: "Stick To Your Guns".to_string(),
+                album: Some("New Jersey (28PD-498)".to_string()),
+                artist: Some("BON JOVI".to_string()),
+                local_path: "Music/BON JOVI/New Jersey (28PD-498)/09 - Stick To Your Guns.mp3"
+                    .to_string(),
+                size_bytes: 11_540_179,
+                synced_at: "2026-05-19T19:09:05Z".to_string(),
+                original_name: None,
+                etag: None,
+                provider_album_id: None,
+                provider_content_type: None,
+                provider_suffix: Some("mp3".to_string()),
+            }],
+            ..DeviceManifest::default()
+        });
+
+        let device_io = make_msc_backend(temp_dir.path());
+        let result = process_device_scrobbles(
+            device_io,
+            "test-device-id".to_string(),
+            Some(manifest),
+            Arc::new(crate::db::Database::memory().unwrap()),
+            Arc::new(crate::api::JellyfinClient::new()),
+            &server.url(),
+            "test-token-1234567890",
+            "user-placeholder",
+        )
+        .await;
+
+        assert_eq!(result.total_entries, 1);
+        assert_eq!(result.submitted, 1);
+        assert_eq!(result.unmatched, 0);
         assert_eq!(result.failed, 0);
         assert!(result.errors.is_empty());
     }
@@ -671,6 +810,7 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
         let result = process_device_scrobbles(
             device_io,
             device_id,
+            None,
             db,
             client,
             "http://localhost:8096",
@@ -705,6 +845,7 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
         let result = process_device_scrobbles(
             device_io,
             "test-device-id".to_string(),
+            None,
             db,
             client,
             "http://localhost:8096",
