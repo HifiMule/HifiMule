@@ -1,7 +1,11 @@
 use crate::api::JellyfinClient;
 use crate::db::Database;
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+const PLAYBACK_LOG_PATH: &str = ".rockbox/playback.log";
+const LEGACY_SCROBBLER_LOG_PATH: &str = ".scrobbler.log";
 
 #[derive(Debug, Clone)]
 pub struct ScrobblerEntry {
@@ -39,7 +43,12 @@ pub fn parse_scrobbler_log(content: &str) -> Vec<ScrobblerEntry> {
 
     for line in content.lines() {
         // Skip header lines
-        if line.starts_with('#') {
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        if let Some(entry) = parse_playback_log_line(line.trim()) {
+            entries.push(entry);
             continue;
         }
 
@@ -82,6 +91,81 @@ pub fn parse_scrobbler_log(content: &str) -> Vec<ScrobblerEntry> {
     entries
 }
 
+fn parse_playback_log_line(line: &str) -> Option<ScrobblerEntry> {
+    let mut fields = line.splitn(4, ':');
+    let timestamp_raw = fields.next()?.parse::<i64>().ok()?;
+    let elapsed_ms = fields.next()?.parse::<u64>().ok()?;
+    let duration_ms = fields.next()?.parse::<u64>().ok()?;
+    let path = fields.next()?.trim();
+
+    let (artist, album, title) = parse_track_info_from_path(path)?;
+    let timestamp_unix = if timestamp_raw > 1_000_000_000_000 {
+        timestamp_raw / 1000
+    } else {
+        timestamp_raw
+    };
+    let duration_secs = duration_ms / 1000;
+    let rating = if duration_ms > 0 && elapsed_ms.saturating_mul(2) >= duration_ms {
+        "L"
+    } else {
+        "S"
+    };
+
+    Some(ScrobblerEntry {
+        artist,
+        album,
+        title,
+        track_num: None,
+        duration_secs,
+        rating: rating.to_string(),
+        timestamp_unix,
+        mb_track_id: None,
+    })
+}
+
+fn parse_track_info_from_path(path: &str) -> Option<(String, String, String)> {
+    let components: Vec<&str> = path
+        .split('/')
+        .filter(|part| !part.is_empty() && !part.starts_with('<'))
+        .collect();
+
+    if components.len() < 3 {
+        return None;
+    }
+
+    let file_name = components.last()?;
+    let album = components.get(components.len() - 2)?.trim();
+    let artist = components.get(components.len() - 3)?.trim();
+    let title = strip_track_number_prefix(strip_audio_extension(file_name)).trim();
+
+    if artist.is_empty() || album.is_empty() || title.is_empty() {
+        return None;
+    }
+
+    Some((artist.to_string(), album.to_string(), title.to_string()))
+}
+
+fn strip_audio_extension(file_name: &str) -> &str {
+    file_name
+        .rsplit_once('.')
+        .map_or(file_name, |(stem, _)| stem)
+}
+
+fn strip_track_number_prefix(title: &str) -> &str {
+    let trimmed = title.trim_start();
+    let digit_count = trimmed.chars().take_while(|ch| ch.is_ascii_digit()).count();
+
+    if digit_count == 0 || digit_count > 3 {
+        return trimmed;
+    }
+
+    let rest = &trimmed[digit_count..].trim_start();
+    rest.strip_prefix('-')
+        .or_else(|| rest.strip_prefix('.'))
+        .map(str::trim_start)
+        .unwrap_or(trimmed)
+}
+
 fn is_missing_scrobbler_log_error(error: &anyhow::Error) -> bool {
     if error
         .downcast_ref::<std::io::Error>()
@@ -93,8 +177,25 @@ fn is_missing_scrobbler_log_error(error: &anyhow::Error) -> bool {
 
     error.chain().any(|cause| {
         let message = cause.to_string().to_lowercase();
-        message.contains(".scrobbler.log") && message.contains("not found")
+        (message.contains(PLAYBACK_LOG_PATH) || message.contains(LEGACY_SCROBBLER_LOG_PATH))
+            && message.contains("not found")
     })
+}
+
+async fn read_scrobbler_log(
+    device_io: Arc<dyn crate::device_io::DeviceIO>,
+) -> Result<Option<(String, Vec<u8>)>, anyhow::Error> {
+    match device_io.read_file(PLAYBACK_LOG_PATH).await {
+        Ok(bytes) => return Ok(Some((PLAYBACK_LOG_PATH.to_string(), bytes))),
+        Err(e) if is_missing_scrobbler_log_error(&e) => {}
+        Err(e) => return Err(e.context(format!("Failed to read {}", PLAYBACK_LOG_PATH))),
+    }
+
+    match device_io.read_file(LEGACY_SCROBBLER_LOG_PATH).await {
+        Ok(bytes) => Ok(Some((LEGACY_SCROBBLER_LOG_PATH.to_string(), bytes))),
+        Err(e) if is_missing_scrobbler_log_error(&e) => Ok(None),
+        Err(e) => Err(e.context(format!("Failed to read {}", LEGACY_SCROBBLER_LOG_PATH))),
+    }
 }
 
 pub async fn process_device_scrobbles(
@@ -106,22 +207,9 @@ pub async fn process_device_scrobbles(
     token: &str,
     user_id: &str,
 ) -> ScrobblerResult {
-    let content = match device_io.read_file(".scrobbler.log").await {
-        Err(e) => {
-            // Distinguish "file not present" from genuine read errors.
-            if is_missing_scrobbler_log_error(&e) {
-                return ScrobblerResult {
-                    total_entries: 0,
-                    submitted: 0,
-                    skipped_rating: 0,
-                    skipped_duplicate: 0,
-                    unmatched: 0,
-                    failed: 0,
-                    errors: Vec::new(),
-                    device_id,
-                    total_scrobbled: 0,
-                };
-            }
+    let (log_path, bytes) = match read_scrobbler_log(device_io).await {
+        Ok(Some(log)) => log,
+        Ok(None) => {
             return ScrobblerResult {
                 total_entries: 0,
                 submitted: 0,
@@ -129,27 +217,41 @@ pub async fn process_device_scrobbles(
                 skipped_duplicate: 0,
                 unmatched: 0,
                 failed: 0,
-                errors: vec![format!("Failed to read .scrobbler.log: {}", e)],
+                errors: Vec::new(),
                 device_id,
                 total_scrobbled: 0,
             };
         }
-        Ok(bytes) => match String::from_utf8(bytes) {
-            Ok(s) => s,
-            Err(e) => {
-                return ScrobblerResult {
-                    total_entries: 0,
-                    submitted: 0,
-                    skipped_rating: 0,
-                    skipped_duplicate: 0,
-                    unmatched: 0,
-                    failed: 0,
-                    errors: vec![format!("Failed to read .scrobbler.log: {}", e)],
-                    device_id,
-                    total_scrobbled: 0,
-                };
-            }
-        },
+        Err(e) => {
+            return ScrobblerResult {
+                total_entries: 0,
+                submitted: 0,
+                skipped_rating: 0,
+                skipped_duplicate: 0,
+                unmatched: 0,
+                failed: 0,
+                errors: vec![e.to_string()],
+                device_id,
+                total_scrobbled: 0,
+            };
+        }
+    };
+
+    let content = match String::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            return ScrobblerResult {
+                total_entries: 0,
+                submitted: 0,
+                skipped_rating: 0,
+                skipped_duplicate: 0,
+                unmatched: 0,
+                failed: 0,
+                errors: vec![format!("Failed to read {}: {}", log_path, e)],
+                device_id,
+                total_scrobbled: 0,
+            };
+        }
     };
 
     let entries = parse_scrobbler_log(&content);
@@ -320,6 +422,27 @@ Led Zeppelin\tLed Zeppelin IV\tStairway to Heaven\t4\t482\tL\t1706752800\tsome-m
     }
 
     #[test]
+    fn test_parse_playback_log() {
+        let log = "\
+1779229621:285518:285518:/<microSD0>/Music/BON JOVI/New Jersey (28PD-498)/09 - Stick To Your Guns.mp3
+1779229622000:78420:285518:/<microSD0>/Music/BON JOVI/New Jersey (28PD-498)/10. Ride Cowboy Ride.mp3
+";
+        let entries = parse_scrobbler_log(log);
+        assert_eq!(entries.len(), 2);
+
+        assert_eq!(entries[0].artist, "BON JOVI");
+        assert_eq!(entries[0].album, "New Jersey (28PD-498)");
+        assert_eq!(entries[0].title, "Stick To Your Guns");
+        assert_eq!(entries[0].duration_secs, 285);
+        assert_eq!(entries[0].rating, "L");
+        assert_eq!(entries[0].timestamp_unix, 1779229621);
+
+        assert_eq!(entries[1].title, "Ride Cowboy Ride");
+        assert_eq!(entries[1].rating, "S");
+        assert_eq!(entries[1].timestamp_unix, 1779229622);
+    }
+
+    #[test]
     fn test_parse_malformed_lines_skipped() {
         let log = "\
 #AUDIOSCROBBLER/1.1
@@ -467,6 +590,53 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
         assert_eq!(result.submitted, 0);
         assert_eq!(result.errors.len(), 1);
         assert!(result.errors[0].contains("Failed to read .scrobbler.log"));
+    }
+
+    #[tokio::test]
+    async fn test_process_device_prefers_playback_log() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let playback_dir = temp_dir.path().join(".rockbox");
+        std::fs::create_dir(&playback_dir).unwrap();
+        std::fs::write(
+            playback_dir.join("playback.log"),
+            b"1779229621:285518:285518:/<microSD0>/Music/BON JOVI/New Jersey (28PD-498)/09 - Stick To Your Guns.mp3\n",
+        )
+        .unwrap();
+        std::fs::write(
+            temp_dir.path().join(".scrobbler.log"),
+            SAMPLE_LOG.as_bytes(),
+        )
+        .unwrap();
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_id = "test-device-uuid".to_string();
+        db.record_scrobble(
+            &device_id,
+            "BON JOVI",
+            "New Jersey (28PD-498)",
+            "Stick To Your Guns",
+            1779229621,
+        )
+        .unwrap();
+
+        let device_io = make_msc_backend(temp_dir.path());
+        let client = Arc::new(crate::api::JellyfinClient::new());
+        let result = process_device_scrobbles(
+            device_io,
+            device_id,
+            db,
+            client,
+            "http://localhost:8096",
+            "token-placeholder",
+            "user-placeholder",
+        )
+        .await;
+
+        assert_eq!(result.total_entries, 1);
+        assert_eq!(result.skipped_duplicate, 1);
+        assert_eq!(result.submitted, 0);
+        assert_eq!(result.failed, 0);
+        assert!(result.errors.is_empty());
     }
 
     #[tokio::test]
