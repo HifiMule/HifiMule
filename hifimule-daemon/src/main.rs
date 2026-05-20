@@ -355,6 +355,9 @@ fn run_interactive() -> Result<()> {
     let (shutdown, state_rx) = start_daemon_core()?;
 
     // 3. Setup Tray Icon and Event Loop on the main thread
+    #[cfg(target_os = "macos")]
+    let mut event_loop = EventLoopBuilder::new().build();
+    #[cfg(not(target_os = "macos"))]
     let event_loop = EventLoopBuilder::new().build();
     #[cfg(target_os = "macos")]
     {
