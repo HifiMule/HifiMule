@@ -1,7 +1,6 @@
 use crate::api::JellyfinClient;
 use crate::db::Database;
 use crate::device::DeviceManifest;
-use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -24,6 +23,7 @@ pub struct ScrobblerEntry {
     #[allow(dead_code)]
     pub mb_track_id: Option<String>,
     pub source_path: Option<String>,
+    pub played_position_ticks: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +38,10 @@ pub struct ScrobblerResult {
     pub errors: Vec<String>,
     pub device_id: String,
     pub total_scrobbled: i64,
+}
+
+fn seconds_to_jellyfin_ticks(seconds: u64) -> u64 {
+    seconds.saturating_mul(10_000_000)
 }
 
 pub fn parse_scrobbler_log(content: &str) -> Vec<ScrobblerEntry> {
@@ -88,6 +92,7 @@ pub fn parse_scrobbler_log(content: &str) -> Vec<ScrobblerEntry> {
             timestamp_unix,
             mb_track_id,
             source_path: None,
+            played_position_ticks: None,
         });
     }
 
@@ -108,6 +113,7 @@ fn parse_playback_log_line(line: &str) -> Option<ScrobblerEntry> {
         timestamp_raw
     };
     let duration_secs = duration_ms / 1000;
+    let played_position_ticks = elapsed_ms.saturating_mul(10_000);
     let rating = if duration_ms > 0 && elapsed_ms.saturating_mul(2) >= duration_ms {
         "L"
     } else {
@@ -124,6 +130,7 @@ fn parse_playback_log_line(line: &str) -> Option<ScrobblerEntry> {
         timestamp_unix,
         mb_track_id: None,
         source_path: Some(normalize_scrobble_path(path)),
+        played_position_ticks: Some(played_position_ticks),
     })
 }
 
@@ -331,9 +338,16 @@ pub async fn process_device_scrobbles(
         };
 
         // Submit to Jellyfin
-        if let Err(e) = client
-            .report_item_played(url, token, user_id, &item_id)
-            .await
+        if let Err(e) = submit_scrobble_to_jellyfin(
+            client.as_ref(),
+            url,
+            token,
+            &item_id,
+            entry
+                .played_position_ticks
+                .unwrap_or_else(|| seconds_to_jellyfin_ticks(entry.duration_secs)),
+        )
+        .await
         {
             errors.push(format!(
                 "Failed to submit '{}' by '{}': {}",
@@ -378,6 +392,18 @@ pub async fn process_device_scrobbles(
         device_id,
         total_scrobbled,
     }
+}
+
+async fn submit_scrobble_to_jellyfin(
+    client: &JellyfinClient,
+    url: &str,
+    token: &str,
+    item_id: &str,
+    position_ticks: u64,
+) -> anyhow::Result<()> {
+    client
+        .report_playback_session(url, token, item_id, position_ticks)
+        .await
 }
 
 fn find_manifest_item_id(
@@ -717,12 +743,26 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
     async fn test_process_device_submits_manifest_match() {
         let mut server = mockito::Server::new_async().await;
         let item_id = "6aff97688560276ce460ff2187ff8a6f";
-        let _played = server
-            .mock("POST", format!("/UserPlayedItems/{}", item_id).as_str())
-            .match_query(mockito::Matcher::UrlEncoded(
-                "userId".to_string(),
-                "user-placeholder".to_string(),
-            ))
+        let _playing = server
+            .mock("POST", "/Sessions/Playing")
+            .match_header("X-Emby-Token", "test-token-1234567890")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "ItemId": item_id,
+                "PositionTicks": 0,
+                "PlayMethod": "DirectPlay",
+            })))
+            .with_status(204)
+            .expect(1)
+            .create_async()
+            .await;
+        let _stopped = server
+            .mock("POST", "/Sessions/Playing/Stopped")
+            .match_header("X-Emby-Token", "test-token-1234567890")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "ItemId": item_id,
+                "PositionTicks": 2_195_080_000u64,
+                "Failed": false,
+            })))
             .with_status(204)
             .expect(1)
             .create_async()

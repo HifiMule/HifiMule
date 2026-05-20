@@ -32,6 +32,21 @@ pub struct JellyfinClient {
     client: reqwest::Client,
 }
 
+#[cfg(not(test))]
+fn playback_reporting_registration_delay() -> std::time::Duration {
+    std::time::Duration::from_millis(
+        std::env::var("HIFIMULE_PLAYBACK_REPORTING_DELAY_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(22_000),
+    )
+}
+
+#[cfg(test)]
+fn playback_reporting_registration_delay() -> std::time::Duration {
+    std::time::Duration::from_millis(1)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct SystemInfo {
@@ -708,6 +723,18 @@ impl JellyfinClient {
         user_id: &str,
         item_id: &str,
     ) -> Result<()> {
+        self.report_item_played_at(url, token, user_id, item_id, None)
+            .await
+    }
+
+    pub async fn report_item_played_at(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        item_id: &str,
+        date_played: Option<&str>,
+    ) -> Result<()> {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
@@ -717,11 +744,16 @@ impl JellyfinClient {
             HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
         );
 
+        let mut query_params = vec![format!("userId={}", user_id)];
+        if let Some(date_played) = date_played {
+            query_params.push(format!("datePlayed={}", url_encode(date_played)));
+        }
+
         let endpoint = format!(
-            "{}/UserPlayedItems/{}?userId={}",
+            "{}/UserPlayedItems/{}?{}",
             url.trim_end_matches('/'),
             item_id,
-            user_id
+            query_params.join("&")
         );
 
         let response = self.client.post(&endpoint).headers(headers).send().await?;
@@ -729,6 +761,73 @@ impl JellyfinClient {
         let status = response.status();
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
+        }
+
+        Ok(())
+    }
+
+    pub async fn report_playback_session(
+        &self,
+        url: &str,
+        token: &str,
+        item_id: &str,
+        position_ticks: u64,
+    ) -> Result<()> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let play_session_id = uuid::Uuid::new_v4().to_string();
+        let start_endpoint = format!("{}/Sessions/Playing", url.trim_end_matches('/'));
+        let start_body = serde_json::json!({
+            "ItemId": item_id,
+            "CanSeek": true,
+            "IsPaused": false,
+            "IsMuted": false,
+            "PositionTicks": 0,
+            "PlayMethod": "DirectPlay",
+            "PlaySessionId": play_session_id,
+        });
+
+        let response = self
+            .client
+            .post(&start_endpoint)
+            .headers(headers.clone())
+            .json(&start_body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(anyhow!("Playback start returned status: {}", status));
+        }
+
+        tokio::time::sleep(playback_reporting_registration_delay()).await;
+
+        let stop_endpoint = format!("{}/Sessions/Playing/Stopped", url.trim_end_matches('/'));
+        let stop_body = serde_json::json!({
+            "ItemId": item_id,
+            "PositionTicks": position_ticks,
+            "PlaySessionId": play_session_id,
+            "Failed": false,
+        });
+
+        let response = self
+            .client
+            .post(&stop_endpoint)
+            .headers(headers)
+            .json(&stop_body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(anyhow!("Playback stop returned status: {}", status));
         }
 
         Ok(())
@@ -836,7 +935,10 @@ impl JellyfinClient {
 
         let json: serde_json::Value = response.json().await?;
 
-        eprintln!("[StreamUrl] item={} PlaybackInfo response: {}", item_id, json);
+        eprintln!(
+            "[StreamUrl] item={} PlaybackInfo response: {}",
+            item_id, json
+        );
 
         if let Some(source) = json["MediaSources"].as_array().and_then(|a| a.first()) {
             let supports_direct_play = source["SupportsDirectPlay"].as_bool().unwrap_or(false);
@@ -851,7 +953,10 @@ impl JellyfinClient {
             // but still include a TranscodingUrl — always honour it when it's there.
             if let Some(transcode_path) = transcode_url {
                 let full_url = format!("{}{}", base_url.trim_end_matches('/'), transcode_path);
-                eprintln!("[StreamUrl] item={} → case 1: using TranscodingUrl: {}", item_id, full_url);
+                eprintln!(
+                    "[StreamUrl] item={} → case 1: using TranscodingUrl: {}",
+                    item_id, full_url
+                );
                 return Ok((full_url, true));
             }
 
@@ -866,7 +971,11 @@ impl JellyfinClient {
                 );
 
                 if !profile_forbids_direct_play {
-                    let url = format!("{}/Items/{}/Download", base_url.trim_end_matches('/'), item_id);
+                    let url = format!(
+                        "{}/Items/{}/Download",
+                        base_url.trim_end_matches('/'),
+                        item_id
+                    );
                     eprintln!("[StreamUrl] item={} → case 2: direct play allowed by profile, using Download: {}", item_id, url);
                     return Ok((url, false));
                 }
@@ -904,7 +1013,10 @@ impl JellyfinClient {
                 codec,
                 bitrate_kbps,
             );
-            eprintln!("[StreamUrl] item={} → case 4: forced audio stream endpoint: {}", item_id, url);
+            eprintln!(
+                "[StreamUrl] item={} → case 4: forced audio stream endpoint: {}",
+                item_id, url
+            );
             return Ok((url, true));
         }
 
@@ -1356,6 +1468,35 @@ mod tests {
         assert_eq!(item.name, "Test Album");
         assert_eq!(item.item_type, "MusicAlbum");
         assert_eq!(item.album_artist, Some("Test Artist".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_report_item_played_at_sends_date_played() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let token = "test-token-1234567890";
+
+        let _mock = server
+            .mock("POST", "/UserPlayedItems/track1")
+            .match_header("X-Emby-Token", token)
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("userId".to_string(), "user1".to_string()),
+                mockito::Matcher::UrlEncoded(
+                    "datePlayed".to_string(),
+                    "2026-05-19T22:27:01Z".to_string(),
+                ),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Played":true,"PlayCount":1}"#)
+            .create_async()
+            .await;
+
+        let client = JellyfinClient::new();
+        client
+            .report_item_played_at(&url, token, "user1", "track1", Some("2026-05-19T22:27:01Z"))
+            .await
+            .expect("Failed to report played item");
     }
 
     #[tokio::test]
