@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.5.6 - 2026-05-20
+
+Rockbox scrobbling works again with the current `.rockbox/playback.log` format. HifiMule now reads the newer Rockbox log location, keeps compatibility with older `.scrobbler.log` files, matches plays against the files HifiMule synced to the device, and reports completed listens to Jellyfin using playback-session events. This should mean fewer missed scrobbles, fewer incorrect track matches, and more reliable Jellyfin play counts after listening on a Rockbox device.
+
 ## v0.5.5 — 2026-05-15
 
 Deletes now work correctly when syncing to Garmin smartwatches and other MTP devices — tracks and playlists removed from the basket are actually removed from the device. Android phones connected in charge-only (USB charging) mode no longer show a broken Initialize button; the app waits silently until the user switches to file-transfer mode. Connecting to devices with large music libraries (smartphones) is faster because the folder scan is now triggered on demand instead of upfront.
