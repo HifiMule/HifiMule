@@ -1,12 +1,12 @@
 use crate::api::{JellyfinClient, JellyfinItem, JellyfinView};
 use crate::domain::models::{
-    Album, AlbumWithTracks, Artist, ArtistWithAlbums, Bps, ChangeEvent, ChangeType, ItemRef,
+    Album, AlbumWithTracks, Artist, ArtistWithAlbums, Bps, ChangeEvent, ChangeType, Genre, ItemRef,
     ItemType, JellyfinTicks, Kbps, Library, Playlist, PlaylistWithTracks, SearchResult, Seconds,
     Song,
 };
 use crate::providers::{
-    Capabilities, MediaProvider, ProviderChangeContext, ProviderError, ScrobbleRequest,
-    ScrobbleSubmission, ServerType, TranscodeProfile,
+    BrowseCapabilities, BrowseMode, Capabilities, MediaProvider, ProviderChangeContext,
+    ProviderError, ScrobbleRequest, ScrobbleSubmission, ServerType, TranscodeProfile,
 };
 use async_trait::async_trait;
 
@@ -349,7 +349,101 @@ impl MediaProvider for JellyfinProvider {
             open_subsonic: false,
             supports_changes_since: true,
             supports_server_transcoding: true,
+            browse: BrowseCapabilities {
+                list_modes: vec![
+                    BrowseMode::Artists,
+                    BrowseMode::Albums,
+                    BrowseMode::Playlists,
+                    BrowseMode::Genres,
+                    BrowseMode::RecentlyAdded,
+                    BrowseMode::FrequentlyPlayed,
+                    BrowseMode::RecentlyPlayed,
+                    BrowseMode::Favorites,
+                ],
+            },
         }
+    }
+
+    async fn list_genres(
+        &self,
+        library_id: Option<&str>,
+    ) -> Result<Vec<Genre>, ProviderError> {
+        let response = self
+            .client
+            .get_genres(self.url(), self.token(), self.user_id(), library_id)
+            .await
+            .map_err(Self::map_error)?;
+        Ok(response.items.into_iter().map(genre_from_item).collect())
+    }
+
+    async fn get_genre_tracks(
+        &self,
+        genre_id: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Song>, ProviderError> {
+        let response = self
+            .client
+            .get_songs_by_genre(self.url(), self.token(), self.user_id(), genre_id, offset, limit)
+            .await
+            .map_err(Self::map_error)?;
+        Ok(response.items.into_iter().map(song_from_item).collect())
+    }
+
+    async fn list_recently_added(
+        &self,
+        library_id: Option<&str>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Song>, ProviderError> {
+        let response = self
+            .client
+            .get_recently_added_songs(self.url(), self.token(), self.user_id(), library_id, offset, limit)
+            .await
+            .map_err(Self::map_error)?;
+        Ok(response.items.into_iter().map(song_from_item).collect())
+    }
+
+    async fn list_frequently_played(
+        &self,
+        library_id: Option<&str>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Song>, ProviderError> {
+        let response = self
+            .client
+            .get_frequently_played_songs(self.url(), self.token(), self.user_id(), library_id, offset, limit)
+            .await
+            .map_err(Self::map_error)?;
+        Ok(response.items.into_iter().map(song_from_item).collect())
+    }
+
+    async fn list_recently_played(
+        &self,
+        library_id: Option<&str>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Song>, ProviderError> {
+        let response = self
+            .client
+            .get_recently_played_songs(self.url(), self.token(), self.user_id(), library_id, offset, limit)
+            .await
+            .map_err(Self::map_error)?;
+        Ok(response.items.into_iter().map(song_from_item).collect())
+    }
+
+    async fn list_favorites(
+        &self,
+        library_id: Option<&str>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Song>, ProviderError> {
+        let response = self
+            .client
+            .get_favorite_songs(self.url(), self.token(), self.user_id(), library_id, offset, limit)
+            .await
+            .map_err(Self::map_error)?;
+        Ok(response.items.into_iter().map(song_from_item).collect())
     }
 }
 
@@ -444,6 +538,23 @@ pub(crate) fn song_from_item(item: JellyfinItem) -> Song {
         track_number: item.index_number,
         disc_number: item.parent_index_number,
         cover_art_id,
+        date_added: item.date_created.clone(),
+        last_played_at: item
+            .user_data
+            .as_ref()
+            .and_then(|ud| ud.last_played_date.clone()),
+        play_count: item.user_data.as_ref().map(|ud| ud.play_count),
+        is_favorite: item.user_data.as_ref().map(|ud| ud.is_favorite),
+    }
+}
+
+pub(crate) fn genre_from_item(item: JellyfinItem) -> Genre {
+    let cover_art_id = cover_art_id(&item);
+    Genre {
+        id: item.id,
+        name: item.name,
+        song_count: item.recursive_item_count,
+        cover_art_id,
     }
 }
 
@@ -509,7 +620,9 @@ mod tests {
     use super::*;
     use crate::api::{JellyfinClient, JellyfinItem, JellyfinView, MediaSource};
     use crate::domain::models::{ChangeType, ItemType};
-    use crate::providers::{Capabilities, MediaProvider, ScrobbleSubmission, ServerType};
+    use crate::providers::{
+        BrowseCapabilities, BrowseMode, Capabilities, MediaProvider, ScrobbleSubmission, ServerType,
+    };
     use mockito::{Matcher, Server};
 
     const TOKEN: &str = "test-token-1234567890";
@@ -630,6 +743,18 @@ mod tests {
                 open_subsonic: false,
                 supports_changes_since: true,
                 supports_server_transcoding: true,
+                browse: BrowseCapabilities {
+                    list_modes: vec![
+                        BrowseMode::Artists,
+                        BrowseMode::Albums,
+                        BrowseMode::Playlists,
+                        BrowseMode::Genres,
+                        BrowseMode::RecentlyAdded,
+                        BrowseMode::FrequentlyPlayed,
+                        BrowseMode::RecentlyPlayed,
+                        BrowseMode::Favorites,
+                    ],
+                },
             }
         );
     }
@@ -1106,5 +1231,164 @@ mod tests {
             "ScrobbleSubmission::Playing should return UnsupportedCapability, got: {:?}",
             result
         );
+    }
+
+    #[tokio::test]
+    async fn provider_list_genres_calls_genres_endpoint() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _mock = server
+            .mock("GET", "/Genres")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("userId".into(), USER_ID.into()),
+                Matcher::UrlEncoded("IncludeItemTypes".into(), "Audio".into()),
+                Matcher::UrlEncoded("Recursive".into(), "true".into()),
+            ]))
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Items":[{"Id":"genre1","Name":"Rock","Type":"Genre","RecursiveItemCount":42}],"TotalRecordCount":1,"StartIndex":0}"#)
+            .create_async()
+            .await;
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+        let genres = provider.list_genres(None).await.expect("genres");
+
+        assert_eq!(genres.len(), 1);
+        assert_eq!(genres[0].id, "genre1");
+        assert_eq!(genres[0].name, "Rock");
+        assert_eq!(genres[0].song_count, Some(42));
+    }
+
+    #[tokio::test]
+    async fn provider_get_genre_tracks_uses_genre_ids_param() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _mock = server
+            .mock("GET", "/Items")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("userId".into(), USER_ID.into()),
+                Matcher::UrlEncoded("GenreIds".into(), "genre1".into()),
+                Matcher::UrlEncoded("Fields".into(), "MediaSources,UserData,DateCreated".into()),
+            ]))
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Items":[{"Id":"song1","Name":"Rock Track","Type":"Audio","RunTimeTicks":200000000}],"TotalRecordCount":1,"StartIndex":0}"#)
+            .create_async()
+            .await;
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+        let tracks = provider.get_genre_tracks("genre1", 0, 50).await.expect("tracks");
+
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id, "song1");
+    }
+
+    #[tokio::test]
+    async fn provider_list_recently_added_sorts_by_date_created_descending() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _mock = server
+            .mock("GET", "/Items")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("userId".into(), USER_ID.into()),
+                Matcher::UrlEncoded("SortBy".into(), "DateCreated".into()),
+                Matcher::UrlEncoded("SortOrder".into(), "Descending".into()),
+                Matcher::UrlEncoded("Fields".into(), "MediaSources,UserData,DateCreated".into()),
+            ]))
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Items":[{"Id":"new1","Name":"New Track","Type":"Audio","DateCreated":"2024-05-01T00:00:00Z"}],"TotalRecordCount":1,"StartIndex":0}"#)
+            .create_async()
+            .await;
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+        let tracks = provider.list_recently_added(None, 0, 50).await.expect("tracks");
+
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id, "new1");
+        assert_eq!(tracks[0].date_added.as_deref(), Some("2024-05-01T00:00:00Z"));
+    }
+
+    #[tokio::test]
+    async fn provider_list_frequently_played_sorts_by_play_count_descending() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _mock = server
+            .mock("GET", "/Items")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("userId".into(), USER_ID.into()),
+                Matcher::UrlEncoded("SortBy".into(), "PlayCount".into()),
+                Matcher::UrlEncoded("SortOrder".into(), "Descending".into()),
+                Matcher::UrlEncoded("Fields".into(), "MediaSources,UserData,DateCreated".into()),
+            ]))
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Items":[{"Id":"song1","Name":"Played Track","Type":"Audio","UserData":{"PlayCount":15,"IsFavorite":false}}],"TotalRecordCount":1,"StartIndex":0}"#)
+            .create_async()
+            .await;
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+        let tracks = provider.list_frequently_played(None, 0, 50).await.expect("tracks");
+
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id, "song1");
+        assert_eq!(tracks[0].play_count, Some(15));
+    }
+
+    #[tokio::test]
+    async fn provider_list_recently_played_sorts_by_date_played_descending() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _mock = server
+            .mock("GET", "/Items")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("userId".into(), USER_ID.into()),
+                Matcher::UrlEncoded("SortBy".into(), "DatePlayed".into()),
+                Matcher::UrlEncoded("SortOrder".into(), "Descending".into()),
+                Matcher::UrlEncoded("Fields".into(), "MediaSources,UserData,DateCreated".into()),
+            ]))
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Items":[{"Id":"song1","Name":"Played Track","Type":"Audio","UserData":{"PlayCount":3,"IsFavorite":false,"LastPlayedDate":"2024-04-01T10:00:00Z"}}],"TotalRecordCount":1,"StartIndex":0}"#)
+            .create_async()
+            .await;
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+        let tracks = provider.list_recently_played(None, 0, 50).await.expect("tracks");
+
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id, "song1");
+        assert_eq!(tracks[0].last_played_at.as_deref(), Some("2024-04-01T10:00:00Z"));
+    }
+
+    #[tokio::test]
+    async fn provider_list_favorites_filters_is_favorite_true() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _mock = server
+            .mock("GET", "/Items")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("userId".into(), USER_ID.into()),
+                Matcher::UrlEncoded("IsFavorite".into(), "true".into()),
+                Matcher::UrlEncoded("Fields".into(), "MediaSources,UserData,DateCreated".into()),
+            ]))
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Items":[{"Id":"fav1","Name":"Favorite Track","Type":"Audio","UserData":{"PlayCount":0,"IsFavorite":true}}],"TotalRecordCount":1,"StartIndex":0}"#)
+            .create_async()
+            .await;
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+        let tracks = provider.list_favorites(None, 0, 50).await.expect("tracks");
+
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id, "fav1");
+        assert_eq!(tracks[0].is_favorite, Some(true));
     }
 }

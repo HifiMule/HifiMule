@@ -12,6 +12,14 @@ pub struct Library {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Genre {
+    pub id: String,
+    pub name: String,
+    pub song_count: Option<u32>,
+    pub cover_art_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Song {
     pub id: String,
     pub title: String,
@@ -24,6 +32,10 @@ pub struct Song {
     pub track_number: Option<u32>,
     pub disc_number: Option<u32>,
     pub cover_art_id: Option<String>,
+    pub date_added: Option<String>,
+    pub last_played_at: Option<String>,
+    pub play_count: Option<u32>,
+    pub is_favorite: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,6 +206,10 @@ mod tests {
             track_number: Some(1),
             disc_number: None,
             cover_art_id: Some("cover-art-md5-id".to_string()),
+            date_added: None,
+            last_played_at: None,
+            play_count: None,
+            is_favorite: None,
         };
 
         assert_eq!(song.id, "9f86d081884c7d659a2feaa0c55ad015");

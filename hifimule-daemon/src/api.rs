@@ -138,6 +138,8 @@ pub struct JellyfinUserData {
     pub is_favorite: bool,
     #[serde(default)]
     pub play_count: u32,
+    #[serde(default)]
+    pub last_played_date: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1031,6 +1033,225 @@ impl JellyfinClient {
             ),
             false,
         ))
+    }
+
+    /// Fetch genres from the Jellyfin `/Genres` endpoint.
+    /// Uses `IncludeItemTypes=Audio&Recursive=true` to scope to music genres.
+    pub async fn get_genres(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        library_id: Option<&str>,
+    ) -> Result<JellyfinItemsResponse> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+        let mut query_params = vec![
+            format!("userId={}", user_id),
+            "IncludeItemTypes=Audio".to_string(),
+            "Recursive=true".to_string(),
+        ];
+        if let Some(parent) = library_id {
+            query_params.push(format!("ParentId={}", parent));
+        }
+        let endpoint = format!(
+            "{}/Genres?{}",
+            url.trim_end_matches('/'),
+            query_params.join("&")
+        );
+        let response = self.client.get(&endpoint).headers(headers).send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("Server returned status: {}", status));
+        }
+        Ok(serde_json::from_str::<JellyfinItemsResponse>(&text)?)
+    }
+
+    /// Fetch audio items filtered by genre ID, sorted by track name.
+    pub async fn get_songs_by_genre(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        genre_id: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<JellyfinItemsResponse> {
+        self.get_audio_items(
+            url,
+            token,
+            user_id,
+            None,
+            Some(genre_id),
+            Some("SortName"),
+            Some("Ascending"),
+            None,
+            offset,
+            limit,
+        )
+        .await
+    }
+
+    /// Fetch audio items sorted by `DateCreated` descending (recently added).
+    pub async fn get_recently_added_songs(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        library_id: Option<&str>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<JellyfinItemsResponse> {
+        self.get_audio_items(
+            url,
+            token,
+            user_id,
+            library_id,
+            None,
+            Some("DateCreated"),
+            Some("Descending"),
+            None,
+            offset,
+            limit,
+        )
+        .await
+    }
+
+    /// Fetch audio items sorted by `PlayCount` descending (frequently played).
+    pub async fn get_frequently_played_songs(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        library_id: Option<&str>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<JellyfinItemsResponse> {
+        self.get_audio_items(
+            url,
+            token,
+            user_id,
+            library_id,
+            None,
+            Some("PlayCount"),
+            Some("Descending"),
+            None,
+            offset,
+            limit,
+        )
+        .await
+    }
+
+    /// Fetch audio items sorted by `DatePlayed` descending (recently played).
+    pub async fn get_recently_played_songs(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        library_id: Option<&str>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<JellyfinItemsResponse> {
+        self.get_audio_items(
+            url,
+            token,
+            user_id,
+            library_id,
+            None,
+            Some("DatePlayed"),
+            Some("Descending"),
+            None,
+            offset,
+            limit,
+        )
+        .await
+    }
+
+    /// Fetch audio items filtered by `IsFavorite=true`.
+    pub async fn get_favorite_songs(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        library_id: Option<&str>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<JellyfinItemsResponse> {
+        self.get_audio_items(
+            url,
+            token,
+            user_id,
+            library_id,
+            None,
+            Some("SortName"),
+            Some("Ascending"),
+            Some(true),
+            offset,
+            limit,
+        )
+        .await
+    }
+
+    /// Internal helper for browse queries. All public browse methods delegate here.
+    /// Requests `Fields=MediaSources,UserData,DateCreated` so `Song` browse metadata
+    /// is populated in the response.
+    async fn get_audio_items(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        parent_id: Option<&str>,
+        genre_ids: Option<&str>,
+        sort_by: Option<&str>,
+        sort_order: Option<&str>,
+        is_favorite: Option<bool>,
+        start_index: u32,
+        limit: u32,
+    ) -> Result<JellyfinItemsResponse> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+        let mut query_params = vec![
+            format!("userId={}", user_id),
+            "IncludeItemTypes=Audio".to_string(),
+            "Recursive=true".to_string(),
+            "Fields=MediaSources,UserData,DateCreated".to_string(),
+            format!("StartIndex={}", start_index),
+            format!("Limit={}", limit),
+        ];
+        if let Some(parent) = parent_id {
+            query_params.push(format!("ParentId={}", parent));
+        }
+        if let Some(genre_id) = genre_ids {
+            query_params.push(format!("GenreIds={}", genre_id));
+        }
+        if let Some(sort) = sort_by {
+            query_params.push(format!("SortBy={}", sort));
+        }
+        if let Some(order) = sort_order {
+            query_params.push(format!("SortOrder={}", order));
+        }
+        if let Some(fav) = is_favorite {
+            query_params.push(format!("IsFavorite={}", fav));
+        }
+        let endpoint = format!(
+            "{}/Items?{}",
+            url.trim_end_matches('/'),
+            query_params.join("&")
+        );
+        let response = self.client.get(&endpoint).headers(headers).send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("Server returned status: {}", status));
+        }
+        Ok(serde_json::from_str::<JellyfinItemsResponse>(&text)?)
     }
 }
 

@@ -1,11 +1,12 @@
 use crate::domain::models::{
-    Album, AlbumWithTracks, Artist, ArtistWithAlbums, ChangeEvent, ChangeType, ItemRef, ItemType,
-    Kbps, Library, Playlist, PlaylistWithTracks, SearchResult, Seconds, Song,
+    Album, AlbumWithTracks, Artist, ArtistWithAlbums, ChangeEvent, ChangeType, Genre, ItemRef,
+    ItemType, Kbps, Library, Playlist, PlaylistWithTracks, SearchResult, Seconds, Song,
 };
 use crate::providers::{
-    Capabilities, CredentialKind, MediaProvider, ProviderChangeContext, ProviderChangeMetadata,
-    ProviderCredentials, ProviderError, ProviderSyncedSong, ScrobbleRequest, ScrobbleSubmission,
-    ServerType, TranscodeProfile, SUBSONIC_PLAYLISTS_LIBRARY_ID,
+    BrowseCapabilities, BrowseMode, Capabilities, CredentialKind, MediaProvider,
+    ProviderChangeContext, ProviderChangeMetadata, ProviderCredentials, ProviderError,
+    ProviderSyncedSong, ScrobbleRequest, ScrobbleSubmission, ServerType, TranscodeProfile,
+    SUBSONIC_PLAYLISTS_LIBRARY_ID,
 };
 use async_trait::async_trait;
 use md5::{Digest, Md5};
@@ -344,7 +345,66 @@ impl MediaProvider for SubsonicProvider {
             open_subsonic: self.open_subsonic,
             supports_changes_since: true,
             supports_server_transcoding: self.open_subsonic,
+            browse: BrowseCapabilities {
+                list_modes: vec![
+                    BrowseMode::Artists,
+                    BrowseMode::Albums,
+                    BrowseMode::Playlists,
+                    BrowseMode::Genres,
+                    BrowseMode::Favorites,
+                ],
+            },
         }
+    }
+
+    async fn list_genres(
+        &self,
+        _library_id: Option<&str>,
+    ) -> Result<Vec<Genre>, ProviderError> {
+        let genres = self.client.get_genres().await?;
+        Ok(genres
+            .genres
+            .genre
+            .into_iter()
+            .map(genre_from_dto)
+            .collect())
+    }
+
+    async fn get_genre_tracks(
+        &self,
+        genre_id_or_name: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<Song>, ProviderError> {
+        let body = self
+            .client
+            .get_songs_by_genre(genre_id_or_name, offset, limit)
+            .await?;
+        Ok(body
+            .songs_by_genre
+            .song
+            .into_iter()
+            .map(song_from_dto)
+            .collect())
+    }
+
+    async fn list_favorites(
+        &self,
+        _library_id: Option<&str>,
+        _offset: u32,
+        _limit: u32,
+    ) -> Result<Vec<Song>, ProviderError> {
+        let starred = self.client.get_starred2().await?;
+        Ok(starred
+            .starred2
+            .song
+            .into_iter()
+            .map(|s| {
+                let mut song = song_from_dto(s);
+                song.is_favorite = Some(true);
+                song
+            })
+            .collect())
     }
 }
 
@@ -485,6 +545,29 @@ impl SubsonicClient {
             params.push(("ifModifiedSince", value));
         }
         self.get("getIndexes", &params).await
+    }
+
+    async fn get_genres(&self) -> Result<GenresBody, ProviderError> {
+        self.get("getGenres", &[]).await
+    }
+
+    async fn get_songs_by_genre(
+        &self,
+        genre: &str,
+        offset: u32,
+        count: u32,
+    ) -> Result<SongsByGenreBody, ProviderError> {
+        let count_str = count.to_string();
+        let offset_str = offset.to_string();
+        self.get(
+            "getSongsByGenre",
+            &[("genre", genre), ("count", &count_str), ("offset", &offset_str)],
+        )
+        .await
+    }
+
+    async fn get_starred2(&self) -> Result<Starred2Body, ProviderError> {
+        self.get("getStarred2", &[]).await
     }
 
     async fn scrobble(&self, id: &str, submission: bool) -> Result<(), ProviderError> {
@@ -790,6 +873,10 @@ fn song_from_dto(song: SongDto) -> Song {
         track_number: non_negative_i32(song.track),
         disc_number: non_negative_i32(song.disc_number),
         cover_art_id: song.cover_art,
+        date_added: None,
+        last_played_at: None,
+        play_count: None,
+        is_favorite: None,
     }
 }
 
@@ -1113,10 +1200,67 @@ struct IndexesDto {
     index: Vec<ArtistIndexDto>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct GenresBody {
+    genres: GenresDto,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct GenresDto {
+    #[serde(default)]
+    genre: Vec<GenreDto>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GenreDto {
+    #[serde(rename = "value")]
+    name: String,
+    #[serde(rename = "songCount")]
+    song_count: Option<i32>,
+    #[serde(rename = "albumCount")]
+    _album_count: Option<i32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SongsByGenreBody {
+    #[serde(rename = "songsByGenre")]
+    songs_by_genre: SongsByGenreDto,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SongsByGenreDto {
+    #[serde(default)]
+    song: Vec<SongDto>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Starred2Body {
+    starred2: Starred2Dto,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Starred2Dto {
+    #[serde(default)]
+    artist: Vec<ArtistDto>,
+    #[serde(default)]
+    album: Vec<AlbumDto>,
+    #[serde(default)]
+    song: Vec<SongDto>,
+}
+
+fn genre_from_dto(genre: GenreDto) -> Genre {
+    Genre {
+        id: genre.name.clone(),
+        name: genre.name,
+        song_count: non_negative_i32(genre.song_count),
+        cover_art_id: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::ScrobbleSubmission;
+    use crate::providers::{BrowseCapabilities, BrowseMode, ScrobbleSubmission};
     use mockito::{Matcher, Server};
 
     const USERNAME: &str = "arthur";
@@ -1234,6 +1378,15 @@ mod tests {
                 open_subsonic: true,
                 supports_changes_since: true,
                 supports_server_transcoding: true,
+                browse: BrowseCapabilities {
+                    list_modes: vec![
+                        BrowseMode::Artists,
+                        BrowseMode::Albums,
+                        BrowseMode::Playlists,
+                        BrowseMode::Genres,
+                        BrowseMode::Favorites,
+                    ],
+                },
             }
         );
         assert!(provider.capabilities().open_subsonic);
@@ -2100,5 +2253,97 @@ mod tests {
         assert!(!sanitized.contains("token-value"));
         assert!(!sanitized.contains("salt-value"));
         assert!(debug.contains("[redacted]"));
+    }
+
+    #[tokio::test]
+    async fn provider_list_genres_calls_get_genres_endpoint() {
+        let mut server = Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/rest/getGenres.view")
+            .match_query(Matcher::AllOf(auth_matchers()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(
+                r#""genres":{"genre":[{"value":"Rock","songCount":42,"albumCount":5}]}"#,
+            ))
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        let genres = provider.list_genres(None).await.expect("genres");
+
+        assert_eq!(genres.len(), 1);
+        assert_eq!(genres[0].id, "Rock");
+        assert_eq!(genres[0].name, "Rock");
+        assert_eq!(genres[0].song_count, Some(42));
+    }
+
+    #[tokio::test]
+    async fn provider_get_genre_tracks_calls_songs_by_genre() {
+        let mut server = Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/rest/getSongsByGenre.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("genre".into(), "Rock".into()));
+                matchers.push(Matcher::UrlEncoded("count".into(), "20".into()));
+                matchers.push(Matcher::UrlEncoded("offset".into(), "0".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(
+                r#""songsByGenre":{"song":[{"id":"song1","title":"Rock Track","duration":180}]}"#,
+            ))
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        let tracks = provider.get_genre_tracks("Rock", 0, 20).await.expect("tracks");
+
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id, "song1");
+        assert_eq!(tracks[0].title, "Rock Track");
+    }
+
+    #[tokio::test]
+    async fn provider_list_favorites_calls_starred2_and_marks_is_favorite() {
+        let mut server = Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/rest/getStarred2.view")
+            .match_query(Matcher::AllOf(auth_matchers()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(
+                r#""starred2":{"song":[{"id":"fav1","title":"Starred Song","duration":200}]}"#,
+            ))
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        let tracks = provider.list_favorites(None, 0, 50).await.expect("tracks");
+
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id, "fav1");
+        assert_eq!(
+            tracks[0].is_favorite,
+            Some(true),
+            "list_favorites must set is_favorite=true on all returned songs"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_recently_added_returns_unsupported_capability() {
+        let provider = SubsonicProvider::from_client_for_tests(
+            SubsonicClient::new("http://localhost", USERNAME, PASSWORD).expect("client"),
+            true,
+        );
+
+        let result = provider.list_recently_added(None, 0, 50).await;
+
+        assert!(
+            matches!(result, Err(ProviderError::UnsupportedCapability(_))),
+            "list_recently_added must be unsupported on Subsonic, got: {result:?}"
+        );
     }
 }

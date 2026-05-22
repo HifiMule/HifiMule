@@ -1,6 +1,6 @@
 use crate::domain::models::{
-    Album, AlbumWithTracks, Artist, ArtistWithAlbums, ChangeEvent, Library, Playlist,
-    PlaylistWithTracks, SearchResult,
+    Album, AlbumWithTracks, Artist, ArtistWithAlbums, ChangeEvent, Genre, Library, Playlist,
+    PlaylistWithTracks, SearchResult, Song,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -88,6 +88,70 @@ pub trait MediaProvider: Send + Sync {
 
     async fn scrobble(&self, request: ScrobbleRequest) -> Result<(), ProviderError>;
 
+    async fn list_genres(
+        &self,
+        _library_id: Option<&str>,
+    ) -> Result<Vec<Genre>, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "list_genres is not supported by this provider".to_string(),
+        ))
+    }
+
+    async fn get_genre_tracks(
+        &self,
+        _genre_id_or_name: &str,
+        _offset: u32,
+        _limit: u32,
+    ) -> Result<Vec<Song>, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "get_genre_tracks is not supported by this provider".to_string(),
+        ))
+    }
+
+    async fn list_recently_added(
+        &self,
+        _library_id: Option<&str>,
+        _offset: u32,
+        _limit: u32,
+    ) -> Result<Vec<Song>, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "list_recently_added is not supported by this provider".to_string(),
+        ))
+    }
+
+    async fn list_frequently_played(
+        &self,
+        _library_id: Option<&str>,
+        _offset: u32,
+        _limit: u32,
+    ) -> Result<Vec<Song>, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "list_frequently_played is not supported by this provider".to_string(),
+        ))
+    }
+
+    async fn list_recently_played(
+        &self,
+        _library_id: Option<&str>,
+        _offset: u32,
+        _limit: u32,
+    ) -> Result<Vec<Song>, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "list_recently_played is not supported by this provider".to_string(),
+        ))
+    }
+
+    async fn list_favorites(
+        &self,
+        _library_id: Option<&str>,
+        _offset: u32,
+        _limit: u32,
+    ) -> Result<Vec<Song>, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "list_favorites is not supported by this provider".to_string(),
+        ))
+    }
+
     fn change_metadata(&self, _event: &ChangeEvent) -> Option<ProviderChangeMetadata> {
         None
     }
@@ -125,11 +189,31 @@ pub enum ServerType {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BrowseMode {
+    Artists,
+    Albums,
+    Playlists,
+    Genres,
+    RecentlyAdded,
+    FrequentlyPlayed,
+    RecentlyPlayed,
+    Favorites,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowseCapabilities {
+    pub list_modes: Vec<BrowseMode>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capabilities {
     pub open_subsonic: bool,
     pub supports_changes_since: bool,
     pub supports_server_transcoding: bool,
+    pub browse: BrowseCapabilities,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -668,5 +752,29 @@ mod tests {
             Some("openSubsonic")
         );
         assert_eq!(server_type_slug(ServerType::Unknown), None);
+    }
+
+    #[test]
+    fn browse_mode_serializes_to_camel_case_wire_values() {
+        assert_eq!(serde_json::to_string(&BrowseMode::Artists).unwrap(), "\"artists\"");
+        assert_eq!(serde_json::to_string(&BrowseMode::Albums).unwrap(), "\"albums\"");
+        assert_eq!(serde_json::to_string(&BrowseMode::Playlists).unwrap(), "\"playlists\"");
+        assert_eq!(serde_json::to_string(&BrowseMode::Genres).unwrap(), "\"genres\"");
+        assert_eq!(serde_json::to_string(&BrowseMode::RecentlyAdded).unwrap(), "\"recentlyAdded\"");
+        assert_eq!(serde_json::to_string(&BrowseMode::FrequentlyPlayed).unwrap(), "\"frequentlyPlayed\"");
+        assert_eq!(serde_json::to_string(&BrowseMode::RecentlyPlayed).unwrap(), "\"recentlyPlayed\"");
+        assert_eq!(serde_json::to_string(&BrowseMode::Favorites).unwrap(), "\"favorites\"");
+    }
+
+    #[test]
+    fn browse_capabilities_preserves_mode_list_order_in_json() {
+        let caps = BrowseCapabilities {
+            list_modes: vec![BrowseMode::Artists, BrowseMode::Albums, BrowseMode::Playlists],
+        };
+        let json = serde_json::to_value(&caps).unwrap();
+        let modes = json["listModes"].as_array().unwrap();
+        assert_eq!(modes[0], "artists");
+        assert_eq!(modes[1], "albums");
+        assert_eq!(modes[2], "playlists");
     }
 }

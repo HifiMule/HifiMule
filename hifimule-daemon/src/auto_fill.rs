@@ -248,6 +248,7 @@ mod tests {
             user_data: Some(JellyfinUserData {
                 is_favorite,
                 play_count,
+                last_played_date: None,
             }),
             date_created: Some(date_created.to_string()),
         }

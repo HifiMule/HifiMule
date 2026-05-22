@@ -1,6 +1,6 @@
 # Story 9.1: Provider Browse Modes and Capability Contract
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -19,41 +19,41 @@ so that the UI can show Jellyfin-like navigation without hardcoding server-speci
 
 ## Tasks / Subtasks
 
-- [ ] Add provider-neutral browse domain types (AC: 1, 2)
-  - [ ] Update `hifimule-daemon/src/domain/models.rs` with a `Genre` struct using provider-neutral fields: `id: String`, `name: String`, `song_count: Option<u32>`, and `cover_art_id: Option<String>`.
-  - [ ] Extend `Song` with optional browse metadata needed by history/favorites modes: `date_added: Option<String>`, `last_played_at: Option<String>`, `play_count: Option<u32>`, and `is_favorite: Option<bool>`.
-  - [ ] Preserve existing `Song` field meanings and all current conversion tests; new optional fields must default to `None` for existing provider responses.
-  - [ ] Add `BrowseMode` and `BrowseCapabilities` in `hifimule-daemon/src/providers/mod.rs`. Serialize RPC-facing mode values as the exact camelCase strings in AC #1.
-  - [ ] Extend existing `Capabilities` without removing or renaming `open_subsonic`, `supports_changes_since`, or `supports_server_transcoding`.
+- [x] Add provider-neutral browse domain types (AC: 1, 2)
+  - [x] Update `hifimule-daemon/src/domain/models.rs` with a `Genre` struct using provider-neutral fields: `id: String`, `name: String`, `song_count: Option<u32>`, and `cover_art_id: Option<String>`.
+  - [x] Extend `Song` with optional browse metadata needed by history/favorites modes: `date_added: Option<String>`, `last_played_at: Option<String>`, `play_count: Option<u32>`, and `is_favorite: Option<bool>`.
+  - [x] Preserve existing `Song` field meanings and all current conversion tests; new optional fields must default to `None` for existing provider responses.
+  - [x] Add `BrowseMode` and `BrowseCapabilities` in `hifimule-daemon/src/providers/mod.rs`. Serialize RPC-facing mode values as the exact camelCase strings in AC #1.
+  - [x] Extend existing `Capabilities` without removing or renaming `open_subsonic`, `supports_changes_since`, or `supports_server_transcoding`.
 
-- [ ] Extend `MediaProvider` with explicit browse capabilities and methods (AC: 1, 2, 3)
-  - [ ] Add `fn browse_capabilities(&self) -> BrowseCapabilities` or nest `browse: BrowseCapabilities` inside `capabilities()`. Use one source of truth for `browse.listModes`.
-  - [ ] Add explicit async methods rather than generic string dispatch:
+- [x] Extend `MediaProvider` with explicit browse capabilities and methods (AC: 1, 2, 3)
+  - [x] Add `fn browse_capabilities(&self) -> BrowseCapabilities` or nest `browse: BrowseCapabilities` inside `capabilities()`. Use one source of truth for `browse.listModes`.
+  - [x] Add explicit async methods rather than generic string dispatch:
     - `list_genres(library_id: Option<&str>) -> Result<Vec<Genre>, ProviderError>`
     - `get_genre_tracks(genre_id_or_name: &str, offset: u32, limit: u32) -> Result<Vec<Song>, ProviderError>`
     - `list_recently_added(library_id: Option<&str>, offset: u32, limit: u32) -> Result<Vec<Song>, ProviderError>`
     - `list_frequently_played(library_id: Option<&str>, offset: u32, limit: u32) -> Result<Vec<Song>, ProviderError>`
     - `list_recently_played(library_id: Option<&str>, offset: u32, limit: u32) -> Result<Vec<Song>, ProviderError>`
     - `list_favorites(library_id: Option<&str>, offset: u32, limit: u32) -> Result<Vec<Song>, ProviderError>`
-  - [ ] Provide default trait implementations that return `ProviderError::UnsupportedCapability` only if doing so keeps implementors and tests focused; otherwise implement each method explicitly on both providers.
-  - [ ] Keep all provider-specific API details inside `providers/jellyfin.rs`, `providers/subsonic.rs`, or named `JellyfinClient` helpers in `api.rs`. Do not build provider URLs in `rpc.rs` or TypeScript.
+  - [x] Provide default trait implementations that return `ProviderError::UnsupportedCapability` only if doing so keeps implementors and tests focused; otherwise implement each method explicitly on both providers.
+  - [x] Keep all provider-specific API details inside `providers/jellyfin.rs`, `providers/subsonic.rs`, or named `JellyfinClient` helpers in `api.rs`. Do not build provider URLs in `rpc.rs` or TypeScript.
 
-- [ ] Implement Jellyfin browse capability support (AC: 1, 3, 4)
-  - [ ] Update `JellyfinProvider::capabilities()`/browse capabilities to expose modes only after the provider methods are implemented and tested.
-  - [ ] Extend `JellyfinClient` with named methods for new query shapes instead of assembling ad hoc URLs in `rpc.rs`.
-  - [ ] Use Jellyfin `/Items` queries through the existing authenticated client path for genre-filtered tracks, recently added, frequently played, recently played, and favorites.
-  - [ ] Include fields needed for metadata mapping, especially `DateCreated` and user data fields such as favorite/play count/last played where available.
-  - [ ] Map `JellyfinItem` into the extended `Song` fields without changing existing title, album, artist, duration, bitrate, or cover art behavior.
+- [x] Implement Jellyfin browse capability support (AC: 1, 3, 4)
+  - [x] Update `JellyfinProvider::capabilities()`/browse capabilities to expose modes only after the provider methods are implemented and tested.
+  - [x] Extend `JellyfinClient` with named methods for new query shapes instead of assembling ad hoc URLs in `rpc.rs`.
+  - [x] Use Jellyfin `/Items` queries through the existing authenticated client path for genre-filtered tracks, recently added, frequently played, recently played, and favorites.
+  - [x] Include fields needed for metadata mapping, especially `DateCreated` and user data fields such as favorite/play count/last played where available.
+  - [x] Map `JellyfinItem` into the extended `Song` fields without changing existing title, album, artist, duration, bitrate, or cover art behavior.
 
-- [ ] Implement Subsonic/OpenSubsonic browse capability support (AC: 1, 2, 3, 4)
-  - [ ] Add local `SubsonicClient` helpers for official Subsonic endpoints needed by the contract; reuse `signed_url`, sanitizer, envelope parsing, and existing DTO conversion style.
-  - [ ] Use `getGenres` for `list_genres` and `getSongsByGenre` for `get_genre_tracks`.
-  - [ ] Use only endpoints whose return shape can satisfy the requested contract. If classic Subsonic can return albums but not track-level results for a mode, keep that mode disabled until Story 9.4 defines the album-to-track behavior.
-  - [ ] Reuse `getStarred2` for favorites if it can return songs directly; preserve the `coverArt != id` rule.
-  - [ ] Ensure all new Subsonic request logging or errors use the existing sanitization behavior for `u`, `p`, `t`, and `s`.
+- [x] Implement Subsonic/OpenSubsonic browse capability support (AC: 1, 2, 3, 4)
+  - [x] Add local `SubsonicClient` helpers for official Subsonic endpoints needed by the contract; reuse `signed_url`, sanitizer, envelope parsing, and existing DTO conversion style.
+  - [x] Use `getGenres` for `list_genres` and `getSongsByGenre` for `get_genre_tracks`.
+  - [x] Use only endpoints whose return shape can satisfy the requested contract. If classic Subsonic can return albums but not track-level results for a mode, keep that mode disabled until Story 9.4 defines the album-to-track behavior.
+  - [x] Reuse `getStarred2` for favorites if it can return songs directly; preserve the `coverArt != id` rule.
+  - [x] Ensure all new Subsonic request logging or errors use the existing sanitization behavior for `u`, `p`, `t`, and `s`.
 
-- [ ] Add provider-neutral `browse.*` JSON-RPC methods (AC: 1, 2, 3, 4)
-  - [ ] Add handler cases in `hifimule-daemon/src/rpc.rs` for:
+- [x] Add provider-neutral `browse.*` JSON-RPC methods (AC: 1, 2, 3, 4)
+  - [x] Add handler cases in `hifimule-daemon/src/rpc.rs` for:
     - `browse.listModes`
     - `browse.listArtists`
     - `browse.getArtist`
@@ -67,20 +67,20 @@ so that the UI can show Jellyfin-like navigation without hardcoding server-speci
     - `browse.listFrequentlyPlayed`
     - `browse.listRecentlyPlayed`
     - `browse.listFavorites`
-  - [ ] Each handler must call `require_provider(state).await?`, clone the provider, release locks before awaits, and call a `MediaProvider` method.
-  - [ ] Return provider-neutral camelCase response shapes from the architecture: `{ modes }`, `{ artists, total }`, `{ albums, total }`, `{ playlists }`, `{ genres, total }`, `{ tracks, total }`, and detail wrappers such as `{ artist, albums }`.
-  - [ ] Keep existing `jellyfin_get_views`, `jellyfin_get_items`, `jellyfin_get_item_details`, `jellyfin_get_item_counts`, and `jellyfin_get_item_sizes` stable for the current UI.
-  - [ ] Do not use `active_non_jellyfin_provider()` for new browse methods; that helper intentionally bypasses `JellyfinProvider` for legacy compatibility and would violate the new provider-neutral contract.
+  - [x] Each handler must call `require_provider(state).await?`, clone the provider, release locks before awaits, and call a `MediaProvider` method.
+  - [x] Return provider-neutral camelCase response shapes from the architecture: `{ modes }`, `{ artists, total }`, `{ albums, total }`, `{ playlists }`, `{ genres, total }`, `{ tracks, total }`, and detail wrappers such as `{ artist, albums }`.
+  - [x] Keep existing `jellyfin_get_views`, `jellyfin_get_items`, `jellyfin_get_item_details`, `jellyfin_get_item_counts`, and `jellyfin_get_item_sizes` stable for the current UI.
+  - [x] Do not use `active_non_jellyfin_provider()` for new browse methods; that helper intentionally bypasses `JellyfinProvider` for legacy compatibility and would violate the new provider-neutral contract.
 
-- [ ] Add focused tests and verification (AC: 1, 2, 3, 4)
-  - [ ] Add pure tests for `BrowseMode` wire values and `BrowseCapabilities` -> mode list ordering.
-  - [ ] Add provider tests for Jellyfin capability reporting and all implemented new methods using `mockito`.
-  - [ ] Add provider tests for Subsonic/OpenSubsonic capability reporting and every implemented endpoint using `mockito`.
-  - [ ] Add RPC tests using a fake or mock provider proving `browse.listModes` and at least one data method route through `Arc<dyn MediaProvider>` instead of `JellyfinClient`.
-  - [ ] Add unsupported-mode tests proving hidden modes are omitted and direct requests map `UnsupportedCapability` cleanly.
-  - [ ] Run `rtk cargo test -p hifimule-daemon browse --no-fail-fast`.
-  - [ ] Run `rtk cargo test -p hifimule-daemon providers --no-fail-fast`.
-  - [ ] Run `rtk cargo test -p hifimule-daemon`.
+- [x] Add focused tests and verification (AC: 1, 2, 3, 4)
+  - [x] Add pure tests for `BrowseMode` wire values and `BrowseCapabilities` -> mode list ordering.
+  - [x] Add provider tests for Jellyfin capability reporting and all implemented new methods using `mockito`.
+  - [x] Add provider tests for Subsonic/OpenSubsonic capability reporting and every implemented endpoint using `mockito`.
+  - [x] Add RPC tests using a fake or mock provider proving `browse.listModes` and at least one data method route through `Arc<dyn MediaProvider>` instead of `JellyfinClient`.
+  - [x] Add unsupported-mode tests proving hidden modes are omitted and direct requests map `UnsupportedCapability` cleanly.
+  - [x] Run `rtk cargo test -p hifimule-daemon browse --no-fail-fast`.
+  - [x] Run `rtk cargo test -p hifimule-daemon providers --no-fail-fast`.
+  - [x] Run `rtk cargo test -p hifimule-daemon`.
 
 ## Dev Notes
 
@@ -180,12 +180,32 @@ so that the UI can show Jellyfin-like navigation without hardcoding server-speci
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+claude-sonnet-4-6
 
 ### Debug Log References
 
+- Duplicate `provider_error_to_rpc` function: old version (mapped all errors to ERR_CONNECTION_FAILED) existed at line ~1167 in rpc.rs. Removed old version; kept new version with per-error-type code discrimination.
+- `JellyfinUserData` missing `last_played_date` field caused compile error in `auto_fill.rs` test helper; added `last_played_date: None` to fix.
+
 ### Completion Notes List
 
-- Ultimate context engine analysis completed - comprehensive developer guide created.
+- Task 1: Added `Genre` struct to `domain/models.rs`; extended `Song` with `date_added`, `last_played_at`, `play_count`, `is_favorite`. Updated all struct literal sites (auto_fill.rs, subsonic.rs, jellyfin.rs) with `None` defaults.
+- Task 2: Added `BrowseMode` (8 camelCase variants), `BrowseCapabilities`, extended `Capabilities` with `browse` field. Added 6 default-`UnsupportedCapability` methods to `MediaProvider` trait.
+- Task 3: Added `last_played_date` to `JellyfinUserData`; added `get_genres`, `get_songs_by_genre`, `get_recently_added_songs`, `get_frequently_played_songs`, `get_recently_played_songs`, `get_favorite_songs` to `JellyfinClient` via `get_audio_items` private helper. Updated `song_from_item` to map new `Song` fields. Added `genre_from_item`. `JellyfinProvider::capabilities()` returns all 8 modes; all 6 browse methods implemented.
+- Task 4: Added `getGenres`, `getSongsByGenre`, `getStarred2` to `SubsonicClient` with local DTOs. Implemented `list_genres`, `get_genre_tracks`, `list_favorites` on `SubsonicProvider`. Capabilities expose 5 modes (Artists/Albums/Playlists/Genres/Favorites); recently-added/played/frequently-played deferred to Story 9.4.
+- Task 5: Added 14 `browse.*` JSON-RPC handlers to `rpc.rs` using `require_provider()`. Added `ERR_NOT_FOUND=-4`, `ERR_UNSUPPORTED_CAPABILITY=-5` error codes. Replaced old generic `provider_error_to_rpc` with per-variant mapping. Added `browse_pagination` helper.
+- Task 6: Added 15 new focused tests: 2 BrowseMode serialization tests in `providers/mod.rs`; 6 Jellyfin browse method tests in `providers/jellyfin.rs`; 4 Subsonic browse method tests in `providers/subsonic.rs`; `FakeBrowseProvider` + 3 RPC browse handler tests in `rpc.rs`. All 317 daemon tests pass.
 
 ### File List
+
+- hifimule-daemon/src/domain/models.rs
+- hifimule-daemon/src/providers/mod.rs
+- hifimule-daemon/src/providers/jellyfin.rs
+- hifimule-daemon/src/providers/subsonic.rs
+- hifimule-daemon/src/api.rs
+- hifimule-daemon/src/rpc.rs
+- hifimule-daemon/src/auto_fill.rs
+
+### Change Log
+
+- Story 9.1 implemented: provider browse modes contract — domain types, MediaProvider extension, Jellyfin/Subsonic implementations, 14 browse.* RPC handlers, 15 focused tests. 317 daemon tests pass. (Date: 2026-05-22)

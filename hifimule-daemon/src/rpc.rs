@@ -1,7 +1,7 @@
 use crate::api::{CredentialManager, JellyfinClient};
 use crate::domain::models::{Album, Artist, ChangeType, ItemType, Library, Playlist, Song};
 use crate::providers::{
-    server_type_slug, CredentialKind, MediaProvider, ProviderCredentials, ServerType,
+    server_type_slug, CredentialKind, MediaProvider, ProviderCredentials, ProviderError, ServerType,
     ServerTypeHint, SUBSONIC_PLAYLISTS_LIBRARY_ID,
 };
 use axum::{
@@ -32,6 +32,8 @@ const ERR_CONNECTION_FAILED: i32 = -1;
 #[allow(dead_code)] // Reserved for future use
 const ERR_INVALID_CREDENTIALS: i32 = -2;
 const ERR_STORAGE_ERROR: i32 = -3;
+const ERR_NOT_FOUND: i32 = -4;
+const ERR_UNSUPPORTED_CAPABILITY: i32 = -5;
 const JELLYFIN_TICKS_PER_SECOND: u64 = 10_000_000;
 
 #[derive(Debug, Deserialize)]
@@ -328,6 +330,19 @@ async fn handler(
         "device.select" => handle_device_select(&state, payload.params).await,
         "server.probe" => handle_server_probe(payload.params).await,
         "daemon.health" => Ok(serde_json::json!({ "data": { "status": "ok" } })),
+        "browse.listModes" => handle_browse_list_modes(&state).await,
+        "browse.listArtists" => handle_browse_list_artists(&state, payload.params).await,
+        "browse.getArtist" => handle_browse_get_artist(&state, payload.params).await,
+        "browse.listAlbums" => handle_browse_list_albums(&state, payload.params).await,
+        "browse.getAlbum" => handle_browse_get_album(&state, payload.params).await,
+        "browse.listPlaylists" => handle_browse_list_playlists(&state).await,
+        "browse.getPlaylist" => handle_browse_get_playlist(&state, payload.params).await,
+        "browse.listGenres" => handle_browse_list_genres(&state, payload.params).await,
+        "browse.getGenre" => handle_browse_get_genre(&state, payload.params).await,
+        "browse.listRecentlyAdded" => handle_browse_list_recently_added(&state, payload.params).await,
+        "browse.listFrequentlyPlayed" => handle_browse_list_frequently_played(&state, payload.params).await,
+        "browse.listRecentlyPlayed" => handle_browse_list_recently_played(&state, payload.params).await,
+        "browse.listFavorites" => handle_browse_list_favorites(&state, payload.params).await,
         _ => Err(JsonRpcError {
             code: ERR_METHOD_NOT_FOUND,
             message: "Method not found".to_string(),
@@ -425,13 +440,267 @@ async fn handle_test_connection(
     }
 }
 
-#[allow(dead_code)]
 pub async fn require_provider(state: &AppState) -> Result<Arc<dyn MediaProvider>, JsonRpcError> {
     state.provider.read().await.clone().ok_or(JsonRpcError {
         code: ERR_CONNECTION_FAILED,
         message: "No active media provider".to_string(),
         data: None,
     })
+}
+
+fn provider_error_to_rpc(error: ProviderError) -> JsonRpcError {
+    match error {
+        ProviderError::Auth(msg) => JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: msg,
+            data: None,
+        },
+        ProviderError::UnsupportedCapability(msg) => JsonRpcError {
+            code: ERR_UNSUPPORTED_CAPABILITY,
+            message: msg,
+            data: None,
+        },
+        ProviderError::NotFound { item_type, id } => JsonRpcError {
+            code: ERR_NOT_FOUND,
+            message: format!("{item_type} not found: {id}"),
+            data: None,
+        },
+        _ => JsonRpcError {
+            code: ERR_INTERNAL_ERROR,
+            message: error.to_string(),
+            data: None,
+        },
+    }
+}
+
+fn browse_pagination(params: &Option<Value>) -> (u32, u32) {
+    let offset = params
+        .as_ref()
+        .and_then(|p| p["offset"].as_u64())
+        .unwrap_or(0) as u32;
+    let limit = params
+        .as_ref()
+        .and_then(|p| p["limit"].as_u64())
+        .unwrap_or(50) as u32;
+    (offset, limit)
+}
+
+async fn handle_browse_list_modes(state: &AppState) -> Result<Value, JsonRpcError> {
+    let provider = require_provider(state).await?;
+    let caps = provider.capabilities();
+    let modes: Vec<Value> = caps
+        .browse
+        .list_modes
+        .iter()
+        .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
+        .collect();
+    Ok(serde_json::json!({ "modes": modes }))
+}
+
+async fn handle_browse_list_artists(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let library_id = params.as_ref().and_then(|p| p["libraryId"].as_str()).map(str::to_owned);
+    let provider = require_provider(state).await?;
+    let artists = provider
+        .list_artists(library_id.as_deref())
+        .await
+        .map_err(provider_error_to_rpc)?;
+    let total = artists.len() as u64;
+    Ok(serde_json::json!({ "artists": artists, "total": total }))
+}
+
+async fn handle_browse_get_artist(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let artist_id = params
+        .as_ref()
+        .and_then(|p| p["artistId"].as_str())
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing artistId".to_string(),
+            data: None,
+        })?
+        .to_owned();
+    let provider = require_provider(state).await?;
+    let result = provider
+        .get_artist(&artist_id)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    Ok(serde_json::json!({ "artist": result.artist, "albums": result.albums }))
+}
+
+async fn handle_browse_list_albums(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let library_id = params.as_ref().and_then(|p| p["libraryId"].as_str()).map(str::to_owned);
+    let provider = require_provider(state).await?;
+    let albums = provider
+        .list_albums(library_id.as_deref())
+        .await
+        .map_err(provider_error_to_rpc)?;
+    let total = albums.len() as u64;
+    Ok(serde_json::json!({ "albums": albums, "total": total }))
+}
+
+async fn handle_browse_get_album(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let album_id = params
+        .as_ref()
+        .and_then(|p| p["albumId"].as_str())
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing albumId".to_string(),
+            data: None,
+        })?
+        .to_owned();
+    let provider = require_provider(state).await?;
+    let result = provider
+        .get_album(&album_id)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    Ok(serde_json::json!({ "album": result.album, "tracks": result.tracks }))
+}
+
+async fn handle_browse_list_playlists(state: &AppState) -> Result<Value, JsonRpcError> {
+    let provider = require_provider(state).await?;
+    let playlists = provider
+        .list_playlists()
+        .await
+        .map_err(provider_error_to_rpc)?;
+    Ok(serde_json::json!({ "playlists": playlists }))
+}
+
+async fn handle_browse_get_playlist(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let playlist_id = params
+        .as_ref()
+        .and_then(|p| p["playlistId"].as_str())
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing playlistId".to_string(),
+            data: None,
+        })?
+        .to_owned();
+    let provider = require_provider(state).await?;
+    let result = provider
+        .get_playlist(&playlist_id)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    Ok(serde_json::json!({ "playlist": result.playlist, "tracks": result.tracks }))
+}
+
+async fn handle_browse_list_genres(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let library_id = params.as_ref().and_then(|p| p["libraryId"].as_str()).map(str::to_owned);
+    let provider = require_provider(state).await?;
+    let genres = provider
+        .list_genres(library_id.as_deref())
+        .await
+        .map_err(provider_error_to_rpc)?;
+    let total = genres.len() as u64;
+    Ok(serde_json::json!({ "genres": genres, "total": total }))
+}
+
+async fn handle_browse_get_genre(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let genre_id = params
+        .as_ref()
+        .and_then(|p| p["genreId"].as_str())
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing genreId".to_string(),
+            data: None,
+        })?
+        .to_owned();
+    let (offset, limit) = browse_pagination(&params);
+    let provider = require_provider(state).await?;
+    let genres = provider
+        .list_genres(None)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    let genre = genres.into_iter().find(|g| g.id == genre_id).ok_or(JsonRpcError {
+        code: ERR_NOT_FOUND,
+        message: format!("Genre not found: {genre_id}"),
+        data: None,
+    })?;
+    let tracks = provider
+        .get_genre_tracks(&genre_id, offset, limit)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    let total = tracks.len() as u64;
+    Ok(serde_json::json!({ "genre": genre, "tracks": tracks, "total": total }))
+}
+
+async fn handle_browse_list_recently_added(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let library_id = params.as_ref().and_then(|p| p["libraryId"].as_str()).map(str::to_owned);
+    let (offset, limit) = browse_pagination(&params);
+    let provider = require_provider(state).await?;
+    let tracks = provider
+        .list_recently_added(library_id.as_deref(), offset, limit)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    let total = tracks.len() as u64;
+    Ok(serde_json::json!({ "tracks": tracks, "total": total }))
+}
+
+async fn handle_browse_list_frequently_played(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let library_id = params.as_ref().and_then(|p| p["libraryId"].as_str()).map(str::to_owned);
+    let (offset, limit) = browse_pagination(&params);
+    let provider = require_provider(state).await?;
+    let tracks = provider
+        .list_frequently_played(library_id.as_deref(), offset, limit)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    let total = tracks.len() as u64;
+    Ok(serde_json::json!({ "tracks": tracks, "total": total }))
+}
+
+async fn handle_browse_list_recently_played(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let library_id = params.as_ref().and_then(|p| p["libraryId"].as_str()).map(str::to_owned);
+    let (offset, limit) = browse_pagination(&params);
+    let provider = require_provider(state).await?;
+    let tracks = provider
+        .list_recently_played(library_id.as_deref(), offset, limit)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    let total = tracks.len() as u64;
+    Ok(serde_json::json!({ "tracks": tracks, "total": total }))
+}
+
+async fn handle_browse_list_favorites(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let library_id = params.as_ref().and_then(|p| p["libraryId"].as_str()).map(str::to_owned);
+    let (offset, limit) = browse_pagination(&params);
+    let provider = require_provider(state).await?;
+    let tracks = provider
+        .list_favorites(library_id.as_deref(), offset, limit)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    let total = tracks.len() as u64;
+    Ok(serde_json::json!({ "tracks": tracks, "total": total }))
 }
 
 async fn handle_server_connect(
@@ -895,13 +1164,6 @@ async fn check_server_connection_cached(state: &AppState) -> bool {
     is_connected
 }
 
-fn provider_error_to_rpc(error: crate::providers::ProviderError) -> JsonRpcError {
-    JsonRpcError {
-        code: ERR_CONNECTION_FAILED,
-        message: crate::providers::subsonic::sanitize_subsonic_message(&error.to_string()),
-        data: None,
-    }
-}
 
 async fn active_non_jellyfin_provider(state: &AppState) -> Option<Arc<dyn MediaProvider>> {
     let provider = state.provider.read().await.clone()?;
@@ -5751,5 +6013,149 @@ mod tests {
         );
         assert_eq!(views[0]["Id"], "lib1");
         assert_eq!(views[0]["CollectionType"], "music");
+    }
+
+    // --- Fake provider for browse handler tests ---
+
+    struct FakeBrowseProvider {
+        modes: Vec<crate::providers::BrowseMode>,
+        genres: Vec<crate::domain::models::Genre>,
+    }
+
+    impl FakeBrowseProvider {
+        fn new(
+            modes: Vec<crate::providers::BrowseMode>,
+            genres: Vec<crate::domain::models::Genre>,
+        ) -> Arc<Self> {
+            Arc::new(Self { modes, genres })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MediaProvider for FakeBrowseProvider {
+        async fn list_libraries(&self) -> Result<Vec<crate::domain::models::Library>, ProviderError> {
+            unimplemented!()
+        }
+        async fn list_artists(&self, _: Option<&str>) -> Result<Vec<crate::domain::models::Artist>, ProviderError> {
+            unimplemented!()
+        }
+        async fn get_artist(&self, _: &str) -> Result<crate::domain::models::ArtistWithAlbums, ProviderError> {
+            unimplemented!()
+        }
+        async fn list_albums(&self, _: Option<&str>) -> Result<Vec<crate::domain::models::Album>, ProviderError> {
+            unimplemented!()
+        }
+        async fn get_album(&self, _: &str) -> Result<crate::domain::models::AlbumWithTracks, ProviderError> {
+            unimplemented!()
+        }
+        async fn list_playlists(&self) -> Result<Vec<crate::domain::models::Playlist>, ProviderError> {
+            unimplemented!()
+        }
+        async fn get_playlist(&self, _: &str) -> Result<crate::domain::models::PlaylistWithTracks, ProviderError> {
+            unimplemented!()
+        }
+        async fn search(&self, _: &str) -> Result<crate::domain::models::SearchResult, ProviderError> {
+            unimplemented!()
+        }
+        async fn download_url(&self, _: &str, _: Option<&crate::providers::TranscodeProfile>) -> Result<String, ProviderError> {
+            unimplemented!()
+        }
+        async fn cover_art_url(&self, _: &str) -> Result<String, ProviderError> {
+            unimplemented!()
+        }
+        async fn changes_since_with_context(
+            &self,
+            _: Option<&str>,
+            _: &crate::providers::ProviderChangeContext,
+        ) -> Result<Vec<crate::domain::models::ChangeEvent>, ProviderError> {
+            unimplemented!()
+        }
+        async fn scrobble(&self, _: crate::providers::ScrobbleRequest) -> Result<(), ProviderError> {
+            unimplemented!()
+        }
+        async fn list_genres(
+            &self,
+            _library_id: Option<&str>,
+        ) -> Result<Vec<crate::domain::models::Genre>, ProviderError> {
+            Ok(self.genres.clone())
+        }
+        fn server_type(&self) -> crate::providers::ServerType {
+            crate::providers::ServerType::Jellyfin
+        }
+        fn capabilities(&self) -> crate::providers::Capabilities {
+            crate::providers::Capabilities {
+                open_subsonic: false,
+                supports_changes_since: false,
+                supports_server_transcoding: false,
+                browse: crate::providers::BrowseCapabilities {
+                    list_modes: self.modes.clone(),
+                },
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn browse_list_modes_routes_through_provider_capabilities() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let provider = FakeBrowseProvider::new(
+            vec![
+                crate::providers::BrowseMode::Artists,
+                crate::providers::BrowseMode::Genres,
+            ],
+            vec![],
+        );
+        *state.provider.write().await = Some(provider as Arc<dyn MediaProvider>);
+
+        let result = handle_browse_list_modes(&state).await.expect("list modes");
+
+        let modes = result["modes"].as_array().expect("modes array");
+        assert_eq!(modes.len(), 2);
+        assert_eq!(modes[0], "artists");
+        assert_eq!(modes[1], "genres");
+    }
+
+    #[tokio::test]
+    async fn browse_list_genres_returns_genres_from_provider() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let genre = crate::domain::models::Genre {
+            id: "rock".to_string(),
+            name: "Rock".to_string(),
+            song_count: Some(10),
+            cover_art_id: None,
+        };
+        let provider = FakeBrowseProvider::new(
+            vec![crate::providers::BrowseMode::Genres],
+            vec![genre],
+        );
+        *state.provider.write().await = Some(provider as Arc<dyn MediaProvider>);
+
+        let result = handle_browse_list_genres(&state, None).await.expect("list genres");
+
+        assert_eq!(result["total"], 1);
+        assert_eq!(result["genres"][0]["id"], "rock");
+        assert_eq!(result["genres"][0]["name"], "Rock");
+    }
+
+    #[tokio::test]
+    async fn browse_unsupported_capability_maps_to_err_unsupported_capability() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let provider = FakeBrowseProvider::new(
+            vec![crate::providers::BrowseMode::Artists],
+            vec![],
+        );
+        *state.provider.write().await = Some(provider as Arc<dyn MediaProvider>);
+
+        let err = handle_browse_list_recently_added(&state, None)
+            .await
+            .expect_err("should be unsupported");
+
+        assert_eq!(
+            err.code, ERR_UNSUPPORTED_CAPABILITY,
+            "UnsupportedCapability must map to ERR_UNSUPPORTED_CAPABILITY, got code {}",
+            err.code
+        );
     }
 }
