@@ -37,7 +37,6 @@ const ERR_UNSUPPORTED_CAPABILITY: i32 = -5;
 const JELLYFIN_TICKS_PER_SECOND: u64 = 10_000_000;
 const GENRE_TRACK_PAGE_SIZE: u32 = 500;
 const GENRE_TRACK_MAX_PAGES: u32 = 200;
-const GENRE_ART_ENRICHMENT_BATCH_SIZE: usize = 8;
 
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
@@ -662,7 +661,7 @@ async fn handle_browse_list_genres(
         .take(limit as usize)
         .collect();
 
-    // Enrich genres without cover art: fetch first track's art in parallel
+    // Enrich genres without cover art: fetch first track's art, all in parallel
     let needs_art: Vec<(usize, String)> = genres
         .iter()
         .enumerate()
@@ -671,26 +670,24 @@ async fn handle_browse_list_genres(
         .collect();
 
     if !needs_art.is_empty() {
-        for batch in needs_art.chunks(GENRE_ART_ENRICHMENT_BATCH_SIZE) {
-            let art_futures: Vec<_> = batch
-                .iter()
-                .map(|(_, genre_id)| {
-                    let p = provider.clone();
-                    let id = genre_id.clone();
-                    async move {
-                        p.get_genre_tracks(&id, 0, 1)
-                            .await
-                            .ok()
-                            .and_then(|(tracks, _)| tracks.into_iter().next())
-                            .and_then(|t| t.cover_art_id)
-                    }
-                })
-                .collect();
+        let art_futures: Vec<_> = needs_art
+            .iter()
+            .map(|(_, genre_id)| {
+                let p = provider.clone();
+                let id = genre_id.clone();
+                async move {
+                    p.get_genre_tracks(&id, 0, 1)
+                        .await
+                        .ok()
+                        .and_then(|(tracks, _)| tracks.into_iter().next())
+                        .and_then(|t| t.cover_art_id)
+                }
+            })
+            .collect();
 
-            let art_results = futures::future::join_all(art_futures).await;
-            for ((idx, _), art) in batch.iter().zip(art_results) {
-                genres[*idx].cover_art_id = art;
-            }
+        let art_results = futures::future::join_all(art_futures).await;
+        for ((idx, _), art) in needs_art.iter().zip(art_results) {
+            genres[*idx].cover_art_id = art;
         }
     }
 
