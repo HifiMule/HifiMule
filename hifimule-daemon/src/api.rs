@@ -1075,6 +1075,7 @@ impl JellyfinClient {
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
         }
+        crate::daemon_log!("Jellyfin Response [{}] - Body: {}", status, text);
         Ok(serde_json::from_str::<JellyfinItemsResponse>(&text)?)
     }
 
