@@ -403,14 +403,21 @@ impl MediaProvider for SubsonicProvider {
         }
     }
 
-    async fn list_genres(&self, _library_id: Option<&str>) -> Result<Vec<Genre>, ProviderError> {
-        let genres = self.client.get_genres().await?;
-        Ok(genres
-            .genres
-            .genre
+    async fn list_genres(
+        &self,
+        _library_id: Option<&str>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<Genre>, u64), ProviderError> {
+        let all = self.client.get_genres().await?.genres.genre;
+        let total = all.len() as u64;
+        let page = all
             .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
             .map(genre_from_dto)
-            .collect())
+            .collect();
+        Ok((page, total))
     }
 
     async fn get_genre_tracks(
@@ -2333,8 +2340,9 @@ mod tests {
             .await;
         let provider = provider(&server).await;
 
-        let genres = provider.list_genres(None).await.expect("genres");
+        let (genres, total) = provider.list_genres(None, 0, 50).await.expect("genres");
 
+        assert_eq!(total, 1);
         assert_eq!(genres.len(), 1);
         assert_eq!(genres[0].id, "Rock");
         assert_eq!(genres[0].name, "Rock");

@@ -100,7 +100,12 @@ pub trait MediaProvider: Send + Sync {
 
     async fn scrobble(&self, request: ScrobbleRequest) -> Result<(), ProviderError>;
 
-    async fn list_genres(&self, _library_id: Option<&str>) -> Result<Vec<Genre>, ProviderError> {
+    async fn list_genres(
+        &self,
+        _library_id: Option<&str>,
+        _offset: u32,
+        _limit: u32,
+    ) -> Result<(Vec<Genre>, u64), ProviderError> {
         Err(ProviderError::UnsupportedCapability(
             "list_genres is not supported by this provider".to_string(),
         ))

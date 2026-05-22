@@ -1037,12 +1037,16 @@ impl JellyfinClient {
 
     /// Fetch genres from the Jellyfin `/Genres` endpoint.
     /// Uses `IncludeItemTypes=Audio&Recursive=true` to scope to music genres.
-    pub async fn get_genres(
+    /// Fetch music genres with server-side pagination. Uses `/MusicGenres` so that
+    /// `ImageTags.Primary` is populated directly — no per-genre track lookup needed.
+    pub async fn get_music_genres(
         &self,
         url: &str,
         token: &str,
         user_id: &str,
         library_id: Option<&str>,
+        offset: u32,
+        limit: u32,
     ) -> Result<JellyfinItemsResponse> {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -1051,14 +1055,15 @@ impl JellyfinClient {
         );
         let mut query_params = vec![
             format!("userId={}", user_id),
-            "IncludeItemTypes=Audio".to_string(),
             "Recursive=true".to_string(),
+            format!("StartIndex={}", offset),
+            format!("Limit={}", limit),
         ];
         if let Some(parent) = library_id {
-            query_params.push(format!("ParentId={}", parent));
+            query_params.push(format!("parentId={}", parent));
         }
         let endpoint = format!(
-            "{}/Genres?{}",
+            "{}/MusicGenres?{}",
             url.trim_end_matches('/'),
             query_params.join("&")
         );

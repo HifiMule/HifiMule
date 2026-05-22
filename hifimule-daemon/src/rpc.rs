@@ -650,56 +650,15 @@ async fn handle_browse_list_genres(
     let (offset, limit) = browse_pagination(&params);
     let provider = require_provider(state).await?;
 
-    let t_list = std::time::Instant::now();
-    let all_genres = provider
-        .list_genres(library_id.as_deref())
+    let t = std::time::Instant::now();
+    let (genres, total) = provider
+        .list_genres(library_id.as_deref(), offset, limit)
         .await
         .map_err(provider_error_to_rpc)?;
-    crate::daemon_log!("[browse.listGenres] list_genres: {}ms", t_list.elapsed().as_millis());
-
-    let total = all_genres.len() as u64;
-    let mut genres: Vec<_> = all_genres
-        .into_iter()
-        .skip(offset as usize)
-        .take(limit as usize)
-        .collect();
-
-    // Enrich genres without cover art: fetch first track's art, all in parallel
-    let needs_art: Vec<(usize, String)> = genres
-        .iter()
-        .enumerate()
-        .filter(|(_, g)| g.cover_art_id.is_none())
-        .map(|(i, g)| (i, g.id.clone()))
-        .collect();
-
     crate::daemon_log!(
-        "[browse.listGenres] total={} page_size={} needs_art={} offset={} limit={}",
-        total, genres.len(), needs_art.len(), offset, limit
+        "[browse.listGenres] {}ms total={} page={} offset={} limit={}",
+        t.elapsed().as_millis(), total, genres.len(), offset, limit
     );
-
-    if !needs_art.is_empty() {
-        let t_art = std::time::Instant::now();
-        let art_futures: Vec<_> = needs_art
-            .iter()
-            .map(|(_, genre_id)| {
-                let p = provider.clone();
-                let id = genre_id.clone();
-                async move {
-                    p.get_genre_tracks(&id, 0, 1)
-                        .await
-                        .ok()
-                        .and_then(|(tracks, _)| tracks.into_iter().next())
-                        .and_then(|t| t.cover_art_id)
-                }
-            })
-            .collect();
-
-        let art_results = futures::future::join_all(art_futures).await;
-        crate::daemon_log!("[browse.listGenres] art enrichment: {}ms ({} genres)", t_art.elapsed().as_millis(), needs_art.len());
-        for ((idx, _), art) in needs_art.iter().zip(art_results) {
-            genres[*idx].cover_art_id = art;
-        }
-    }
 
     Ok(serde_json::json!({ "genres": genres, "total": total }))
 }
@@ -719,8 +678,8 @@ async fn handle_browse_get_genre(
         .to_owned();
     let (offset, limit) = browse_pagination(&params);
     let provider = require_provider(state).await?;
-    let genres = provider
-        .list_genres(None)
+    let (genres, _) = provider
+        .list_genres(None, 0, 10_000)
         .await
         .map_err(provider_error_to_rpc)?;
     let genre = genres
@@ -6362,8 +6321,16 @@ mod tests {
         async fn list_genres(
             &self,
             _library_id: Option<&str>,
-        ) -> Result<Vec<crate::domain::models::Genre>, ProviderError> {
-            Ok(self.genres.clone())
+            offset: u32,
+            limit: u32,
+        ) -> Result<(Vec<crate::domain::models::Genre>, u64), ProviderError> {
+            let total = self.genres.len() as u64;
+            let page = self.genres.iter()
+                .skip(offset as usize)
+                .take(limit as usize)
+                .cloned()
+                .collect();
+            Ok((page, total))
         }
         async fn get_genre_tracks(
             &self,

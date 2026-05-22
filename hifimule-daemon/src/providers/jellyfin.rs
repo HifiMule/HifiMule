@@ -384,13 +384,20 @@ impl MediaProvider for JellyfinProvider {
         }
     }
 
-    async fn list_genres(&self, library_id: Option<&str>) -> Result<Vec<Genre>, ProviderError> {
+    async fn list_genres(
+        &self,
+        library_id: Option<&str>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<Genre>, u64), ProviderError> {
         let response = self
             .client
-            .get_genres(self.url(), self.token(), self.user_id(), library_id)
+            .get_music_genres(self.url(), self.token(), self.user_id(), library_id, offset, limit)
             .await
             .map_err(Self::map_error)?;
-        Ok(response.items.into_iter().map(genre_from_item).collect())
+        let total = response.total_record_count as u64;
+        let genres = response.items.into_iter().map(genre_from_item).collect();
+        Ok((genres, total))
     }
 
     async fn get_genre_tracks(
@@ -1305,30 +1312,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_list_genres_calls_genres_endpoint() {
+    async fn provider_list_genres_calls_music_genres_endpoint() {
         let mut server = Server::new_async().await;
         let url = server.url();
         let _mock = server
-            .mock("GET", "/Genres")
+            .mock("GET", "/MusicGenres")
             .match_query(Matcher::AllOf(vec![
                 Matcher::UrlEncoded("userId".into(), USER_ID.into()),
-                Matcher::UrlEncoded("IncludeItemTypes".into(), "Audio".into()),
                 Matcher::UrlEncoded("Recursive".into(), "true".into()),
+                Matcher::UrlEncoded("StartIndex".into(), "0".into()),
+                Matcher::UrlEncoded("Limit".into(), "50".into()),
             ]))
             .match_header("X-Emby-Token", TOKEN)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"Items":[{"Id":"genre1","Name":"Rock","Type":"Genre","RecursiveItemCount":42}],"TotalRecordCount":1,"StartIndex":0}"#)
+            .with_body(r#"{"Items":[{"Id":"genre1","Name":"Rock","Type":"MusicGenre","RecursiveItemCount":42,"ImageTags":{"Primary":"abc123"}}],"TotalRecordCount":1,"StartIndex":0}"#)
             .create_async()
             .await;
 
         let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
-        let genres = provider.list_genres(None).await.expect("genres");
+        let (genres, total) = provider.list_genres(None, 0, 50).await.expect("genres");
 
+        assert_eq!(total, 1);
         assert_eq!(genres.len(), 1);
         assert_eq!(genres[0].id, "genre1");
         assert_eq!(genres[0].name, "Rock");
         assert_eq!(genres[0].song_count, Some(42));
+        assert_eq!(genres[0].cover_art_id.as_deref(), Some("genre1")); // ImageTags.Primary present → id used
     }
 
     #[tokio::test]
