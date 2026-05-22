@@ -1,6 +1,6 @@
 # Story 9.4: History and Favorites Browse Modes
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -26,8 +26,8 @@ so that I can build a device basket from the music I am most likely to want offl
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Fix pagination bug in daemon `browse_pagination` helper (AC: 6)
-  - [ ] In `hifimule-daemon/src/rpc.rs`, in `browse_pagination` (line ~486), change `p["offset"]` to `p["startIndex"]`:
+- [x] Task 1: Fix pagination bug in daemon `browse_pagination` helper (AC: 6)
+  - [x] In `hifimule-daemon/src/rpc.rs`, in `browse_pagination` (line ~486), change `p["offset"]` to `p["startIndex"]`:
     ```rust
     fn browse_pagination(params: &Option<Value>) -> (u32, u32) {
         let offset = params
@@ -41,11 +41,11 @@ so that I can build a device basket from the music I am most likely to want offl
         (offset, limit)
     }
     ```
-  - [ ] Verify `handle_browse_list_genres` (line ~673) also uses `browse_pagination` — the same fix makes genre pagination correct as a bonus
-  - [ ] `handle_browse_list_artists` (line ~515) and `handle_browse_list_albums` (line ~552) use their own `startIndex` reads directly and are **not affected** by this change
+  - [x] Verify `handle_browse_list_genres` (line ~673) also uses `browse_pagination` — the same fix makes genre pagination correct as a bonus
+  - [x] `handle_browse_list_artists` (line ~515) and `handle_browse_list_albums` (line ~552) use their own `startIndex` reads directly and are **not affected** by this change
 
-- [ ] Task 2: Add `formatBrowseDate` helper to `library.ts` (AC: 3)
-  - [ ] In `hifimule-ui/src/library.ts`, add a module-level helper **before** the `mapFlatTracks` function:
+- [x] Task 2: Add `formatBrowseDate` helper to `library.ts` (AC: 3)
+  - [x] In `hifimule-ui/src/library.ts`, add a module-level helper **before** the `mapFlatTracks` function:
     ```typescript
     function formatBrowseDate(isoStr: string | null | undefined): string | null {
         if (!isoStr) return null;
@@ -68,8 +68,8 @@ so that I can build a device basket from the music I am most likely to want offl
     }
     ```
 
-- [ ] Task 3: Make `mapFlatTracks` mode-aware for metadata display (AC: 2, 3, 4)
-  - [ ] In `hifimule-ui/src/library.ts`, update `mapFlatTracks` (line ~167) to accept an optional mode parameter and include metadata in the subtitle:
+- [x] Task 3: Make `mapFlatTracks` mode-aware for metadata display (AC: 2, 3, 4)
+  - [x] In `hifimule-ui/src/library.ts`, update `mapFlatTracks` (line ~167) to accept an optional mode parameter and include metadata in the subtitle:
     ```typescript
     function mapFlatTracks(
         tracks: BrowseTrack[],
@@ -96,13 +96,13 @@ so that I can build a device basket from the music I am most likely to want offl
         });
     }
     ```
-  - [ ] Update the call site in `loadFlatTracks` (line ~747): `const mapped = mapFlatTracks(result.tracks, mode);`
-  - [ ] Do NOT change `mapAlbumTracks` (line ~180) — it is a separate function for hierarchical album drill-down and must remain unchanged
-  - [ ] Do NOT change the `mapFlatTracks` call in any other location (verify there is only one call site)
+  - [x] Update the call site in `loadFlatTracks` (line ~747): `const mapped = mapFlatTracks(result.tracks, mode);`
+  - [x] Do NOT change `mapAlbumTracks` (line ~180) — it is a separate function for hierarchical album drill-down and must remain unchanged
+  - [x] Do NOT change the `mapFlatTracks` call in any other location (verify there is only one call site)
 
-- [ ] Task 4: TypeScript compile check and smoke test (AC: 1–6)
-  - [ ] Run `rtk tsc` from `hifimule-ui/` — must pass with zero type errors
-  - [ ] Run `rtk cargo build` from workspace root — must compile with zero errors
+- [x] Task 4: TypeScript compile check and smoke test (AC: 1–6)
+  - [x] Run `rtk tsc` from `hifimule-ui/` — must pass with zero type errors
+  - [x] Run `rtk cargo build` from workspace root — must compile with zero errors
   - [ ] Smoke: open Recently Added → albums appear sorted newest-first ✓
   - [ ] Smoke: open Frequently Played → tracks appear, subtitle shows "Artist — Album · N plays" when playCount is available ✓
   - [ ] Smoke: open Recently Played → tracks appear, subtitle shows "Artist — Album · May 1" or relative date ✓
@@ -198,4 +198,16 @@ claude-sonnet-4-6
 
 ### Completion Notes List
 
+- Task 1: Fixed `browse_pagination` in `hifimule-daemon/src/rpc.rs` — changed `p["offset"]` to `p["startIndex"]`. This one-line fix corrects pagination for all four history/favorites modes plus genre browse as a bonus (6 call sites all use this helper). Artists/albums handlers were not affected as they read `startIndex` inline.
+- Task 2: Added `formatBrowseDate` helper to `hifimule-ui/src/library.ts` immediately before `mapFlatTracks`. Handles today/yesterday/N-days-ago/<date> display with graceful null fallback.
+- Task 3: Updated `mapFlatTracks` to accept an optional `mode` parameter. Frequently Played appends `· N play(s)` when `playCount` is non-null; Recently Played appends `· <date>` from `formatBrowseDate`; Favorites and unknown modes use the baseline `Artist — Album` subtitle. Updated only the `loadFlatTracks` call site (line ~779) to pass `mode`; playlist and genre call sites remain unchanged with implicit `undefined`.
+- Task 4: `rtk tsc` — 0 type errors. `rtk cargo build` — 0 errors, 2 pre-existing dead-code warnings in mtp.rs (unrelated). Smoke tests require manual verification with running app.
+
 ### File List
+
+- hifimule-daemon/src/rpc.rs
+- hifimule-ui/src/library.ts
+
+### Change Log
+
+- 2026-05-22: Fixed `browse_pagination` field name bug (`"offset"` → `"startIndex"`), added `formatBrowseDate` helper, and made `mapFlatTracks` mode-aware for Frequently Played / Recently Played metadata subtitles.

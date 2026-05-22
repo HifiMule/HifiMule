@@ -164,17 +164,53 @@ function mapGenres(genres: BrowseGenre[]): BrowseDisplayItem[] {
     }));
 }
 
-function mapFlatTracks(tracks: BrowseTrack[]): BrowseDisplayItem[] {
-    return tracks.map(t => ({
-        id: t.id,
-        name: t.title,
-        type: 'Audio' as const,
-        coverArtId: t.coverArtId,
-        subtitle: `${t.artistName} — ${t.albumName}`,
-        sizeBytes: t.sizeBytes ?? 0,
-        sizeTicks: t.duration * 10_000_000,
-        childCount: 1,
-    }));
+function formatBrowseDate(isoStr: string | null | undefined): string | null {
+    if (!isoStr) return null;
+    try {
+        const d = new Date(isoStr);
+        if (isNaN(d.getTime())) return null;
+        const now = new Date();
+        const diffDays = Math.floor((now.getTime() - d.getTime()) / 86_400_000);
+        if (diffDays === 0) return 'Today';
+        if (diffDays === 1) return 'Yesterday';
+        if (diffDays < 7) return `${diffDays} days ago`;
+        return d.toLocaleDateString(undefined, {
+            month: 'short',
+            day: 'numeric',
+            ...(d.getFullYear() !== now.getFullYear() && { year: 'numeric' }),
+        });
+    } catch {
+        return null;
+    }
+}
+
+function mapFlatTracks(
+    tracks: BrowseTrack[],
+    mode?: 'frequentlyPlayed' | 'recentlyPlayed' | 'favorites',
+): BrowseDisplayItem[] {
+    return tracks.map(t => {
+        let subtitle: string;
+        if (mode === 'frequentlyPlayed' && t.playCount != null) {
+            subtitle = `${t.artistName} · ${t.playCount} play${t.playCount === 1 ? '' : 's'}`;
+        } else if (mode === 'recentlyPlayed') {
+            const dateStr = formatBrowseDate(t.lastPlayedAt);
+            subtitle = dateStr
+                ? `${t.artistName} · ${dateStr}`
+                : `${t.artistName} — ${t.albumName}`;
+        } else {
+            subtitle = `${t.artistName} — ${t.albumName}`;
+        }
+        return {
+            id: t.id,
+            name: t.title,
+            type: 'Audio' as const,
+            coverArtId: t.coverArtId,
+            subtitle,
+            sizeBytes: t.sizeBytes ?? 0,
+            sizeTicks: t.duration * 10_000_000,
+            childCount: 1,
+        };
+    });
 }
 
 function mapAlbumTracks(tracks: BrowseTrack[]): BrowseDisplayItem[] {
@@ -744,7 +780,7 @@ async function loadFlatTracks(
         }
 
         state.pagination.total = result.total;
-        const mapped = mapFlatTracks(result.tracks);
+        const mapped = mapFlatTracks(result.tracks, mode);
 
         if (reset) {
             state.items = mapped;

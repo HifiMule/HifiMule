@@ -485,7 +485,7 @@ fn provider_error_to_rpc(error: ProviderError) -> JsonRpcError {
 fn browse_pagination(params: &Option<Value>) -> (u32, u32) {
     let offset = params
         .as_ref()
-        .and_then(|p| p["offset"].as_u64())
+        .and_then(|p| p["startIndex"].as_u64())
         .unwrap_or(0) as u32;
     let limit = params
         .as_ref()
