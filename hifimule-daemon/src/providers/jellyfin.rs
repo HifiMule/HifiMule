@@ -381,13 +381,13 @@ impl MediaProvider for JellyfinProvider {
         genre_id: &str,
         offset: u32,
         limit: u32,
-    ) -> Result<Vec<Song>, ProviderError> {
+    ) -> Result<(Vec<Song>, u32), ProviderError> {
         let response = self
             .client
             .get_songs_by_genre(self.url(), self.token(), self.user_id(), genre_id, offset, limit)
             .await
             .map_err(Self::map_error)?;
-        Ok(response.items.into_iter().map(song_from_item).collect())
+        Ok((response.items.into_iter().map(song_from_item).collect(), response.total_record_count))
     }
 
     async fn list_recently_added(
@@ -395,13 +395,13 @@ impl MediaProvider for JellyfinProvider {
         library_id: Option<&str>,
         offset: u32,
         limit: u32,
-    ) -> Result<Vec<Song>, ProviderError> {
+    ) -> Result<(Vec<Song>, u32), ProviderError> {
         let response = self
             .client
             .get_recently_added_songs(self.url(), self.token(), self.user_id(), library_id, offset, limit)
             .await
             .map_err(Self::map_error)?;
-        Ok(response.items.into_iter().map(song_from_item).collect())
+        Ok((response.items.into_iter().map(song_from_item).collect(), response.total_record_count))
     }
 
     async fn list_frequently_played(
@@ -409,13 +409,13 @@ impl MediaProvider for JellyfinProvider {
         library_id: Option<&str>,
         offset: u32,
         limit: u32,
-    ) -> Result<Vec<Song>, ProviderError> {
+    ) -> Result<(Vec<Song>, u32), ProviderError> {
         let response = self
             .client
             .get_frequently_played_songs(self.url(), self.token(), self.user_id(), library_id, offset, limit)
             .await
             .map_err(Self::map_error)?;
-        Ok(response.items.into_iter().map(song_from_item).collect())
+        Ok((response.items.into_iter().map(song_from_item).collect(), response.total_record_count))
     }
 
     async fn list_recently_played(
@@ -423,13 +423,13 @@ impl MediaProvider for JellyfinProvider {
         library_id: Option<&str>,
         offset: u32,
         limit: u32,
-    ) -> Result<Vec<Song>, ProviderError> {
+    ) -> Result<(Vec<Song>, u32), ProviderError> {
         let response = self
             .client
             .get_recently_played_songs(self.url(), self.token(), self.user_id(), library_id, offset, limit)
             .await
             .map_err(Self::map_error)?;
-        Ok(response.items.into_iter().map(song_from_item).collect())
+        Ok((response.items.into_iter().map(song_from_item).collect(), response.total_record_count))
     }
 
     async fn list_favorites(
@@ -437,13 +437,13 @@ impl MediaProvider for JellyfinProvider {
         library_id: Option<&str>,
         offset: u32,
         limit: u32,
-    ) -> Result<Vec<Song>, ProviderError> {
+    ) -> Result<(Vec<Song>, u32), ProviderError> {
         let response = self
             .client
             .get_favorite_songs(self.url(), self.token(), self.user_id(), library_id, offset, limit)
             .await
             .map_err(Self::map_error)?;
-        Ok(response.items.into_iter().map(song_from_item).collect())
+        Ok((response.items.into_iter().map(song_from_item).collect(), response.total_record_count))
     }
 }
 
@@ -1279,8 +1279,9 @@ mod tests {
             .await;
 
         let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
-        let tracks = provider.get_genre_tracks("genre1", 0, 50).await.expect("tracks");
+        let (tracks, total) = provider.get_genre_tracks("genre1", 0, 50).await.expect("tracks");
 
+        assert_eq!(total, 1);
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].id, "song1");
     }
@@ -1305,8 +1306,9 @@ mod tests {
             .await;
 
         let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
-        let tracks = provider.list_recently_added(None, 0, 50).await.expect("tracks");
+        let (tracks, total) = provider.list_recently_added(None, 0, 50).await.expect("tracks");
 
+        assert_eq!(total, 1);
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].id, "new1");
         assert_eq!(tracks[0].date_added.as_deref(), Some("2024-05-01T00:00:00Z"));
@@ -1332,8 +1334,9 @@ mod tests {
             .await;
 
         let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
-        let tracks = provider.list_frequently_played(None, 0, 50).await.expect("tracks");
+        let (tracks, total) = provider.list_frequently_played(None, 0, 50).await.expect("tracks");
 
+        assert_eq!(total, 1);
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].id, "song1");
         assert_eq!(tracks[0].play_count, Some(15));
@@ -1359,8 +1362,9 @@ mod tests {
             .await;
 
         let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
-        let tracks = provider.list_recently_played(None, 0, 50).await.expect("tracks");
+        let (tracks, total) = provider.list_recently_played(None, 0, 50).await.expect("tracks");
 
+        assert_eq!(total, 1);
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].id, "song1");
         assert_eq!(tracks[0].last_played_at.as_deref(), Some("2024-04-01T10:00:00Z"));
@@ -1385,8 +1389,9 @@ mod tests {
             .await;
 
         let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
-        let tracks = provider.list_favorites(None, 0, 50).await.expect("tracks");
+        let (tracks, total) = provider.list_favorites(None, 0, 50).await.expect("tracks");
 
+        assert_eq!(total, 1);
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].id, "fav1");
         assert_eq!(tracks[0].is_favorite, Some(true));

@@ -375,27 +375,24 @@ impl MediaProvider for SubsonicProvider {
         genre_id_or_name: &str,
         offset: u32,
         limit: u32,
-    ) -> Result<Vec<Song>, ProviderError> {
+    ) -> Result<(Vec<Song>, u32), ProviderError> {
         let body = self
             .client
             .get_songs_by_genre(genre_id_or_name, offset, limit)
             .await?;
-        Ok(body
-            .songs_by_genre
-            .song
-            .into_iter()
-            .map(song_from_dto)
-            .collect())
+        let songs: Vec<Song> = body.songs_by_genre.song.into_iter().map(song_from_dto).collect();
+        let total = songs.len() as u32;
+        Ok((songs, total))
     }
 
     async fn list_favorites(
         &self,
         _library_id: Option<&str>,
-        _offset: u32,
-        _limit: u32,
-    ) -> Result<Vec<Song>, ProviderError> {
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<Song>, u32), ProviderError> {
         let starred = self.client.get_starred2().await?;
-        Ok(starred
+        let all_songs: Vec<Song> = starred
             .starred2
             .song
             .into_iter()
@@ -404,7 +401,14 @@ impl MediaProvider for SubsonicProvider {
                 song.is_favorite = Some(true);
                 song
             })
-            .collect())
+            .collect();
+        let total = all_songs.len() as u32;
+        let page: Vec<Song> = all_songs
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect();
+        Ok((page, total))
     }
 }
 
@@ -2299,8 +2303,9 @@ mod tests {
             .await;
         let provider = provider(&server).await;
 
-        let tracks = provider.get_genre_tracks("Rock", 0, 20).await.expect("tracks");
+        let (tracks, total) = provider.get_genre_tracks("Rock", 0, 20).await.expect("tracks");
 
+        assert_eq!(total, 1);
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].id, "song1");
         assert_eq!(tracks[0].title, "Rock Track");
@@ -2321,8 +2326,9 @@ mod tests {
             .await;
         let provider = provider(&server).await;
 
-        let tracks = provider.list_favorites(None, 0, 50).await.expect("tracks");
+        let (tracks, total) = provider.list_favorites(None, 0, 50).await.expect("tracks");
 
+        assert_eq!(total, 1);
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].id, "fav1");
         assert_eq!(
@@ -2330,6 +2336,32 @@ mod tests {
             Some(true),
             "list_favorites must set is_favorite=true on all returned songs"
         );
+    }
+
+    #[tokio::test]
+    async fn provider_list_favorites_applies_client_side_pagination() {
+        let mut server = Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/rest/getStarred2.view")
+            .match_query(Matcher::AllOf(auth_matchers()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(
+                r#""starred2":{"song":[
+                    {"id":"fav1","title":"Song A","duration":200},
+                    {"id":"fav2","title":"Song B","duration":210},
+                    {"id":"fav3","title":"Song C","duration":220}
+                ]}"#,
+            ))
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        let (tracks, total) = provider.list_favorites(None, 1, 1).await.expect("tracks");
+
+        assert_eq!(total, 3, "total must reflect full collection before slicing");
+        assert_eq!(tracks.len(), 1, "page must respect limit");
+        assert_eq!(tracks[0].id, "fav2", "page must respect offset");
     }
 
     #[tokio::test]

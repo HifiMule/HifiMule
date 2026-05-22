@@ -635,11 +635,11 @@ async fn handle_browse_get_genre(
         message: format!("Genre not found: {genre_id}"),
         data: None,
     })?;
-    let tracks = provider
+    let (tracks, total) = provider
         .get_genre_tracks(&genre_id, offset, limit)
         .await
         .map_err(provider_error_to_rpc)?;
-    let total = tracks.len() as u64;
+    let total = total as u64;
     Ok(serde_json::json!({ "genre": genre, "tracks": tracks, "total": total }))
 }
 
@@ -650,11 +650,11 @@ async fn handle_browse_list_recently_added(
     let library_id = params.as_ref().and_then(|p| p["libraryId"].as_str()).map(str::to_owned);
     let (offset, limit) = browse_pagination(&params);
     let provider = require_provider(state).await?;
-    let tracks = provider
+    let (tracks, total) = provider
         .list_recently_added(library_id.as_deref(), offset, limit)
         .await
         .map_err(provider_error_to_rpc)?;
-    let total = tracks.len() as u64;
+    let total = total as u64;
     Ok(serde_json::json!({ "tracks": tracks, "total": total }))
 }
 
@@ -665,11 +665,11 @@ async fn handle_browse_list_frequently_played(
     let library_id = params.as_ref().and_then(|p| p["libraryId"].as_str()).map(str::to_owned);
     let (offset, limit) = browse_pagination(&params);
     let provider = require_provider(state).await?;
-    let tracks = provider
+    let (tracks, total) = provider
         .list_frequently_played(library_id.as_deref(), offset, limit)
         .await
         .map_err(provider_error_to_rpc)?;
-    let total = tracks.len() as u64;
+    let total = total as u64;
     Ok(serde_json::json!({ "tracks": tracks, "total": total }))
 }
 
@@ -680,11 +680,11 @@ async fn handle_browse_list_recently_played(
     let library_id = params.as_ref().and_then(|p| p["libraryId"].as_str()).map(str::to_owned);
     let (offset, limit) = browse_pagination(&params);
     let provider = require_provider(state).await?;
-    let tracks = provider
+    let (tracks, total) = provider
         .list_recently_played(library_id.as_deref(), offset, limit)
         .await
         .map_err(provider_error_to_rpc)?;
-    let total = tracks.len() as u64;
+    let total = total as u64;
     Ok(serde_json::json!({ "tracks": tracks, "total": total }))
 }
 
@@ -695,11 +695,11 @@ async fn handle_browse_list_favorites(
     let library_id = params.as_ref().and_then(|p| p["libraryId"].as_str()).map(str::to_owned);
     let (offset, limit) = browse_pagination(&params);
     let provider = require_provider(state).await?;
-    let tracks = provider
+    let (tracks, total) = provider
         .list_favorites(library_id.as_deref(), offset, limit)
         .await
         .map_err(provider_error_to_rpc)?;
-    let total = tracks.len() as u64;
+    let total = total as u64;
     Ok(serde_json::json!({ "tracks": tracks, "total": total }))
 }
 

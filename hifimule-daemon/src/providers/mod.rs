@@ -102,7 +102,7 @@ pub trait MediaProvider: Send + Sync {
         _genre_id_or_name: &str,
         _offset: u32,
         _limit: u32,
-    ) -> Result<Vec<Song>, ProviderError> {
+    ) -> Result<(Vec<Song>, u32), ProviderError> {
         Err(ProviderError::UnsupportedCapability(
             "get_genre_tracks is not supported by this provider".to_string(),
         ))
@@ -113,7 +113,7 @@ pub trait MediaProvider: Send + Sync {
         _library_id: Option<&str>,
         _offset: u32,
         _limit: u32,
-    ) -> Result<Vec<Song>, ProviderError> {
+    ) -> Result<(Vec<Song>, u32), ProviderError> {
         Err(ProviderError::UnsupportedCapability(
             "list_recently_added is not supported by this provider".to_string(),
         ))
@@ -124,7 +124,7 @@ pub trait MediaProvider: Send + Sync {
         _library_id: Option<&str>,
         _offset: u32,
         _limit: u32,
-    ) -> Result<Vec<Song>, ProviderError> {
+    ) -> Result<(Vec<Song>, u32), ProviderError> {
         Err(ProviderError::UnsupportedCapability(
             "list_frequently_played is not supported by this provider".to_string(),
         ))
@@ -135,7 +135,7 @@ pub trait MediaProvider: Send + Sync {
         _library_id: Option<&str>,
         _offset: u32,
         _limit: u32,
-    ) -> Result<Vec<Song>, ProviderError> {
+    ) -> Result<(Vec<Song>, u32), ProviderError> {
         Err(ProviderError::UnsupportedCapability(
             "list_recently_played is not supported by this provider".to_string(),
         ))
@@ -146,7 +146,7 @@ pub trait MediaProvider: Send + Sync {
         _library_id: Option<&str>,
         _offset: u32,
         _limit: u32,
-    ) -> Result<Vec<Song>, ProviderError> {
+    ) -> Result<(Vec<Song>, u32), ProviderError> {
         Err(ProviderError::UnsupportedCapability(
             "list_favorites is not supported by this provider".to_string(),
         ))

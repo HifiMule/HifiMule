@@ -1,6 +1,6 @@
 # Story 9.1: Provider Browse Modes and Capability Contract
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -81,6 +81,16 @@ so that the UI can show Jellyfin-like navigation without hardcoding server-speci
   - [x] Run `rtk cargo test -p hifimule-daemon browse --no-fail-fast`.
   - [x] Run `rtk cargo test -p hifimule-daemon providers --no-fail-fast`.
   - [x] Run `rtk cargo test -p hifimule-daemon`.
+
+### Review Findings
+
+- [x] [Review][Decision] Removed Subsonic credential sanitization catch-all in `provider_error_to_rpc` — **Dismissed**: verified all Subsonic ProviderError messages are sanitized at source in subsonic.rs (lines 656, 714, 717, 724, 730); the catch-all was redundant.
+- [x] [Review][Decision] Paginated list methods return `tracks.len()` as `total`, not server TotalRecordCount — **Fixed**: changed `get_genre_tracks`, `list_recently_added`, `list_frequently_played`, `list_recently_played`, `list_favorites` trait signatures to return `Result<(Vec<Song>, u32), ProviderError>`; Jellyfin implementations return `response.total_record_count`; updated all call sites and tests.
+- [x] [Review][Decision] Subsonic `list_favorites` ignores `offset`/`limit` — **Fixed**: applied client-side slice (`skip(offset).take(limit)`) after fetching all favorites; `total` reflects full collection size; added pagination test.
+- [x] [Review][Patch] Dead `browse_pagination()` call in `handle_browse_list_genres` — **Dismissed**: current code never contained this dead call; finding was a diff-summary artifact.
+- [x] [Review][Patch] Missing RPC-level test for unsupported browse mode returning `ERR_UNSUPPORTED_CAPABILITY` — **Dismissed**: `browse_unsupported_capability_maps_to_err_unsupported_capability` test already covers this at rpc.rs:6141.
+- [x] [Review][Defer] URL parameter encoding in Jellyfin query building [`hifimule-daemon/src/api.rs`] — deferred, pre-existing pattern throughout JellyfinClient codebase; IDs are server-provided UUIDs/strings with low injection risk
+- [x] [Review][Defer] `list_genres` has no pagination parameter [`hifimule-daemon/src/providers/mod.rs`] — deferred, by design for this story; address in Story 9.3 if large genre lists become a concern
 
 ## Dev Notes
 
