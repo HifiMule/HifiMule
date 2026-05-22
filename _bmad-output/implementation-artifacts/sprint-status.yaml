@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-05-22  # Story 9.4 dev complete: history and favorites browse modes
+last_updated: 2026-05-22  # Story 9.4 reviewed: history and favorites browse modes done
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -122,4 +122,4 @@ development_status:
   9-1-provider-browse-modes-and-capability-contract: done
   9-2-browse-mode-navigation-ui: done
   9-3-genre-browsing-and-genre-entity-basket-item: done
-  9-4-history-and-favorites-browse-modes: review
+  9-4-history-and-favorites-browse-modes: done

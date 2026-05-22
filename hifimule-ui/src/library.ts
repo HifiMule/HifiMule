@@ -170,10 +170,12 @@ function formatBrowseDate(isoStr: string | null | undefined): string | null {
         const d = new Date(isoStr);
         if (isNaN(d.getTime())) return null;
         const now = new Date();
-        const diffDays = Math.floor((now.getTime() - d.getTime()) / 86_400_000);
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const playedDay = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+        const diffDays = Math.floor((today.getTime() - playedDay.getTime()) / 86_400_000);
         if (diffDays === 0) return 'Today';
         if (diffDays === 1) return 'Yesterday';
-        if (diffDays < 7) return `${diffDays} days ago`;
+        if (diffDays > 1 && diffDays < 7) return `${diffDays} days ago`;
         return d.toLocaleDateString(undefined, {
             month: 'short',
             day: 'numeric',
@@ -189,16 +191,12 @@ function mapFlatTracks(
     mode?: 'frequentlyPlayed' | 'recentlyPlayed' | 'favorites',
 ): BrowseDisplayItem[] {
     return tracks.map(t => {
-        let subtitle: string;
+        let subtitle = `${t.artistName} — ${t.albumName}`;
         if (mode === 'frequentlyPlayed' && t.playCount != null) {
-            subtitle = `${t.artistName} · ${t.playCount} play${t.playCount === 1 ? '' : 's'}`;
+            subtitle += ` · ${t.playCount} play${t.playCount === 1 ? '' : 's'}`;
         } else if (mode === 'recentlyPlayed') {
             const dateStr = formatBrowseDate(t.lastPlayedAt);
-            subtitle = dateStr
-                ? `${t.artistName} · ${dateStr}`
-                : `${t.artistName} — ${t.albumName}`;
-        } else {
-            subtitle = `${t.artistName} — ${t.albumName}`;
+            if (dateStr) subtitle += ` · ${dateStr}`;
         }
         return {
             id: t.id,

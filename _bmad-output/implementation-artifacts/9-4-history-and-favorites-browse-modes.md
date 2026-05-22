@@ -1,6 +1,6 @@
 # Story 9.4: History and Favorites Browse Modes
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -109,6 +109,12 @@ so that I can build a device basket from the music I am most likely to want offl
   - [ ] Smoke: open Favorites → tracks appear with "Artist — Album" subtitle ✓
   - [ ] Smoke: add a track from any history mode to the basket → basket toggle works, item appears as Audio card in BasketSidebar ✓
   - [ ] Smoke: "Load More" fires correctly and appends next page (not duplicate of first page) ✓
+
+### Review Findings
+
+- [x] [Review][Patch] Frequently Played subtitles omit the album name required by AC2 [hifimule-ui/src/library.ts:193]
+- [x] [Review][Patch] Recently Played subtitles omit the album name required by AC3 when date metadata exists [hifimule-ui/src/library.ts:197]
+- [x] [Review][Patch] Relative date formatting can mislabel future or calendar-yesterday plays [hifimule-ui/src/library.ts:173]
 
 ## Dev Notes
 

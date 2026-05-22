@@ -180,7 +180,9 @@ impl MediaProvider for SubsonicProvider {
             .into_iter()
             .filter(|idx| {
                 letter.map_or(true, |l| {
-                    idx.name.as_deref().map_or(false, |n| n.eq_ignore_ascii_case(l))
+                    idx.name
+                        .as_deref()
+                        .map_or(false, |n| n.eq_ignore_ascii_case(l))
                 })
             })
             .flat_map(|idx| idx.artist)
@@ -188,7 +190,11 @@ impl MediaProvider for SubsonicProvider {
             .collect();
         let total = all_artists.len() as u32;
         let page: Vec<Artist> = if limit > 0 {
-            all_artists.into_iter().skip(offset as usize).take(limit as usize).collect()
+            all_artists
+                .into_iter()
+                .skip(offset as usize)
+                .take(limit as usize)
+                .collect()
         } else {
             all_artists.into_iter().skip(offset as usize).collect()
         };
@@ -232,7 +238,11 @@ impl MediaProvider for SubsonicProvider {
             .collect();
         let total = all_albums.len() as u32;
         let page: Vec<Album> = if limit > 0 {
-            all_albums.into_iter().skip(offset as usize).take(limit as usize).collect()
+            all_albums
+                .into_iter()
+                .skip(offset as usize)
+                .take(limit as usize)
+                .collect()
         } else {
             all_albums.into_iter().skip(offset as usize).collect()
         };
@@ -393,10 +403,7 @@ impl MediaProvider for SubsonicProvider {
         }
     }
 
-    async fn list_genres(
-        &self,
-        _library_id: Option<&str>,
-    ) -> Result<Vec<Genre>, ProviderError> {
+    async fn list_genres(&self, _library_id: Option<&str>) -> Result<Vec<Genre>, ProviderError> {
         let genres = self.client.get_genres().await?;
         Ok(genres
             .genres
@@ -416,7 +423,12 @@ impl MediaProvider for SubsonicProvider {
             .client
             .get_songs_by_genre(genre_id_or_name, offset, limit)
             .await?;
-        let songs: Vec<Song> = body.songs_by_genre.song.into_iter().map(song_from_dto).collect();
+        let songs: Vec<Song> = body
+            .songs_by_genre
+            .song
+            .into_iter()
+            .map(song_from_dto)
+            .collect();
         let total = songs.len() as u32;
         Ok((songs, total))
     }
@@ -601,7 +613,11 @@ impl SubsonicClient {
         let offset_str = offset.to_string();
         self.get(
             "getSongsByGenre",
-            &[("genre", genre), ("count", &count_str), ("offset", &offset_str)],
+            &[
+                ("genre", genre),
+                ("count", &count_str),
+                ("offset", &offset_str),
+            ],
         )
         .await
     }
@@ -1535,7 +1551,10 @@ mod tests {
         let provider = provider(&server).await;
 
         let artist = provider.get_artist("artist1").await.expect("artist");
-        let (albums, total) = provider.list_albums(Some("ignored"), None, 0, 0).await.expect("albums");
+        let (albums, total) = provider
+            .list_albums(Some("ignored"), None, 0, 0)
+            .await
+            .expect("albums");
 
         assert_eq!(artist.artist.cover_art_id.as_deref(), Some("artist-cover"));
         assert_eq!(artist.albums[0].id, "album1");
@@ -2343,7 +2362,10 @@ mod tests {
             .await;
         let provider = provider(&server).await;
 
-        let (tracks, total) = provider.get_genre_tracks("Rock", 0, 20).await.expect("tracks");
+        let (tracks, total) = provider
+            .get_genre_tracks("Rock", 0, 20)
+            .await
+            .expect("tracks");
 
         assert_eq!(total, 1);
         assert_eq!(tracks.len(), 1);
@@ -2386,20 +2408,21 @@ mod tests {
             .match_query(Matcher::AllOf(auth_matchers()))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(&ok(
-                r#""starred2":{"song":[
+            .with_body(&ok(r#""starred2":{"song":[
                     {"id":"fav1","title":"Song A","duration":200},
                     {"id":"fav2","title":"Song B","duration":210},
                     {"id":"fav3","title":"Song C","duration":220}
-                ]}"#,
-            ))
+                ]}"#))
             .create_async()
             .await;
         let provider = provider(&server).await;
 
         let (tracks, total) = provider.list_favorites(None, 1, 1).await.expect("tracks");
 
-        assert_eq!(total, 3, "total must reflect full collection before slicing");
+        assert_eq!(
+            total, 3,
+            "total must reflect full collection before slicing"
+        );
         assert_eq!(tracks.len(), 1, "page must respect limit");
         assert_eq!(tracks[0].id, "fav2", "page must respect offset");
     }

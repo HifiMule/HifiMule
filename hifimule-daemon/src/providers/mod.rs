@@ -100,10 +100,7 @@ pub trait MediaProvider: Send + Sync {
 
     async fn scrobble(&self, request: ScrobbleRequest) -> Result<(), ProviderError>;
 
-    async fn list_genres(
-        &self,
-        _library_id: Option<&str>,
-    ) -> Result<Vec<Genre>, ProviderError> {
+    async fn list_genres(&self, _library_id: Option<&str>) -> Result<Vec<Genre>, ProviderError> {
         Err(ProviderError::UnsupportedCapability(
             "list_genres is not supported by this provider".to_string(),
         ))
@@ -768,20 +765,48 @@ mod tests {
 
     #[test]
     fn browse_mode_serializes_to_camel_case_wire_values() {
-        assert_eq!(serde_json::to_string(&BrowseMode::Artists).unwrap(), "\"artists\"");
-        assert_eq!(serde_json::to_string(&BrowseMode::Albums).unwrap(), "\"albums\"");
-        assert_eq!(serde_json::to_string(&BrowseMode::Playlists).unwrap(), "\"playlists\"");
-        assert_eq!(serde_json::to_string(&BrowseMode::Genres).unwrap(), "\"genres\"");
-        assert_eq!(serde_json::to_string(&BrowseMode::RecentlyAdded).unwrap(), "\"recentlyAdded\"");
-        assert_eq!(serde_json::to_string(&BrowseMode::FrequentlyPlayed).unwrap(), "\"frequentlyPlayed\"");
-        assert_eq!(serde_json::to_string(&BrowseMode::RecentlyPlayed).unwrap(), "\"recentlyPlayed\"");
-        assert_eq!(serde_json::to_string(&BrowseMode::Favorites).unwrap(), "\"favorites\"");
+        assert_eq!(
+            serde_json::to_string(&BrowseMode::Artists).unwrap(),
+            "\"artists\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BrowseMode::Albums).unwrap(),
+            "\"albums\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BrowseMode::Playlists).unwrap(),
+            "\"playlists\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BrowseMode::Genres).unwrap(),
+            "\"genres\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BrowseMode::RecentlyAdded).unwrap(),
+            "\"recentlyAdded\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BrowseMode::FrequentlyPlayed).unwrap(),
+            "\"frequentlyPlayed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BrowseMode::RecentlyPlayed).unwrap(),
+            "\"recentlyPlayed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BrowseMode::Favorites).unwrap(),
+            "\"favorites\""
+        );
     }
 
     #[test]
     fn browse_capabilities_preserves_mode_list_order_in_json() {
         let caps = BrowseCapabilities {
-            list_modes: vec![BrowseMode::Artists, BrowseMode::Albums, BrowseMode::Playlists],
+            list_modes: vec![
+                BrowseMode::Artists,
+                BrowseMode::Albums,
+                BrowseMode::Playlists,
+            ],
         };
         let json = serde_json::to_value(&caps).unwrap();
         let modes = json["listModes"].as_array().unwrap();
