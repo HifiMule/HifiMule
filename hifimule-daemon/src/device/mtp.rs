@@ -1429,8 +1429,6 @@ pub mod libmtp {
         _opaque: [u8; 0],
     }
 
-
-
     #[repr(C)]
     struct LIBMTP_File_t {
         item_id: u32,
@@ -1459,17 +1457,17 @@ pub mod libmtp {
 
     fn filetype_for_extension(ext: &str) -> u32 {
         match ext.to_ascii_lowercase().as_str() {
-            "mp3"  => LIBMTP_FILETYPE_MP3,
-            "mp2"  => LIBMTP_FILETYPE_MP2,
-            "wav"  => LIBMTP_FILETYPE_WAV,
-            "ogg"  => LIBMTP_FILETYPE_OGG,
+            "mp3" => LIBMTP_FILETYPE_MP3,
+            "mp2" => LIBMTP_FILETYPE_MP2,
+            "wav" => LIBMTP_FILETYPE_WAV,
+            "ogg" => LIBMTP_FILETYPE_OGG,
             "flac" => LIBMTP_FILETYPE_FLAC,
-            "aac"  => LIBMTP_FILETYPE_AAC,
-            "m4a"  => LIBMTP_FILETYPE_M4A,
-            "mp4"  => LIBMTP_FILETYPE_MP4,
-            "wma"  => LIBMTP_FILETYPE_WMA,
+            "aac" => LIBMTP_FILETYPE_AAC,
+            "m4a" => LIBMTP_FILETYPE_M4A,
+            "mp4" => LIBMTP_FILETYPE_MP4,
+            "wma" => LIBMTP_FILETYPE_WMA,
             "m3u" | "m3u8" => LIBMTP_FILETYPE_PLAYLIST,
-            _      => LIBMTP_FILETYPE_UNKNOWN,
+            _ => LIBMTP_FILETYPE_UNKNOWN,
         }
     }
     const LIBMTP_ERROR_NONE: c_int = 0;
@@ -1672,8 +1670,7 @@ pub mod libmtp {
                 let mut cur = files;
                 while !cur.is_null() {
                     if found.is_none() && !(*cur).filename.is_null() {
-                        let fname =
-                            std::ffi::CStr::from_ptr((*cur).filename).to_string_lossy();
+                        let fname = std::ffi::CStr::from_ptr((*cur).filename).to_string_lossy();
                         if fname.eq_ignore_ascii_case(name) {
                             found = Some(((*cur).item_id, (*cur).storage_id));
                         }
@@ -1792,9 +1789,7 @@ pub mod libmtp {
                         return Some(((*node).folder_id, (*node).storage_id));
                     }
                 }
-                if let Some(found) =
-                    Self::search_folder_tree((*node).child, target_parent, name)
-                {
+                if let Some(found) = Self::search_folder_tree((*node).child, target_parent, name) {
                     return Some(found);
                 }
                 node = (*node).sibling;
@@ -1861,8 +1856,7 @@ pub mod libmtp {
                         && !(*cur).filename.is_null()
                         && (*cur).parent_id == target_parent
                     {
-                        let fname =
-                            std::ffi::CStr::from_ptr((*cur).filename).to_string_lossy();
+                        let fname = std::ffi::CStr::from_ptr((*cur).filename).to_string_lossy();
                         if fname.eq_ignore_ascii_case(name) {
                             result = Some(((*cur).item_id, (*cur).storage_id));
                         }
@@ -1962,7 +1956,11 @@ pub mod libmtp {
                         crate::daemon_log!(
                             "[libmtp] ensure_path: '{}' not found — lazy-priming hints under '{}'",
                             component,
-                            if parent_path_prefix.is_empty() { "<root>" } else { parent_path_prefix }
+                            if parent_path_prefix.is_empty() {
+                                "<root>"
+                            } else {
+                                parent_path_prefix
+                            }
                         );
                         let primed = Self::build_folder_hints_raw(
                             dev,
@@ -2004,15 +2002,11 @@ pub mod libmtp {
                         // folder appears missing and the create fails. Try two fallbacks to
                         // recover the existing folder's ID.
                         if let Some((existing_id, existing_storage)) =
-                            Self::find_folder_in_list(dev, parent_id, component)
-                                .or_else(|| {
-                                    Self::find_folder_in_all_objects(
-                                        dev,
-                                        parent_id,
-                                        storage_id,
-                                        component,
-                                    )
-                                })
+                            Self::find_folder_in_list(dev, parent_id, component).or_else(|| {
+                                Self::find_folder_in_all_objects(
+                                    dev, parent_id, storage_id, component,
+                                )
+                            })
                         {
                             crate::daemon_log!(
                                 "[libmtp] ensure_path: '{}' already exists as id={} (recovered via fallback)",
@@ -2189,9 +2183,7 @@ pub mod libmtp {
                 .unwrap_or_default();
             // Only allow lazy BFS priming if it hasn't happened yet for this device handle.
             // Using SeqCst for safety; the MTP device lock serialises actual FFI calls anyway.
-            let can_lazy_prime = !self
-                .hints_primed
-                .load(std::sync::atomic::Ordering::SeqCst);
+            let can_lazy_prime = !self.hints_primed.load(std::sync::atomic::Ordering::SeqCst);
             let mut lazy_primed = false;
             let mut discovered = std::collections::HashMap::new();
             // ensure_path_raw creates any missing parent directories and returns the
@@ -2263,7 +2255,9 @@ pub mod libmtp {
             let filetype = filetype_for_extension(ext);
             crate::daemon_log!(
                 "[libmtp] write_file: '{}' ext='{}' filetype={}",
-                path, ext, filetype
+                path,
+                ext,
+                filetype
             );
             let mut file_meta = LIBMTP_File_t {
                 item_id: 0,
@@ -2331,8 +2325,7 @@ pub mod libmtp {
                 .unwrap_or_default();
             let guard = self.device.lock().unwrap();
             let dev = *guard;
-            let obj_id =
-                unsafe { Self::path_to_object_id_with_hints_raw(dev, path, &hints)? };
+            let obj_id = unsafe { Self::path_to_object_id_with_hints_raw(dev, path, &hints)? };
             let rc = unsafe { LIBMTP_Delete_Object(dev, obj_id) };
             drop(guard);
             if rc != LIBMTP_ERROR_NONE {

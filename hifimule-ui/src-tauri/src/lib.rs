@@ -23,7 +23,11 @@ fn resolve_daemon_binary_path() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
-        if entry.file_name().to_string_lossy().starts_with("hifimule-daemon") {
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("hifimule-daemon")
+        {
             return Some(entry.path());
         }
     }
@@ -102,8 +106,7 @@ fn install_launchd_plist() -> Result<(), String> {
         .ok_or_else(|| "Cannot get LaunchAgents parent dir".to_string())?;
     std::fs::create_dir_all(launch_agents)
         .map_err(|e| format!("Cannot create LaunchAgents dir: {}", e))?;
-    std::fs::write(&plist_path, plist_content)
-        .map_err(|e| format!("Cannot write plist: {}", e))?;
+    std::fs::write(&plist_path, plist_content).map_err(|e| format!("Cannot write plist: {}", e))?;
     let plist_str = plist_path
         .to_str()
         .ok_or_else(|| "Plist path is not valid UTF-8".to_string())?;
@@ -123,8 +126,8 @@ fn install_launchd_plist() -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn unload_and_remove_launchd_plist() -> Result<(), String> {
-    let plist_path = launchd_plist_path()
-        .ok_or_else(|| "Cannot resolve LaunchAgents path".to_string())?;
+    let plist_path =
+        launchd_plist_path().ok_or_else(|| "Cannot resolve LaunchAgents path".to_string())?;
     if plist_path.exists() {
         let plist_str = plist_path
             .to_str()
@@ -133,15 +136,17 @@ fn unload_and_remove_launchd_plist() -> Result<(), String> {
             .args(["unload", plist_str])
             .output()
         {
-            Err(e) => ui_log(&format!("launchctl unload warning (failed to execute): {}", e)),
+            Err(e) => ui_log(&format!(
+                "launchctl unload warning (failed to execute): {}",
+                e
+            )),
             Ok(output) if !output.status.success() => ui_log(&format!(
                 "launchctl unload warning (may already be unloaded): {}",
                 String::from_utf8_lossy(&output.stderr)
             )),
             Ok(_) => {}
         }
-        std::fs::remove_file(&plist_path)
-            .map_err(|e| format!("Cannot remove plist: {}", e))?;
+        std::fs::remove_file(&plist_path).map_err(|e| format!("Cannot remove plist: {}", e))?;
     }
     Ok(())
 }
@@ -310,8 +315,7 @@ fn ui_log(msg: &str) {
 
     #[cfg(target_os = "macos")]
     if let Ok(home) = std::env::var("HOME") {
-        let log_dir = std::path::Path::new(&home)
-            .join("Library/Application Support/HifiMule");
+        let log_dir = std::path::Path::new(&home).join("Library/Application Support/HifiMule");
         let _ = std::fs::create_dir_all(&log_dir);
         let log_path = log_dir.join("ui.log");
         if let Ok(meta) = std::fs::metadata(&log_path) {

@@ -22,9 +22,9 @@ fn main() {
         for inc_path in &lib.include_paths {
             let header = inc_path.join("libmtp.h");
             if header.exists() {
-                let content = std::fs::read_to_string(&header)
-                    .expect("failed to read libmtp.h");
-                let entries: Vec<&str> = content.lines()
+                let content = std::fs::read_to_string(&header).expect("failed to read libmtp.h");
+                let entries: Vec<&str> = content
+                    .lines()
                     .map(|l| l.trim())
                     .filter(|t| {
                         t.starts_with("LIBMTP_FILETYPE_")
@@ -34,16 +34,20 @@ fn main() {
                     })
                     .map(|t| t.trim_end_matches(','))
                     .collect();
-                assert!(!entries.is_empty(), "Could not find LIBMTP_FILETYPE_ enum entries in libmtp.h");
+                assert!(
+                    !entries.is_empty(),
+                    "Could not find LIBMTP_FILETYPE_ enum entries in libmtp.h"
+                );
                 let out_dir = std::env::var("OUT_DIR").unwrap();
                 let mut out = String::new();
                 for (i, name) in entries.iter().enumerate() {
-                    out.push_str(&format!("#[allow(dead_code)] const {}: u32 = {};\n", name, i));
+                    out.push_str(&format!(
+                        "#[allow(dead_code)] const {}: u32 = {};\n",
+                        name, i
+                    ));
                 }
-                std::fs::write(
-                    format!("{out_dir}/libmtp_constants.rs"),
-                    out,
-                ).expect("failed to write libmtp_constants.rs");
+                std::fs::write(format!("{out_dir}/libmtp_constants.rs"), out)
+                    .expect("failed to write libmtp_constants.rs");
                 break;
             }
         }

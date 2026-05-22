@@ -681,21 +681,18 @@ pub async fn execute_sync(
         );
 
         // Construct target path (includes legacy hardware path length validation)
-        let construction = match construct_file_path_with_extension(
-            &managed_path,
-            &item,
-            extension_override,
-        ) {
-            Ok(result) => result,
-            Err(e) => {
-                errors.push(SyncFileError {
-                    jellyfin_id: add_item.jellyfin_id.clone(),
-                    filename: add_item.name.clone(),
-                    error_message: format!("Failed to construct file path: {}", e),
-                });
-                continue;
-            }
-        };
+        let construction =
+            match construct_file_path_with_extension(&managed_path, &item, extension_override) {
+                Ok(result) => result,
+                Err(e) => {
+                    errors.push(SyncFileError {
+                        jellyfin_id: add_item.jellyfin_id.clone(),
+                        filename: add_item.name.clone(),
+                        error_message: format!("Failed to construct file path: {}", e),
+                    });
+                    continue;
+                }
+            };
         let target_path = construction.path;
 
         // Create progress callback for this file
@@ -770,7 +767,9 @@ pub async fn execute_sync(
                     errors.push(SyncFileError {
                         jellyfin_id: add_item.jellyfin_id.clone(),
                         filename: add_item.name.clone(),
-                        error_message: "File reported as written but not found on device after transfer".to_string(),
+                        error_message:
+                            "File reported as written but not found on device after transfer"
+                                .to_string(),
                     });
                     continue;
                 }
@@ -835,16 +834,12 @@ pub async fn execute_sync(
     // - MTP: device_path is a synthetic "mtp://…" URI that doesn't exist on the local
     //   filesystem — canonicalize() always fails and would silently skip every delete.
     //   Use a string-prefix check on the relative local_path instead.
-    let is_mtp = device_path
-        .to_string_lossy()
-        .starts_with("mtp://");
+    let is_mtp = device_path.to_string_lossy().starts_with("mtp://");
     // Option<String>: None = strip_prefix failed (malformed managed_path) → fail-safe reject all.
     // Some("") = whole device root is managed → all paths are valid.
     // Some("Music") = only paths under "Music/" are valid.
-    let managed_subfolder_for_delete: Option<String> = managed_path
-        .strip_prefix(device_path)
-        .ok()
-        .map(|p| {
+    let managed_subfolder_for_delete: Option<String> =
+        managed_path.strip_prefix(device_path).ok().map(|p| {
             p.to_string_lossy()
                 .replace('\\', "/")
                 .trim_end_matches('/')
@@ -915,7 +910,8 @@ pub async fn execute_sync(
         // Treat "not found" as idempotent success: the file is already absent, which is
         // the goal of deletion. This handles duplicate manifest entries (e.g. same path
         // added via basket and playlist) and re-runs after a failed manifest update.
-        let already_absent = matches!(&delete_result, Err(e) if e.to_string().contains("not found"));
+        let already_absent =
+            matches!(&delete_result, Err(e) if e.to_string().contains("not found"));
         match delete_result {
             Ok(_) => {
                 // Successfully deleted

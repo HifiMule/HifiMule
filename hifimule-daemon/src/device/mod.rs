@@ -1608,11 +1608,10 @@ async fn emit_mtp_probe_event(
     // Prefer the local manifest cache for MTP devices — it is the authoritative store
     // (updated by update_manifest on every successful sync), so it survives device
     // reconnects and daemon restarts without depending on an MTP write succeeding.
-    let local_manifest: Option<DeviceManifest> =
-        crate::paths::get_local_mtp_manifest_path(dev_id)
-            .ok()
-            .and_then(|p| std::fs::read_to_string(&p).ok())
-            .and_then(|s| serde_json::from_str(&s).ok());
+    let local_manifest: Option<DeviceManifest> = crate::paths::get_local_mtp_manifest_path(dev_id)
+        .ok()
+        .and_then(|p| std::fs::read_to_string(&p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok());
 
     if let Some(manifest) = local_manifest {
         daemon_log!(

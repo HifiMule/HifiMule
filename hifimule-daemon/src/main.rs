@@ -17,6 +17,7 @@ use tray_icon::{
 mod service;
 
 const LOG_MAX_BYTES: u64 = 1_048_576; // 1 MB
+const MAX_TOKIO_WORKER_THREADS: usize = 8;
 
 /// Simple file-based logger for release mode where stdout/stderr are unavailable.
 /// Writes to `%APPDATA%/HifiMule/daemon.log`. Truncates at 1 MB.
@@ -131,6 +132,7 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
     // REQUIRED for macOS: main thread MUST handle the event loop
     thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(daemon_worker_threads())
             .enable_all()
             .build()
             .expect("Failed to build tokio runtime");
@@ -348,6 +350,12 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
     });
 
     Ok((shutdown, state_rx))
+}
+
+fn daemon_worker_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|cores| cores.get().min(MAX_TOKIO_WORKER_THREADS))
+        .unwrap_or(1)
 }
 
 /// Interactive mode: tray icon + event loop on the main thread
