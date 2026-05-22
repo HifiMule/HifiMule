@@ -655,7 +655,7 @@ async fn handle_browse_list_genres(
         .list_genres(library_id.as_deref())
         .await
         .map_err(provider_error_to_rpc)?;
-    tracing::debug!(ms = t_list.elapsed().as_millis(), "list_genres");
+    crate::daemon_log!("[browse.listGenres] list_genres: {}ms", t_list.elapsed().as_millis());
 
     let total = all_genres.len() as u64;
     let mut genres: Vec<_> = all_genres
@@ -672,13 +672,9 @@ async fn handle_browse_list_genres(
         .map(|(i, g)| (i, g.id.clone()))
         .collect();
 
-    tracing::debug!(
-        total,
-        page_size = genres.len(),
-        needs_art = needs_art.len(),
-        offset,
-        limit,
-        "browse.listGenres page"
+    crate::daemon_log!(
+        "[browse.listGenres] total={} page_size={} needs_art={} offset={} limit={}",
+        total, genres.len(), needs_art.len(), offset, limit
     );
 
     if !needs_art.is_empty() {
@@ -699,7 +695,7 @@ async fn handle_browse_list_genres(
             .collect();
 
         let art_results = futures::future::join_all(art_futures).await;
-        tracing::debug!(ms = t_art.elapsed().as_millis(), count = needs_art.len(), "art enrichment");
+        crate::daemon_log!("[browse.listGenres] art enrichment: {}ms ({} genres)", t_art.elapsed().as_millis(), needs_art.len());
         for ((idx, _), art) in needs_art.iter().zip(art_results) {
             genres[*idx].cover_art_id = art;
         }
