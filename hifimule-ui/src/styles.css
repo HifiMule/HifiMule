@@ -415,13 +415,15 @@ h2 {
 }
 
 .card-content {
-  padding: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  height: 3.5rem;
+  overflow: hidden;
 }
 
 .card-content strong {
   display: block;
   font-size: 0.9rem;
-  margin-bottom: 0.25rem;
+  margin-bottom: 0.1rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -430,9 +432,10 @@ h2 {
 .card-subtitle {
   font-size: 0.8rem;
   color: var(--sl-color-neutral-400);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .card-year {
