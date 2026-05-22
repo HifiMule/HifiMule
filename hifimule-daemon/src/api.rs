@@ -1037,10 +1037,9 @@ impl JellyfinClient {
         ))
     }
 
-    /// Fetch genres from the Jellyfin `/Genres` endpoint.
-    /// Uses `IncludeItemTypes=Audio&Recursive=true` to scope to music genres.
     /// Fetch music genres with server-side pagination. Uses `/MusicGenres` so that
     /// `ImageTags.Primary` is populated directly — no per-genre track lookup needed.
+    /// `Fields=RecursiveItemCount` is requested to populate the track count per genre.
     pub async fn get_music_genres(
         &self,
         url: &str,
@@ -1060,6 +1059,7 @@ impl JellyfinClient {
             "Recursive=true".to_string(),
             format!("StartIndex={}", offset),
             format!("Limit={}", limit),
+            "Fields=RecursiveItemCount".to_string(),
         ];
         if let Some(parent) = library_id {
             query_params.push(format!("parentId={}", parent));

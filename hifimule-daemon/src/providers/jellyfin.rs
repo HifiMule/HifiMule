@@ -1326,11 +1326,12 @@ mod tests {
                 Matcher::UrlEncoded("Recursive".into(), "true".into()),
                 Matcher::UrlEncoded("StartIndex".into(), "0".into()),
                 Matcher::UrlEncoded("Limit".into(), "50".into()),
+                Matcher::UrlEncoded("Fields".into(), "RecursiveItemCount".into()),
             ]))
             .match_header("X-Emby-Token", TOKEN)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"Items":[{"Id":"genre1","Name":"Rock","Type":"MusicGenre","SongCount":42,"ImageTags":{"Primary":"abc123"}}],"TotalRecordCount":1,"StartIndex":0}"#)
+            .with_body(r#"{"Items":[{"Id":"genre1","Name":"Rock","Type":"MusicGenre","RecursiveItemCount":42,"ImageTags":{"Primary":"abc123"}}],"TotalRecordCount":1,"StartIndex":0}"#)
             .create_async()
             .await;
 
