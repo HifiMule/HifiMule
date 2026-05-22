@@ -1159,9 +1159,29 @@ export class BasketSidebar {
         `;
     }
 
+    private renderGenreCard(item: BasketItem): string {
+        return `
+            <div class="basket-item-card basket-item-genre" data-id="${this.escapeHtml(item.id)}">
+                <div class="basket-item-genre-icon">
+                    <sl-icon name="music-note-beamed"></sl-icon>
+                </div>
+                <div class="basket-item-info">
+                    <div class="basket-item-name">${this.escapeHtml(item.name)}</div>
+                    <div class="basket-item-meta">
+                        Genre · ~${item.childCount ?? 0} tracks · ~${formatSize(item.sizeBytes ?? 0)}
+                    </div>
+                </div>
+                <sl-icon-button name="x" class="remove-item-btn" data-id="${this.escapeHtml(item.id)}" label="Remove"></sl-icon-button>
+            </div>
+        `;
+    }
+
     private renderItem(item: BasketItem): string {
         if (item.id === AUTO_FILL_SLOT_ID) {
             return this.renderAutoFillSlotCard(item);
+        }
+        if (item.type === 'MusicGenre') {
+            return this.renderGenreCard(item);
         }
         if (item.type === 'MusicArtist') {
             return this.renderArtistCard(item);

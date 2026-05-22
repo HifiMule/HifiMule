@@ -1,6 +1,6 @@
 # Story 9.3: Genre Browsing and Genre Entity Basket Item
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -26,8 +26,8 @@ so that my device can receive a dynamic genre-based selection without manually p
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Enable basket toggle for genre cards in library.ts (AC: 1, 3)
-  - [ ] In `hifimule-ui/src/library.ts`, in the `renderGrid()` function (lines ~309–315), **remove** the `MusicGenre` guard:
+- [x] Task 1: Enable basket toggle for genre cards in library.ts (AC: 1, 3)
+  - [x] In `hifimule-ui/src/library.ts`, in the `renderGrid()` function (lines ~309–315), **remove** the `MusicGenre` guard:
     ```typescript
     // REMOVE this block:
     // Genre container items have no basket toggle until Story 9.3
@@ -36,12 +36,12 @@ so that my device can receive a dynamic genre-based selection without manually p
     // REPLACE with:
     const selEnabled = true;
     ```
-  - [ ] Remove the comment `// Genre container items have no basket toggle until Story 9.3`
-  - [ ] All other `renderGrid()` logic remains unchanged — device lock is handled by the CSS class `.device-locked` toggled by `BasketSidebar`, not by `selEnabled`
-  - [ ] Verify: `MediaCard.create(item, 'items', false, ..., selEnabled)` now receives `true` for `MusicGenre` items — no other changes to `MediaCard.ts` are required (it already creates the correct `BasketItem` from `BrowseDisplayItem`)
+  - [x] Remove the comment `// Genre container items have no basket toggle until Story 9.3`
+  - [x] All other `renderGrid()` logic remains unchanged — device lock is handled by the CSS class `.device-locked` toggled by `BasketSidebar`, not by `selEnabled`
+  - [x] Verify: `MediaCard.create(item, 'items', false, ..., selEnabled)` now receives `true` for `MusicGenre` items — no other changes to `MediaCard.ts` are required (it already creates the correct `BasketItem` from `BrowseDisplayItem`)
 
-- [ ] Task 2: Add Genre card renderer to BasketSidebar (AC: 4)
-  - [ ] In `hifimule-ui/src/components/BasketSidebar.ts`, add a `renderGenreCard(item: BasketItem)` private method **after** `renderArtistCard()` (around line 1160):
+- [x] Task 2: Add Genre card renderer to BasketSidebar (AC: 4)
+  - [x] In `hifimule-ui/src/components/BasketSidebar.ts`, add a `renderGenreCard(item: BasketItem)` private method **after** `renderArtistCard()` (around line 1160):
     ```typescript
     private renderGenreCard(item: BasketItem): string {
         return `
@@ -60,7 +60,7 @@ so that my device can receive a dynamic genre-based selection without manually p
         `;
     }
     ```
-  - [ ] In `renderItem()`, add dispatch for genre **before** the auto-fill check (after the `AUTO_FILL_SLOT_ID` check, before the `MusicArtist` check):
+  - [x] In `renderItem()`, add dispatch for genre **before** the auto-fill check (after the `AUTO_FILL_SLOT_ID` check, before the `MusicArtist` check):
     ```typescript
     private renderItem(item: BasketItem): string {
         if (item.id === AUTO_FILL_SLOT_ID) {
@@ -75,10 +75,10 @@ so that my device can receive a dynamic genre-based selection without manually p
         // ... existing default renderer ...
     }
     ```
-  - [ ] No CSS changes required — reuse the same structure as `.basket-item-artist`; the `.basket-item-genre` class will inherit existing `.basket-item-card` styles without needing new CSS rules (can optionally add minimal distinct styling, but not required)
+  - [x] No CSS changes required — reuse the same structure as `.basket-item-artist`; the `.basket-item-genre` class will inherit existing `.basket-item-card` styles without needing new CSS rules (can optionally add minimal distinct styling, but not required)
 
-- [ ] Task 3: Add genre sync resolution — non-Jellyfin path (AC: 5)
-  - [ ] In `hifimule-daemon/src/rpc.rs`, in function `provider_sync_items_for_id` (around line 1440), add genre resolution **before** the final `Err(...)`:
+- [x] Task 3: Add genre sync resolution — non-Jellyfin path (AC: 5)
+  - [x] In `hifimule-daemon/src/rpc.rs`, in function `provider_sync_items_for_id` (around line 1440), add genre resolution **before** the final `Err(...)`:
     ```rust
     // After the artist check and before the final Err:
     if let Ok((tracks, _)) = provider.get_genre_tracks(item_id, 0, 10_000).await {
@@ -94,11 +94,11 @@ so that my device can receive a dynamic genre-based selection without manually p
         data: None,
     })
     ```
-  - [ ] The `get_genre_tracks` trait method has a default `Err(UnsupportedCapability)` impl — if the provider doesn't support genres, `if let Ok(...)` won't match and the existing `Err` is returned (correct behavior: sync aborted with informative error)
-  - [ ] Limit `10_000` is intentional: genre track counts above 10,000 are unrealistic; if needed, a future story can add pagination loops
+  - [x] The `get_genre_tracks` trait method has a default `Err(UnsupportedCapability)` impl — if the provider doesn't support genres, `if let Ok(...)` won't match and the existing `Err` is returned (correct behavior: sync aborted with informative error)
+  - [x] Limit `10_000` is intentional: genre track counts above 10,000 are unrealistic; if needed, a future story can add pagination loops
 
-- [ ] Task 4: Add genre sync resolution — Jellyfin path (AC: 5)
-  - [ ] In `hifimule-daemon/src/rpc.rs`, in function `handle_sync_calculate_delta`, in the inner loop processing Jellyfin items (around line 2053), add genre detection and expansion **after** the `is_playlist` variable declaration and **before** the `match state.jellyfin_client.get_child_items_with_sizes(...)` call:
+- [x] Task 4: Add genre sync resolution — Jellyfin path (AC: 5)
+  - [x] In `hifimule-daemon/src/rpc.rs`, in function `handle_sync_calculate_delta`, in the inner loop processing Jellyfin items (around line 2053), add genre detection and expansion **after** the `is_playlist` variable declaration and **before** the `match state.jellyfin_client.get_child_items_with_sizes(...)` call:
     ```rust
     let is_playlist = item.item_type == "Playlist";
     let item_id = item.id.clone();
@@ -132,13 +132,13 @@ so that my device can receive a dynamic genre-based selection without manually p
         .await
     { ...
     ```
-  - [ ] `get_songs_by_genre` is on `state.jellyfin_client` (type `JellyfinClient`) — it's already used elsewhere in the same file (e.g. the browse genre handler); no import changes needed
-  - [ ] Return type of `get_songs_by_genre` is `anyhow::Result<JellyfinItemsResponse>` where `JellyfinItemsResponse` has `.items: Vec<JellyfinItem>` — use `response.items` to iterate
-  - [ ] The `continue` at the end skips the `get_child_items_with_sizes` call (which uses `ParentId` and does NOT work for genre entities)
-  - [ ] Jellyfin genre type string is `"Genre"` (confirmed from test data in `jellyfin.rs:1265` and from `genre_from_item()` which reads `item.id` from a Jellyfin item returned by the genres endpoint)
+  - [x] `get_songs_by_genre` is on `state.jellyfin_client` (type `JellyfinClient`) — it's already used elsewhere in the same file (e.g. the browse genre handler); no import changes needed
+  - [x] Return type of `get_songs_by_genre` is `anyhow::Result<JellyfinItemsResponse>` where `JellyfinItemsResponse` has `.items: Vec<JellyfinItem>` — use `response.items` to iterate
+  - [x] The `continue` at the end skips the `get_child_items_with_sizes` call (which uses `ParentId` and does NOT work for genre entities)
+  - [x] Jellyfin genre type string is `"Genre"` (confirmed from test data in `jellyfin.rs:1265` and from `genre_from_item()` which reads `item.id` from a Jellyfin item returned by the genres endpoint)
 
-- [ ] Task 5: Enrich genre cover art in the daemon's `browse.listGenres` handler (AC: 1)
-  - [ ] In `hifimule-daemon/src/rpc.rs`, in `handle_browse_list_genres` (line ~610), change `genres` to `mut` and add parallel cover art enrichment after the `list_genres` call:
+- [x] Task 5: Enrich genre cover art in the daemon's `browse.listGenres` handler (AC: 1)
+  - [x] In `hifimule-daemon/src/rpc.rs`, in `handle_browse_list_genres` (line ~610), change `genres` to `mut` and add parallel cover art enrichment after the `list_genres` call:
     ```rust
     async fn handle_browse_list_genres(
         state: &AppState,
@@ -185,15 +185,15 @@ so that my device can receive a dynamic genre-based selection without manually p
         Ok(serde_json::json!({ "genres": genres, "total": total }))
     }
     ```
-  - [ ] `futures::future::join_all` is already imported and used in `rpc.rs` (line 1841) — no new dependency
-  - [ ] `provider.clone()` clones the `Arc<dyn MediaProvider>` — cheap, already done elsewhere in the file
-  - [ ] `get_genre_tracks(id, 0, 1)` fetches exactly 1 track — minimal network overhead per genre
-  - [ ] Failures are silently ignored via `.ok()` — a genre with no tracks or a provider error simply keeps `cover_art_id: None`; `None` serialises to `"coverArtId": null` and `MediaCard` renders with no image (identical to the current behaviour)
-  - [ ] No changes to `browse.getGenre`, `browse.listModes`, or any other handler
+  - [x] `futures::future::join_all` is already imported and used in `rpc.rs` (line 1841) — no new dependency
+  - [x] `provider.clone()` clones the `Arc<dyn MediaProvider>` — cheap, already done elsewhere in the file
+  - [x] `get_genre_tracks(id, 0, 1)` fetches exactly 1 track — minimal network overhead per genre
+  - [x] Failures are silently ignored via `.ok()` — a genre with no tracks or a provider error simply keeps `cover_art_id: None`; `None` serialises to `"coverArtId": null` and `MediaCard` renders with no image (identical to the current behaviour)
+  - [x] No changes to `browse.getGenre`, `browse.listModes`, or any other handler
 
-- [ ] Task 6: TypeScript compile check and smoke test (AC: 1–6)
-  - [ ] Run `rtk tsc` from `hifimule-ui/` — must pass with zero type errors
-  - [ ] Run `rtk cargo build` from workspace root — must compile with zero errors
+- [x] Task 6: TypeScript compile check and smoke test (AC: 1–6)
+  - [x] Run `rtk tsc` from `hifimule-ui/` — must pass with zero type errors
+  - [x] Run `rtk cargo build` from workspace root — must compile with zero errors
   - [ ] Smoke test: genre cards in the Genres browse mode show an album cover image (first track's art) rather than blank
   - [ ] Smoke test: add a genre card to basket, verify it appears as Genre card in BasketSidebar (not the default image card)
   - [ ] Smoke test: verify basket toggle button on genre card in library browser is enabled (not greyed out) when a device is selected
@@ -303,4 +303,19 @@ claude-sonnet-4-6
 
 ### Completion Notes List
 
+- Task 1: Removed `isGenreContainer` guard and `selEnabled = !isGenreContainer` from `renderGrid()` in `library.ts`. Replaced with `const selEnabled = true;` — genre cards now receive a basket toggle exactly like artist/album cards. Device lock remains handled exclusively by `.device-locked` CSS class.
+- Task 2: Added `renderGenreCard()` private method to `BasketSidebar.ts` modelled on `renderArtistCard()`. Added `MusicGenre` dispatch in `renderItem()` between the `AUTO_FILL_SLOT_ID` check and `MusicArtist` check. No CSS changes needed — `.basket-item-card` base styles apply automatically.
+- Task 3: Added genre resolution in `provider_sync_items_for_id` (non-Jellyfin path) before the final `Err(...)`. Uses `get_genre_tracks(item_id, 0, 10_000)` — if provider doesn't support genres, the `if let Ok` arm doesn't match and the existing error fires.
+- Task 4: Added genre detection block in `handle_sync_calculate_delta` Jellyfin inner loop after `item_name` declaration and before `get_child_items_with_sizes`. Uses `get_songs_by_genre` (via `GenreIds` query) and `continue`s to skip the `ParentId`-based expansion that doesn't work for genre entities.
+- Task 5: Replaced `handle_browse_list_genres` with enriched version that fetches first track's cover art in parallel (via `futures::future::join_all`) for each genre with `cover_art_id: None`. Zero extra dependencies — `join_all` already imported, `provider.clone()` clones the `Arc`.
+- Task 6: `rtk tsc` from `hifimule-ui/` — 0 errors. `rtk cargo build` from workspace root — 0 errors, 2 pre-existing warnings (unrelated to this story). Smoke tests are manual (no vitest setup in hifimule-ui).
+
 ### File List
+
+- hifimule-ui/src/library.ts
+- hifimule-ui/src/components/BasketSidebar.ts
+- hifimule-daemon/src/rpc.rs
+
+## Change Log
+
+- 2026-05-22: Implemented Story 9.3 — enabled genre basket toggle in library.ts, added renderGenreCard/renderItem dispatch in BasketSidebar.ts, added genre sync resolution for both non-Jellyfin (provider_sync_items_for_id) and Jellyfin (handle_sync_calculate_delta) paths, added parallel cover art enrichment in handle_browse_list_genres. tsc: 0 errors, cargo build: 0 errors.

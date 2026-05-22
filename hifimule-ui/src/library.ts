@@ -306,10 +306,7 @@ function renderGrid(items: BrowseDisplayItem[]) {
     grid.className = 'media-grid';
 
     items.forEach(item => {
-        // Genre container items have no basket toggle until Story 9.3
-        // Device lock is handled by BasketSidebar toggling #library-content.device-locked via CSS
-        const isGenreContainer = item.type === 'MusicGenre';
-        const selEnabled = !isGenreContainer;
+        const selEnabled = true;
 
         const card = MediaCard.create(item, 'items', false, () => navigateToBrowseItem(item), selEnabled);
         card.setAttribute('data-name', item.name);

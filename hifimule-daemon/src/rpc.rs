@@ -613,10 +613,41 @@ async fn handle_browse_list_genres(
 ) -> Result<Value, JsonRpcError> {
     let library_id = params.as_ref().and_then(|p| p["libraryId"].as_str()).map(str::to_owned);
     let provider = require_provider(state).await?;
-    let genres = provider
+    let mut genres = provider
         .list_genres(library_id.as_deref())
         .await
         .map_err(provider_error_to_rpc)?;
+
+    // Enrich genres without cover art: fetch first track's art in parallel
+    let needs_art: Vec<(usize, String)> = genres
+        .iter()
+        .enumerate()
+        .filter(|(_, g)| g.cover_art_id.is_none())
+        .map(|(i, g)| (i, g.id.clone()))
+        .collect();
+
+    if !needs_art.is_empty() {
+        let art_futures: Vec<_> = needs_art
+            .iter()
+            .map(|(_, genre_id)| {
+                let p = provider.clone();
+                let id = genre_id.clone();
+                async move {
+                    p.get_genre_tracks(&id, 0, 1)
+                        .await
+                        .ok()
+                        .and_then(|(tracks, _)| tracks.into_iter().next())
+                        .and_then(|t| t.cover_art_id)
+                }
+            })
+            .collect();
+
+        let art_results = futures::future::join_all(art_futures).await;
+        for ((idx, _), art) in needs_art.iter().zip(art_results) {
+            genres[*idx].cover_art_id = art;
+        }
+    }
+
     let total = genres.len() as u64;
     Ok(serde_json::json!({ "genres": genres, "total": total }))
 }
@@ -1445,6 +1476,13 @@ async fn provider_sync_items_for_id(
         return Ok((tracks, None));
     }
 
+    if let Ok((tracks, _)) = provider.get_genre_tracks(item_id, 0, 10_000).await {
+        return Ok((
+            tracks.iter().map(provider_song_to_desired_item).collect(),
+            None,
+        ));
+    }
+
     Err(JsonRpcError {
         code: ERR_CONNECTION_FAILED,
         message: format!("Sync aborted: Failed to fetch item {item_id}: Not found"),
@@ -2054,6 +2092,27 @@ async fn handle_sync_calculate_delta(
                     let is_playlist = item.item_type == "Playlist";
                     let item_id = item.id.clone();
                     let item_name = item.name.clone();
+
+                    // Genre items use GenreIds query — ParentId expansion via get_child_items_with_sizes doesn't work for Jellyfin genre entities
+                    if item.item_type == "Genre" {
+                        match state
+                            .jellyfin_client
+                            .get_songs_by_genre(&url, &token, &user_id, &item_id, 0, 10_000)
+                            .await
+                        {
+                            Ok(response) => {
+                                for track in response.items {
+                                    if is_downloadable_item_type(&track.item_type) {
+                                        results.push(Ok(to_desired_item(track)));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                results.push(Err(format!("Failed to expand genre {item_id}: {e}")));
+                            }
+                        }
+                        continue;
+                    }
 
                     match state
                         .jellyfin_client
