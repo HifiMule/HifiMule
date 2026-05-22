@@ -88,14 +88,22 @@ All server communication is routed through the `MediaProvider` trait:
 pub trait MediaProvider: Send + Sync {
     async fn list_libraries(&self) -> Result<Vec<Library>, ProviderError>;
     async fn list_artists(&self, library_id: Option<&str>) -> Result<Vec<Artist>, ProviderError>;
-    async fn get_artist(&self, id: &str) -> Result<ArtistWithAlbums, ProviderError>;
-    async fn get_album(&self, id: &str) -> Result<AlbumWithTracks, ProviderError>;
-    async fn search(&self, query: &str) -> Result<SearchResult, ProviderError>;
-    fn download_url(&self, track_id: &str, profile: &TranscodeProfile) -> Result<Url, ProviderError>;
-    fn cover_art_url(&self, item_id: &str, size: u32) -> Result<Url, ProviderError>;
+    async fn get_artist(&self, artist_id: &str) -> Result<ArtistWithAlbums, ProviderError>;
+    async fn list_albums(&self, library_id: Option<&str>) -> Result<Vec<Album>, ProviderError>;
+    async fn get_album(&self, album_id: &str) -> Result<AlbumWithTracks, ProviderError>;
     async fn list_playlists(&self) -> Result<Vec<Playlist>, ProviderError>;
-    async fn get_playlist(&self, id: &str) -> Result<PlaylistWithTracks, ProviderError>;
-    async fn changes_since(&self, since: SystemTime) -> Result<Vec<ChangeEvent>, ProviderError>;
+    async fn get_playlist(&self, playlist_id: &str) -> Result<PlaylistWithTracks, ProviderError>;
+    async fn list_genres(&self, library_id: Option<&str>) -> Result<Vec<Genre>, ProviderError>;
+    async fn get_genre_tracks(&self, genre_id_or_name: &str) -> Result<Vec<Song>, ProviderError>;
+    async fn list_recently_added(&self, library_id: Option<&str>, limit: u32, offset: u32) -> Result<Vec<Song>, ProviderError>;
+    async fn list_frequently_played(&self, library_id: Option<&str>, limit: u32, offset: u32) -> Result<Vec<Song>, ProviderError>;
+    async fn list_recently_played(&self, library_id: Option<&str>, limit: u32, offset: u32) -> Result<Vec<Song>, ProviderError>;
+    async fn list_favorites(&self, library_id: Option<&str>, limit: u32, offset: u32) -> Result<Vec<Song>, ProviderError>;
+    async fn search(&self, query: &str) -> Result<SearchResult, ProviderError>;
+    async fn download_url(&self, song_id: &str, profile: Option<&TranscodeProfile>) -> Result<String, ProviderError>;
+    async fn cover_art_url(&self, cover_art_id: &str) -> Result<String, ProviderError>;
+    async fn changes_since(&self, token: Option<&str>) -> Result<Vec<ChangeEvent>, ProviderError>;
+    async fn scrobble(&self, request: ScrobbleRequest) -> Result<(), ProviderError>;
     fn server_type(&self) -> ServerType;
     fn capabilities(&self) -> &Capabilities;
 }
@@ -103,7 +111,7 @@ pub trait MediaProvider: Send + Sync {
 pub enum ServerType { Jellyfin, Subsonic }
 ```
 
-Domain types (`Song`, `Album`, `Artist`, `Playlist`) live in `domain/models.rs` — independent of API DTOs. DTOs map to domain types via `From` conversions at the adapter boundary.
+Domain types (`Song`, `Album`, `Artist`, `Playlist`, `Genre`) live in `domain/models.rs` — independent of API DTOs. DTOs map to domain types via `From` conversions at the adapter boundary.
 
 **Key normalization rules:**
 - All IDs: `String` (Navidrome uses MD5 hashes — never `i64`/`u64`)
@@ -296,9 +304,17 @@ Level-specific `browse.*` methods expose the provider hierarchy to the UI. Each 
 | `browse.listLibraries` | — | `{ libraries: Library[] }` |
 | `browse.listArtists` | `{ libraryId?: string, letter?: string }` | `{ artists: Artist[], total: number }` |
 | `browse.getArtist` | `{ artistId: string }` | `{ artist: Artist, albums: Album[] }` |
+| `browse.listAlbums` | `{ libraryId?: string, startIndex?: number, limit?: number }` | `{ albums: Album[], total: number }` |
 | `browse.getAlbum` | `{ albumId: string }` | `{ album: Album, tracks: Track[] }` |
 | `browse.listPlaylists` | — | `{ playlists: Playlist[] }` |
 | `browse.getPlaylist` | `{ playlistId: string }` | `{ playlist: Playlist, tracks: Track[] }` |
+| `browse.listModes` | — | `{ modes: BrowseMode[] }` |
+| `browse.listGenres` | `{ libraryId?: string, startIndex?: number, limit?: number }` | `{ genres: Genre[], total: number }` |
+| `browse.getGenre` | `{ genreIdOrName: string, startIndex?: number, limit?: number }` | `{ genre: Genre, tracks: Track[], total: number }` |
+| `browse.listRecentlyAdded` | `{ libraryId?: string, startIndex?: number, limit?: number }` | `{ tracks: Track[], total: number }` |
+| `browse.listFrequentlyPlayed` | `{ libraryId?: string, startIndex?: number, limit?: number }` | `{ tracks: Track[], total: number }` |
+| `browse.listRecentlyPlayed` | `{ libraryId?: string, startIndex?: number, limit?: number }` | `{ tracks: Track[], total: number }` |
+| `browse.listFavorites` | `{ libraryId?: string, startIndex?: number, limit?: number }` | `{ tracks: Track[], total: number }` |
 
 **Response shapes (camelCase per IPC naming convention):**
 ```typescript
@@ -308,9 +324,16 @@ type Album    = { id: string; name: string; artistId: string; artistName: string
                   year: number | null; trackCount: number; coverArtId: string | null }
 type Track    = { id: string; title: string; artistName: string; albumName: string;
                   trackNumber: number | null; duration: number; bitrateKbps: number | null;
-                  coverArtId: string | null; sizeBytes: number | null }
+                  coverArtId: string | null; sizeBytes: number | null;
+                  dateAdded?: string | null; lastPlayedAt?: string | null;
+                  playCount?: number | null; isFavorite?: boolean | null }
 type Playlist = { id: string; name: string; trackCount: number; durationSeconds: number }
+type Genre    = { id: string; name: string; trackCount: number | null; coverArtId: string | null }
+type BrowseMode = "artists" | "albums" | "playlists" | "genres" |
+                  "recentlyAdded" | "frequentlyPlayed" | "recentlyPlayed" | "favorites"
 ```
+
+`browse.listModes` is capability-driven. The daemon returns only modes that the active provider can service reliably. The UI must hide unsupported modes instead of issuing requests that are expected to fail.
 
 ### Subsonic Library Level
 

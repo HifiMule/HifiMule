@@ -20,7 +20,7 @@ FR4: Read persistent hardware identifiers to link devices across different sessi
 FR5: Configure Jellyfin server credentials (URL, username, token).
 FR6: Select a specific Jellyfin user profile for syncing.
 FR7: Maintain a persistent, encrypted connection state to the Jellyfin server.
-FR8: Browse Jellyfin Playlists, Genres, and Artists within the UI.
+FR8: Browse server-supported music navigation modes within the UI: Playlists, Artists, Albums, Genres, Recently Added, Frequently Played, Recently Played, and Favorites.
 FR9: Select specific playlists or entities for synchronization.
 FR10: Report real-time storage availability on the target device.
 FR11: View a preview of "Proposed Changes" (files to add, remove, or update) before starting a sync.
@@ -76,7 +76,7 @@ FR4: Epic 2 - Persistent Hardware ID
 FR5: Epic 2 - Server Credential Entry
 FR6: Epic 2 - User Profile Select
 FR7: Epic 2 - Persistent Server Token (Keyring)
-FR8: Epic 3 - Jellyfin Library Browser
+FR8: Epic 3 - Jellyfin Library Browser; Epic 9 - Rich Library Navigation
 FR9: Epic 3 - Entity Selection Logic
 FR10: Epic 3 - Real-time Disk Projection
 FR11: Epic 3 - Staging Basket (Live Diff)
@@ -419,8 +419,8 @@ Develop the high-confidence Library Browser and Selection Basket with storage pr
 ### Story 3.1: Immersive Media Browser (Multi-Server Integration)
 
 As a Ritualist (Arthur),
-I want to browse my Jellyfin playlists and albums with high-quality artwork,
-So that I can enjoy the curation process as I do on the server.
+I want to browse my media server library through familiar music views such as Artists, Albums, Playlists, Genres, Recently Added, Frequently Played, Recently Played, and Favorites,
+So that HifiMule feels like a curation surface for my server rather than only an artist/album tree.
 
 **Acceptance Criteria:**
 
@@ -428,11 +428,15 @@ So that I can enjoy the curation process as I do on the server.
 **When** I open the main UI
 **Then** I see the "Vibrant Hub" layout with paginated album art grids.
 **And** items already on the device are marked with a "Synced" badge.
+**And** the Library Browser exposes provider-supported browse modes in a stable navigation control.
 
 **Given** a Subsonic/Navidrome server is connected
 **When** the Library Browser loads
 **Then** artists are fetched via `provider.list_artists()` and albums via `provider.get_artist()`.
 **And** the browse hierarchy (Library → Artist → Album → Tracks) works identically regardless of server type.
+**And** hierarchical modes preserve breadcrumb navigation, synced badges, artwork, pagination, and add-to-basket behavior.
+**And** history and favorites modes display music-only results sorted by the matching server metadata.
+**And** unsupported modes are hidden or marked unavailable based on provider capabilities.
 **And** cover art is fetched via `provider.cover_art_url()` — for Subsonic, uses the song's `coverArt` field (not the song ID directly).
 
 **Technical Notes:**
@@ -1560,3 +1564,128 @@ So that a new track added to an album I have synced is picked up on the next inc
 - `SubsonicProvider.changes_since()`: when `getIndexes` returns "not modified", re-fetch all albums in the current manifest and compare song lists (by count + track IDs)
 - No ETag equivalent in Subsonic — compare `size` + `contentType` + `suffix` as a change signal
 - This story can be implemented in parallel with Story 8.3
+
+## Epic 9: Rich Library Navigation
+
+Expand the Library Browser from artist/album hierarchy into a Jellyfin-like curation surface with provider-supported navigation modes for genres, recently added, frequently played, recently played, and favorites.
+
+### Story 9.1: Provider Browse Modes and Capability Contract
+
+As a System Admin (Alexis),
+I want the daemon provider layer to expose supported browse modes explicitly,
+So that the UI can show Jellyfin-like navigation without hardcoding server-specific API behavior.
+
+**Acceptance Criteria:**
+
+**Given** a provider is connected
+**When** the UI requests available browse modes
+**Then** the daemon returns the modes supported by that provider: artists, albums, playlists, genres, recentlyAdded, frequentlyPlayed, recentlyPlayed, favorites.
+
+**Given** a browse mode is unsupported by the active provider
+**Then** the UI does not offer it as an active navigation path.
+
+**Given** browse data is requested
+**Then** all calls go through `Arc<dyn MediaProvider>` and no UI or RPC handler constructs server-specific URLs directly.
+
+**Technical Notes:**
+- Extend domain models with `Genre` and optional browse metadata fields such as `dateAdded`, `lastPlayedAt`, `playCount`, and `isFavorite`.
+- Extend `Capabilities` or add `BrowseCapabilities` with boolean support per mode.
+- Add explicit trait methods rather than a generic string dispatch:
+  - `list_genres(library_id: Option<&str>)`
+  - `get_genre_tracks(genre_id_or_name: &str)`
+  - `list_recently_added(library_id: Option<&str>, limit: u32, offset: u32)`
+  - `list_frequently_played(library_id: Option<&str>, limit: u32, offset: u32)`
+  - `list_recently_played(library_id: Option<&str>, limit: u32, offset: u32)`
+  - `list_favorites(library_id: Option<&str>, limit: u32, offset: u32)`
+- Preserve the architecture rule that server API details stay inside `providers/`.
+
+### Story 9.2: Browse Mode Navigation UI
+
+As a Ritualist (Arthur),
+I want a clear browse-mode control in the Library Browser,
+So that I can switch between Artists, Albums, Playlists, Genres, Recently Added, Frequently Played, Recently Played, and Favorites without losing basket context.
+
+**Acceptance Criteria:**
+
+**Given** the main UI is open and a server is connected
+**When** supported browse modes are returned by the daemon
+**Then** the Library Browser renders them as a compact tab or segmented navigation control.
+
+**Given** I switch browse modes
+**Then** the current basket remains unchanged and the library content refreshes to the selected mode.
+
+**Given** I browse into a hierarchical item
+**Then** breadcrumbs continue to work within that mode.
+
+**Given** I return to a previous browse mode
+**Then** scroll and page cache restore for that mode when valid.
+
+**Given** no device is selected
+**Then** add buttons are disabled in every browse mode.
+
+**Technical Notes:**
+- Refactor `library.ts` state to include `browseMode`.
+- Cache key should include both browse mode and parent ID, e.g. `${browseMode}:${parentId ?? 'root'}`.
+- Keep artist quick-nav, and consider applying the same pattern to genres if result count is large.
+- Preserve existing `MediaCard` selection overlay and synced badge behavior.
+
+### Story 9.3: Genre Browsing and Genre Entity Basket Item
+
+As a Ritualist (Arthur),
+I want to browse by genre and add a genre to the basket as a single entity,
+So that my device can receive a dynamic genre-based selection without manually picking every album.
+
+**Acceptance Criteria:**
+
+**Given** the active provider supports genres
+**When** I open the Genres browse mode
+**Then** I see a music-only list/grid of genres.
+
+**Given** I click a genre
+**Then** I can view the tracks or albums associated with that genre.
+
+**Given** I click (+) on a genre
+**Then** a single Genre card is added to the basket.
+
+**Given** sync starts with a Genre card in the basket
+**Then** the daemon resolves the current track list for that genre at sync time.
+
+**Given** artist, album, playlist, track, and genre selections overlap
+**Then** duplicates are removed during sync planning.
+
+**Technical Notes:**
+- Add `BasketItem.type: 'MusicGenre'`.
+- Use the existing Artist entity pattern as the model.
+- Genre entity size and track count may be estimates at add time, then resolved exactly at sync time.
+
+### Story 9.4: History and Favorites Browse Modes
+
+As a Convenience Seeker (Sarah),
+I want quick access to Recently Added, Frequently Played, Recently Played, and Favorites,
+So that I can build a device basket from the music I am most likely to want offline.
+
+**Acceptance Criteria:**
+
+**Given** the active provider supports Recently Added
+**When** I open Recently Added
+**Then** the newest music items are shown first.
+
+**Given** the active provider supports Frequently Played
+**When** I open Frequently Played
+**Then** items are sorted by server play count descending.
+
+**Given** the active provider supports Recently Played
+**When** I open Recently Played
+**Then** items are sorted by last played date descending.
+
+**Given** the active provider supports Favorites
+**When** I open Favorites
+**Then** favorited music items are shown.
+
+**Given** a mode returns tracks directly
+**Then** track cards can be added to the basket with existing metadata and size calculation behavior.
+
+**Technical Notes:**
+- Keep these as manual browse result views, not dynamic basket slots.
+- Auto-Fill remains the only dynamic priority slot for this change.
+- Display relevant metadata when available: play count, last played date, date added, favorite state.

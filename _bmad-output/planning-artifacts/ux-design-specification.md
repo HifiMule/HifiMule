@@ -74,7 +74,7 @@ graph TD
 
 ### 5.1 Foundation Components
 *   **Library Grid:** Uses Shoelace `<sl-card>` with custom aspect-ratio tokens for album art.
-*   **Navigation:** Vertical sidebar using `<sl-tree>` for folder exploration and `<sl-tab-group>` for views.
+*   **Navigation:** The Library Browser includes a compact browse-mode control for server-supported views: Artists, Albums, Playlists, Genres, Recently Added, Frequently Played, Recently Played, and Favorites. Hierarchical modes use breadcrumbs; smart/history modes use sorted music grids or lists with relevant metadata. Unsupported provider modes are hidden or unavailable based on daemon capabilities.
 
 ### 5.2 Custom Components
 *   **The Sync Basket:** A real-time "Staging Area" component that calculates literal disk bytes based on transcoding rules.

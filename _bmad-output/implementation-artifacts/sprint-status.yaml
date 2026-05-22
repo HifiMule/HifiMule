@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-05-11  # Story 6.7 review complete, set to done
+last_updated: 2026-05-22  # Correct Course approved Rich Library Navigation, Epic 9 added to backlog
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -117,3 +117,9 @@ development_status:
   8-4-runtime-server-type-detection-factory: done
   8-5-subsonic-url-credential-sanitization: done
   8-6-incremental-sync-subsonic-album-level-fallback: done
+
+  epic-9: backlog
+  9-1-provider-browse-modes-and-capability-contract: backlog
+  9-2-browse-mode-navigation-ui: backlog
+  9-3-genre-browsing-and-genre-entity-basket-item: backlog
+  9-4-history-and-favorites-browse-modes: backlog

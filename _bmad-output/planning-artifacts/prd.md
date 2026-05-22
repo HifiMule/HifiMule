@@ -61,7 +61,7 @@ workflowType: 'prd'
 ## User Journeys
 
 ### Arthur's Weekly Ritual (Legacy Success)
-*   **Narrative:** Every Saturday morning, Arthur plugs his beloved 160GB iPod Classic into his Linux desktop. The headless HifiMule engine detects the mount instantly. Arthur opens the UI, which automatically highlights 50 new tracks in his "Recently Added" Jellyfin playlist. He clicks "Sync".
+*   **Narrative:** Every Saturday morning, Arthur plugs his beloved 160GB iPod Classic into his Linux desktop. The headless HifiMule engine detects the mount instantly. Arthur opens the UI, switches to Recently Added, reviews the newest music from his server, and adds selected albums or tracks to the basket. He clicks "Sync".
 *   **Success Moment:** The sync completes in under 20 seconds using the pre-calculated manifest. Arthur ejects the device, confident that his manual "Voice Memos" folder remains untouched.
 
 ### Sarah's Pre-Run Dash (Speed Success)
@@ -155,7 +155,7 @@ As a cross-platform desktop application, HifiMule consists of a performance-crit
 - **FR7:** The system can maintain a persistent, encrypted connection state to the configured media server. For Jellyfin, the access token is stored. For Subsonic/OpenSubsonic, the user password is stored (encrypted) and used to sign each request stateless-style.
 
 ### 3. Content Selection & Browsing
-- **FR8:** Users can browse server Playlists, Artists, and Albums from the connected media server, regardless of server type. The provider abstraction normalizes the library tree across Jellyfin (unified `/Items` query) and Subsonic (method-per-level: `getArtists` → `getArtist` → `getAlbum`).
+- **FR8:** Users can browse music from the connected media server through server-supported navigation modes: Playlists, Artists, Albums, Genres, Recently Added, Frequently Played, Recently Played, and Favorites. The provider abstraction normalizes these browse modes across Jellyfin, Navidrome, Subsonic, and OpenSubsonic-compatible servers. Unsupported modes are hidden or clearly unavailable based on provider capabilities.
 - **FR9:** Users can select specific playlists or entities for synchronization.
 - **FR10:** The system can report real-time storage availability on the target device.
 - **FR11:** Users can see a preview of "Proposed Changes" (files to add, remove, or update) before starting a sync.
