@@ -624,10 +624,12 @@ pub(crate) fn song_from_item(item: JellyfinItem) -> Song {
 
 pub(crate) fn genre_from_item(item: JellyfinItem) -> Genre {
     let cover_art_id = cover_art_id(&item);
+    // /MusicGenres returns SongCount; /Genres (legacy) returns RecursiveItemCount
+    let song_count = item.song_count.or(item.recursive_item_count);
     Genre {
         id: item.id,
         name: item.name,
-        song_count: item.recursive_item_count,
+        song_count,
         cover_art_id,
     }
 }
@@ -739,6 +741,7 @@ mod tests {
             container: None,
             production_year: None,
             recursive_item_count: None,
+            song_count: None,
             cumulative_run_time_ticks: None,
             run_time_ticks: Some(215_000_0000),
             bitrate: Some(1_411_200),
@@ -785,6 +788,7 @@ mod tests {
             container: None,
             production_year: None,
             recursive_item_count: None,
+            song_count: None,
             cumulative_run_time_ticks: None,
             run_time_ticks: None,
             bitrate: None,
@@ -1326,7 +1330,7 @@ mod tests {
             .match_header("X-Emby-Token", TOKEN)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"Items":[{"Id":"genre1","Name":"Rock","Type":"MusicGenre","RecursiveItemCount":42,"ImageTags":{"Primary":"abc123"}}],"TotalRecordCount":1,"StartIndex":0}"#)
+            .with_body(r#"{"Items":[{"Id":"genre1","Name":"Rock","Type":"MusicGenre","SongCount":42,"ImageTags":{"Primary":"abc123"}}],"TotalRecordCount":1,"StartIndex":0}"#)
             .create_async()
             .await;
 

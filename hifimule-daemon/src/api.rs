@@ -113,6 +113,8 @@ pub struct JellyfinItem {
     #[serde(default)]
     pub recursive_item_count: Option<u32>,
     #[serde(default)]
+    pub song_count: Option<u32>,
+    #[serde(default)]
     pub cumulative_run_time_ticks: Option<u64>,
     #[serde(default)]
     pub run_time_ticks: Option<u64>,

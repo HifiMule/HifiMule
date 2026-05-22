@@ -235,6 +235,7 @@ mod tests {
             container: None,
             production_year: None,
             recursive_item_count: None,
+            song_count: None,
             cumulative_run_time_ticks: None,
             run_time_ticks: None,
             bitrate: None,
