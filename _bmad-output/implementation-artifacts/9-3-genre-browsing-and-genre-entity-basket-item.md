@@ -1,6 +1,6 @@
 # Story 9.3: Genre Browsing and Genre Entity Basket Item
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -198,6 +198,12 @@ so that my device can receive a dynamic genre-based selection without manually p
   - [ ] Smoke test: add a genre card to basket, verify it appears as Genre card in BasketSidebar (not the default image card)
   - [ ] Smoke test: verify basket toggle button on genre card in library browser is enabled (not greyed out) when a device is selected
   - [ ] Smoke test: verify basket toggle is still CSS-locked (greyed out via `.device-locked`) when no device is selected — this is handled by the existing CSS rule, NOT by `selEnabled`
+
+### Review Findings
+
+- [x] [Review][Patch] Genre sync caps expansion at 10,000 tracks despite "full track list" AC [`hifimule-daemon/src/rpc.rs:1479`]
+- [x] [Review][Patch] Genre browse cover-art enrichment fans out unbounded provider calls [`hifimule-daemon/src/rpc.rs:622`]
+- [x] [Review][Patch] Genre basket icon/card lacks matching artist-card styling [`hifimule-ui/src/components/BasketSidebar.ts:1162`]
 
 ## Dev Notes
 

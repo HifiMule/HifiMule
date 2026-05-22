@@ -1,8 +1,8 @@
 use crate::api::{CredentialManager, JellyfinClient};
 use crate::domain::models::{Album, Artist, ChangeType, ItemType, Library, Playlist, Song};
 use crate::providers::{
-    server_type_slug, CredentialKind, MediaProvider, ProviderCredentials, ProviderError, ServerType,
-    ServerTypeHint, SUBSONIC_PLAYLISTS_LIBRARY_ID,
+    server_type_slug, CredentialKind, MediaProvider, ProviderCredentials, ProviderError,
+    ServerType, ServerTypeHint, SUBSONIC_PLAYLISTS_LIBRARY_ID,
 };
 use axum::{
     extract::{Path, State},
@@ -35,6 +35,9 @@ const ERR_STORAGE_ERROR: i32 = -3;
 const ERR_NOT_FOUND: i32 = -4;
 const ERR_UNSUPPORTED_CAPABILITY: i32 = -5;
 const JELLYFIN_TICKS_PER_SECOND: u64 = 10_000_000;
+const GENRE_TRACK_PAGE_SIZE: u32 = 500;
+const GENRE_TRACK_MAX_PAGES: u32 = 200;
+const GENRE_ART_ENRICHMENT_BATCH_SIZE: usize = 8;
 
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
@@ -627,24 +630,26 @@ async fn handle_browse_list_genres(
         .collect();
 
     if !needs_art.is_empty() {
-        let art_futures: Vec<_> = needs_art
-            .iter()
-            .map(|(_, genre_id)| {
-                let p = provider.clone();
-                let id = genre_id.clone();
-                async move {
-                    p.get_genre_tracks(&id, 0, 1)
-                        .await
-                        .ok()
-                        .and_then(|(tracks, _)| tracks.into_iter().next())
-                        .and_then(|t| t.cover_art_id)
-                }
-            })
-            .collect();
+        for batch in needs_art.chunks(GENRE_ART_ENRICHMENT_BATCH_SIZE) {
+            let art_futures: Vec<_> = batch
+                .iter()
+                .map(|(_, genre_id)| {
+                    let p = provider.clone();
+                    let id = genre_id.clone();
+                    async move {
+                        p.get_genre_tracks(&id, 0, 1)
+                            .await
+                            .ok()
+                            .and_then(|(tracks, _)| tracks.into_iter().next())
+                            .and_then(|t| t.cover_art_id)
+                    }
+                })
+                .collect();
 
-        let art_results = futures::future::join_all(art_futures).await;
-        for ((idx, _), art) in needs_art.iter().zip(art_results) {
-            genres[*idx].cover_art_id = art;
+            let art_results = futures::future::join_all(art_futures).await;
+            for ((idx, _), art) in batch.iter().zip(art_results) {
+                genres[*idx].cover_art_id = art;
+            }
         }
     }
 
@@ -1421,6 +1426,56 @@ fn provider_song_to_desired_item(song: &Song) -> crate::sync::DesiredItem {
     }
 }
 
+async fn provider_genre_sync_items_for_id(
+    provider: Arc<dyn MediaProvider>,
+    item_id: &str,
+) -> Result<Option<Vec<crate::sync::DesiredItem>>, JsonRpcError> {
+    let mut desired_items = Vec::new();
+    let mut start_index = 0;
+
+    for page_index in 0..GENRE_TRACK_MAX_PAGES {
+        let tracks = match provider
+            .get_genre_tracks(item_id, start_index, GENRE_TRACK_PAGE_SIZE)
+            .await
+        {
+            Ok((tracks, _)) => tracks,
+            Err(ProviderError::UnsupportedCapability(_)) if desired_items.is_empty() => {
+                return Ok(None);
+            }
+            Err(ProviderError::NotFound { .. }) if desired_items.is_empty() => {
+                return Ok(None);
+            }
+            Err(error) => return Err(provider_error_to_rpc(error)),
+        };
+
+        let fetched = tracks.len() as u32;
+        if fetched == 0 {
+            break;
+        }
+
+        desired_items.extend(tracks.iter().map(provider_song_to_desired_item));
+
+        if fetched < GENRE_TRACK_PAGE_SIZE {
+            break;
+        }
+
+        if page_index + 1 >= GENRE_TRACK_MAX_PAGES {
+            return Err(JsonRpcError {
+                code: ERR_CONNECTION_FAILED,
+                message: format!(
+                    "Sync aborted: Genre {item_id} exceeded pagination guard after {} tracks",
+                    desired_items.len()
+                ),
+                data: None,
+            });
+        }
+
+        start_index = start_index.saturating_add(fetched);
+    }
+
+    Ok(Some(desired_items))
+}
+
 async fn provider_sync_items_for_id(
     provider: Arc<dyn MediaProvider>,
     item_id: &str,
@@ -1476,11 +1531,8 @@ async fn provider_sync_items_for_id(
         return Ok((tracks, None));
     }
 
-    if let Ok((tracks, _)) = provider.get_genre_tracks(item_id, 0, 10_000).await {
-        return Ok((
-            tracks.iter().map(provider_song_to_desired_item).collect(),
-            None,
-        ));
+    if let Some(tracks) = provider_genre_sync_items_for_id(provider.clone(), item_id).await? {
+        return Ok((tracks, None));
     }
 
     Err(JsonRpcError {
@@ -2095,20 +2147,67 @@ async fn handle_sync_calculate_delta(
 
                     // Genre items use GenreIds query — ParentId expansion via get_child_items_with_sizes doesn't work for Jellyfin genre entities
                     if item.item_type == "Genre" {
-                        match state
-                            .jellyfin_client
-                            .get_songs_by_genre(&url, &token, &user_id, &item_id, 0, 10_000)
-                            .await
-                        {
-                            Ok(response) => {
-                                for track in response.items {
-                                    if is_downloadable_item_type(&track.item_type) {
-                                        results.push(Ok(to_desired_item(track)));
+                        let mut start_index = 0;
+                        let mut total_record_count: Option<u32> = None;
+
+                        for page_index in 0..GENRE_TRACK_MAX_PAGES {
+                            match state
+                                .jellyfin_client
+                                .get_songs_by_genre(
+                                    &url,
+                                    &token,
+                                    &user_id,
+                                    &item_id,
+                                    start_index,
+                                    GENRE_TRACK_PAGE_SIZE,
+                                )
+                                .await
+                            {
+                                Ok(response) => {
+                                    let fetched = response.items.len() as u32;
+                                    let total = *total_record_count
+                                        .get_or_insert(response.total_record_count);
+
+                                    if fetched == 0 {
+                                        if total > 0 && start_index < total {
+                                            results.push(Err(format!(
+                                                "Failed to expand genre {item_id}: empty page at offset {start_index} before total {total}"
+                                            )));
+                                        }
+                                        break;
                                     }
+
+                                    for track in response.items {
+                                        if is_downloadable_item_type(&track.item_type) {
+                                            results.push(Ok(to_desired_item(track)));
+                                        }
+                                    }
+
+                                    let next_index = start_index.saturating_add(fetched);
+                                    let reached_end = if total > 0 {
+                                        next_index >= total
+                                    } else {
+                                        fetched < GENRE_TRACK_PAGE_SIZE
+                                    };
+                                    if reached_end {
+                                        break;
+                                    }
+
+                                    if page_index + 1 >= GENRE_TRACK_MAX_PAGES {
+                                        results.push(Err(format!(
+                                            "Failed to expand genre {item_id}: exceeded pagination guard after {next_index} tracks"
+                                        )));
+                                        break;
+                                    }
+
+                                    start_index = next_index;
                                 }
-                            }
-                            Err(e) => {
-                                results.push(Err(format!("Failed to expand genre {item_id}: {e}")));
+                                Err(e) => {
+                                    results.push(Err(format!(
+                                        "Failed to expand genre {item_id}: {e}"
+                                    )));
+                                    break;
+                                }
                             }
                         }
                         continue;
@@ -6090,6 +6189,7 @@ mod tests {
     struct FakeBrowseProvider {
         modes: Vec<crate::providers::BrowseMode>,
         genres: Vec<crate::domain::models::Genre>,
+        genre_tracks: HashMap<String, Vec<crate::domain::models::Song>>,
     }
 
     impl FakeBrowseProvider {
@@ -6097,7 +6197,24 @@ mod tests {
             modes: Vec<crate::providers::BrowseMode>,
             genres: Vec<crate::domain::models::Genre>,
         ) -> Arc<Self> {
-            Arc::new(Self { modes, genres })
+            Arc::new(Self {
+                modes,
+                genres,
+                genre_tracks: HashMap::new(),
+            })
+        }
+
+        fn with_genre_tracks(
+            genre_id: &str,
+            tracks: Vec<crate::domain::models::Song>,
+        ) -> Arc<Self> {
+            let mut genre_tracks = HashMap::new();
+            genre_tracks.insert(genre_id.to_string(), tracks);
+            Arc::new(Self {
+                modes: vec![crate::providers::BrowseMode::Genres],
+                genres: vec![],
+                genre_tracks,
+            })
         }
     }
 
@@ -6110,19 +6227,25 @@ mod tests {
             unimplemented!()
         }
         async fn get_artist(&self, _: &str) -> Result<crate::domain::models::ArtistWithAlbums, ProviderError> {
-            unimplemented!()
+            Err(ProviderError::UnsupportedCapability(
+                "fake provider has no artists".to_string(),
+            ))
         }
         async fn list_albums(&self, _: Option<&str>, _: Option<&str>, _: u32, _: u32) -> Result<(Vec<crate::domain::models::Album>, u32), ProviderError> {
             unimplemented!()
         }
         async fn get_album(&self, _: &str) -> Result<crate::domain::models::AlbumWithTracks, ProviderError> {
-            unimplemented!()
+            Err(ProviderError::UnsupportedCapability(
+                "fake provider has no albums".to_string(),
+            ))
         }
         async fn list_playlists(&self) -> Result<Vec<crate::domain::models::Playlist>, ProviderError> {
             unimplemented!()
         }
         async fn get_playlist(&self, _: &str) -> Result<crate::domain::models::PlaylistWithTracks, ProviderError> {
-            unimplemented!()
+            Err(ProviderError::UnsupportedCapability(
+                "fake provider has no playlists".to_string(),
+            ))
         }
         async fn search(&self, _: &str) -> Result<crate::domain::models::SearchResult, ProviderError> {
             unimplemented!()
@@ -6148,6 +6271,27 @@ mod tests {
             _library_id: Option<&str>,
         ) -> Result<Vec<crate::domain::models::Genre>, ProviderError> {
             Ok(self.genres.clone())
+        }
+        async fn get_genre_tracks(
+            &self,
+            genre_id_or_name: &str,
+            offset: u32,
+            limit: u32,
+        ) -> Result<(Vec<crate::domain::models::Song>, u32), ProviderError> {
+            let tracks =
+                self.genre_tracks
+                    .get(genre_id_or_name)
+                    .ok_or(ProviderError::NotFound {
+                        item_type: "Genre".to_string(),
+                        id: genre_id_or_name.to_string(),
+                    })?;
+            let page = tracks
+                .iter()
+                .skip(offset as usize)
+                .take(limit as usize)
+                .cloned()
+                .collect();
+            Ok((page, tracks.len() as u32))
         }
         fn server_type(&self) -> crate::providers::ServerType {
             crate::providers::ServerType::Jellyfin
@@ -6206,6 +6350,44 @@ mod tests {
         assert_eq!(result["total"], 1);
         assert_eq!(result["genres"][0]["id"], "rock");
         assert_eq!(result["genres"][0]["name"], "Rock");
+    }
+
+    #[tokio::test]
+    async fn provider_sync_items_for_id_paginates_genre_tracks() {
+        let track_count = GENRE_TRACK_PAGE_SIZE + 3;
+        let tracks = (0..track_count)
+            .map(|idx| crate::domain::models::Song {
+                id: format!("song-{idx}"),
+                title: format!("Track {idx}"),
+                artist_id: None,
+                artist_name: Some("Artist".to_string()),
+                album_id: Some("album-1".to_string()),
+                album_title: Some("Album".to_string()),
+                duration_seconds: 60,
+                bitrate_kbps: Some(320),
+                track_number: Some(idx + 1),
+                disc_number: Some(1),
+                cover_art_id: None,
+                date_added: None,
+                last_played_at: None,
+                play_count: None,
+                is_favorite: None,
+            })
+            .collect::<Vec<_>>();
+        let provider = FakeBrowseProvider::with_genre_tracks("rock", tracks);
+
+        let (items, playlist) =
+            provider_sync_items_for_id(provider as Arc<dyn MediaProvider>, "rock")
+                .await
+                .expect("genre should resolve");
+
+        assert!(playlist.is_none());
+        assert_eq!(items.len(), track_count as usize);
+        assert_eq!(items[0].jellyfin_id, "song-0");
+        assert_eq!(
+            items.last().map(|item| item.jellyfin_id.as_str()),
+            Some("song-502")
+        );
     }
 
     #[tokio::test]

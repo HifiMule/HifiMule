@@ -915,12 +915,14 @@ h2 {
   background: color-mix(in srgb, var(--sl-color-primary-100) 20%, transparent);
 }
 
-.basket-item-artist {
+.basket-item-artist,
+.basket-item-genre {
   border: 1.5px solid var(--sl-color-neutral-300);
   background: color-mix(in srgb, var(--sl-color-neutral-100) 30%, transparent);
 }
 
-.basket-item-artist-icon {
+.basket-item-artist-icon,
+.basket-item-genre-icon {
   width: 48px;
   height: 48px;
   display: flex;
