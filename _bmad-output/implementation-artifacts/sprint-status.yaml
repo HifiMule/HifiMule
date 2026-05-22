@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-05-22  # Story 9.2 context created; ready for dev
+last_updated: 2026-05-22  # Story 9.2 code review complete; device-lock fix applied
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -120,6 +120,6 @@ development_status:
 
   epic-9: in-progress
   9-1-provider-browse-modes-and-capability-contract: done
-  9-2-browse-mode-navigation-ui: review
+  9-2-browse-mode-navigation-ui: done
   9-3-genre-browsing-and-genre-entity-basket-item: backlog
   9-4-history-and-favorites-browse-modes: backlog

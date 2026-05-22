@@ -1,5 +1,4 @@
 import {
-    rpcCall,
     BrowseMode,
     BrowseArtist,
     BrowseAlbum,
@@ -61,8 +60,6 @@ let state: AppState = {
     albumViewTotal: 0,
     activeLetter: null,
 };
-
-let deviceSelected = false;
 
 function cacheKey(parentId?: string): string {
     return `${state.browseMode}:${parentId ?? 'root'}`;
@@ -310,8 +307,9 @@ function renderGrid(items: BrowseDisplayItem[]) {
 
     items.forEach(item => {
         // Genre container items have no basket toggle until Story 9.3
+        // Device lock is handled by BasketSidebar toggling #library-content.device-locked via CSS
         const isGenreContainer = item.type === 'MusicGenre';
-        const selEnabled = !isGenreContainer && deviceSelected;
+        const selEnabled = !isGenreContainer;
 
         const card = MediaCard.create(item, 'items', false, () => navigateToBrowseItem(item), selEnabled);
         card.setAttribute('data-name', item.name);
@@ -1070,12 +1068,7 @@ export async function initLibraryView() {
     }
 
     try {
-        const [daemonState, modesResult] = await Promise.all([
-            rpcCall('get_daemon_state'),
-            fetchBrowseModes(),
-        ]);
-
-        deviceSelected = !!daemonState.selectedDevicePath;
+        const modesResult = await fetchBrowseModes();
 
         state.availableModes = modesResult;
         const defaultMode: BrowseMode = modesResult.includes('artists')
