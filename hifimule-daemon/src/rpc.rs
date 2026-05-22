@@ -2137,6 +2137,12 @@ async fn handle_sync_calculate_delta(
         }
     };
 
+    crate::daemon_log!(
+        "[Delta] Calculating delta for {} item(s): {:?}",
+        item_ids.len(),
+        item_ids
+    );
+
     // Fetch item details from Jellyfin in chunks to avoid URL length limits.
     // Container items (playlist/album/artist) are expanded to individual tracks.
     let mut playlist_sync_items: Vec<crate::sync::PlaylistSyncItem> = Vec::new();
@@ -2151,6 +2157,12 @@ async fn handle_sync_calculate_delta(
             Ok(items) => {
                 let mut fetched_ids: HashSet<String> = HashSet::new();
                 for item in items {
+                    crate::daemon_log!(
+                        "[Delta] Resolved item '{}' (id={}, type={})",
+                        item.name,
+                        item.id,
+                        item.item_type
+                    );
                     fetched_ids.insert(item.id.clone());
 
                     if is_downloadable_item_type(&item.item_type) {
@@ -2162,12 +2174,25 @@ async fn handle_sync_calculate_delta(
                     let item_id = item.id.clone();
                     let item_name = item.name.clone();
 
-                    // Genre items use GenreIds query — ParentId expansion via get_child_items_with_sizes doesn't work for Jellyfin genre entities
-                    if item.item_type == "Genre" {
+                    // Genre items use GenreIds query — ParentId expansion via get_child_items_with_sizes doesn't work for Jellyfin genre entities.
+                    // Jellyfin returns genre items with ItemType "MusicGenre" (not "Genre"), so we match both.
+                    if matches!(item.item_type.as_str(), "Genre" | "MusicGenre") {
+                        crate::daemon_log!(
+                            "[Genre Sync] Expanding genre '{}' (id={}, type={})",
+                            item_name,
+                            item_id,
+                            item.item_type
+                        );
                         let mut start_index = 0;
                         let mut total_record_count: Option<u32> = None;
 
                         for page_index in 0..GENRE_TRACK_MAX_PAGES {
+                            crate::daemon_log!(
+                                "[Genre Sync] Fetching page {} for genre '{}' (offset={})",
+                                page_index,
+                                item_name,
+                                start_index
+                            );
                             match state
                                 .jellyfin_client
                                 .get_songs_by_genre(
@@ -2184,6 +2209,14 @@ async fn handle_sync_calculate_delta(
                                     let fetched = response.items.len() as u32;
                                     let total = *total_record_count
                                         .get_or_insert(response.total_record_count);
+
+                                    crate::daemon_log!(
+                                        "[Genre Sync] Page {}: got {}/{} tracks for genre '{}'",
+                                        page_index,
+                                        fetched,
+                                        total,
+                                        item_name
+                                    );
 
                                     if fetched == 0 {
                                         if total > 0 && start_index < total {
@@ -2207,6 +2240,11 @@ async fn handle_sync_calculate_delta(
                                         fetched < GENRE_TRACK_PAGE_SIZE
                                     };
                                     if reached_end {
+                                        crate::daemon_log!(
+                                            "[Genre Sync] Finished expanding genre '{}': {} tracks total",
+                                            item_name,
+                                            next_index
+                                        );
                                         break;
                                     }
 
@@ -2220,6 +2258,12 @@ async fn handle_sync_calculate_delta(
                                     start_index = next_index;
                                 }
                                 Err(e) => {
+                                    crate::daemon_log!(
+                                        "[Genre Sync] Error fetching page {} for genre '{}': {}",
+                                        page_index,
+                                        item_name,
+                                        e
+                                    );
                                     results.push(Err(format!(
                                         "Failed to expand genre {item_id}: {e}"
                                     )));
