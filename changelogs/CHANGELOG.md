@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.6.0 — 2026-05-22
+
+Eight browse modes are now available in the Library Browser: Artists, Albums, Playlists, Genres, Recently Added, Frequently Played, Recently Played, and Favorites. A compact tab bar at the top switches between them — only modes your server supports are shown. Genres can now be added to the sync basket as a single item; HifiMule resolves the full track list at sync time and removes duplicates automatically. Track cards in Frequently Played show the server play count, and Recently Played cards show the last-listened date. 
+
 ## v0.5.6 - 2026-05-20
 
 Rockbox scrobbling works again with the current `.rockbox/playback.log` format. HifiMule now reads the newer Rockbox log location, keeps compatibility with older `.scrobbler.log` files, matches plays against the files HifiMule synced to the device, and reports completed listens to Jellyfin using playback-session events. This should mean fewer missed scrobbles, fewer incorrect track matches, and more reliable Jellyfin play counts after listening on a Rockbox device.
