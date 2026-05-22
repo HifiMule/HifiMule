@@ -649,10 +649,13 @@ async fn handle_browse_list_genres(
         .map(str::to_owned);
     let (offset, limit) = browse_pagination(&params);
     let provider = require_provider(state).await?;
+
+    let t_list = std::time::Instant::now();
     let all_genres = provider
         .list_genres(library_id.as_deref())
         .await
         .map_err(provider_error_to_rpc)?;
+    tracing::debug!(ms = t_list.elapsed().as_millis(), "list_genres");
 
     let total = all_genres.len() as u64;
     let mut genres: Vec<_> = all_genres
@@ -669,7 +672,17 @@ async fn handle_browse_list_genres(
         .map(|(i, g)| (i, g.id.clone()))
         .collect();
 
+    tracing::debug!(
+        total,
+        page_size = genres.len(),
+        needs_art = needs_art.len(),
+        offset,
+        limit,
+        "browse.listGenres page"
+    );
+
     if !needs_art.is_empty() {
+        let t_art = std::time::Instant::now();
         let art_futures: Vec<_> = needs_art
             .iter()
             .map(|(_, genre_id)| {
@@ -686,6 +699,7 @@ async fn handle_browse_list_genres(
             .collect();
 
         let art_results = futures::future::join_all(art_futures).await;
+        tracing::debug!(ms = t_art.elapsed().as_millis(), count = needs_art.len(), "art enrichment");
         for ((idx, _), art) in needs_art.iter().zip(art_results) {
             genres[*idx].cover_art_id = art;
         }
