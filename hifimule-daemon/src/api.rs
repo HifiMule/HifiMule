@@ -267,7 +267,7 @@ impl JellyfinClient {
             HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
         );
 
-        let mut query_params = vec![];
+        let mut query_params = vec!["Recursive=true".to_string()];
         if let Some(parent) = parent_id {
             query_params.push(format!("ParentId={}", parent));
         }
@@ -1096,8 +1096,8 @@ impl JellyfinClient {
         .await
     }
 
-    /// Fetch audio items sorted by `DateCreated` descending (recently added).
-    pub async fn get_recently_added_songs(
+    /// Fetch albums sorted by `DateCreated` descending (recently added).
+    pub async fn get_recently_added_albums(
         &self,
         url: &str,
         token: &str,
@@ -1106,19 +1106,35 @@ impl JellyfinClient {
         offset: u32,
         limit: u32,
     ) -> Result<JellyfinItemsResponse> {
-        self.get_audio_items(
-            url,
-            token,
-            user_id,
-            library_id,
-            None,
-            Some("DateCreated"),
-            Some("Descending"),
-            None,
-            offset,
-            limit,
-        )
-        .await
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+        let mut query_params = vec![
+            format!("userId={}", user_id),
+            "IncludeItemTypes=MusicAlbum".to_string(),
+            "Recursive=true".to_string(),
+            format!("StartIndex={}", offset),
+            format!("Limit={}", limit),
+            "SortBy=DateCreated".to_string(),
+            "SortOrder=Descending".to_string(),
+        ];
+        if let Some(parent) = library_id {
+            query_params.push(format!("ParentId={}", parent));
+        }
+        let endpoint = format!(
+            "{}/Items?{}",
+            url.trim_end_matches('/'),
+            query_params.join("&")
+        );
+        let response = self.client.get(&endpoint).headers(headers).send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("Server returned status: {}", status));
+        }
+        Ok(serde_json::from_str::<JellyfinItemsResponse>(&text)?)
     }
 
     /// Fetch audio items sorted by `PlayCount` descending (frequently played).
@@ -1629,7 +1645,7 @@ mod tests {
         let token = "test-token-1234567890";
 
         let _mock = server
-            .mock("GET", "/Items?userId=user1&ParentId=lib1&IncludeItemTypes=MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo&Limit=50")
+            .mock("GET", "/Items?userId=user1&Recursive=true&ParentId=lib1&IncludeItemTypes=MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo&Limit=50")
             .match_header("X-Emby-Token", token)
             .with_status(200)
             .with_header("content-type", "application/json")

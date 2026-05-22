@@ -1,39 +1,56 @@
-import { rpcCall } from './rpc';
-import { MediaCard, JellyfinItem, JellyfinView } from './components/MediaCard';
+import {
+    rpcCall,
+    BrowseMode,
+    BrowseArtist,
+    BrowseAlbum,
+    BrowsePlaylist,
+    BrowseTrack,
+    BrowseGenre,
+    fetchBrowseModes,
+    fetchBrowseArtists,
+    fetchBrowseArtist,
+    fetchBrowseAlbums,
+    fetchBrowseAlbum,
+    fetchBrowsePlaylists,
+    fetchBrowsePlaylist,
+    fetchBrowseGenres,
+    fetchBrowseGenre,
+    fetchBrowseRecentlyAdded,
+    fetchBrowseFrequentlyPlayed,
+    fetchBrowseRecentlyPlayed,
+    fetchBrowseFavorites,
+} from './rpc';
+import { MediaCard, BrowseDisplayItem } from './components/MediaCard';
 
-const MUSIC_ITEM_TYPES = 'MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo';
-const ALLOWED_COLLECTION_TYPES = ['music', 'playlists'];
-
-interface JellyfinItemsResponse {
-    Items: JellyfinItem[];
-    TotalRecordCount: number;
-    StartIndex: number;
-}
-
-interface DeviceStatusMap {
-    syncedItemIds: string[];
-}
+const MODE_LABELS: Record<BrowseMode, string> = {
+    artists: 'Artists',
+    albums: 'Albums',
+    playlists: 'Playlists',
+    genres: 'Genres',
+    recentlyAdded: 'Recent',
+    frequentlyPlayed: 'Frequent',
+    recentlyPlayed: 'Recent Played',
+    favorites: 'Favorites',
+};
 
 interface AppState {
-    view: 'libraries' | 'items';
-    libraryId?: string; // Root library ID
-    parentId?: string; // Current folder ID
-    breadcrumbStack: { id: string, name: string }[];
-    items: JellyfinItem[];
-    pagination: {
-        startIndex: number;
-        limit: number;
-        total: number;
-    };
+    browseMode: BrowseMode;
+    availableModes: BrowseMode[];
+    parentId?: string;
+    breadcrumbStack: { id: string; name: string }[];
+    items: BrowseDisplayItem[];
+    pagination: { startIndex: number; limit: number; total: number };
     loading: boolean;
     scrollCache: Map<string, number>;
-    pageCache: Map<string, { items: JellyfinItem[]; total: number }>;
-    artistViewTotal: number; // Total MusicArtist count for the current parent; 0 when not in artist view
-    activeLetter: string | null; // Currently selected quick-nav letter, null = no filter
+    pageCache: Map<string, { items: BrowseDisplayItem[]; total: number }>;
+    artistViewTotal: number;
+    albumViewTotal: number;
+    activeLetter: string | null;
 }
 
 let state: AppState = {
-    view: 'libraries',
+    browseMode: 'artists',
+    availableModes: [],
     breadcrumbStack: [],
     items: [],
     pagination: { startIndex: 0, limit: 50, total: 0 },
@@ -41,33 +58,14 @@ let state: AppState = {
     scrollCache: new Map(),
     pageCache: new Map(),
     artistViewTotal: 0,
+    albumViewTotal: 0,
     activeLetter: null,
 };
 
-export async function fetchViews(): Promise<JellyfinView[]> {
-    return await rpcCall('jellyfin_get_views');
-}
+let deviceSelected = false;
 
-export async function fetchItems(
-    parentId?: string,
-    includeItemTypes?: string,
-    startIndex?: number,
-    limit: number = 50,
-    nameStartsWith?: string,
-    nameLessThan?: string,
-): Promise<JellyfinItemsResponse> {
-    return await rpcCall('jellyfin_get_items', {
-        parentId,
-        includeItemTypes,
-        startIndex,
-        limit,
-        ...(nameStartsWith !== undefined && { nameStartsWith }),
-        ...(nameLessThan !== undefined && { nameLessThan }),
-    });
-}
-
-export async function fetchDeviceStatusMap(): Promise<DeviceStatusMap> {
-    return await rpcCall('sync_get_device_status_map');
+function cacheKey(parentId?: string): string {
+    return `${state.browseMode}:${parentId ?? 'root'}`;
 }
 
 export function clearNavigationCache() {
@@ -77,19 +75,170 @@ export function clearNavigationCache() {
     state.items = [];
     state.pagination = { startIndex: 0, limit: 50, total: 0 };
     state.artistViewTotal = 0;
+    state.albumViewTotal = 0;
     state.activeLetter = null;
+    state.parentId = undefined;
+    // browseMode and availableModes are intentionally preserved
+}
+
+// --- Scroll helpers ---
+
+function saveScroll() {
+    const key = cacheKey(state.parentId);
+    const content = document.getElementById('library-content') as HTMLElement;
+    if (content) {
+        state.scrollCache.set(key, content.scrollTop);
+    }
+}
+
+function restoreScroll(key: string) {
+    const cachedScroll = state.scrollCache.get(key);
+    if (cachedScroll !== undefined) {
+        requestAnimationFrame(() => {
+            const content = document.getElementById('library-content') as HTMLElement;
+            if (content) content.scrollTop = cachedScroll;
+            state.scrollCache.delete(key);
+        });
+    }
+}
+
+async function yieldTick(): Promise<void> {
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+}
+
+function showSpinner(container: HTMLElement) {
+    if (!container.querySelector('.is-navigating')) {
+        container.innerHTML = '<sl-spinner style="font-size: 3rem;"></sl-spinner>';
+    }
+}
+
+// --- Item mappers ---
+
+function mapArtists(artists: BrowseArtist[]): BrowseDisplayItem[] {
+    return artists.map(a => ({
+        id: a.id,
+        name: a.name,
+        type: 'MusicArtist' as const,
+        coverArtId: a.coverArtId,
+        subtitle: null,
+        childCount: a.albumCount,
+        sizeBytes: 0,
+        sizeTicks: 0,
+    }));
+}
+
+function mapAlbums(albums: BrowseAlbum[]): BrowseDisplayItem[] {
+    return albums.map(a => ({
+        id: a.id,
+        name: a.name,
+        type: 'MusicAlbum' as const,
+        coverArtId: a.coverArtId,
+        subtitle: a.artistName,
+        year: a.year,
+        childCount: a.trackCount,
+        sizeBytes: 0,
+        sizeTicks: 0,
+    }));
+}
+
+function mapPlaylists(playlists: BrowsePlaylist[]): BrowseDisplayItem[] {
+    return playlists.map(p => ({
+        id: p.id,
+        name: p.name,
+        type: 'Playlist' as const,
+        coverArtId: null,
+        subtitle: null,
+        childCount: p.trackCount,
+        sizeBytes: 0,
+        sizeTicks: p.durationSeconds * 10_000_000,
+    }));
+}
+
+function mapGenres(genres: BrowseGenre[]): BrowseDisplayItem[] {
+    return genres.map(g => ({
+        id: g.id,
+        name: g.name,
+        type: 'MusicGenre' as const,
+        coverArtId: g.coverArtId,
+        subtitle: g.trackCount != null ? `${g.trackCount} tracks` : null,
+        childCount: g.trackCount ?? 0,
+        sizeBytes: 0,
+        sizeTicks: 0,
+    }));
+}
+
+function mapFlatTracks(tracks: BrowseTrack[]): BrowseDisplayItem[] {
+    return tracks.map(t => ({
+        id: t.id,
+        name: t.title,
+        type: 'Audio' as const,
+        coverArtId: t.coverArtId,
+        subtitle: `${t.artistName} — ${t.albumName}`,
+        sizeBytes: t.sizeBytes ?? 0,
+        sizeTicks: t.duration * 10_000_000,
+        childCount: 1,
+    }));
+}
+
+function mapAlbumTracks(tracks: BrowseTrack[]): BrowseDisplayItem[] {
+    return tracks.map(t => ({
+        id: t.id,
+        name: t.title,
+        type: 'Audio' as const,
+        coverArtId: t.coverArtId,
+        subtitle: t.artistName,
+        sizeBytes: t.sizeBytes ?? 0,
+        sizeTicks: t.duration * 10_000_000,
+        childCount: 1,
+    }));
+}
+
+// --- UI rendering ---
+
+function renderModeBar() {
+    const container = document.getElementById('browse-mode-bar');
+    if (!container) return;
+
+    const existingBtns = container.querySelectorAll('sl-button[data-mode]');
+    if (existingBtns.length > 0) {
+        existingBtns.forEach(btn => {
+            const mode = (btn as HTMLElement).getAttribute('data-mode') as BrowseMode;
+            (btn as any).variant = mode === state.browseMode ? 'primary' : 'default';
+            (btn as any).disabled = state.loading;
+        });
+        return;
+    }
+
+    container.innerHTML = '';
+    const bar = document.createElement('div');
+    bar.className = 'browse-mode-bar';
+
+    state.availableModes.forEach(mode => {
+        const btn = document.createElement('sl-button') as any;
+        btn.setAttribute('data-mode', mode);
+        btn.variant = mode === state.browseMode ? 'primary' : 'default';
+        btn.size = 'small';
+        btn.textContent = MODE_LABELS[mode];
+        btn.disabled = state.loading;
+        btn.addEventListener('click', () => switchMode(mode));
+        bar.appendChild(btn);
+    });
+
+    container.appendChild(bar);
 }
 
 function createBreadcrumbs(): HTMLElement {
     const nav = document.createElement('nav');
     nav.className = 'breadcrumbs';
 
-    // Home button
     const homeBtn = document.createElement('sl-button') as any;
     homeBtn.variant = 'text';
     homeBtn.size = 'small';
-    homeBtn.innerHTML = '<sl-icon slot="prefix" name="house"></sl-icon> Libraries';
-    homeBtn.onclick = () => renderLibrarySelection();
+    homeBtn.innerHTML = `<sl-icon slot="prefix" name="house"></sl-icon> ${MODE_LABELS[state.browseMode]}`;
+    homeBtn.onclick = () => {
+        saveScroll();
+        loadModeRoot();
+    };
     nav.appendChild(homeBtn);
 
     state.breadcrumbStack.forEach((crumb, index) => {
@@ -102,11 +251,10 @@ function createBreadcrumbs(): HTMLElement {
         btn.variant = 'text';
         btn.size = 'small';
         btn.textContent = crumb.name;
-        // Navigate back to this crumb
         if (index < state.breadcrumbStack.length - 1) {
             btn.onclick = () => navigateToCrumb(index);
         } else {
-            btn.disabled = true; // Current page
+            btn.disabled = true;
         }
         nav.appendChild(btn);
     });
@@ -114,217 +262,15 @@ function createBreadcrumbs(): HTMLElement {
     return nav;
 }
 
-async function renderLibrarySelection() {
-    clearNavigationCache();
-    state.view = 'libraries';
-
-    const container = document.getElementById('library-content');
-    if (!container) return;
-
-    try {
-        const views = await fetchViews();
-        // Filter for music and playlists collection types only
-        const musicViews = views.filter(view =>
-            view.CollectionType && ALLOWED_COLLECTION_TYPES.includes(view.CollectionType.toLowerCase())
-        );
-        renderGrid(musicViews, 'libraries');
-    } catch (e) {
-        renderError(e as Error);
-    }
-}
-
-async function navigateToLibrary(view: JellyfinView) {
-    state.view = 'items';
-    state.libraryId = view.Id;
-    state.parentId = view.Id;
-    state.breadcrumbStack = [{ id: view.Id, name: view.Name }];
-    state.items = [];
-    state.pagination.startIndex = 0;
-
-    await loadItems(true);
-}
-
-async function navigateToCrumb(index: number) {
-    state.activeLetter = null;
-    // Save scroll position for the page being left
-    const libraryView = document.querySelector('.library-view') as HTMLElement;
-    if (libraryView && state.parentId) {
-        state.scrollCache.set(state.parentId, libraryView.scrollTop);
-    }
-
-    // Truncate stack
-    state.breadcrumbStack = state.breadcrumbStack.slice(0, index + 1);
-    const target = state.breadcrumbStack[index];
-    state.parentId = target.id;
-    state.pagination.startIndex = 0;
-    state.items = [];
-    await loadItems(true);
-}
-
-async function navigateToItem(item: JellyfinItem) {
-    // Only navigate if container
-    // Common Jellyfin container types
-    const containerTypes = ['MusicArtist', 'MusicAlbum', 'Playlist', 'Folder', 'CollectionFolder', 'BoxSet', 'Series', 'Season']; // MusicArtist: navigates into artist's albums
-    if (containerTypes.includes(item.Type)) {
-        state.activeLetter = null;
-        // Save scroll position for the page being left
-        const libraryView = document.querySelector('.library-view') as HTMLElement;
-        if (libraryView && state.parentId) {
-            state.scrollCache.set(state.parentId, libraryView.scrollTop);
-        }
-
-        state.parentId = item.Id;
-        state.breadcrumbStack.push({ id: item.Id, name: item.Name });
-        state.pagination.startIndex = 0;
-        state.items = [];
-        await loadItems(true);
-    } else {
-        console.log("Clicked leaf item", item);
-        // Could trigger play or add to basket here
-    }
-}
-
-async function loadItems(reset: boolean) {
-    const container = document.getElementById('library-content');
-    if (!container) return;
-
-    const targetParentId = state.parentId;
-
-    // Cache hit path: render from page cache instantly (no spinner, no items re-fetch)
-    if (reset && targetParentId) {
-        const cached = state.pageCache.get(targetParentId);
-        if (cached) {
-            state.loading = true;
-            try {
-                const deviceStatus = await fetchDeviceStatusMap();
-                state.items = cached.items;
-                state.pagination.total = cached.total;
-                state.pagination.startIndex = 0;
-                state.artistViewTotal = state.items[0]?.Type === 'MusicArtist' ? cached.total : 0;
-                renderGrid(state.items, 'items', deviceStatus);
-                // Restore scroll position after DOM is painted
-                const cachedScroll = state.scrollCache.get(targetParentId);
-                if (cachedScroll !== undefined) {
-                    requestAnimationFrame(() => {
-                        const libraryView = document.querySelector('.library-view') as HTMLElement;
-                        if (libraryView) libraryView.scrollTop = cachedScroll;
-                        state.scrollCache.delete(targetParentId);
-                    });
-                }
-            } catch (e) {
-                renderError(e as Error);
-            } finally {
-                state.loading = false;
-            }
-            return;
-        }
-    }
-
-    if (reset) {
-        // Yield one tick so any click-feedback (card overlay, opacity) renders before we wipe the container.
-        await new Promise<void>(resolve => setTimeout(resolve, 0));
-        if (!container.isConnected) return;
-
-        // Only show the big spinner if a card isn't already showing a loading state
-        if (!container.querySelector('.is-navigating')) {
-            container.innerHTML = '<sl-spinner style="font-size: 3rem;"></sl-spinner>';
-        }
-    }
-
-    state.loading = true;
-    try {
-        const [itemsResponse, deviceStatus] = await Promise.all([
-            fetchItems(targetParentId, MUSIC_ITEM_TYPES, state.pagination.startIndex, state.pagination.limit),
-            fetchDeviceStatusMap()
-        ]);
-
-        state.pagination.total = itemsResponse.TotalRecordCount;
-
-        if (reset) {
-            state.items = itemsResponse.Items;
-            // Track whether this is an artist view so the quick-nav bar visibility
-            // survives letter-filtered re-renders (which return fewer than 20 items)
-            state.artistViewTotal = state.items[0]?.Type === 'MusicArtist'
-                ? state.pagination.total
-                : 0;
-            // Cache the page for back-navigation
-            if (targetParentId) {
-                state.pageCache.set(targetParentId, { items: state.items, total: state.pagination.total });
-            }
-        } else {
-            state.items = [...state.items, ...itemsResponse.Items];
-        }
-
-        renderGrid(state.items, 'items', deviceStatus);
-
-        // Restore scroll position after DOM is painted (for back-navigation)
-        if (reset && targetParentId) {
-            const cachedScroll = state.scrollCache.get(targetParentId);
-            if (cachedScroll !== undefined) {
-                requestAnimationFrame(() => {
-                    const libraryView = document.querySelector('.library-view') as HTMLElement;
-                    if (libraryView) libraryView.scrollTop = cachedScroll;
-                    state.scrollCache.delete(targetParentId);
-                });
-            }
-        }
-
-    } catch (e) {
-        renderError(e as Error);
-    } finally {
-        state.loading = false;
-    }
-}
-
-async function loadMore() {
-    if (state.loading) return;
-    state.pagination.startIndex += state.pagination.limit;
-    await loadItems(false);
-}
-
-async function loadItemsByLetter(letter: string) {
-    const container = document.getElementById('library-content');
-    if (!container || state.loading) return;
-
-    // Clicking the active letter clears the filter and reloads all artists
-    if (state.activeLetter === letter) {
-        state.activeLetter = null;
-        await loadItems(true);
-        return;
-    }
-    state.activeLetter = letter;
-    state.loading = true;
-
-    // '#' = non-alpha names (sort before 'A' in Jellyfin)
-    const nameStartsWith = letter === '#' ? undefined : letter;
-    const nameLessThan = letter === '#' ? 'A' : undefined;
-
-    container.innerHTML = '<sl-spinner style="font-size: 3rem;"></sl-spinner>';
-    // Yield to the event loop so any pending mouseup from the letter-button click
-    // fires on the spinner before we render cards, preventing click-through navigation.
-    await new Promise<void>(resolve => setTimeout(resolve, 0));
-    if (!container.isConnected) {
-        state.loading = false;
-        return;
-    }
-
-    try {
-        const [itemsResponse, deviceStatus] = await Promise.all([
-            fetchItems(state.parentId, MUSIC_ITEM_TYPES, 0, 200, nameStartsWith, nameLessThan),
-            fetchDeviceStatusMap()
-        ]);
-        state.items = itemsResponse.Items;
-        // Do not overwrite state.pagination — Load More is suppressed while activeLetter is set
-        renderGrid(state.items, 'items', deviceStatus);
-    } catch (e) {
-        renderError(e as Error);
-    } finally {
-        state.loading = false;
-    }
-}
-
 function renderQuickNav(): HTMLElement | null {
-    if (state.artistViewTotal < 20) return null;
+    if (state.breadcrumbStack.length > 0) return null;
+
+    const isArtists = state.browseMode === 'artists';
+    const isAlbums = state.browseMode === 'albums';
+    if (!isArtists && !isAlbums) return null;
+
+    const viewTotal = isArtists ? state.artistViewTotal : state.albumViewTotal;
+    if (viewTotal < 20) return null;
 
     const allLetters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').concat('#');
 
@@ -336,47 +282,45 @@ function renderQuickNav(): HTMLElement | null {
         btn.size = 'small';
         btn.variant = letter === state.activeLetter ? 'primary' : 'text';
         btn.textContent = letter;
-        btn.addEventListener('click', () => loadItemsByLetter(letter));
+        btn.addEventListener('click', () => {
+            if (isArtists) loadArtistsByLetter(letter);
+            else loadAlbumsByLetter(letter);
+        });
         navBar.appendChild(btn);
     }
 
     return navBar;
 }
 
-function renderGrid(items: (JellyfinItem | JellyfinView)[], mode: 'libraries' | 'items', deviceStatus?: DeviceStatusMap) {
+function renderGrid(items: BrowseDisplayItem[]) {
     const container = document.getElementById('library-content');
     if (!container) return;
 
     container.innerHTML = '';
 
-    // Breadcrumbs
-    if (mode === 'items') {
+    if (state.breadcrumbStack.length > 0) {
         container.appendChild(createBreadcrumbs());
-        // Quick-nav bar (only for MusicArtist views with 20+ total items)
-        const quickNav = renderQuickNav();
-        if (quickNav) container.appendChild(quickNav);
     }
+
+    const quickNav = renderQuickNav();
+    if (quickNav) container.appendChild(quickNav);
 
     const grid = document.createElement('div');
     grid.className = 'media-grid';
 
-    const syncedIds = new Set(deviceStatus?.syncedItemIds || []);
-
     items.forEach(item => {
-        const isSynced = syncedIds.has(item.Id);
-        const onClick = mode === 'libraries'
-            ? () => navigateToLibrary(item as JellyfinView)
-            : () => navigateToItem(item as JellyfinItem);
+        // Genre container items have no basket toggle until Story 9.3
+        const isGenreContainer = item.type === 'MusicGenre';
+        const selEnabled = !isGenreContainer && deviceSelected;
 
-        const card = MediaCard.create(item, mode, isSynced, onClick);
-        card.setAttribute('data-name', (item as JellyfinItem).Name || '');
+        const card = MediaCard.create(item, 'items', false, () => navigateToBrowseItem(item), selEnabled);
+        card.setAttribute('data-name', item.name);
         grid.appendChild(card);
     });
 
     container.appendChild(grid);
 
-    // Pagination controls — hidden during letter-filtered views
-    if (mode === 'items' && state.activeLetter === null && state.items.length < state.pagination.total) {
+    if (state.activeLetter === null && state.items.length < state.pagination.total) {
         const loadMoreContainer = document.createElement('div');
         loadMoreContainer.className = 'load-more-container';
 
@@ -407,10 +351,742 @@ function renderError(error: Error) {
     });
 }
 
-// Global scope init for module
-// Make initLibraryView global so main.ts can access it if imported as module,
-// but typically main calls it directly if imported.
-export function initLibraryView() {
+// --- Mode switching ---
+
+async function switchMode(mode: BrowseMode) {
+    if (mode === state.browseMode || state.loading) return;
+
+    saveScroll();
+    state.browseMode = mode;
+    state.breadcrumbStack = [];
+    state.pagination.startIndex = 0;
+    state.items = [];
+    state.activeLetter = null;
+    state.artistViewTotal = 0;
+    state.albumViewTotal = 0;
+    state.parentId = undefined;
+
+    renderModeBar();
+    await loadModeRoot();
+}
+
+// --- Mode root loading ---
+
+async function loadModeRoot() {
+    state.breadcrumbStack = [];
+    state.pagination.startIndex = 0;
+    state.items = [];
+    state.activeLetter = null;
+    state.artistViewTotal = 0;
+    state.albumViewTotal = 0;
+    state.parentId = undefined;
+
+    switch (state.browseMode) {
+        case 'artists': await loadArtists(true); break;
+        case 'albums': await loadAlbums(true); break;
+        case 'playlists': await loadPlaylists(); break;
+        case 'genres': await loadGenres(true); break;
+        case 'recentlyAdded':
+            await loadRecentlyAddedAlbums(true);
+            break;
+        case 'frequentlyPlayed':
+        case 'recentlyPlayed':
+        case 'favorites':
+            await loadFlatTracks(state.browseMode, true);
+            break;
+    }
+}
+
+// --- Mode-specific loaders ---
+
+async function loadArtists(reset: boolean) {
+    const container = document.getElementById('library-content');
+    if (!container) return;
+
+    const key = cacheKey(undefined);
+
+    if (reset) {
+        const cached = state.pageCache.get(key);
+        if (cached) {
+            state.items = cached.items;
+            state.pagination.total = cached.total;
+            state.pagination.startIndex = 0;
+            state.artistViewTotal = cached.total;
+            renderGrid(state.items);
+            restoreScroll(key);
+            return;
+        }
+
+        await yieldTick();
+        if (!container.isConnected) return;
+        showSpinner(container);
+    }
+
+    state.loading = true;
+    renderModeBar();
+    try {
+        const startIndex = reset ? 0 : state.pagination.startIndex;
+        const result = await fetchBrowseArtists(undefined, undefined, startIndex, state.pagination.limit);
+
+        state.pagination.total = result.total;
+        const mapped = mapArtists(result.artists);
+
+        if (reset) {
+            state.items = mapped;
+            state.artistViewTotal = result.total;
+            state.pageCache.set(key, { items: state.items, total: result.total });
+        } else {
+            state.items = [...state.items, ...mapped];
+        }
+
+        renderGrid(state.items);
+        if (reset) restoreScroll(key);
+    } catch (e) {
+        renderError(e as Error);
+    } finally {
+        state.loading = false;
+        renderModeBar();
+    }
+}
+
+async function loadArtistsByLetter(letter: string) {
+    const container = document.getElementById('library-content');
+    if (!container || state.loading) return;
+
+    if (state.activeLetter === letter) {
+        state.activeLetter = null;
+        await loadArtists(true);
+        return;
+    }
+
+    state.activeLetter = letter;
+    state.loading = true;
+    renderModeBar();
+
+    container.innerHTML = '<sl-spinner style="font-size: 3rem;"></sl-spinner>';
+    await yieldTick();
+    if (!container.isConnected) {
+        state.loading = false;
+        return;
+    }
+
+    try {
+        const result = await fetchBrowseArtists(letter, undefined, 0, 200);
+        state.items = mapArtists(result.artists);
+        renderGrid(state.items);
+    } catch (e) {
+        renderError(e as Error);
+    } finally {
+        state.loading = false;
+        renderModeBar();
+    }
+}
+
+async function loadAlbumsByLetter(letter: string) {
+    const container = document.getElementById('library-content');
+    if (!container || state.loading) return;
+
+    if (state.activeLetter === letter) {
+        state.activeLetter = null;
+        await loadAlbums(true);
+        return;
+    }
+
+    state.activeLetter = letter;
+    state.loading = true;
+    renderModeBar();
+
+    container.innerHTML = '<sl-spinner style="font-size: 3rem;"></sl-spinner>';
+    await yieldTick();
+    if (!container.isConnected) {
+        state.loading = false;
+        return;
+    }
+
+    try {
+        const result = await fetchBrowseAlbums(letter, undefined, 0, 200);
+        state.items = mapAlbums(result.albums);
+        state.pagination.total = result.total;
+        renderGrid(state.items);
+    } catch (e) {
+        renderError(e as Error);
+    } finally {
+        state.loading = false;
+        renderModeBar();
+    }
+}
+
+async function loadAlbums(reset: boolean) {
+    const container = document.getElementById('library-content');
+    if (!container) return;
+
+    const key = cacheKey(undefined);
+
+    if (reset) {
+        const cached = state.pageCache.get(key);
+        if (cached) {
+            state.items = cached.items;
+            state.pagination.total = cached.total;
+            state.pagination.startIndex = 0;
+            state.artistViewTotal = 0;
+            renderGrid(state.items);
+            restoreScroll(key);
+            return;
+        }
+
+        await yieldTick();
+        if (!container.isConnected) return;
+        showSpinner(container);
+    }
+
+    state.loading = true;
+    renderModeBar();
+    try {
+        const startIndex = reset ? 0 : state.pagination.startIndex;
+        const result = await fetchBrowseAlbums(undefined, undefined, startIndex, state.pagination.limit);
+
+        state.pagination.total = result.total;
+        const mapped = mapAlbums(result.albums);
+
+        if (reset) {
+            state.items = mapped;
+            state.albumViewTotal = result.total;
+            state.pageCache.set(key, { items: state.items, total: result.total });
+        } else {
+            state.items = [...state.items, ...mapped];
+        }
+
+        renderGrid(state.items);
+        if (reset) restoreScroll(key);
+    } catch (e) {
+        renderError(e as Error);
+    } finally {
+        state.loading = false;
+        renderModeBar();
+    }
+}
+
+async function loadPlaylists() {
+    const container = document.getElementById('library-content');
+    if (!container) return;
+
+    const key = cacheKey(undefined);
+
+    const cached = state.pageCache.get(key);
+    if (cached) {
+        state.items = cached.items;
+        state.pagination.total = cached.total;
+        state.artistViewTotal = 0;
+        renderGrid(state.items);
+        restoreScroll(key);
+        return;
+    }
+
+    await yieldTick();
+    if (!container.isConnected) return;
+    showSpinner(container);
+
+    state.loading = true;
+    renderModeBar();
+    try {
+        const result = await fetchBrowsePlaylists();
+        const mapped = mapPlaylists(result.playlists);
+        state.items = mapped;
+        state.pagination.total = mapped.length;
+        state.pagination.startIndex = mapped.length;
+        state.artistViewTotal = 0;
+        state.pageCache.set(key, { items: state.items, total: mapped.length });
+        renderGrid(state.items);
+        restoreScroll(key);
+    } catch (e) {
+        renderError(e as Error);
+    } finally {
+        state.loading = false;
+        renderModeBar();
+    }
+}
+
+async function loadGenres(reset: boolean) {
+    const container = document.getElementById('library-content');
+    if (!container) return;
+
+    const key = cacheKey(undefined);
+
+    if (reset) {
+        const cached = state.pageCache.get(key);
+        if (cached) {
+            state.items = cached.items;
+            state.pagination.total = cached.total;
+            state.pagination.startIndex = 0;
+            state.artistViewTotal = 0;
+            renderGrid(state.items);
+            restoreScroll(key);
+            return;
+        }
+
+        await yieldTick();
+        if (!container.isConnected) return;
+        showSpinner(container);
+    }
+
+    state.loading = true;
+    renderModeBar();
+    try {
+        const startIndex = reset ? 0 : state.pagination.startIndex;
+        const result = await fetchBrowseGenres(undefined, startIndex, state.pagination.limit);
+
+        state.pagination.total = result.total;
+        const mapped = mapGenres(result.genres);
+
+        if (reset) {
+            state.items = mapped;
+            state.artistViewTotal = 0;
+            state.pageCache.set(key, { items: state.items, total: result.total });
+        } else {
+            state.items = [...state.items, ...mapped];
+        }
+
+        renderGrid(state.items);
+        if (reset) restoreScroll(key);
+    } catch (e) {
+        renderError(e as Error);
+    } finally {
+        state.loading = false;
+        renderModeBar();
+    }
+}
+
+async function loadRecentlyAddedAlbums(reset: boolean) {
+    const container = document.getElementById('library-content');
+    if (!container) return;
+
+    const key = cacheKey(undefined);
+
+    if (reset) {
+        const cached = state.pageCache.get(key);
+        if (cached) {
+            state.items = cached.items;
+            state.pagination.total = cached.total;
+            state.pagination.startIndex = 0;
+            renderGrid(state.items);
+            restoreScroll(key);
+            return;
+        }
+
+        await yieldTick();
+        if (!container.isConnected) return;
+        showSpinner(container);
+    }
+
+    state.loading = true;
+    renderModeBar();
+    try {
+        const startIndex = reset ? 0 : state.pagination.startIndex;
+        const result = await fetchBrowseRecentlyAdded(undefined, startIndex, state.pagination.limit);
+
+        state.pagination.total = result.total;
+        const mapped = mapAlbums(result.albums);
+
+        if (reset) {
+            state.items = mapped;
+            state.pageCache.set(key, { items: state.items, total: result.total });
+        } else {
+            state.items = [...state.items, ...mapped];
+        }
+
+        renderGrid(state.items);
+        if (reset) restoreScroll(key);
+    } catch (e) {
+        renderError(e as Error);
+    } finally {
+        state.loading = false;
+        renderModeBar();
+    }
+}
+
+async function loadFlatTracks(
+    mode: 'frequentlyPlayed' | 'recentlyPlayed' | 'favorites',
+    reset: boolean,
+) {
+    const container = document.getElementById('library-content');
+    if (!container) return;
+
+    const key = cacheKey(undefined);
+
+    if (reset) {
+        const cached = state.pageCache.get(key);
+        if (cached) {
+            state.items = cached.items;
+            state.pagination.total = cached.total;
+            state.pagination.startIndex = 0;
+            state.artistViewTotal = 0;
+            renderGrid(state.items);
+            restoreScroll(key);
+            return;
+        }
+
+        await yieldTick();
+        if (!container.isConnected) return;
+        showSpinner(container);
+    }
+
+    state.loading = true;
+    renderModeBar();
+    try {
+        const startIndex = reset ? 0 : state.pagination.startIndex;
+        let result: { tracks: BrowseTrack[]; total: number };
+
+        switch (mode) {
+            case 'frequentlyPlayed':
+                result = await fetchBrowseFrequentlyPlayed(undefined, startIndex, state.pagination.limit);
+                break;
+            case 'recentlyPlayed':
+                result = await fetchBrowseRecentlyPlayed(undefined, startIndex, state.pagination.limit);
+                break;
+            case 'favorites':
+                result = await fetchBrowseFavorites(undefined, startIndex, state.pagination.limit);
+                break;
+        }
+
+        state.pagination.total = result.total;
+        const mapped = mapFlatTracks(result.tracks);
+
+        if (reset) {
+            state.items = mapped;
+            state.artistViewTotal = 0;
+            state.pageCache.set(key, { items: state.items, total: result.total });
+        } else {
+            state.items = [...state.items, ...mapped];
+        }
+
+        renderGrid(state.items);
+        if (reset) restoreScroll(key);
+    } catch (e) {
+        renderError(e as Error);
+    } finally {
+        state.loading = false;
+        renderModeBar();
+    }
+}
+
+// --- Hierarchical navigation loaders ---
+
+async function loadArtistAlbums(artistId: string) {
+    const container = document.getElementById('library-content');
+    if (!container) return;
+
+    const key = cacheKey(artistId);
+
+    const cached = state.pageCache.get(key);
+    if (cached) {
+        state.items = cached.items;
+        state.pagination.total = cached.total;
+        state.pagination.startIndex = cached.total;
+        state.artistViewTotal = 0;
+        renderGrid(state.items);
+        restoreScroll(key);
+        return;
+    }
+
+    await yieldTick();
+    if (!container.isConnected) return;
+    showSpinner(container);
+
+    state.loading = true;
+    renderModeBar();
+    try {
+        const result = await fetchBrowseArtist(artistId);
+        const albums = mapAlbums(result.albums);
+        state.items = albums;
+        state.pagination.total = albums.length;
+        state.pagination.startIndex = albums.length;
+        state.artistViewTotal = 0;
+        state.pageCache.set(key, { items: albums, total: albums.length });
+        renderGrid(state.items);
+        restoreScroll(key);
+    } catch (e) {
+        renderError(e as Error);
+    } finally {
+        state.loading = false;
+        renderModeBar();
+    }
+}
+
+async function loadAlbumTracks(albumId: string) {
+    const container = document.getElementById('library-content');
+    if (!container) return;
+
+    const key = cacheKey(albumId);
+
+    const cached = state.pageCache.get(key);
+    if (cached) {
+        state.items = cached.items;
+        state.pagination.total = cached.total;
+        state.pagination.startIndex = cached.total;
+        state.artistViewTotal = 0;
+        renderGrid(state.items);
+        restoreScroll(key);
+        return;
+    }
+
+    await yieldTick();
+    if (!container.isConnected) return;
+    showSpinner(container);
+
+    state.loading = true;
+    renderModeBar();
+    try {
+        const result = await fetchBrowseAlbum(albumId);
+        const tracks = mapAlbumTracks(result.tracks);
+        state.items = tracks;
+        state.pagination.total = tracks.length;
+        state.pagination.startIndex = tracks.length;
+        state.artistViewTotal = 0;
+        state.pageCache.set(key, { items: tracks, total: tracks.length });
+        renderGrid(state.items);
+        restoreScroll(key);
+    } catch (e) {
+        renderError(e as Error);
+    } finally {
+        state.loading = false;
+        renderModeBar();
+    }
+}
+
+async function loadPlaylistTracks(playlistId: string) {
+    const container = document.getElementById('library-content');
+    if (!container) return;
+
+    const key = cacheKey(playlistId);
+
+    const cached = state.pageCache.get(key);
+    if (cached) {
+        state.items = cached.items;
+        state.pagination.total = cached.total;
+        state.pagination.startIndex = cached.total;
+        state.artistViewTotal = 0;
+        renderGrid(state.items);
+        restoreScroll(key);
+        return;
+    }
+
+    await yieldTick();
+    if (!container.isConnected) return;
+    showSpinner(container);
+
+    state.loading = true;
+    renderModeBar();
+    try {
+        const result = await fetchBrowsePlaylist(playlistId);
+        const tracks = mapFlatTracks(result.tracks);
+        state.items = tracks;
+        state.pagination.total = tracks.length;
+        state.pagination.startIndex = tracks.length;
+        state.artistViewTotal = 0;
+        state.pageCache.set(key, { items: tracks, total: tracks.length });
+        renderGrid(state.items);
+        restoreScroll(key);
+    } catch (e) {
+        renderError(e as Error);
+    } finally {
+        state.loading = false;
+        renderModeBar();
+    }
+}
+
+async function loadGenreTracks(genreIdOrName: string, reset: boolean) {
+    const container = document.getElementById('library-content');
+    if (!container) return;
+
+    const key = cacheKey(genreIdOrName);
+
+    if (reset) {
+        const cached = state.pageCache.get(key);
+        if (cached) {
+            state.items = cached.items;
+            state.pagination.total = cached.total;
+            state.pagination.startIndex = 0;
+            state.artistViewTotal = 0;
+            renderGrid(state.items);
+            restoreScroll(key);
+            return;
+        }
+
+        await yieldTick();
+        if (!container.isConnected) return;
+        showSpinner(container);
+    }
+
+    state.loading = true;
+    renderModeBar();
+    try {
+        const startIndex = reset ? 0 : state.pagination.startIndex;
+        const result = await fetchBrowseGenre(genreIdOrName, startIndex, state.pagination.limit);
+
+        state.pagination.total = result.total;
+        const mapped = mapFlatTracks(result.tracks);
+
+        if (reset) {
+            state.items = mapped;
+            state.artistViewTotal = 0;
+            state.pageCache.set(key, { items: state.items, total: result.total });
+        } else {
+            state.items = [...state.items, ...mapped];
+        }
+
+        renderGrid(state.items);
+        if (reset) restoreScroll(key);
+    } catch (e) {
+        renderError(e as Error);
+    } finally {
+        state.loading = false;
+        renderModeBar();
+    }
+}
+
+// --- Navigation ---
+
+async function navigateToBrowseItem(item: BrowseDisplayItem) {
+    switch (item.type) {
+        case 'MusicArtist': await navigateToArtist(item.id, item.name); break;
+        case 'MusicAlbum': await navigateToAlbum(item.id, item.name); break;
+        case 'Playlist': await navigateToPlaylist(item.id, item.name); break;
+        case 'MusicGenre': await navigateToGenre(item.id, item.name); break;
+        case 'Audio': break; // leaf item — no drill-down
+    }
+}
+
+async function navigateToArtist(artistId: string, artistName: string) {
+    saveScroll();
+    state.breadcrumbStack.push({ id: artistId, name: artistName });
+    state.parentId = artistId;
+    state.pagination.startIndex = 0;
+    state.items = [];
+    await loadArtistAlbums(artistId);
+}
+
+async function navigateToAlbum(albumId: string, albumName: string) {
+    saveScroll();
+    state.breadcrumbStack.push({ id: albumId, name: albumName });
+    state.parentId = albumId;
+    state.pagination.startIndex = 0;
+    state.items = [];
+    await loadAlbumTracks(albumId);
+}
+
+async function navigateToPlaylist(playlistId: string, playlistName: string) {
+    saveScroll();
+    state.breadcrumbStack.push({ id: playlistId, name: playlistName });
+    state.parentId = playlistId;
+    state.pagination.startIndex = 0;
+    state.items = [];
+    await loadPlaylistTracks(playlistId);
+}
+
+async function navigateToGenre(genreIdOrName: string, genreName: string) {
+    saveScroll();
+    state.breadcrumbStack.push({ id: genreIdOrName, name: genreName });
+    state.parentId = genreIdOrName;
+    state.pagination.startIndex = 0;
+    state.items = [];
+    await loadGenreTracks(genreIdOrName, true);
+}
+
+async function navigateToCrumb(index: number) {
+    state.activeLetter = null;
+    saveScroll();
+
+    state.breadcrumbStack = state.breadcrumbStack.slice(0, index + 1);
+    const target = state.breadcrumbStack[index];
+    state.parentId = target.id;
+    state.pagination.startIndex = 0;
+    state.items = [];
+
+    await reloadCurrentLevel();
+}
+
+async function reloadCurrentLevel() {
+    const depth = state.breadcrumbStack.length;
+    const parentId = state.parentId;
+
+    if (depth === 0 || !parentId) {
+        await loadModeRoot();
+        return;
+    }
+
+    switch (state.browseMode) {
+        case 'artists':
+            if (depth === 1) await loadArtistAlbums(parentId);
+            else await loadAlbumTracks(parentId);
+            break;
+        case 'albums':
+            await loadAlbumTracks(parentId);
+            break;
+        case 'playlists':
+            await loadPlaylistTracks(parentId);
+            break;
+        case 'genres':
+            await loadGenreTracks(parentId, true);
+            break;
+        default:
+            await loadModeRoot();
+    }
+}
+
+// --- Load More ---
+
+async function loadMore() {
+    if (state.loading) return;
+    state.pagination.startIndex += state.pagination.limit;
+
+    const depth = state.breadcrumbStack.length;
+    if (depth === 0) {
+        switch (state.browseMode) {
+            case 'artists': await loadArtists(false); break;
+            case 'albums': await loadAlbums(false); break;
+            case 'genres': await loadGenres(false); break;
+            case 'recentlyAdded':
+                await loadRecentlyAddedAlbums(false);
+                break;
+            case 'frequentlyPlayed':
+            case 'recentlyPlayed':
+            case 'favorites':
+                await loadFlatTracks(state.browseMode, false);
+                break;
+        }
+    } else if (state.browseMode === 'genres' && depth === 1 && state.parentId) {
+        await loadGenreTracks(state.parentId, false);
+    }
+}
+
+// --- Entry point ---
+
+export async function initLibraryView() {
     console.log('Initializing library view...');
-    renderLibrarySelection();
+
+    const container = document.getElementById('library-content');
+    if (container) {
+        container.innerHTML = '<sl-spinner style="font-size: 3rem;"></sl-spinner>';
+    }
+
+    try {
+        const [daemonState, modesResult] = await Promise.all([
+            rpcCall('get_daemon_state'),
+            fetchBrowseModes(),
+        ]);
+
+        deviceSelected = !!daemonState.selectedDevicePath;
+
+        state.availableModes = modesResult;
+        const defaultMode: BrowseMode = modesResult.includes('artists')
+            ? 'artists'
+            : (modesResult[0] ?? 'artists');
+        state.browseMode = defaultMode;
+    } catch (e) {
+        renderError(e as Error);
+        return;
+    }
+
+    renderModeBar();
+    await loadModeRoot();
 }

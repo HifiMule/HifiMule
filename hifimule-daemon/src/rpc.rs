@@ -230,17 +230,23 @@ async fn restore_provider_from_config(state: &AppState) {
 
     let provider: Option<Arc<dyn MediaProvider>> = match config.server_type.as_str() {
         "jellyfin" => {
+            // saved_creds holds (url, token, user_id_uuid) from the JSON config file.
+            // user_id is the Jellyfin UUID, which differs from the display username.
+            let saved_creds = CredentialManager::get_credentials().ok();
             // Fall back to legacy keyring key for users who connected via the old `login` RPC.
             let token = CredentialManager::get_server_secret("jellyfin")
-                .or_else(|_| CredentialManager::get_credentials().map(|(_, t, _)| t))
-                .ok();
+                .ok()
+                .or_else(|| saved_creds.as_ref().map(|(_, t, _)| t.clone()));
+            let user_id = saved_creds
+                .and_then(|(_, _, uid)| uid)
+                .unwrap_or_else(|| config.username.clone());
             token.map(|token| {
                 Arc::new(
                     crate::providers::jellyfin::JellyfinProvider::new_with_version(
                         JellyfinClient::new(),
                         config.url.clone(),
                         token,
-                        config.username.clone(),
+                        user_id,
                         config.server_version.clone(),
                     ),
                 ) as Arc<dyn MediaProvider>
@@ -502,12 +508,14 @@ async fn handle_browse_list_artists(
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
     let library_id = params.as_ref().and_then(|p| p["libraryId"].as_str()).map(str::to_owned);
+    let letter = params.as_ref().and_then(|p| p["letter"].as_str()).map(str::to_owned);
+    let offset = params.as_ref().and_then(|p| p["startIndex"].as_u64()).unwrap_or(0) as u32;
+    let limit = params.as_ref().and_then(|p| p["limit"].as_u64()).unwrap_or(50) as u32;
     let provider = require_provider(state).await?;
-    let artists = provider
-        .list_artists(library_id.as_deref())
+    let (artists, total) = provider
+        .list_artists(library_id.as_deref(), letter.as_deref(), offset, limit)
         .await
         .map_err(provider_error_to_rpc)?;
-    let total = artists.len() as u64;
     Ok(serde_json::json!({ "artists": artists, "total": total }))
 }
 
@@ -537,12 +545,14 @@ async fn handle_browse_list_albums(
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
     let library_id = params.as_ref().and_then(|p| p["libraryId"].as_str()).map(str::to_owned);
+    let letter = params.as_ref().and_then(|p| p["letter"].as_str()).map(str::to_owned);
+    let offset = params.as_ref().and_then(|p| p["startIndex"].as_u64()).unwrap_or(0) as u32;
+    let limit = params.as_ref().and_then(|p| p["limit"].as_u64()).unwrap_or(50) as u32;
     let provider = require_provider(state).await?;
-    let albums = provider
-        .list_albums(library_id.as_deref())
+    let (albums, total) = provider
+        .list_albums(library_id.as_deref(), letter.as_deref(), offset, limit)
         .await
         .map_err(provider_error_to_rpc)?;
-    let total = albums.len() as u64;
     Ok(serde_json::json!({ "albums": albums, "total": total }))
 }
 
@@ -650,12 +660,12 @@ async fn handle_browse_list_recently_added(
     let library_id = params.as_ref().and_then(|p| p["libraryId"].as_str()).map(str::to_owned);
     let (offset, limit) = browse_pagination(&params);
     let provider = require_provider(state).await?;
-    let (tracks, total) = provider
+    let (albums, total) = provider
         .list_recently_added(library_id.as_deref(), offset, limit)
         .await
         .map_err(provider_error_to_rpc)?;
     let total = total as u64;
-    Ok(serde_json::json!({ "tracks": tracks, "total": total }))
+    Ok(serde_json::json!({ "albums": albums, "total": total }))
 }
 
 async fn handle_browse_list_frequently_played(
@@ -1535,10 +1545,11 @@ async fn provider_items_response(
 ) -> Result<Value, JsonRpcError> {
     let parent_id = parent_id.filter(|id| !id.is_empty());
     let mut items = if parent_id.is_none() || parent_id == Some("all") {
-        provider
-            .list_artists(parent_id)
+        let (artists, _) = provider
+            .list_artists(parent_id, name_starts_with, start_index, limit)
             .await
-            .map_err(provider_error_to_rpc)?
+            .map_err(provider_error_to_rpc)?;
+        artists
             .iter()
             .map(legacy_artist_item)
             .collect::<Vec<_>>()
@@ -3682,7 +3693,7 @@ mod tests {
         let _items = server
             .mock(
                 "GET",
-                "/Items?userId=user1&ParentId=music-folder&IncludeItemTypes=MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo&StartIndex=0&Limit=50",
+                "/Items?userId=user1&Recursive=true&ParentId=music-folder&IncludeItemTypes=MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo&StartIndex=0&Limit=50",
             )
             .match_header("X-Emby-Token", token)
             .with_status(200)
@@ -6036,13 +6047,13 @@ mod tests {
         async fn list_libraries(&self) -> Result<Vec<crate::domain::models::Library>, ProviderError> {
             unimplemented!()
         }
-        async fn list_artists(&self, _: Option<&str>) -> Result<Vec<crate::domain::models::Artist>, ProviderError> {
+        async fn list_artists(&self, _: Option<&str>, _: Option<&str>, _: u32, _: u32) -> Result<(Vec<crate::domain::models::Artist>, u32), ProviderError> {
             unimplemented!()
         }
         async fn get_artist(&self, _: &str) -> Result<crate::domain::models::ArtistWithAlbums, ProviderError> {
             unimplemented!()
         }
-        async fn list_albums(&self, _: Option<&str>) -> Result<Vec<crate::domain::models::Album>, ProviderError> {
+        async fn list_albums(&self, _: Option<&str>, _: Option<&str>, _: u32, _: u32) -> Result<(Vec<crate::domain::models::Album>, u32), ProviderError> {
             unimplemented!()
         }
         async fn get_album(&self, _: &str) -> Result<crate::domain::models::AlbumWithTracks, ProviderError> {

@@ -12,21 +12,26 @@ pub struct Library {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Genre {
     pub id: String,
     pub name: String,
+    #[serde(rename = "trackCount")]
     pub song_count: Option<u32>,
     pub cover_art_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Song {
     pub id: String,
     pub title: String,
     pub artist_id: Option<String>,
     pub artist_name: Option<String>,
     pub album_id: Option<String>,
+    #[serde(rename = "albumName")]
     pub album_title: Option<String>,
+    #[serde(rename = "duration")]
     pub duration_seconds: u32,
     pub bitrate_kbps: Option<u32>,
     pub track_number: Option<u32>,
@@ -39,18 +44,22 @@ pub struct Song {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Album {
     pub id: String,
+    #[serde(rename = "name")]
     pub title: String,
     pub artist_id: Option<String>,
     pub artist_name: Option<String>,
     pub year: Option<u32>,
+    #[serde(rename = "trackCount")]
     pub song_count: Option<u32>,
     pub duration_seconds: Option<u32>,
     pub cover_art_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Artist {
     pub id: String,
     pub name: String,
@@ -60,9 +69,11 @@ pub struct Artist {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Playlist {
     pub id: String,
     pub name: String,
+    #[serde(rename = "trackCount")]
     pub song_count: Option<u32>,
     pub duration_seconds: Option<u32>,
     pub cover_art_id: Option<String>,

@@ -53,11 +53,23 @@ pub struct ProviderChangeMetadata {
 pub trait MediaProvider: Send + Sync {
     async fn list_libraries(&self) -> Result<Vec<Library>, ProviderError>;
 
-    async fn list_artists(&self, library_id: Option<&str>) -> Result<Vec<Artist>, ProviderError>;
+    async fn list_artists(
+        &self,
+        library_id: Option<&str>,
+        letter: Option<&str>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<Artist>, u32), ProviderError>;
 
     async fn get_artist(&self, artist_id: &str) -> Result<ArtistWithAlbums, ProviderError>;
 
-    async fn list_albums(&self, library_id: Option<&str>) -> Result<Vec<Album>, ProviderError>;
+    async fn list_albums(
+        &self,
+        library_id: Option<&str>,
+        letter: Option<&str>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<Album>, u32), ProviderError>;
 
     async fn get_album(&self, album_id: &str) -> Result<AlbumWithTracks, ProviderError>;
 
@@ -113,7 +125,7 @@ pub trait MediaProvider: Send + Sync {
         _library_id: Option<&str>,
         _offset: u32,
         _limit: u32,
-    ) -> Result<(Vec<Song>, u32), ProviderError> {
+    ) -> Result<(Vec<Album>, u32), ProviderError> {
         Err(ProviderError::UnsupportedCapability(
             "list_recently_added is not supported by this provider".to_string(),
         ))

@@ -166,15 +166,33 @@ impl MediaProvider for SubsonicProvider {
         ])
     }
 
-    async fn list_artists(&self, _library_id: Option<&str>) -> Result<Vec<Artist>, ProviderError> {
-        let artists = self.client.get_artists().await?;
-        Ok(artists
+    async fn list_artists(
+        &self,
+        _library_id: Option<&str>,
+        letter: Option<&str>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<Artist>, u32), ProviderError> {
+        let response = self.client.get_artists().await?;
+        let all_artists: Vec<Artist> = response
             .artists
             .index
             .into_iter()
-            .flat_map(|index| index.artist)
+            .filter(|idx| {
+                letter.map_or(true, |l| {
+                    idx.name.as_deref().map_or(false, |n| n.eq_ignore_ascii_case(l))
+                })
+            })
+            .flat_map(|idx| idx.artist)
             .map(artist_from_dto)
-            .collect())
+            .collect();
+        let total = all_artists.len() as u32;
+        let page: Vec<Artist> = if limit > 0 {
+            all_artists.into_iter().skip(offset as usize).take(limit as usize).collect()
+        } else {
+            all_artists.into_iter().skip(offset as usize).collect()
+        };
+        Ok((page, total))
     }
 
     async fn get_artist(&self, artist_id: &str) -> Result<ArtistWithAlbums, ProviderError> {
@@ -193,14 +211,32 @@ impl MediaProvider for SubsonicProvider {
         })
     }
 
-    async fn list_albums(&self, _library_id: Option<&str>) -> Result<Vec<Album>, ProviderError> {
-        let albums = self.client.get_album_list2().await?;
-        Ok(albums
+    async fn list_albums(
+        &self,
+        _library_id: Option<&str>,
+        letter: Option<&str>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<Album>, u32), ProviderError> {
+        let response = self.client.get_album_list2().await?;
+        let all_albums: Vec<Album> = response
             .album_list2
             .album
             .into_iter()
+            .filter(|a| {
+                letter.map_or(true, |l| {
+                    a.name.to_uppercase().starts_with(&l.to_uppercase())
+                })
+            })
             .map(album_from_dto)
-            .collect())
+            .collect();
+        let total = all_albums.len() as u32;
+        let page: Vec<Album> = if limit > 0 {
+            all_albums.into_iter().skip(offset as usize).take(limit as usize).collect()
+        } else {
+            all_albums.into_iter().skip(offset as usize).collect()
+        };
+        Ok((page, total))
     }
 
     async fn get_album(&self, album_id: &str) -> Result<AlbumWithTracks, ProviderError> {
@@ -1028,6 +1064,8 @@ struct ArtistsDto {
 #[derive(Debug, Default, Deserialize)]
 struct ArtistIndexDto {
     #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
     artist: Vec<ArtistDto>,
 }
 
@@ -1425,11 +1463,12 @@ mod tests {
             .await;
         let provider = provider(&server).await;
 
-        let artists = provider
-            .list_artists(Some("ignored"))
+        let (artists, total) = provider
+            .list_artists(Some("ignored"), None, 0, 0)
             .await
             .expect("artists");
 
+        assert_eq!(total, 1);
         assert_eq!(artists[0].id, "artist1");
         assert_eq!(artists[0].album_count, Some(2));
         assert_eq!(artists[0].cover_art_id.as_deref(), Some("artist-cover"));
@@ -1496,10 +1535,11 @@ mod tests {
         let provider = provider(&server).await;
 
         let artist = provider.get_artist("artist1").await.expect("artist");
-        let albums = provider.list_albums(Some("ignored")).await.expect("albums");
+        let (albums, total) = provider.list_albums(Some("ignored"), None, 0, 0).await.expect("albums");
 
         assert_eq!(artist.artist.cover_art_id.as_deref(), Some("artist-cover"));
         assert_eq!(artist.albums[0].id, "album1");
+        assert_eq!(total, 1);
         assert_eq!(albums[0].song_count, Some(4));
         assert_eq!(albums[0].cover_art_id.as_deref(), Some("album-cover"));
     }
@@ -2092,7 +2132,7 @@ mod tests {
             .await;
         let auth_provider = provider(&server).await;
 
-        let auth = auth_provider.list_artists(None).await;
+        let auth = auth_provider.list_artists(None, None, 0, 0).await;
 
         assert!(
             matches!(auth, Err(ProviderError::Auth(ref message)) if !message.contains(PASSWORD)),
@@ -2111,7 +2151,7 @@ mod tests {
             .await;
         let json_provider = provider(&server).await;
 
-        let malformed = json_provider.list_artists(None).await;
+        let malformed = json_provider.list_artists(None, None, 0, 0).await;
 
         assert!(matches!(malformed, Err(ProviderError::Deserialization(_))));
     }
@@ -2206,7 +2246,7 @@ mod tests {
             .await;
         let provider = provider(&server).await;
 
-        let auth_result = provider.list_artists(None).await;
+        let auth_result = provider.list_artists(None, None, 0, 0).await;
 
         assert!(
             matches!(auth_result, Err(ProviderError::Auth(_))),

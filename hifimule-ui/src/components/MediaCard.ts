@@ -21,22 +21,53 @@ export interface JellyfinView {
     CollectionType?: string;
 }
 
+export interface BrowseDisplayItem {
+    id: string;
+    name: string;
+    type: 'MusicArtist' | 'MusicAlbum' | 'Playlist' | 'Audio' | 'MusicGenre';
+    coverArtId?: string | null;
+    subtitle?: string | null;
+    year?: number | null;
+    childCount?: number;
+    sizeBytes?: number;
+    sizeTicks?: number;
+}
+
 export class MediaCard {
     public static create(
-        item: JellyfinItem | JellyfinView,
+        item: JellyfinItem | JellyfinView | BrowseDisplayItem,
         mode: 'libraries' | 'items',
         isSynced: boolean,
-        onNavigate: () => void | Promise<void>
+        onNavigate: () => void | Promise<void>,
+        deviceSelectionEnabled?: boolean,
     ): HTMLElement {
+        const isBrowseItem = !('Id' in item);
+        const itemId = isBrowseItem ? (item as BrowseDisplayItem).id : (item as JellyfinItem | JellyfinView).Id;
+        const itemName = isBrowseItem ? (item as BrowseDisplayItem).name : (item as JellyfinItem | JellyfinView).Name;
+        const selectionAllowed = deviceSelectionEnabled !== false;
+
         const card = document.createElement('sl-card');
         card.className = 'media-card';
         if (isSynced) card.classList.add('synced');
 
-        const isSelected = basketStore.has(item.Id);
+        const isSelected = basketStore.has(itemId);
         if (isSelected) card.classList.add('is-selected');
 
-        // Selection overlay (only for items, not root libraries)
-        const showSelection = mode === 'items';
+        const showSelection = isBrowseItem ? true : mode === 'items';
+        const btnDisabled = !selectionAllowed;
+
+        let subtitleHtml = '';
+        let yearHtml = '';
+        if (isBrowseItem) {
+            const bi = item as BrowseDisplayItem;
+            if (bi.subtitle) subtitleHtml = `<div class="card-subtitle">${this.escapeHtml(bi.subtitle)}</div>`;
+            if (bi.year) yearHtml = `<div class="card-year">${bi.year}</div>`;
+        } else {
+            const ji = item as JellyfinItem;
+            if (ji.AlbumArtist) subtitleHtml = `<div class="card-subtitle">${this.escapeHtml(ji.AlbumArtist)}</div>`;
+            if (ji.ProductionYear) yearHtml = `<div class="card-year">${ji.ProductionYear}</div>`;
+            if ((item as JellyfinView).Type === 'CollectionFolder') subtitleHtml = '<div class="card-subtitle">Library</div>';
+        }
 
         card.innerHTML = `
             <div class="card-image">
@@ -49,6 +80,7 @@ export class MediaCard {
                             class="basket-toggle-btn"
                             variant="${isSelected ? 'danger' : 'primary'}"
                             label="${isSelected ? 'Remove from basket' : 'Add to basket'}"
+                            ${btnDisabled ? 'disabled' : ''}
                         ></sl-icon-button>
                     </div>
                 ` : ''}
@@ -57,16 +89,22 @@ export class MediaCard {
                 <div class="track-count-placeholder"></div>
             </div>
             <div class="card-content">
-                <strong>${this.escapeHtml(item.Name)}</strong>
-                ${(item as JellyfinItem).AlbumArtist ? `<div class="card-subtitle">${this.escapeHtml((item as JellyfinItem).AlbumArtist!)}</div>` : ''}
-                ${(item as JellyfinItem).ProductionYear ? `<div class="card-year">${(item as JellyfinItem).ProductionYear}</div>` : ''}
-                 ${(item as JellyfinView).Type === 'CollectionFolder' ? '<div class="card-subtitle">Library</div>' : ''}
+                <strong>${this.escapeHtml(itemName)}</strong>
+                ${subtitleHtml}
+                ${yearHtml}
             </div>
         `;
 
         // Load image asynchronously via Tauri proxy
         const cardImage = card.querySelector('.card-image') as HTMLElement;
-        const imageId = item.ImageId || item.Id;
+        let imageId: string;
+        if (isBrowseItem) {
+            const bi = item as BrowseDisplayItem;
+            imageId = bi.coverArtId ?? bi.id;
+        } else {
+            const ji = item as JellyfinItem | JellyfinView;
+            imageId = ji.ImageId || ji.Id;
+        }
         getImageUrl(imageId, 300, 90).then(dataUrl => {
             if (cardImage) {
                 cardImage.style.backgroundImage = `url('${dataUrl}')`;
@@ -98,14 +136,25 @@ export class MediaCard {
             const toggleBtn = card.querySelector('.basket-toggle-btn') as any;
             toggleBtn.addEventListener('click', async (e: Event) => {
                 e.stopPropagation();
+                if (!selectionAllowed) return;
 
-                if (basketStore.has(item.Id)) {
-                    basketStore.remove(item.Id);
+                if (basketStore.has(itemId)) {
+                    basketStore.remove(itemId);
+                } else if (isBrowseItem) {
+                    const bi = item as BrowseDisplayItem;
+                    basketStore.add({
+                        id: bi.id,
+                        name: bi.name,
+                        type: bi.type,
+                        artist: bi.subtitle ?? undefined,
+                        childCount: bi.childCount ?? 0,
+                        sizeTicks: bi.sizeTicks ?? 0,
+                        sizeBytes: bi.sizeBytes ?? 0,
+                    });
                 } else {
-                    // Fetch metadata (track count + file size) from daemon
+                    // Fetch metadata (track count + file size) from daemon (Jellyfin-specific)
                     toggleBtn.loading = true;
 
-                    // Add large spinner to card image
                     let overlay: HTMLElement | null = null;
                     if (cardImage) {
                         overlay = document.createElement('div');
@@ -116,18 +165,19 @@ export class MediaCard {
                     }
 
                     try {
+                        const ji = item as JellyfinItem | JellyfinView;
                         const [metadata, sizeData] = await Promise.all([
-                            rpcCall('jellyfin_get_item_counts', { itemIds: [item.Id] }),
-                            rpcCall('jellyfin_get_item_sizes', { itemIds: [item.Id] }),
+                            rpcCall('jellyfin_get_item_counts', { itemIds: [ji.Id] }),
+                            rpcCall('jellyfin_get_item_sizes', { itemIds: [ji.Id] }),
                         ]);
                         const info = metadata[0] || { recursiveItemCount: 0, cumulativeRunTimeTicks: 0 };
                         const sizeInfo = sizeData[0] || { totalSizeBytes: 0 };
 
                         basketStore.add({
-                            id: item.Id,
-                            name: item.Name,
-                            type: item.Type,
-                            artist: (item as JellyfinItem).AlbumArtist,
+                            id: ji.Id,
+                            name: ji.Name,
+                            type: ji.Type,
+                            artist: (ji as JellyfinItem).AlbumArtist,
                             childCount: info.recursiveItemCount,
                             sizeTicks: info.cumulativeRunTimeTicks,
                             sizeBytes: sizeInfo.totalSizeBytes,
@@ -146,7 +196,7 @@ export class MediaCard {
 
         // Listen for store updates to update visual state locally
         basketStore.addEventListener('update', () => {
-            const selected = basketStore.has(item.Id);
+            const selected = basketStore.has(itemId);
             card.classList.toggle('is-selected', selected);
             if (showSelection) {
                 const btn = card.querySelector('.basket-toggle-btn') as any;

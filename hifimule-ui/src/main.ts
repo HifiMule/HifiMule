@@ -123,6 +123,8 @@ function renderMainLayout(currentServer: CurrentServer = null) {
           </div>
         </header>
 
+        <div id="browse-mode-bar"></div>
+
         <div id="library-content" class="content">
           <!-- Media grid will be rendered here by library.ts -->
         </div>

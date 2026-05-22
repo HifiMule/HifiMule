@@ -127,7 +127,14 @@ impl MediaProvider for JellyfinProvider {
         Ok(views.into_iter().filter_map(library_from_view).collect())
     }
 
-    async fn list_artists(&self, library_id: Option<&str>) -> Result<Vec<Artist>, ProviderError> {
+    async fn list_artists(
+        &self,
+        library_id: Option<&str>,
+        letter: Option<&str>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<Artist>, u32), ProviderError> {
+        let limit_param = if limit > 0 { Some(limit) } else { None };
         let response = self
             .client
             .get_items(
@@ -136,15 +143,15 @@ impl MediaProvider for JellyfinProvider {
                 self.user_id(),
                 library_id,
                 Some(ARTIST_TYPES),
-                None,
-                None,
-                None,
+                Some(offset),
+                limit_param,
+                letter,
                 None,
             )
             .await
             .map_err(Self::map_error)?;
-
-        Ok(response.items.into_iter().map(artist_from_item).collect())
+        let total = response.total_record_count;
+        Ok((response.items.into_iter().map(artist_from_item).collect(), total))
     }
 
     async fn get_artist(&self, artist_id: &str) -> Result<ArtistWithAlbums, ProviderError> {
@@ -169,7 +176,14 @@ impl MediaProvider for JellyfinProvider {
         })
     }
 
-    async fn list_albums(&self, library_id: Option<&str>) -> Result<Vec<Album>, ProviderError> {
+    async fn list_albums(
+        &self,
+        library_id: Option<&str>,
+        letter: Option<&str>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<Album>, u32), ProviderError> {
+        let limit_param = if limit > 0 { Some(limit) } else { None };
         let response = self
             .client
             .get_items(
@@ -178,15 +192,15 @@ impl MediaProvider for JellyfinProvider {
                 self.user_id(),
                 library_id,
                 Some(ALBUM_TYPES),
-                None,
-                None,
-                None,
+                Some(offset),
+                limit_param,
+                letter,
                 None,
             )
             .await
             .map_err(Self::map_error)?;
-
-        Ok(response.items.into_iter().map(album_from_item).collect())
+        let total = response.total_record_count;
+        Ok((response.items.into_iter().map(album_from_item).collect(), total))
     }
 
     async fn get_album(&self, album_id: &str) -> Result<AlbumWithTracks, ProviderError> {
@@ -395,13 +409,13 @@ impl MediaProvider for JellyfinProvider {
         library_id: Option<&str>,
         offset: u32,
         limit: u32,
-    ) -> Result<(Vec<Song>, u32), ProviderError> {
+    ) -> Result<(Vec<Album>, u32), ProviderError> {
         let response = self
             .client
-            .get_recently_added_songs(self.url(), self.token(), self.user_id(), library_id, offset, limit)
+            .get_recently_added_albums(self.url(), self.token(), self.user_id(), library_id, offset, limit)
             .await
             .map_err(Self::map_error)?;
-        Ok((response.items.into_iter().map(song_from_item).collect(), response.total_record_count))
+        Ok((response.items.into_iter().map(album_from_item).collect(), response.total_record_count))
     }
 
     async fn list_frequently_played(
@@ -1094,8 +1108,9 @@ mod tests {
 
         let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
 
-        let artists = provider.list_artists(None).await.expect("artists");
+        let (artists, total) = provider.list_artists(None, None, 0, 0).await.expect("artists");
 
+        assert_eq!(total, 1);
         assert_eq!(artists.len(), 1);
         assert_eq!(artists[0].id, "artist1");
         assert_eq!(artists[0].name, "The Beatles");
@@ -1287,31 +1302,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_list_recently_added_sorts_by_date_created_descending() {
+    async fn provider_list_recently_added_returns_albums_sorted_by_date_created_descending() {
         let mut server = Server::new_async().await;
         let url = server.url();
         let _mock = server
             .mock("GET", "/Items")
             .match_query(Matcher::AllOf(vec![
                 Matcher::UrlEncoded("userId".into(), USER_ID.into()),
+                Matcher::UrlEncoded("IncludeItemTypes".into(), "MusicAlbum".into()),
                 Matcher::UrlEncoded("SortBy".into(), "DateCreated".into()),
                 Matcher::UrlEncoded("SortOrder".into(), "Descending".into()),
-                Matcher::UrlEncoded("Fields".into(), "MediaSources,UserData,DateCreated".into()),
             ]))
             .match_header("X-Emby-Token", TOKEN)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"Items":[{"Id":"new1","Name":"New Track","Type":"Audio","DateCreated":"2024-05-01T00:00:00Z"}],"TotalRecordCount":1,"StartIndex":0}"#)
+            .with_body(r#"{"Items":[{"Id":"album1","Name":"New Album","Type":"MusicAlbum","AlbumArtist":"The Artist","ProductionYear":2024}],"TotalRecordCount":1,"StartIndex":0}"#)
             .create_async()
             .await;
 
         let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
-        let (tracks, total) = provider.list_recently_added(None, 0, 50).await.expect("tracks");
+        let (albums, total) = provider.list_recently_added(None, 0, 50).await.expect("albums");
 
         assert_eq!(total, 1);
-        assert_eq!(tracks.len(), 1);
-        assert_eq!(tracks[0].id, "new1");
-        assert_eq!(tracks[0].date_added.as_deref(), Some("2024-05-01T00:00:00Z"));
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].id, "album1");
+        assert_eq!(albums[0].title, "New Album");
+        assert_eq!(albums[0].artist_name.as_deref(), Some("The Artist"));
     }
 
     #[tokio::test]

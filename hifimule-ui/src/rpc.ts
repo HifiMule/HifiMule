@@ -52,3 +52,183 @@ export async function rpcCall(method: string, params: any = {}): Promise<any> {
 export async function getImageUrl(id: string, maxHeight?: number, quality?: number): Promise<string> {
     return await invoke('image_proxy', { id, maxHeight: maxHeight ?? null, quality: quality ?? null });
 }
+
+// --- Provider-neutral browse types ---
+
+export type BrowseMode = "artists" | "albums" | "playlists" | "genres" | "recentlyAdded" | "frequentlyPlayed" | "recentlyPlayed" | "favorites";
+
+export interface BrowseArtist {
+    id: string;
+    name: string;
+    albumCount: number;
+    coverArtId: string | null;
+}
+
+export interface BrowseAlbum {
+    id: string;
+    name: string;
+    artistId: string;
+    artistName: string;
+    year: number | null;
+    trackCount: number;
+    coverArtId: string | null;
+}
+
+export interface BrowsePlaylist {
+    id: string;
+    name: string;
+    trackCount: number;
+    durationSeconds: number;
+}
+
+export interface BrowseTrack {
+    id: string;
+    title: string;
+    artistName: string;
+    albumName: string;
+    trackNumber: number | null;
+    duration: number;
+    bitrateKbps: number | null;
+    coverArtId: string | null;
+    sizeBytes: number | null;
+    dateAdded?: string | null;
+    lastPlayedAt?: string | null;
+    playCount?: number | null;
+    isFavorite?: boolean | null;
+}
+
+export interface BrowseGenre {
+    id: string;
+    name: string;
+    trackCount: number | null;
+    coverArtId: string | null;
+}
+
+// --- browse.* RPC wrapper functions ---
+
+export async function fetchBrowseModes(): Promise<BrowseMode[]> {
+    const result = await rpcCall('browse.listModes');
+    return result.modes;
+}
+
+export async function fetchBrowseArtists(
+    letter?: string,
+    libraryId?: string,
+    startIndex?: number,
+    limit?: number,
+): Promise<{ artists: BrowseArtist[]; total: number }> {
+    return await rpcCall('browse.listArtists', {
+        ...(letter !== undefined && { letter }),
+        ...(libraryId !== undefined && { libraryId }),
+        ...(startIndex !== undefined && { startIndex }),
+        ...(limit !== undefined && { limit }),
+    });
+}
+
+export async function fetchBrowseArtist(
+    artistId: string,
+): Promise<{ artist: BrowseArtist; albums: BrowseAlbum[] }> {
+    return await rpcCall('browse.getArtist', { artistId });
+}
+
+export async function fetchBrowseAlbums(
+    letter?: string,
+    libraryId?: string,
+    startIndex?: number,
+    limit?: number,
+): Promise<{ albums: BrowseAlbum[]; total: number }> {
+    return await rpcCall('browse.listAlbums', {
+        ...(letter !== undefined && { letter }),
+        ...(libraryId !== undefined && { libraryId }),
+        ...(startIndex !== undefined && { startIndex }),
+        ...(limit !== undefined && { limit }),
+    });
+}
+
+export async function fetchBrowseAlbum(
+    albumId: string,
+): Promise<{ album: BrowseAlbum; tracks: BrowseTrack[] }> {
+    return await rpcCall('browse.getAlbum', { albumId });
+}
+
+export async function fetchBrowsePlaylists(): Promise<{ playlists: BrowsePlaylist[] }> {
+    return await rpcCall('browse.listPlaylists');
+}
+
+export async function fetchBrowsePlaylist(
+    playlistId: string,
+): Promise<{ playlist: BrowsePlaylist; tracks: BrowseTrack[] }> {
+    return await rpcCall('browse.getPlaylist', { playlistId });
+}
+
+export async function fetchBrowseGenres(
+    libraryId?: string,
+    startIndex?: number,
+    limit?: number,
+): Promise<{ genres: BrowseGenre[]; total: number }> {
+    return await rpcCall('browse.listGenres', {
+        ...(libraryId !== undefined && { libraryId }),
+        ...(startIndex !== undefined && { startIndex }),
+        ...(limit !== undefined && { limit }),
+    });
+}
+
+export async function fetchBrowseGenre(
+    genreIdOrName: string,
+    startIndex?: number,
+    limit?: number,
+): Promise<{ genre: BrowseGenre; tracks: BrowseTrack[]; total: number }> {
+    return await rpcCall('browse.getGenre', {
+        genreId: genreIdOrName,
+        ...(startIndex !== undefined && { startIndex }),
+        ...(limit !== undefined && { limit }),
+    });
+}
+
+export async function fetchBrowseRecentlyAdded(
+    libraryId?: string,
+    startIndex?: number,
+    limit?: number,
+): Promise<{ albums: BrowseAlbum[]; total: number }> {
+    return await rpcCall('browse.listRecentlyAdded', {
+        ...(libraryId !== undefined && { libraryId }),
+        ...(startIndex !== undefined && { startIndex }),
+        ...(limit !== undefined && { limit }),
+    });
+}
+
+export async function fetchBrowseFrequentlyPlayed(
+    libraryId?: string,
+    startIndex?: number,
+    limit?: number,
+): Promise<{ tracks: BrowseTrack[]; total: number }> {
+    return await rpcCall('browse.listFrequentlyPlayed', {
+        ...(libraryId !== undefined && { libraryId }),
+        ...(startIndex !== undefined && { startIndex }),
+        ...(limit !== undefined && { limit }),
+    });
+}
+
+export async function fetchBrowseRecentlyPlayed(
+    libraryId?: string,
+    startIndex?: number,
+    limit?: number,
+): Promise<{ tracks: BrowseTrack[]; total: number }> {
+    return await rpcCall('browse.listRecentlyPlayed', {
+        ...(libraryId !== undefined && { libraryId }),
+        ...(startIndex !== undefined && { startIndex }),
+        ...(limit !== undefined && { limit }),
+    });
+}
+
+export async function fetchBrowseFavorites(
+    libraryId?: string,
+    startIndex?: number,
+    limit?: number,
+): Promise<{ tracks: BrowseTrack[]; total: number }> {
+    return await rpcCall('browse.listFavorites', {
+        ...(libraryId !== undefined && { libraryId }),
+        ...(startIndex !== undefined && { startIndex }),
+        ...(limit !== undefined && { limit }),
+    });
+}
