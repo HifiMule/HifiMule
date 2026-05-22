@@ -125,59 +125,7 @@ jobs:
 
       - name: Bundle macOS libmtp dylibs
         if: matrix.platform == 'macos-latest'
-        run: |
-          set -euo pipefail
-          LIB_DIR="hifimule-ui/src-tauri/bundled-libs"
-          mkdir -p "$LIB_DIR"
-          LIBMTP_PREFIX="$(brew --prefix libmtp)"
-          LIBMTP_DYLIB="$(find "$LIBMTP_PREFIX/lib" -name 'libmtp*.dylib' ! -type l -print -quit)"
-          test -n "$LIBMTP_DYLIB" || { echo "libmtp dylib not found"; exit 1; }
-
-          copy_brew_dylib() {
-            local dylib="$1"
-            local target="$LIB_DIR/$(basename "$dylib")"
-            cp "$dylib" "$target"
-            chmod u+w "$target"
-            install_name_tool -id "@executable_path/../Resources/bundled-libs/$(basename "$target")" "$target" \
-              || echo "Warning: install_name_tool -id failed for $(basename "$target")" >&2
-            otool -L "$target" | awk '/\/opt\/homebrew|\/usr\/local/ { print $1 }' | while read -r dep; do
-              if [[ -f "$dep" && ! -f "$LIB_DIR/$(basename "$dep")" ]]; then
-                copy_brew_dylib "$dep"
-              fi
-            done
-          }
-
-          copy_brew_dylib "$LIBMTP_DYLIB"
-
-          find "$LIB_DIR" -name '*.dylib' -print0 | while IFS= read -r -d '' dylib; do
-            otool -L "$dylib" | awk '/\/opt\/homebrew|\/usr\/local/ { print $1 }' | while read -r dep; do
-              dep_name="$(basename "$dep")"
-              if [[ -f "$LIB_DIR/$dep_name" ]]; then
-                install_name_tool -change "$dep" "@executable_path/../Resources/bundled-libs/$dep_name" "$dylib"
-              fi
-            done
-          done
-
-          find hifimule-ui/src-tauri/sidecars -type f -name 'hifimule-daemon-*apple-darwin' -print0 | while IFS= read -r -d '' sidecar; do
-            otool -L "$sidecar" | awk '/libmtp.*\.dylib/ { print $1 }' | while read -r dep; do
-              install_name_tool -change "$dep" "@executable_path/../Resources/bundled-libs/$(basename "$LIBMTP_DYLIB")" "$sidecar"
-            done
-            if otool -L "$sidecar" | grep -E '/opt/homebrew|/usr/local' | grep -q 'libmtp'; then
-              echo "Homebrew libmtp path still present in $sidecar"
-              otool -L "$sidecar"
-              exit 1
-            fi
-          done
-
-      - name: Re-sign binaries after install_name_tool
-        if: matrix.platform == 'macos-latest'
-        run: |
-          find hifimule-ui/src-tauri/bundled-libs -name '*.dylib' -print0 | while IFS= read -r -d '' dylib; do
-            codesign --force --sign - "$dylib"
-          done
-          find hifimule-ui/src-tauri/sidecars -type f -name 'hifimule-daemon-*apple-darwin' -print0 | while IFS= read -r -d '' sidecar; do
-            codesign --force --sign - "$sidecar"
-          done
+        run: node scripts/bundle-macos-libs.mjs
 
       - name: Check macOS minimum system version reminder
         if: matrix.platform == 'macos-latest'
@@ -241,9 +189,16 @@ jobs:
             exit 1
           }
           find "$APP_DIR/Contents/MacOS" -type f -name 'hifimule-daemon*' -print0 | while IFS= read -r -d '' sidecar; do
-            if otool -L "$sidecar" | grep -E '/opt/homebrew|/usr/local' | grep -q 'libmtp'; then
-              echo "Homebrew libmtp path still present in bundled sidecar: $sidecar"
+            if otool -L "$sidecar" | grep -E '/opt/homebrew|/usr/local'; then
+              echo "Homebrew dylib path still present in bundled sidecar: $sidecar"
               otool -L "$sidecar"
+              exit 1
+            fi
+          done
+          find "$APP_DIR/Contents/Resources/bundled-libs" -type f -name '*.dylib' -print0 | while IFS= read -r -d '' dylib; do
+            if otool -L "$dylib" | grep -E '/opt/homebrew|/usr/local'; then
+              echo "Homebrew dylib path still present in bundled dylib: $dylib"
+              otool -L "$dylib"
               exit 1
             fi
           done

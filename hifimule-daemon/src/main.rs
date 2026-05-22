@@ -17,7 +17,7 @@ use tray_icon::{
 mod service;
 
 const LOG_MAX_BYTES: u64 = 1_048_576; // 1 MB
-const MAX_TOKIO_WORKER_THREADS: usize = 8;
+const MAX_TOKIO_WORKER_THREADS: usize = 4; // Limit worker threads to prevent resource contention on low-end systems
 
 /// Simple file-based logger for release mode where stdout/stderr are unavailable.
 /// Writes to `%APPDATA%/HifiMule/daemon.log`. Truncates at 1 MB.

@@ -79,3 +79,11 @@ for (const entry of readdirSync(sidecarsDir, { withFileTypes: true })) {
 }
 
 console.log(`Sidecar copied: ${destBinary}`);
+
+if (process.platform === "darwin") {
+  console.log("Bundling macOS libmtp dylibs...");
+  execSync("node scripts/bundle-macos-libs.mjs", {
+    cwd: projectRoot,
+    stdio: "inherit",
+  });
+}
