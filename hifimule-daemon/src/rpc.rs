@@ -648,11 +648,19 @@ async fn handle_browse_list_genres(
         .as_ref()
         .and_then(|p| p["libraryId"].as_str())
         .map(str::to_owned);
+    let (offset, limit) = browse_pagination(&params);
     let provider = require_provider(state).await?;
-    let mut genres = provider
+    let all_genres = provider
         .list_genres(library_id.as_deref())
         .await
         .map_err(provider_error_to_rpc)?;
+
+    let total = all_genres.len() as u64;
+    let mut genres: Vec<_> = all_genres
+        .into_iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .collect();
 
     // Enrich genres without cover art: fetch first track's art in parallel
     let needs_art: Vec<(usize, String)> = genres
@@ -686,7 +694,6 @@ async fn handle_browse_list_genres(
         }
     }
 
-    let total = genres.len() as u64;
     Ok(serde_json::json!({ "genres": genres, "total": total }))
 }
 
