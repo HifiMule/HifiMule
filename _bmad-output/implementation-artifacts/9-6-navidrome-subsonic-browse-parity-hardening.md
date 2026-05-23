@@ -1,6 +1,6 @@
 # Story 9.6: Navidrome/Subsonic Browse Parity Hardening
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -93,6 +93,8 @@ GPT-5 Codex
 - 2026-05-23: `rtk cargo test -p hifimule-daemon` passed: 327 passed.
 - 2026-05-23: `rtk tsc` from `hifimule-ui` could not start because `npx` is not on PATH; repo-local `.\node_modules\.bin\tsc.cmd` passed after approval.
 - 2026-05-23: Manual Navidrome smoke test validated by Alexis.
+- 2026-05-23: Review patch verified with `rtk cargo test -p hifimule-daemon providers::subsonic` (43 passed) and `rtk cargo test -p hifimule-daemon` (328 passed).
+- 2026-05-23: Follow-up performance patch changed frequent/recent played retrieval from full `search3` song dumps to `getAlbumList2(type=frequent|recent)` plus targeted `getAlbum` calls; verified with `rtk cargo test -p hifimule-daemon providers::subsonic` (43 passed) and `rtk cargo test -p hifimule-daemon` (328 passed).
 
 ### Completion Notes List
 
@@ -102,6 +104,7 @@ GPT-5 Codex
 - Normalized Subsonic song `created`, `played`, and `playCount` fields into provider-domain `Song` metadata.
 - Hardened Subsonic album quick-nav filtering, including `#` for non-alpha album names, without adding UI provider-specific branching.
 - Manual Navidrome smoke testing was confirmed valid by Alexis.
+- Optimized frequently/recently played retrieval to narrow via server frequent/recent album lists before fetching tracks.
 
 ### File List
 
@@ -113,3 +116,8 @@ GPT-5 Codex
 
 - 2026-05-23: Created story from approved Correct Course proposal for Navidrome/Subsonic browse parity.
 - 2026-05-23: Implemented OpenSubsonic history browse capabilities/methods and Subsonic album quick-nav hardening; automated and manual validation passed.
+
+### Review Findings
+
+- [x] [Review][Decision][Dismissed] History modes are exposed for every OpenSubsonic server without proving per-mode reliability — Alexis chose to treat `open_subsonic` as sufficient for Story 9.6.
+- [x] [Review][Patch] `list_recently_added` returns the current page length as `total` and bypasses `offset` when `limit == 0` [hifimule-daemon/src/providers/subsonic.rs:452]

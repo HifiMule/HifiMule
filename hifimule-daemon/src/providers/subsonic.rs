@@ -181,6 +181,24 @@ impl SubsonicProvider {
         }
         Ok(songs)
     }
+
+    async fn history_songs_from_album_list(
+        &self,
+        album_list_type: &str,
+    ) -> Result<Vec<SongDto>, ProviderError> {
+        let albums = self
+            .client
+            .get_album_list2_all_by_type(album_list_type)
+            .await?
+            .album_list2
+            .album;
+        let mut songs = Vec::new();
+        for album in albums {
+            let album = self.client.get_album(&album.id).await?;
+            songs.extend(album.album.song);
+        }
+        Ok(songs)
+    }
 }
 
 #[async_trait]
@@ -451,7 +469,7 @@ impl MediaProvider for SubsonicProvider {
         self.ensure_open_subsonic_history("list_recently_added")?;
         let response = self
             .client
-            .get_album_list2_by_type("newest", offset, limit)
+            .get_album_list2_all_by_type("newest")
             .await?;
         let albums: Vec<Album> = response
             .album_list2
@@ -460,7 +478,7 @@ impl MediaProvider for SubsonicProvider {
             .map(album_from_dto)
             .collect();
         let total = albums.len() as u32;
-        Ok((albums, total))
+        Ok(page_vec(albums, offset, limit, total))
     }
 
     async fn list_frequently_played(
@@ -471,7 +489,7 @@ impl MediaProvider for SubsonicProvider {
     ) -> Result<(Vec<Song>, u32), ProviderError> {
         self.ensure_open_subsonic_history("list_frequently_played")?;
         let mut songs: Vec<Song> = self
-            .history_song_dump()
+            .history_songs_from_album_list("frequent")
             .await?
             .into_iter()
             .filter(|song| song.play_count.unwrap_or_default() > 0)
@@ -496,7 +514,7 @@ impl MediaProvider for SubsonicProvider {
     ) -> Result<(Vec<Song>, u32), ProviderError> {
         self.ensure_open_subsonic_history("list_recently_played")?;
         let mut songs: Vec<Song> = self
-            .history_song_dump()
+            .history_songs_from_album_list("recent")
             .await?
             .into_iter()
             .filter(|song| {
@@ -713,28 +731,6 @@ impl SubsonicClient {
         Ok(AlbumList2Body {
             album_list2: AlbumListDto { album: all_albums },
         })
-    }
-
-    async fn get_album_list2_by_type(
-        &self,
-        album_list_type: &str,
-        offset: u32,
-        limit: u32,
-    ) -> Result<AlbumList2Body, ProviderError> {
-        if limit == 0 {
-            return self.get_album_list2_all_by_type(album_list_type).await;
-        }
-        let size_str = limit.to_string();
-        let offset_str = offset.to_string();
-        self.get(
-            "getAlbumList2",
-            &[
-                ("type", album_list_type),
-                ("size", &size_str),
-                ("offset", &offset_str),
-            ],
-        )
-        .await
     }
 
     async fn get_album(&self, id: &str) -> Result<AlbumWithSongsBody, ProviderError> {
@@ -2746,7 +2742,7 @@ mod tests {
             .match_query(Matcher::AllOf({
                 let mut matchers = auth_matchers();
                 matchers.push(Matcher::UrlEncoded("type".into(), "newest".into()));
-                matchers.push(Matcher::UrlEncoded("size".into(), "50".into()));
+                matchers.push(Matcher::UrlEncoded("size".into(), "500".into()));
                 matchers.push(Matcher::UrlEncoded("offset".into(), "0".into()));
                 matchers
             }))
@@ -2774,20 +2770,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_subsonic_frequently_played_sorts_tracks_by_play_count_descending() {
+    async fn open_subsonic_recently_added_pages_after_calculating_total() {
         let mut server = Server::new_async().await;
-        let _songs = server
-            .mock("GET", "/rest/search3.view")
+        let _albums = server
+            .mock("GET", "/rest/getAlbumList2.view")
             .match_query(Matcher::AllOf({
                 let mut matchers = auth_matchers();
-                matchers.push(Matcher::UrlEncoded("query".into(), "".into()));
-                matchers.push(Matcher::UrlEncoded("songCount".into(), "500".into()));
-                matchers.push(Matcher::UrlEncoded("songOffset".into(), "0".into()));
+                matchers.push(Matcher::UrlEncoded("type".into(), "newest".into()));
+                matchers.push(Matcher::UrlEncoded("size".into(), "500".into()));
+                matchers.push(Matcher::UrlEncoded("offset".into(), "0".into()));
                 matchers
             }))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(&ok(r#""searchResult3":{"song":[
+            .with_body(&ok(r#""albumList2":{"album":[
+                {"id":"first","name":"First"},
+                {"id":"second","name":"Second"},
+                {"id":"third","name":"Third"}
+            ]}"#))
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        let (albums, total) = provider
+            .list_recently_added(None, 1, 1)
+            .await
+            .expect("paged recently added");
+
+        assert_eq!(total, 3);
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].id, "second");
+    }
+
+    #[tokio::test]
+    async fn open_subsonic_frequently_played_sorts_tracks_by_play_count_descending() {
+        let mut server = Server::new_async().await;
+        let _albums = server
+            .mock("GET", "/rest/getAlbumList2.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("type".into(), "frequent".into()));
+                matchers.push(Matcher::UrlEncoded("size".into(), "500".into()));
+                matchers.push(Matcher::UrlEncoded("offset".into(), "0".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(r#""albumList2":{"album":[{"id":"album1","name":"Album"}]}"#))
+            .expect(1)
+            .create_async()
+            .await;
+        let _album = server
+            .mock("GET", "/rest/getAlbum.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "album1".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(r#""album":{"id":"album1","name":"Album","song":[
                 {"id":"low","title":"Low","album":"Album","albumId":"album1","artist":"Artist","artistId":"artist1","duration":180,"bitRate":192,"coverArt":"cover-low","playCount":2,"played":"2026-05-20T12:00:00Z","created":"2026-05-01T00:00:00Z"},
                 {"id":"high","title":"High","album":"Album","albumId":"album1","artist":"Artist","artistId":"artist1","duration":200,"bitRate":320,"coverArt":"cover-high","playCount":9,"played":"2026-05-21T12:00:00Z","created":"2026-05-02T00:00:00Z"},
                 {"id":"none","title":"None","album":"Album","albumId":"album1","duration":210}
@@ -2826,18 +2869,31 @@ mod tests {
     #[tokio::test]
     async fn open_subsonic_recently_played_sorts_tracks_by_last_played_descending() {
         let mut server = Server::new_async().await;
-        let _songs = server
-            .mock("GET", "/rest/search3.view")
+        let _albums = server
+            .mock("GET", "/rest/getAlbumList2.view")
             .match_query(Matcher::AllOf({
                 let mut matchers = auth_matchers();
-                matchers.push(Matcher::UrlEncoded("query".into(), "".into()));
-                matchers.push(Matcher::UrlEncoded("songCount".into(), "500".into()));
-                matchers.push(Matcher::UrlEncoded("songOffset".into(), "0".into()));
+                matchers.push(Matcher::UrlEncoded("type".into(), "recent".into()));
+                matchers.push(Matcher::UrlEncoded("size".into(), "500".into()));
+                matchers.push(Matcher::UrlEncoded("offset".into(), "0".into()));
                 matchers
             }))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(&ok(r#""searchResult3":{"song":[
+            .with_body(&ok(r#""albumList2":{"album":[{"id":"album1","name":"Album"}]}"#))
+            .expect(1)
+            .create_async()
+            .await;
+        let _album = server
+            .mock("GET", "/rest/getAlbum.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "album1".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(r#""album":{"id":"album1","name":"Album","song":[
                 {"id":"older","title":"Older","duration":180,"playCount":4,"played":"2026-05-20T12:00:00Z"},
                 {"id":"newer","title":"Newer","duration":200,"playCount":1,"played":"2026-05-22T12:00:00Z"},
                 {"id":"never","title":"Never","duration":210}
