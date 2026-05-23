@@ -308,7 +308,10 @@ pub async fn process_device_scrobbles(
             Ok(false) => {}
             Err(e) => {
                 // Non-fatal: log and proceed with submission attempt
-                println!("[Scrobbler] Warning: dedup check failed for '{}': {} — will attempt submission", entry.title, e);
+                println!(
+                    "[Scrobbler] Warning: dedup check failed for '{}': {} — will attempt submission",
+                    entry.title, e
+                );
             }
         }
 

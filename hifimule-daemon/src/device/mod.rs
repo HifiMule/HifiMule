@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -1268,8 +1268,8 @@ fn is_removable_drive(_path: &Path) -> bool {
 #[cfg(target_os = "windows")]
 fn has_msc_drive_for_device(friendly_name: &str, wpd_device_id: &str) -> bool {
     use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
-        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
-        SetupDiGetDeviceInstanceIdW, DIGCF_PRESENT, SP_DEVINFO_DATA,
+        DIGCF_PRESENT, SP_DEVINFO_DATA, SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo,
+        SetupDiGetClassDevsW, SetupDiGetDeviceInstanceIdW,
     };
     use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
 
@@ -1281,7 +1281,7 @@ fn has_msc_drive_for_device(friendly_name: &str, wpd_device_id: &str) -> bool {
         // Find the "usb#" or "usb\\" prefix
         let start = lower.find("usb#").or_else(|| lower.find("usb\\"))?;
         let rest = &wpd_device_id[start + 4..]; // skip "usb#"
-                                                // rest = "vid_XXXX&pid_YYYY#SERIAL#{guid}" — take up to the third '#' separator
+        // rest = "vid_XXXX&pid_YYYY#SERIAL#{guid}" — take up to the third '#' separator
         let parts: Vec<&str> = rest.splitn(3, '#').collect();
         if parts.len() < 2 {
             return None;

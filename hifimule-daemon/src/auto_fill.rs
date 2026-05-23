@@ -6,7 +6,7 @@
 ///   3. DateCreated DESC (newest last)
 /// Stops paginating as soon as the device capacity budget is filled.
 use crate::api::{
-    url_encode, CredentialManager, JellyfinClient, JellyfinItem, JellyfinItemsResponse,
+    CredentialManager, JellyfinClient, JellyfinItem, JellyfinItemsResponse, url_encode,
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

@@ -1,7 +1,29 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::path::PathBuf;
 
+#[cfg(test)]
+static TEST_APP_DATA_DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub fn set_test_app_data_dir(path: PathBuf) {
+    *TEST_APP_DATA_DIR.lock().unwrap() = Some(path);
+}
+
+#[cfg(test)]
+pub fn clear_test_app_data_dir() {
+    *TEST_APP_DATA_DIR.lock().unwrap() = None;
+}
+
 pub fn get_app_data_dir() -> Result<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = TEST_APP_DATA_DIR.lock().unwrap().clone() {
+        if !path.exists() {
+            std::fs::create_dir_all(&path)
+                .map_err(|e| anyhow!("Failed to create application data directory: {}", e))?;
+        }
+        return Ok(path);
+    }
+
     if let Ok(override_path) = std::env::var("HIFIMULE_APP_DATA_DIR") {
         let path = PathBuf::from(override_path);
         if !path.exists() {

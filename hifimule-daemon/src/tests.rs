@@ -4,7 +4,7 @@ use std::sync::Arc;
 #[test]
 fn test_start_daemon_core_returns_shutdown_and_receiver() {
     let temp_dir = tempfile::tempdir().unwrap();
-    std::env::set_var("HIFIMULE_APP_DATA_DIR", temp_dir.path());
+    crate::paths::set_test_app_data_dir(temp_dir.path().to_path_buf());
 
     // Verify start_daemon_core returns a working shutdown signal and state receiver
     let result = start_daemon_core();
@@ -24,7 +24,7 @@ fn test_start_daemon_core_returns_shutdown_and_receiver() {
     shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
     // Give the daemon thread time to clean up
     std::thread::sleep(std::time::Duration::from_millis(200));
-    std::env::remove_var("HIFIMULE_APP_DATA_DIR");
+    crate::paths::clear_test_app_data_dir();
 }
 
 #[test]

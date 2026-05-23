@@ -2,15 +2,16 @@
 
 use anyhow::Result;
 use std::sync::{
+    Arc,
     atomic::{AtomicBool, Ordering},
-    mpsc, Arc,
+    mpsc,
 };
 use std::thread;
 use std::time::{Duration, Instant};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tray_icon::{
-    menu::{Menu, MenuEvent, MenuItem},
     Icon, TrayIconBuilder,
+    menu::{Menu, MenuEvent, MenuItem},
 };
 
 #[cfg(windows)]

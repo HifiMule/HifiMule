@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 use tauri::{Manager, RunEvent};
-use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
+use tauri_plugin_shell::process::CommandChild;
 
 struct DaemonProcess(Mutex<Option<CommandChild>>);
 

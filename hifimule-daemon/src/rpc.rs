@@ -1,14 +1,14 @@
 use crate::api::{CredentialManager, JellyfinClient};
 use crate::domain::models::{Album, Artist, ChangeType, ItemType, Library, Playlist, Song};
 use crate::providers::{
-    server_type_slug, CredentialKind, MediaProvider, ProviderCredentials, ProviderError,
-    ServerType, ServerTypeHint, SUBSONIC_PLAYLISTS_LIBRARY_ID,
+    CredentialKind, MediaProvider, ProviderCredentials, ProviderError,
+    SUBSONIC_PLAYLISTS_LIBRARY_ID, ServerType, ServerTypeHint, server_type_slug,
 };
 use axum::{
+    Json, Router,
     extract::{Path, State},
     response::IntoResponse,
     routing::{get, post},
-    Json, Router,
 };
 use notify_rust::Notification;
 use serde::{Deserialize, Serialize};
@@ -2640,7 +2640,7 @@ async fn handle_sync_calculate_delta(
                     code: ERR_CONNECTION_FAILED,
                     message: format!("Sync aborted: {}", e),
                     data: None,
-                })
+                });
             }
         }
     }
@@ -2659,7 +2659,7 @@ async fn handle_sync_calculate_delta(
                             code: ERR_CONNECTION_FAILED,
                             message: "Auto-fill: could not determine device free space".to_string(),
                             data: None,
-                        })
+                        });
                     }
                 }
             };
@@ -2735,7 +2735,7 @@ async fn handle_sync_detect_changes(
                 code: ERR_INVALID_PARAMS,
                 message: "syncToken must be a string or null".to_string(),
                 data: None,
-            })
+            });
         }
     };
 
@@ -5918,10 +5918,12 @@ mod tests {
         // Verify device is now recognized
         let current_device = device_manager.get_current_device().await;
         assert!(current_device.is_some(), "Device should now be recognized");
-        assert!(device_manager
-            .get_unrecognized_device_path()
-            .await
-            .is_none());
+        assert!(
+            device_manager
+                .get_unrecognized_device_path()
+                .await
+                .is_none()
+        );
 
         // Verify DB mapping was stored
         let device_id = res["data"]["deviceId"].as_str().unwrap();

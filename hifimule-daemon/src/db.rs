@@ -1,5 +1,5 @@
-use anyhow::{anyhow, Result};
-use rusqlite::{params, Connection};
+use anyhow::{Result, anyhow};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

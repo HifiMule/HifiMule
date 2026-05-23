@@ -1,5 +1,4 @@
 use super::*;
-use crate::device_io::DeviceIO;
 use serde_json;
 
 #[cfg(target_os = "windows")]
@@ -27,7 +26,7 @@ fn dummy_mtp_device_info(id: &str) -> mtp::MtpDeviceInfo {
 use std::fs;
 use std::sync::Arc;
 use tempfile::tempdir;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 fn msc(dir: &std::path::Path) -> Arc<dyn crate::device_io::DeviceIO> {
     Arc::new(crate::device_io::MscBackend::new(dir.to_path_buf()))
@@ -1190,10 +1189,11 @@ async fn test_initialize_device_requires_unrecognized_path() {
         .initialize_device("", None, "My Device".to_string(), None, msc(dir.path()))
         .await;
     assert!(res.is_err());
-    assert!(res
-        .unwrap_err()
-        .to_string()
-        .contains("No unrecognized device"));
+    assert!(
+        res.unwrap_err()
+            .to_string()
+            .contains("No unrecognized device")
+    );
 }
 
 #[tokio::test]

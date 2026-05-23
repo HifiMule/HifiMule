@@ -352,7 +352,11 @@ fn construct_file_path_with_extension(
             } else {
                 // Even with minimal components, it's too long. The managed_path itself is probably too long.
                 // We have to return what we have and let the OS error out, or return our own error.
-                return Err(anyhow::anyhow!("Resulting path is too long for Windows MAX_PATH ({}), even after minimal truncation: {}", WINDOWS_MAX_PATH, path.display()));
+                return Err(anyhow::anyhow!(
+                    "Resulting path is too long for Windows MAX_PATH ({}), even after minimal truncation: {}",
+                    WINDOWS_MAX_PATH,
+                    path.display()
+                ));
             }
         }
 
@@ -1175,7 +1179,11 @@ pub async fn execute_sync(
         let extension_override = preferred_audio_container.or(profile_container);
         eprintln!(
             "[Sync] item={} extension_override={:?} (preferred_audio_container={:?}, profile_container={:?}, is_transcoded={})",
-            add_item.jellyfin_id, extension_override, preferred_audio_container, profile_container, is_transcoded
+            add_item.jellyfin_id,
+            extension_override,
+            preferred_audio_container,
+            profile_container,
+            is_transcoded
         );
 
         // Construct target path (includes legacy hardware path length validation)
@@ -2715,14 +2723,16 @@ mod tests {
         let root = dir.path().to_path_buf();
         let managed_path = root.join("Music");
 
-        assert!(validate_delete_path_for_managed_zone(
-            &root,
-            &managed_path,
-            Some("Music"),
-            "Music/Artist/Missing Track.flac",
-            false,
-        )
-        .is_ok());
+        assert!(
+            validate_delete_path_for_managed_zone(
+                &root,
+                &managed_path,
+                Some("Music"),
+                "Music/Artist/Missing Track.flac",
+                false,
+            )
+            .is_ok()
+        );
     }
 
     #[cfg(unix)]

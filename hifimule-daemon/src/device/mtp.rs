@@ -55,13 +55,12 @@ where
 
 #[cfg(target_os = "windows")]
 pub mod windows_wpd {
-    use super::{resolve_path_with_lookup, MtpDeviceInfo, MtpDeviceInner};
+    use super::{MtpDeviceInfo, MtpDeviceInner, resolve_path_with_lookup};
     use crate::device_io::{FileEntry, MtpHandle};
     use anyhow::Result;
     use std::mem::ManuallyDrop;
-    use std::sync::{mpsc, Mutex};
+    use std::sync::{Mutex, mpsc};
     use std::thread::JoinHandle;
-    use windows::core::{Interface, HSTRING, PCWSTR, PWSTR};
     use windows::Win32::Devices::PortableDevices::{
         IPortableDeviceDataStream, IPortableDevicePropVariantCollection,
         PortableDevicePropVariantCollection, *,
@@ -71,10 +70,11 @@ pub mod windows_wpd {
     use windows::Win32::UI::Shell::Common::{ITEMIDLIST, STRRET};
     use windows::Win32::UI::Shell::PropertiesSystem::PROPERTYKEY;
     use windows::Win32::UI::Shell::{
-        FileOperation, IEnumIDList, IFileOperation, IShellFolder, IShellItem,
-        SHCreateItemFromParsingName, SHCreateItemWithParent, SHGetKnownFolderItem, StrRetToStrW,
-        FILEOPERATION_FLAGS, KF_FLAG_DEFAULT, SHCONTF_FOLDERS, SHCONTF_NONFOLDERS, SHGDN_NORMAL,
+        FILEOPERATION_FLAGS, FileOperation, IEnumIDList, IFileOperation, IShellFolder, IShellItem,
+        KF_FLAG_DEFAULT, SHCONTF_FOLDERS, SHCONTF_NONFOLDERS, SHCreateItemFromParsingName,
+        SHCreateItemWithParent, SHGDN_NORMAL, SHGetKnownFolderItem, StrRetToStrW,
     };
+    use windows::core::{HSTRING, Interface, PCWSTR, PWSTR};
 
     const ERROR_FILE_NOT_FOUND_HRESULT: i32 = 0x80070002u32 as i32;
     const ERROR_GEN_FAILURE_HRESULT: i32 = 0x8007001Fu32 as i32;

@@ -482,8 +482,8 @@ impl DeviceIO for MtpBackend {
 pub mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tempfile::tempdir;
 
@@ -757,11 +757,13 @@ pub mod tests {
         assert_eq!(log, vec!["write:Music/track.mp3"]);
 
         assert!(mock.files.lock().unwrap().contains_key("Music/track.mp3"));
-        assert!(!mock
-            .files
-            .lock()
-            .unwrap()
-            .contains_key("Music/track.mp3.dirty"));
+        assert!(
+            !mock
+                .files
+                .lock()
+                .unwrap()
+                .contains_key("Music/track.mp3.dirty")
+        );
     }
 
     #[tokio::test]

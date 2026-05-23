@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -980,15 +980,27 @@ impl JellyfinClient {
                         base_url.trim_end_matches('/'),
                         item_id
                     );
-                    eprintln!("[StreamUrl] item={} → case 2: direct play allowed by profile, using Download: {}", item_id, url);
+                    eprintln!(
+                        "[StreamUrl] item={} → case 2: direct play allowed by profile, using Download: {}",
+                        item_id, url
+                    );
                     return Ok((url, false));
                 }
-                eprintln!("[StreamUrl] item={} → case 3: profile forbids direct play but Jellyfin gave SupportsDirectPlay=true with no TranscodingUrl — falling through to forced stream", item_id);
+                eprintln!(
+                    "[StreamUrl] item={} → case 3: profile forbids direct play but Jellyfin gave SupportsDirectPlay=true with no TranscodingUrl — falling through to forced stream",
+                    item_id
+                );
             } else {
-                eprintln!("[StreamUrl] item={} → SupportsDirectPlay=false with no TranscodingUrl (unexpected) — falling through to forced stream", item_id);
+                eprintln!(
+                    "[StreamUrl] item={} → SupportsDirectPlay=false with no TranscodingUrl (unexpected) — falling through to forced stream",
+                    item_id
+                );
             }
         } else {
-            eprintln!("[StreamUrl] item={} → no MediaSources in PlaybackInfo response — falling through to forced stream", item_id);
+            eprintln!(
+                "[StreamUrl] item={} → no MediaSources in PlaybackInfo response — falling through to forced stream",
+                item_id
+            );
         }
 
         // PlaybackInfo gave no usable URL. If the profile targets a specific container,
@@ -1024,7 +1036,10 @@ impl JellyfinClient {
             return Ok((url, true));
         }
 
-        eprintln!("[StreamUrl] item={} → case 5 (last resort): no TranscodingProfiles in profile — falling back to Download", item_id);
+        eprintln!(
+            "[StreamUrl] item={} → case 5 (last resort): no TranscodingProfiles in profile — falling back to Download",
+            item_id
+        );
 
         // Last resort: direct download.
         Ok((
@@ -1651,10 +1666,11 @@ mod tests {
             .await;
 
         assert!(res.is_err());
-        assert!(res
-            .unwrap_err()
-            .to_string()
-            .contains("must start with http"));
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("must start with http")
+        );
     }
 
     #[test]

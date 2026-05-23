@@ -5,14 +5,14 @@ use crate::domain::models::{
 use crate::providers::{
     BrowseCapabilities, BrowseMode, Capabilities, CredentialKind, MediaProvider,
     ProviderChangeContext, ProviderChangeMetadata, ProviderCredentials, ProviderError,
-    ProviderSyncedSong, ScrobbleRequest, ScrobbleSubmission, ServerType, TranscodeProfile,
-    SUBSONIC_PLAYLISTS_LIBRARY_ID,
+    ProviderSyncedSong, SUBSONIC_PLAYLISTS_LIBRARY_ID, ScrobbleRequest, ScrobbleSubmission,
+    ServerType, TranscodeProfile,
 };
 use async_trait::async_trait;
 use md5::{Digest, Md5};
 use reqwest::Url;
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use std::{
     collections::{HashMap, HashSet},
     fmt,
@@ -2310,15 +2310,21 @@ mod tests {
             .expect("changes");
 
         assert_eq!(changes.len(), 3);
-        assert!(changes
-            .iter()
-            .any(|change| change.item.id == "song1" && change.change_type == ChangeType::Updated));
-        assert!(changes
-            .iter()
-            .any(|change| change.item.id == "song2" && change.change_type == ChangeType::Deleted));
-        assert!(changes
-            .iter()
-            .any(|change| change.item.id == "song3" && change.change_type == ChangeType::Created));
+        assert!(
+            changes.iter().any(
+                |change| change.item.id == "song1" && change.change_type == ChangeType::Updated
+            )
+        );
+        assert!(
+            changes.iter().any(
+                |change| change.item.id == "song2" && change.change_type == ChangeType::Deleted
+            )
+        );
+        assert!(
+            changes.iter().any(
+                |change| change.item.id == "song3" && change.change_type == ChangeType::Created
+            )
+        );
     }
 
     #[tokio::test]
