@@ -1,6 +1,6 @@
 # Story 9.6: Navidrome/Subsonic Browse Parity Hardening
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -26,36 +26,36 @@ so that switching from Jellyfin does not remove core curation workflows.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Refine Subsonic/OpenSubsonic browse capabilities (AC: 1-4, 6)
-  - [ ] Detect whether the connected server can reliably support recently added, frequently played, and recently played modes.
-  - [ ] Include supported modes in `SubsonicProvider.capabilities().browse.list_modes`.
-  - [ ] Keep unsupported modes hidden and returning `UnsupportedCapability` when called directly.
-  - [ ] Keep capability decisions inside `SubsonicProvider`.
+- [x] Task 1: Refine Subsonic/OpenSubsonic browse capabilities (AC: 1-4, 6)
+  - [x] Detect whether the connected server can reliably support recently added, frequently played, and recently played modes.
+  - [x] Include supported modes in `SubsonicProvider.capabilities().browse.list_modes`.
+  - [x] Keep unsupported modes hidden and returning `UnsupportedCapability` when called directly.
+  - [x] Keep capability decisions inside `SubsonicProvider`.
 
-- [ ] Task 2: Implement supported history navigation methods (AC: 1-3)
-  - [ ] Implement `list_recently_added` for servers with reliable newest-album support.
-  - [ ] Implement `list_frequently_played` for servers with reliable play-count sorting.
-  - [ ] Implement `list_recently_played` for servers with reliable last-played sorting.
-  - [ ] Preserve provider-domain normalization for IDs, duration, bitrate, cover art, dates, and play counts.
+- [x] Task 2: Implement supported history navigation methods (AC: 1-3)
+  - [x] Implement `list_recently_added` for servers with reliable newest-album support.
+  - [x] Implement `list_frequently_played` for servers with reliable play-count sorting.
+  - [x] Implement `list_recently_played` for servers with reliable last-played sorting.
+  - [x] Preserve provider-domain normalization for IDs, duration, bitrate, cover art, dates, and play counts.
 
-- [ ] Task 3: Harden album letter filtering for Subsonic/Navidrome (AC: 5)
-  - [ ] Verify `browse.listAlbums` forwards `letter` to `MediaProvider::list_albums`.
-  - [ ] Ensure Subsonic/Navidrome album letter filtering matches Jellyfin quick-nav expectations.
-  - [ ] Include `#`/non-alpha behavior if the UI sends that value.
+- [x] Task 3: Harden album letter filtering for Subsonic/Navidrome (AC: 5)
+  - [x] Verify `browse.listAlbums` forwards `letter` to `MediaProvider::list_albums`.
+  - [x] Ensure Subsonic/Navidrome album letter filtering matches Jellyfin quick-nav expectations.
+  - [x] Include `#`/non-alpha behavior if the UI sends that value.
 
-- [ ] Task 4: Keep the UI provider-neutral (AC: 6)
-  - [ ] Do not add Navidrome/Subsonic-specific mode branching in `hifimule-ui/src/library.ts`.
-  - [ ] Continue rendering modes from `browse.listModes`.
-  - [ ] Ensure unsupported modes do not show as broken buttons.
+- [x] Task 4: Keep the UI provider-neutral (AC: 6)
+  - [x] Do not add Navidrome/Subsonic-specific mode branching in `hifimule-ui/src/library.ts`.
+  - [x] Continue rendering modes from `browse.listModes`.
+  - [x] Ensure unsupported modes do not show as broken buttons.
 
-- [ ] Task 5: Verification (AC: 1-6)
-  - [ ] Add provider tests for OpenSubsonic/Navidrome capability lists.
-  - [ ] Add provider tests for classic Subsonic capability lists.
-  - [ ] Add sorting tests for recently added, frequently played, and recently played where implemented.
-  - [ ] Add album letter filtering tests for Subsonic/Navidrome.
-  - [ ] Run `rtk cargo test -p hifimule-daemon`.
-  - [ ] Run `rtk tsc` from `hifimule-ui`.
-  - [ ] Manually smoke test against a Navidrome server.
+- [x] Task 5: Verification (AC: 1-6)
+  - [x] Add provider tests for OpenSubsonic/Navidrome capability lists.
+  - [x] Add provider tests for classic Subsonic capability lists.
+  - [x] Add sorting tests for recently added, frequently played, and recently played where implemented.
+  - [x] Add album letter filtering tests for Subsonic/Navidrome.
+  - [x] Run `rtk cargo test -p hifimule-daemon`.
+  - [x] Run `rtk tsc` from `hifimule-ui`.
+  - [x] Manually smoke test against a Navidrome server.
 
 ## Dev Notes
 
@@ -84,12 +84,32 @@ Prefer honest capability exposure. If a Subsonic-compatible server cannot provid
 
 ### Agent Model Used
 
+GPT-5 Codex
+
 ### Debug Log References
+
+- 2026-05-23: `rtk cargo test -p hifimule-daemon providers::subsonic` red phase failed on missing OpenSubsonic history methods/modes and `#` album filtering.
+- 2026-05-23: `rtk cargo test -p hifimule-daemon providers::subsonic` passed: 42 passed.
+- 2026-05-23: `rtk cargo test -p hifimule-daemon` passed: 327 passed.
+- 2026-05-23: `rtk tsc` from `hifimule-ui` could not start because `npx` is not on PATH; repo-local `.\node_modules\.bin\tsc.cmd` passed after approval.
+- 2026-05-23: Manual Navidrome smoke test validated by Alexis.
 
 ### Completion Notes List
 
+- Implemented OpenSubsonic-only exposure for `recentlyAdded`, `frequentlyPlayed`, and `recentlyPlayed` browse modes in `SubsonicProvider.capabilities()`.
+- Implemented Subsonic/OpenSubsonic history browse methods: newest albums through `getAlbumList2(type=newest)`, frequently played tracks sorted by `playCount` descending, and recently played tracks sorted by `played` descending.
+- Preserved classic Subsonic unsupported behavior for direct history method calls.
+- Normalized Subsonic song `created`, `played`, and `playCount` fields into provider-domain `Song` metadata.
+- Hardened Subsonic album quick-nav filtering, including `#` for non-alpha album names, without adding UI provider-specific branching.
+- Manual Navidrome smoke testing was confirmed valid by Alexis.
+
 ### File List
+
+- hifimule-daemon/src/providers/subsonic.rs
+- _bmad-output/implementation-artifacts/9-6-navidrome-subsonic-browse-parity-hardening.md
+- _bmad-output/implementation-artifacts/sprint-status.yaml
 
 ## Change Log
 
 - 2026-05-23: Created story from approved Correct Course proposal for Navidrome/Subsonic browse parity.
+- 2026-05-23: Implemented OpenSubsonic history browse capabilities/methods and Subsonic album quick-nav hardening; automated and manual validation passed.

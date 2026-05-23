@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-05-23  # Correct course: Navidrome/Subsonic parity and sync correctness
+last_updated: 2026-05-23  # Story 9.6 ready for review
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -126,4 +126,4 @@ development_status:
   9-3-genre-browsing-and-genre-entity-basket-item: done
   9-4-history-and-favorites-browse-modes: done
   9-5-hierarchical-favorites-navigation: done
-  9-6-navidrome-subsonic-browse-parity-hardening: ready-for-dev
+  9-6-navidrome-subsonic-browse-parity-hardening: review

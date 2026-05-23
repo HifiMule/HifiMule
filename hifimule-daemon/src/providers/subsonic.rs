@@ -145,6 +145,42 @@ impl SubsonicProvider {
             suffix: clean(parts[4]),
         })
     }
+
+    fn ensure_open_subsonic_history(&self, mode: &str) -> Result<(), ProviderError> {
+        if self.open_subsonic {
+            Ok(())
+        } else {
+            Err(ProviderError::UnsupportedCapability(format!(
+                "{mode} requires OpenSubsonic history support"
+            )))
+        }
+    }
+
+    async fn history_song_dump(&self) -> Result<Vec<SongDto>, ProviderError> {
+        const PAGE_SIZE: usize = 500;
+        let mut songs = Vec::new();
+        let mut offset = 0usize;
+        let mut pages_fetched = 0usize;
+        loop {
+            let page = self
+                .client
+                .search3_paged("", Some(PAGE_SIZE), Some(offset))
+                .await?;
+            let count = page.search_result3.song.len();
+            songs.extend(page.search_result3.song);
+            pages_fetched += 1;
+            if count < PAGE_SIZE {
+                break;
+            }
+            if pages_fetched >= MAX_SONG_DUMP_PAGES {
+                return Err(ProviderError::UnsupportedCapability(format!(
+                    "Subsonic history browse exceeded {MAX_SONG_DUMP_PAGES} pages without a partial page"
+                )));
+            }
+            offset += PAGE_SIZE;
+        }
+        Ok(songs)
+    }
 }
 
 #[async_trait]
@@ -229,11 +265,7 @@ impl MediaProvider for SubsonicProvider {
             .album_list2
             .album
             .into_iter()
-            .filter(|a| {
-                letter.map_or(true, |l| {
-                    a.name.to_uppercase().starts_with(&l.to_uppercase())
-                })
-            })
+            .filter(|album| album_matches_letter(&album.name, letter))
             .map(album_from_dto)
             .collect();
         let total = all_albums.len() as u32;
@@ -387,20 +419,101 @@ impl MediaProvider for SubsonicProvider {
     }
 
     fn capabilities(&self) -> Capabilities {
+        let mut list_modes = vec![
+            BrowseMode::Artists,
+            BrowseMode::Albums,
+            BrowseMode::Playlists,
+            BrowseMode::Genres,
+        ];
+        if self.open_subsonic {
+            list_modes.extend([
+                BrowseMode::RecentlyAdded,
+                BrowseMode::FrequentlyPlayed,
+                BrowseMode::RecentlyPlayed,
+            ]);
+        }
+        list_modes.push(BrowseMode::Favorites);
+
         Capabilities {
             open_subsonic: self.open_subsonic,
             supports_changes_since: true,
             supports_server_transcoding: self.open_subsonic,
-            browse: BrowseCapabilities {
-                list_modes: vec![
-                    BrowseMode::Artists,
-                    BrowseMode::Albums,
-                    BrowseMode::Playlists,
-                    BrowseMode::Genres,
-                    BrowseMode::Favorites,
-                ],
-            },
+            browse: BrowseCapabilities { list_modes },
         }
+    }
+
+    async fn list_recently_added(
+        &self,
+        _library_id: Option<&str>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<Album>, u32), ProviderError> {
+        self.ensure_open_subsonic_history("list_recently_added")?;
+        let response = self
+            .client
+            .get_album_list2_by_type("newest", offset, limit)
+            .await?;
+        let albums: Vec<Album> = response
+            .album_list2
+            .album
+            .into_iter()
+            .map(album_from_dto)
+            .collect();
+        let total = albums.len() as u32;
+        Ok((albums, total))
+    }
+
+    async fn list_frequently_played(
+        &self,
+        _library_id: Option<&str>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<Song>, u32), ProviderError> {
+        self.ensure_open_subsonic_history("list_frequently_played")?;
+        let mut songs: Vec<Song> = self
+            .history_song_dump()
+            .await?
+            .into_iter()
+            .filter(|song| song.play_count.unwrap_or_default() > 0)
+            .map(song_from_dto)
+            .collect();
+        songs.sort_by(|left, right| {
+            right
+                .play_count
+                .cmp(&left.play_count)
+                .then_with(|| right.last_played_at.cmp(&left.last_played_at))
+                .then_with(|| left.title.cmp(&right.title))
+        });
+        let total = songs.len() as u32;
+        Ok(page_vec(songs, offset, limit, total))
+    }
+
+    async fn list_recently_played(
+        &self,
+        _library_id: Option<&str>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<Song>, u32), ProviderError> {
+        self.ensure_open_subsonic_history("list_recently_played")?;
+        let mut songs: Vec<Song> = self
+            .history_song_dump()
+            .await?
+            .into_iter()
+            .filter(|song| {
+                song.played
+                    .as_deref()
+                    .is_some_and(|played| !played.is_empty())
+            })
+            .map(song_from_dto)
+            .collect();
+        songs.sort_by(|left, right| {
+            right
+                .last_played_at
+                .cmp(&left.last_played_at)
+                .then_with(|| left.title.cmp(&right.title))
+        });
+        let total = songs.len() as u32;
+        Ok(page_vec(songs, offset, limit, total))
     }
 
     async fn list_genres(
@@ -567,6 +680,13 @@ impl SubsonicClient {
     }
 
     async fn get_album_list2(&self) -> Result<AlbumList2Body, ProviderError> {
+        self.get_album_list2_all_by_type("alphabeticalByName").await
+    }
+
+    async fn get_album_list2_all_by_type(
+        &self,
+        album_list_type: &str,
+    ) -> Result<AlbumList2Body, ProviderError> {
         const PAGE_SIZE: usize = 500;
         let mut all_albums = Vec::new();
         let mut offset = 0usize;
@@ -577,7 +697,7 @@ impl SubsonicClient {
                 .get(
                     "getAlbumList2",
                     &[
-                        ("type", "alphabeticalByName"),
+                        ("type", album_list_type),
                         ("size", &size_str),
                         ("offset", &offset_str),
                     ],
@@ -593,6 +713,28 @@ impl SubsonicClient {
         Ok(AlbumList2Body {
             album_list2: AlbumListDto { album: all_albums },
         })
+    }
+
+    async fn get_album_list2_by_type(
+        &self,
+        album_list_type: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<AlbumList2Body, ProviderError> {
+        if limit == 0 {
+            return self.get_album_list2_all_by_type(album_list_type).await;
+        }
+        let size_str = limit.to_string();
+        let offset_str = offset.to_string();
+        self.get(
+            "getAlbumList2",
+            &[
+                ("type", album_list_type),
+                ("size", &size_str),
+                ("offset", &offset_str),
+            ],
+        )
+        .await
     }
 
     async fn get_album(&self, id: &str) -> Result<AlbumWithSongsBody, ProviderError> {
@@ -971,11 +1113,40 @@ fn song_from_dto(song: SongDto) -> Song {
         track_number: non_negative_i32(song.track),
         disc_number: non_negative_i32(song.disc_number),
         cover_art_id: song.cover_art,
-        date_added: None,
-        last_played_at: None,
-        play_count: None,
+        date_added: song.created,
+        last_played_at: song.played,
+        play_count: non_negative_i32(song.play_count),
         is_favorite: None,
     }
+}
+
+fn album_matches_letter(name: &str, letter: Option<&str>) -> bool {
+    let Some(letter) = letter.map(str::trim).filter(|letter| !letter.is_empty()) else {
+        return true;
+    };
+    let Some(first) = name.chars().find(|ch| !ch.is_whitespace()) else {
+        return letter == "#";
+    };
+    if letter == "#" {
+        return !first.is_ascii_alphabetic();
+    }
+    let Some(expected) = letter.chars().next() else {
+        return true;
+    };
+    first.eq_ignore_ascii_case(&expected)
+}
+
+fn page_vec<T>(items: Vec<T>, offset: u32, limit: u32, total: u32) -> (Vec<T>, u32) {
+    let page = if limit > 0 {
+        items
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect()
+    } else {
+        items.into_iter().skip(offset as usize).collect()
+    };
+    (page, total)
 }
 
 fn song_created_event(song: SongDto) -> ChangeEvent {
@@ -1285,6 +1456,10 @@ struct SongDto {
     #[serde(rename = "contentType")]
     content_type: Option<String>,
     suffix: Option<String>,
+    #[serde(rename = "playCount")]
+    play_count: Option<i32>,
+    played: Option<String>,
+    created: Option<String>,
     #[serde(default)]
     artists: Option<Vec<ArtistDto>>,
 }
@@ -1360,7 +1535,7 @@ fn genre_from_dto(genre: GenreDto) -> Genre {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::{BrowseCapabilities, BrowseMode, ScrobbleSubmission};
+    use crate::providers::{BrowseCapabilities, BrowseMode, MediaProvider, ScrobbleSubmission};
     use mockito::{Matcher, Server};
 
     const USERNAME: &str = "arthur";
@@ -1409,6 +1584,9 @@ mod tests {
             size: Some(1_234),
             content_type: Some("audio/flac".to_string()),
             suffix: Some("flac".to_string()),
+            play_count: Some(12),
+            played: Some("2026-05-22T12:00:00Z".to_string()),
+            created: Some("2026-05-01T00:00:00Z".to_string()),
             artists: None,
         });
 
@@ -1418,6 +1596,9 @@ mod tests {
         assert_eq!(song.album_id.as_deref(), Some("album-id"));
         assert_eq!(song.artist_id.as_deref(), Some("artist-id"));
         assert_eq!(song.cover_art_id.as_deref(), Some("cover-id"));
+        assert_eq!(song.play_count, Some(12));
+        assert_eq!(song.last_played_at.as_deref(), Some("2026-05-22T12:00:00Z"));
+        assert_eq!(song.date_added.as_deref(), Some("2026-05-01T00:00:00Z"));
         assert_ne!(song.cover_art_id.as_deref(), Some("song-id"));
     }
 
@@ -1438,6 +1619,9 @@ mod tests {
             size: None,
             content_type: None,
             suffix: None,
+            play_count: None,
+            played: None,
+            created: None,
             artists: None,
         });
 
@@ -1484,12 +1668,34 @@ mod tests {
                         BrowseMode::Albums,
                         BrowseMode::Playlists,
                         BrowseMode::Genres,
+                        BrowseMode::RecentlyAdded,
+                        BrowseMode::FrequentlyPlayed,
+                        BrowseMode::RecentlyPlayed,
                         BrowseMode::Favorites,
                     ],
                 },
             }
         );
         assert!(provider.capabilities().open_subsonic);
+    }
+
+    #[test]
+    fn classic_subsonic_keeps_history_modes_hidden() {
+        let provider = SubsonicProvider::from_client_for_tests(
+            SubsonicClient::new("http://localhost", USERNAME, PASSWORD).expect("client"),
+            false,
+        );
+
+        assert_eq!(
+            provider.capabilities().browse.list_modes,
+            vec![
+                BrowseMode::Artists,
+                BrowseMode::Albums,
+                BrowseMode::Playlists,
+                BrowseMode::Genres,
+                BrowseMode::Favorites,
+            ]
+        );
     }
 
     #[tokio::test]
@@ -2135,6 +2341,9 @@ mod tests {
             size: Some(1000),
             content_type: Some("audio/mpeg".to_string()),
             suffix: Some("mp3".to_string()),
+            play_count: None,
+            played: None,
+            created: None,
             artists: None,
         };
 
@@ -2505,17 +2714,210 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_recently_added_returns_unsupported_capability() {
+    async fn classic_subsonic_history_methods_return_unsupported_capability() {
         let provider = SubsonicProvider::from_client_for_tests(
             SubsonicClient::new("http://localhost", USERNAME, PASSWORD).expect("client"),
-            true,
+            false,
         );
 
-        let result = provider.list_recently_added(None, 0, 50).await;
+        let recently_added = provider.list_recently_added(None, 0, 50).await;
+        let frequently_played = provider.list_frequently_played(None, 0, 50).await;
+        let recently_played = provider.list_recently_played(None, 0, 50).await;
 
         assert!(
-            matches!(result, Err(ProviderError::UnsupportedCapability(_))),
-            "list_recently_added must be unsupported on Subsonic, got: {result:?}"
+            matches!(recently_added, Err(ProviderError::UnsupportedCapability(_))),
+            "list_recently_added must be unsupported on classic Subsonic, got: {recently_added:?}"
+        );
+        assert!(matches!(
+            frequently_played,
+            Err(ProviderError::UnsupportedCapability(_))
+        ));
+        assert!(matches!(
+            recently_played,
+            Err(ProviderError::UnsupportedCapability(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn open_subsonic_recently_added_uses_newest_album_list() {
+        let mut server = Server::new_async().await;
+        let _albums = server
+            .mock("GET", "/rest/getAlbumList2.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("type".into(), "newest".into()));
+                matchers.push(Matcher::UrlEncoded("size".into(), "50".into()));
+                matchers.push(Matcher::UrlEncoded("offset".into(), "0".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(r#""albumList2":{"album":[
+                {"id":"new","name":"Newest","artist":"Artist B","artistId":"artist-b","songCount":8,"duration":2400,"coverArt":"cover-new"},
+                {"id":"old","name":"Older","artist":"Artist A","artistId":"artist-a","songCount":4,"duration":1200,"coverArt":"cover-old"}
+            ]}"#))
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        let (albums, total) = provider
+            .list_recently_added(None, 0, 50)
+            .await
+            .expect("recently added");
+
+        assert_eq!(total, 2);
+        assert_eq!(albums[0].id, "new");
+        assert_eq!(albums[0].artist_id.as_deref(), Some("artist-b"));
+        assert_eq!(albums[0].duration_seconds, Some(2400));
+        assert_eq!(albums[0].cover_art_id.as_deref(), Some("cover-new"));
+    }
+
+    #[tokio::test]
+    async fn open_subsonic_frequently_played_sorts_tracks_by_play_count_descending() {
+        let mut server = Server::new_async().await;
+        let _songs = server
+            .mock("GET", "/rest/search3.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("query".into(), "".into()));
+                matchers.push(Matcher::UrlEncoded("songCount".into(), "500".into()));
+                matchers.push(Matcher::UrlEncoded("songOffset".into(), "0".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(r#""searchResult3":{"song":[
+                {"id":"low","title":"Low","album":"Album","albumId":"album1","artist":"Artist","artistId":"artist1","duration":180,"bitRate":192,"coverArt":"cover-low","playCount":2,"played":"2026-05-20T12:00:00Z","created":"2026-05-01T00:00:00Z"},
+                {"id":"high","title":"High","album":"Album","albumId":"album1","artist":"Artist","artistId":"artist1","duration":200,"bitRate":320,"coverArt":"cover-high","playCount":9,"played":"2026-05-21T12:00:00Z","created":"2026-05-02T00:00:00Z"},
+                {"id":"none","title":"None","album":"Album","albumId":"album1","duration":210}
+            ]}"#))
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        let (tracks, total) = provider
+            .list_frequently_played(None, 0, 10)
+            .await
+            .expect("frequently played");
+
+        assert_eq!(total, 2);
+        assert_eq!(
+            tracks
+                .iter()
+                .map(|song| song.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["high", "low"]
+        );
+        assert_eq!(tracks[0].play_count, Some(9));
+        assert_eq!(
+            tracks[0].last_played_at.as_deref(),
+            Some("2026-05-21T12:00:00Z")
+        );
+        assert_eq!(
+            tracks[0].date_added.as_deref(),
+            Some("2026-05-02T00:00:00Z")
+        );
+        assert_eq!(tracks[0].bitrate_kbps, Some(320));
+        assert_eq!(tracks[0].cover_art_id.as_deref(), Some("cover-high"));
+    }
+
+    #[tokio::test]
+    async fn open_subsonic_recently_played_sorts_tracks_by_last_played_descending() {
+        let mut server = Server::new_async().await;
+        let _songs = server
+            .mock("GET", "/rest/search3.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("query".into(), "".into()));
+                matchers.push(Matcher::UrlEncoded("songCount".into(), "500".into()));
+                matchers.push(Matcher::UrlEncoded("songOffset".into(), "0".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(r#""searchResult3":{"song":[
+                {"id":"older","title":"Older","duration":180,"playCount":4,"played":"2026-05-20T12:00:00Z"},
+                {"id":"newer","title":"Newer","duration":200,"playCount":1,"played":"2026-05-22T12:00:00Z"},
+                {"id":"never","title":"Never","duration":210}
+            ]}"#))
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        let (tracks, total) = provider
+            .list_recently_played(None, 0, 10)
+            .await
+            .expect("recently played");
+
+        assert_eq!(total, 2);
+        assert_eq!(
+            tracks
+                .iter()
+                .map(|song| song.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["newer", "older"]
+        );
+        assert_eq!(
+            tracks[0].last_played_at.as_deref(),
+            Some("2026-05-22T12:00:00Z")
+        );
+        assert_eq!(tracks[0].play_count, Some(1));
+    }
+
+    #[tokio::test]
+    async fn list_albums_letter_filter_matches_alpha_and_hash_quick_nav() {
+        let mut server = Server::new_async().await;
+        let _albums = server
+            .mock("GET", "/rest/getAlbumList2.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded(
+                    "type".into(),
+                    "alphabeticalByName".into(),
+                ));
+                matchers.push(Matcher::UrlEncoded("size".into(), "500".into()));
+                matchers.push(Matcher::UrlEncoded("offset".into(), "0".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(r#""albumList2":{"album":[
+                {"id":"alpha","name":"Alpha"},
+                {"id":"accent","name":"a softer dawn"},
+                {"id":"number","name":"1999"},
+                {"id":"symbol","name":"_Collected"}
+            ]}"#))
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        let (a_albums, a_total) = provider
+            .list_albums(None, Some("A"), 0, 50)
+            .await
+            .expect("A albums");
+        let (hash_albums, hash_total) = provider
+            .list_albums(None, Some("#"), 0, 50)
+            .await
+            .expect("# albums");
+
+        assert_eq!(a_total, 2);
+        assert_eq!(
+            a_albums
+                .iter()
+                .map(|album| album.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "accent"]
+        );
+        assert_eq!(hash_total, 2);
+        assert_eq!(
+            hash_albums
+                .iter()
+                .map(|album| album.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["number", "symbol"]
         );
     }
 }
