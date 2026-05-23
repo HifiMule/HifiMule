@@ -901,6 +901,75 @@ So that tracks play correctly on DAPs that don't support FLAC, Opus, or AAC (e.g
 
 **Status:** Implementation complete. Story added to formally track completed work.
 
+### Story 4.9: Provider-Neutral Transcoding, Compatibility, and Extension Verification
+
+As a user syncing to a device that only supports MP3,
+I want incompatible source formats to be truly transcoded before being written, and skipped when compatible transcoding is unavailable,
+So that the device never receives unplayable media.
+
+**Acceptance Criteria:**
+
+**Given** the target device/profile requires MP3 and the source item is FLAC
+**When** sync starts against a Subsonic/Navidrome provider
+**Then** the daemon requests a provider stream URL with `format=mp3` and `maxBitRate` in kbps.
+
+**Given** the target device/profile requires MP3 and the provider cannot transcode the track to MP3
+**When** sync plans or executes that item
+**Then** sync skips that track with a clear warning/result entry instead of copying the incompatible source file.
+**And** the skipped track is not written to the device manifest.
+
+**Given** transcoding is requested but cannot be negotiated or confirmed
+**When** sync executes the item
+**Then** sync skips that item with a clear warning/result entry instead of writing source bytes to a target-extension path.
+
+**Given** the provider returns direct/passthrough content
+**When** the source suffix/content type is compatible with the active device profile
+**Then** the output filename uses the original source suffix, not the requested target extension.
+
+**Given** the provider returns direct/passthrough content whose source suffix/content type is not compatible with the active device profile
+**When** sync executes the item
+**Then** sync skips the item and keeps it out of the manifest.
+
+**Given** the active provider is Jellyfin
+**When** a non-passthrough device profile is selected
+**Then** existing PlaybackInfo transcoding behavior remains intact.
+
+**Given** the active provider is Subsonic/OpenSubsonic
+**When** sync needs a stream or download URL
+**Then** no code outside `providers/subsonic.rs` constructs Subsonic stream URLs directly.
+
+**Technical Notes:**
+- Treat profile compatibility as a hard device constraint, not a best-effort preference.
+- The safe fallback for unsupported transcoding is omission, not passthrough.
+- Tests should cover FLAC-to-MP3 success, compatible direct-download fallback preserving source extension, skipped incompatible direct downloads, skipped tracks when required transcoding cannot be honored, and manifest exclusion for skipped items.
+
+### Story 4.10: Idempotent Managed File Deletion on USB
+
+As a user syncing a USB drive,
+I want cleanup to tolerate files that are already missing,
+So that stale manifest entries do not turn into noisy sync failures.
+
+**Acceptance Criteria:**
+
+**Given** a managed manifest entry points to a file that is already absent on an MSC device
+**When** sync cleanup deletes it
+**Then** the delete is treated as successful.
+**And** the manifest entry is removed.
+
+**Given** deletion fails because of permission, read-only media, or another real IO error
+**When** sync cleanup deletes it
+**Then** sync reports the error.
+**And** the manifest entry is not silently dropped.
+
+**Given** an MTP backend reports an item missing during delete
+**When** the backend can distinguish missing-object errors from real IO errors
+**Then** the sync layer treats the missing-object case equivalently to MSC not-found deletion.
+
+**Technical Notes:**
+- Missing managed files are expected after manual deletion or prior partial cleanup.
+- Keep genuine delete failures visible so hardware or permission problems are not hidden.
+- Tests should cover MSC missing-file deletion, a real deletion error, and sync cleanup removing stale manifest entries without failing the operation.
+
 ## Epic 5: Ecosystem Lifecycle & Advanced Tools
 
 Complete the scrobble bridge and implement user-facing repair/completion notifications.
@@ -1726,3 +1795,44 @@ So that I can sync favorite artists, favorite albums, and favorite tracks withou
 - Use a cached UI favorite tree to derive the three navigation levels.
 - Preserve existing artist, album, and audio basket item types; do not add a new dynamic favorites basket entity.
 - Favorites hierarchy is not paginated in the UI; `Load More` remains a no-op for this mode.
+
+### Story 9.6: Navidrome/Subsonic Browse Parity Hardening
+
+As a Navidrome/Subsonic user,
+I want the browse surface to expose every history/navigation mode the active server can support,
+So that switching from Jellyfin does not remove core curation workflows.
+
+**Acceptance Criteria:**
+
+**Given** a Navidrome/OpenSubsonic server exposes a reliable Recently Added album endpoint
+**When** `browse.listModes` is called
+**Then** `recentlyAdded` is included.
+**And** `browse.listRecentlyAdded` returns newest albums first.
+
+**Given** a Navidrome/OpenSubsonic server exposes reliable frequent listening data
+**When** `browse.listModes` is called
+**Then** `frequentlyPlayed` is included.
+**And** `browse.listFrequentlyPlayed` returns tracks sorted by server play count descending.
+
+**Given** a Navidrome/OpenSubsonic server exposes reliable recent listening data
+**When** `browse.listModes` is called
+**Then** `recentlyPlayed` is included.
+**And** `browse.listRecentlyPlayed` returns tracks sorted by last played date descending.
+
+**Given** classic Subsonic cannot support a mode reliably
+**When** capabilities are calculated
+**Then** the mode remains hidden.
+**And** the daemon returns `UnsupportedCapability` if the mode is called directly.
+
+**Given** Albums mode is open and the result count warrants quick navigation
+**When** the active provider is Subsonic/Navidrome
+**Then** alphabetic filtering works consistently with Jellyfin album quick navigation.
+
+**Given** provider support differs by server
+**When** the UI renders browse modes
+**Then** all capability decisions are made in `SubsonicProvider`, not in the UI.
+
+**Technical Notes:**
+- Keep the UI provider-neutral; it should consume `browse.listModes` and existing `browse.*` RPCs only.
+- Prefer OpenSubsonic/Navidrome endpoints that expose ordered recent/frequent data reliably; hide modes rather than synthesizing misleading lists.
+- Tests should cover capability lists for OpenSubsonic/Navidrome versus classic Subsonic, recently added sorting, frequently played sorting, recently played sorting, and album letter filtering.
