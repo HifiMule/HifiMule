@@ -458,15 +458,41 @@ fn forced_audio_profile(container: &str) -> serde_json::Value {
 
 #[derive(Debug, Clone, Default)]
 struct AudioCompatibilityProfile {
-    direct_formats: HashSet<String>,
-    output_formats: HashSet<String>,
+    direct_formats: Vec<AudioFormatRequirement>,
+    output_formats: Vec<AudioFormatRequirement>,
     transcode_profile: Option<TranscodeProfile>,
 }
 
 #[derive(Debug, Clone, Default)]
 struct AudioFormat {
-    keys: HashSet<String>,
+    containers: HashSet<String>,
+    codecs: HashSet<String>,
     extension: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AudioFormatRequirement {
+    containers: HashSet<String>,
+    codecs: HashSet<String>,
+}
+
+impl AudioFormat {
+    fn is_empty(&self) -> bool {
+        self.containers.is_empty() && self.codecs.is_empty()
+    }
+}
+
+impl AudioFormatRequirement {
+    fn is_empty(&self) -> bool {
+        self.containers.is_empty() && self.codecs.is_empty()
+    }
+
+    fn matches(&self, format: &AudioFormat) -> bool {
+        let container_matches =
+            self.containers.is_empty() || !format.containers.is_disjoint(&self.containers);
+        let codec_matches = self.codecs.is_empty() || !format.codecs.is_disjoint(&self.codecs);
+        container_matches && codec_matches
+    }
 }
 
 impl AudioCompatibilityProfile {
@@ -478,22 +504,22 @@ impl AudioCompatibilityProfile {
         if !self.is_constrained() {
             return true;
         }
-        !source.keys.is_empty()
-            && source
-                .keys
+        !source.is_empty()
+            && self
+                .direct_formats
                 .iter()
-                .any(|key| self.direct_formats.contains(key))
+                .any(|requirement| requirement.matches(source))
     }
 
     fn output_is_compatible(&self, output: &AudioFormat) -> bool {
         if !self.is_constrained() {
             return true;
         }
-        !output.keys.is_empty()
-            && output
-                .keys
+        !output.is_empty()
+            && self
+                .output_formats
                 .iter()
-                .any(|key| self.output_formats.contains(key))
+                .any(|requirement| requirement.matches(output))
     }
 
     fn transcode_target_label(&self) -> String {
@@ -510,11 +536,13 @@ fn audio_compatibility_profile(
     preferred_audio_container: Option<&str>,
 ) -> AudioCompatibilityProfile {
     if let Some(container) = preferred_audio_container {
-        let mut direct_formats = HashSet::new();
-        add_audio_format_keys(&mut direct_formats, container);
-        let output_formats = direct_formats.clone();
+        let direct_requirement: Vec<AudioFormatRequirement> =
+            audio_requirement(Some(container), Some(container))
+                .into_iter()
+                .collect();
+        let output_formats = direct_requirement.clone();
         return AudioCompatibilityProfile {
-            direct_formats,
+            direct_formats: direct_requirement,
             output_formats,
             transcode_profile: Some(TranscodeProfile {
                 container: Some(container.to_string()),
@@ -532,7 +560,7 @@ fn audio_compatibility_profile(
         return AudioCompatibilityProfile::default();
     };
 
-    let mut direct_formats = HashSet::new();
+    let mut direct_formats = Vec::new();
     if let Some(profiles) = profile["DirectPlayProfiles"].as_array() {
         for direct in profiles {
             if direct["Type"]
@@ -541,11 +569,10 @@ fn audio_compatibility_profile(
             {
                 continue;
             }
-            if let Some(container) = direct["Container"].as_str() {
-                add_audio_format_keys(&mut direct_formats, container);
-            }
-            if let Some(codec) = direct["AudioCodec"].as_str() {
-                add_audio_format_keys(&mut direct_formats, codec);
+            if let Some(requirement) =
+                audio_requirement(direct["Container"].as_str(), direct["AudioCodec"].as_str())
+            {
+                direct_formats.push(requirement);
             }
         }
     }
@@ -553,11 +580,10 @@ fn audio_compatibility_profile(
     let transcode_profile = transcode_profile_from_device_profile(profile);
     let mut output_formats = direct_formats.clone();
     if let Some(profile) = &transcode_profile {
-        if let Some(container) = profile.container.as_deref() {
-            add_audio_format_keys(&mut output_formats, container);
-        }
-        if let Some(codec) = profile.audio_codec.as_deref() {
-            add_audio_format_keys(&mut output_formats, codec);
+        if let Some(requirement) =
+            audio_requirement(profile.container.as_deref(), profile.audio_codec.as_deref())
+        {
+            output_formats.push(requirement);
         }
     }
 
@@ -605,11 +631,11 @@ fn profile_bitrate_kbps(profile: &serde_json::Value) -> Option<u32> {
 fn provider_audio_format(suffix: Option<&str>, content_type: Option<&str>) -> AudioFormat {
     let mut format = AudioFormat::default();
     if let Some(suffix) = suffix {
-        add_audio_format_keys(&mut format.keys, suffix);
+        add_source_suffix_format(&mut format, suffix);
         format.extension = clean_audio_extension(suffix);
     }
     if let Some(content_type) = content_type {
-        add_audio_format_keys(&mut format.keys, content_type);
+        add_content_type_format(&mut format, content_type);
         if format.extension.is_none() {
             format.extension = extension_from_content_type(content_type).map(str::to_string);
         }
@@ -617,35 +643,122 @@ fn provider_audio_format(suffix: Option<&str>, content_type: Option<&str>) -> Au
     format
 }
 
-fn add_audio_format_keys(keys: &mut HashSet<String>, value: &str) {
+fn audio_requirement(
+    container: Option<&str>,
+    codec: Option<&str>,
+) -> Option<AudioFormatRequirement> {
+    let mut requirement = AudioFormatRequirement::default();
+    if let Some(container) = container {
+        add_audio_container_keys(&mut requirement.containers, container);
+    }
+    if let Some(codec) = codec {
+        add_audio_codec_keys(&mut requirement.codecs, codec);
+    }
+    (!requirement.is_empty()).then_some(requirement)
+}
+
+fn add_source_suffix_format(format: &mut AudioFormat, value: &str) {
     for part in value.split(',') {
         let Some(key) = normalized_audio_key(part) else {
             continue;
         };
-        keys.insert(key.clone());
+        add_audio_container_key(&mut format.containers, &key);
+        if is_self_describing_audio_key(&key) {
+            add_audio_codec_key(&mut format.codecs, &key);
+        }
+    }
+}
+
+fn add_content_type_format(format: &mut AudioFormat, value: &str) {
+    for part in value.split(',') {
+        let Some(key) = normalized_audio_key(part) else {
+            continue;
+        };
         match key.as_str() {
-            "mp3" => {
-                keys.insert("mpeg".to_string());
+            "mp3" | "flac" | "aac" | "opus" => {
+                add_audio_container_key(&mut format.containers, &key);
+                add_audio_codec_key(&mut format.codecs, &key);
             }
-            "flac" => {
-                keys.insert("x-flac".to_string());
+            "m4a" | "mp4" | "ogg" | "oga" => {
+                add_audio_container_key(&mut format.containers, &key);
             }
-            "mp4" | "m4a" | "aac" => {
-                keys.insert("mp4".to_string());
-                keys.insert("m4a".to_string());
-                keys.insert("aac".to_string());
-            }
-            "ogg" | "oga" | "vorbis" => {
-                keys.insert("ogg".to_string());
-                keys.insert("oga".to_string());
-                keys.insert("vorbis".to_string());
-            }
-            "opus" => {
-                keys.insert("opus".to_string());
+            "vorbis" => {
+                add_audio_codec_key(&mut format.codecs, &key);
             }
             _ => {}
         }
     }
+}
+
+fn add_audio_container_keys(keys: &mut HashSet<String>, value: &str) {
+    for part in value.split(',') {
+        if let Some(key) = normalized_audio_key(part) {
+            add_audio_container_key(keys, &key);
+        }
+    }
+}
+
+fn add_audio_codec_keys(keys: &mut HashSet<String>, value: &str) {
+    for part in value.split(',') {
+        if let Some(key) = normalized_audio_key(part) {
+            add_audio_codec_key(keys, &key);
+        }
+    }
+}
+
+fn add_audio_container_key(keys: &mut HashSet<String>, key: &str) {
+    match key {
+        "mp3" | "mpeg" => {
+            keys.insert("mp3".to_string());
+        }
+        "flac" | "x-flac" => {
+            keys.insert("flac".to_string());
+        }
+        "mp4" | "m4a" => {
+            keys.insert("mp4".to_string());
+            keys.insert("m4a".to_string());
+        }
+        "ogg" | "oga" => {
+            keys.insert("ogg".to_string());
+            keys.insert("oga".to_string());
+        }
+        "aac" => {
+            keys.insert("aac".to_string());
+        }
+        "opus" => {
+            keys.insert("opus".to_string());
+        }
+        other => {
+            keys.insert(other.to_string());
+        }
+    }
+}
+
+fn add_audio_codec_key(keys: &mut HashSet<String>, key: &str) {
+    match key {
+        "mp3" | "mpeg" => {
+            keys.insert("mp3".to_string());
+        }
+        "flac" | "x-flac" => {
+            keys.insert("flac".to_string());
+        }
+        "aac" => {
+            keys.insert("aac".to_string());
+        }
+        "vorbis" => {
+            keys.insert("vorbis".to_string());
+        }
+        "opus" => {
+            keys.insert("opus".to_string());
+        }
+        other => {
+            keys.insert(other.to_string());
+        }
+    }
+}
+
+fn is_self_describing_audio_key(key: &str) -> bool {
+    matches!(key, "mp3" | "flac" | "aac" | "opus")
 }
 
 fn normalized_audio_key(value: &str) -> Option<String> {
@@ -664,10 +777,11 @@ fn normalized_audio_key(value: &str) -> Option<String> {
         match normalized.as_str() {
             "audio/mpeg" | "audio/mp3" | "mpeg" | "mpga" => "mp3",
             "audio/flac" | "audio/x-flac" | "x-flac" => "flac",
-            "audio/mp4" | "audio/x-m4a" => "mp4",
+            "audio/mp4" | "audio/x-m4a" => "m4a",
             "audio/aac" | "audio/aacp" => "aac",
             "audio/ogg" | "application/ogg" => "ogg",
             "audio/opus" => "opus",
+            "application/octet-stream" | "binary/octet-stream" => return None,
             other => other,
         }
         .to_string(),
@@ -694,12 +808,28 @@ fn extension_from_content_type(content_type: &str) -> Option<&'static str> {
     }
 }
 
+fn is_generic_binary_content_type(content_type: &str) -> bool {
+    let content_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim()
+        .to_ascii_lowercase();
+    matches!(
+        content_type.as_str(),
+        "application/octet-stream" | "binary/octet-stream"
+    )
+}
+
 async fn mark_operation_item_handled(
     operation_manager: &Arc<SyncOperationManager>,
     operation_id: &str,
+    skipped_bytes: u64,
 ) {
     if let Some(mut operation) = operation_manager.get_operation(operation_id).await {
         operation.files_completed += 1;
+        let adjusted_total = operation.total_bytes.saturating_sub(skipped_bytes);
+        operation.total_bytes = adjusted_total.max(operation.bytes_transferred);
         operation_manager
             .update_operation(operation_id, operation)
             .await;
@@ -1470,7 +1600,12 @@ pub async fn execute_provider_sync(
                         "[Sync] Skipped '{}' ({}) because the source format is incompatible and no compatible transcode profile is available",
                         add_item.name, add_item.jellyfin_id
                     ));
-                    mark_operation_item_handled(&operation_manager, &operation_id).await;
+                    mark_operation_item_handled(
+                        &operation_manager,
+                        &operation_id,
+                        add_item.size_bytes,
+                    )
+                    .await;
                     continue;
                 }
             }
@@ -1488,7 +1623,12 @@ pub async fn execute_provider_sync(
                         "[Sync] Skipped '{}' ({}) because required transcoding could not be negotiated: {}",
                         add_item.name, add_item.jellyfin_id, e
                     ));
-                    mark_operation_item_handled(&operation_manager, &operation_id).await;
+                    mark_operation_item_handled(
+                        &operation_manager,
+                        &operation_id,
+                        add_item.size_bytes,
+                    )
+                    .await;
                 } else {
                     errors.push(SyncFileError {
                         jellyfin_id: add_item.jellyfin_id.clone(),
@@ -1518,7 +1658,8 @@ pub async fn execute_provider_sync(
                     add_item.jellyfin_id,
                     response.status()
                 ));
-                mark_operation_item_handled(&operation_manager, &operation_id).await;
+                mark_operation_item_handled(&operation_manager, &operation_id, add_item.size_bytes)
+                    .await;
             } else {
                 errors.push(SyncFileError {
                     jellyfin_id: add_item.jellyfin_id.clone(),
@@ -1540,9 +1681,7 @@ pub async fn execute_provider_sync(
                 .clone()
                 .or_else(|| response_format.extension.clone())
         } else if profile.is_some() {
-            if !response_format.keys.is_empty()
-                && compatibility.output_is_compatible(&response_format)
-            {
+            if !response_format.is_empty() && compatibility.output_is_compatible(&response_format) {
                 response_format.extension.clone().or_else(|| {
                     profile
                         .as_ref()
@@ -1550,7 +1689,7 @@ pub async fn execute_provider_sync(
                         .and_then(clean_audio_extension)
                 })
             } else {
-                let reason = if response_format.keys.is_empty() {
+                let reason = if response_format.is_empty() {
                     format!(
                         "transcoding to {} was requested but the provider output was unconfirmed",
                         compatibility.transcode_target_label()
@@ -1565,12 +1704,18 @@ pub async fn execute_provider_sync(
                     "[Sync] Skipped '{}' ({}) because {}",
                     add_item.name, add_item.jellyfin_id, reason
                 ));
-                mark_operation_item_handled(&operation_manager, &operation_id).await;
+                mark_operation_item_handled(&operation_manager, &operation_id, add_item.size_bytes)
+                    .await;
                 continue;
             }
         } else {
-            if !response_format.keys.is_empty()
-                && !compatibility.output_is_compatible(&response_format)
+            let has_unrecognized_specific_content_type =
+                response_content_type.is_some_and(|content_type| {
+                    response_format.is_empty() && !is_generic_binary_content_type(content_type)
+                });
+            if (!response_format.is_empty()
+                && !compatibility.output_is_compatible(&response_format))
+                || has_unrecognized_specific_content_type
             {
                 sync_warnings.push(format!(
                     "[Sync] Skipped '{}' ({}) because the provider returned incompatible content type {:?}",
@@ -1578,7 +1723,8 @@ pub async fn execute_provider_sync(
                     add_item.jellyfin_id,
                     response_content_type.unwrap_or("unknown")
                 ));
-                mark_operation_item_handled(&operation_manager, &operation_id).await;
+                mark_operation_item_handled(&operation_manager, &operation_id, add_item.size_bytes)
+                    .await;
                 continue;
             }
             source_format
@@ -2700,6 +2846,28 @@ mod tests {
         })
     }
 
+    fn m4a_aac_direct_profile() -> serde_json::Value {
+        serde_json::json!({
+            "Name": "Test M4A AAC",
+            "MaxStreamingBitrate": 256000,
+            "MusicStreamingTranscodingBitrate": 256000,
+            "DirectPlayProfiles": [
+                { "Container": "m4a", "Type": "Audio", "AudioCodec": "aac" }
+            ],
+            "TranscodingProfiles": [
+                {
+                    "Container": "mp3",
+                    "Type": "Audio",
+                    "AudioCodec": "mp3",
+                    "Protocol": "http",
+                    "EstimateContentLength": true,
+                    "EnableMpegtsM2TsMode": false
+                }
+            ],
+            "CodecProfiles": []
+        })
+    }
+
     fn provider_credentials(server_url: String) -> crate::providers::ProviderCredentials {
         crate::providers::ProviderCredentials {
             server_url,
@@ -2719,6 +2887,22 @@ mod tests {
             )
             .expect("subsonic provider"),
         )
+    }
+
+    #[test]
+    fn test_audio_compatibility_requires_distinct_codec_confirmation() {
+        let compatibility = audio_compatibility_profile(Some(&m4a_aac_direct_profile()), None);
+        let m4a_container_only = provider_audio_format(Some("m4a"), Some("audio/mp4"));
+        let confirmed_aac = provider_audio_format(Some("m4a"), Some("audio/aac"));
+
+        assert!(
+            !compatibility.source_is_direct_compatible(&m4a_container_only),
+            "m4a/mp4 container metadata alone must not prove AAC compatibility"
+        );
+        assert!(
+            compatibility.source_is_direct_compatible(&confirmed_aac),
+            "explicit AAC metadata with an M4A suffix should satisfy the profile"
+        );
     }
 
     fn add_item_with_provider_format(
@@ -2847,7 +3031,7 @@ mod tests {
                 "song-flac".into(),
             )]))
             .with_status(200)
-            .with_header("content-type", "audio/flac")
+            .with_header("content-type", "application/octet-stream")
             .with_body(vec![1_u8, 2, 3, 4])
             .expect(1)
             .create_async()
@@ -2972,6 +3156,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(operation.files_completed, 1);
+        assert_eq!(operation.bytes_transferred, 0);
+        assert_eq!(operation.total_bytes, 0);
         assert_eq!(operation.warnings.len(), 1);
         assert!(
             operation.warnings[0].contains("incompatible"),

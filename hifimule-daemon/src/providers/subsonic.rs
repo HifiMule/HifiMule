@@ -1131,6 +1131,8 @@ fn song_from_dto(song: SongDto) -> Song {
         last_played_at: song.played,
         play_count: non_negative_i32(song.play_count),
         is_favorite: None,
+        content_type: song.content_type,
+        suffix: song.suffix,
     }
 }
 
@@ -1620,6 +1622,8 @@ mod tests {
         assert_eq!(song.album_id.as_deref(), Some("album-id"));
         assert_eq!(song.artist_id.as_deref(), Some("artist-id"));
         assert_eq!(song.cover_art_id.as_deref(), Some("cover-id"));
+        assert_eq!(song.content_type.as_deref(), Some("audio/flac"));
+        assert_eq!(song.suffix.as_deref(), Some("flac"));
         assert_eq!(song.play_count, Some(12));
         assert_eq!(song.last_played_at.as_deref(), Some("2026-05-22T12:00:00Z"));
         assert_eq!(song.date_added.as_deref(), Some("2026-05-01T00:00:00Z"));

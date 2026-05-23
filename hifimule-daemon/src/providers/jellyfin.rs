@@ -618,6 +618,12 @@ pub(crate) fn song_from_item(item: JellyfinItem) -> Song {
         .or_else(|| item.media_sources.as_ref()?.first()?.bitrate)
         .map(|bps| u32::from(Kbps::from(Bps(bps))));
     let artist = item.artist_items.as_ref().and_then(|items| items.first());
+    let suffix = item
+        .media_sources
+        .as_ref()
+        .and_then(|sources| sources.first())
+        .and_then(|source| source.container.clone())
+        .or_else(|| item.container.clone());
 
     Song {
         id: item.id.clone(),
@@ -647,6 +653,8 @@ pub(crate) fn song_from_item(item: JellyfinItem) -> Song {
             .and_then(|ud| ud.last_played_date.clone()),
         play_count: item.user_data.as_ref().map(|ud| ud.play_count),
         is_favorite: item.user_data.as_ref().map(|ud| ud.is_favorite),
+        content_type: None,
+        suffix,
     }
 }
 

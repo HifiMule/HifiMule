@@ -1468,8 +1468,48 @@ fn provider_song_to_desired_item(song: &Song) -> crate::sync::DesiredItem {
         size_bytes: provider_track_size(song),
         etag: None,
         provider_album_id: song.album_id.clone(),
-        provider_content_type: None,
-        provider_suffix: None,
+        provider_content_type: song.content_type.clone(),
+        provider_suffix: song.suffix.clone(),
+    }
+}
+
+fn load_selected_transcoding_profile(profile_id: Option<&str>) -> Result<Option<Value>, String> {
+    let Some(profile_id) = profile_id else {
+        return Ok(None);
+    };
+    if profile_id == "passthrough" {
+        return Ok(None);
+    }
+
+    let profiles_path = crate::paths::get_device_profiles_path().map_err(|e| e.to_string())?;
+    let profiles = crate::transcoding::load_profiles(&profiles_path).map_err(|e| e.to_string())?;
+    let entry = profiles
+        .into_iter()
+        .find(|profile| profile.id == profile_id)
+        .ok_or_else(|| {
+            format!(
+                "Transcoding profile '{}' not found in device-profiles.json",
+                profile_id
+            )
+        })?;
+
+    Ok(entry.device_profile)
+}
+
+async fn fail_sync_operation(
+    op_manager: &Arc<crate::sync::SyncOperationManager>,
+    op_id: &str,
+    filename: &str,
+    message: String,
+) {
+    if let Some(mut operation) = op_manager.get_operation(op_id).await {
+        operation.status = crate::sync::SyncStatus::Failed;
+        operation.errors.push(crate::sync::SyncFileError {
+            jellyfin_id: String::new(),
+            filename: filename.to_string(),
+            error_message: message,
+        });
+        op_manager.update_operation(op_id, operation).await;
     }
 }
 
@@ -2871,23 +2911,23 @@ async fn handle_sync_execute(
                 }
             };
 
-            let transcoding_profile =
-                if let Some(ref profile_id) = sync_manifest.transcoding_profile_id {
-                    match crate::paths::get_device_profiles_path()
-                        .and_then(|p| crate::transcoding::find_device_profile(&p, profile_id))
-                    {
-                        Ok(profile) => profile,
-                        Err(e) => {
-                            eprintln!(
-                                "[Sync] Failed to load transcoding profile '{}': {}",
-                                profile_id, e
-                            );
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
+            let transcoding_profile = match load_selected_transcoding_profile(
+                sync_manifest.transcoding_profile_id.as_deref(),
+            ) {
+                Ok(profile) => profile,
+                Err(e) => {
+                    eprintln!("[Sync] Failed to load transcoding profile: {}", e);
+                    fail_sync_operation(
+                        &op_manager,
+                        &op_id,
+                        "sync_execute",
+                        format!("Failed to load transcoding profile: {}", e),
+                    )
+                    .await;
+                    let _ = state_tx.send(crate::DaemonState::Error);
+                    return;
+                }
+            };
 
             let result = crate::sync::execute_provider_sync(
                 &delta,
@@ -2981,22 +3021,22 @@ async fn handle_sync_execute(
         };
 
         // Load transcoding profile from the atomically fetched manifest
-        let transcoding_profile = if let Some(ref profile_id) = sync_manifest.transcoding_profile_id
-        {
-            match crate::paths::get_device_profiles_path()
-                .and_then(|p| crate::transcoding::find_device_profile(&p, profile_id))
-            {
-                Ok(profile) => profile,
-                Err(e) => {
-                    eprintln!(
-                        "[Sync] Failed to load transcoding profile '{}': {}",
-                        profile_id, e
-                    );
-                    None
-                }
+        let transcoding_profile = match load_selected_transcoding_profile(
+            sync_manifest.transcoding_profile_id.as_deref(),
+        ) {
+            Ok(profile) => profile,
+            Err(e) => {
+                eprintln!("[Sync] Failed to load transcoding profile: {}", e);
+                fail_sync_operation(
+                    &op_manager,
+                    &op_id,
+                    "sync_execute",
+                    format!("Failed to load transcoding profile: {}", e),
+                )
+                .await;
+                let _ = state_tx.send(crate::DaemonState::Error);
+                return;
             }
-        } else {
-            None
         };
 
         let result = crate::sync::execute_sync(
@@ -6931,6 +6971,8 @@ mod tests {
                 last_played_at: None,
                 play_count: None,
                 is_favorite: None,
+                content_type: Some("audio/mpeg".to_string()),
+                suffix: Some("mp3".to_string()),
             })
             .collect::<Vec<_>>();
         let provider = FakeBrowseProvider::with_genre_tracks("rock", tracks);
@@ -6967,6 +7009,8 @@ mod tests {
             last_played_at: None,
             play_count: None,
             is_favorite: None,
+            content_type: Some("audio/flac".to_string()),
+            suffix: Some("flac".to_string()),
         });
 
         let (items, playlist) =
@@ -6981,6 +7025,11 @@ mod tests {
         assert_eq!(items[0].artist.as_deref(), Some("Artist"));
         assert_eq!(items[0].album.as_deref(), Some("Album"));
         assert_eq!(items[0].provider_album_id.as_deref(), Some("album1"));
+        assert_eq!(
+            items[0].provider_content_type.as_deref(),
+            Some("audio/flac")
+        );
+        assert_eq!(items[0].provider_suffix.as_deref(), Some("flac"));
     }
 
     #[tokio::test]
@@ -7013,6 +7062,8 @@ mod tests {
             last_played_at: None,
             play_count: None,
             is_favorite: None,
+            content_type: Some("audio/mpeg".to_string()),
+            suffix: Some("mp3".to_string()),
         };
         let provider = FakeBrowseProvider::with_album_and_song(
             crate::domain::models::AlbumWithTracks {

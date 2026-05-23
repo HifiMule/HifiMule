@@ -41,6 +41,10 @@ pub struct Song {
     pub last_played_at: Option<String>,
     pub play_count: Option<u32>,
     pub is_favorite: Option<bool>,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub suffix: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -221,6 +225,8 @@ mod tests {
             last_played_at: None,
             play_count: None,
             is_favorite: None,
+            content_type: Some("audio/mpeg".to_string()),
+            suffix: Some("mp3".to_string()),
         };
 
         assert_eq!(song.id, "9f86d081884c7d659a2feaa0c55ad015");

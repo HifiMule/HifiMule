@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-05-23  # Story 4.9 ready for review
+last_updated: 2026-05-23  # Story 4.9 review complete
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -73,7 +73,7 @@ development_status:
   3-9-artist-entity-basket-item: done
   epic-3-retrospective: done
 
-  epic-4: in-progress
+  epic-4: done
   4-0-device-io-abstraction-layer: done
   4-1-differential-sync-algorithm-manifest-comparison: done
   4-2-atomic-buffered-io-streaming: done
@@ -84,7 +84,7 @@ development_status:
   4-6-sync-progress-eta: done
   4-7-playlist-m3u-file-generation: done
   4-8-transcoding-handshake-via-device-profiles: done
-  4-9-provider-neutral-transcoding-compatibility-and-extension-verification: review
+  4-9-provider-neutral-transcoding-compatibility-and-extension-verification: done
   4-10-idempotent-managed-file-deletion-on-usb: done
   epic-4-retrospective: done
 
@@ -120,7 +120,7 @@ development_status:
   8-5-subsonic-url-credential-sanitization: done
   8-6-incremental-sync-subsonic-album-level-fallback: done
 
-  epic-9: in-progress
+  epic-9: done
   9-1-provider-browse-modes-and-capability-contract: done
   9-2-browse-mode-navigation-ui: done
   9-3-genre-browsing-and-genre-entity-basket-item: done

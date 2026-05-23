@@ -1,6 +1,6 @@
 # Story 4.9: Provider-Neutral Transcoding, Compatibility, and Extension Verification
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -57,6 +57,14 @@ so that the device never receives unplayable media.
   - [x] Add tests proving skipped items are excluded from the manifest.
   - [x] Run `rtk cargo test -p hifimule-daemon`.
 
+### Review Findings
+
+- [x] [Review][Patch] Real provider sync drops Subsonic source format metadata, so compatible passthrough cannot be detected [hifimule-daemon/src/rpc.rs:1462]
+- [x] [Review][Patch] Missing or unreadable selected transcoding profile falls back to unconstrained provider sync [hifimule-daemon/src/rpc.rs:2875]
+- [x] [Review][Patch] Direct compatibility flattens container and codec aliases, allowing unconfirmed codecs to pass through [hifimule-daemon/src/sync.rs:477]
+- [x] [Review][Patch] Generic direct-download response content types can cause compatible passthrough tracks to be skipped [hifimule-daemon/src/sync.rs:1572]
+- [x] [Review][Patch] Skipped incompatible items leave byte progress and ETA totals inconsistent [hifimule-daemon/src/sync.rs:1426]
+
 ## Dev Notes
 
 ### Current Code Context
@@ -92,6 +100,8 @@ GPT-5 Codex
 - `rtk cargo test -p hifimule-daemon test_rpc_sync_detect_changes_returns_stable_wire_fields_and_metadata` - passed after aligning the test fixture with album-managed change detection.
 - `rtk cargo test -p hifimule-daemon` - passed, 348 tests.
 - `rtk cargo clippy -p hifimule-daemon --all-targets` - exited successfully; repo still reports existing clippy warning categories.
+- `rtk cargo test -p hifimule-daemon` - passed after review fixes, 349 tests.
+- `rtk cargo clippy -p hifimule-daemon --all-targets` - exited successfully after review fixes; repo still reports existing clippy warning categories.
 
 ### Completion Notes List
 
@@ -100,11 +110,15 @@ GPT-5 Codex
 - Preserved compatible passthrough suffixes and kept skipped tracks out of both device writes and manifest updates.
 - Loaded active transcoding profiles for non-Jellyfin provider execution while keeping Subsonic URL construction behind `MediaProvider::download_url`.
 - Kept Jellyfin PlaybackInfo execution behavior unchanged.
+- Resolved review findings by carrying provider format metadata through provider songs, failing invalid selected profile loads, separating container and codec compatibility checks, allowing generic binary direct-download responses when source metadata is compatible, and adjusting byte totals for skipped items.
 
 ### File List
 
 - `_bmad-output/implementation-artifacts/4-9-provider-neutral-transcoding-compatibility-and-extension-verification.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `hifimule-daemon/src/domain/models.rs`
+- `hifimule-daemon/src/providers/jellyfin.rs`
+- `hifimule-daemon/src/providers/subsonic.rs`
 - `hifimule-daemon/src/rpc.rs`
 - `hifimule-daemon/src/sync.rs`
 
@@ -112,3 +126,4 @@ GPT-5 Codex
 
 - 2026-05-23: Created story from approved Correct Course proposal for Navidrome/Subsonic parity and sync correctness.
 - 2026-05-23: Implemented provider-neutral transcoding compatibility enforcement, skip warnings, passthrough extension preservation, and provider-sync verification tests.
+- 2026-05-23: Resolved code-review findings and marked story done.
