@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-05-23  # Story 4.10 review complete
+last_updated: 2026-05-23  # Story 4.9 ready for review
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -84,7 +84,7 @@ development_status:
   4-6-sync-progress-eta: done
   4-7-playlist-m3u-file-generation: done
   4-8-transcoding-handshake-via-device-profiles: done
-  4-9-provider-neutral-transcoding-compatibility-and-extension-verification: ready-for-dev
+  4-9-provider-neutral-transcoding-compatibility-and-extension-verification: review
   4-10-idempotent-managed-file-deletion-on-usb: done
   epic-4-retrospective: done
 

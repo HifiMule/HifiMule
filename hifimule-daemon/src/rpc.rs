@@ -2858,7 +2858,7 @@ async fn handle_sync_execute(
         let _ = state_tx.send(crate::DaemonState::Syncing);
 
         tokio::spawn(async move {
-            let (_sync_manifest, device_io) = match device_manager.get_manifest_and_io().await {
+            let (sync_manifest, device_io) = match device_manager.get_manifest_and_io().await {
                 Some(pair) => pair,
                 None => {
                     eprintln!("[Sync] No device available — cannot execute sync");
@@ -2871,10 +2871,31 @@ async fn handle_sync_execute(
                 }
             };
 
+            let transcoding_profile =
+                if let Some(ref profile_id) = sync_manifest.transcoding_profile_id {
+                    match crate::paths::get_device_profiles_path()
+                        .and_then(|p| crate::transcoding::find_device_profile(&p, profile_id))
+                    {
+                        Ok(profile) => profile,
+                        Err(e) => {
+                            eprintln!(
+                                "[Sync] Failed to load transcoding profile '{}': {}",
+                                profile_id, e
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
             let result = crate::sync::execute_provider_sync(
                 &delta,
                 &device_path,
-                provider,
+                crate::sync::ProviderSyncSource {
+                    provider,
+                    transcoding_profile,
+                },
                 op_manager.clone(),
                 op_id.clone(),
                 device_manager.clone(),
@@ -5121,7 +5142,16 @@ mod tests {
             }],
             dirty: false,
             pending_item_ids: vec![],
-            basket_items: vec![],
+            basket_items: vec![crate::device::BasketItem {
+                id: "album1".to_string(),
+                name: "Album".to_string(),
+                item_type: "MusicAlbum".to_string(),
+                server_id: None,
+                artist: None,
+                child_count: 2,
+                size_ticks: 0,
+                size_bytes: 4000,
+            }],
             auto_sync_on_connect: false,
             auto_fill: crate::device::AutoFillPrefs::default(),
             transcoding_profile_id: None,

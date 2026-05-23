@@ -456,6 +456,256 @@ fn forced_audio_profile(container: &str) -> serde_json::Value {
     })
 }
 
+#[derive(Debug, Clone, Default)]
+struct AudioCompatibilityProfile {
+    direct_formats: HashSet<String>,
+    output_formats: HashSet<String>,
+    transcode_profile: Option<TranscodeProfile>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AudioFormat {
+    keys: HashSet<String>,
+    extension: Option<String>,
+}
+
+impl AudioCompatibilityProfile {
+    fn is_constrained(&self) -> bool {
+        !self.output_formats.is_empty() || self.transcode_profile.is_some()
+    }
+
+    fn source_is_direct_compatible(&self, source: &AudioFormat) -> bool {
+        if !self.is_constrained() {
+            return true;
+        }
+        !source.keys.is_empty()
+            && source
+                .keys
+                .iter()
+                .any(|key| self.direct_formats.contains(key))
+    }
+
+    fn output_is_compatible(&self, output: &AudioFormat) -> bool {
+        if !self.is_constrained() {
+            return true;
+        }
+        !output.keys.is_empty()
+            && output
+                .keys
+                .iter()
+                .any(|key| self.output_formats.contains(key))
+    }
+
+    fn transcode_target_label(&self) -> String {
+        self.transcode_profile
+            .as_ref()
+            .and_then(|profile| profile.container.as_deref())
+            .unwrap_or("requested profile")
+            .to_string()
+    }
+}
+
+fn audio_compatibility_profile(
+    device_profile: Option<&serde_json::Value>,
+    preferred_audio_container: Option<&str>,
+) -> AudioCompatibilityProfile {
+    if let Some(container) = preferred_audio_container {
+        let mut direct_formats = HashSet::new();
+        add_audio_format_keys(&mut direct_formats, container);
+        let output_formats = direct_formats.clone();
+        return AudioCompatibilityProfile {
+            direct_formats,
+            output_formats,
+            transcode_profile: Some(TranscodeProfile {
+                container: Some(container.to_string()),
+                audio_codec: Some(container.to_string()),
+                max_bitrate_kbps: Some(if container.eq_ignore_ascii_case("mp3") {
+                    320
+                } else {
+                    256
+                }),
+            }),
+        };
+    }
+
+    let Some(profile) = device_profile else {
+        return AudioCompatibilityProfile::default();
+    };
+
+    let mut direct_formats = HashSet::new();
+    if let Some(profiles) = profile["DirectPlayProfiles"].as_array() {
+        for direct in profiles {
+            if direct["Type"]
+                .as_str()
+                .is_some_and(|kind| !kind.eq_ignore_ascii_case("Audio"))
+            {
+                continue;
+            }
+            if let Some(container) = direct["Container"].as_str() {
+                add_audio_format_keys(&mut direct_formats, container);
+            }
+            if let Some(codec) = direct["AudioCodec"].as_str() {
+                add_audio_format_keys(&mut direct_formats, codec);
+            }
+        }
+    }
+
+    let transcode_profile = transcode_profile_from_device_profile(profile);
+    let mut output_formats = direct_formats.clone();
+    if let Some(profile) = &transcode_profile {
+        if let Some(container) = profile.container.as_deref() {
+            add_audio_format_keys(&mut output_formats, container);
+        }
+        if let Some(codec) = profile.audio_codec.as_deref() {
+            add_audio_format_keys(&mut output_formats, codec);
+        }
+    }
+
+    AudioCompatibilityProfile {
+        direct_formats,
+        output_formats,
+        transcode_profile,
+    }
+}
+
+fn transcode_profile_from_device_profile(profile: &serde_json::Value) -> Option<TranscodeProfile> {
+    let transcode = profile["TranscodingProfiles"]
+        .as_array()?
+        .iter()
+        .find(|candidate| {
+            candidate["Type"]
+                .as_str()
+                .is_none_or(|kind| kind.eq_ignore_ascii_case("Audio"))
+        })?;
+    let container = transcode["Container"]
+        .as_str()
+        .map(|container| container.to_string());
+    let audio_codec = transcode["AudioCodec"]
+        .as_str()
+        .map(|codec| codec.to_string());
+
+    Some(TranscodeProfile {
+        container,
+        audio_codec,
+        max_bitrate_kbps: profile_bitrate_kbps(profile),
+    })
+}
+
+fn profile_bitrate_kbps(profile: &serde_json::Value) -> Option<u32> {
+    let bitrate = profile["MusicStreamingTranscodingBitrate"]
+        .as_u64()
+        .or_else(|| profile["MaxStreamingBitrate"].as_u64())?;
+    if bitrate >= 1000 {
+        Some((bitrate / 1000) as u32)
+    } else {
+        Some(bitrate as u32)
+    }
+}
+
+fn provider_audio_format(suffix: Option<&str>, content_type: Option<&str>) -> AudioFormat {
+    let mut format = AudioFormat::default();
+    if let Some(suffix) = suffix {
+        add_audio_format_keys(&mut format.keys, suffix);
+        format.extension = clean_audio_extension(suffix);
+    }
+    if let Some(content_type) = content_type {
+        add_audio_format_keys(&mut format.keys, content_type);
+        if format.extension.is_none() {
+            format.extension = extension_from_content_type(content_type).map(str::to_string);
+        }
+    }
+    format
+}
+
+fn add_audio_format_keys(keys: &mut HashSet<String>, value: &str) {
+    for part in value.split(',') {
+        let Some(key) = normalized_audio_key(part) else {
+            continue;
+        };
+        keys.insert(key.clone());
+        match key.as_str() {
+            "mp3" => {
+                keys.insert("mpeg".to_string());
+            }
+            "flac" => {
+                keys.insert("x-flac".to_string());
+            }
+            "mp4" | "m4a" | "aac" => {
+                keys.insert("mp4".to_string());
+                keys.insert("m4a".to_string());
+                keys.insert("aac".to_string());
+            }
+            "ogg" | "oga" | "vorbis" => {
+                keys.insert("ogg".to_string());
+                keys.insert("oga".to_string());
+                keys.insert("vorbis".to_string());
+            }
+            "opus" => {
+                keys.insert("opus".to_string());
+            }
+            _ => {}
+        }
+    }
+}
+
+fn normalized_audio_key(value: &str) -> Option<String> {
+    let normalized = value
+        .split(';')
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    Some(
+        match normalized.as_str() {
+            "audio/mpeg" | "audio/mp3" | "mpeg" | "mpga" => "mp3",
+            "audio/flac" | "audio/x-flac" | "x-flac" => "flac",
+            "audio/mp4" | "audio/x-m4a" => "mp4",
+            "audio/aac" | "audio/aacp" => "aac",
+            "audio/ogg" | "application/ogg" => "ogg",
+            "audio/opus" => "opus",
+            other => other,
+        }
+        .to_string(),
+    )
+}
+
+fn clean_audio_extension(value: &str) -> Option<String> {
+    let extension = value.trim().trim_start_matches('.').to_ascii_lowercase();
+    if extension.is_empty() || extension.contains('/') {
+        None
+    } else {
+        Some(extension)
+    }
+}
+
+fn extension_from_content_type(content_type: &str) -> Option<&'static str> {
+    match normalized_audio_key(content_type)?.as_str() {
+        "mp3" | "mpeg" => Some("mp3"),
+        "flac" | "x-flac" => Some("flac"),
+        "ogg" | "oga" | "vorbis" => Some("ogg"),
+        "opus" => Some("opus"),
+        "mp4" | "m4a" | "aac" => Some("m4a"),
+        _ => None,
+    }
+}
+
+async fn mark_operation_item_handled(
+    operation_manager: &Arc<SyncOperationManager>,
+    operation_id: &str,
+) {
+    if let Some(mut operation) = operation_manager.get_operation(operation_id).await {
+        operation.files_completed += 1;
+        operation_manager
+            .update_operation(operation_id, operation)
+            .await;
+    }
+}
+
 /// Sanitizes a path component by removing/replacing invalid filesystem characters.
 ///
 /// Also strips trailing dots and spaces — forbidden by FAT32/Windows for both
@@ -1144,17 +1394,27 @@ pub async fn execute_sync(
     Ok((synced_items, errors))
 }
 
+pub struct ProviderSyncSource {
+    pub provider: Arc<dyn MediaProvider>,
+    pub transcoding_profile: Option<serde_json::Value>,
+}
+
 pub async fn execute_provider_sync(
     delta: &SyncDelta,
     device_path: &Path,
-    provider: Arc<dyn MediaProvider>,
+    source: ProviderSyncSource,
     operation_manager: Arc<SyncOperationManager>,
     operation_id: String,
     device_manager: Arc<crate::device::DeviceManager>,
     device_io: Arc<dyn crate::device_io::DeviceIO>,
 ) -> Result<(Vec<crate::device::SyncedItem>, Vec<SyncFileError>)> {
+    let ProviderSyncSource {
+        provider,
+        transcoding_profile,
+    } = source;
     let mut synced_items = Vec::new();
     let mut errors = Vec::new();
+    let mut sync_warnings = Vec::new();
     if let Err(e) = device_io.begin_sync_job().await {
         errors.push(SyncFileError {
             jellyfin_id: String::new(),
@@ -1192,41 +1452,50 @@ pub async fn execute_provider_sync(
                 .to_string()
         });
 
+    let preferred_audio_container = device_io.preferred_audio_container();
+    let compatibility =
+        audio_compatibility_profile(transcoding_profile.as_ref(), preferred_audio_container);
+
     for add_item in delta.adds.iter() {
-        let preferred_audio_container = device_io.preferred_audio_container();
-        let construction =
-            match construct_desired_file_path(&managed_path, add_item, preferred_audio_container) {
-                Ok(result) => result,
-                Err(e) => {
-                    errors.push(SyncFileError {
-                        jellyfin_id: add_item.jellyfin_id.clone(),
-                        filename: add_item.name.clone(),
-                        error_message: format!("Failed to construct file path: {}", e),
-                    });
+        let source_format = provider_audio_format(
+            add_item.provider_suffix.as_deref(),
+            add_item.provider_content_type.as_deref(),
+        );
+        let source_direct_compatible = compatibility.source_is_direct_compatible(&source_format);
+        let profile = if compatibility.is_constrained() && !source_direct_compatible {
+            match compatibility.transcode_profile.clone() {
+                Some(profile) => Some(profile),
+                None => {
+                    sync_warnings.push(format!(
+                        "[Sync] Skipped '{}' ({}) because the source format is incompatible and no compatible transcode profile is available",
+                        add_item.name, add_item.jellyfin_id
+                    ));
+                    mark_operation_item_handled(&operation_manager, &operation_id).await;
                     continue;
                 }
-            };
-
-        let profile = preferred_audio_container.map(|container| TranscodeProfile {
-            container: Some(container.to_string()),
-            audio_codec: Some(container.to_string()),
-            max_bitrate_kbps: Some(if container.eq_ignore_ascii_case("mp3") {
-                320
-            } else {
-                256
-            }),
-        });
+            }
+        } else {
+            None
+        };
         let url = match provider
             .download_url(&add_item.jellyfin_id, profile.as_ref())
             .await
         {
             Ok(url) => url,
             Err(e) => {
-                errors.push(SyncFileError {
-                    jellyfin_id: add_item.jellyfin_id.clone(),
-                    filename: add_item.name.clone(),
-                    error_message: format!("Failed to get stream: {}", e),
-                });
+                if profile.is_some() {
+                    sync_warnings.push(format!(
+                        "[Sync] Skipped '{}' ({}) because required transcoding could not be negotiated: {}",
+                        add_item.name, add_item.jellyfin_id, e
+                    ));
+                    mark_operation_item_handled(&operation_manager, &operation_id).await;
+                } else {
+                    errors.push(SyncFileError {
+                        jellyfin_id: add_item.jellyfin_id.clone(),
+                        filename: add_item.name.clone(),
+                        error_message: format!("Failed to get stream: {}", e),
+                    });
+                }
                 continue;
             }
         };
@@ -1242,13 +1511,97 @@ pub async fn execute_provider_sync(
             }
         };
         if !response.status().is_success() {
-            errors.push(SyncFileError {
-                jellyfin_id: add_item.jellyfin_id.clone(),
-                filename: add_item.name.clone(),
-                error_message: format!("Stream returned status {}", response.status()),
-            });
+            if profile.is_some() {
+                sync_warnings.push(format!(
+                    "[Sync] Skipped '{}' ({}) because required transcoding returned status {}",
+                    add_item.name,
+                    add_item.jellyfin_id,
+                    response.status()
+                ));
+                mark_operation_item_handled(&operation_manager, &operation_id).await;
+            } else {
+                errors.push(SyncFileError {
+                    jellyfin_id: add_item.jellyfin_id.clone(),
+                    filename: add_item.name.clone(),
+                    error_message: format!("Stream returned status {}", response.status()),
+                });
+            }
             continue;
         }
+
+        let response_content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok());
+        let response_format = provider_audio_format(None, response_content_type);
+        let extension_override = if !compatibility.is_constrained() {
+            source_format
+                .extension
+                .clone()
+                .or_else(|| response_format.extension.clone())
+        } else if profile.is_some() {
+            if !response_format.keys.is_empty()
+                && compatibility.output_is_compatible(&response_format)
+            {
+                response_format.extension.clone().or_else(|| {
+                    profile
+                        .as_ref()
+                        .and_then(|profile| profile.container.as_deref())
+                        .and_then(clean_audio_extension)
+                })
+            } else {
+                let reason = if response_format.keys.is_empty() {
+                    format!(
+                        "transcoding to {} was requested but the provider output was unconfirmed",
+                        compatibility.transcode_target_label()
+                    )
+                } else {
+                    format!(
+                        "the provider returned incompatible content type {:?}",
+                        response_content_type.unwrap_or("unknown")
+                    )
+                };
+                sync_warnings.push(format!(
+                    "[Sync] Skipped '{}' ({}) because {}",
+                    add_item.name, add_item.jellyfin_id, reason
+                ));
+                mark_operation_item_handled(&operation_manager, &operation_id).await;
+                continue;
+            }
+        } else {
+            if !response_format.keys.is_empty()
+                && !compatibility.output_is_compatible(&response_format)
+            {
+                sync_warnings.push(format!(
+                    "[Sync] Skipped '{}' ({}) because the provider returned incompatible content type {:?}",
+                    add_item.name,
+                    add_item.jellyfin_id,
+                    response_content_type.unwrap_or("unknown")
+                ));
+                mark_operation_item_handled(&operation_manager, &operation_id).await;
+                continue;
+            }
+            source_format
+                .extension
+                .clone()
+                .or_else(|| response_format.extension.clone())
+        };
+
+        let construction = match construct_desired_file_path(
+            &managed_path,
+            add_item,
+            extension_override.as_deref(),
+        ) {
+            Ok(result) => result,
+            Err(e) => {
+                errors.push(SyncFileError {
+                    jellyfin_id: add_item.jellyfin_id.clone(),
+                    filename: add_item.name.clone(),
+                    error_message: format!("Failed to construct file path: {}", e),
+                });
+                continue;
+            }
+        };
 
         let file_name = add_item.name.clone();
         let total_size = add_item.size_bytes;
@@ -1467,7 +1820,8 @@ pub async fn execute_provider_sync(
         }
     }
 
-    let mut device_warnings = device_io.take_warnings().await;
+    let mut device_warnings = sync_warnings;
+    device_warnings.extend(device_io.take_warnings().await);
     if let Err(e) = device_io.end_sync_job().await {
         device_warnings.push(format!(
             "[DeviceIO] Failed to end device sync job cleanly: {}",
@@ -2299,6 +2653,404 @@ mod tests {
             provider_content_type: None,
             provider_suffix: None,
         }
+    }
+
+    fn generic_mp3_profile() -> serde_json::Value {
+        serde_json::json!({
+            "Name": "Test Generic MP3",
+            "MaxStreamingBitrate": 320000,
+            "MusicStreamingTranscodingBitrate": 320000,
+            "DirectPlayProfiles": [
+                { "Container": "mp3", "Type": "Audio", "AudioCodec": "mp3" }
+            ],
+            "TranscodingProfiles": [
+                {
+                    "Container": "mp3",
+                    "Type": "Audio",
+                    "AudioCodec": "mp3",
+                    "Protocol": "http",
+                    "EstimateContentLength": true,
+                    "EnableMpegtsM2TsMode": false
+                }
+            ],
+            "CodecProfiles": []
+        })
+    }
+
+    fn rockbox_direct_profile() -> serde_json::Value {
+        serde_json::json!({
+            "Name": "Test Rockbox",
+            "MaxStreamingBitrate": 320000,
+            "MusicStreamingTranscodingBitrate": 320000,
+            "DirectPlayProfiles": [
+                { "Container": "mp3", "Type": "Audio", "AudioCodec": "mp3" },
+                { "Container": "flac", "Type": "Audio", "AudioCodec": "flac" }
+            ],
+            "TranscodingProfiles": [
+                {
+                    "Container": "mp3",
+                    "Type": "Audio",
+                    "AudioCodec": "mp3",
+                    "Protocol": "http",
+                    "EstimateContentLength": true,
+                    "EnableMpegtsM2TsMode": false
+                }
+            ],
+            "CodecProfiles": []
+        })
+    }
+
+    fn provider_credentials(server_url: String) -> crate::providers::ProviderCredentials {
+        crate::providers::ProviderCredentials {
+            server_url,
+            credential: crate::providers::CredentialKind::Password {
+                username: "tester".to_string(),
+                password: "secret".to_string(),
+            },
+        }
+    }
+
+    fn subsonic_provider(server_url: String) -> Arc<dyn crate::providers::MediaProvider> {
+        Arc::new(
+            crate::providers::subsonic::SubsonicProvider::from_stored_config(
+                provider_credentials(server_url),
+                true,
+                Some("1.16.1".to_string()),
+            )
+            .expect("subsonic provider"),
+        )
+    }
+
+    fn add_item_with_provider_format(
+        id: &str,
+        suffix: &str,
+        content_type: &str,
+        size_bytes: u64,
+    ) -> SyncAddItem {
+        SyncAddItem {
+            jellyfin_id: id.to_string(),
+            name: format!("Track {id}"),
+            album: Some("Album".to_string()),
+            artist: Some("Artist".to_string()),
+            size_bytes,
+            etag: None,
+            provider_album_id: Some("album1".to_string()),
+            provider_content_type: Some(content_type.to_string()),
+            provider_suffix: Some(suffix.to_string()),
+        }
+    }
+
+    async fn setup_provider_sync_device(
+        root: &Path,
+    ) -> (
+        Arc<crate::device::DeviceManager>,
+        Arc<dyn crate::device_io::DeviceIO>,
+    ) {
+        let manifest = empty_manifest();
+        crate::device::write_manifest(
+            Arc::new(crate::device_io::MscBackend::new(root.to_path_buf())),
+            &manifest,
+        )
+        .await
+        .unwrap();
+        let manager = Arc::new(crate::device::DeviceManager::new(Arc::new(
+            crate::db::Database::memory().unwrap(),
+        )));
+        let device_io: Arc<dyn crate::device_io::DeviceIO> =
+            Arc::new(crate::device_io::MscBackend::new(root.to_path_buf()));
+        manager
+            .handle_device_detected(root.to_path_buf(), manifest, Arc::clone(&device_io))
+            .await
+            .unwrap();
+        (manager, device_io)
+    }
+
+    #[tokio::test]
+    async fn test_execute_provider_sync_transcodes_subsonic_flac_to_mp3_with_kbps() {
+        let mut server = mockito::Server::new_async().await;
+        let _stream = server
+            .mock("GET", "/rest/stream.view")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("id".into(), "song-flac".into()),
+                mockito::Matcher::UrlEncoded("format".into(), "mp3".into()),
+                mockito::Matcher::UrlEncoded("maxBitRate".into(), "320".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "audio/mpeg")
+            .with_body(vec![1_u8, 2, 3, 4])
+            .expect(1)
+            .create_async()
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, device_io) = setup_provider_sync_device(dir.path()).await;
+        let operation_manager = Arc::new(SyncOperationManager::new());
+        let operation_id = "op-transcode-mp3".to_string();
+        operation_manager
+            .create_operation(operation_id.clone(), 1)
+            .await;
+        let delta = SyncDelta {
+            adds: vec![add_item_with_provider_format(
+                "song-flac",
+                "flac",
+                "audio/flac",
+                4,
+            )],
+            deletes: vec![],
+            id_changes: vec![],
+            unchanged: 0,
+            playlists: vec![],
+        };
+
+        let (synced, errors) = execute_provider_sync(
+            &delta,
+            dir.path(),
+            ProviderSyncSource {
+                provider: subsonic_provider(server.url()),
+                transcoding_profile: Some(generic_mp3_profile()),
+            },
+            Arc::clone(&operation_manager),
+            operation_id.clone(),
+            Arc::clone(&manager),
+            device_io,
+        )
+        .await
+        .unwrap();
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(synced.len(), 1);
+        assert!(
+            synced[0].local_path.ends_with(".mp3"),
+            "transcoded output must use confirmed mp3 extension: {}",
+            synced[0].local_path
+        );
+        assert!(
+            dir.path().join(&synced[0].local_path).exists(),
+            "transcoded file should be written"
+        );
+        let manifest = manager.get_current_device().await.unwrap();
+        assert_eq!(manifest.synced_items.len(), 1);
+        let operation = operation_manager
+            .get_operation(&operation_id)
+            .await
+            .unwrap();
+        assert!(operation.warnings.is_empty(), "{:?}", operation.warnings);
+    }
+
+    #[tokio::test]
+    async fn test_execute_provider_sync_preserves_compatible_direct_suffix() {
+        let mut server = mockito::Server::new_async().await;
+        let _download = server
+            .mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::AllOf(vec![mockito::Matcher::UrlEncoded(
+                "id".into(),
+                "song-flac".into(),
+            )]))
+            .with_status(200)
+            .with_header("content-type", "audio/flac")
+            .with_body(vec![1_u8, 2, 3, 4])
+            .expect(1)
+            .create_async()
+            .await;
+        let _stream = server
+            .mock("GET", "/rest/stream.view")
+            .expect(0)
+            .create_async()
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, device_io) = setup_provider_sync_device(dir.path()).await;
+        let operation_manager = Arc::new(SyncOperationManager::new());
+        let operation_id = "op-direct-flac".to_string();
+        operation_manager
+            .create_operation(operation_id.clone(), 1)
+            .await;
+        let delta = SyncDelta {
+            adds: vec![add_item_with_provider_format(
+                "song-flac",
+                "flac",
+                "audio/flac",
+                4,
+            )],
+            deletes: vec![],
+            id_changes: vec![],
+            unchanged: 0,
+            playlists: vec![],
+        };
+
+        let (synced, errors) = execute_provider_sync(
+            &delta,
+            dir.path(),
+            ProviderSyncSource {
+                provider: subsonic_provider(server.url()),
+                transcoding_profile: Some(rockbox_direct_profile()),
+            },
+            Arc::clone(&operation_manager),
+            operation_id.clone(),
+            Arc::clone(&manager),
+            device_io,
+        )
+        .await
+        .unwrap();
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(synced.len(), 1);
+        assert!(
+            synced[0].local_path.ends_with(".flac"),
+            "compatible passthrough should keep source suffix: {}",
+            synced[0].local_path
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_provider_sync_skips_incompatible_direct_response() {
+        let mut server = mockito::Server::new_async().await;
+        let _stream = server
+            .mock("GET", "/rest/stream.view")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("id".into(), "song-flac".into()),
+                mockito::Matcher::UrlEncoded("format".into(), "mp3".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "audio/flac")
+            .with_body(vec![1_u8, 2, 3, 4])
+            .expect(1)
+            .create_async()
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, device_io) = setup_provider_sync_device(dir.path()).await;
+        let operation_manager = Arc::new(SyncOperationManager::new());
+        let operation_id = "op-skip-incompatible".to_string();
+        operation_manager
+            .create_operation(operation_id.clone(), 1)
+            .await;
+        let delta = SyncDelta {
+            adds: vec![add_item_with_provider_format(
+                "song-flac",
+                "flac",
+                "audio/flac",
+                4,
+            )],
+            deletes: vec![],
+            id_changes: vec![],
+            unchanged: 0,
+            playlists: vec![],
+        };
+
+        let (synced, errors) = execute_provider_sync(
+            &delta,
+            dir.path(),
+            ProviderSyncSource {
+                provider: subsonic_provider(server.url()),
+                transcoding_profile: Some(generic_mp3_profile()),
+            },
+            Arc::clone(&operation_manager),
+            operation_id.clone(),
+            Arc::clone(&manager),
+            device_io,
+        )
+        .await
+        .unwrap();
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            synced.is_empty(),
+            "incompatible passthrough must be skipped"
+        );
+        assert!(
+            manager
+                .get_current_device()
+                .await
+                .unwrap()
+                .synced_items
+                .is_empty(),
+            "skipped items must stay out of the manifest"
+        );
+        let operation = operation_manager
+            .get_operation(&operation_id)
+            .await
+            .unwrap();
+        assert_eq!(operation.files_completed, 1);
+        assert_eq!(operation.warnings.len(), 1);
+        assert!(
+            operation.warnings[0].contains("incompatible"),
+            "warning should explain incompatible output: {:?}",
+            operation.warnings
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_provider_sync_skips_unconfirmed_transcode_output() {
+        let mut server = mockito::Server::new_async().await;
+        let _stream = server
+            .mock("GET", "/rest/stream.view")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("id".into(), "song-flac".into()),
+                mockito::Matcher::UrlEncoded("format".into(), "mp3".into()),
+            ]))
+            .with_status(200)
+            .with_body(vec![1_u8, 2, 3, 4])
+            .expect(1)
+            .create_async()
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, device_io) = setup_provider_sync_device(dir.path()).await;
+        let operation_manager = Arc::new(SyncOperationManager::new());
+        let operation_id = "op-skip-unconfirmed".to_string();
+        operation_manager
+            .create_operation(operation_id.clone(), 1)
+            .await;
+        let delta = SyncDelta {
+            adds: vec![add_item_with_provider_format(
+                "song-flac",
+                "flac",
+                "audio/flac",
+                4,
+            )],
+            deletes: vec![],
+            id_changes: vec![],
+            unchanged: 0,
+            playlists: vec![],
+        };
+
+        let (synced, errors) = execute_provider_sync(
+            &delta,
+            dir.path(),
+            ProviderSyncSource {
+                provider: subsonic_provider(server.url()),
+                transcoding_profile: Some(generic_mp3_profile()),
+            },
+            Arc::clone(&operation_manager),
+            operation_id.clone(),
+            Arc::clone(&manager),
+            device_io,
+        )
+        .await
+        .unwrap();
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(synced.is_empty(), "unconfirmed transcode must be skipped");
+        assert!(
+            manager
+                .get_current_device()
+                .await
+                .unwrap()
+                .synced_items
+                .is_empty(),
+            "unconfirmed output must stay out of the manifest"
+        );
+        let operation = operation_manager
+            .get_operation(&operation_id)
+            .await
+            .unwrap();
+        assert_eq!(operation.warnings.len(), 1);
+        assert!(
+            operation.warnings[0].contains("unconfirmed"),
+            "warning should explain unconfirmed output: {:?}",
+            operation.warnings
+        );
     }
 
     #[test]
