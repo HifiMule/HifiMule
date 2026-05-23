@@ -1689,3 +1689,40 @@ So that I can build a device basket from the music I am most likely to want offl
 - Keep these as manual browse result views, not dynamic basket slots.
 - Auto-Fill remains the only dynamic priority slot for this change.
 - Display relevant metadata when available: play count, last played date, date added, favorite state.
+
+### Story 9.5: Hierarchical Favorites Navigation
+
+As a Convenience Seeker (Sarah),
+I want Favorites to browse as Artists -> Albums -> Tracks instead of a flat song list,
+So that I can sync favorite artists, favorite albums, and favorite tracks without losing the normal music hierarchy.
+
+**Acceptance Criteria:**
+
+**Given** the active provider supports Favorites
+**When** I open the Favorites browse mode
+**Then** the root level shows artists that are directly favorited, artists that have favorited albums, and artists that have favorited tracks.
+
+**Given** I select an artist in Favorites
+**When** the artist is directly favorited
+**Then** the album level shows all albums for that artist.
+
+**Given** I select an artist in Favorites
+**When** the artist is not directly favorited but has favorite albums or tracks
+**Then** the album level shows directly favorited albums for that artist plus albums that contain favorited tracks for that artist.
+
+**Given** I select an album in Favorites
+**When** the album is directly favorited or belongs to a directly favorited artist selected from Favorites
+**Then** the track level shows all tracks in that album.
+
+**Given** I select an album in Favorites
+**When** the album is not directly favorited and does not belong to a directly favorited artist
+**Then** the track level shows only favorited tracks from that album.
+
+**Given** the provider exposes favorite artists, favorite albums, and favorite tracks in a single favorites response
+**Then** the UI uses that response as the favorite tree source and does not continue to render root Favorites as a paginated flat track result.
+
+**Technical Notes:**
+- Add or keep a provider-neutral `list_favorite_items(library_id)` contract returning favorite artists, albums, and songs.
+- Use a cached UI favorite tree to derive the three navigation levels.
+- Preserve existing artist, album, and audio basket item types; do not add a new dynamic favorites basket entity.
+- Favorites hierarchy is not paginated in the UI; `Load More` remains a no-op for this mode.

@@ -25,6 +25,8 @@ export interface BrowseDisplayItem {
     id: string;
     name: string;
     type: 'MusicArtist' | 'MusicAlbum' | 'Playlist' | 'Audio' | 'MusicGenre';
+    basketId?: string;
+    basketType?: string;
     coverArtId?: string | null;
     subtitle?: string | null;
     year?: number | null;
@@ -42,7 +44,7 @@ export class MediaCard {
         deviceSelectionEnabled?: boolean,
     ): HTMLElement {
         const isBrowseItem = !('Id' in item);
-        const itemId = isBrowseItem ? (item as BrowseDisplayItem).id : (item as JellyfinItem | JellyfinView).Id;
+        const itemId = isBrowseItem ? ((item as BrowseDisplayItem).basketId ?? (item as BrowseDisplayItem).id) : (item as JellyfinItem | JellyfinView).Id;
         const itemName = isBrowseItem ? (item as BrowseDisplayItem).name : (item as JellyfinItem | JellyfinView).Name;
         const selectionAllowed = deviceSelectionEnabled !== false;
 
@@ -143,9 +145,9 @@ export class MediaCard {
                 } else if (isBrowseItem) {
                     const bi = item as BrowseDisplayItem;
                     basketStore.add({
-                        id: bi.id,
+                        id: bi.basketId ?? bi.id,
                         name: bi.name,
-                        type: bi.type,
+                        type: bi.basketType ?? bi.type,
                         artist: bi.subtitle ?? undefined,
                         childCount: bi.childCount ?? 0,
                         sizeTicks: bi.sizeTicks ?? 0,

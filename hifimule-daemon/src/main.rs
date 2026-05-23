@@ -600,11 +600,41 @@ async fn run_auto_sync(
     } else {
         // Manual basket: resolve basket items to desired items via Jellyfin API
         let item_ids: Vec<String> = manifest.basket_items.iter().map(|b| b.id.clone()).collect();
+        let favorite_basket_by_id: std::collections::HashMap<String, device::BasketItem> = manifest
+            .basket_items
+            .iter()
+            .filter(|item| matches!(item.item_type.as_str(), "FavoriteArtist" | "FavoriteAlbum"))
+            .map(|item| (item.id.clone(), item.clone()))
+            .collect();
+        let normal_item_ids: Vec<String> = item_ids
+            .iter()
+            .filter(|id| !favorite_basket_by_id.contains_key(*id))
+            .cloned()
+            .collect();
         let is_downloadable = |t: &str| matches!(t, "Audio" | "MusicVideo");
 
         const API_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(30);
 
-        for chunk in item_ids.chunks(100) {
+        for favorite_item in favorite_basket_by_id.values() {
+            match resolve_jellyfin_favorite_basket_item(
+                &jellyfin_client,
+                &url,
+                &token,
+                &user_id,
+                favorite_item,
+            )
+            .await
+            {
+                Ok(items) => desired_items.extend(items),
+                Err(e) => daemon_log!(
+                    "[AutoSync] Failed to expand favorite item {}: {}",
+                    favorite_item.id,
+                    e
+                ),
+            }
+        }
+
+        for chunk in normal_item_ids.chunks(100) {
             let chunk_strs: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
             let fetch_result = tokio::time::timeout(
                 API_TIMEOUT,
@@ -875,6 +905,84 @@ fn to_desired_item(item: api::JellyfinItem) -> sync::DesiredItem {
         provider_album_id: item.album_id,
         provider_content_type: None,
         provider_suffix,
+    }
+}
+
+fn scoped_favorite_target_id<'a>(basket_item: &'a device::BasketItem, prefix: &str) -> &'a str {
+    basket_item
+        .id
+        .strip_prefix(prefix)
+        .unwrap_or(&basket_item.id)
+}
+
+async fn resolve_jellyfin_favorite_basket_item(
+    jellyfin_client: &api::JellyfinClient,
+    url: &str,
+    token: &str,
+    user_id: &str,
+    basket_item: &device::BasketItem,
+) -> anyhow::Result<Vec<sync::DesiredItem>> {
+    let favorites = jellyfin_client
+        .get_favorite_music_items(url, token, user_id, None)
+        .await?;
+
+    match basket_item.item_type.as_str() {
+        "FavoriteAlbum" => {
+            let album_id = scoped_favorite_target_id(basket_item, "favorites:album:");
+            Ok(favorites
+                .items
+                .into_iter()
+                .filter(|item| {
+                    matches!(item.item_type.as_str(), "Audio" | "MusicVideo")
+                        && item.album_id.as_deref() == Some(album_id)
+                })
+                .map(to_desired_item)
+                .collect())
+        }
+        "FavoriteArtist" => {
+            let artist_id = scoped_favorite_target_id(basket_item, "favorites:artist:");
+            let mut desired_items = Vec::new();
+            let mut favorite_album_ids = Vec::new();
+            for item in favorites.items {
+                match item.item_type.as_str() {
+                    "MusicAlbum" => {
+                        let item_artist_id = item
+                            .artist_items
+                            .as_ref()
+                            .and_then(|items| items.first())
+                            .map(|artist| artist.id.as_str());
+                        if item_artist_id == Some(artist_id) {
+                            favorite_album_ids.push(item.id);
+                        }
+                    }
+                    "Audio" | "MusicVideo" => {
+                        let item_artist_id = item
+                            .artist_items
+                            .as_ref()
+                            .and_then(|items| items.first())
+                            .map(|artist| artist.id.as_str());
+                        if item_artist_id == Some(artist_id) {
+                            desired_items.push(to_desired_item(item));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            for album_id in favorite_album_ids {
+                let children = jellyfin_client
+                    .get_child_items_with_sizes(url, token, user_id, &album_id)
+                    .await?;
+                desired_items.extend(
+                    children
+                        .into_iter()
+                        .filter(|child| matches!(child.item_type.as_str(), "Audio" | "MusicVideo"))
+                        .map(to_desired_item),
+                );
+            }
+            Ok(desired_items)
+        }
+        _ => Ok(Vec::new()),
     }
 }
 

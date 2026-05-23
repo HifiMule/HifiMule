@@ -1220,6 +1220,30 @@ impl JellyfinClient {
         .await
     }
 
+    /// Fetch favorite artists, albums, and audio items for hierarchical favorites navigation.
+    pub async fn get_favorite_music_items(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        library_id: Option<&str>,
+    ) -> Result<JellyfinItemsResponse> {
+        self.get_music_items(
+            url,
+            token,
+            user_id,
+            library_id,
+            "MusicArtist,MusicAlbum,Audio",
+            None,
+            Some("SortName"),
+            Some("Ascending"),
+            Some(true),
+            0,
+            10_000,
+        )
+        .await
+    }
+
     /// Internal helper for browse queries. All public browse methods delegate here.
     /// Requests `Fields=MediaSources,UserData,DateCreated` so `Song` browse metadata
     /// is populated in the response.
@@ -1236,6 +1260,36 @@ impl JellyfinClient {
         start_index: u32,
         limit: u32,
     ) -> Result<JellyfinItemsResponse> {
+        self.get_music_items(
+            url,
+            token,
+            user_id,
+            parent_id,
+            "Audio",
+            genre_ids,
+            sort_by,
+            sort_order,
+            is_favorite,
+            start_index,
+            limit,
+        )
+        .await
+    }
+
+    async fn get_music_items(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        parent_id: Option<&str>,
+        include_item_types: &str,
+        genre_ids: Option<&str>,
+        sort_by: Option<&str>,
+        sort_order: Option<&str>,
+        is_favorite: Option<bool>,
+        start_index: u32,
+        limit: u32,
+    ) -> Result<JellyfinItemsResponse> {
         let mut headers = HeaderMap::new();
         headers.insert(
             "X-Emby-Token",
@@ -1243,7 +1297,7 @@ impl JellyfinClient {
         );
         let mut query_params = vec![
             format!("userId={}", user_id),
-            "IncludeItemTypes=Audio".to_string(),
+            format!("IncludeItemTypes={}", include_item_types),
             "Recursive=true".to_string(),
             "Fields=MediaSources,UserData,DateCreated".to_string(),
             format!("StartIndex={}", start_index),

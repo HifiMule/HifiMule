@@ -84,7 +84,9 @@ export interface BrowsePlaylist {
 export interface BrowseTrack {
     id: string;
     title: string;
+    artistId?: string | null;
     artistName: string;
+    albumId?: string | null;
     albumName: string;
     trackNumber: number | null;
     duration: number;
@@ -230,5 +232,13 @@ export async function fetchBrowseFavorites(
         ...(libraryId !== undefined && { libraryId }),
         ...(startIndex !== undefined && { startIndex }),
         ...(limit !== undefined && { limit }),
+    });
+}
+
+export async function fetchBrowseFavoriteItems(
+    libraryId?: string,
+): Promise<{ artists: BrowseArtist[]; albums: BrowseAlbum[]; tracks: BrowseTrack[] }> {
+    return await rpcCall('browse.listFavoriteItems', {
+        ...(libraryId !== undefined && { libraryId }),
     });
 }

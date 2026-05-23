@@ -18,6 +18,7 @@ import {
     fetchBrowseFrequentlyPlayed,
     fetchBrowseRecentlyPlayed,
     fetchBrowseFavorites,
+    fetchBrowseFavoriteItems,
 } from './rpc';
 import { MediaCard, BrowseDisplayItem } from './components/MediaCard';
 
@@ -45,6 +46,15 @@ interface AppState {
     artistViewTotal: number;
     albumViewTotal: number;
     activeLetter: string | null;
+    favoriteTree: FavoriteTree | null;
+}
+
+interface FavoriteTree {
+    artists: BrowseArtist[];
+    albums: BrowseAlbum[];
+    tracks: BrowseTrack[];
+    favoriteArtistIds: Set<string>;
+    favoriteAlbumIds: Set<string>;
 }
 
 let state: AppState = {
@@ -59,6 +69,7 @@ let state: AppState = {
     artistViewTotal: 0,
     albumViewTotal: 0,
     activeLetter: null,
+    favoriteTree: null,
 };
 
 function cacheKey(parentId?: string): string {
@@ -75,6 +86,7 @@ export function clearNavigationCache() {
     state.albumViewTotal = 0;
     state.activeLetter = null;
     state.parentId = undefined;
+    state.favoriteTree = null;
     // browseMode and availableModes are intentionally preserved
 }
 
@@ -124,6 +136,37 @@ function mapArtists(artists: BrowseArtist[]): BrowseDisplayItem[] {
     }));
 }
 
+function mapFavoriteArtists(tree: FavoriteTree): BrowseDisplayItem[] {
+    return favoriteArtistsForTree(tree).map(artist => {
+        const directFavorite = tree.favoriteArtistIds.has(artist.id);
+        const favoriteTracks = tree.tracks.filter(track => track.artistId === artist.id);
+        const favoriteAlbumIds = new Set(
+            tree.albums
+                .filter(album => album.artistId === artist.id)
+                .map(album => album.id),
+        );
+        const favoriteTrackAlbumIds = new Set(
+            favoriteTracks
+                .map(track => track.albumId)
+                .filter((albumId): albumId is string => !!albumId),
+        );
+        return {
+            id: artist.id,
+            name: artist.name,
+            type: 'MusicArtist' as const,
+            basketId: directFavorite ? artist.id : favoriteBasketId('artist', artist.id),
+            basketType: directFavorite ? 'MusicArtist' : 'FavoriteArtist',
+            coverArtId: artist.coverArtId,
+            subtitle: directFavorite ? null : 'Favorite items',
+            childCount: directFavorite
+                ? (artist.albumCount ?? 0)
+                : new Set([...favoriteAlbumIds, ...favoriteTrackAlbumIds]).size,
+            sizeBytes: directFavorite ? 0 : sumTrackSizes(favoriteTracks),
+            sizeTicks: directFavorite ? 0 : sumTrackTicks(favoriteTracks),
+        };
+    });
+}
+
 function mapAlbums(albums: BrowseAlbum[]): BrowseDisplayItem[] {
     return albums.map(a => ({
         id: a.id,
@@ -136,6 +179,31 @@ function mapAlbums(albums: BrowseAlbum[]): BrowseDisplayItem[] {
         sizeBytes: 0,
         sizeTicks: 0,
     }));
+}
+
+function mapFavoriteAlbums(
+    albums: BrowseAlbum[],
+    tree: FavoriteTree,
+    artistDirectFavorite: boolean,
+): BrowseDisplayItem[] {
+    return albums.map(album => {
+        const directFavorite = tree.favoriteAlbumIds.has(album.id);
+        const scopedFavorite = !directFavorite && !artistDirectFavorite;
+        const favoriteTracks = tree.tracks.filter(track => track.albumId === album.id);
+        return {
+            id: album.id,
+            name: album.name,
+            type: 'MusicAlbum' as const,
+            basketId: scopedFavorite ? favoriteBasketId('album', album.id) : album.id,
+            basketType: scopedFavorite ? 'FavoriteAlbum' : 'MusicAlbum',
+            coverArtId: album.coverArtId,
+            subtitle: album.artistName,
+            year: album.year,
+            childCount: scopedFavorite ? favoriteTracks.length : album.trackCount,
+            sizeBytes: scopedFavorite ? sumTrackSizes(favoriteTracks) : 0,
+            sizeTicks: scopedFavorite ? sumTrackTicks(favoriteTracks) : 0,
+        };
+    });
 }
 
 function mapPlaylists(playlists: BrowsePlaylist[]): BrowseDisplayItem[] {
@@ -222,6 +290,96 @@ function mapAlbumTracks(tracks: BrowseTrack[]): BrowseDisplayItem[] {
         sizeTicks: t.duration * 10_000_000,
         childCount: 1,
     }));
+}
+
+function upsertById<T extends { id: string }>(map: Map<string, T>, item: T) {
+    if (!map.has(item.id)) {
+        map.set(item.id, item);
+    }
+}
+
+function favoriteBasketId(kind: 'artist' | 'album', id: string): string {
+    return `favorites:${kind}:${id}`;
+}
+
+function sumTrackSizes(tracks: BrowseTrack[]): number {
+    return tracks.reduce((sum, track) => sum + (track.sizeBytes ?? 0), 0);
+}
+
+function sumTrackTicks(tracks: BrowseTrack[]): number {
+    return tracks.reduce((sum, track) => sum + (track.duration * 10_000_000), 0);
+}
+
+async function ensureFavoriteTree(): Promise<FavoriteTree> {
+    if (state.favoriteTree) return state.favoriteTree;
+
+    const result = await fetchBrowseFavoriteItems();
+    state.favoriteTree = {
+        artists: result.artists,
+        albums: result.albums,
+        tracks: result.tracks,
+        favoriteArtistIds: new Set(result.artists.map(a => a.id)),
+        favoriteAlbumIds: new Set(result.albums.map(a => a.id)),
+    };
+    return state.favoriteTree;
+}
+
+function favoriteArtistsForTree(tree: FavoriteTree): BrowseArtist[] {
+    const artists = new Map<string, BrowseArtist>();
+
+    tree.artists.forEach(artist => upsertById(artists, artist));
+
+    tree.albums.forEach(album => {
+        if (!album.artistId || !album.artistName) return;
+        upsertById(artists, {
+            id: album.artistId,
+            name: album.artistName,
+            albumCount: 0,
+            coverArtId: album.coverArtId,
+        });
+    });
+
+    tree.tracks.forEach(track => {
+        const artistId = track.artistId ?? undefined;
+        if (!artistId || !track.artistName) return;
+        upsertById(artists, {
+            id: artistId,
+            name: track.artistName,
+            albumCount: 0,
+            coverArtId: track.coverArtId,
+        });
+    });
+
+    return [...artists.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function favoriteAlbumsForArtist(tree: FavoriteTree, artistId: string): BrowseAlbum[] {
+    const albums = new Map<string, BrowseAlbum>();
+
+    tree.albums
+        .filter(album => album.artistId === artistId || tree.favoriteArtistIds.has(artistId))
+        .forEach(album => upsertById(albums, album));
+
+    tree.tracks.forEach(track => {
+        const trackArtistId = track.artistId ?? undefined;
+        const albumId = track.albumId ?? undefined;
+        if (trackArtistId !== artistId || !albumId || !track.albumName) return;
+        upsertById(albums, {
+            id: albumId,
+            name: track.albumName,
+            artistId,
+            artistName: track.artistName,
+            year: null,
+            trackCount: 0,
+            coverArtId: track.coverArtId,
+        });
+    });
+
+    return [...albums.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function favoriteTracksForAlbum(tree: FavoriteTree, albumId: string): BrowseTrack[] {
+    return tree.tracks.filter(track => track.albumId === albumId);
 }
 
 // --- UI rendering ---
@@ -420,8 +578,10 @@ async function loadModeRoot() {
             break;
         case 'frequentlyPlayed':
         case 'recentlyPlayed':
-        case 'favorites':
             await loadFlatTracks(state.browseMode, true);
+            break;
+        case 'favorites':
+            await loadFavoriteArtists();
             break;
     }
 }
@@ -798,6 +958,133 @@ async function loadFlatTracks(
     }
 }
 
+async function loadFavoriteArtists() {
+    const container = document.getElementById('library-content');
+    if (!container) return;
+
+    const key = cacheKey(undefined);
+    const cached = state.pageCache.get(key);
+    if (cached) {
+        state.items = cached.items;
+        state.pagination.total = cached.total;
+        state.pagination.startIndex = cached.total;
+        renderGrid(state.items);
+        restoreScroll(key);
+        return;
+    }
+
+    await yieldTick();
+    if (!container.isConnected) return;
+    showSpinner(container);
+
+    state.loading = true;
+    renderModeBar();
+    try {
+        const tree = await ensureFavoriteTree();
+        const artists = mapFavoriteArtists(tree);
+        state.items = artists;
+        state.pagination.total = artists.length;
+        state.pagination.startIndex = artists.length;
+        state.artistViewTotal = 0;
+        state.albumViewTotal = 0;
+        state.pageCache.set(key, { items: artists, total: artists.length });
+        renderGrid(state.items);
+        restoreScroll(key);
+    } catch (e) {
+        renderError(e as Error);
+    } finally {
+        state.loading = false;
+        renderModeBar();
+    }
+}
+
+async function loadFavoriteArtistAlbums(artistId: string) {
+    const container = document.getElementById('library-content');
+    if (!container) return;
+
+    const key = cacheKey(artistId);
+    const cached = state.pageCache.get(key);
+    if (cached) {
+        state.items = cached.items;
+        state.pagination.total = cached.total;
+        state.pagination.startIndex = cached.total;
+        renderGrid(state.items);
+        restoreScroll(key);
+        return;
+    }
+
+    await yieldTick();
+    if (!container.isConnected) return;
+    showSpinner(container);
+
+    state.loading = true;
+    renderModeBar();
+    try {
+        const tree = await ensureFavoriteTree();
+        const artistDirectFavorite = tree.favoriteArtistIds.has(artistId);
+        const albums = artistDirectFavorite
+            ? (await fetchBrowseArtist(artistId)).albums
+            : favoriteAlbumsForArtist(tree, artistId);
+        const mapped = mapFavoriteAlbums(albums, tree, artistDirectFavorite);
+        state.items = mapped;
+        state.pagination.total = mapped.length;
+        state.pagination.startIndex = mapped.length;
+        state.pageCache.set(key, { items: mapped, total: mapped.length });
+        renderGrid(state.items);
+        restoreScroll(key);
+    } catch (e) {
+        renderError(e as Error);
+    } finally {
+        state.loading = false;
+        renderModeBar();
+    }
+}
+
+async function loadFavoriteAlbumTracks(albumId: string) {
+    const container = document.getElementById('library-content');
+    if (!container) return;
+
+    const key = cacheKey(albumId);
+    const cached = state.pageCache.get(key);
+    if (cached) {
+        state.items = cached.items;
+        state.pagination.total = cached.total;
+        state.pagination.startIndex = cached.total;
+        renderGrid(state.items);
+        restoreScroll(key);
+        return;
+    }
+
+    await yieldTick();
+    if (!container.isConnected) return;
+    showSpinner(container);
+
+    state.loading = true;
+    renderModeBar();
+    try {
+        const tree = await ensureFavoriteTree();
+        const artistId = state.breadcrumbStack[0]?.id;
+        const showFullAlbum =
+            tree.favoriteAlbumIds.has(albumId) ||
+            (artistId != null && tree.favoriteArtistIds.has(artistId));
+        const tracks = showFullAlbum
+            ? (await fetchBrowseAlbum(albumId)).tracks
+            : favoriteTracksForAlbum(tree, albumId);
+        const mapped = mapAlbumTracks(tracks);
+        state.items = mapped;
+        state.pagination.total = mapped.length;
+        state.pagination.startIndex = mapped.length;
+        state.pageCache.set(key, { items: mapped, total: mapped.length });
+        renderGrid(state.items);
+        restoreScroll(key);
+    } catch (e) {
+        renderError(e as Error);
+    } finally {
+        state.loading = false;
+        renderModeBar();
+    }
+}
+
 // --- Hierarchical navigation loaders ---
 
 async function loadArtistAlbums(artistId: string) {
@@ -991,6 +1278,10 @@ async function navigateToArtist(artistId: string, artistName: string) {
     state.parentId = artistId;
     state.pagination.startIndex = 0;
     state.items = [];
+    if (state.browseMode === 'favorites') {
+        await loadFavoriteArtistAlbums(artistId);
+        return;
+    }
     await loadArtistAlbums(artistId);
 }
 
@@ -1000,6 +1291,10 @@ async function navigateToAlbum(albumId: string, albumName: string) {
     state.parentId = albumId;
     state.pagination.startIndex = 0;
     state.items = [];
+    if (state.browseMode === 'favorites') {
+        await loadFavoriteAlbumTracks(albumId);
+        return;
+    }
     await loadAlbumTracks(albumId);
 }
 
@@ -1048,6 +1343,10 @@ async function reloadCurrentLevel() {
             if (depth === 1) await loadArtistAlbums(parentId);
             else await loadAlbumTracks(parentId);
             break;
+        case 'favorites':
+            if (depth === 1) await loadFavoriteArtistAlbums(parentId);
+            else await loadFavoriteAlbumTracks(parentId);
+            break;
         case 'albums':
             await loadAlbumTracks(parentId);
             break;
@@ -1066,6 +1365,8 @@ async function reloadCurrentLevel() {
 
 async function loadMore() {
     if (state.loading) return;
+    if (state.browseMode === 'favorites') return;
+
     state.pagination.startIndex += state.pagination.limit;
 
     const depth = state.breadcrumbStack.length;
@@ -1079,7 +1380,6 @@ async function loadMore() {
                 break;
             case 'frequentlyPlayed':
             case 'recentlyPlayed':
-            case 'favorites':
                 await loadFlatTracks(state.browseMode, false);
                 break;
         }

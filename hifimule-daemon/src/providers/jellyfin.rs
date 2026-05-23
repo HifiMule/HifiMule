@@ -392,7 +392,14 @@ impl MediaProvider for JellyfinProvider {
     ) -> Result<(Vec<Genre>, u64), ProviderError> {
         let response = self
             .client
-            .get_music_genres(self.url(), self.token(), self.user_id(), library_id, offset, limit)
+            .get_music_genres(
+                self.url(),
+                self.token(),
+                self.user_id(),
+                library_id,
+                offset,
+                limit,
+            )
             .await
             .map_err(Self::map_error)?;
         let total = response.total_record_count as u64;
@@ -518,6 +525,27 @@ impl MediaProvider for JellyfinProvider {
             response.items.into_iter().map(song_from_item).collect(),
             response.total_record_count,
         ))
+    }
+
+    async fn list_favorite_items(
+        &self,
+        library_id: Option<&str>,
+    ) -> Result<SearchResult, ProviderError> {
+        let response = self
+            .client
+            .get_favorite_music_items(self.url(), self.token(), self.user_id(), library_id)
+            .await
+            .map_err(Self::map_error)?;
+        let mut result = SearchResult::default();
+        for item in response.items {
+            match item.item_type.as_str() {
+                "MusicArtist" => result.artists.push(artist_from_item(item)),
+                "MusicAlbum" => result.albums.push(album_from_item(item)),
+                "Audio" => result.songs.push(song_from_item(item)),
+                _ => {}
+            }
+        }
+        Ok(result)
     }
 }
 
@@ -1497,5 +1525,49 @@ mod tests {
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].id, "fav1");
         assert_eq!(tracks[0].is_favorite, Some(true));
+    }
+
+    #[tokio::test]
+    async fn provider_list_favorite_items_maps_artists_albums_and_songs() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _mock = server
+            .mock("GET", "/Items")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("userId".into(), USER_ID.into()),
+                Matcher::UrlEncoded("IncludeItemTypes".into(), "MusicArtist,MusicAlbum,Audio".into()),
+                Matcher::UrlEncoded("IsFavorite".into(), "true".into()),
+                Matcher::UrlEncoded("SortBy".into(), "SortName".into()),
+                Matcher::UrlEncoded("SortOrder".into(), "Ascending".into()),
+            ]))
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"Items":[
+                    {"Id":"artist1","Name":"Favorite Artist","Type":"MusicArtist","RecursiveItemCount":2},
+                    {"Id":"album1","Name":"Favorite Album","Type":"MusicAlbum","AlbumArtist":"Favorite Artist","ArtistItems":[{"Id":"artist1","Name":"Favorite Artist"}],"RecursiveItemCount":10},
+                    {"Id":"song1","Name":"Favorite Track","Type":"Audio","AlbumId":"album1","Album":"Favorite Album","ArtistItems":[{"Id":"artist1","Name":"Favorite Artist"}],"RunTimeTicks":200000000,"UserData":{"IsFavorite":true}}
+                ],"TotalRecordCount":3,"StartIndex":0}"#,
+            )
+            .create_async()
+            .await;
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+        let favorites = provider
+            .list_favorite_items(None)
+            .await
+            .expect("favorite items");
+
+        assert_eq!(favorites.artists.len(), 1);
+        assert_eq!(favorites.albums.len(), 1);
+        assert_eq!(favorites.songs.len(), 1);
+        assert_eq!(favorites.artists[0].id, "artist1");
+        assert_eq!(favorites.albums[0].id, "album1");
+        assert_eq!(favorites.albums[0].artist_id.as_deref(), Some("artist1"));
+        assert_eq!(favorites.songs[0].id, "song1");
+        assert_eq!(favorites.songs[0].album_id.as_deref(), Some("album1"));
+        assert_eq!(favorites.songs[0].artist_id.as_deref(), Some("artist1"));
+        assert_eq!(favorites.songs[0].is_favorite, Some(true));
     }
 }

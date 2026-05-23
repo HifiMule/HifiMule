@@ -829,7 +829,10 @@ export class BasketSidebar {
 
         // Build delta request params
         const syncItemIds = await this.itemIdsWithIncrementalChanges(manualIds);
-        const deltaParams: Record<string, unknown> = { itemIds: syncItemIds };
+        const deltaParams: Record<string, unknown> = {
+            itemIds: syncItemIds,
+            basketItems: currentItems.filter(i => i.id !== AUTO_FILL_SLOT_ID),
+        };
         if (autoFillSlot) {
             // Recompute fill budget fresh from current storage state — the slot's
             // sizeBytes may be stale (e.g. set to 0 when storageInfo was null).

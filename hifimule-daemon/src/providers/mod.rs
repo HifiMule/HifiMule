@@ -166,6 +166,15 @@ pub trait MediaProvider: Send + Sync {
         ))
     }
 
+    async fn list_favorite_items(
+        &self,
+        _library_id: Option<&str>,
+    ) -> Result<SearchResult, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "list_favorite_items is not supported by this provider".to_string(),
+        ))
+    }
+
     fn change_metadata(&self, _event: &ChangeEvent) -> Option<ProviderChangeMetadata> {
         None
     }

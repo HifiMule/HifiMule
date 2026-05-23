@@ -357,6 +357,9 @@ async fn handler(
             handle_browse_list_recently_played(&state, payload.params).await
         }
         "browse.listFavorites" => handle_browse_list_favorites(&state, payload.params).await,
+        "browse.listFavoriteItems" => {
+            handle_browse_list_favorite_items(&state, payload.params).await
+        }
         _ => Err(JsonRpcError {
             code: ERR_METHOD_NOT_FOUND,
             message: "Method not found".to_string(),
@@ -657,7 +660,11 @@ async fn handle_browse_list_genres(
         .map_err(provider_error_to_rpc)?;
     crate::daemon_log!(
         "[browse.listGenres] {}ms total={} page={} offset={} limit={}",
-        t.elapsed().as_millis(), total, genres.len(), offset, limit
+        t.elapsed().as_millis(),
+        total,
+        genres.len(),
+        offset,
+        limit
     );
 
     Ok(serde_json::json!({ "genres": genres, "total": total }))
@@ -768,6 +775,26 @@ async fn handle_browse_list_favorites(
         .map_err(provider_error_to_rpc)?;
     let total = total as u64;
     Ok(serde_json::json!({ "tracks": tracks, "total": total }))
+}
+
+async fn handle_browse_list_favorite_items(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let library_id = params
+        .as_ref()
+        .and_then(|p| p["libraryId"].as_str())
+        .map(str::to_owned);
+    let provider = require_provider(state).await?;
+    let favorites = provider
+        .list_favorite_items(library_id.as_deref())
+        .await
+        .map_err(provider_error_to_rpc)?;
+    Ok(serde_json::json!({
+        "artists": favorites.artists,
+        "albums": favorites.albums,
+        "tracks": favorites.songs,
+    }))
 }
 
 async fn handle_server_connect(
@@ -1446,6 +1473,62 @@ fn provider_song_to_desired_item(song: &Song) -> crate::sync::DesiredItem {
     }
 }
 
+fn scoped_favorite_target_id<'a>(
+    basket_item: &'a crate::device::BasketItem,
+    prefix: &str,
+) -> &'a str {
+    basket_item
+        .id
+        .strip_prefix(prefix)
+        .unwrap_or(&basket_item.id)
+}
+
+async fn provider_favorite_sync_items_for_basket_item(
+    provider: Arc<dyn MediaProvider>,
+    basket_item: &crate::device::BasketItem,
+) -> Result<Vec<crate::sync::DesiredItem>, JsonRpcError> {
+    let favorites = provider
+        .list_favorite_items(None)
+        .await
+        .map_err(provider_error_to_rpc)?;
+
+    match basket_item.item_type.as_str() {
+        "FavoriteAlbum" => {
+            let album_id = scoped_favorite_target_id(basket_item, "favorites:album:");
+            Ok(favorites
+                .songs
+                .iter()
+                .filter(|song| song.album_id.as_deref() == Some(album_id))
+                .map(provider_song_to_desired_item)
+                .collect())
+        }
+        "FavoriteArtist" => {
+            let artist_id = scoped_favorite_target_id(basket_item, "favorites:artist:");
+            let mut desired_items = Vec::new();
+            for album in favorites
+                .albums
+                .iter()
+                .filter(|album| album.artist_id.as_deref() == Some(artist_id))
+            {
+                let album = provider
+                    .get_album(&album.id)
+                    .await
+                    .map_err(provider_error_to_rpc)?;
+                desired_items.extend(album.tracks.iter().map(provider_song_to_desired_item));
+            }
+            desired_items.extend(
+                favorites
+                    .songs
+                    .iter()
+                    .filter(|song| song.artist_id.as_deref() == Some(artist_id))
+                    .map(provider_song_to_desired_item),
+            );
+            Ok(desired_items)
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
 async fn provider_genre_sync_items_for_id(
     provider: Arc<dyn MediaProvider>,
     item_id: &str,
@@ -1586,7 +1669,25 @@ async fn provider_calculate_delta(
     let mut playlist_sync_items = Vec::new();
     let mut seen_ids = HashSet::new();
 
+    let basket_items = basket_items_from_params_or_manifest(params, manifest);
+    let favorite_basket_by_id: HashMap<String, crate::device::BasketItem> = basket_items
+        .into_iter()
+        .filter(|item| matches!(item.item_type.as_str(), "FavoriteArtist" | "FavoriteAlbum"))
+        .map(|item| (item.id.clone(), item))
+        .collect();
+
     for item_id in item_ids {
+        if let Some(basket_item) = favorite_basket_by_id.get(item_id) {
+            let tracks =
+                provider_favorite_sync_items_for_basket_item(provider.clone(), basket_item).await?;
+            for item in tracks {
+                if seen_ids.insert(item.jellyfin_id.clone()) {
+                    desired_items.push(item);
+                }
+            }
+            continue;
+        }
+
         let (tracks, playlist) = provider_sync_items_for_id(provider.clone(), item_id).await?;
         if let Some(playlist) = playlist {
             playlist_sync_items.push(playlist);
@@ -1601,6 +1702,124 @@ async fn provider_calculate_delta(
     let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
     delta.playlists = playlist_sync_items;
     Ok(serde_json::to_value(delta).unwrap())
+}
+
+fn basket_items_from_params_or_manifest(
+    params: &Value,
+    manifest: &crate::device::DeviceManifest,
+) -> Vec<crate::device::BasketItem> {
+    params
+        .get("basketItems")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_else(|| manifest.basket_items.clone())
+}
+
+fn jellyfin_item_to_desired_item(item: crate::api::JellyfinItem) -> crate::sync::DesiredItem {
+    let size_bytes = item
+        .media_sources
+        .as_ref()
+        .and_then(|sources| sources.first())
+        .and_then(|s| s.size)
+        .unwrap_or(0) as u64;
+    let provider_suffix = item
+        .media_sources
+        .as_ref()
+        .and_then(|sources| sources.first())
+        .and_then(|source| source.container.clone())
+        .or_else(|| item.container.clone());
+    crate::sync::DesiredItem {
+        jellyfin_id: item.id,
+        name: item.name,
+        album: item.album,
+        artist: item.album_artist,
+        size_bytes,
+        etag: item.etag,
+        provider_album_id: item.album_id,
+        provider_content_type: None,
+        provider_suffix,
+    }
+}
+
+async fn jellyfin_favorite_sync_items_for_basket_item(
+    client: &JellyfinClient,
+    url: &str,
+    token: &str,
+    user_id: &str,
+    basket_item: &crate::device::BasketItem,
+) -> Result<Vec<crate::sync::DesiredItem>, JsonRpcError> {
+    let favorites = client
+        .get_favorite_music_items(url, token, user_id, None)
+        .await
+        .map_err(|error| JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: error.to_string(),
+            data: None,
+        })?;
+
+    match basket_item.item_type.as_str() {
+        "FavoriteAlbum" => {
+            let album_id = scoped_favorite_target_id(basket_item, "favorites:album:");
+            Ok(favorites
+                .items
+                .into_iter()
+                .filter(|item| {
+                    matches!(item.item_type.as_str(), "Audio" | "MusicVideo")
+                        && item.album_id.as_deref() == Some(album_id)
+                })
+                .map(jellyfin_item_to_desired_item)
+                .collect())
+        }
+        "FavoriteArtist" => {
+            let artist_id = scoped_favorite_target_id(basket_item, "favorites:artist:");
+            let mut desired_items = Vec::new();
+            let mut favorite_album_ids = Vec::new();
+            for item in favorites.items {
+                match item.item_type.as_str() {
+                    "MusicAlbum" => {
+                        let item_artist_id = item
+                            .artist_items
+                            .as_ref()
+                            .and_then(|items| items.first())
+                            .map(|artist| artist.id.as_str());
+                        if item_artist_id == Some(artist_id) {
+                            favorite_album_ids.push(item.id);
+                        }
+                    }
+                    "Audio" | "MusicVideo" => {
+                        let item_artist_id = item
+                            .artist_items
+                            .as_ref()
+                            .and_then(|items| items.first())
+                            .map(|artist| artist.id.as_str());
+                        if item_artist_id == Some(artist_id) {
+                            desired_items.push(jellyfin_item_to_desired_item(item));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            for album_id in favorite_album_ids {
+                let children = client
+                    .get_child_items_with_sizes(url, token, user_id, &album_id)
+                    .await
+                    .map_err(|error| JsonRpcError {
+                        code: ERR_CONNECTION_FAILED,
+                        message: error.to_string(),
+                        data: None,
+                    })?;
+                desired_items.extend(
+                    children
+                        .into_iter()
+                        .filter(|child| matches!(child.item_type.as_str(), "Audio" | "MusicVideo"))
+                        .map(jellyfin_item_to_desired_item),
+                );
+            }
+            Ok(desired_items)
+        }
+        _ => Ok(Vec::new()),
+    }
 }
 
 fn paginate_values(mut items: Vec<Value>, start_index: u32, limit: u32) -> Value {
@@ -2145,9 +2364,35 @@ async fn handle_sync_calculate_delta(
 
     // Fetch item details from Jellyfin in chunks to avoid URL length limits.
     // Container items (playlist/album/artist) are expanded to individual tracks.
+    let basket_items = basket_items_from_params_or_manifest(&params, &manifest);
+    let favorite_basket_by_id: HashMap<String, crate::device::BasketItem> = basket_items
+        .into_iter()
+        .filter(|item| matches!(item.item_type.as_str(), "FavoriteArtist" | "FavoriteAlbum"))
+        .map(|item| (item.id.clone(), item))
+        .collect();
+    let normal_item_ids: Vec<String> = item_ids
+        .iter()
+        .filter(|id| !favorite_basket_by_id.contains_key(*id))
+        .cloned()
+        .collect();
     let mut playlist_sync_items: Vec<crate::sync::PlaylistSyncItem> = Vec::new();
     let mut results = Vec::new();
-    for chunk in item_ids.chunks(100) {
+    for favorite_item in favorite_basket_by_id.values() {
+        match jellyfin_favorite_sync_items_for_basket_item(
+            &state.jellyfin_client,
+            &url,
+            &token,
+            &user_id,
+            favorite_item,
+        )
+        .await
+        {
+            Ok(items) => results.extend(items.into_iter().map(Ok)),
+            Err(error) => results.push(Err(error.message)),
+        }
+    }
+
+    for chunk in normal_item_ids.chunks(100) {
         let chunk_strs: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
         match state
             .jellyfin_client
@@ -4185,6 +4430,105 @@ mod tests {
         assert_eq!(delta["adds"][0]["jellyfinId"], "song1");
         assert_eq!(delta["adds"][0]["name"], "Track One");
         assert_eq!(delta["adds"][0]["providerAlbumId"], "album1");
+    }
+
+    #[tokio::test]
+    async fn test_sync_calculate_delta_favorite_album_syncs_only_favorite_tracks() {
+        let _lock = credential_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
+
+        let mut server = mockito::Server::new_async().await;
+        let _ping = server
+            .mock("GET", "/rest/ping.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let _starred = server
+            .mock("GET", "/rest/getStarred2.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"subsonic-response":{"status":"ok","version":"1.16.1","starred2":{
+                    "song":[
+                        {"id":"fav-track","title":"Favorite Track","artist":"Artist","artistId":"artist1","album":"Album","albumId":"album1","duration":120},
+                        {"id":"other-track","title":"Other Favorite","artist":"Artist","artistId":"artist1","album":"Other Album","albumId":"album2","duration":130}
+                    ]
+                }}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        handle_server_connect(
+            &state,
+            Some(json!({
+                "url": server.url(),
+                "serverType": "subsonic",
+                "username": "subsonic-user",
+                "password": "subsonic-password"
+            })),
+        )
+        .await
+        .expect("connect");
+
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = crate::device::DeviceManifest {
+            device_id: "favorite-album-dev".to_string(),
+            name: Some("Favorite Album Dev".to_string()),
+            version: "1.1".to_string(),
+            managed_paths: vec!["Music".to_string()],
+            basket_items: vec![crate::device::BasketItem {
+                id: "favorites:album:album1".to_string(),
+                name: "Album".to_string(),
+                item_type: "FavoriteAlbum".to_string(),
+                server_id: None,
+                artist: Some("Artist".to_string()),
+                child_count: 1,
+                size_ticks: 0,
+                size_bytes: 0,
+            }],
+            ..Default::default()
+        };
+        state
+            .device_manager
+            .handle_device_detected(
+                dir.path().to_path_buf(),
+                manifest,
+                std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())),
+            )
+            .await
+            .unwrap();
+
+        let delta = handle_sync_calculate_delta(
+            &state,
+            Some(json!({
+                "itemIds": ["favorites:album:album1"],
+                "basketItems": [{
+                    "id": "favorites:album:album1",
+                    "name": "Album",
+                    "type": "FavoriteAlbum",
+                    "artist": "Artist",
+                    "childCount": 1,
+                    "sizeTicks": 0,
+                    "sizeBytes": 0
+                }]
+            })),
+        )
+        .await
+        .expect("favorite album delta");
+
+        let adds = delta["adds"].as_array().expect("adds array");
+        assert_eq!(adds.len(), 1);
+        assert_eq!(adds[0]["jellyfinId"], "fav-track");
+        assert_eq!(adds[0]["providerAlbumId"], "album1");
     }
 
     #[tokio::test]
@@ -6369,7 +6713,9 @@ mod tests {
             limit: u32,
         ) -> Result<(Vec<crate::domain::models::Genre>, u64), ProviderError> {
             let total = self.genres.len() as u64;
-            let page = self.genres.iter()
+            let page = self
+                .genres
+                .iter()
                 .skip(offset as usize)
                 .take(limit as usize)
                 .cloned()

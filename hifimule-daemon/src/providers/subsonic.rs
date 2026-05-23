@@ -465,6 +465,41 @@ impl MediaProvider for SubsonicProvider {
             .collect();
         Ok((page, total))
     }
+
+    async fn list_favorite_items(
+        &self,
+        _library_id: Option<&str>,
+    ) -> Result<SearchResult, ProviderError> {
+        let starred = self.client.get_starred2().await?;
+        let artists = starred
+            .starred2
+            .artist
+            .into_iter()
+            .map(artist_from_dto)
+            .collect();
+        let albums = starred
+            .starred2
+            .album
+            .into_iter()
+            .map(album_from_dto)
+            .collect();
+        let songs = starred
+            .starred2
+            .song
+            .into_iter()
+            .map(|s| {
+                let mut song = song_from_dto(s);
+                song.is_favorite = Some(true);
+                song
+            })
+            .collect();
+        Ok(SearchResult {
+            artists,
+            albums,
+            songs,
+            playlists: vec![],
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -2433,6 +2468,40 @@ mod tests {
         );
         assert_eq!(tracks.len(), 1, "page must respect limit");
         assert_eq!(tracks[0].id, "fav2", "page must respect offset");
+    }
+
+    #[tokio::test]
+    async fn provider_list_favorite_items_maps_starred2_artists_albums_and_songs() {
+        let mut server = Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/rest/getStarred2.view")
+            .match_query(Matcher::AllOf(auth_matchers()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(r#""starred2":{
+                    "artist":[{"id":"artist1","name":"Favorite Artist","albumCount":2}],
+                    "album":[{"id":"album1","name":"Favorite Album","artist":"Favorite Artist","artistId":"artist1","songCount":10}],
+                    "song":[{"id":"song1","title":"Favorite Track","artist":"Favorite Artist","artistId":"artist1","album":"Favorite Album","albumId":"album1","duration":200}]
+                }"#))
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        let favorites = provider
+            .list_favorite_items(None)
+            .await
+            .expect("favorite items");
+
+        assert_eq!(favorites.artists.len(), 1);
+        assert_eq!(favorites.albums.len(), 1);
+        assert_eq!(favorites.songs.len(), 1);
+        assert_eq!(favorites.artists[0].id, "artist1");
+        assert_eq!(favorites.albums[0].id, "album1");
+        assert_eq!(favorites.albums[0].artist_id.as_deref(), Some("artist1"));
+        assert_eq!(favorites.songs[0].id, "song1");
+        assert_eq!(favorites.songs[0].album_id.as_deref(), Some("album1"));
+        assert_eq!(favorites.songs[0].artist_id.as_deref(), Some("artist1"));
+        assert_eq!(favorites.songs[0].is_favorite, Some(true));
     }
 
     #[tokio::test]
