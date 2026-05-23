@@ -1,6 +1,6 @@
 # Story 9.5: Hierarchical Favorites Navigation
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -67,6 +67,13 @@ so that I can sync favorite artists, favorite albums, and favorite tracks withou
   - [x] Add or update Rust provider tests proving `list_favorite_items` includes artist, album, and song favorites where provider fixtures support them.
   - [x] Manually smoke test Favorites root -> artist -> album -> tracks with: directly favorite artist, directly favorite album, and isolated favorite track.
 
+### Review Findings
+
+- [x] [Review][Decision] Favorites basket toggles introduce scoped basket item types — Resolved: accept scoped `FavoriteArtist` and `FavoriteAlbum` basket item types as the intended design for inferred Favorites containers, so sync can preserve favorite-only semantics without expanding non-favorite artists/albums as full containers.
+- [x] [Review][Patch] Jellyfin delta expands unrequested scoped Favorites basket items [hifimule-daemon/src/rpc.rs:2380]
+- [x] [Review][Patch] Auto-sync can duplicate tracks when a favorite artist contains a favorite album and favorite track overlap [hifimule-daemon/src/main.rs:918]
+- [x] [Review][Patch] Favorites tree cache is not cleared on library reinitialization/reconnect [hifimule-ui/src/library.ts:1393]
+
 ## Dev Notes
 
 ### Current Implementation Context
@@ -106,10 +113,10 @@ Use a cached tree from `browse.listFavoriteItems`:
 - Hierarchical Favorites root/artist/album navigation.
 - Provider-neutral favorite tree RPC and provider implementations.
 - De-duplication and deterministic sorting for inferred artists/albums.
-- Verification that basket toggles still produce existing `MusicArtist`, `MusicAlbum`, and `Audio` item types.
+- Scoped Favorites basket item types for inferred containers: `FavoriteArtist` and `FavoriteAlbum` preserve favorite-only sync semantics when an artist/album is present only because it contains favorite descendants.
 
 **Out of scope:**
-- New dynamic basket item types.
+- Additional dynamic basket item types beyond the scoped Favorites containers above.
 - Changing Recently Added, Frequently Played, or Recently Played behavior.
 - Making Favorites root paginated; the tree is expected to be small enough for one response.
 - Sync-time semantic changes for existing artist, album, and track basket items.
@@ -144,6 +151,7 @@ GPT-5 Codex
 - 2026-05-23: `rtk C:\Users\alexi\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe node_modules/typescript/bin/tsc` passed.
 - 2026-05-23: `rtk cargo test -p hifimule-daemon` passed (322 tests).
 - 2026-05-23: Manual smoke test confirmed by Alexis.
+- 2026-05-23: Code review patches applied; TypeScript check passed via bundled Node, targeted favorite-album delta test passed, and `rtk cargo test -p hifimule-daemon` passed (322 tests).
 
 ### Implementation Plan
 
@@ -182,3 +190,4 @@ GPT-5 Codex
 - 2026-05-23: Implemented and verified hierarchical Favorites provider/UI path; story remains in-progress pending live manual smoke.
 - 2026-05-23: Corrected Favorites sync semantics for inferred non-favorite artists/albums by adding scoped basket item types.
 - 2026-05-23: Manual smoke passed; story moved to review.
+- 2026-05-23: Code review findings resolved; story moved to done.

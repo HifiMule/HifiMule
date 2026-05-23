@@ -1393,6 +1393,8 @@ async function loadMore() {
 export async function initLibraryView() {
     console.log('Initializing library view...');
 
+    clearNavigationCache();
+
     const container = document.getElementById('library-content');
     if (container) {
         container.innerHTML = '<sl-spinner style="font-size: 3rem;"></sl-spinner>';

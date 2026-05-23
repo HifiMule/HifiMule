@@ -2377,18 +2377,23 @@ async fn handle_sync_calculate_delta(
         .collect();
     let mut playlist_sync_items: Vec<crate::sync::PlaylistSyncItem> = Vec::new();
     let mut results = Vec::new();
-    for favorite_item in favorite_basket_by_id.values() {
-        match jellyfin_favorite_sync_items_for_basket_item(
-            &state.jellyfin_client,
-            &url,
-            &token,
-            &user_id,
-            favorite_item,
-        )
-        .await
-        {
-            Ok(items) => results.extend(items.into_iter().map(Ok)),
-            Err(error) => results.push(Err(error.message)),
+    for item_id in item_ids
+        .iter()
+        .filter(|id| favorite_basket_by_id.contains_key(*id))
+    {
+        if let Some(favorite_item) = favorite_basket_by_id.get(item_id) {
+            match jellyfin_favorite_sync_items_for_basket_item(
+                &state.jellyfin_client,
+                &url,
+                &token,
+                &user_id,
+                favorite_item,
+            )
+            .await
+            {
+                Ok(items) => results.extend(items.into_iter().map(Ok)),
+                Err(error) => results.push(Err(error.message)),
+            }
         }
     }
 

@@ -711,6 +711,9 @@ async fn run_auto_sync(
         }
     } // end else (basket_items non-empty)
 
+    let mut seen_desired_ids = std::collections::HashSet::new();
+    desired_items.retain(|item| seen_desired_ids.insert(item.jellyfin_id.clone()));
+
     if desired_items.is_empty() {
         daemon_log!("[AutoSync] No downloadable items resolved, skipping");
         return Ok(());
