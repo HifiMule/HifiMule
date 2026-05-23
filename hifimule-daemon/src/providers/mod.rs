@@ -18,6 +18,8 @@ pub const SUBSONIC_PLAYLISTS_LIBRARY_ID: &str = "playlists";
 pub struct ProviderChangeContext {
     #[serde(default)]
     pub synced_songs: Vec<ProviderSyncedSong>,
+    #[serde(default)]
+    pub synced_album_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +74,12 @@ pub trait MediaProvider: Send + Sync {
     ) -> Result<(Vec<Album>, u32), ProviderError>;
 
     async fn get_album(&self, album_id: &str) -> Result<AlbumWithTracks, ProviderError>;
+
+    async fn get_song(&self, song_id: &str) -> Result<Song, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(format!(
+            "get_song is not supported by this provider for song {song_id}"
+        )))
+    }
 
     async fn list_playlists(&self) -> Result<Vec<Playlist>, ProviderError>;
 

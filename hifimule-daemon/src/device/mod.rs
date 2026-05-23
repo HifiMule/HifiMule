@@ -3,6 +3,7 @@ pub mod mtp;
 use crate::providers::{ProviderChangeContext, ProviderSyncedSong};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use tokio::time::{sleep, Duration};
 
@@ -98,6 +99,13 @@ pub struct DeviceManifest {
 
 impl DeviceManifest {
     pub fn provider_change_context(&self) -> ProviderChangeContext {
+        let synced_album_ids: BTreeSet<String> = self
+            .basket_items
+            .iter()
+            .filter(|item| item.item_type == "MusicAlbum")
+            .map(|item| item.id.clone())
+            .collect();
+
         ProviderChangeContext {
             synced_songs: self
                 .synced_items
@@ -115,6 +123,7 @@ impl DeviceManifest {
                     version: item.etag.clone(),
                 })
                 .collect(),
+            synced_album_ids: synced_album_ids.into_iter().collect(),
         }
     }
 }

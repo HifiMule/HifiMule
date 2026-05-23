@@ -1634,6 +1634,12 @@ async fn provider_sync_items_for_id(
         return Ok((tracks, None));
     }
 
+    match provider.get_song(item_id).await {
+        Ok(song) => return Ok((vec![provider_song_to_desired_item(&song)], None)),
+        Err(ProviderError::UnsupportedCapability(_)) | Err(ProviderError::NotFound { .. }) => {}
+        Err(error) => return Err(provider_error_to_rpc(error)),
+    }
+
     if let Some(tracks) = provider_genre_sync_items_for_id(provider.clone(), item_id).await? {
         return Ok((tracks, None));
     }
@@ -6599,7 +6605,10 @@ mod tests {
     struct FakeBrowseProvider {
         modes: Vec<crate::providers::BrowseMode>,
         genres: Vec<crate::domain::models::Genre>,
+        albums: HashMap<String, crate::domain::models::AlbumWithTracks>,
         genre_tracks: HashMap<String, Vec<crate::domain::models::Song>>,
+        songs: HashMap<String, crate::domain::models::Song>,
+        song_auth_error: Option<String>,
     }
 
     impl FakeBrowseProvider {
@@ -6610,7 +6619,10 @@ mod tests {
             Arc::new(Self {
                 modes,
                 genres,
+                albums: HashMap::new(),
                 genre_tracks: HashMap::new(),
+                songs: HashMap::new(),
+                song_auth_error: None,
             })
         }
 
@@ -6623,7 +6635,52 @@ mod tests {
             Arc::new(Self {
                 modes: vec![crate::providers::BrowseMode::Genres],
                 genres: vec![],
+                albums: HashMap::new(),
                 genre_tracks,
+                songs: HashMap::new(),
+                song_auth_error: None,
+            })
+        }
+
+        fn with_song(song: crate::domain::models::Song) -> Arc<Self> {
+            let mut songs = HashMap::new();
+            songs.insert(song.id.clone(), song);
+            Arc::new(Self {
+                modes: vec![],
+                genres: vec![],
+                albums: HashMap::new(),
+                genre_tracks: HashMap::new(),
+                songs,
+                song_auth_error: None,
+            })
+        }
+
+        fn with_album_and_song(
+            album: crate::domain::models::AlbumWithTracks,
+            song: crate::domain::models::Song,
+        ) -> Arc<Self> {
+            let mut albums = HashMap::new();
+            albums.insert(album.album.id.clone(), album);
+            let mut songs = HashMap::new();
+            songs.insert(song.id.clone(), song);
+            Arc::new(Self {
+                modes: vec![],
+                genres: vec![],
+                albums,
+                genre_tracks: HashMap::new(),
+                songs,
+                song_auth_error: None,
+            })
+        }
+
+        fn with_song_auth_error(message: &str) -> Arc<Self> {
+            Arc::new(Self {
+                modes: vec![],
+                genres: vec![],
+                albums: HashMap::new(),
+                genre_tracks: HashMap::new(),
+                songs: HashMap::new(),
+                song_auth_error: Some(message.to_string()),
             })
         }
     }
@@ -6663,11 +6720,28 @@ mod tests {
         }
         async fn get_album(
             &self,
-            _: &str,
+            album_id: &str,
         ) -> Result<crate::domain::models::AlbumWithTracks, ProviderError> {
-            Err(ProviderError::UnsupportedCapability(
-                "fake provider has no albums".to_string(),
-            ))
+            self.albums
+                .get(album_id)
+                .cloned()
+                .ok_or(ProviderError::UnsupportedCapability(
+                    "fake provider has no albums".to_string(),
+                ))
+        }
+        async fn get_song(
+            &self,
+            song_id: &str,
+        ) -> Result<crate::domain::models::Song, ProviderError> {
+            if let Some(message) = &self.song_auth_error {
+                return Err(ProviderError::Auth(message.clone()));
+            }
+            self.songs
+                .get(song_id)
+                .cloned()
+                .ok_or(ProviderError::UnsupportedCapability(
+                    "fake provider has no matching song".to_string(),
+                ))
         }
         async fn list_playlists(
             &self,
@@ -6843,6 +6917,105 @@ mod tests {
             items.last().map(|item| item.jellyfin_id.as_str()),
             Some("song-502")
         );
+    }
+
+    #[tokio::test]
+    async fn provider_sync_items_for_id_resolves_single_song() {
+        let provider = FakeBrowseProvider::with_song(crate::domain::models::Song {
+            id: "song1".to_string(),
+            title: "Track".to_string(),
+            artist_id: Some("artist1".to_string()),
+            artist_name: Some("Artist".to_string()),
+            album_id: Some("album1".to_string()),
+            album_title: Some("Album".to_string()),
+            duration_seconds: 319,
+            bitrate_kbps: Some(320),
+            track_number: Some(1),
+            disc_number: None,
+            cover_art_id: Some("cover1".to_string()),
+            date_added: None,
+            last_played_at: None,
+            play_count: None,
+            is_favorite: None,
+        });
+
+        let (items, playlist) =
+            provider_sync_items_for_id(provider as Arc<dyn MediaProvider>, "song1")
+                .await
+                .expect("song should resolve");
+
+        assert!(playlist.is_none());
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].jellyfin_id, "song1");
+        assert_eq!(items[0].name, "Track");
+        assert_eq!(items[0].artist.as_deref(), Some("Artist"));
+        assert_eq!(items[0].album.as_deref(), Some("Album"));
+        assert_eq!(items[0].provider_album_id.as_deref(), Some("album1"));
+    }
+
+    #[tokio::test]
+    async fn provider_sync_items_for_id_propagates_song_lookup_failures() {
+        let provider = FakeBrowseProvider::with_song_auth_error("auth failed");
+
+        let err = provider_sync_items_for_id(provider as Arc<dyn MediaProvider>, "song1")
+            .await
+            .expect_err("auth failure should not be masked as not found");
+
+        assert_eq!(err.code, ERR_CONNECTION_FAILED);
+        assert_eq!(err.message, "auth failed");
+    }
+
+    #[tokio::test]
+    async fn provider_calculate_delta_dedupes_album_and_selected_song() {
+        let song = crate::domain::models::Song {
+            id: "song1".to_string(),
+            title: "Track".to_string(),
+            artist_id: Some("artist1".to_string()),
+            artist_name: Some("Artist".to_string()),
+            album_id: Some("album1".to_string()),
+            album_title: Some("Album".to_string()),
+            duration_seconds: 319,
+            bitrate_kbps: Some(320),
+            track_number: Some(1),
+            disc_number: None,
+            cover_art_id: Some("cover1".to_string()),
+            date_added: None,
+            last_played_at: None,
+            play_count: None,
+            is_favorite: None,
+        };
+        let provider = FakeBrowseProvider::with_album_and_song(
+            crate::domain::models::AlbumWithTracks {
+                album: crate::domain::models::Album {
+                    id: "album1".to_string(),
+                    title: "Album".to_string(),
+                    artist_id: Some("artist1".to_string()),
+                    artist_name: Some("Artist".to_string()),
+                    year: None,
+                    song_count: Some(1),
+                    duration_seconds: Some(319),
+                    cover_art_id: Some("cover1".to_string()),
+                },
+                tracks: vec![song.clone()],
+            },
+            song,
+        );
+        let manifest = crate::device::DeviceManifest::default();
+        let item_ids = vec!["album1".to_string(), "song1".to_string()];
+
+        let delta = provider_calculate_delta(
+            &make_test_state(Arc::new(crate::db::Database::memory().unwrap())),
+            provider as Arc<dyn MediaProvider>,
+            &item_ids,
+            &manifest,
+            &json!({}),
+        )
+        .await
+        .expect("delta");
+
+        let adds = delta["adds"].as_array().expect("adds");
+        assert_eq!(adds.len(), 1);
+        assert_eq!(adds[0]["jellyfinId"], "song1");
     }
 
     #[tokio::test]

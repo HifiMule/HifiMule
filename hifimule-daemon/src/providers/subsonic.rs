@@ -13,7 +13,10 @@ use md5::{Digest, Md5};
 use reqwest::Url;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
-use std::{collections::HashMap, fmt};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+};
 use uuid::Uuid;
 
 const CLIENT_NAME: &str = "hifimule";
@@ -117,9 +120,18 @@ impl SubsonicProvider {
         let mut changes = Vec::new();
         let mut albums: Vec<_> = by_album.into_iter().collect();
         albums.sort_by(|left, right| left.0.cmp(&right.0));
+        let synced_album_ids: HashSet<&str> = context
+            .synced_album_ids
+            .iter()
+            .map(String::as_str)
+            .collect();
         for (album_id, expected) in albums {
             let album = self.client.get_album(&album_id).await?;
-            changes.extend(album_song_changes(&expected, &album.album.song));
+            changes.extend(album_song_changes(
+                &expected,
+                &album.album.song,
+                synced_album_ids.contains(album_id.as_str()),
+            ));
         }
         Ok(changes)
     }
@@ -313,6 +325,11 @@ impl MediaProvider for SubsonicProvider {
             album: album_from_with_songs_dto(album.album),
             tracks,
         })
+    }
+
+    async fn get_song(&self, song_id: &str) -> Result<Song, ProviderError> {
+        let song = self.client.get_song(song_id).await?;
+        Ok(song_from_dto(song.song))
     }
 
     async fn list_playlists(&self) -> Result<Vec<Playlist>, ProviderError> {
@@ -732,6 +749,10 @@ impl SubsonicClient {
 
     async fn get_album(&self, id: &str) -> Result<AlbumWithSongsBody, ProviderError> {
         self.get("getAlbum", &[("id", id)]).await
+    }
+
+    async fn get_song(&self, id: &str) -> Result<SongBody, ProviderError> {
+        self.get("getSong", &[("id", id)]).await
     }
 
     async fn get_playlists(&self) -> Result<PlaylistsBody, ProviderError> {
@@ -1173,7 +1194,11 @@ fn song_metadata_changed(expected: &ProviderSyncedSong, actual: &SongDto) -> boo
     compared && changed
 }
 
-fn album_song_changes(expected: &[&ProviderSyncedSong], actual: &[SongDto]) -> Vec<ChangeEvent> {
+fn album_song_changes(
+    expected: &[&ProviderSyncedSong],
+    actual: &[SongDto],
+    emit_created: bool,
+) -> Vec<ChangeEvent> {
     let expected_by_id: HashMap<&str, &ProviderSyncedSong> = expected
         .iter()
         .map(|song| (song.song_id.as_str(), *song))
@@ -1186,7 +1211,8 @@ fn album_song_changes(expected: &[&ProviderSyncedSong], actual: &[SongDto]) -> V
     actual_songs.sort_by(|left, right| left.id.cmp(&right.id));
     for song in actual_songs {
         match expected_by_id.get(song.id.as_str()) {
-            None => changes.push(song_created_event(song.clone())),
+            None if emit_created => changes.push(song_created_event(song.clone())),
+            None => {}
             Some(expected) if song_metadata_changed(expected, song) => changes.push(ChangeEvent {
                 item: ItemRef {
                     id: song.id.clone(),
@@ -1416,6 +1442,11 @@ struct Search3Body {
 }
 
 #[derive(Debug, Default, Deserialize)]
+struct SongBody {
+    song: SongDto,
+}
+
+#[derive(Debug, Default, Deserialize)]
 struct Search3Dto {
     #[serde(default)]
     artist: Vec<ArtistDto>,
@@ -1427,7 +1458,7 @@ struct Search3Dto {
     playlist: Vec<PlaylistDto>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 struct SongDto {
     id: String,
     title: String,
@@ -1755,6 +1786,35 @@ mod tests {
         assert_eq!(album.album.id, "album1");
         assert_eq!(album.album.duration_seconds, Some(319));
         assert_eq!(album.tracks[0].bitrate_kbps, Some(320));
+    }
+
+    #[tokio::test]
+    async fn get_song_maps_track_from_get_song() {
+        let mut server = Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/rest/getSong.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "song1".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(
+                r#""song":{"id":"song1","title":"Track","album":"Album","artist":"Artist","albumId":"album1","artistId":"artist1","duration":319,"bitRate":320,"track":1,"coverArt":"song-cover"}"#,
+            ))
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        let song = provider.get_song("song1").await.expect("song");
+
+        assert_eq!(song.id, "song1");
+        assert_eq!(song.title, "Track");
+        assert_eq!(song.album_id.as_deref(), Some("album1"));
+        assert_eq!(song.artist_name.as_deref(), Some("Artist"));
+        assert_eq!(song.duration_seconds, 319);
+        assert_eq!(song.bitrate_kbps, Some(320));
     }
 
     #[tokio::test]
@@ -2237,6 +2297,7 @@ mod tests {
                     version: Some("old-v2".to_string()),
                 },
             ],
+            synced_album_ids: vec!["album1".to_string()],
         };
 
         let changes = provider
@@ -2254,6 +2315,64 @@ mod tests {
         assert!(changes
             .iter()
             .any(|change| change.item.id == "song3" && change.change_type == ChangeType::Created));
+    }
+
+    #[tokio::test]
+    async fn changes_since_album_fallback_does_not_create_unselected_album_tracks() {
+        let mut server = Server::new_async().await;
+        let _indexes = server
+            .mock("GET", "/rest/getIndexes.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded(
+                    "ifModifiedSince".into(),
+                    "1710000000000".into(),
+                ));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(r#""indexes":{"index":[]}"#))
+            .expect(1)
+            .create_async()
+            .await;
+        let _album = server
+            .mock("GET", "/rest/getAlbum.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "album1".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(
+                r#""album":{"id":"album1","name":"Album","song":[{"id":"song1","title":"Track 1","albumId":"album1","size":1000,"contentType":"audio/mpeg","suffix":"mp3"},{"id":"song2","title":"Track 2","albumId":"album1","size":2000,"contentType":"audio/mpeg","suffix":"mp3"}]}"#,
+            ))
+            .expect(1)
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+        let context = ProviderChangeContext {
+            synced_songs: vec![ProviderSyncedSong {
+                song_id: "song1".to_string(),
+                album_id: Some("album1".to_string()),
+                size: Some(1000),
+                content_type: Some("audio/mpeg".to_string()),
+                suffix: Some("mp3".to_string()),
+                version: Some("old-v1".to_string()),
+            }],
+            synced_album_ids: vec![],
+        };
+
+        let changes = provider
+            .changes_since_with_context(Some("1710000000000"), &context)
+            .await
+            .expect("changes");
+
+        assert!(
+            changes.is_empty(),
+            "single-track sync must not create sibling album tracks"
+        );
     }
 
     #[tokio::test]
@@ -2300,6 +2419,7 @@ mod tests {
                 suffix: Some("mp3".to_string()),
                 version: Some("old-v1".to_string()),
             }],
+            synced_album_ids: vec![],
         };
 
         let result = provider
@@ -2340,7 +2460,7 @@ mod tests {
             artists: None,
         };
 
-        let changes = album_song_changes(&[&expected], &[actual]);
+        let changes = album_song_changes(&[&expected], &[actual], true);
 
         assert!(changes.is_empty());
     }
