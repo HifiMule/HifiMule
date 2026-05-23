@@ -1,6 +1,6 @@
 # API Contracts — HifiMule Daemon
 
-**Generated:** 2026-05-07 | **Scan depth:** Exhaustive | **Protocol:** JSON-RPC 2.0 over HTTP POST to `localhost:19140`
+**Generated:** 2026-05-23 | **Scan depth:** Exhaustive | **Protocol:** JSON-RPC 2.0 over HTTP POST to `localhost:19140`
 
 All requests: `Content-Type: application/json`  
 All successful responses: `{ "jsonrpc": "2.0", "result": <value>, "id": 1 }`  
@@ -8,13 +8,61 @@ All error responses: `{ "jsonrpc": "2.0", "error": { "code": <N>, "message": "<t
 
 **Error codes:** `-32001` invalid credentials, `-32002` invalid params, `-32003` connection/device failed, `-32004` storage error, `-32005` internal error
 
+The daemon now exposes a provider-neutral media-server layer. Legacy `jellyfin_*` RPC names remain supported for compatibility, but active Subsonic/OpenSubsonic connections are routed through `MediaProvider` where possible.
+
 ---
 
-## Auth & Credentials
+## Server Connection & Credentials
+
+### `server.probe`
+
+Detects a server type before authentication.
+
+**Params:** `{ url: string }`  
+**Returns:** `{ serverType: "jellyfin" | "subsonic" | "openSubsonic" | null }`
+
+---
+
+### `server.connect`
+
+Connects to Jellyfin, Subsonic, Navidrome, or OpenSubsonic and stores the resulting provider configuration.
+
+**Params:**
+```json
+{
+  "url": "http://localhost:8096",
+  "serverType": "auto",
+  "username": "alexis",
+  "password": "secret"
+}
+```
+
+`serverType` accepts `"auto"`, `"jellyfin"`, or `"subsonic"`. Navidrome is treated as a Subsonic/OpenSubsonic-compatible server.
+
+**Returns:**
+```json
+{
+  "status": "success",
+  "serverType": "jellyfin|subsonic|openSubsonic",
+  "serverVersion": "string|null",
+  "userId": "string|null"
+}
+```
+
+---
+
+### `server.logout`
+
+Clears the active in-memory provider connection.
+
+**Params:** none  
+**Returns:** `{ "status": "success", "data": { "ok": true } }`
+
+---
 
 ### `test_connection`
 
-Tests Jellyfin connectivity.
+Tests Jellyfin token connectivity. Kept for legacy compatibility.
 
 **Params:** `{ url: string, token: string }`  
 **Returns:** `{ status: "ok" }` or error `-32003`
@@ -23,7 +71,7 @@ Tests Jellyfin connectivity.
 
 ### `login`
 
-Authenticates with Jellyfin and persists credentials.
+Authenticates and persists credentials. Current UI uses `server.connect`; `login` now auto-detects compatible Subsonic/OpenSubsonic servers while preserving the legacy Jellyfin response shape where possible.
 
 **Params:** `{ url: string, username: string, password: string }`  
 **Returns:**
@@ -51,12 +99,21 @@ Saves credentials directly (bypasses authentication).
 Returns stored credentials.
 
 **Params:** none  
-**Returns:** `{ url: string, token: string, userId: string | null }` or `null` if not configured  
+**Returns:** `{ url: string, token?: string, userId: string | null, serverType?: string }` or `null` if not configured  
 **Errors:** `-32004` (storage error, excluding expected "not configured" states which return `null`)
 
 ---
 
 ## Daemon State
+
+### `daemon.health`
+
+Lightweight health probe.
+
+**Params:** none  
+**Returns:** `{ "data": { "status": "ok" } }`
+
+---
 
 ### `get_daemon_state`
 
@@ -75,11 +132,12 @@ Returns comprehensive daemon state snapshot. Polled by UI every 2s.
   "autoFill": { "enabled": bool, "maxBytes": number | null } | null,
   "activeOperationId": string | null,
   "connectedDevices": Array<{ "path": string, "deviceId": string, "name": string, "icon": string | null, "deviceClass": "msc" | "mtp" }>,
-  "selectedDevicePath": string | null
+  "selectedDevicePath": string | null,
+  "serverType": "jellyfin" | "subsonic" | "openSubsonic" | null
 }
 ```
 
-Note: `serverConnected` is cached for 5 seconds to avoid excessive Jellyfin health checks.
+Note: `serverConnected` is cached for 5 seconds to avoid excessive media-server health checks.
 
 ---
 
@@ -93,7 +151,7 @@ Initializes a newly detected device that has no `.hifimule.json` manifest.
 ```json
 {
   "folderPath": string,              // managed folder name ("Music") or "" for device root
-  "profileId": string,               // Jellyfin user ID (used as device profile ID)
+  "profileId": string,               // provider user/profile ID
   "transcodingProfileId": string | null,
   "name": string,                    // 1–40 characters
   "icon": string | null              // one of: "usb-drive", "phone-fill", "watch", "sd-card", "headphones", "music-note-list"
@@ -105,7 +163,7 @@ Initializes a newly detected device that has no `.hifimule.json` manifest.
   "status": "success",
   "data": {
     "deviceId": string,
-    "version": number,
+    "version": string,
     "managedPaths": string[],
     "transcodingProfileId": string | null
   }
@@ -133,11 +191,29 @@ Switches the "current device" to the given path (multi-device hub).
 
 ---
 
+### `device.list`
+
+Returns connected managed devices.
+
+**Params:** none  
+**Returns:** `{ "status": "success", "data": Array<{ path: string, deviceId: string, name: string, icon: string | null, deviceClass: "msc" | "mtp" }> }`
+
+---
+
 ### `set_device_profile`
 
-Updates device's Jellyfin profile ID and optional sync rules.
+Updates the device's provider profile ID and optional sync rules.
 
 **Params:** `{ "deviceId": string, "profileId": string, "syncRules"?: string }`  
+**Returns:** `true`
+
+---
+
+### `device.set_transcoding_profile`
+
+Updates the current device's transcoding profile.
+
+**Params:** `{ "deviceId": string, "profileId": string | null }`  
 **Returns:** `true`
 
 ---
@@ -183,7 +259,96 @@ or `null` if no device.
 
 ---
 
-## Jellyfin Browse
+## Provider-Neutral Browse
+
+Browse responses use camelCase provider-domain DTOs:
+
+```typescript
+type BrowseArtist = { id: string; name: string; albumCount?: number; coverArtId?: string | null };
+type BrowseAlbum = { id: string; name: string; artistId?: string | null; artistName?: string | null; year?: number | null; trackCount?: number; coverArtId?: string | null };
+type BrowsePlaylist = { id: string; name: string; trackCount?: number; durationSeconds?: number | null; coverArtId?: string | null };
+type BrowseTrack = { id: string; title: string; artistId?: string | null; artistName?: string | null; albumId?: string | null; albumName?: string | null; duration: number; bitrateKbps?: number | null; coverArtId?: string | null; sizeBytes?: number | null; dateAdded?: string | null; lastPlayedAt?: string | null; playCount?: number | null; isFavorite?: boolean | null };
+type BrowseGenre = { id: string; name: string; trackCount?: number | null; coverArtId?: string | null };
+```
+
+### `browse.listModes`
+
+Returns browse modes supported by the active provider.
+
+**Params:** none  
+**Returns:** `{ "modes": Array<"artists" | "albums" | "playlists" | "genres" | "recentlyAdded" | "frequentlyPlayed" | "recentlyPlayed" | "favorites"> }`
+
+---
+
+### `browse.listArtists`
+
+Lists artists for the active provider.
+
+**Params:** `{ "libraryId"?: string, "letter"?: string, "startIndex"?: number, "limit"?: number }`  
+**Returns:** `{ "artists": BrowseArtist[], "total": number }`
+
+---
+
+### `browse.getArtist`
+
+Returns one artist plus albums.
+
+**Params:** `{ "artistId": string }`  
+**Returns:** `{ "artist": BrowseArtist, "albums": BrowseAlbum[] }`
+
+---
+
+### `browse.listAlbums`
+
+Lists albums for the active provider.
+
+**Params:** `{ "libraryId"?: string, "letter"?: string, "startIndex"?: number, "limit"?: number }`  
+**Returns:** `{ "albums": BrowseAlbum[], "total": number }`
+
+---
+
+### `browse.getAlbum`
+
+Returns one album plus tracks.
+
+**Params:** `{ "albumId": string }`  
+**Returns:** `{ "album": BrowseAlbum, "tracks": BrowseTrack[] }`
+
+---
+
+### `browse.listPlaylists` / `browse.getPlaylist`
+
+Lists playlists and loads playlist tracks.
+
+**Params:** none for `browse.listPlaylists`; `{ "playlistId": string }` for `browse.getPlaylist`  
+**Returns:** `{ "playlists": BrowsePlaylist[] }` or `{ "playlist": BrowsePlaylist, "tracks": BrowseTrack[] }`
+
+---
+
+### `browse.listGenres` / `browse.getGenre`
+
+Lists genres and loads tracks for a genre.
+
+**Params:** `{ "libraryId"?: string, "startIndex"?: number, "limit"?: number }` or `{ "genreId": string, "startIndex"?: number, "limit"?: number }`  
+**Returns:** `{ "genres": BrowseGenre[], "total": number }` or `{ "genre": BrowseGenre, "tracks": BrowseTrack[], "total": number }`
+
+---
+
+### History and Favorites Browse
+
+| Method | Params | Returns |
+|--------|--------|---------|
+| `browse.listRecentlyAdded` | `{ "libraryId"?: string, "startIndex"?: number, "limit"?: number }` | `{ "albums": BrowseAlbum[], "total": number }` |
+| `browse.listFrequentlyPlayed` | `{ "libraryId"?: string, "startIndex"?: number, "limit"?: number }` | `{ "tracks": BrowseTrack[], "total": number }` |
+| `browse.listRecentlyPlayed` | `{ "libraryId"?: string, "startIndex"?: number, "limit"?: number }` | `{ "tracks": BrowseTrack[], "total": number }` |
+| `browse.listFavorites` | `{ "libraryId"?: string, "startIndex"?: number, "limit"?: number }` | `{ "tracks": BrowseTrack[], "total": number }` |
+| `browse.listFavoriteItems` | `{ "libraryId"?: string }` | `{ "artists": BrowseArtist[], "albums": BrowseAlbum[], "tracks": BrowseTrack[] }` |
+
+Classic Subsonic returns `-32002`/unsupported capability for history modes that are not advertised by `browse.listModes`.
+
+---
+
+## Legacy Jellyfin-Compatible Browse
 
 ### `jellyfin_get_views`
 
@@ -307,7 +472,7 @@ Clears the manifest's dirty flag after manual repair.
 
 ### `sync_get_device_status_map`
 
-Returns all Jellyfin item IDs currently synced to the device.
+Returns all provider item IDs currently synced to the device.
 
 **Params:** none  
 **Returns:** `{ "syncedItemIds": string[] }`
@@ -332,6 +497,7 @@ Calculates the sync delta between the basket and the current device manifest.
 
 Behavior:
 - Container IDs (albums, playlists, artists) are expanded to constituent tracks
+- Favorite group IDs (`favorites:artist:<id>`, `favorites:album:<id>`) expand only the favorite subset selected in the favorites browse tree
 - Auto-fill items are fetched via the priority algorithm and merged
 - If any item fetch fails, the whole delta is aborted (to prevent accidental deletes)
 
@@ -344,6 +510,31 @@ Behavior:
   "playlists": Array<PlaylistSyncItem>
 }
 ```
+
+---
+
+### `sync_detect_changes`
+
+Detects provider-side changes since a sync token. Used by Subsonic/OpenSubsonic-aware refresh flows and by providers that can map manifest state into change context.
+
+**Params:** `{ "syncToken"?: string | null }`  
+**Returns:**
+```json
+[
+  {
+    "id": "provider-item-id",
+    "itemType": "song|album|artist|playlist|library",
+    "changeType": "created|updated|deleted",
+    "version": "provider-version-or-null",
+    "providerAlbumId": "album-id-or-null",
+    "providerSize": 3000,
+    "providerContentType": "audio/flac",
+    "providerSuffix": "flac"
+  }
+]
+```
+
+Subsonic/OpenSubsonic change metadata may be derived from album-level fallbacks when a server lacks an item-level changes feed.
 
 ---
 
@@ -376,7 +567,8 @@ Returns the current status of a sync operation.
   "totalBytes": number,                  // total bytes for entire operation
   "filesCompleted": number,
   "filesTotal": number,
-  "errors": Array<{ "jellyfinId": string, "filename": string, "errorMessage": string }>
+  "errors": Array<{ "jellyfinId": string, "filename": string, "errorMessage": string }>,
+  "warnings": string[]
 }
 ```
 
@@ -411,7 +603,7 @@ Persists auto-fill preferences to the device manifest.
 
 ### `basket.autoFill`
 
-Runs the auto-fill priority algorithm and returns ranked tracks.
+Runs the Jellyfin-backed auto-fill priority algorithm and returns ranked tracks. Subsonic/OpenSubsonic auto-fill is not available yet and returns an invalid-params error.
 
 **Params:**
 ```json
@@ -439,7 +631,7 @@ Runs the auto-fill priority algorithm and returns ranked tracks.
 
 ## Scrobbler
 
-### `scrobbler.getLastResult`
+### `scrobbler_get_last_result`
 
 Returns the result of the most recent scrobble submission.
 
@@ -471,7 +663,7 @@ Array<{
   "id": string,
   "name": string,
   "description": string,
-  "jellyfinProfileId"?: string
+  "deviceProfile": object | null
 }>
 ```
 
@@ -483,4 +675,4 @@ Always includes at least the built-in `"passthrough"` profile (no transcoding).
 
 `GET /jellyfin/image/:id[?maxHeight=N&quality=N]`
 
-Proxies the request to Jellyfin's `GET /Items/:id/Images/Primary` endpoint. Returns the image with its original content-type header. Used by the Rust-side `image_proxy` Tauri command, not directly by the WebView.
+Proxies cover art for the active provider. Jellyfin uses `GET /Items/:id/Images/Primary`; Subsonic/OpenSubsonic uses provider `cover_art_url`. Returns the image with its original content-type header. Used by the Rust-side `image_proxy` Tauri command, not directly by the WebView.

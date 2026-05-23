@@ -1,6 +1,6 @@
 # HifiMule — Development Guide
 
-**Generated:** 2026-05-07 | **Scan depth:** Exhaustive
+**Generated:** 2026-05-23 | **Scan depth:** Exhaustive
 
 ---
 
@@ -47,16 +47,16 @@ All `cargo` commands should be run from the repo root (workspace). All `pnpm`/`n
 
 ```bash
 # Debug build
-cargo build -p hifimule-daemon
+rtk cargo build -p hifimule-daemon
 
 # Release build
-cargo build -p hifimule-daemon --release
+rtk cargo build -p hifimule-daemon --release
 
 # Check only (fast type-check, no binary)
-cargo check -p hifimule-daemon
+rtk cargo check -p hifimule-daemon
 
 # Clippy
-cargo clippy -p hifimule-daemon
+rtk cargo clippy -p hifimule-daemon
 ```
 
 Binary output: `target/debug/hifimule-daemon` or `target/release/hifimule-daemon`.
@@ -82,15 +82,15 @@ hifimule-daemon.exe --service
 cd hifimule-ui
 
 # Install dependencies
-pnpm install
+rtk pnpm install
 
 # Development mode (Vite dev server + Tauri hot reload)
-pnpm tauri dev
+rtk pnpm tauri dev
 
 # Production build
-pnpm run build                           # tsc + vite → dist/
-node ../scripts/prepare-sidecar.mjs     # copies daemon binary to src-tauri/sidecars/
-pnpm tauri build                         # bundles: .dmg / .deb / .exe
+rtk pnpm run build                       # tsc + vite -> dist/
+rtk node ../scripts/prepare-sidecar.mjs  # copies daemon binary to src-tauri/sidecars/
+rtk pnpm tauri build                     # bundles: .dmg / .deb / .exe
 ```
 
 ### Important: Sidecar Preparation
@@ -103,17 +103,18 @@ Before running `pnpm tauri build`, the daemon binary must exist in `src-tauri/si
 
 ```bash
 # All daemon tests (unit + integration)
-cargo test -p hifimule-daemon
+rtk cargo test -p hifimule-daemon
 
 # Specific test module
-cargo test -p hifimule-daemon --lib db::tests
-cargo test -p hifimule-daemon --lib auto_fill::tests
+rtk cargo test -p hifimule-daemon --lib db::tests
+rtk cargo test -p hifimule-daemon --lib auto_fill::tests
+rtk cargo test -p hifimule-daemon providers::subsonic
 
 # With output (for debugging)
-cargo test -p hifimule-daemon -- --nocapture
+rtk cargo test -p hifimule-daemon -- --nocapture
 ```
 
-Tests in `api.rs` use `mockito` (HTTP mock server). Tests in `db.rs` use in-memory SQLite. No external services required.
+Tests in `api.rs` and `providers/*` use `mockito` (HTTP mock server). Tests in `db.rs` use in-memory SQLite. No external services are required for automated tests.
 
 ---
 
@@ -138,7 +139,7 @@ curl -X POST http://localhost:19140 \
 
 ```bash
 cd hifimule-ui
-pnpm tauri dev
+rtk pnpm tauri dev
 ```
 
 This starts:
@@ -152,7 +153,8 @@ For faster UI iteration, you can run the daemon separately and start just Vite:
 ./target/debug/hifimule-daemon
 
 # Terminal 2: start Vite + Tauri
-cd hifimule-ui && pnpm tauri dev
+cd hifimule-ui
+rtk pnpm tauri dev
 ```
 
 ---
@@ -170,7 +172,7 @@ Platform-specific app data directory (`get_app_data_dir()` in `paths.rs`):
 | Linux | `$XDG_DATA_HOME/HifiMule/` or `~/.local/share/HifiMule/` |
 
 Contents:
-- `config.json` — `{ "url": "...", "user_id": "..." }`
+- `config.json` — legacy Jellyfin `{ "url": "...", "user_id": "..." }` compatibility file
 - `hifimule.db` — SQLite database
 - `device-profiles.json` — transcoding profiles (auto-created from embedded asset on first run)
 - `daemon.log` — daemon log (release builds only)
@@ -203,6 +205,24 @@ Format:
 
 The `"passthrough"` profile (id: `"passthrough"`) means no transcoding; the original file is downloaded as-is.
 
+## Provider Development Notes
+
+The daemon supports Jellyfin, Subsonic, Navidrome, and OpenSubsonic through `MediaProvider`.
+
+- Add server-specific behavior in `hifimule-daemon/src/providers/<provider>.rs`
+- Keep RPC and UI contracts provider-neutral where possible
+- Browse modes must come from `provider.capabilities().browse.list_modes`
+- Prefer hiding unsupported modes over synthesizing inaccurate data
+- Sanitize all URL and credential-bearing error messages before surfacing them
+
+Useful targeted tests:
+
+```bash
+rtk cargo test -p hifimule-daemon providers::subsonic
+rtk cargo test -p hifimule-daemon providers::jellyfin
+rtk cargo test -p hifimule-daemon rpc::tests::browse
+```
+
 ---
 
 ## Adding a New RPC Method
@@ -211,6 +231,8 @@ The `"passthrough"` profile (id: `"passthrough"`) means no transcoding; the orig
 2. Write the async handler function `async fn handle_my_method(state: &AppState, params: Option<Value>) -> Result<Value, JsonRpcError>`
 3. Call the handler from the match arm: `"my_method" => handle_my_method(&state, params).await`
 4. Add TypeScript typings / calls in the UI as needed
+
+For browse or media-server capabilities, prefer adding a `MediaProvider` method and a `browse.*` RPC rather than a server-specific UI branch.
 
 ---
 

@@ -1,6 +1,6 @@
 # Component Inventory — HifiMule UI
 
-**Generated:** 2026-05-07 | **Scan depth:** Exhaustive
+**Generated:** 2026-05-23 | **Scan depth:** Exhaustive
 
 ---
 
@@ -22,51 +22,56 @@ The DOMContentLoaded handler and application bootstrapper.
 
 ### Login View (`login.ts`)
 
-Minimal stateless view rendering a Jellyfin connection form.
+Minimal stateless view rendering a provider-neutral media-server connection form.
 
-**Renders:** `sl-card` with `sl-input` fields for URL, username, and password.  
-**On submit:** `rpcCall('login', { url, username, password })` → calls `onLoginSuccess()` callback on success, shows error message on failure.  
+**Renders:** `sl-card` with `sl-input` fields for server URL, username, and password. The URL field is debounced and calls `server.probe`; known server types render as Shoelace badges (`Jellyfin`, `Subsonic`, `OpenSubsonic`).  
+**On submit:** `rpcCall('server.connect', { url, serverType: 'auto', username, password })` → calls `onLoginSuccess()` callback on success, shows error message on failure.  
 **Injected into:** `.app-container` (replaces any existing content).
 
 ---
 
 ### Library View (`library.ts`)
 
-Hierarchical media browser with pagination and quick-navigation.
+Provider-neutral media browser with mode tabs, hierarchical navigation, pagination, quick-navigation, and favorite tree handling.
 
-**Exported:** `initLibraryView()` (entry), `fetchViews()`, `fetchItems()`, `fetchDeviceStatusMap()`, `clearNavigationCache()`
+**Exported:** `initLibraryView()` (entry), `clearNavigationCache()`
 
 **State:**
 ```typescript
 interface AppState {
-    view: 'libraries' | 'items';
-    libraryId?: string;
+    browseMode: BrowseMode;
+    availableModes: BrowseMode[];
     parentId?: string;
     breadcrumbStack: { id: string, name: string }[];
-    items: JellyfinItem[];
+    items: BrowseDisplayItem[];
     pagination: { startIndex: number; limit: number; total: number };
     loading: boolean;
     scrollCache: Map<string, number>;
-    pageCache: Map<string, { items: JellyfinItem[]; total: number }>;
+    pageCache: Map<string, { items: BrowseDisplayItem[]; total: number }>;
     artistViewTotal: number;
+    albumViewTotal: number;
     activeLetter: string | null;
+    favoriteTree: FavoriteTree | null;
 }
 ```
 
 **Navigation flow:**
-1. `renderLibrarySelection()` — root: shows filtered Jellyfin views (music + playlists collections only)
-2. `navigateToLibrary(view)` — enters a library root
-3. `navigateToItem(item)` — navigates into container items (Album, Artist, Playlist, Folder, etc.)
-4. `navigateToCrumb(index)` — back-navigation via breadcrumb
-5. Leaf items (Audio, MusicVideo) do not navigate — clicking the basket toggle is the action
+1. `fetchBrowseModes()` — asks daemon which modes the active provider supports
+2. `renderModeBar()` — renders only supported modes
+3. `loadModeRoot()` — loads root view for artists, albums, playlists, genres, history, or favorites
+4. `navigateToBrowseItem(item)` — drills into artist albums, album tracks, playlist tracks, or genre tracks
+5. `navigateToCrumb(index)` — back-navigation via breadcrumb
+6. Leaf items (`Audio`) do not navigate — clicking the basket toggle is the action
 
 **Caching:**
-- `pageCache`: stores fetched items by `parentId`; hit path skips the network call entirely
-- `scrollCache`: stores `scrollTop` by `parentId`; restored after back-navigation
+- `pageCache`: stores fetched items by `${browseMode}:${parentId ?? 'root'}`; hit path skips the network call entirely
+- `scrollCache`: stores `scrollTop` by the same mode-aware key; restored after back-navigation
 
 **Pagination:** Default 50 items per page; "Load More" button appears when `items.length < total`. Hidden during letter-filtered views.
 
-**Quick-nav bar:** Renders A-Z + `#` alphabet bar when `artistViewTotal >= 20`. Letter filter uses `nameStartsWith` / `nameLessThan` params. `#` = non-alpha names (`nameLessThan: 'A'`). Clicking active letter resets filter.
+**Quick-nav bar:** Renders A-Z + `#` alphabet bar for large artist and album roots. Letter filtering is forwarded to provider-neutral RPCs. `#` = non-alpha names.
+
+**Favorites mode:** `browse.listFavoriteItems` builds a cached `FavoriteTree`. Direct favorite artists/albums keep their original basket IDs. Scoped favorites use synthetic IDs (`favorites:artist:<id>`, `favorites:album:<id>`) so the daemon can expand only the favorite subset during sync.
 
 ---
 
@@ -76,6 +81,8 @@ interface AppState {
 - `RPC_PORT`, `RPC_URL`, `IMAGE_PROXY_URL` — configuration constants
 - `rpcCall(method, params)` — proxies via `invoke('rpc_proxy')`; normalizes errors via `getErrorMessage()`
 - `getImageUrl(id, maxHeight?, quality?)` — proxies via `invoke('image_proxy')`; returns data URL
+- Provider-neutral browse types (`BrowseMode`, `BrowseArtist`, `BrowseAlbum`, `BrowsePlaylist`, `BrowseTrack`, `BrowseGenre`)
+- Provider-neutral browse wrappers (`fetchBrowseModes`, `fetchBrowseArtists`, `fetchBrowseAlbum`, `fetchBrowseFavoriteItems`, etc.)
 
 **Error normalization:** `getErrorMessage()` handles plain string errors (from Tauri), `Error` objects, and object errors with `message`/`error`/`details` fields; falls back to JSON serialization.
 
@@ -171,7 +178,7 @@ Returns an `sl-card` custom element with:
 - **Selection overlay** (mode === 'items'): `basket-toggle-btn` icon button (plus/minus)
 - **Navigation click**: distinguished from basket toggle via `composedPath()`; adds `is-navigating` CSS class during async navigation
 
-**Adding to basket:** Concurrently fetches `jellyfin_get_item_counts` + `jellyfin_get_item_sizes` then calls `basketStore.add()`.
+**Adding to basket:** Concurrently fetches `jellyfin_get_item_counts` + `jellyfin_get_item_sizes` then calls `basketStore.add()`. These legacy method names are provider-aware in the daemon when a non-Jellyfin provider is active.
 
 **Listening for store updates:** Each card subscribes to `basketStore.addEventListener('update')` to toggle `is-selected` and update the toggle button icon.
 
@@ -205,7 +212,7 @@ Bottom status bar showing daemon health. Polls `GET http://localhost:19140` (dir
 - Icon picker (6 tile options: usb-drive, phone-fill, watch, sd-card, headphones, music-note-list)
 - Sync folder path (`sl-input`, optional — blank = device root)
 - Transcoding profile (`sl-select`, populated from `device_profiles.list`)
-- Linked Jellyfin user display (read-only, from `get_credentials`)
+- Linked media-server user display (read-only, from `get_credentials`)
 
 **Submits:** `device_initialize(folderPath, profileId, transcodingProfileId?, name, icon?)`
 

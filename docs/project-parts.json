@@ -10,7 +10,7 @@
       "primary_language": "Rust",
       "primary_framework": "Axum",
       "entry_points": ["src/main.rs"],
-      "description": "Background daemon service with system tray, JSON-RPC API, Jellyfin client, SQLite storage"
+      "description": "Background daemon service with system tray, provider-aware JSON-RPC API, Jellyfin/Subsonic/OpenSubsonic adapters, SQLite storage"
     },
     {
       "part_id": "hifimule-ui",
@@ -20,7 +20,7 @@
       "primary_language": "TypeScript",
       "primary_framework": "Tauri 2",
       "entry_points": ["src/main.ts", "src-tauri/src/main.rs"],
-      "description": "Tauri 2 desktop application with TypeScript/Vite frontend and Shoelace web components"
+      "description": "Tauri 2 desktop application with TypeScript/Vite frontend, Shoelace web components, and provider-neutral browse/sync UI"
     }
   ],
   "integration_points": [
@@ -29,21 +29,21 @@
       "to": "hifimule-daemon",
       "type": "JSON-RPC 2.0 over HTTP",
       "endpoint": "http://127.0.0.1:19140/",
-      "method_count": 24,
-      "details": "UI sends JSON-RPC requests to daemon for all data and operations"
+      "method_count": 52,
+      "details": "UI sends JSON-RPC requests to daemon for server connection, provider-neutral browse, device management, sync, manifests, scrobbling, and transcoding"
     },
     {
       "from": "hifimule-ui",
       "to": "hifimule-daemon",
       "type": "HTTP GET",
       "endpoint": "http://127.0.0.1:19140/jellyfin/image/{id}",
-      "details": "Image proxy — daemon fetches Jellyfin artwork with auth"
+      "details": "Image proxy — daemon fetches active-provider cover art with auth"
     },
     {
       "from": "hifimule-daemon",
-      "to": "Jellyfin Server (external)",
+      "to": "Media Server (external)",
       "type": "HTTP/HTTPS",
-      "details": "Daemon communicates with remote Jellyfin server for library data and media downloads"
+      "details": "Daemon communicates with Jellyfin, Subsonic, Navidrome, or OpenSubsonic servers for library data, downloads, cover art, scrobbling, and change detection"
     }
   ]
 }

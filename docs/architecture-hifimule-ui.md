@@ -1,6 +1,6 @@
 # HifiMule UI — Architecture
 
-**Part:** `hifimule-ui` | **Generated:** 2026-05-07 | **Scan depth:** Exhaustive
+**Part:** `hifimule-ui` | **Generated:** 2026-05-23 | **Scan depth:** Exhaustive
 
 ---
 
@@ -9,7 +9,8 @@
 The UI is a **Tauri 2** desktop application that provides a thin shell around the daemon. All business logic lives in the daemon; the UI's responsibility is:
 1. Launching and monitoring the daemon process
 2. Rendering the library browser and basket using data from the daemon
-3. Proxying RPC calls and image requests to the daemon
+3. Proxying RPC calls and provider cover-art requests to the daemon
+4. Keeping browse and sync UI provider-neutral so Jellyfin, Subsonic, Navidrome, and OpenSubsonic share the same interaction model
 
 ---
 
@@ -26,7 +27,7 @@ Tauri 2 Shell (Rust)
            │   └─ false → initLoginView()
            └─ renderMainLayout()
                 ├─ sl-split-panel (70/30)
-                │   ├─ left: library-view → library.ts
+                │   ├─ left: provider-neutral library-view → library.ts
                 │   └─ right: basket-view → BasketSidebar.ts
                 └─ statusbar-container → StatusBar.ts (not wired in current index.html)
 ```
@@ -40,7 +41,7 @@ Tauri 2 Shell (Rust)
 | Command | Params | Returns | Description |
 |---------|--------|---------|-------------|
 | `rpc_proxy` | `method: String, params: Value` | `Value` or `String` (error) | Forwards JSON-RPC to daemon; extracts `result` or surfaces `error.message` |
-| `image_proxy` | `id: String, maxHeight?, quality?` | `String` (data URL) | Fetches image from daemon → base64 data URL |
+| `image_proxy` | `id: String, maxHeight?, quality?` | `String` (data URL) | Fetches provider cover art from daemon → base64 data URL |
 | `get_sidecar_status` | — | `String` | Returns daemon launch status for splashscreen |
 
 ### Daemon Launch Strategy
@@ -82,6 +83,24 @@ export async function getImageUrl(id: string, maxHeight?: number, quality?: numb
 ```
 
 `rpcCall` passes through `invoke`'s error as an `Error` with `getErrorMessage()` normalization (handles plain strings, Error objects, and JSON serialized objects).
+
+### Provider-Neutral Browse API
+
+`rpc.ts` defines the TypeScript contracts and wrappers for the current browse surface:
+
+| Wrapper | RPC |
+|---------|-----|
+| `fetchBrowseModes()` | `browse.listModes` |
+| `fetchBrowseArtists()` / `fetchBrowseArtist()` | `browse.listArtists`, `browse.getArtist` |
+| `fetchBrowseAlbums()` / `fetchBrowseAlbum()` | `browse.listAlbums`, `browse.getAlbum` |
+| `fetchBrowsePlaylists()` / `fetchBrowsePlaylist()` | `browse.listPlaylists`, `browse.getPlaylist` |
+| `fetchBrowseGenres()` / `fetchBrowseGenre()` | `browse.listGenres`, `browse.getGenre` |
+| `fetchBrowseRecentlyAdded()` | `browse.listRecentlyAdded` |
+| `fetchBrowseFrequentlyPlayed()` | `browse.listFrequentlyPlayed` |
+| `fetchBrowseRecentlyPlayed()` | `browse.listRecentlyPlayed` |
+| `fetchBrowseFavorites()` / `fetchBrowseFavoriteItems()` | `browse.listFavorites`, `browse.listFavoriteItems` |
+
+The UI uses the returned `BrowseMode[]` to decide which buttons to render. Server-specific capability decisions stay in the daemon provider layer.
 
 ---
 
@@ -181,23 +200,20 @@ Shows daemon health at the bottom of the window. Polls `get_daemon_state` every 
 
 ```
 initLibraryView()
-  └─ renderLibrarySelection()
-       └─ fetchViews() → filter music + playlists collections
-            └─ renderGrid(views, 'libraries')
-                 └─ MediaCard.create() per view
-                      └─ click → navigateToLibrary(view)
-                           └─ loadItems(true) → fetchItems(parentId, MUSIC_ITEM_TYPES, 0, 50)
-                                └─ renderGrid(items, 'items', deviceStatus)
-                                     ├─ breadcrumbs
-                                     ├─ quick-nav bar (A-Z+# for MusicArtist views with ≥20 total)
-                                     └─ MediaCard.create() per item
-                                          ├─ container click → navigateToItem(item) → push to breadcrumbStack
-                                          └─ basket-toggle click → basketStore.add/remove
+  ├─ fetchBrowseModes() → capability-driven mode buttons
+  └─ loadModeRoot()
+       ├─ artists → list artists → artist albums → album tracks
+       ├─ albums → list albums → album tracks
+       ├─ playlists → list playlists → playlist tracks
+       ├─ genres → list genres → genre tracks
+       ├─ recentlyAdded → newest albums → album tracks
+       ├─ frequentlyPlayed / recentlyPlayed → flat track lists
+       └─ favorites → favorite artists → scoped favorite albums → scoped tracks
 ```
 
-**Page/scroll cache:** `pageCache: Map<parentId, {items, total}>` enables instant back-navigation. `scrollCache: Map<parentId, scrollTop>` restores scroll position after cache hit or fresh load.
+**Page/scroll cache:** `pageCache: Map<mode:parentId, {items, total}>` enables instant back-navigation across browse modes. `scrollCache: Map<mode:parentId, scrollTop>` restores scroll position after cache hit or fresh load.
 
-**Quick-nav bar:** visible for `MusicArtist` views with `artistViewTotal >= 20`. Letter buttons call `loadItemsByLetter(letter)` which uses `nameStartsWith`/`nameLessThan` parameters to filter. `#` maps to `nameLessThan: 'A'`.
+**Quick-nav bar:** visible for artists or albums when the current result count warrants it. Letter buttons call provider-neutral artist/album RPCs with `letter`; `#` maps to the non-alpha bucket.
 
 ---
 
@@ -206,7 +222,7 @@ initLibraryView()
 ```json
 {
   "productName": "HifiMule",
-  "version": "0.2.0",
+  "version": "0.6.1",
   "identifier": "hifimule.github.io",
   "bundle": {
     "externalBin": ["sidecars/hifimule-daemon"],

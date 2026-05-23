@@ -1,6 +1,6 @@
 # Data Models — HifiMule Daemon
 
-**Generated:** 2026-05-07 | **Scan depth:** Exhaustive
+**Generated:** 2026-05-23 | **Scan depth:** Exhaustive
 
 ---
 
@@ -11,7 +11,7 @@ Stored at `<device-root>/.hifimule.json`. Source of truth for all sync state.
 ```rust
 pub struct DeviceManifest {
     pub device_id: String,                         // UUID v4, generated once on initialize
-    pub version: u32,                              // manifest schema version
+    pub version: String,                           // manifest schema version
     pub name: Option<String>,                      // human-readable name (max 40 chars)
     pub icon: Option<String>,                      // icon key for UI display
     pub synced_items: Vec<SyncedItem>,             // files confirmed present on device
@@ -22,6 +22,9 @@ pub struct DeviceManifest {
     pub auto_fill: AutoFillPrefs,
     pub auto_sync_on_connect: bool,
     pub transcoding_profile_id: Option<String>,   // null = passthrough (no transcoding)
+    pub playlists: Vec<PlaylistManifestEntry>,
+    pub storage_id: Option<String>,                // MTP storage object ID cache
+    pub folder_ids: HashMap<String, u32>,          // libmtp folder object ID cache
 }
 ```
 
@@ -40,12 +43,18 @@ pub struct SyncedItem {
     pub album: Option<String>,
     pub artist: Option<String>,
     pub local_path: String,        // relative path on device from device root
-    pub etag: Option<String>,      // Jellyfin etag for change detection
+    pub size_bytes: u64,
+    pub synced_at: String,
+    pub original_name: Option<String>,
+    pub etag: Option<String>,      // provider version/etag for change detection
+    pub provider_album_id: Option<String>,
+    pub provider_content_type: Option<String>,
+    pub provider_suffix: Option<String>,
 }
 ```
 
 `local_path` is relative to the device root (e.g., `"Music/Artist/Album/01 - Track.mp3"`).
-The synced-item ID is written as `providerItemId` in `.hifimule.json`.
+The synced-item ID is written as `providerItemId` in `.hifimule.json`. The Rust field is still named `jellyfin_id` for compatibility, but its semantic meaning is now "active provider item ID."
 
 ---
 
@@ -55,15 +64,14 @@ An item in the user's current sync selection (stored in the manifest, also held 
 
 ```rust
 pub struct BasketItem {
-    pub id: String,                    // Jellyfin item ID (or "__auto_fill_slot__" for the virtual slot)
+    pub id: String,                    // provider item ID (or "__auto_fill_slot__" for the virtual slot)
     pub name: String,
-    pub item_type: String,             // "MusicAlbum", "Playlist", "MusicArtist", "Audio", "AutoFillSlot"
+    pub item_type: String,             // "MusicAlbum", "Playlist", "MusicArtist", "MusicGenre", "Audio", "FavoriteArtist", "FavoriteAlbum", "AutoFillSlot"
+    pub server_id: Option<String>,
     pub artist: Option<String>,
     pub child_count: u32,              // recursive track count (0 for Audio items)
     pub size_ticks: i64,               // cumulativeRunTimeTicks (used for duration display)
     pub size_bytes: u64,               // total file size in bytes
-    pub auto_filled: Option<bool>,     // true for auto-fill algorithm items
-    pub priority_reason: Option<String>, // "favorite" | "playCount:N" | "new"
 }
 ```
 
@@ -107,6 +115,9 @@ pub struct DesiredItem {
     pub artist: Option<String>,
     pub size_bytes: u64,
     pub etag: Option<String>,
+    pub provider_album_id: Option<String>,
+    pub provider_content_type: Option<String>,
+    pub provider_suffix: Option<String>,
 }
 ```
 
@@ -118,9 +129,10 @@ Output of `calculate_delta`. Describes what needs to change on the device.
 
 ```rust
 pub struct SyncDelta {
-    pub adds: Vec<DesiredItem>,
-    pub deletes: Vec<SyncedItem>,
-    pub id_changes: Vec<IdChangeItem>,
+    pub adds: Vec<SyncAddItem>,
+    pub deletes: Vec<SyncDeleteItem>,
+    pub id_changes: Vec<SyncIdChangeItem>,
+    pub unchanged: usize,
     pub playlists: Vec<PlaylistSyncItem>,
 }
 
@@ -134,6 +146,10 @@ pub struct IdChangeItem {
     pub artist: Option<String>,
     pub size_bytes: u64,
     pub etag: Option<String>,
+    pub provider_album_id: Option<String>,
+    pub provider_content_type: Option<String>,
+    pub provider_suffix: Option<String>,
+    pub original_name: Option<String>,
 }
 ```
 
@@ -176,6 +192,7 @@ pub struct SyncOperation {
     pub files_completed: u32,
     pub files_total: u32,
     pub errors: Vec<SyncFileError>,
+    pub warnings: Vec<String>,
 }
 
 pub enum SyncStatus {
@@ -205,6 +222,34 @@ pub struct AutoFillItem {
     pub artist: Option<String>,
     pub size_bytes: u64,
     pub priority_reason: String,       // "favorite" | "playCount:N" | "new"
+}
+```
+
+---
+
+## Provider-Domain Models
+
+The provider layer maps Jellyfin, Subsonic, Navidrome, and OpenSubsonic DTOs into a common domain model.
+
+```rust
+pub struct Library { pub id: String, pub name: String, pub item_type: ItemType, pub cover_art_id: Option<String> }
+pub struct Artist { pub id: String, pub name: String, pub album_count: Option<u32>, pub song_count: Option<u32>, pub cover_art_id: Option<String> }
+pub struct Album { pub id: String, pub title: String, pub artist_id: Option<String>, pub artist_name: Option<String>, pub year: Option<u32>, pub song_count: Option<u32>, pub duration_seconds: Option<u32>, pub cover_art_id: Option<String> }
+pub struct Song { pub id: String, pub title: String, pub artist_id: Option<String>, pub artist_name: Option<String>, pub album_id: Option<String>, pub album_title: Option<String>, pub duration_seconds: u32, pub bitrate_kbps: Option<u32>, pub track_number: Option<u32>, pub disc_number: Option<u32>, pub cover_art_id: Option<String>, pub date_added: Option<String>, pub last_played_at: Option<String>, pub play_count: Option<u32>, pub is_favorite: Option<bool>, pub content_type: Option<String>, pub suffix: Option<String> }
+pub struct Genre { pub id: String, pub name: String, pub song_count: Option<u32>, pub cover_art_id: Option<String> }
+pub struct Playlist { pub id: String, pub name: String, pub song_count: Option<u32>, pub duration_seconds: Option<u32>, pub cover_art_id: Option<String> }
+```
+
+`ChangeEvent`, `ProviderChangeContext`, and `ProviderSyncedSong` carry provider change metadata for incremental sync:
+
+```rust
+pub struct ProviderSyncedSong {
+    pub song_id: String,
+    pub album_id: Option<String>,
+    pub size: Option<u64>,
+    pub content_type: Option<String>,
+    pub suffix: Option<String>,
+    pub version: Option<String>,
 }
 ```
 
@@ -254,10 +299,28 @@ Per-device settings persisted in SQLite.
 ```rust
 pub struct DeviceMapping {
     pub device_id: String,                         // PRIMARY KEY
-    pub device_profile_id: Option<String>,         // Jellyfin user ID
+    pub jellyfin_user_id: Option<String>,          // provider user/profile ID; legacy DB column name
+    pub name: Option<String>,
     pub auto_sync_on_connect: bool,
     pub transcoding_profile_id: Option<String>,
     pub sync_rules: Option<String>,                // future use
+    pub last_seen_at: Option<String>,
+}
+```
+
+---
+
+## ServerConfig (SQLite `server_config` table)
+
+Stores the active media-server connection metadata. Secrets are not stored here.
+
+```rust
+pub struct ServerConfig {
+    pub url: String,
+    pub server_type: String,       // "jellyfin" | "subsonic" | "openSubsonic"
+    pub username: Option<String>,
+    pub server_version: Option<String>,
+    pub updated_at: String,
 }
 ```
 
@@ -272,7 +335,7 @@ pub struct DeviceProfileEntry {
     pub id: String,
     pub name: String,
     pub description: String,
-    pub jellyfin_profile_id: Option<String>,       // links to Jellyfin's device profile
+    pub device_profile: Option<serde_json::Value>, // null = passthrough
 }
 ```
 
@@ -332,5 +395,6 @@ Credentials are split across two locations:
 
 | Data | Location |
 |------|----------|
-| Server URL + User ID | `<AppData>/HifiMule/config.json` as `{ "url": "...", "user_id": "..." }` |
-| Access Token | OS keyring, service name `"hifimule"`, username `"token"` |
+| Legacy Jellyfin URL + User ID | `<AppData>/HifiMule/config.json` as `{ "url": "...", "user_id": "..." }` |
+| Current server metadata | SQLite `server_config` table |
+| Access token / provider secret | OS keyring, service name `"hifimule.github.io"`, username `"secrets"` |

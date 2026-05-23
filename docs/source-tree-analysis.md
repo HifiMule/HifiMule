@@ -1,6 +1,6 @@
 # HifiMule — Source Tree Analysis
 
-**Generated:** 2026-05-07 | **Scan depth:** Exhaustive
+**Generated:** 2026-05-23 | **Scan depth:** Exhaustive
 
 ---
 
@@ -24,7 +24,7 @@ hifimule/
 │   │   └── device-profiles.json      Embedded default transcoding profiles
 │   └── src/
 │       ├── main.rs                   Entry point, DaemonState enum, Tokio runtime spawn
-│       ├── rpc.rs                    Axum HTTP server, 34 RPC method dispatch table, AppState
+│       ├── rpc.rs                    Axum HTTP server, provider-aware RPC dispatch table, AppState
 │       ├── api.rs                    JellyfinClient (reqwest), CredentialManager
 │       ├── db.rs                     SQLite wrapper (rusqlite), devices + scrobble_history tables
 │       ├── sync.rs                   Delta calculation, execute_sync, path construction, M3U gen
@@ -34,6 +34,13 @@ hifimule/
 │       ├── paths.rs                  get_app_data_dir() / get_device_profiles_path() (OS-aware)
 │       ├── service.rs                Windows Service install/uninstall/run (windows-service crate)
 │       ├── device_io.rs              DeviceIO trait, MscBackend, MtpBackend, MockMtpHandle
+│       ├── domain/
+│       │   ├── mod.rs                Provider-neutral domain module
+│       │   └── models.rs             Library/Artist/Album/Song/Playlist/Genre/Change DTOs
+│       ├── providers/
+│       │   ├── mod.rs                MediaProvider trait, capabilities, provider factory
+│       │   ├── jellyfin.rs           JellyfinProvider adapter over JellyfinClient
+│       │   └── subsonic.rs           Subsonic/OpenSubsonic/Navidrome provider adapter
 │       ├── device/
 │       │   ├── mod.rs                DeviceManifest, DeviceManager, MSC/MTP observers, mount detection
 │       │   ├── mtp.rs                WpdHandle (Windows WPD COM), LibmtpHandle (Unix FFI)
@@ -48,8 +55,8 @@ hifimule/
     ├── src/
     │   ├── main.ts                   Entry — splash/main routing, daemon readiness polling
     │   ├── rpc.ts                    rpcCall() via Tauri invoke (rpc_proxy); getImageUrl() via image_proxy
-    │   ├── login.ts                  Login form → rpcCall('login')
-    │   ├── library.ts                Media browser (hierarchical navigation, pagination, quick-nav)
+    │   ├── login.ts                  Provider-neutral login form → server.probe/server.connect
+    │   ├── library.ts                Provider-neutral browser (modes, hierarchy, pagination, favorites)
     │   ├── state/
     │   │   └── basket.ts             BasketStore singleton (EventTarget, localStorage + daemon sync)
     │   └── components/
@@ -85,7 +92,7 @@ hifimule/
 | `axum 0.8` | HTTP/JSON-RPC server |
 | `rusqlite` (bundled) | SQLite database |
 | `keyring 2.3` | OS credential store |
-| `reqwest` | Jellyfin HTTP client |
+| `reqwest` | Jellyfin/Subsonic/OpenSubsonic HTTP clients |
 | `serde / serde_json` | Serialization |
 | `uuid` | Device ID generation |
 | `tray-icon` + `tao` | System tray (cross-platform) |
@@ -95,7 +102,7 @@ hifimule/
 | `windows-service` | Windows Service integration (Windows only) |
 | `bytes` | HTTP body streaming |
 | `futures` | `join_all` for concurrent Jellyfin fetches |
-| `async-trait` | Async trait objects (DeviceIO) |
+| `async-trait` | Async trait objects (`DeviceIO`, `MediaProvider`) |
 | `anyhow` | Error handling |
 | `winresource` (build-dep) | Windows EXE icon embedding |
 | `pkg-config` (build-dep) | libmtp detection on Unix |
@@ -104,19 +111,23 @@ hifimule/
 
 | Module | LOC | Responsibility |
 |--------|-----|----------------|
-| `main.rs` | 823 | Entry point, CLI flags, `DaemonState` enum, tray, auto-sync orchestration |
-| `rpc.rs` | ~1700 | Axum server setup, AppState, CORS, 34-method dispatch, all handlers |
-| `api.rs` | 1438 | `JellyfinClient`: all Jellyfin API calls; `CredentialManager`: config.json + keyring |
-| `db.rs` | 359 | SQLite CRUD: `devices` + `scrobble_history`; runtime migrations |
-| `sync.rs` | 2111 | `calculate_delta`, `execute_sync`, path sanitization, M3U generation |
+| `main.rs` | ~900 | Entry point, CLI flags, `DaemonState` enum, tray, auto-sync orchestration |
+| `rpc.rs` | ~6900 | Axum server setup, AppState, CORS, provider-aware RPC dispatch, all handlers and tests |
+| `api.rs` | ~1500 | `JellyfinClient`: Jellyfin API calls; `CredentialManager`: config.json + keyring secret map |
+| `db.rs` | ~450 | SQLite CRUD: `devices`, `scrobble_history`, `server_config`; runtime migrations |
+| `sync.rs` | ~4100 | `calculate_delta`, provider-aware `execute_sync`, path sanitization, M3U generation, warnings |
 | `auto_fill.rs` | 325 | Priority-sorted capacity fill; `run_auto_fill`, `rank_and_truncate` |
 | `scrobbler.rs` | 577 | Rockbox log parse, Jellyfin match, `process_device_scrobbles` |
 | `transcoding.rs` | 142 | `DeviceProfileEntry`, `load_profiles`, `find_device_profile` |
 | `paths.rs` | 52 | OS-appropriate app data dir resolution |
 | `service.rs` | 232 | Windows Service lifecycle (install, uninstall, SCM handler) |
 | `device_io.rs` | 504 | `DeviceIO` async trait; `MscBackend` (filesystem); `MtpBackend` (blocking wrapper) |
-| `device/mod.rs` | 1327 | `DeviceManifest`, `DeviceManager` (multi-device), mount detection, observers |
-| `device/mtp.rs` | 1522 | `WpdHandle` (WPD COM), `LibmtpHandle` (libmtp FFI) |
+| `domain/models.rs` | ~230 | Provider-neutral library, artist, album, song, playlist, genre, change, and unit conversion models |
+| `providers/mod.rs` | ~450 | `MediaProvider` trait, capabilities, server probing, provider factory, error taxonomy |
+| `providers/jellyfin.rs` | ~1500 | Jellyfin adapter mapping Jellyfin DTOs to provider-domain models |
+| `providers/subsonic.rs` | ~2400 | Subsonic/OpenSubsonic/Navidrome adapter, signed URLs, history/favorites/genre support |
+| `device/mod.rs` | ~1800 | `DeviceManifest`, `DeviceManager` (multi-device), MTP cache fields, mount detection, observers |
+| `device/mtp.rs` | ~1600 | `WpdHandle` (WPD COM), `LibmtpHandle` (libmtp FFI) |
 
 ### Entry Points
 
@@ -160,9 +171,9 @@ Main thread (macOS: event loop; Windows: main)
 | File | Responsibility |
 |------|----------------|
 | `main.ts` | DOMContentLoaded handler; splash vs main window routing; daemon readiness poll |
-| `rpc.ts` | `rpcCall(method, params)` via `invoke('rpc_proxy')`; `getImageUrl(id)` via `invoke('image_proxy')` |
-| `login.ts` | Login form rendering and submission |
-| `library.ts` | Library browser: hierarchical navigation, paginated items, quick-nav A-Z bar, page/scroll cache |
+| `rpc.ts` | `rpcCall(method, params)`, `getImageUrl(id)`, provider-neutral browse DTOs and wrappers |
+| `login.ts` | Media-server connection form, debounced `server.probe`, `server.connect` submission |
+| `library.ts` | Provider-neutral browser: capability-driven modes, hierarchy, paginated items, quick-nav, favorite tree |
 | `state/basket.ts` | `BasketStore` singleton: in-memory Map + localStorage + 1s debounced daemon save |
 | `components/BasketSidebar.ts` | Main sidebar: basket list, capacity bar, sync flow, auto-fill, device hub, folder info |
 | `components/MediaCard.ts` | Grid card: cover art (via image_proxy), basket toggle, navigation click |
@@ -208,7 +219,8 @@ The Rust-side `src-tauri/src/lib.rs` exposes three Tauri commands:
 
 ## Test Coverage
 
-- `hifimule-daemon/src/api.rs` — Comprehensive mockito-based integration tests for all Jellyfin API calls
+- `hifimule-daemon/src/api.rs` — Comprehensive mockito-based integration tests for Jellyfin API calls
+- `hifimule-daemon/src/providers/*.rs` — Provider adapter tests for Jellyfin/Subsonic/OpenSubsonic mapping, capabilities, changes, and error sanitization
 - `hifimule-daemon/src/db.rs` — In-memory SQLite tests for all CRUD operations and migrations
 - `hifimule-daemon/src/auto_fill.rs` — Unit tests for `rank_and_truncate` (capacity, negatives, zero-size, break semantics)
 - `hifimule-daemon/src/sync.rs` — Delta calculation tests

@@ -1,14 +1,14 @@
 {
   "workflow_version": "1.2.0",
   "timestamps": {
-    "started": "2026-05-07T00:00:00Z",
-    "last_updated": "2026-05-07T01:00:00Z",
-    "completed": "2026-05-07T01:00:00Z"
+    "started": "2026-05-23T23:34:20+02:00",
+    "last_updated": "2026-05-23T23:34:20+02:00",
+    "completed": "2026-05-23T23:34:20+02:00"
   },
   "mode": "full_rescan",
   "scan_level": "exhaustive",
-  "project_root": "/Users/akartmann/Documents/Projects/HifiMule",
-  "project_knowledge": "/Users/akartmann/Documents/Projects/HifiMule/docs",
+  "project_root": "C:/Workspaces/HifiMule",
+  "project_knowledge": "C:/Workspaces/HifiMule/docs",
   "repository_type": "monorepo",
   "project_types": [
     {
@@ -27,7 +27,7 @@
       "part_id": "hifimule-daemon",
       "root_path": "hifimule-daemon/",
       "project_type_id": "backend",
-      "primary_tech": "Rust (Axum 0.8, Tokio, rusqlite, reqwest, keyring, tray-icon, windows-sys/libmtp)"
+      "primary_tech": "Rust 2024 (Axum 0.8, Tokio, rusqlite, reqwest, keyring, tray-icon, windows-sys/WPD, libmtp, MediaProvider adapters)"
     },
     {
       "part_id": "hifimule-ui",
@@ -37,27 +37,92 @@
     }
   ],
   "completed_steps": [
-    {"step": "step_0.5", "status": "completed", "timestamp": "2026-05-07T00:00:00Z", "summary": "Initialized state file; archived stale March 2026 state to .archive/"},
-    {"step": "step_1", "status": "completed", "timestamp": "2026-05-07T00:05:00Z", "summary": "Classified as monorepo with 2 parts: daemon (backend) and ui (desktop)"},
-    {"step": "step_2", "status": "completed", "timestamp": "2026-05-07T00:06:00Z", "summary": "Existing docs from 2026-03-08 found; full rescan confirmed by user"},
-    {"step": "step_3", "status": "completed", "timestamp": "2026-05-07T00:07:00Z", "summary": "Tech stack: Rust (Tokio/Axum/rusqlite/keyring/WPD/libmtp) + TypeScript (Tauri 2/Vite/Shoelace)"},
-    {"step": "step_4", "status": "completed", "timestamp": "2026-05-07T00:55:00Z", "summary": "Exhaustive scan: all daemon modules (main, rpc, api, db, sync, auto_fill, scrobbler, transcoding, paths, service, device/mod, device/mtp, device_io) + all UI files (main.ts, library.ts, login.ts, rpc.ts, state/basket.ts, components/*.ts, src-tauri/lib.rs) + tauri.conf.json + package.json + CI workflows"},
-    {"step": "step_5", "status": "completed", "timestamp": "2026-05-07T00:57:00Z", "summary": "source-tree-analysis.md written with full file tree, module LOC, responsibilities, dependencies"},
-    {"step": "step_6", "status": "completed", "timestamp": "2026-05-07T00:58:00Z", "summary": "development-guide.md written with prerequisites, build commands, test commands, debugging"},
-    {"step": "step_7", "status": "completed", "timestamp": "2026-05-07T00:59:00Z", "summary": "integration-architecture.md written: IPC (rpc_proxy/image_proxy), JSON-RPC protocol, sync flow, auto-sync flow"},
-    {"step": "step_8", "status": "completed", "timestamp": "2026-05-07T01:00:00Z", "summary": "Architecture docs written for daemon (AppState, DeviceManager, sync engine, MTP, service) and UI (Tauri shell, BasketSidebar, library navigation)"},
-    {"step": "step_9", "status": "completed", "timestamp": "2026-05-07T01:00:00Z", "summary": "API contracts (34 RPC methods), data models (DeviceManifest, SyncedItem, BasketItem, SyncDelta, etc.), component inventory (all 5 components + state/views)"},
-    {"step": "step_10", "status": "completed", "timestamp": "2026-05-07T01:00:00Z", "summary": "Master index with quick reference, key architectural decisions table"},
-    {"step": "step_11", "status": "completed", "timestamp": "2026-05-07T01:00:00Z", "summary": "Validation: all 9 doc files regenerated from exhaustive scan; no placeholder markers"},
-    {"step": "step_12", "status": "completed", "timestamp": "2026-05-07T01:00:00Z", "summary": "State file updated; workflow complete"}
+    {
+      "step": "step_0.5",
+      "status": "completed",
+      "timestamp": "2026-05-23T23:34:20+02:00",
+      "summary": "Loaded documentation requirements and treated the prior May 7 completed scan as stale."
+    },
+    {
+      "step": "step_1",
+      "status": "completed",
+      "timestamp": "2026-05-23T23:34:20+02:00",
+      "summary": "Classified as Cargo workspace monorepo with 2 parts: Rust daemon backend and Tauri desktop UI."
+    },
+    {
+      "step": "step_2",
+      "status": "completed",
+      "timestamp": "2026-05-23T23:34:20+02:00",
+      "summary": "Existing docs in docs/ were found; full rescan/update selected from user request."
+    },
+    {
+      "step": "step_3",
+      "status": "completed",
+      "timestamp": "2026-05-23T23:34:20+02:00",
+      "summary": "Tech stack refreshed: Rust daemon with MediaProvider adapters for Jellyfin/Subsonic/OpenSubsonic and Tauri/TypeScript UI with provider-neutral browse."
+    },
+    {
+      "step": "step_4",
+      "status": "completed",
+      "timestamp": "2026-05-23T23:34:20+02:00",
+      "summary": "Exhaustive refresh focused on provider layer, RPC surface, browse UI, sync change detection, manifest metadata, MTP cache fields, and documentation filename drift."
+    },
+    {
+      "step": "step_5",
+      "status": "completed",
+      "timestamp": "2026-05-23T23:34:20+02:00",
+      "summary": "Source-tree analysis updated with domain/ and providers/ modules plus provider-neutral UI responsibilities."
+    },
+    {
+      "step": "step_6",
+      "status": "completed",
+      "timestamp": "2026-05-23T23:34:20+02:00",
+      "summary": "Development guide updated for RTK-prefixed commands, provider tests, and provider development notes."
+    },
+    {
+      "step": "step_7",
+      "status": "completed",
+      "timestamp": "2026-05-23T23:34:20+02:00",
+      "summary": "Integration architecture updated for provider-aware media-server communication, browse flow, and Subsonic/OpenSubsonic API paths."
+    },
+    {
+      "step": "step_8",
+      "status": "completed",
+      "timestamp": "2026-05-23T23:34:20+02:00",
+      "summary": "Architecture docs updated for daemon provider layer, AppState provider state, provider capabilities, database server_config, and UI browse wrappers."
+    },
+    {
+      "step": "step_9",
+      "status": "completed",
+      "timestamp": "2026-05-23T23:34:20+02:00",
+      "summary": "Supporting docs updated: API contracts, data models, component inventory, project overview, and project-parts metadata."
+    },
+    {
+      "step": "step_10",
+      "status": "completed",
+      "timestamp": "2026-05-23T23:34:20+02:00",
+      "summary": "Master index updated and stale legacy doc filenames renamed to hifimule filenames."
+    },
+    {
+      "step": "step_11",
+      "status": "completed",
+      "timestamp": "2026-05-23T23:34:20+02:00",
+      "summary": "Validation checks run for markdown links, stale filename references, generated dates, and git diff status."
+    },
+    {
+      "step": "step_12",
+      "status": "completed",
+      "timestamp": "2026-05-23T23:34:20+02:00",
+      "summary": "Workflow complete."
+    }
   ],
   "current_step": "completed",
   "findings": {
     "project_classification": "Monorepo (Cargo workspace), 2 parts: Rust backend + Tauri 2 desktop",
-    "technology_stack": "Rust (Tokio/Axum 0.8/rusqlite/keyring/WPD/libmtp) + TypeScript (Tauri 2/Vite 6/Shoelace 2.19.1)",
-    "api_summary": "34 JSON-RPC methods on localhost:19140 + image proxy endpoint",
-    "data_summary": "DeviceManifest (.hifimule.json on device) + SQLite (devices, scrobble_history) + OS keyring (token) + localStorage (basket session)",
-    "ui_summary": "5 components (BasketSidebar, MediaCard, StatusBar, InitDeviceModal, RepairModal) + 3 views (library, login, splash) + 1 state store (BasketStore)"
+    "technology_stack": "Rust (Tokio/Axum/rusqlite/keyring/WPD/libmtp/MediaProvider) + TypeScript (Tauri 2/Vite 6/Shoelace 2.19.1)",
+    "api_summary": "JSON-RPC on localhost:19140 with provider-neutral server.connect/server.probe, browse.*, sync_detect_changes, device, manifest, sync, scrobble, and transcoding methods",
+    "data_summary": "DeviceManifest (.hifimule.json on device) + SQLite (devices, scrobble_history, server_config) + OS keyring provider secrets + localStorage basket session",
+    "ui_summary": "Provider-neutral browse modes in library.ts, server probe badges in login.ts, BasketSidebar sync/device workflow, MediaCard, StatusBar, InitDeviceModal, RepairModal"
   },
   "outputs_generated": [
     "project-scan-report.json",
@@ -70,7 +135,8 @@
     "api-contracts-hifimule-daemon.md",
     "data-models-hifimule-daemon.md",
     "component-inventory-hifimule-ui.md",
-    "development-guide.md"
+    "development-guide.md",
+    "project-parts.json"
   ],
-  "resume_instructions": "Workflow completed successfully (exhaustive full_rescan, 2026-05-07)"
+  "resume_instructions": "Workflow completed successfully (exhaustive full_rescan, 2026-05-23)"
 }

@@ -1,6 +1,6 @@
 # HifiMule — Integration Architecture
 
-**Generated:** 2026-05-07 | **Scan depth:** Exhaustive
+**Generated:** 2026-05-23 | **Scan depth:** Exhaustive
 
 ---
 
@@ -31,13 +31,14 @@ HifiMule consists of two cooperating processes that run on the same machine. The
 │  Daemon (hifimule-daemon)                                │
 │  ┌───────────────────────────────────────────────────────┐  │
 │  │  Axum HTTP Server (rpc.rs)                            │  │
-│  │  POST / → JSON-RPC 2.0 dispatch (34 methods)         │  │
-│  │  GET /jellyfin/image/:id → image proxy               │  │
+│  │  POST / → JSON-RPC 2.0 dispatch                      │  │
+│  │  GET /jellyfin/image/:id → provider-aware image proxy │  │
 │  └──────────────┬────────────────────────────────────────┘  │
 │                 │                                            │
 │  ┌──────────────▼────────────────────────────────────────┐  │
 │  │  AppState                                             │  │
-│  │  - JellyfinClient (reqwest → Jellyfin HTTP API)       │  │
+│  │  - JellyfinClient (legacy/direct Jellyfin API path)   │  │
+│  │  - provider (MediaProvider: Jellyfin/Subsonic/etc.)   │  │
 │  │  - DeviceManager (DeviceManifest + DeviceIO)          │  │
 │  │  - DatabaseHandle (SQLite via rusqlite)               │  │
 │  │  - SyncOperationManager                               │  │
@@ -53,8 +54,10 @@ HifiMule consists of two cooperating processes that run on the same machine. The
 └──────────────────────────────────────────────────────────────┘
                         │
                ┌────────▼─────────┐
-               │  Jellyfin Server │
-               │  HTTP REST API   │
+               │ Media Server     │
+               │ Jellyfin /       │
+               │ Subsonic /       │
+               │ OpenSubsonic     │
                └──────────────────┘
 ```
 
@@ -95,7 +98,7 @@ export async function getImageUrl(id: string, maxHeight?: number, quality?: numb
 }
 ```
 
-The Rust `image_proxy` command fetches `GET http://127.0.0.1:19140/jellyfin/image/:id` from the daemon, which in turn proxies the request to the actual Jellyfin server.
+The Rust `image_proxy` command fetches `GET http://127.0.0.1:19140/jellyfin/image/:id` from the daemon. The daemon keeps the route name for compatibility, but if a non-Jellyfin provider is active it resolves cover art through `MediaProvider::cover_art_url`.
 
 ---
 
@@ -139,9 +142,9 @@ The Rust `image_proxy` command fetches `GET http://127.0.0.1:19140/jellyfin/imag
 
 | Code | Constant | Meaning |
 |------|----------|---------|
-| -32001 | `ERR_INVALID_CREDENTIALS` | Auth failed with Jellyfin |
+| -32001 | `ERR_INVALID_CREDENTIALS` | Auth failed with the active media server |
 | -32002 | `ERR_INVALID_PARAMS` | Missing or invalid request parameters |
-| -32003 | `ERR_CONNECTION_FAILED` | Cannot reach Jellyfin or no device connected |
+| -32003 | `ERR_CONNECTION_FAILED` | Cannot reach the media server or no device connected |
 | -32004 | `ERR_STORAGE_ERROR` | Database, keyring, or filesystem write failed |
 | -32005 | `ERR_INTERNAL_ERROR` | Unexpected internal error |
 
@@ -151,19 +154,19 @@ The Axum server allows requests from `https://tauri.localhost` and `http://local
 
 ---
 
-## Daemon ↔ Jellyfin Server
+## Daemon ↔ Media Server
 
-The daemon communicates with Jellyfin over standard HTTP REST. The `JellyfinClient` in `api.rs` uses `reqwest` for all calls.
+The daemon communicates with media servers over HTTP through a provider layer. `JellyfinClient` in `api.rs` still owns the Jellyfin REST client and legacy compatibility path. The `MediaProvider` trait in `providers/mod.rs` normalizes Jellyfin, Subsonic, Navidrome, and OpenSubsonic behavior into common library, artist, album, playlist, song, genre, search, change, download, cover-art, transcoding, and scrobble operations.
 
 ### Authentication Flow
 
-1. User enters server URL + credentials in the UI login form
-2. UI calls `rpcCall('login', { url, username, password })`
-3. Daemon calls `POST /Users/AuthenticateByName` → receives `{ AccessToken, User.Id }`
-4. Daemon stores URL + UserId in `config.json` (app data dir); stores AccessToken in OS keyring
-5. All subsequent calls use the stored token in `X-Emby-Token` header
+1. User enters server URL + credentials in the UI login form.
+2. UI probes the URL with `server.probe` and submits `server.connect` with `serverType: "auto"` unless the user chose a specific type.
+3. The daemon tries Subsonic/OpenSubsonic first for compatible servers, otherwise authenticates with Jellyfin.
+4. The daemon stores URL, server type, username, and server version in SQLite `server_config`; provider secrets live in the OS keyring. The legacy Jellyfin `config.json` path remains for compatibility.
+5. Subsequent browse/sync calls use the active `MediaProvider`. Legacy `jellyfin_*` RPCs fall through to `JellyfinClient` only when the active provider is Jellyfin.
 
-### Key API Calls
+### Key Jellyfin API Calls
 
 | Purpose | Endpoint |
 |---------|----------|
@@ -176,6 +179,23 @@ The daemon communicates with Jellyfin over standard HTTP REST. The `JellyfinClie
 | Report played | `POST /Users/{userId}/PlayedItems/{itemId}` |
 | Image | `GET /Items/{itemId}/Images/Primary` |
 | Search | `GET /Items?SearchTerm=...` |
+
+### Key Subsonic/OpenSubsonic API Calls
+
+| Purpose | Endpoint |
+|---------|----------|
+| Probe/auth | `GET /rest/ping.view` |
+| Artists | `GET /rest/getArtists.view`, `GET /rest/getArtist.view` |
+| Albums | `GET /rest/getAlbumList2.view`, `GET /rest/getAlbum.view` |
+| Songs | `GET /rest/getSong.view`, `GET /rest/search3.view` |
+| Playlists | `GET /rest/getPlaylists.view`, `GET /rest/getPlaylist.view` |
+| Genres | `GET /rest/getGenres.view`, `GET /rest/getSongsByGenre.view` |
+| Favorites | `GET /rest/getStarred2.view` |
+| Downloads/streams | `GET /rest/download.view`, `GET /rest/stream.view` |
+| Cover art | `GET /rest/getCoverArt.view` |
+| Scrobble | `GET /rest/scrobble.view` |
+
+OpenSubsonic-capable servers expose additional reliable history semantics. HifiMule advertises `recentlyAdded`, `frequentlyPlayed`, and `recentlyPlayed` only when provider capabilities say those modes are reliable.
 
 ---
 
@@ -246,6 +266,25 @@ The UI has no global state store framework. State is managed at two levels:
 - Polls `sync_get_operation_status` every **500ms** during an active sync
 - `StatusBar` polls `get_daemon_state` every **3 seconds** independently via direct fetch (not invoke, because it was written before the mixed-content constraint was fully appreciated)
 
+## Provider-Neutral Browse Flow
+
+The current browser does not hard-code server type. On library initialization:
+
+1. `library.ts` calls `browse.listModes`.
+2. The daemon returns `MediaProvider::capabilities().browse.list_modes`.
+3. The UI renders mode buttons for only those modes.
+4. Each mode calls a provider-neutral RPC:
+   - `browse.listArtists` / `browse.getArtist`
+   - `browse.listAlbums` / `browse.getAlbum`
+   - `browse.listPlaylists` / `browse.getPlaylist`
+   - `browse.listGenres` / `browse.getGenre`
+   - `browse.listRecentlyAdded`
+   - `browse.listFrequentlyPlayed`
+   - `browse.listRecentlyPlayed`
+   - `browse.listFavorites` / `browse.listFavoriteItems`
+
+Jellyfin currently advertises the full mode set. OpenSubsonic/Navidrome advertises artists, albums, playlists, genres, favorites, and reliable history modes. Classic Subsonic keeps history modes hidden and returns `UnsupportedCapability` if a hidden mode is called directly.
+
 ---
 
 ## Sync Flow (End-to-End)
@@ -260,9 +299,9 @@ BasketSidebar.handleStartSync()
   ├─ rpcCall('sync_calculate_delta', { itemIds, autoFill? })
   │     │
   │     ▼ Daemon: handle_sync_calculate_delta
-  │       ├─ Fetch item details from Jellyfin (in 100-item chunks)
-  │       ├─ Expand containers (albums/playlists) → tracks
-  │       ├─ If autoFill: run_auto_fill() → merge results
+  │       ├─ Resolve the active provider
+  │       ├─ Expand containers (albums/playlists/artists/favorite groups) → tracks
+  │       ├─ If autoFill and Jellyfin-backed: run_auto_fill() → merge results
   │       ├─ calculate_delta(desired_items, manifest) → SyncDelta
   │       └─ Return SyncDelta {adds, deletes, id_changes, playlists}
   │
@@ -277,11 +316,11 @@ BasketSidebar.handleStartSync()
   ├─ Start 500ms polling: rpcCall('sync_get_operation_status', { operationId })
   │     │
   │     ▼ Background sync task (sync.rs: execute_sync)
-  │       ├─ For each ADD: download from Jellyfin → write to device → update manifest
+  │       ├─ For each ADD: download from active provider → write to device → update manifest
   │       ├─ For each DELETE: remove file from device → update manifest
   │       ├─ For each ID_CHANGE: download new → delete old → update manifest
   │       ├─ Generate M3U playlists
-  │       ├─ Process scrobbles (parse .scrobbler.log → submit to Jellyfin)
+  │       ├─ Process scrobbles (parse .scrobbler.log → submit through provider)
   │       └─ Clear dirty flag on success
   │
   └─ On status=complete: reset basket dirty flag, show "Sync Complete"
@@ -301,7 +340,7 @@ DeviceManager.handle_device_detected()
         ▼
 main.rs: run_auto_sync()
   ├─ Load manifest (basket_items as desired_items)
-  ├─ Fetch details from Jellyfin for each basket item
+  ├─ Resolve desired sync items through the active provider
   ├─ calculate_delta()
   ├─ execute_sync() (same as manual sync)
   └─ send_sync_complete_notification() → OS desktop notification
