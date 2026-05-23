@@ -1,6 +1,6 @@
 # Story 4.10: Idempotent Managed File Deletion on USB
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -42,6 +42,14 @@ so that stale manifest entries do not turn into noisy sync failures.
   - [x] Add or update an MTP mock test if missing-object classification is implemented.
   - [x] Run `rtk cargo test -p hifimule-daemon`.
 
+### Review Findings
+
+- [x] [Review][Patch] Restore safe MSC containment validation while allowing missing-file cleanup [hifimule-daemon/src/sync.rs:938]
+- [x] [Review][Patch] Narrow missing-delete classification so real backend/device errors are reported [hifimule-daemon/src/sync.rs:522]
+- [x] [Review][Patch] Add managed-zone validation to provider-sync deletes before calling DeviceIO [hifimule-daemon/src/sync.rs:1302]
+- [x] [Review][Patch] Reject rooted or directory-level delete paths that pass lexical managed-subfolder checks [hifimule-daemon/src/sync.rs:539]
+- [x] [Review][Patch] Count already-absent deletes as completed operation work [hifimule-daemon/src/sync.rs:983]
+
 ## Dev Notes
 
 ### Current Code Context
@@ -77,15 +85,17 @@ GPT-5 Codex
 - `rtk cargo test -p hifimule-daemon msc_delete_directory_reports_real_io_error` - passed
 - `rtk cargo test -p hifimule-daemon mtp_delete_generic_failure_remains_visible` - passed
 - `rtk cargo test -p hifimule-daemon test_delete_validation_rejects_unmanaged_relative_path` - passed
-- `rtk cargo test -p hifimule-daemon` - passed, 334 tests
+- `rtk cargo test -p hifimule-daemon delete` - passed, 13 tests
+- `rtk cargo test -p hifimule-daemon` - passed, 339 tests
 
 ### Completion Notes List
 
 - Implemented idempotent MSC deletion by treating `std::io::ErrorKind::NotFound` from `MscBackend::delete_file` as success while preserving all other IO failures.
 - Updated sync cleanup validation so missing managed files can still pass the managed-zone check without requiring the leaf file to exist, while rejecting absolute paths, parent traversal, and unmanaged relative paths.
-- Added shared missing-delete classification in sync cleanup for OS error 2/localized not-found messages and distinguishable MTP missing-object errors.
+- Added shared missing-delete classification in sync cleanup for OS error 2 and distinguishable MTP missing-object errors.
 - Updated MTP delete handling to treat explicit WPD/libmtp path-component missing errors as already deleted, while preserving generic MTP delete failures.
 - Added tests for MSC idempotent delete, real delete errors, stale manifest cleanup, unmanaged path rejection, and MTP missing/generic delete classification.
+- Addressed review findings by restoring MSC canonical containment for existing targets, narrowing missing-delete classification, guarding provider-sync deletes, rejecting unsafe delete paths, and counting already-absent deletes in operation progress.
 
 ### File List
 
@@ -98,3 +108,4 @@ GPT-5 Codex
 
 - 2026-05-23: Created story from approved Correct Course proposal for USB deletion hardening.
 - 2026-05-23: Implemented idempotent managed-file deletion for MSC/MTP cleanup paths and added regression coverage.
+- 2026-05-23: Addressed code review findings and marked story done.

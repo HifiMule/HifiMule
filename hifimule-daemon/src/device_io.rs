@@ -66,6 +66,37 @@ fn check_relative(path: &str) -> Result<()> {
             ));
         }
     }
+    let normalized = path.replace('\\', "/");
+    if normalized.starts_with('/') {
+        return Err(anyhow::anyhow!("DeviceIO path must be relative: {}", path));
+    }
+    for (index, component) in normalized.split('/').enumerate() {
+        if component == "." || component == ".." {
+            return Err(anyhow::anyhow!(
+                "DeviceIO path must not traverse parent directories: {}",
+                path
+            ));
+        }
+        if index == 0
+            && component.len() == 2
+            && component.as_bytes()[1] == b':'
+            && component.as_bytes()[0].is_ascii_alphabetic()
+        {
+            return Err(anyhow::anyhow!("DeviceIO path must be relative: {}", path));
+        }
+    }
+    Ok(())
+}
+
+fn check_delete_target(path: &str) -> Result<()> {
+    check_relative(path)?;
+    let normalized = path.replace('\\', "/");
+    if normalized.is_empty() || normalized.ends_with('/') {
+        return Err(anyhow::anyhow!(
+            "DeviceIO delete path must name a file: {}",
+            path
+        ));
+    }
     Ok(())
 }
 
@@ -168,7 +199,7 @@ impl DeviceIO for MscBackend {
     }
 
     async fn delete_file(&self, path: &str) -> Result<()> {
-        check_relative(path)?;
+        check_delete_target(path)?;
         let full = self.root.join(path);
         match tokio::fs::remove_file(&full).await {
             Ok(()) => Ok(()),
@@ -352,6 +383,7 @@ impl DeviceIO for MtpBackend {
     }
 
     async fn delete_file(&self, path: &str) -> Result<()> {
+        check_delete_target(path)?;
         let _guard = self.operation_lock.lock().await;
         let handle = Arc::clone(&self.handle);
         let path = path.to_string();
@@ -520,6 +552,19 @@ pub mod tests {
                 .unwrap_or(true),
             "directory deletion failure must not be treated as missing-file success"
         );
+    }
+
+    #[tokio::test]
+    async fn msc_delete_backslash_parent_traversal_is_rejected() {
+        let dir = tempdir().unwrap();
+        let backend = MscBackend::new(dir.path().to_path_buf());
+
+        let err = backend
+            .delete_file("Music\\..\\outside.txt")
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("must not traverse"));
     }
 
     #[tokio::test]
@@ -811,5 +856,16 @@ pub mod tests {
         let err = backend.delete_file("Music/track.mp3").await.unwrap_err();
 
         assert!(err.to_string().contains("rc=-1"));
+    }
+
+    #[tokio::test]
+    async fn mtp_delete_empty_path_is_rejected_before_backend_call() {
+        let mock = Arc::new(MockMtpHandle::new());
+        let backend = MtpBackend::new(Arc::clone(&mock) as Arc<dyn MtpHandle>);
+
+        let err = backend.delete_file("").await.unwrap_err();
+
+        assert!(err.to_string().contains("must name a file"));
+        assert!(mock.call_log.lock().unwrap().is_empty());
     }
 }

@@ -530,36 +530,111 @@ fn is_missing_delete_error(error: &anyhow::Error) -> bool {
 
     let message = error.to_string().to_ascii_lowercase();
     message.contains("os error 2")
-        || message.contains("not found")
-        || message.contains("introuvable")
-        || message.contains("mtp path component") && message.contains("not found")
+        || message.contains("mtp path component not found:")
         || message.contains("libmtp: path component") && message.contains("not found")
 }
 
-fn relative_path_is_in_managed_subfolder(path: &str, managed_subfolder: &str) -> bool {
+fn component_looks_like_windows_drive(component: &str) -> bool {
+    component.len() == 2
+        && component.as_bytes()[1] == b':'
+        && component.as_bytes()[0].is_ascii_alphabetic()
+}
+
+fn normalized_relative_components_are_safe(path: &str) -> bool {
+    path.split('/').enumerate().all(|(index, component)| {
+        !component.is_empty()
+            && component != "."
+            && component != ".."
+            && !(index == 0 && component_looks_like_windows_drive(component))
+    })
+}
+
+fn normalize_delete_relative_path(path: &str) -> Option<String> {
     let candidate = Path::new(path);
     if candidate.is_absolute()
         || candidate.components().any(|component| {
             matches!(
                 component,
-                std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                std::path::Component::ParentDir
+                    | std::path::Component::Prefix(_)
+                    | std::path::Component::RootDir
             )
         })
     {
-        return false;
+        return None;
     }
 
-    let normalized_path = path.replace('\\', "/").trim_matches('/').to_string();
-    let normalized_managed = managed_subfolder
+    let normalized_path = path.replace('\\', "/");
+    if normalized_path.is_empty()
+        || normalized_path.starts_with('/')
+        || normalized_path.ends_with('/')
+        || !normalized_relative_components_are_safe(&normalized_path)
+    {
+        return None;
+    }
+
+    Some(normalized_path)
+}
+
+fn normalize_managed_subfolder(managed_subfolder: &str) -> Option<String> {
+    let normalized = managed_subfolder
         .replace('\\', "/")
         .trim_matches('/')
         .to_string();
+    if normalized.is_empty() {
+        return Some(String::new());
+    }
+    normalized_relative_components_are_safe(&normalized).then_some(normalized)
+}
+
+fn relative_path_is_in_managed_subfolder(path: &str, managed_subfolder: &str) -> bool {
+    let Some(normalized_path) = normalize_delete_relative_path(path) else {
+        return false;
+    };
+    let Some(normalized_managed) = normalize_managed_subfolder(managed_subfolder) else {
+        return false;
+    };
 
     normalized_managed.is_empty()
-        || normalized_path == normalized_managed
         || normalized_path
-            .strip_prefix(&normalized_managed)
-            .is_some_and(|suffix| suffix.starts_with('/'))
+            .strip_prefix(&format!("{}/", normalized_managed))
+            .is_some()
+}
+
+fn validate_delete_path_for_managed_zone(
+    device_path: &Path,
+    managed_path: &Path,
+    managed_subfolder: Option<&str>,
+    local_path: &str,
+    is_mtp: bool,
+) -> std::result::Result<(), String> {
+    let Some(managed_subfolder) = managed_subfolder else {
+        return Err("Failed to resolve managed subfolder - refusing to delete".to_string());
+    };
+
+    if !relative_path_is_in_managed_subfolder(local_path, managed_subfolder) {
+        return Err("File is not in managed zone - refusing to delete".to_string());
+    }
+
+    if is_mtp {
+        return Ok(());
+    }
+
+    let file_path = device_path.join(local_path);
+    match file_path.canonicalize() {
+        Ok(absolute_file_path) => {
+            let absolute_managed_path = managed_path
+                .canonicalize()
+                .map_err(|e| format!("Failed to resolve managed path: {}", e))?;
+            if !absolute_file_path.starts_with(&absolute_managed_path) {
+                return Err("File is not in managed zone - refusing to delete".to_string());
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("Failed to resolve file path: {}", e)),
+    }
+
+    Ok(())
 }
 
 /// Executes a sync operation by downloading adds and deleting removals.
@@ -891,66 +966,19 @@ pub async fn execute_sync(
 
     for delete_item in &delta.deletes {
         // Verify file is in managed zone (security check)
-        if is_mtp {
-            match &managed_subfolder_for_delete {
-                None => {
-                    // managed_path is not rooted at device_path — config error, fail safe.
-                    errors.push(SyncFileError {
-                        jellyfin_id: delete_item.jellyfin_id.clone(),
-                        filename: delete_item.name.clone(),
-                        error_message: "Failed to resolve managed subfolder - refusing to delete"
-                            .to_string(),
-                    });
-                    continue;
-                }
-                Some(subfolder) if !subfolder.is_empty() => {
-                    if !relative_path_is_in_managed_subfolder(&delete_item.local_path, subfolder) {
-                        errors.push(SyncFileError {
-                            jellyfin_id: delete_item.jellyfin_id.clone(),
-                            filename: delete_item.name.clone(),
-                            error_message: "File is not in managed zone - refusing to delete"
-                                .to_string(),
-                        });
-                        continue;
-                    }
-                }
-                Some(subfolder) => {
-                    if !relative_path_is_in_managed_subfolder(&delete_item.local_path, subfolder) {
-                        errors.push(SyncFileError {
-                            jellyfin_id: delete_item.jellyfin_id.clone(),
-                            filename: delete_item.name.clone(),
-                            error_message: "File is not in managed zone - refusing to delete"
-                                .to_string(),
-                        });
-                        continue;
-                    }
-                }
-            }
-        } else {
-            let Some(managed_subfolder) = &managed_subfolder_for_delete else {
-                errors.push(SyncFileError {
-                    jellyfin_id: delete_item.jellyfin_id.clone(),
-                    filename: delete_item.name.clone(),
-                    error_message: "File is not in managed zone - refusing to delete".to_string(),
-                });
-                continue;
-            };
-            if let Err(e) = managed_path.canonicalize() {
-                errors.push(SyncFileError {
-                    jellyfin_id: delete_item.jellyfin_id.clone(),
-                    filename: delete_item.name.clone(),
-                    error_message: format!("Failed to resolve managed path: {}", e),
-                });
-                continue;
-            }
-            if !relative_path_is_in_managed_subfolder(&delete_item.local_path, managed_subfolder) {
-                errors.push(SyncFileError {
-                    jellyfin_id: delete_item.jellyfin_id.clone(),
-                    filename: delete_item.name.clone(),
-                    error_message: "File is not in managed zone - refusing to delete".to_string(),
-                });
-                continue;
-            }
+        if let Err(error_message) = validate_delete_path_for_managed_zone(
+            device_path,
+            &managed_path,
+            managed_subfolder_for_delete.as_deref(),
+            &delete_item.local_path,
+            is_mtp,
+        ) {
+            errors.push(SyncFileError {
+                jellyfin_id: delete_item.jellyfin_id.clone(),
+                filename: delete_item.name.clone(),
+                error_message,
+            });
+            continue;
         }
 
         // Delete file via device IO abstraction (relative path, backend handles resolution)
@@ -983,6 +1011,13 @@ pub async fn execute_sync(
             Err(_) if already_absent => {
                 // File was not on device (already deleted or never written).
                 // Remove the manifest entry so this item is not retried on the next sync.
+                if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
+                    operation.files_completed += 1;
+                    operation_manager
+                        .update_operation(&operation_id, operation)
+                        .await;
+                }
+
                 let id_to_remove = delete_item.jellyfin_id.clone();
                 if let Err(e) = device_manager
                     .update_manifest(|m| {
@@ -1148,6 +1183,14 @@ pub async fn execute_provider_sync(
             .unwrap_or("Music");
         device_path.join(subfolder)
     };
+    let is_mtp = device_path.to_string_lossy().starts_with("mtp://");
+    let managed_subfolder_for_delete: Option<String> =
+        managed_path.strip_prefix(device_path).ok().map(|p| {
+            p.to_string_lossy()
+                .replace('\\', "/")
+                .trim_end_matches('/')
+                .to_string()
+        });
 
     for add_item in delta.adds.iter() {
         let preferred_audio_container = device_io.preferred_audio_container();
@@ -1300,6 +1343,21 @@ pub async fn execute_provider_sync(
     }
 
     for delete_item in &delta.deletes {
+        if let Err(error_message) = validate_delete_path_for_managed_zone(
+            device_path,
+            &managed_path,
+            managed_subfolder_for_delete.as_deref(),
+            &delete_item.local_path,
+            is_mtp,
+        ) {
+            errors.push(SyncFileError {
+                jellyfin_id: delete_item.jellyfin_id.clone(),
+                filename: delete_item.name.clone(),
+                error_message,
+            });
+            continue;
+        }
+
         let delete_result = device_io.delete_file(&delete_item.local_path).await;
         let already_absent = matches!(&delete_result, Err(e) if is_missing_delete_error(e));
         match delete_result {
@@ -1321,6 +1379,13 @@ pub async fn execute_provider_sync(
                 }
             }
             Err(_) if already_absent => {
+                if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
+                    operation.files_completed += 1;
+                    operation_manager
+                        .update_operation(&operation_id, operation)
+                        .await;
+                }
+
                 let id_to_remove = delete_item.jellyfin_id.clone();
                 if let Err(e) = device_manager
                     .update_manifest(|m| {
@@ -1897,6 +1962,47 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct MissingDeleteDeviceIo;
+
+    #[async_trait::async_trait]
+    impl crate::device_io::DeviceIO for MissingDeleteDeviceIo {
+        async fn read_file(&self, _path: &str) -> anyhow::Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+
+        async fn write_file(&self, _path: &str, _data: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn write_with_verify(&self, _path: &str, _data: &[u8]) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn delete_file(&self, _path: &str) -> anyhow::Result<()> {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing").into())
+        }
+
+        async fn list_files(
+            &self,
+            _path: &str,
+        ) -> anyhow::Result<Vec<crate::device_io::FileEntry>> {
+            Ok(Vec::new())
+        }
+
+        async fn free_space(&self) -> anyhow::Result<u64> {
+            Ok(1)
+        }
+
+        async fn ensure_dir(&self, _path: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn cleanup_empty_subdirs(&self, _path: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn test_execute_sync_removes_manifest_entry_when_managed_file_missing() {
         let dir = tempfile::tempdir().unwrap();
@@ -1974,6 +2080,75 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_execute_sync_counts_already_absent_delete_as_completed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+
+        let mut manifest = empty_manifest();
+        manifest.synced_items = vec![make_synced_item(
+            "stale-id",
+            "Missing Track",
+            Some("Album"),
+            Some("Artist"),
+        )];
+        crate::device::write_manifest(
+            Arc::new(crate::device_io::MscBackend::new(root.clone())),
+            &manifest,
+        )
+        .await
+        .unwrap();
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let manager = Arc::new(crate::device::DeviceManager::new(db));
+        let manifest_io: Arc<dyn crate::device_io::DeviceIO> =
+            Arc::new(crate::device_io::MscBackend::new(root.clone()));
+        manager
+            .handle_device_detected(root.clone(), manifest, Arc::clone(&manifest_io))
+            .await
+            .unwrap();
+
+        let delta = SyncDelta {
+            adds: vec![],
+            deletes: vec![SyncDeleteItem {
+                jellyfin_id: "stale-id".to_string(),
+                local_path: "Music/Artist/Missing Track.flac".to_string(),
+                name: "Missing Track".to_string(),
+            }],
+            id_changes: vec![],
+            unchanged: 0,
+            playlists: vec![],
+        };
+        let operation_manager = Arc::new(SyncOperationManager::new());
+        let operation_id = "op-missing-delete-progress".to_string();
+        operation_manager
+            .create_operation(operation_id.clone(), 1)
+            .await;
+
+        let (_synced, errors) = execute_sync(
+            &delta,
+            &root,
+            &crate::api::JellyfinClient::new(),
+            "",
+            "",
+            "",
+            Arc::clone(&operation_manager),
+            operation_id.clone(),
+            Arc::clone(&manager),
+            None,
+            Arc::new(MissingDeleteDeviceIo),
+        )
+        .await
+        .unwrap();
+
+        assert!(errors.is_empty());
+        let operation = operation_manager
+            .get_operation(&operation_id)
+            .await
+            .unwrap();
+        assert_eq!(operation.files_completed, 1);
+    }
+
     #[test]
     fn test_delete_validation_rejects_unmanaged_relative_path() {
         assert!(relative_path_is_in_managed_subfolder(
@@ -1988,6 +2163,89 @@ mod tests {
             "Music/../Podcasts/Track.flac",
             "Music"
         ));
+        assert!(!relative_path_is_in_managed_subfolder(
+            "Music\\..\\Podcasts\\Track.flac",
+            "Music"
+        ));
+        assert!(!relative_path_is_in_managed_subfolder(
+            "\\Music\\Artist\\Track.flac",
+            "Music"
+        ));
+        assert!(!relative_path_is_in_managed_subfolder("Music", "Music"));
+        assert!(!relative_path_is_in_managed_subfolder("", ""));
+        assert!(relative_path_is_in_managed_subfolder("Track.flac", ""));
+        assert!(!relative_path_is_in_managed_subfolder(
+            "Music2/Track.flac",
+            "Music"
+        ));
+        assert!(!relative_path_is_in_managed_subfolder(
+            "Music../Track.flac",
+            "Music"
+        ));
+    }
+
+    #[test]
+    fn test_missing_delete_error_classification_is_narrow() {
+        let io_missing: anyhow::Error =
+            std::io::Error::new(std::io::ErrorKind::NotFound, "missing").into();
+        assert!(is_missing_delete_error(&io_missing));
+        assert!(is_missing_delete_error(&anyhow::anyhow!(
+            "Le fichier specifie est introuvable. (os error 2)"
+        )));
+        assert!(is_missing_delete_error(&anyhow::anyhow!(
+            "libmtp: path component 'missing.mp3' not found"
+        )));
+        assert!(is_missing_delete_error(&anyhow::anyhow!(
+            "MTP path component not found: missing.mp3"
+        )));
+        assert!(!is_missing_delete_error(&anyhow::anyhow!(
+            "MTP device 1:2 not found"
+        )));
+        assert!(!is_missing_delete_error(&anyhow::anyhow!(
+            "WPD: device 'Phone' not found in Shell namespace under This PC"
+        )));
+        assert!(!is_missing_delete_error(&anyhow::anyhow!(
+            "file not found on device after transfer"
+        )));
+    }
+
+    #[test]
+    fn test_msc_delete_validation_allows_missing_managed_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let managed_path = root.join("Music");
+
+        assert!(validate_delete_path_for_managed_zone(
+            &root,
+            &managed_path,
+            Some("Music"),
+            "Music/Artist/Missing Track.flac",
+            false,
+        )
+        .is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_msc_delete_validation_rejects_symlink_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let managed_path = root.join("Music");
+        std::fs::create_dir_all(&managed_path).unwrap();
+        std::fs::write(outside.path().join("Track.flac"), b"outside").unwrap();
+        std::os::unix::fs::symlink(outside.path(), managed_path.join("link")).unwrap();
+
+        let err = validate_delete_path_for_managed_zone(
+            &root,
+            &managed_path,
+            Some("Music"),
+            "Music/link/Track.flac",
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(err, "File is not in managed zone - refusing to delete");
     }
 
     fn make_test_item(
