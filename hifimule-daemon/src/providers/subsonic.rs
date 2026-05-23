@@ -467,10 +467,7 @@ impl MediaProvider for SubsonicProvider {
         limit: u32,
     ) -> Result<(Vec<Album>, u32), ProviderError> {
         self.ensure_open_subsonic_history("list_recently_added")?;
-        let response = self
-            .client
-            .get_album_list2_all_by_type("newest")
-            .await?;
+        let response = self.client.get_album_list2_all_by_type("newest").await?;
         let albums: Vec<Album> = response
             .album_list2
             .album
@@ -2817,7 +2814,9 @@ mod tests {
             }))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(&ok(r#""albumList2":{"album":[{"id":"album1","name":"Album"}]}"#))
+            .with_body(&ok(
+                r#""albumList2":{"album":[{"id":"album1","name":"Album"}]}"#,
+            ))
             .expect(1)
             .create_async()
             .await;
@@ -2880,7 +2879,9 @@ mod tests {
             }))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(&ok(r#""albumList2":{"album":[{"id":"album1","name":"Album"}]}"#))
+            .with_body(&ok(
+                r#""albumList2":{"album":[{"id":"album1","name":"Album"}]}"#,
+            ))
             .expect(1)
             .create_async()
             .await;
