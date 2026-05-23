@@ -519,6 +519,49 @@ fn truncate_filename(base: &str, extension: &str, max_len: usize) -> String {
     format!("{}.{}", clean_base, extension)
 }
 
+fn is_missing_delete_error(error: &anyhow::Error) -> bool {
+    if error
+        .downcast_ref::<std::io::Error>()
+        .map(|io| io.kind() == std::io::ErrorKind::NotFound)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("os error 2")
+        || message.contains("not found")
+        || message.contains("introuvable")
+        || message.contains("mtp path component") && message.contains("not found")
+        || message.contains("libmtp: path component") && message.contains("not found")
+}
+
+fn relative_path_is_in_managed_subfolder(path: &str, managed_subfolder: &str) -> bool {
+    let candidate = Path::new(path);
+    if candidate.is_absolute()
+        || candidate.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return false;
+    }
+
+    let normalized_path = path.replace('\\', "/").trim_matches('/').to_string();
+    let normalized_managed = managed_subfolder
+        .replace('\\', "/")
+        .trim_matches('/')
+        .to_string();
+
+    normalized_managed.is_empty()
+        || normalized_path == normalized_managed
+        || normalized_path
+            .strip_prefix(&normalized_managed)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
 /// Executes a sync operation by downloading adds and deleting removals.
 ///
 /// This function handles individual file failures gracefully - if one file fails,
@@ -861,8 +904,7 @@ pub async fn execute_sync(
                     continue;
                 }
                 Some(subfolder) if !subfolder.is_empty() => {
-                    let local_norm = delete_item.local_path.replace('\\', "/");
-                    if !local_norm.starts_with(&format!("{}/", subfolder)) {
+                    if !relative_path_is_in_managed_subfolder(&delete_item.local_path, subfolder) {
                         errors.push(SyncFileError {
                             jellyfin_id: delete_item.jellyfin_id.clone(),
                             filename: delete_item.name.clone(),
@@ -872,30 +914,36 @@ pub async fn execute_sync(
                         continue;
                     }
                 }
-                Some(_) => {} // Empty subfolder = whole device is managed, all paths are valid
+                Some(subfolder) => {
+                    if !relative_path_is_in_managed_subfolder(&delete_item.local_path, subfolder) {
+                        errors.push(SyncFileError {
+                            jellyfin_id: delete_item.jellyfin_id.clone(),
+                            filename: delete_item.name.clone(),
+                            error_message: "File is not in managed zone - refusing to delete"
+                                .to_string(),
+                        });
+                        continue;
+                    }
+                }
             }
         } else {
-            // MSC path: resolve real filesystem paths to prevent directory traversal attacks.
-            let file_path = device_path.join(&delete_item.local_path);
-            let absolute_file_path = match file_path.canonicalize() {
-                Ok(path) => path,
-                Err(_) => {
-                    // File doesn't exist on disk — nothing to delete.
-                    continue;
-                }
+            let Some(managed_subfolder) = &managed_subfolder_for_delete else {
+                errors.push(SyncFileError {
+                    jellyfin_id: delete_item.jellyfin_id.clone(),
+                    filename: delete_item.name.clone(),
+                    error_message: "File is not in managed zone - refusing to delete".to_string(),
+                });
+                continue;
             };
-            let absolute_managed_path = match managed_path.canonicalize() {
-                Ok(path) => path,
-                Err(e) => {
-                    errors.push(SyncFileError {
-                        jellyfin_id: delete_item.jellyfin_id.clone(),
-                        filename: delete_item.name.clone(),
-                        error_message: format!("Failed to resolve managed path: {}", e),
-                    });
-                    continue;
-                }
-            };
-            if !absolute_file_path.starts_with(&absolute_managed_path) {
+            if let Err(e) = managed_path.canonicalize() {
+                errors.push(SyncFileError {
+                    jellyfin_id: delete_item.jellyfin_id.clone(),
+                    filename: delete_item.name.clone(),
+                    error_message: format!("Failed to resolve managed path: {}", e),
+                });
+                continue;
+            }
+            if !relative_path_is_in_managed_subfolder(&delete_item.local_path, managed_subfolder) {
                 errors.push(SyncFileError {
                     jellyfin_id: delete_item.jellyfin_id.clone(),
                     filename: delete_item.name.clone(),
@@ -910,8 +958,7 @@ pub async fn execute_sync(
         // Treat "not found" as idempotent success: the file is already absent, which is
         // the goal of deletion. This handles duplicate manifest entries (e.g. same path
         // added via basket and playlist) and re-runs after a failed manifest update.
-        let already_absent =
-            matches!(&delete_result, Err(e) if e.to_string().contains("not found"));
+        let already_absent = matches!(&delete_result, Err(e) if is_missing_delete_error(e));
         match delete_result {
             Ok(_) => {
                 // Successfully deleted
@@ -1253,7 +1300,9 @@ pub async fn execute_provider_sync(
     }
 
     for delete_item in &delta.deletes {
-        match device_io.delete_file(&delete_item.local_path).await {
+        let delete_result = device_io.delete_file(&delete_item.local_path).await;
+        let already_absent = matches!(&delete_result, Err(e) if is_missing_delete_error(e));
+        match delete_result {
             Ok(_) => {
                 if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
                     operation.files_completed += 1;
@@ -1261,6 +1310,17 @@ pub async fn execute_provider_sync(
                         .update_operation(&operation_id, operation)
                         .await;
                 }
+                let id_to_remove = delete_item.jellyfin_id.clone();
+                if let Err(e) = device_manager
+                    .update_manifest(|m| {
+                        m.synced_items.retain(|i| i.jellyfin_id != id_to_remove);
+                    })
+                    .await
+                {
+                    eprintln!("[Sync] Warning: per-delete manifest write failed: {}", e);
+                }
+            }
+            Err(_) if already_absent => {
                 let id_to_remove = delete_item.jellyfin_id.clone();
                 if let Err(e) = device_manager
                     .update_manifest(|m| {
@@ -1472,11 +1532,7 @@ async fn generate_m3u_files(
             Ok(()) => {
                 println!("[M3U] Deleted removed playlist: {}", entry.filename);
             }
-            Err(e)
-                if e.downcast_ref::<std::io::Error>()
-                    .map(|io| io.kind() == std::io::ErrorKind::NotFound)
-                    .unwrap_or(false) =>
-            {
+            Err(e) if is_missing_delete_error(&e) => {
                 // Already gone — still remove manifest entry
             }
             Err(e) => {
@@ -1839,6 +1895,99 @@ mod tests {
             provider_content_type: None,
             provider_suffix: None,
         }
+    }
+
+    #[tokio::test]
+    async fn test_execute_sync_removes_manifest_entry_when_managed_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        tokio::fs::create_dir_all(root.join("Music/Artist"))
+            .await
+            .unwrap();
+
+        let mut manifest = empty_manifest();
+        manifest.synced_items = vec![make_synced_item(
+            "stale-id",
+            "Missing Track",
+            Some("Album"),
+            Some("Artist"),
+        )];
+        crate::device::write_manifest(
+            Arc::new(crate::device_io::MscBackend::new(root.clone())),
+            &manifest,
+        )
+        .await
+        .unwrap();
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let manager = Arc::new(crate::device::DeviceManager::new(db));
+        let device_io: Arc<dyn crate::device_io::DeviceIO> =
+            Arc::new(crate::device_io::MscBackend::new(root.clone()));
+        manager
+            .handle_device_detected(root.clone(), manifest, Arc::clone(&device_io))
+            .await
+            .unwrap();
+
+        let delta = SyncDelta {
+            adds: vec![],
+            deletes: vec![SyncDeleteItem {
+                jellyfin_id: "stale-id".to_string(),
+                local_path: "Music/Artist/Missing Track.flac".to_string(),
+                name: "Missing Track".to_string(),
+            }],
+            id_changes: vec![],
+            unchanged: 0,
+            playlists: vec![],
+        };
+
+        let (_synced, errors) = execute_sync(
+            &delta,
+            &root,
+            &crate::api::JellyfinClient::new(),
+            "",
+            "",
+            "",
+            Arc::new(SyncOperationManager::new()),
+            "op-missing-delete".to_string(),
+            Arc::clone(&manager),
+            None,
+            device_io,
+        )
+        .await
+        .unwrap();
+
+        assert!(errors.is_empty(), "missing managed file is already gone");
+        let updated = manager.get_current_device().await.unwrap();
+        assert!(
+            updated.synced_items.is_empty(),
+            "stale manifest entry must be removed after idempotent cleanup"
+        );
+
+        let manifest_json = tokio::fs::read_to_string(root.join(".hifimule.json"))
+            .await
+            .unwrap();
+        let persisted: crate::device::DeviceManifest =
+            serde_json::from_str(&manifest_json).unwrap();
+        assert!(
+            persisted.synced_items.is_empty(),
+            "manifest cleanup must be persisted"
+        );
+    }
+
+    #[test]
+    fn test_delete_validation_rejects_unmanaged_relative_path() {
+        assert!(relative_path_is_in_managed_subfolder(
+            "Music/Artist/Track.flac",
+            "Music"
+        ));
+        assert!(!relative_path_is_in_managed_subfolder(
+            "Podcasts/Track.flac",
+            "Music"
+        ));
+        assert!(!relative_path_is_in_managed_subfolder(
+            "Music/../Podcasts/Track.flac",
+            "Music"
+        ));
     }
 
     fn make_test_item(

@@ -1,6 +1,6 @@
 # Story 4.10: Idempotent Managed File Deletion on USB
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -20,27 +20,27 @@ so that stale manifest entries do not turn into noisy sync failures.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Make missing managed-file deletion idempotent for MSC (AC: 1, 2)
-  - [ ] Update MSC delete behavior or sync cleanup handling so `NotFound`/OS error 2 is treated as already-deleted success.
-  - [ ] Preserve errors for permission, read-only, disconnect, and other real IO failures.
-  - [ ] Keep path validation in place before deletion.
+- [x] Task 1: Make missing managed-file deletion idempotent for MSC (AC: 1, 2)
+  - [x] Update MSC delete behavior or sync cleanup handling so `NotFound`/OS error 2 is treated as already-deleted success.
+  - [x] Preserve errors for permission, read-only, disconnect, and other real IO failures.
+  - [x] Keep path validation in place before deletion.
 
-- [ ] Task 2: Keep manifest cleanup consistent (AC: 1, 2)
-  - [ ] Ensure stale manifest entries are removed when the corresponding managed file is already missing.
-  - [ ] Ensure manifest entries are not removed when deletion fails for a real IO reason.
-  - [ ] Confirm cleanup does not touch unmanaged files.
+- [x] Task 2: Keep manifest cleanup consistent (AC: 1, 2)
+  - [x] Ensure stale manifest entries are removed when the corresponding managed file is already missing.
+  - [x] Ensure manifest entries are not removed when deletion fails for a real IO reason.
+  - [x] Confirm cleanup does not touch unmanaged files.
 
-- [ ] Task 3: Handle MTP missing-object cases where distinguishable (AC: 3)
-  - [ ] Review MTP delete error mapping from WPD/libmtp backends.
-  - [ ] Where a missing object can be identified, map it to the same idempotent delete behavior.
-  - [ ] Do not hide generic MTP failures that cannot be confidently classified as missing-object.
+- [x] Task 3: Handle MTP missing-object cases where distinguishable (AC: 3)
+  - [x] Review MTP delete error mapping from WPD/libmtp backends.
+  - [x] Where a missing object can be identified, map it to the same idempotent delete behavior.
+  - [x] Do not hide generic MTP failures that cannot be confidently classified as missing-object.
 
-- [ ] Task 4: Verification (AC: 1-3)
-  - [ ] Add an MSC test for deleting a missing managed file.
-  - [ ] Add a test proving a real deletion error remains visible.
-  - [ ] Add a sync cleanup test proving stale manifest entries are removed without failing the operation.
-  - [ ] Add or update an MTP mock test if missing-object classification is implemented.
-  - [ ] Run `rtk cargo test -p hifimule-daemon`.
+- [x] Task 4: Verification (AC: 1-3)
+  - [x] Add an MSC test for deleting a missing managed file.
+  - [x] Add a test proving a real deletion error remains visible.
+  - [x] Add a sync cleanup test proving stale manifest entries are removed without failing the operation.
+  - [x] Add or update an MTP mock test if missing-object classification is implemented.
+  - [x] Run `rtk cargo test -p hifimule-daemon`.
 
 ## Dev Notes
 
@@ -67,12 +67,34 @@ Missing managed files are expected after manual deletion or prior partial cleanu
 
 ### Agent Model Used
 
+GPT-5 Codex
+
 ### Debug Log References
+
+- `rtk cargo test -p hifimule-daemon msc_delete_missing_file_is_idempotent` - passed
+- `rtk cargo test -p hifimule-daemon mtp_delete_missing_object_is_idempotent_when_distinguishable` - passed
+- `rtk cargo test -p hifimule-daemon test_execute_sync_removes_manifest_entry_when_managed_file_missing` - passed
+- `rtk cargo test -p hifimule-daemon msc_delete_directory_reports_real_io_error` - passed
+- `rtk cargo test -p hifimule-daemon mtp_delete_generic_failure_remains_visible` - passed
+- `rtk cargo test -p hifimule-daemon test_delete_validation_rejects_unmanaged_relative_path` - passed
+- `rtk cargo test -p hifimule-daemon` - passed, 334 tests
 
 ### Completion Notes List
 
+- Implemented idempotent MSC deletion by treating `std::io::ErrorKind::NotFound` from `MscBackend::delete_file` as success while preserving all other IO failures.
+- Updated sync cleanup validation so missing managed files can still pass the managed-zone check without requiring the leaf file to exist, while rejecting absolute paths, parent traversal, and unmanaged relative paths.
+- Added shared missing-delete classification in sync cleanup for OS error 2/localized not-found messages and distinguishable MTP missing-object errors.
+- Updated MTP delete handling to treat explicit WPD/libmtp path-component missing errors as already deleted, while preserving generic MTP delete failures.
+- Added tests for MSC idempotent delete, real delete errors, stale manifest cleanup, unmanaged path rejection, and MTP missing/generic delete classification.
+
 ### File List
+
+- hifimule-daemon/src/device_io.rs
+- hifimule-daemon/src/sync.rs
+- _bmad-output/implementation-artifacts/4-10-idempotent-managed-file-deletion-on-usb.md
+- _bmad-output/implementation-artifacts/sprint-status.yaml
 
 ## Change Log
 
 - 2026-05-23: Created story from approved Correct Course proposal for USB deletion hardening.
+- 2026-05-23: Implemented idempotent managed-file deletion for MSC/MTP cleanup paths and added regression coverage.

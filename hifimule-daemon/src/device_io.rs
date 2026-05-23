@@ -105,6 +105,20 @@ impl MscBackend {
     }
 }
 
+fn is_missing_object_error(error: &anyhow::Error) -> bool {
+    if error
+        .downcast_ref::<std::io::Error>()
+        .map(|io| io.kind() == std::io::ErrorKind::NotFound)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("mtp path component not found")
+        || message.contains("libmtp: path component") && message.contains("not found")
+}
+
 #[async_trait]
 impl DeviceIO for MscBackend {
     async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
@@ -156,8 +170,11 @@ impl DeviceIO for MscBackend {
     async fn delete_file(&self, path: &str) -> Result<()> {
         check_relative(path)?;
         let full = self.root.join(path);
-        tokio::fs::remove_file(&full).await?;
-        Ok(())
+        match tokio::fs::remove_file(&full).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 
     async fn list_files(&self, path: &str) -> Result<Vec<FileEntry>> {
@@ -338,9 +355,14 @@ impl DeviceIO for MtpBackend {
         let _guard = self.operation_lock.lock().await;
         let handle = Arc::clone(&self.handle);
         let path = path.to_string();
-        tokio::task::spawn_blocking(move || handle.delete_file(&path))
+        let result = tokio::task::spawn_blocking(move || handle.delete_file(&path))
             .await
-            .map_err(|e| anyhow::anyhow!("MTP delete_file task panicked: {}", e))?
+            .map_err(|e| anyhow::anyhow!("MTP delete_file task panicked: {}", e))?;
+        match result {
+            Ok(()) => Ok(()),
+            Err(e) if is_missing_object_error(&e) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     async fn list_files(&self, path: &str) -> Result<Vec<FileEntry>> {
@@ -477,6 +499,30 @@ pub mod tests {
     }
 
     #[tokio::test]
+    async fn msc_delete_missing_file_is_idempotent() {
+        let dir = tempdir().unwrap();
+        let backend = MscBackend::new(dir.path().to_path_buf());
+
+        backend.delete_file("missing.txt").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn msc_delete_directory_reports_real_io_error() {
+        let dir = tempdir().unwrap();
+        let backend = MscBackend::new(dir.path().to_path_buf());
+        backend.ensure_dir("Music").await.unwrap();
+
+        let err = backend.delete_file("Music").await.unwrap_err();
+
+        assert!(
+            err.downcast_ref::<std::io::Error>()
+                .map(|io| io.kind() != std::io::ErrorKind::NotFound)
+                .unwrap_or(true),
+            "directory deletion failure must not be treated as missing-file success"
+        );
+    }
+
+    #[tokio::test]
     async fn msc_ensure_dir_creates_path() {
         let dir = tempdir().unwrap();
         let backend = MscBackend::new(dir.path().to_path_buf());
@@ -567,6 +613,38 @@ pub mod tests {
 
         fn free_space(&self) -> Result<u64> {
             Ok(1_000_000_000)
+        }
+    }
+
+    pub struct FailingDeleteMtpHandle {
+        message: &'static str,
+    }
+
+    impl FailingDeleteMtpHandle {
+        pub fn new(message: &'static str) -> Self {
+            Self { message }
+        }
+    }
+
+    impl MtpHandle for FailingDeleteMtpHandle {
+        fn read_file(&self, _path: &str) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+
+        fn write_file(&self, _path: &str, _data: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        fn delete_file(&self, _path: &str) -> Result<()> {
+            Err(anyhow::anyhow!(self.message))
+        }
+
+        fn list_files(&self, _path: &str) -> Result<Vec<FileEntry>> {
+            Ok(Vec::new())
+        }
+
+        fn free_space(&self) -> Result<u64> {
+            Ok(1)
         }
     }
 
@@ -711,5 +789,27 @@ pub mod tests {
             1,
             "operations for one MtpBackend must not overlap"
         );
+    }
+
+    #[tokio::test]
+    async fn mtp_delete_missing_object_is_idempotent_when_distinguishable() {
+        let mock = Arc::new(FailingDeleteMtpHandle::new(
+            "libmtp: path component 'missing.mp3' not found",
+        ));
+        let backend = MtpBackend::new(Arc::clone(&mock) as Arc<dyn MtpHandle>);
+
+        backend.delete_file("Music/missing.mp3").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mtp_delete_generic_failure_remains_visible() {
+        let mock = Arc::new(FailingDeleteMtpHandle::new(
+            "libmtp delete_file failed: rc=-1",
+        ));
+        let backend = MtpBackend::new(Arc::clone(&mock) as Arc<dyn MtpHandle>);
+
+        let err = backend.delete_file("Music/track.mp3").await.unwrap_err();
+
+        assert!(err.to_string().contains("rc=-1"));
     }
 }
