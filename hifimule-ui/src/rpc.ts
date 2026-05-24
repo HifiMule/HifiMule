@@ -1,10 +1,14 @@
 import { invoke } from '@tauri-apps/api/core';
+import { t } from './i18n';
 
 export const RPC_PORT = (import.meta as any).env?.VITE_RPC_PORT || '19140';
 export const RPC_URL = `http://localhost:${RPC_PORT}`;
 export const IMAGE_PROXY_URL = `${RPC_URL}/jellyfin/image`;
 
 function getErrorMessage(error: unknown): string {
+    const localized = localizeKnownRpcError(error);
+    if (localized) return localized;
+
     if (error instanceof Error && error.message.trim()) {
         return error.message;
     }
@@ -32,7 +36,40 @@ function getErrorMessage(error: unknown): string {
         }
     }
 
-    return 'Unknown RPC error';
+    return t('error.unknown_rpc');
+}
+
+function localizeKnownRpcError(error: unknown): string | null {
+    const message = rawErrorMessage(error);
+    if (!message) return null;
+
+    if (
+        message === 'Unknown server type at this URL'
+        || message === 'provider capability is unsupported: Unknown server type at this URL'
+    ) {
+        return t('error.unknown_server_type');
+    }
+
+    return null;
+}
+
+function rawErrorMessage(error: unknown): string | null {
+    if (error instanceof Error && error.message.trim()) {
+        return error.message;
+    }
+    if (typeof error === 'string' && error.trim()) {
+        return error;
+    }
+    if (error && typeof error === 'object') {
+        const record = error as Record<string, unknown>;
+        for (const key of ['message', 'error', 'details']) {
+            const value = record[key];
+            if (typeof value === 'string' && value.trim()) {
+                return value;
+            }
+        }
+    }
+    return null;
 }
 
 export async function rpcCall(method: string, params: any = {}): Promise<any> {

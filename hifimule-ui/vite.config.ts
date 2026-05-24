@@ -5,6 +5,7 @@ const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
+  root: __dirname,
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
@@ -28,6 +29,11 @@ export default defineConfig(async () => ({
     },
   },
   envPrefix: ['VITE_', 'TAURI_ENV_*'],
+  resolve: {
+    alias: {
+      '@hifimule/i18n-catalog': resolve(__dirname, '../hifimule-i18n/catalog.json'),
+    },
+  },
   build: {
     target:
       process.env.TAURI_ENV_PLATFORM == 'windows'

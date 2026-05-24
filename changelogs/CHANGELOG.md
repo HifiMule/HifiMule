@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.8.1 - 2026-05-24
+
+Added support for multilanguage with french and spanish translation.
+
 ## v0.8.0 - 2026-05-24
 
 Device setup is much more flexible now. You can edit an already-managed device, change its name, icon, transcoding profile, music folder, or playlist folder, and HifiMule will clearly flag when the next sync needs cleanup/resync work. Playlists can now be written to their own folder, so Rockbox-style devices can use `Music` for tracks and `Playlists` for `.m3u` files.

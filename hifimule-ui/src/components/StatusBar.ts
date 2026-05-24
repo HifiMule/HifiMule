@@ -2,6 +2,7 @@
 // Shows daemon connection state, RPC info, device status, and errors at the bottom of the app.
 
 import { RPC_URL } from '../rpc';
+import { t } from '../i18n';
 
 export interface StatusBarState {
     daemonConnected: boolean;
@@ -16,7 +17,7 @@ export class StatusBar {
     private container: HTMLElement;
     private state: StatusBarState = {
         daemonConnected: false,
-        daemonState: 'Unknown',
+        daemonState: t('ui.status.unknown'),
         deviceName: null,
         lastError: null,
         lastRpcMethod: null,
@@ -62,7 +63,7 @@ export class StatusBar {
 
         window.addEventListener('rpc:disconnect', (() => {
             this.state.daemonConnected = false;
-            this.state.daemonState = 'Disconnected';
+            this.state.daemonState = t('ui.status.disconnected');
             this.render();
         }) as EventListener);
     }
@@ -89,19 +90,19 @@ export class StatusBar {
                     const r = data.result;
                     // Derive daemon state from response fields
                     if (r.serverConnected === false) {
-                        this.state.daemonState = 'Not logged in';
+                        this.state.daemonState = t('ui.status.not_logged_in');
                     } else if (r.activeOperationId) {
-                        this.state.daemonState = 'Syncing';
+                        this.state.daemonState = t('ui.status.syncing');
                     } else if (r.currentDevice) {
-                        this.state.daemonState = r.currentDevice.dirty ? 'Device (dirty)' : 'Idle';
+                        this.state.daemonState = r.currentDevice.dirty ? t('ui.status.device_dirty') : t('ui.status.idle');
                     } else {
-                        this.state.daemonState = 'Idle';
+                        this.state.daemonState = t('ui.status.idle');
                     }
 
                     // Device name from mapping or manifest
                     this.state.deviceName = r.deviceMapping?.name
                         || r.currentDevice?.name
-                        || (r.pendingDevicePath ? 'Unrecognized device' : null);
+                        || (r.pendingDevicePath ? t('ui.status.unrecognized_device') : null);
                 }
 
                 if (wasDisconnected) {
@@ -115,8 +116,8 @@ export class StatusBar {
             }
         } catch (e: any) {
             this.state.daemonConnected = false;
-            this.state.daemonState = 'Unreachable';
-            this.state.lastError = e.message || 'Connection failed';
+            this.state.daemonState = t('ui.status.unreachable');
+            this.state.lastError = e.message || t('ui.status.connection_failed');
             this.render();
         }
     }
@@ -131,14 +132,14 @@ export class StatusBar {
     private render() {
         const connected = this.state.daemonConnected;
         const dotColor = connected ? '#22c55e' : '#ef4444';
-        const statusText = connected ? 'Connected' : 'Disconnected';
+        const statusText = connected ? t('ui.status.connected') : t('ui.status.disconnected');
 
         const deviceSection = this.state.deviceName
-            ? `<span class="statusbar-device" title="Connected device">
+            ? `<span class="statusbar-device" title="${t('ui.status.connected_device')}">
                  <sl-icon name="usb-drive"></sl-icon> ${this.escapeHtml(this.state.deviceName)}
                </span>`
             : `<span class="statusbar-device statusbar-dim">
-                 <sl-icon name="usb-drive"></sl-icon> No device
+                 <sl-icon name="usb-drive"></sl-icon> ${t('ui.status.no_device')}
                </span>`;
 
         const errorSection = this.state.lastError
@@ -148,7 +149,7 @@ export class StatusBar {
             : '';
 
         const lastRpc = this.state.lastRpcMethod
-            ? `<span class="statusbar-rpc statusbar-dim" title="Last RPC call">
+            ? `<span class="statusbar-rpc statusbar-dim" title="${t('ui.status.last_rpc_call')}">
                  ${this.escapeHtml(this.state.lastRpcMethod)} ${this.state.lastRpcTime ? this.formatAge(this.state.lastRpcTime) : ''}
                </span>`
             : '';
@@ -156,9 +157,9 @@ export class StatusBar {
         this.container.innerHTML = `
             <div class="statusbar">
                 <div class="statusbar-left">
-                    <span class="statusbar-connection" title="Daemon: ${RPC_URL}">
+                    <span class="statusbar-connection" title="${t('ui.status.daemon')}: ${RPC_URL}">
                         <span class="statusbar-dot" style="background: ${dotColor};"></span>
-                        Daemon: ${statusText}
+                        ${t('ui.status.daemon')}: ${statusText}
                     </span>
                     <span class="statusbar-state statusbar-dim">${this.escapeHtml(this.state.daemonState)}</span>
                     ${deviceSection}
@@ -166,7 +167,7 @@ export class StatusBar {
                 <div class="statusbar-right">
                     ${errorSection}
                     ${lastRpc}
-                    <span class="statusbar-url statusbar-dim" title="RPC endpoint">${RPC_URL}</span>
+                    <span class="statusbar-url statusbar-dim" title="${t('ui.status.rpc_endpoint')}">${RPC_URL}</span>
                 </div>
             </div>
         `;
@@ -184,9 +185,9 @@ export class StatusBar {
 
     private formatAge(timestamp: number): string {
         const seconds = Math.floor((Date.now() - timestamp) / 1000);
-        if (seconds < 5) return 'just now';
-        if (seconds < 60) return `${seconds}s ago`;
-        return `${Math.floor(seconds / 60)}m ago`;
+        if (seconds < 5) return t('ui.time.just_now');
+        if (seconds < 60) return t('ui.time.seconds_ago', { count: seconds });
+        return t('ui.time.minutes_ago', { count: Math.floor(seconds / 60) });
     }
 
     destroy() {

@@ -317,15 +317,19 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                                         op.errors.push(sync::SyncFileError {
                                             jellyfin_id: String::new(),
                                             filename: String::new(),
-                                            error_message: "Device removed during sync".to_string(),
+                                            error_message: hifimule_i18n::t(
+                                                "error.device_removed_during_sync",
+                                            ),
                                         });
                                         som_events.update_operation(&op.id.clone(), op).await;
                                     }
                                 }
                                 let _ = tokio::task::spawn_blocking(|| {
                                     if let Err(e) = notify_rust::Notification::new()
-                                        .summary("HifiMule")
-                                        .body("Sync interrupted: device was removed.")
+                                        .summary(&hifimule_i18n::t("app.name"))
+                                        .body(&hifimule_i18n::t(
+                                            "notification.sync_interrupted_removed",
+                                        ))
                                         .show()
                                     {
                                         daemon_log!("[AutoSync] Notification failed: {}", e);
@@ -393,8 +397,8 @@ fn run_interactive() -> Result<()> {
 
     // Setup Menu
     let tray_menu = Menu::new();
-    let quit_item = MenuItem::new("Quit", true, None);
-    let open_ui_item = MenuItem::new("Open UI", true, None);
+    let quit_item = MenuItem::new(hifimule_i18n::t("tray.quit"), true, None);
+    let open_ui_item = MenuItem::new(hifimule_i18n::t("tray.open_ui"), true, None);
     tray_menu
         .append_items(&[&open_ui_item, &quit_item])
         .map_err(|e| anyhow::anyhow!("Failed to create tray menu: {}", e))?;
@@ -402,7 +406,7 @@ fn run_interactive() -> Result<()> {
     let mut tray_icon = Some(
         TrayIconBuilder::new()
             .with_menu(Box::new(tray_menu))
-            .with_tooltip("HifiMule: Idle")
+            .with_tooltip(hifimule_i18n::t("tray.tooltip.idle"))
             .with_icon((*icon_idle).clone())
             .build()?,
     );
@@ -421,30 +425,33 @@ fn run_interactive() -> Result<()> {
             if let Some(ref mut tray) = tray_icon {
                 match state {
                     DaemonState::Idle => {
-                        let _ = tray.set_tooltip(Some("HifiMule: Idle"));
+                        let _ = tray.set_tooltip(Some(&hifimule_i18n::t("tray.tooltip.idle")));
                         let _ = tray.set_icon(Some((*icon_idle).clone()));
                     }
                     DaemonState::Syncing => {
-                        let _ = tray.set_tooltip(Some("HifiMule: Syncing..."));
+                        let _ = tray.set_tooltip(Some(&hifimule_i18n::t("tray.tooltip.syncing")));
                         let _ = tray.set_icon(Some((*icon_syncing).clone()));
                     }
                     DaemonState::Scanning => {
-                        let _ = tray.set_tooltip(Some("HifiMule: Scanning..."));
+                        let _ = tray.set_tooltip(Some(&hifimule_i18n::t("tray.tooltip.scanning")));
                         let _ = tray.set_icon(Some((*icon_syncing).clone()));
                     }
                     DaemonState::DeviceFound(name) => {
-                        let _ = tray.set_tooltip(Some(&format!("HifiMule: Found {}", name)));
+                        let _ = tray.set_tooltip(Some(&hifimule_i18n::tf(
+                            "tray.tooltip.found",
+                            &[("name", &name)],
+                        )));
                         let _ = tray.set_icon(Some((*icon_syncing).clone()));
                     }
                     DaemonState::DeviceRecognized { name, profile_id } => {
-                        let _ = tray.set_tooltip(Some(&format!(
-                            "HifiMule: Recognized {} (Profile: {})",
-                            name, profile_id
+                        let _ = tray.set_tooltip(Some(&hifimule_i18n::tf(
+                            "tray.tooltip.recognized",
+                            &[("name", &name), ("profile", &profile_id)],
                         )));
                         let _ = tray.set_icon(Some((*icon_syncing).clone()));
                     }
                     DaemonState::Error => {
-                        let _ = tray.set_tooltip(Some("HifiMule: Error!"));
+                        let _ = tray.set_tooltip(Some(&hifimule_i18n::t("tray.tooltip.error")));
                         let _ = tray.set_icon(Some((*icon_error).clone()));
                     }
                 }
@@ -838,8 +845,8 @@ async fn run_auto_sync(
                 daemon_log!("[AutoSync] Sync completed successfully");
                 let _ = tokio::task::spawn_blocking(|| {
                     if let Err(e) = notify_rust::Notification::new()
-                        .summary("HifiMule")
-                        .body("Sync Complete. Safe to eject.")
+                        .summary(&hifimule_i18n::t("app.name"))
+                        .body(&hifimule_i18n::t("notification.sync_complete_safe"))
                         .show()
                     {
                         daemon_log!("[AutoSync] Notification failed: {}", e);

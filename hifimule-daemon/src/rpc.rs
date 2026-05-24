@@ -78,7 +78,7 @@ pub struct AppState {
 
 fn send_sync_complete_notification() {
     if let Err(e) = Notification::new()
-        .summary("Sync Complete. Ready to Run.")
+        .summary(&hifimule_i18n::t("notification.sync_complete_ready"))
         .show()
     {
         eprintln!("[Notification] Failed to show OS notification: {}", e);
@@ -363,7 +363,7 @@ async fn handler(
         }
         _ => Err(JsonRpcError {
             code: ERR_METHOD_NOT_FOUND,
-            message: "Method not found".to_string(),
+            message: hifimule_i18n::t("error.method_not_found"),
             data: None,
         }),
     };
@@ -390,7 +390,7 @@ async fn handle_server_probe(params: Option<Value>) -> Result<Value, JsonRpcErro
         .and_then(|p| p["url"].as_str())
         .ok_or(JsonRpcError {
             code: ERR_INVALID_PARAMS,
-            message: "Missing url".to_string(),
+            message: hifimule_i18n::t("error.missing_url"),
             data: None,
         })?;
 
@@ -438,7 +438,7 @@ async fn handle_test_connection(
 
     let url = params["url"].as_str().ok_or(JsonRpcError {
         code: ERR_INVALID_PARAMS,
-        message: "Missing url".to_string(),
+        message: hifimule_i18n::t("error.missing_url"),
         data: None,
     })?;
 
@@ -461,7 +461,7 @@ async fn handle_test_connection(
 pub async fn require_provider(state: &AppState) -> Result<Arc<dyn MediaProvider>, JsonRpcError> {
     state.provider.read().await.clone().ok_or(JsonRpcError {
         code: ERR_CONNECTION_FAILED,
-        message: "No active media provider".to_string(),
+        message: hifimule_i18n::t("error.no_active_media_provider"),
         data: None,
     })
 }
@@ -486,6 +486,25 @@ fn provider_error_to_rpc(error: ProviderError) -> JsonRpcError {
         _ => JsonRpcError {
             code: ERR_INTERNAL_ERROR,
             message: error.to_string(),
+            data: None,
+        },
+    }
+}
+
+fn server_connect_error_to_rpc(error: ProviderError) -> JsonRpcError {
+    match error {
+        ProviderError::UnsupportedCapability(message)
+            if message == "Unknown server type at this URL" =>
+        {
+            JsonRpcError {
+                code: ERR_CONNECTION_FAILED,
+                message: hifimule_i18n::t("error.unknown_server_type"),
+                data: Some(serde_json::json!({ "i18nKey": "error.unknown_server_type" })),
+            }
+        }
+        other => JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: crate::providers::subsonic::sanitize_subsonic_message(&other.to_string()),
             data: None,
         },
     }
@@ -810,7 +829,7 @@ async fn handle_server_connect(
 
     let url = params["url"].as_str().ok_or(JsonRpcError {
         code: ERR_INVALID_PARAMS,
-        message: "Missing url".to_string(),
+        message: hifimule_i18n::t("error.missing_url"),
         data: None,
     })?;
     let server_type = params["serverType"].as_str().unwrap_or("auto");
@@ -835,16 +854,12 @@ async fn handle_server_connect(
     };
     let provider = crate::providers::connect(url, &credentials, hint)
         .await
-        .map_err(|error| JsonRpcError {
-            code: ERR_CONNECTION_FAILED,
-            message: crate::providers::subsonic::sanitize_subsonic_message(&error.to_string()),
-            data: None,
-        })?;
+        .map_err(server_connect_error_to_rpc)?;
     let normalized_type = server_type_slug(provider.server_type())
         .ok_or(JsonRpcError {
             code: ERR_CONNECTION_FAILED,
-            message: "Unknown server type at this URL".to_string(),
-            data: None,
+            message: hifimule_i18n::t("error.unknown_server_type"),
+            data: Some(serde_json::json!({ "i18nKey": "error.unknown_server_type" })),
         })?
         .to_string();
     let version = provider.server_version().map(str::to_string);
@@ -982,7 +997,7 @@ async fn handle_save_credentials(params: Option<Value>) -> Result<Value, JsonRpc
 
     let url = params["url"].as_str().ok_or(JsonRpcError {
         code: ERR_INVALID_PARAMS,
-        message: "Missing url".to_string(),
+        message: hifimule_i18n::t("error.missing_url"),
         data: None,
     })?;
 

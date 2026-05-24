@@ -21,17 +21,11 @@ import {
     fetchBrowseFavoriteItems,
 } from './rpc';
 import { MediaCard, BrowseDisplayItem } from './components/MediaCard';
+import { t } from './i18n';
 
-const MODE_LABELS: Record<BrowseMode, string> = {
-    artists: 'Artists',
-    albums: 'Albums',
-    playlists: 'Playlists',
-    genres: 'Genres',
-    recentlyAdded: 'Recent',
-    frequentlyPlayed: 'Frequent',
-    recentlyPlayed: 'Recent Played',
-    favorites: 'Favorites',
-};
+function modeLabel(mode: BrowseMode): string {
+    return t(`library.mode.${mode}`);
+}
 
 interface AppState {
     browseMode: BrowseMode;
@@ -407,7 +401,7 @@ function renderModeBar() {
         btn.setAttribute('data-mode', mode);
         btn.variant = mode === state.browseMode ? 'primary' : 'default';
         btn.size = 'small';
-        btn.textContent = MODE_LABELS[mode];
+        btn.textContent = modeLabel(mode);
         btn.disabled = state.loading;
         btn.addEventListener('click', () => switchMode(mode));
         bar.appendChild(btn);
@@ -423,7 +417,7 @@ function createBreadcrumbs(): HTMLElement {
     const homeBtn = document.createElement('sl-button') as any;
     homeBtn.variant = 'text';
     homeBtn.size = 'small';
-    homeBtn.innerHTML = `<sl-icon slot="prefix" name="house"></sl-icon> ${MODE_LABELS[state.browseMode]}`;
+    homeBtn.innerHTML = `<sl-icon slot="prefix" name="house"></sl-icon> ${modeLabel(state.browseMode)}`;
     homeBtn.onclick = () => {
         saveScroll();
         loadModeRoot();

@@ -1,5 +1,6 @@
 import { LogicalSize } from '@tauri-apps/api/dpi';
 import { Window, currentMonitor } from '@tauri-apps/api/window';
+import { t } from './i18n';
 
 // HifiMule UI Main Entry Point
 // Coordinates splash screen and main window lifecycle.
@@ -26,7 +27,7 @@ function serverTypeLabel(type?: string | null): string {
         case 'jellyfin': return 'Jellyfin';
         case 'openSubsonic': return 'OpenSubsonic';
         case 'subsonic': return 'Subsonic';
-        default: return 'Server';
+        default: return t('server.default');
     }
 }
 
@@ -147,7 +148,7 @@ function renderMainLayout(currentServer: CurrentServer = null) {
             <div class="server-connection-chip">
               <sl-badge variant="${serverBadgeVariant(currentServer.serverType)}" pill>${serverLabel}</sl-badge>
               <span title="${currentServer.url}">${currentServer.username} @ ${currentServer.url}${serverVersion}</span>
-              <sl-icon-button id="logout-btn" name="box-arrow-right" label="Log out"></sl-icon-button>
+              <sl-icon-button id="logout-btn" name="box-arrow-right" label="${t('ui.logout')}"></sl-icon-button>
             </div>
         `
         : '';
@@ -158,8 +159,8 @@ function renderMainLayout(currentServer: CurrentServer = null) {
         <header>
           <div class="library-header-row">
             <div class="library-title-block">
-              <h1>Library</h1>
-              <p>Select media to sync to your device.</p>
+              <h1>${t('ui.library.title')}</h1>
+              <p>${t('ui.library.subtitle')}</p>
             </div>
             ${serverHint}
           </div>
@@ -235,7 +236,7 @@ async function initSplashScreen(mainWin: Window | null, splashWin: Window | null
 
         isPolling = true;
         try {
-            statusEl.textContent = "Connecting to Daemon...";
+            statusEl.textContent = t('ui.splash.connecting_daemon');
             console.log("Polling daemon via invoke...");
 
             // Use Tauri invoke to bypass browser security restrictions
@@ -244,7 +245,7 @@ async function initSplashScreen(mainWin: Window | null, splashWin: Window | null
             await invoke('rpc_proxy', { method: 'get_daemon_state', params: {} });
 
             console.log("Daemon responded!");
-            statusEl.textContent = "Daemon Ready...";
+            statusEl.textContent = t('ui.splash.daemon_ready');
 
             try {
                 // Show main window and close splash
@@ -259,16 +260,18 @@ async function initSplashScreen(mainWin: Window | null, splashWin: Window | null
                 return; // Successfully finished
             } catch (winError) {
                 console.error("Window API Error (Permissions?):", winError);
-                statusEl.textContent = "UI API Error - Check Console";
+                statusEl.textContent = t('ui.splash.ui_api_error');
             }
         } catch (e: any) {
             console.log("Daemon not reachable yet:", e?.message);
             try {
                 const { invoke } = await import('@tauri-apps/api/core');
                 const sidecarStatus = await invoke('get_sidecar_status');
-                statusEl.textContent = `Connecting to Daemon... (sidecar: ${sidecarStatus})`;
+                statusEl.textContent = t('ui.splash.connecting_daemon_sidecar', { status: String(sidecarStatus) });
             } catch {
-                statusEl.textContent = `Connecting to Daemon... (${e?.message || 'connection failed'})`;
+                statusEl.textContent = t('ui.splash.connecting_daemon_error', {
+                    error: e?.message || t('ui.splash.connection_failed')
+                });
             }
         } finally {
             isPolling = false;
@@ -280,9 +283,9 @@ async function initSplashScreen(mainWin: Window | null, splashWin: Window | null
             try {
                 const { invoke } = await import('@tauri-apps/api/core');
                 const sidecarStatus = await invoke('get_sidecar_status');
-                statusEl.textContent = `Failed to connect to Daemon (sidecar: ${sidecarStatus}).`;
+                statusEl.textContent = t('ui.splash.failed_sidecar', { status: String(sidecarStatus) });
             } catch {
-                statusEl.textContent = "Failed to connect to Daemon. Please ensure it is running.";
+                statusEl.textContent = t('ui.splash.failed');
             }
             return;
         }

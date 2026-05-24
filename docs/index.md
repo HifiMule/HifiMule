@@ -58,6 +58,7 @@
 ### Development
 
 - [Development Guide](./development-guide.md) — Prerequisites, build commands, testing, RPC debugging, common issues
+- [Localization Guide](./localization.md) — Shared daemon/UI translations and how to add a new language
 - [Release Guide](./release-guide.md) — Release process, tagging, CI pipeline
 
 ### Metadata

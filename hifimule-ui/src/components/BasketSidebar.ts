@@ -5,6 +5,7 @@ import { basketStore, BasketItem, AUTO_FILL_SLOT_ID } from '../state/basket';
 import { rpcCall, getImageUrl } from '../rpc';
 import { RepairModal } from './RepairModal';
 import { InitDeviceModal } from './InitDeviceModal';
+import { t } from '../i18n';
 
 interface StorageInfo {
     totalBytes: number;
@@ -90,7 +91,7 @@ function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: numb
         if (projectedBytes > 0) {
             return `
                 <div class="capacity-section capacity-no-device">
-                    <div class="capacity-selection-total">Your selection: <strong>${formatSize(projectedBytes)}</strong></div>
+                    <div class="capacity-selection-total">${t('basket.capacity.selection', { size: formatSize(projectedBytes) })}</div>
                     <div class="capacity-bar-container capacity-bar-disabled">
                         <div class="capacity-bar">
                             <div class="capacity-segment capacity-grey" style="width: 100%;"></div>
@@ -98,7 +99,7 @@ function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: numb
                     </div>
                     <div class="capacity-no-device-label">
                         <sl-icon name="usb-drive" style="font-size: 0.9rem;"></sl-icon>
-                        No device connected
+                        ${t('basket.no_device_connected')}
                     </div>
                 </div>
             `;
@@ -118,12 +119,12 @@ function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: numb
     let statusMessage = '';
     let statusIcon = '';
     if (zone === 'green') {
-        statusMessage = `${formatSize(remaining)} remaining`;
+        statusMessage = t('basket.capacity.remaining', { size: formatSize(remaining) });
         statusIcon = '<sl-icon name="check-circle" style="color: var(--sl-color-success-600);"></sl-icon>';
     } else if (zone === 'amber') {
-        statusMessage = `Tight fit — ${formatSize(remaining)} remaining`;
+        statusMessage = t('basket.capacity.tight_fit', { size: formatSize(remaining) });
     } else {
-        statusMessage = `Selection exceeds available space by ${formatSize(Math.abs(remaining))}`;
+        statusMessage = t('basket.capacity.exceeds', { size: formatSize(Math.abs(remaining)) });
     }
 
     const projectedColor = zone === 'green' ? 'var(--sl-color-success-500)'
@@ -170,7 +171,7 @@ export class BasketSidebar {
     private autoFillEnabled: boolean = false;
     private autoFillMaxBytes: number | null = null;
     private autoSyncOnConnect: boolean = false;
-    private etaText: string = 'Calculating\u2026';
+    private etaText: string = t('basket.sync.calculating');
     // Multi-device hub state
     private connectedDevices: ConnectedDeviceSummary[] = [];
     private selectedDevicePath: string | null = null;
@@ -312,7 +313,7 @@ export class BasketSidebar {
             : available;
         basketStore.add({
             id: AUTO_FILL_SLOT_ID,
-            name: 'Auto-Fill',
+            name: t('basket.autofill.name'),
             type: 'AutoFillSlot',
             childCount: 0,
             sizeTicks: 0,
@@ -415,7 +416,7 @@ export class BasketSidebar {
         try {
             profiles = await rpcCall('device_profiles.list') as DeviceProfileSummary[];
         } catch (err) {
-            profiles = [{ id: 'passthrough', name: 'No Transcoding', description: 'Sync audio files as-is without transcoding.' }];
+            profiles = [{ id: 'passthrough', name: t('basket.profile.no_transcoding'), description: t('basket.profile.no_transcoding_desc') }];
         }
 
         const musicFolder = selected.managedPaths?.[0]
@@ -437,13 +438,13 @@ export class BasketSidebar {
         const selectedProfile = profiles.find(profile => profile.id === selectedProfileId)
             ?? profiles.find(profile => profile.id === 'passthrough');
         const dialog = document.createElement('sl-dialog') as any;
-        dialog.label = 'Device Settings';
+        dialog.label = t('basket.device.settings');
         dialog.className = 'device-settings-dialog';
         dialog.innerHTML = `
             <div class="device-settings-form">
-                <sl-input id="device-settings-name" label="Name" value="${this.escapeHtml(selected.name || selected.deviceId)}"></sl-input>
+                <sl-input id="device-settings-name" label="${t('basket.device.name')}" value="${this.escapeHtml(selected.name || selected.deviceId)}"></sl-input>
                 <div>
-                    <label class="device-settings-label">Icon</label>
+                    <label class="device-settings-label">${t('basket.device.icon')}</label>
                     <div id="device-settings-icon-picker" class="device-settings-icon-picker">
                         ${['usb-drive', 'phone-fill', 'watch', 'sd-card', 'headphones', 'music-note-list'].map(icon => `
                             <div class="init-icon-tile ${icon === selectedIcon ? 'selected' : ''}"
@@ -454,20 +455,20 @@ export class BasketSidebar {
                         `).join('')}
                     </div>
                 </div>
-                <sl-select id="device-settings-transcoding-profile" label="Transcoding Profile" value="${this.escapeHtml(selectedProfileId)}">
+                <sl-select id="device-settings-transcoding-profile" label="${t('basket.device.transcoding_profile')}" value="${this.escapeHtml(selectedProfileId)}">
                     ${profileOptions}
                 </sl-select>
                 <div id="device-settings-transcoding-desc" class="device-settings-description">
                     ${this.escapeHtml(selectedProfile?.description ?? '')}
                 </div>
-                <sl-input id="device-settings-music" label="Music folder" value="${this.escapeHtml(musicFolder)}"></sl-input>
-                <sl-input id="device-settings-playlist" label="Playlist folder" placeholder="${this.escapeHtml(musicFolder)}" value="${this.escapeHtml(playlistFolder ?? '')}"></sl-input>
+                <sl-input id="device-settings-music" label="${t('basket.device.music_folder')}" value="${this.escapeHtml(musicFolder)}"></sl-input>
+                <sl-input id="device-settings-playlist" label="${t('basket.device.playlist_folder')}" placeholder="${this.escapeHtml(musicFolder)}" value="${this.escapeHtml(playlistFolder ?? '')}"></sl-input>
                 <sl-alert id="device-settings-error" variant="danger" closable style="display:none;"></sl-alert>
             </div>
-            <sl-button slot="footer" variant="default" id="device-settings-cancel">Cancel</sl-button>
+            <sl-button slot="footer" variant="default" id="device-settings-cancel">${t('basket.actions.cancel')}</sl-button>
             <sl-button slot="footer" variant="primary" id="device-settings-save">
                 <sl-icon slot="prefix" name="check2"></sl-icon>
-                Save
+                ${t('basket.actions.save')}
             </sl-button>
         `;
         document.body.appendChild(dialog);
@@ -560,21 +561,21 @@ export class BasketSidebar {
             <div class="auto-fill-controls">
                 <div class="auto-fill-toggle-row">
                     <sl-switch id="auto-fill-toggle" size="small" ${this.autoFillEnabled ? 'checked' : ''}>
-                        Auto-Fill
+                        ${t('basket.autofill.name')}
                     </sl-switch>
                     <span class="auto-fill-hint" style="font-size:0.75rem; opacity:0.6;">
-                        Fill basket automatically
+                        ${t('basket.autofill.hint')}
                     </span>
                 </div>
                 ${this.autoFillEnabled && deviceFull ? `
                     <div class="auto-fill-full-notice" style="margin-top:0.5rem; font-size:0.75rem; opacity:0.7;">
-                        Device is full — no space available for Auto-Fill
+                        ${t('basket.autofill.full')}
                     </div>
                 ` : ''}
                 ${this.autoFillEnabled && !deviceFull ? `
                     <div class="auto-fill-slider-row" style="margin-top:0.5rem;">
                         <label style="font-size:0.75rem; opacity:0.7; display:block; margin-bottom:0.25rem;">
-                            Max Fill Size: <strong>${sliderValue} GB</strong>
+                            ${t('basket.autofill.max_fill_size', { size: `${sliderValue} GB` })}
                         </label>
                         <sl-range id="auto-fill-slider"
                             min="0" max="${sliderMax}" step="1" value="${sliderValue}"
@@ -584,11 +585,11 @@ export class BasketSidebar {
                 ` : ''}
                 <div class="auto-fill-toggle-row" style="margin-top:0.5rem;">
                     <sl-switch id="auto-sync-toggle" size="small" ${this.autoSyncOnConnect ? 'checked' : ''}>
-                        Auto-Sync on Connect
+                        ${t('basket.autofill.auto_sync_on_connect')}
                     </sl-switch>
                 </div>
                 <div style="font-size:0.7rem; opacity:0.55; margin-top:0.2rem; padding-left:0.5rem;">
-                    Automatically start syncing when this device is connected. Works with or without the UI open.
+                    ${t('basket.autofill.auto_sync_hint')}
                 </div>
             </div>
         `;
@@ -666,7 +667,7 @@ export class BasketSidebar {
                                      class="device-hub-icon"></sl-icon>
                             <span class="device-hub-name">${this.escapeHtml(d.name || d.deviceId)}</span>
                             ${d.path === this.selectedDevicePath ? `
-                                <sl-icon-button name="gear" label="Device settings" class="device-settings-btn"></sl-icon-button>
+                                <sl-icon-button name="gear" label="${t('basket.device.settings')}" class="device-settings-btn"></sl-icon-button>
                             ` : ''}
                         </div>
                     `).join('')}
@@ -682,7 +683,7 @@ export class BasketSidebar {
                 <div class="device-folders-panel">
                     <div class="capacity-no-device-label" style="opacity: 0.7;">
                         <sl-icon name="usb-drive" style="font-size: 0.9rem;"></sl-icon>
-                        Connect a device to view folders
+                        ${t('basket.device.connect_to_view_folders')}
                     </div>
                 </div>
             `;
@@ -694,13 +695,13 @@ export class BasketSidebar {
         if (!hasManifest) {
             return `
                 <div class="device-folders-panel">
-                    <div class="dirty-manifest-banner" id="open-init-device-btn" title="Initialize this device for syncing">
+                    <div class="dirty-manifest-banner" id="open-init-device-btn" title="${t('basket.device.initialize_title')}">
                         <sl-icon name="usb-drive"></sl-icon>
                         <div class="dirty-manifest-banner-text">
-                            <strong>New Device Detected</strong>
-                            Click Initialize to set up sync
+                            <strong>${t('basket.device.new_detected')}</strong>
+                            ${t('basket.device.click_initialize')}
                         </div>
-                        <sl-button size="small" variant="primary" id="init-device-btn">Initialize</sl-button>
+                        <sl-button size="small" variant="primary" id="init-device-btn">${t('basket.device.initialize')}</sl-button>
                     </div>
                 </div>
             `;
@@ -710,24 +711,24 @@ export class BasketSidebar {
             <div class="dirty-manifest-banner device-relocation-banner">
                 <sl-icon name="arrow-repeat"></sl-icon>
                 <div class="dirty-manifest-banner-text">
-                    <strong>Folder layout changed</strong>
-                    Next sync preview will include cleanup and resync work
+                    <strong>${t('basket.device.folder_layout_changed')}</strong>
+                    ${t('basket.device.relocation_hint')}
                 </div>
             </div>
         ` : '';
 
         const isMtp = this.folderInfo.devicePath.toLowerCase().startsWith('mtp://');
         const unmanagedSummary = isMtp
-            ? 'MTP — folder enumeration not available'
-            : `${unmanagedCount} protected`;
+            ? t('basket.device.mtp_no_folder_enum')
+            : t('basket.device.protected_count', { count: unmanagedCount });
 
         let content = `
             <div class="device-folders-panel">
                 ${relocationBanner}
                 <div class="device-folders-header" id="device-folders-toggle">
-                    <h3>Device Folders</h3>
+                    <h3>${t('basket.device.folders')}</h3>
                     <div style="display: flex; align-items: center; gap: 0.5rem;">
-                        <span class="device-folders-summary">${managedCount} managed | ${unmanagedSummary}</span>
+                        <span class="device-folders-summary">${t('basket.device.managed_count', { count: managedCount })} | ${unmanagedSummary}</span>
                         <sl-icon name="${this.isFoldersExpanded ? 'chevron-up' : 'chevron-down'}" style="font-size: 0.8rem; opacity: 0.5;"></sl-icon>
                     </div>
                 </div>
@@ -736,12 +737,12 @@ export class BasketSidebar {
         if (this.isFoldersExpanded) {
             content += `
                 <div class="device-folders-list">
-                    ${folders.length === 0 ? '<div style="font-size: 0.8rem; opacity: 0.5; padding: 0.5rem;">No folders found</div>' : ''}
+                    ${folders.length === 0 ? `<div style="font-size: 0.8rem; opacity: 0.5; padding: 0.5rem;">${t('basket.device.no_folders_found')}</div>` : ''}
                     ${folders.map(f => `
                         <div class="folder-item ${f.isManaged ? 'folder-managed' : 'folder-protected'}">
                             <sl-icon name="${f.isManaged ? 'unlock' : 'shield-lock'}" class="folder-icon"></sl-icon>
                             <span class="folder-name" title="${this.escapeHtml(f.name)}">${this.escapeHtml(f.name)}</span>
-                            <span class="folder-status">${f.isManaged ? 'Managed' : 'Protected'}</span>
+                            <span class="folder-status">${f.isManaged ? t('basket.device.managed') : t('basket.device.protected')}</span>
                         </div>
                     `).join('')}
                 </div>
@@ -751,11 +752,11 @@ export class BasketSidebar {
         // Show dirty manifest banner if flagged
         if (this.isDirtyManifest) {
             content += `
-                <div class="dirty-manifest-banner" id="open-repair-btn" title="Open Manifest Repair">
+                <div class="dirty-manifest-banner" id="open-repair-btn" title="${t('basket.manifest.open_repair')}">
                     <sl-icon name="exclamation-triangle-fill"></sl-icon>
                     <div class="dirty-manifest-banner-text">
-                        <strong>Manifest Dirty</strong>
-                        Interrupted sync detected — click to repair
+                        <strong>${t('basket.manifest.dirty')}</strong>
+                        ${t('basket.manifest.interrupted')}
                     </div>
                     <sl-icon name="chevron-right" style="opacity: 0.5;"></sl-icon>
                 </div>
@@ -775,7 +776,7 @@ export class BasketSidebar {
             <div class="basket-status-zone">
                 <div class="sync-proposed-banner">
                     <sl-icon name="arrow-repeat"></sl-icon>
-                    <span>Sync Proposed — Basket changed</span>
+                    <span>${t('basket.sync.proposed')}</span>
                 </div>
             </div>
         `;
@@ -791,12 +792,12 @@ export class BasketSidebar {
     private renderLockedBasket(): void {
         this.container.innerHTML = `
             <div class="basket-header">
-                <h2>Basket</h2>
+                <h2>${t('basket.title')}</h2>
                 <sl-badge variant="neutral" pill>0</sl-badge>
             </div>
             <div class="basket-placeholder">
                 <sl-icon name="usb-drive" style="font-size: 2rem; opacity: 0.5;"></sl-icon>
-                <p style="opacity: 0.5;">Select a device to start curating</p>
+                <p style="opacity: 0.5;">${t('basket.select_device')}</p>
             </div>
             <div class="basket-footer">
                 ${this.renderDeviceHub()}
@@ -805,7 +806,7 @@ export class BasketSidebar {
             <div class="basket-actions">
                 <sl-button id="start-sync-btn" variant="primary" style="width: 100%;" disabled>
                     <sl-icon slot="prefix" name="cloud-download"></sl-icon>
-                    Start Sync
+                    ${t('basket.actions.start_sync')}
                 </sl-button>
             </div>
         `;
@@ -838,13 +839,13 @@ export class BasketSidebar {
         if (this.isSyncing) {
             this.updateDeviceLockState();
             this.container.innerHTML = `
-                <div class="basket-header"><h2>Starting...</h2></div>
-                <div class="sync-progress-panel" aria-live="polite" aria-label="Sync progress">
+                <div class="basket-header"><h2>${t('basket.sync.starting')}</h2></div>
+                <div class="sync-progress-panel" aria-live="polite" aria-label="${t('basket.sync.progress')}">
                     <sl-spinner style="font-size: 2rem;"></sl-spinner>
                 </div>
                 <div class="basket-footer">
                     <sl-button variant="primary" style="width: 100%;" disabled loading>
-                        Syncing...
+                        ${t('basket.sync.syncing')}
                     </sl-button>
                 </div>
             `;
@@ -864,12 +865,12 @@ export class BasketSidebar {
         if (items.length === 0) {
             this.container.innerHTML = `
                 <div class="basket-header">
-                    <h2>Basket</h2>
+                    <h2>${t('basket.title')}</h2>
                     <sl-badge variant="neutral" pill>0</sl-badge>
                 </div>
                 <div class="basket-placeholder">
                     <sl-icon name="basket" style="font-size: 2rem; opacity: 0.5;"></sl-icon>
-                    <p style="opacity: 0.5;">Your basket is empty</p>
+                    <p style="opacity: 0.5;">${t('basket.empty')}</p>
                 </div>
                 <div class="basket-footer">
                     ${this.renderAutoFillControls()}
@@ -880,7 +881,7 @@ export class BasketSidebar {
                 <div class="basket-actions">
                     <sl-button id="start-sync-btn" variant="primary" style="width: 100%;" ${(!basketStore.isDirty() && !this.autoFillEnabled) || !this.selectedDevicePath ? 'disabled' : ''}>
                         <sl-icon slot="prefix" name="cloud-download"></sl-icon>
-                        Start Sync
+                        ${t('basket.actions.start_sync')}
                     </sl-button>
                 </div>
             `;
@@ -909,7 +910,7 @@ export class BasketSidebar {
 
         this.container.innerHTML = `
             <div class="basket-header">
-                <h2>Basket</h2>
+                <h2>${t('basket.title')}</h2>
                 <sl-badge variant="primary" pill>${items.length}</sl-badge>
             </div>
 
@@ -919,7 +920,7 @@ export class BasketSidebar {
 
             <div class="basket-footer">
                 <div class="basket-summary">
-                    <span>${totalTracks} tracks | ${formatSize(totalSizeBytes)}</span>
+                    <span>${t('basket.summary.tracks_size', { count: totalTracks, size: formatSize(totalSizeBytes) })}</span>
                 </div>
                 ${renderCapacityBar(this.storageInfo, totalSizeBytes)}
                 ${this.renderAutoFillControls()}
@@ -931,22 +932,22 @@ export class BasketSidebar {
                 ${isOverLimit ? `
                     <sl-button variant="danger" style="width: 100%;" disabled>
                         <sl-icon slot="prefix" name="exclamation-triangle"></sl-icon>
-                        Remove ${formatSize(overAmount)} to fit
+                        ${t('basket.actions.remove_to_fit', { size: formatSize(overAmount) })}
                     </sl-button>
                 ` : this.isDirtyManifest ? `
                     <sl-button variant="warning" style="width: 100%;" disabled>
                         <sl-icon slot="prefix" name="exclamation-triangle"></sl-icon>
-                        Repair Manifest First
+                        ${t('basket.actions.repair_manifest_first')}
                     </sl-button>
                 ` : `
                     <sl-button id="start-sync-btn" variant="primary" style="width: 100%;"
                                ${!this.selectedDevicePath ? 'disabled' : this.isSyncing ? 'loading disabled' : ''}>
                         <sl-icon slot="prefix" name="cloud-download"></sl-icon>
-                        ${this.isSyncing ? 'Syncing...' : 'Start Sync'}
+                        ${this.isSyncing ? t('basket.sync.syncing') : t('basket.actions.start_sync')}
                     </sl-button>
                 `}
                 <sl-button variant="text" size="small" class="clear-basket-btn" style="width: 100%;">
-                    Clear All
+                    ${t('basket.actions.clear_all')}
                 </sl-button>
             </div>
         `;
@@ -1038,7 +1039,7 @@ export class BasketSidebar {
             this.syncErrorMessages = null;
             this.currentOperation = null;
             this.currentOperationId = null;
-            this.etaText = 'Calculating\u2026';
+            this.etaText = t('basket.sync.calculating');
             this.render();
 
             const delta = await rpcCall('sync_calculate_delta', deltaParams);
@@ -1049,7 +1050,7 @@ export class BasketSidebar {
             const rawThreshold = (delta as any)?.destructiveCleanupThreshold;
             const destructiveThreshold = typeof rawThreshold === 'number' ? rawThreshold : Number.POSITIVE_INFINITY;
             const confirmDestructiveCleanup = deleteCount > destructiveThreshold
-                ? window.confirm(`This sync will remove ${deleteCount} managed files. Continue?`)
+                ? window.confirm(t('basket.confirm.remove_managed_files', { count: deleteCount }))
                 : false;
             if (deleteCount > destructiveThreshold && !confirmDestructiveCleanup) {
                 this.stopPolling();
@@ -1069,7 +1070,7 @@ export class BasketSidebar {
             this.isSyncing = false;
             this.currentOperationId = null;
             this.currentOperation = null;
-            this.showError(`Failed to start sync: ${(err as Error).message}`);
+            this.showError(t('basket.sync.failed_to_start', { message: (err as Error).message }));
         }
     }
 
@@ -1154,22 +1155,22 @@ export class BasketSidebar {
     }
 
     private computeEta(op: SyncOperation): string {
-        if (op.totalBytes <= 0 || op.bytesTransferred <= 0) return 'Calculating\u2026';
+        if (op.totalBytes <= 0 || op.bytesTransferred <= 0) return t('basket.sync.calculating');
 
         const elapsedSeconds = (Date.now() - new Date(op.startedAt).getTime()) / 1000;
-        if (elapsedSeconds <= 0 || isNaN(elapsedSeconds)) return 'Calculating\u2026';
+        if (elapsedSeconds <= 0 || isNaN(elapsedSeconds)) return t('basket.sync.calculating');
 
         const totalRate = op.bytesTransferred / elapsedSeconds;
-        if (totalRate <= 0) return 'Calculating\u2026';
+        if (totalRate <= 0) return t('basket.sync.calculating');
 
         const remaining = Math.max(0, op.totalBytes - op.bytesTransferred);
-        if (remaining <= 0) return 'Almost done\u2026';
+        if (remaining <= 0) return t('basket.sync.almost_done');
 
         const etaSeconds = remaining / totalRate;
 
-        if (etaSeconds < 10) return 'Almost done\u2026';
-        if (etaSeconds < 60) return `~${Math.round(etaSeconds)} sec left`;
-        return `~${Math.round(etaSeconds / 60)} min left`;
+        if (etaSeconds < 10) return t('basket.sync.almost_done');
+        if (etaSeconds < 60) return t('basket.sync.seconds_left', { count: Math.round(etaSeconds) });
+        return t('basket.sync.minutes_left', { count: Math.round(etaSeconds / 60) });
     }
 
     private renderSyncProgress() {
@@ -1181,29 +1182,29 @@ export class BasketSidebar {
             : 0;
         const currentFileName = op.currentFile
             ? getBasename(op.currentFile)
-            : 'Preparing...';
+            : t('basket.sync.preparing');
 
         this.etaText = this.computeEta(op);
 
         this.container.innerHTML = `
             <div class="basket-header">
-                <h2>Syncing</h2>
+                <h2>${t('basket.sync.syncing_title')}</h2>
                 <sl-badge variant="primary" pill>${op.filesCompleted}/${op.filesTotal}</sl-badge>
             </div>
-            <div class="sync-progress-panel" aria-live="polite" aria-label="Sync progress">
+            <div class="sync-progress-panel" aria-live="polite" aria-label="${t('basket.sync.progress')}">
                 <sl-progress-bar value="${pct}" style="width: 100%; margin-bottom: 0.75rem;"
-                    label="Sync progress: ${pct}%"></sl-progress-bar>
+                    label="${t('basket.sync.progress_percent', { pct })}"></sl-progress-bar>
                 <div class="sync-current-file">
                     <sl-icon name="arrow-down-circle" style="color: var(--sl-color-primary-600);"></sl-icon>
                     <span title="${this.escapeHtml(op.currentFile || '')}">${this.escapeHtml(currentFileName)}</span>
                 </div>
-                <div class="sync-file-counter">${op.filesCompleted} of ${op.filesTotal} files</div>
+                <div class="sync-file-counter">${t('basket.sync.file_counter', { completed: op.filesCompleted, total: op.filesTotal })}</div>
                 <div class="sync-eta">${this.escapeHtml(this.etaText)}</div>
             </div>
             <div class="basket-footer">
                 <sl-button variant="primary" style="width: 100%;" disabled loading>
                     <sl-icon slot="prefix" name="cloud-download"></sl-icon>
-                    Syncing...
+                    ${t('basket.sync.syncing')}
                 </sl-button>
             </div>
         `;
@@ -1212,18 +1213,18 @@ export class BasketSidebar {
     private renderSyncComplete() {
         this.container.innerHTML = `
             <div class="basket-header">
-                <h2>Basket</h2>
+                <h2>${t('basket.title')}</h2>
                 <sl-badge variant="neutral" pill>0</sl-badge>
             </div>
             <div class="sync-success-panel">
                 <sl-icon name="check-circle-fill"
                     style="font-size: 2.5rem; color: var(--sl-color-success-600);"></sl-icon>
-                <p class="sync-status-label">Sync Complete</p>
+                <p class="sync-status-label">${t('basket.sync.complete')}</p>
             </div>
             <div class="basket-footer">
                 <sl-button id="sync-done-btn" variant="primary" style="width: 100%;">
                     <sl-icon slot="prefix" name="check"></sl-icon>
-                    Done
+                    ${t('basket.actions.done')}
                 </sl-button>
             </div>
         `;
@@ -1237,21 +1238,21 @@ export class BasketSidebar {
     private renderSyncError(errors: string[]) {
         const errorList = errors.length > 0
             ? errors.map(msg => `<li>${this.escapeHtml(msg)}</li>`).join('')
-            : '<li>Sync failed - check device connection and try again.</li>';
+            : `<li>${t('basket.sync.failed_retry')}</li>`;
 
         this.container.innerHTML = `
             <div class="basket-header">
-                <h2>Basket</h2>
+                <h2>${t('basket.title')}</h2>
             </div>
             <div class="sync-error-panel">
                 <sl-icon name="exclamation-triangle-fill"
                     style="font-size: 2.5rem; color: var(--sl-color-danger-500);"></sl-icon>
-                <p class="sync-status-label">Sync Failed</p>
+                <p class="sync-status-label">${t('basket.sync.failed')}</p>
                 <ul class="sync-error-list">${errorList}</ul>
             </div>
             <div class="basket-footer">
                 <sl-button id="sync-dismiss-btn" variant="text" style="width: 100%;">
-                    Dismiss
+                    ${t('basket.actions.dismiss')}
                 </sl-button>
             </div>
         `;
@@ -1278,7 +1279,7 @@ export class BasketSidebar {
         this.showSyncComplete = true;
         this.syncErrorMessages = null;
         this.syncPreviewCleanupDevicePath = null;
-        this.etaText = 'Calculating\u2026';
+        this.etaText = t('basket.sync.calculating');
         const tokenKey = this.syncTokenStorageKey();
         if (this.isSubsonicServer() && tokenKey) {
             localStorage.setItem(tokenKey, Date.now().toString());
@@ -1302,14 +1303,14 @@ export class BasketSidebar {
         this.currentOperationId = null;
         this.currentOperation = null;
         this.showSyncComplete = false;
-        this.etaText = 'Calculating\u2026';
+        this.etaText = t('basket.sync.calculating');
         this.syncErrorMessages = operation.errors.length > 0
             ? operation.errors.map(e => {
-                const target = e.filename || e.jellyfinId || 'Unknown file';
-                const message = e.errorMessage || 'Unknown file error';
+                const target = e.filename || e.jellyfinId || t('basket.sync.unknown_file');
+                const message = e.errorMessage || t('basket.sync.unknown_file_error');
                 return `${target}: ${message}`;
             })
-            : ['Sync failed - check device connection and try again.'];
+            : [t('basket.sync.failed_retry')];
         this.renderSyncError(this.syncErrorMessages);
     }
 
@@ -1323,13 +1324,13 @@ export class BasketSidebar {
     }
 
     private renderPriorityLabel(reason: string): string {
-        if (reason === 'favorite') return '★ Favorite';
+        if (reason === 'favorite') return t('basket.priority.favorite');
         if (reason.startsWith('playCount:')) {
             const count = reason.split(':')[1];
-            return `▶ ${count} plays`;
+            return t('basket.priority.plays', { count });
         }
-        if (reason === 'new' || reason === '') return 'New';
-        return 'Auto';
+        if (reason === 'new' || reason === '') return t('basket.priority.new');
+        return t('basket.priority.auto');
     }
 
     private renderAutoFillSlotCard(item: BasketItem): string {
@@ -1339,12 +1340,12 @@ export class BasketSidebar {
                     <sl-icon name="stars"></sl-icon>
                 </div>
                 <div class="basket-item-info">
-                    <div class="basket-item-name">Auto-Fill Slot</div>
+                    <div class="basket-item-name">${t('basket.autofill.slot')}</div>
                     <div class="basket-item-meta">
-                        Will fill ~${formatSize(item.sizeBytes)} with top-priority tracks at sync time
+                        ${t('basket.autofill.slot_meta', { size: formatSize(item.sizeBytes) })}
                     </div>
                 </div>
-                <sl-icon-button name="x" class="remove-item-btn" data-id="${AUTO_FILL_SLOT_ID}" label="Remove"></sl-icon-button>
+                <sl-icon-button name="x" class="remove-item-btn" data-id="${AUTO_FILL_SLOT_ID}" label="${t('basket.actions.remove')}"></sl-icon-button>
             </div>
         `;
     }
@@ -1358,10 +1359,10 @@ export class BasketSidebar {
                 <div class="basket-item-info">
                     <div class="basket-item-name">${this.escapeHtml(item.name)}</div>
                     <div class="basket-item-meta">
-                        Artist · ~${item.childCount ?? 0} tracks · ~${formatSize(item.sizeBytes ?? 0)}
+                        ${t('basket.item.artist_meta', { count: item.childCount ?? 0, size: formatSize(item.sizeBytes ?? 0) })}
                     </div>
                 </div>
-                <sl-icon-button name="x" class="remove-item-btn" data-id="${this.escapeHtml(item.id)}" label="Remove"></sl-icon-button>
+                <sl-icon-button name="x" class="remove-item-btn" data-id="${this.escapeHtml(item.id)}" label="${t('basket.actions.remove')}"></sl-icon-button>
             </div>
         `;
     }
@@ -1375,10 +1376,10 @@ export class BasketSidebar {
                 <div class="basket-item-info">
                     <div class="basket-item-name">${this.escapeHtml(item.name)}</div>
                     <div class="basket-item-meta">
-                        Genre · ~${item.childCount ?? 0} tracks · ~${formatSize(item.sizeBytes ?? 0)}
+                        ${t('basket.item.genre_meta', { count: item.childCount ?? 0, size: formatSize(item.sizeBytes ?? 0) })}
                     </div>
                 </div>
-                <sl-icon-button name="x" class="remove-item-btn" data-id="${this.escapeHtml(item.id)}" label="Remove"></sl-icon-button>
+                <sl-icon-button name="x" class="remove-item-btn" data-id="${this.escapeHtml(item.id)}" label="${t('basket.actions.remove')}"></sl-icon-button>
             </div>
         `;
     }
@@ -1394,7 +1395,7 @@ export class BasketSidebar {
             return this.renderArtistCard(item);
         }
         const autoBadge = item.autoFilled
-            ? `<span class="basket-item-auto-badge" title="Added by Auto-Fill">Auto</span>`
+            ? `<span class="basket-item-auto-badge" title="${t('basket.autofill.added_by')}">${t('basket.priority.auto')}</span>`
             : '';
         // Always show priority label for auto-filled items; fall back to empty string
         // so renderPriorityLabel returns 'Auto' for items hydrated from older manifests (P13).
@@ -1411,11 +1412,11 @@ export class BasketSidebar {
                         ${this.escapeHtml(item.name)}
                     </div>
                     <div class="basket-item-meta">
-                        ${item.childCount} tracks • ${item.type}
+                        ${t('basket.item.track_count_type', { count: item.childCount, type: item.type })}
                         ${priorityLabel}
                     </div>
                 </div>
-                <sl-icon-button name="x" class="remove-item-btn" data-id="${item.id}" label="Remove"></sl-icon-button>
+                <sl-icon-button name="x" class="remove-item-btn" data-id="${item.id}" label="${t('basket.actions.remove')}"></sl-icon-button>
             </div>
         `;
     }
@@ -1440,12 +1441,12 @@ export class BasketSidebar {
 
     private iconLabel(icon: string): string {
         const labels: Record<string, string> = {
-            'usb-drive': 'USB Drive',
-            'phone-fill': 'Phone',
-            'watch': 'Watch',
-            'sd-card': 'SD Card',
-            'headphones': 'Headphones',
-            'music-note-list': 'Music Player',
+            'usb-drive': t('basket.icon.usb_drive'),
+            'phone-fill': t('basket.icon.phone'),
+            'watch': t('basket.icon.watch'),
+            'sd-card': t('basket.icon.sd_card'),
+            'headphones': t('basket.icon.headphones'),
+            'music-note-list': t('basket.icon.music_player'),
         };
         return labels[icon] ?? icon;
     }

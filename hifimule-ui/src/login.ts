@@ -1,4 +1,5 @@
 import { rpcCall } from './rpc';
+import { t } from './i18n';
 
 type BadgeSpec = { label: string; variant: string };
 
@@ -20,23 +21,23 @@ export function initLoginView(onLoginSuccess: () => void) {
         <div class="login-container">
             <sl-card class="login-card">
                 <div slot="header">
-                    <h3>Connect to Media Server</h3>
+                    <h3>${t('login.title')}</h3>
                 </div>
 
                 <form id="login-form" class="login-form">
                     <div style="position: relative;">
-                        <sl-input name="url" label="Server URL" placeholder="http://localhost:4533 or http://localhost:8096" required></sl-input>
+                        <sl-input name="url" label="${t('login.server_url')}" placeholder="${t('login.server_url_placeholder')}" required></sl-input>
                         <div id="server-type-indicator" style="min-height: 1.5rem; margin-top: 0.4rem;"></div>
                     </div>
                     <br>
-                    <sl-input name="username" label="Username" required></sl-input>
+                    <sl-input name="username" label="${t('login.username')}" required></sl-input>
                     <br>
-                    <sl-input name="password" type="password" label="Password" required password-toggle></sl-input>
+                    <sl-input name="password" type="password" label="${t('login.password')}" required password-toggle></sl-input>
                     <br>
 
                     <div id="login-error" class="error-text" style="display: none; color: var(--sl-color-danger-500); margin-bottom: 1rem;"></div>
 
-                    <sl-button type="submit" variant="primary" style="width: 100%;">Connect</sl-button>
+                    <sl-button type="submit" variant="primary" style="width: 100%;">${t('login.connect')}</sl-button>
                 </form>
             </sl-card>
         </div>
@@ -88,7 +89,7 @@ export function initLoginView(onLoginSuccess: () => void) {
         } catch (err: any) {
             console.error('Login failed', err);
             if (errorEl) {
-                errorEl.textContent = err.message || 'Authentication failed';
+                errorEl.textContent = err.message || t('login.authentication_failed');
                 errorEl.style.display = 'block';
             }
         } finally {
