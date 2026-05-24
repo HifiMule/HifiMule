@@ -1,9 +1,17 @@
-import { Window } from '@tauri-apps/api/window';
+import { LogicalSize } from '@tauri-apps/api/dpi';
+import { Window, currentMonitor } from '@tauri-apps/api/window';
 
 // HifiMule UI Main Entry Point
 // Coordinates splash screen and main window lifecycle.
 
 let activeBasketSidebar: any = null;
+
+const IDEAL_MAIN_WIDTH = 1280;
+const IDEAL_MAIN_HEIGHT = 860;
+const COMFORT_MIN_MAIN_WIDTH = 1040;
+const COMFORT_MIN_MAIN_HEIGHT = 720;
+const ABSOLUTE_MIN_MAIN_WIDTH = 900;
+const ABSOLUTE_MIN_MAIN_HEIGHT = 640;
 
 type CurrentServer = {
     serverId: string;
@@ -53,6 +61,7 @@ async function init() {
     // If we are on the main page (index.html)
     console.log("HifiMule Hub Initialized");
     document.body.classList.add('ready');
+    await fitMainWindowToMonitor();
 
     const { rpcCall } = await import('./rpc');
 
@@ -91,6 +100,39 @@ async function init() {
     }
 }
 
+async function fitMainWindowToMonitor() {
+    try {
+        const appWindow = Window.getCurrent();
+        const monitor = await currentMonitor();
+        const scaleFactor = monitor?.scaleFactor || await appWindow.scaleFactor();
+        const workArea = monitor?.workArea?.size?.toLogical(scaleFactor);
+        if (!workArea) return;
+
+        const availableWidth = Math.floor(workArea.width * 0.92);
+        const availableHeight = Math.floor(workArea.height * 0.9);
+        const minWidth = availableWidth < ABSOLUTE_MIN_MAIN_WIDTH
+            ? availableWidth
+            : Math.min(COMFORT_MIN_MAIN_WIDTH, availableWidth);
+        const minHeight = availableHeight < ABSOLUTE_MIN_MAIN_HEIGHT
+            ? availableHeight
+            : Math.min(COMFORT_MIN_MAIN_HEIGHT, availableHeight);
+        const targetWidth = Math.max(
+            minWidth,
+            Math.min(IDEAL_MAIN_WIDTH, availableWidth),
+        );
+        const targetHeight = Math.max(
+            minHeight,
+            Math.min(IDEAL_MAIN_HEIGHT, availableHeight),
+        );
+
+        await appWindow.setMinSize(new LogicalSize(minWidth, minHeight));
+        await appWindow.setSize(new LogicalSize(targetWidth, targetHeight));
+        await appWindow.center();
+    } catch (error) {
+        console.warn('Unable to fit main window to monitor:', error);
+    }
+}
+
 function renderMainLayout(currentServer: CurrentServer = null) {
     const root = document.querySelector('.app-container');
     if (!root) return;
@@ -111,11 +153,11 @@ function renderMainLayout(currentServer: CurrentServer = null) {
         : '';
 
     root.innerHTML = `
-    <sl-split-panel position="70" class="split-panel">
+    <sl-split-panel position="68" class="split-panel">
       <div slot="start" class="library-view">
         <header>
           <div class="library-header-row">
-            <div>
+            <div class="library-title-block">
               <h1>Library</h1>
               <p>Select media to sync to your device.</p>
             </div>
