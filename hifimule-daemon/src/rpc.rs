@@ -1751,7 +1751,25 @@ async fn provider_calculate_delta(
 
     let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
     delta.playlists = playlist_sync_items;
-    Ok(serde_json::to_value(delta).unwrap())
+    Ok(delta_value_with_cleanup_metadata(&delta, manifest))
+}
+
+fn delta_value_with_cleanup_metadata(
+    delta: &crate::sync::SyncDelta,
+    manifest: &crate::device::DeviceManifest,
+) -> Value {
+    let mut value = serde_json::to_value(delta).unwrap();
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "destructiveCleanupCount".to_string(),
+            serde_json::json!(crate::sync::destructive_cleanup_count(delta, manifest)),
+        );
+        object.insert(
+            "destructiveCleanupThreshold".to_string(),
+            serde_json::json!(crate::sync::DESTRUCTIVE_CLEANUP_THRESHOLD),
+        );
+    }
+    value
 }
 
 fn basket_items_from_params_or_manifest(
@@ -2712,7 +2730,7 @@ async fn handle_sync_calculate_delta(
     let mut delta = crate::sync::calculate_delta(&desired_items, &manifest);
     delta.playlists = playlist_sync_items;
 
-    Ok(serde_json::to_value(delta).unwrap())
+    Ok(delta_value_with_cleanup_metadata(&delta, &manifest))
 }
 
 async fn handle_sync_detect_changes(
@@ -2851,19 +2869,29 @@ async fn handle_sync_execute(
         .get("confirmDestructiveCleanup")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if delta.deletes.len() > crate::sync::DESTRUCTIVE_CLEANUP_THRESHOLD
+    let manifest = state
+        .device_manager
+        .get_current_device()
+        .await
+        .ok_or(JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: "No device connected".to_string(),
+            data: None,
+        })?;
+    let destructive_cleanup_count = crate::sync::destructive_cleanup_count(&delta, &manifest);
+    if destructive_cleanup_count > crate::sync::DESTRUCTIVE_CLEANUP_THRESHOLD
         && !destructive_cleanup_confirmed
     {
         return Err(JsonRpcError {
             code: ERR_INVALID_PARAMS,
             message: format!(
                 "Sync would delete {} managed files; explicit confirmation is required for more than {} deletions",
-                delta.deletes.len(),
+                destructive_cleanup_count,
                 crate::sync::DESTRUCTIVE_CLEANUP_THRESHOLD
             ),
             data: Some(serde_json::json!({
                 "requiresDestructiveCleanupConfirmation": true,
-                "deleteCount": delta.deletes.len(),
+                "deleteCount": destructive_cleanup_count,
                 "threshold": crate::sync::DESTRUCTIVE_CLEANUP_THRESHOLD
             })),
         });
@@ -5325,6 +5353,22 @@ mod tests {
     async fn test_sync_execute_requires_confirmation_over_destructive_cleanup_threshold() {
         let db = Arc::new(crate::db::Database::memory().unwrap());
         let state = make_test_state(db);
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = crate::device::DeviceManifest {
+            device_id: "threshold-dev".to_string(),
+            version: "1.0".to_string(),
+            managed_paths: vec!["Music".to_string()],
+            ..Default::default()
+        };
+        state
+            .device_manager
+            .handle_device_detected(
+                dir.path().to_path_buf(),
+                manifest,
+                std::sync::Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())),
+            )
+            .await
+            .unwrap();
         let deletes: Vec<Value> = (0..=crate::sync::DESTRUCTIVE_CLEANUP_THRESHOLD)
             .map(|idx| {
                 json!({

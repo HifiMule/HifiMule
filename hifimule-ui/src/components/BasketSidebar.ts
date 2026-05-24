@@ -1024,13 +1024,23 @@ export class BasketSidebar {
             this.render();
 
             const delta = await rpcCall('sync_calculate_delta', deltaParams);
-            const deleteCount = Array.isArray((delta as any)?.deletes) ? (delta as any).deletes.length : 0;
-            const destructiveThreshold = 25;
+            const rawCleanupCount = (delta as any)?.destructiveCleanupCount;
+            const deleteCount = typeof rawCleanupCount === 'number'
+                ? rawCleanupCount
+                : Array.isArray((delta as any)?.deletes) ? (delta as any).deletes.length : 0;
+            const rawThreshold = (delta as any)?.destructiveCleanupThreshold;
+            const destructiveThreshold = typeof rawThreshold === 'number' ? rawThreshold : Number.POSITIVE_INFINITY;
             const confirmDestructiveCleanup = deleteCount > destructiveThreshold
-                ? window.confirm(`This sync will remove ${deleteCount} managed files before rewriting them in the new folder layout. Continue?`)
+                ? window.confirm(`This sync will remove ${deleteCount} managed files. Continue?`)
                 : false;
             if (deleteCount > destructiveThreshold && !confirmDestructiveCleanup) {
-                throw new Error('Sync cancelled because destructive cleanup was not confirmed');
+                this.stopPolling();
+                this.isSyncing = false;
+                this.currentOperationId = null;
+                this.currentOperation = null;
+                this.etaText = '';
+                this.render();
+                return;
             }
             const result = await rpcCall('sync_execute', { delta, confirmDestructiveCleanup });
             this.currentOperationId = result.operationId as string;
@@ -1249,6 +1259,7 @@ export class BasketSidebar {
         this.currentOperation = null;
         this.showSyncComplete = true;
         this.syncErrorMessages = null;
+        this.syncPreviewCleanupDevicePath = null;
         this.etaText = 'Calculating\u2026';
         const tokenKey = this.syncTokenStorageKey();
         if (this.isSubsonicServer() && tokenKey) {

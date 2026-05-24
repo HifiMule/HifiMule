@@ -270,6 +270,9 @@ impl DeviceIO for MscBackend {
     }
 
     async fn ensure_dir(&self, path: &str) -> Result<()> {
+        if !path.is_empty() {
+            check_relative(path)?;
+        }
         let full = self.root.join(path);
         tokio::fs::create_dir_all(&full).await?;
         Ok(())

@@ -1,6 +1,6 @@
 # Story 10.2: Separate Playlist Folder and Relocation Cleanup
 
-Status: review
+Status: done
 
 ## Story
 
@@ -30,6 +30,16 @@ So that native playlist browsing works while HifiMule still manages music safely
 - [x] Enforce destructive cleanup threshold before relocation cleanup proceeds.
 - [x] Ensure auto-sync does not silently perform threshold-exceeding relocation cleanup.
 - [x] Add tests for legacy fallback, custom playlist folder writes, relative path generation between sibling folders, music folder relocation cleanup, playlist folder relocation cleanup, threshold confirmation, and unmanaged file protection.
+
+### Review Findings
+
+- [x] [Review][Patch] Music relocation cleanup validates old track paths against the new music folder and leaves stale files [hifimule-daemon/src/sync.rs:1549]
+- [x] [Review][Patch] Relocation can be collapsed into an ID-change and preserve the old folder path [hifimule-daemon/src/sync.rs:2717]
+- [x] [Review][Patch] Playlist relocation cleanup is not included in destructive cleanup threshold checks [hifimule-daemon/src/rpc.rs:2854]
+- [x] [Review][Patch] Playlist stale cleanup deletes same-name legacy candidates that are not proven manifest-owned [hifimule-daemon/src/sync.rs:2508]
+- [x] [Review][Patch] Removed-playlist cleanup can drop the manifest entry even when the real delete failed [hifimule-daemon/src/sync.rs:2404]
+- [x] [Review][Patch] Stored playlist paths are not revalidated before MSC directory creation [hifimule-daemon/src/sync.rs:2370]
+- [x] [Review][Patch] M3U relative path generation treats differently-cased folder names as the same path [hifimule-daemon/src/sync.rs:1196]
 
 ## Dev Notes
 
@@ -74,6 +84,7 @@ GPT-5 Codex
 - `_bmad-output/implementation-artifacts/10-2-separate-playlist-folder-and-relocation-cleanup.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
 - `hifimule-daemon/src/main.rs`
+- `hifimule-daemon/src/device_io.rs`
 - `hifimule-daemon/src/rpc.rs`
 - `hifimule-daemon/src/sync.rs`
 - `hifimule-ui/src/components/BasketSidebar.ts`
@@ -82,3 +93,4 @@ GPT-5 Codex
 
 - 2026-05-24: Created from approved Correct Course proposal for device configuration improvements.
 - 2026-05-24: Implemented separate playlist folder output, relocation cleanup, destructive cleanup confirmation, and tests.
+- 2026-05-24: Addressed code review findings for relocation cleanup ownership, playlist deletion safety, destructive cleanup counting, and path validation.
