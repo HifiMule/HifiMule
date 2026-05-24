@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.7.0 - 2026-05-24
+
+Favorites now browse naturally as Artists -> Albums -> Tracks, so you can sync favorite artists, favorite albums, or only the favorite tracks inside an album without accidentally pulling in more music than intended. Navidrome/OpenSubsonic users get better library parity too: supported servers can now show Recently Added, Frequently Played, and Recently Played, with more consistent album quick navigation.
+
+Sync is safer and less noisy in this release. Single-track sync from Subsonic/Navidrome libraries now resolves the selected song correctly, device-format rules are enforced before files are written, incompatible or unconfirmed transcoding is skipped with warnings instead of producing unplayable files, and USB cleanup no longer fails just because a managed file was already deleted.
+
 ## v0.6.0 — 2026-05-22
 
 Eight browse modes are now available in the Library Browser: Artists, Albums, Playlists, Genres, Recently Added, Frequently Played, Recently Played, and Favorites. A compact tab bar at the top switches between them — only modes your server supports are shown. Genres can now be added to the sync basket as a single item; HifiMule resolves the full track list at sync time and removes duplicates automatically. Track cards in Frequently Played show the server play count, and Recently Played cards show the last-listened date. 
