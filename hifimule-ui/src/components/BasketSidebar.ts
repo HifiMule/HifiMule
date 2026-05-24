@@ -1024,7 +1024,15 @@ export class BasketSidebar {
             this.render();
 
             const delta = await rpcCall('sync_calculate_delta', deltaParams);
-            const result = await rpcCall('sync_execute', { delta });
+            const deleteCount = Array.isArray((delta as any)?.deletes) ? (delta as any).deletes.length : 0;
+            const destructiveThreshold = 25;
+            const confirmDestructiveCleanup = deleteCount > destructiveThreshold
+                ? window.confirm(`This sync will remove ${deleteCount} managed files before rewriting them in the new folder layout. Continue?`)
+                : false;
+            if (deleteCount > destructiveThreshold && !confirmDestructiveCleanup) {
+                throw new Error('Sync cancelled because destructive cleanup was not confirmed');
+            }
+            const result = await rpcCall('sync_execute', { delta, confirmDestructiveCleanup });
             this.currentOperationId = result.operationId as string;
 
             this.startPolling();

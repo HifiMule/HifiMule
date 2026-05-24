@@ -2847,6 +2847,27 @@ async fn handle_sync_execute(
             message: format!("Invalid delta parameter: {}", e),
             data: None,
         })?;
+    let destructive_cleanup_confirmed = params
+        .get("confirmDestructiveCleanup")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if delta.deletes.len() > crate::sync::DESTRUCTIVE_CLEANUP_THRESHOLD
+        && !destructive_cleanup_confirmed
+    {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: format!(
+                "Sync would delete {} managed files; explicit confirmation is required for more than {} deletions",
+                delta.deletes.len(),
+                crate::sync::DESTRUCTIVE_CLEANUP_THRESHOLD
+            ),
+            data: Some(serde_json::json!({
+                "requiresDestructiveCleanupConfirmation": true,
+                "deleteCount": delta.deletes.len(),
+                "threshold": crate::sync::DESTRUCTIVE_CLEANUP_THRESHOLD
+            })),
+        });
+    }
 
     // Derive basket IDs that need downloading — used for dirty-resume (Story 4.4)
     let pending_item_ids: Vec<String> = delta
@@ -3518,6 +3539,16 @@ fn path_in_or_equal(path: &str, folder: &str) -> bool {
     path == folder || path.starts_with(&format!("{folder}/"))
 }
 
+fn playlist_filename_with_folder(folder: &str, filename: &str) -> String {
+    let folder = folder.replace('\\', "/").trim_matches('/').to_string();
+    let filename = filename.replace('\\', "/").trim_matches('/').to_string();
+    if folder.is_empty() || filename.contains('/') {
+        filename
+    } else {
+        format!("{folder}/{filename}")
+    }
+}
+
 fn remove_folder_id_cache_for_path_change(
     folder_ids: &mut HashMap<String, u32>,
     old_path: Option<&str>,
@@ -3592,6 +3623,13 @@ fn apply_manifest_settings_update(
             old_playlist.as_deref(),
             new_playlist.as_deref(),
         );
+        if playlist_changed {
+            if let Some(old_playlist) = old_playlist.as_deref() {
+                for entry in &mut manifest.playlists {
+                    entry.filename = playlist_filename_with_folder(old_playlist, &entry.filename);
+                }
+            }
+        }
     }
 
     let tracks_to_remove = if music_changed {
@@ -4450,6 +4488,7 @@ mod tests {
         assert_eq!(outcome.bytes_to_remove, 123);
         assert_eq!(manifest.managed_paths, vec!["Audio".to_string()]);
         assert_eq!(manifest.playlist_path.as_deref(), Some("Playlists"));
+        assert_eq!(manifest.playlists[0].filename, "Music/Road Trip.m3u");
         assert!(!manifest.folder_ids.contains_key("Music"));
         assert!(!manifest.folder_ids.contains_key("Music/Artist"));
         assert!(!manifest.folder_ids.contains_key("Playlists"));
@@ -5280,6 +5319,42 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         panic!("sync operation did not complete");
+    }
+
+    #[tokio::test]
+    async fn test_sync_execute_requires_confirmation_over_destructive_cleanup_threshold() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let deletes: Vec<Value> = (0..=crate::sync::DESTRUCTIVE_CLEANUP_THRESHOLD)
+            .map(|idx| {
+                json!({
+                    "jellyfinId": format!("old-{idx}"),
+                    "localPath": format!("Music/Old/{idx}.flac"),
+                    "name": format!("Old {idx}")
+                })
+            })
+            .collect();
+        let delta = json!({
+            "adds": [],
+            "deletes": deletes,
+            "idChanges": [],
+            "unchanged": 0,
+            "playlists": []
+        });
+
+        let error = handle_sync_execute(&state, Some(json!({ "delta": delta })))
+            .await
+            .expect_err("large cleanup must require confirmation");
+
+        assert_eq!(error.code, ERR_INVALID_PARAMS);
+        assert!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data["requiresDestructiveCleanupConfirmation"].as_bool())
+                .unwrap_or(false),
+            "error should tell the UI that explicit confirmation is required"
+        );
     }
 
     #[tokio::test]

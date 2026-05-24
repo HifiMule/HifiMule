@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-05-24  # Story 10.1 completed after code review
+last_updated: 2026-05-24  # Story 10.2 ready for review
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -130,4 +130,4 @@ development_status:
 
   epic-10: in-progress
   10-1-device-manifest-editing-identity-and-folder-settings: done
-  10-2-separate-playlist-folder-and-relocation-cleanup: ready-for-dev
+  10-2-separate-playlist-folder-and-relocation-cleanup: review

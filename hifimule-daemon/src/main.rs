@@ -727,6 +727,14 @@ async fn run_auto_sync(
         daemon_log!("[AutoSync] Device already in sync, nothing to do");
         return Ok(());
     }
+    if delta.deletes.len() > sync::DESTRUCTIVE_CLEANUP_THRESHOLD {
+        daemon_log!(
+            "[AutoSync] Skipped: sync would delete {} managed files, exceeding the confirmation threshold of {}",
+            delta.deletes.len(),
+            sync::DESTRUCTIVE_CLEANUP_THRESHOLD
+        );
+        return Ok(());
+    }
 
     daemon_log!(
         "[AutoSync] Delta: {} adds, {} deletes, {} id-changes",

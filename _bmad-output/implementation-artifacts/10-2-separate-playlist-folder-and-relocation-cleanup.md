@@ -1,6 +1,6 @@
 # Story 10.2: Separate Playlist Folder and Relocation Cleanup
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -21,15 +21,15 @@ So that native playlist browsing works while HifiMule still manages music safely
 
 ## Tasks / Subtasks
 
-- [ ] Resolve playlist output folder from `manifest.playlist_path`, falling back to `manifest.managed_paths[0]`.
-- [ ] Update M3U generation to write to the resolved playlist folder.
-- [ ] Calculate M3U track paths relative from the playlist folder to each track `local_path`.
-- [ ] Update sync preview/delta behavior so track relocation cleanup appears when manifest-owned track paths are outside the configured music folder.
-- [ ] Update playlist cleanup so stale manifest-owned playlist files outside the configured playlist folder are removed before writing new playlist files.
-- [ ] Reuse Story 4.10 idempotent deletion handling for already-missing managed files.
-- [ ] Enforce destructive cleanup threshold before relocation cleanup proceeds.
-- [ ] Ensure auto-sync does not silently perform threshold-exceeding relocation cleanup.
-- [ ] Add tests for legacy fallback, custom playlist folder writes, relative path generation between sibling folders, music folder relocation cleanup, playlist folder relocation cleanup, threshold confirmation, and unmanaged file protection.
+- [x] Resolve playlist output folder from `manifest.playlist_path`, falling back to `manifest.managed_paths[0]`.
+- [x] Update M3U generation to write to the resolved playlist folder.
+- [x] Calculate M3U track paths relative from the playlist folder to each track `local_path`.
+- [x] Update sync preview/delta behavior so track relocation cleanup appears when manifest-owned track paths are outside the configured music folder.
+- [x] Update playlist cleanup so stale manifest-owned playlist files outside the configured playlist folder are removed before writing new playlist files.
+- [x] Reuse Story 4.10 idempotent deletion handling for already-missing managed files.
+- [x] Enforce destructive cleanup threshold before relocation cleanup proceeds.
+- [x] Ensure auto-sync does not silently perform threshold-exceeding relocation cleanup.
+- [x] Add tests for legacy fallback, custom playlist folder writes, relative path generation between sibling folders, music folder relocation cleanup, playlist folder relocation cleanup, threshold confirmation, and unmanaged file protection.
 
 ## Dev Notes
 
@@ -50,20 +50,35 @@ So that native playlist browsing works while HifiMule still manages music safely
 
 ### Agent Model Used
 
-TBD
+GPT-5 Codex
 
 ### Debug Log References
 
-TBD
+- `rtk cargo test -p hifimule-daemon generate_m3u`
+- `rtk cargo test -p hifimule-daemon relocation`
+- `rtk cargo test -p hifimule-daemon destructive_cleanup_threshold`
+- `rtk cargo test -p hifimule-daemon`
+- `rtk powershell -NoProfile -Command "& 'C:\Users\alexi\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe' .\node_modules\typescript\bin\tsc --noEmit"`
 
 ### Completion Notes List
 
-TBD
+- Playlist generation now resolves output from `manifest.playlist_path`, falling back to the music folder, and ensures the playlist folder exists through `DeviceIO`.
+- M3U entries are generated relative from the playlist folder to each synced track path with forward slash normalization.
+- Sync delta now treats manifest-owned tracks outside the configured music folder as relocation cleanup plus rewrite work while leaving unmanaged files untouched.
+- Playlist relocation cleanup removes manifest-owned stale playlist files from previous music/custom playlist locations, including already-missing files as successful cleanup.
+- Large destructive cleanup jobs require explicit `confirmDestructiveCleanup` on manual sync; auto-sync skips threshold-exceeding cleanup instead of running silently.
+- Added daemon tests for fallback/custom playlist writes, sibling-folder relative paths, track and playlist relocation cleanup, settings preview, and destructive confirmation.
 
 ### File List
 
-TBD
+- `_bmad-output/implementation-artifacts/10-2-separate-playlist-folder-and-relocation-cleanup.md`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `hifimule-daemon/src/main.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-daemon/src/sync.rs`
+- `hifimule-ui/src/components/BasketSidebar.ts`
 
 ## Change Log
 
 - 2026-05-24: Created from approved Correct Course proposal for device configuration improvements.
+- 2026-05-24: Implemented separate playlist folder output, relocation cleanup, destructive cleanup confirmation, and tests.

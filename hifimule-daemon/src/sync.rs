@@ -9,6 +9,8 @@ use tokio::sync::RwLock;
 use crate::device::DeviceManifest;
 use crate::providers::{MediaProvider, TranscodeProfile};
 
+pub const DESTRUCTIVE_CLEANUP_THRESHOLD: usize = 25;
+
 /// Returns the current UTC time as an ISO 8601 / RFC 3339 string.
 ///
 /// Format: `YYYY-MM-DDTHH:MM:SSZ`
@@ -1157,6 +1159,83 @@ fn validate_delete_path_for_managed_zone(
     Ok(())
 }
 
+fn normalized_device_folder(path: &str) -> String {
+    path.replace('\\', "/").trim_matches('/').to_string()
+}
+
+fn device_path_in_or_equal(path: &str, folder: &str) -> bool {
+    let path = normalized_device_folder(path);
+    let folder = normalized_device_folder(folder);
+    if folder.is_empty() {
+        return true;
+    }
+    path == folder || path.starts_with(&format!("{folder}/"))
+}
+
+fn prefixed_device_path(folder: &str, filename: &str) -> String {
+    let folder = normalized_device_folder(folder);
+    let filename = filename.replace('\\', "/").trim_matches('/').to_string();
+    if folder.is_empty() {
+        filename
+    } else {
+        format!("{folder}/{filename}")
+    }
+}
+
+fn relative_device_path_from_folder(from_folder: &str, target_path: &str) -> String {
+    let normalized_from = normalized_device_folder(from_folder);
+    let normalized_target = normalized_device_folder(target_path);
+    let from_parts: Vec<&str> = normalized_from
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    let target_parts: Vec<&str> = normalized_target
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    let mut common = 0;
+    while common < from_parts.len()
+        && common < target_parts.len()
+        && from_parts[common].eq_ignore_ascii_case(target_parts[common])
+    {
+        common += 1;
+    }
+
+    let mut rel_parts: Vec<String> = Vec::new();
+    rel_parts.extend((common..from_parts.len()).map(|_| "..".to_string()));
+    rel_parts.extend(
+        target_parts[common..]
+            .iter()
+            .map(|part| (*part).to_string()),
+    );
+    if rel_parts.is_empty() {
+        ".".to_string()
+    } else {
+        rel_parts.join("/")
+    }
+}
+
+fn playlist_delete_candidates(
+    filename: &str,
+    playlist_subfolder: &str,
+    managed_subfolder: &str,
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let normalized_filename = filename.replace('\\', "/").trim_matches('/').to_string();
+    if normalized_filename.contains('/') {
+        candidates.push(normalized_filename.clone());
+    }
+    candidates.push(prefixed_device_path(
+        playlist_subfolder,
+        &normalized_filename,
+    ));
+    let legacy = prefixed_device_path(managed_subfolder, &normalized_filename);
+    if !candidates.iter().any(|candidate| candidate == &legacy) {
+        candidates.push(legacy);
+    }
+    candidates
+}
+
 /// Executes a sync operation by downloading adds and deleting removals.
 ///
 /// This function handles individual file failures gracefully - if one file fails,
@@ -2273,8 +2352,8 @@ async fn device_file_exists(device_io: &dyn crate::device_io::DeviceIO, rel_path
 /// Uses Write-Temp-Rename (atomic write) for all .m3u writes.
 ///
 /// `device_path` is the device root (local_path in SyncedItem is relative to this).
-/// `managed_path` is the music folder (e.g. `device_path/Music`) — .m3u files are written here,
-/// and track paths in the .m3u are made relative to this folder.
+/// `managed_path` is the music folder (e.g. `device_path/Music`).
+/// Playlist files are written to manifest.playlist_path, falling back to managed_path.
 async fn generate_m3u_files(
     playlist_items: &[PlaylistSyncItem],
     device_path: &Path,
@@ -2288,7 +2367,19 @@ async fn generate_m3u_files(
         .strip_prefix(device_path)
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_default();
+    let playlist_subfolder = manifest
+        .resolved_playlist_path()
+        .map(normalized_device_folder)
+        .unwrap_or_else(|| normalized_device_folder(&managed_subfolder));
     let mut warnings: Vec<String> = Vec::new();
+
+    if let Err(e) = device_io.ensure_dir(&playlist_subfolder).await {
+        warnings.push(format!(
+            "[M3U] Failed to create playlist folder {}: {}",
+            playlist_subfolder, e
+        ));
+        return warnings;
+    }
 
     // Build a lookup: jellyfin_id → local_path (relative to device_path)
     let path_lookup: HashMap<&str, &str> = all_synced_items
@@ -2310,22 +2401,25 @@ async fn generate_m3u_files(
         .cloned()
         .collect();
     for entry in &to_remove {
-        let rel_path = if managed_subfolder.is_empty() {
-            entry.filename.clone()
-        } else {
-            format!("{}/{}", managed_subfolder, entry.filename)
-        };
-        match device_io.delete_file(&rel_path).await {
-            Ok(()) => {
-                println!("[M3U] Deleted removed playlist: {}", entry.filename);
+        let mut deleted_or_missing = false;
+        for rel_path in
+            playlist_delete_candidates(&entry.filename, &playlist_subfolder, &managed_subfolder)
+        {
+            match device_io.delete_file(&rel_path).await {
+                Ok(()) => {
+                    println!("[M3U] Deleted removed playlist: {}", rel_path);
+                    deleted_or_missing = true;
+                }
+                Err(e) if is_missing_delete_error(&e) => {
+                    deleted_or_missing = true;
+                }
+                Err(e) => {
+                    warnings.push(format!("[M3U] Failed to delete {}: {}", rel_path, e));
+                }
             }
-            Err(e) if is_missing_delete_error(&e) => {
-                // Already gone — still remove manifest entry
-            }
-            Err(e) => {
-                warnings.push(format!("[M3U] Failed to delete {}: {}", entry.filename, e));
-                continue; // Don't remove from manifest if file deletion failed
-            }
+        }
+        if !deleted_or_missing {
+            continue; // Don't remove from manifest if every delete attempt failed.
         }
         manifest
             .playlists
@@ -2394,11 +2488,7 @@ async fn generate_m3u_files(
             .map(|(t, _)| t.jellyfin_id.clone())
             .collect();
 
-        let rel_m3u = if managed_subfolder.is_empty() {
-            m3u_filename.clone()
-        } else {
-            format!("{}/{}", managed_subfolder, m3u_filename)
-        };
+        let rel_m3u = prefixed_device_path(&playlist_subfolder, &m3u_filename);
 
         // Determine if regeneration is needed (filename or resolved track list changed)
         let (needs_write, old_filename_opt) = match manifest
@@ -2415,6 +2505,22 @@ async fn generate_m3u_files(
 
         if !needs_write {
             if device_file_exists(device_io.as_ref(), &rel_m3u).await {
+                for stale_path in playlist_delete_candidates(
+                    &m3u_filename,
+                    &playlist_subfolder,
+                    &managed_subfolder,
+                ) {
+                    if stale_path != rel_m3u {
+                        if let Err(e) = device_io.delete_file(&stale_path).await {
+                            if !is_missing_delete_error(&e) {
+                                warnings.push(format!(
+                                    "[M3U] Failed to delete stale playlist {}: {}",
+                                    stale_path, e
+                                ));
+                            }
+                        }
+                    }
+                }
                 println!("[M3U] Playlist unchanged, skipping: {}", m3u_filename);
                 continue;
             }
@@ -2432,15 +2538,9 @@ async fn generate_m3u_files(
                 None => extract_display_name(rel_path).to_string(),
             };
             lines.push(format!("#EXTINF:{},{}", track.run_time_seconds, label));
-            // Make path relative to managed_path (where the .m3u lives).
-            // local_path is relative to device_path (e.g. "Music/Artist/Album/track.flac").
-            // Strip the managed subfolder prefix so the .m3u entry is just
-            // "Artist/Album/track.flac" for a Rockbox/DAP player in the Music folder.
-            let track_entry = device_path
-                .join(rel_path)
-                .strip_prefix(managed_path)
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_else(|_| rel_path.replace('\\', "/"));
+            // local_path is relative to device_path; M3U entries are relative to the
+            // playlist folder and always use forward slashes.
+            let track_entry = relative_device_path_from_folder(&playlist_subfolder, rel_path);
             lines.push(track_entry);
         }
 
@@ -2461,14 +2561,35 @@ async fn generate_m3u_files(
                 // Delete old file if the playlist was renamed
                 if let Some(old_fn) = &old_filename_opt {
                     if *old_fn != m3u_filename {
-                        let rel_old = if managed_subfolder.is_empty() {
-                            old_fn.clone()
-                        } else {
-                            format!("{}/{}", managed_subfolder, old_fn)
-                        };
-                        if let Err(e) = device_io.delete_file(&rel_old).await {
-                            warnings
-                                .push(format!("[M3U] Failed to delete old file {}: {}", old_fn, e));
+                        for rel_old in playlist_delete_candidates(
+                            old_fn,
+                            &playlist_subfolder,
+                            &managed_subfolder,
+                        ) {
+                            if let Err(e) = device_io.delete_file(&rel_old).await {
+                                if !is_missing_delete_error(&e) {
+                                    warnings.push(format!(
+                                        "[M3U] Failed to delete old file {}: {}",
+                                        rel_old, e
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                for stale_path in playlist_delete_candidates(
+                    &m3u_filename,
+                    &playlist_subfolder,
+                    &managed_subfolder,
+                ) {
+                    if stale_path != rel_m3u {
+                        if let Err(e) = device_io.delete_file(&stale_path).await {
+                            if !is_missing_delete_error(&e) {
+                                warnings.push(format!(
+                                    "[M3U] Failed to delete stale playlist {}: {}",
+                                    stale_path, e
+                                ));
+                            }
                         }
                     }
                 }
@@ -2503,10 +2624,20 @@ async fn generate_m3u_files(
 /// a separate add+delete.
 pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest) -> SyncDelta {
     let profile_dirty = manifest.transcoding_profile_dirty;
+    let music_folder = manifest
+        .managed_paths
+        .first()
+        .map(|path| normalized_device_folder(path))
+        .unwrap_or_default();
     let current_ids: HashSet<&str> = manifest
         .synced_items
         .iter()
-        .filter(|i| !profile_dirty || !desired_items.iter().any(|d| d.jellyfin_id == i.jellyfin_id))
+        .filter(|i| {
+            let desired = desired_items.iter().any(|d| d.jellyfin_id == i.jellyfin_id);
+            let outside_music_folder =
+                desired && !device_path_in_or_equal(&i.local_path, &music_folder);
+            (!profile_dirty || !desired) && !outside_music_folder
+        })
         .map(|i| i.jellyfin_id.as_str())
         .collect();
 
@@ -2546,7 +2677,12 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
 
     for item in &manifest.synced_items {
         let stale_for_profile = profile_dirty && desired_ids.contains(item.jellyfin_id.as_str());
-        if stale_for_profile || !desired_ids.contains(item.jellyfin_id.as_str()) {
+        let stale_for_relocation = desired_ids.contains(item.jellyfin_id.as_str())
+            && !device_path_in_or_equal(&item.local_path, &music_folder);
+        if stale_for_profile
+            || stale_for_relocation
+            || !desired_ids.contains(item.jellyfin_id.as_str())
+        {
             let idx = deletes.len();
             deletes.push(SyncDeleteItem {
                 jellyfin_id: item.jellyfin_id.clone(),
@@ -4045,6 +4181,57 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_calculate_delta_cleans_up_tracks_outside_current_music_folder() {
+        let desired = vec![DesiredItem {
+            jellyfin_id: "t1".to_string(),
+            name: "Song".to_string(),
+            album: Some("Album".to_string()),
+            artist: Some("Artist".to_string()),
+            size_bytes: 10,
+            etag: None,
+            provider_album_id: None,
+            provider_content_type: None,
+            provider_suffix: Some("flac".to_string()),
+        }];
+        let mut manifest = empty_manifest();
+        manifest.managed_paths = vec!["Audio".to_string()];
+        manifest.synced_items = vec![make_playlist_synced_item(
+            "t1",
+            "Music/Artist/Album/01 - Song.flac",
+        )];
+
+        let delta = calculate_delta(&desired, &manifest);
+
+        assert_eq!(
+            delta.adds.len(),
+            1,
+            "track should be rewritten under Audio/"
+        );
+        assert_eq!(
+            delta.deletes.len(),
+            1,
+            "old Music/ file should be cleaned up"
+        );
+        assert_eq!(
+            delta.deletes[0].local_path,
+            "Music/Artist/Album/01 - Song.flac"
+        );
+        assert_eq!(delta.unchanged, 0);
+    }
+
+    #[test]
+    fn test_relative_device_path_from_sibling_playlist_folder() {
+        assert_eq!(
+            relative_device_path_from_folder("Playlists", "Music/A/B/01 - Song.flac"),
+            "../Music/A/B/01 - Song.flac"
+        );
+        assert_eq!(
+            relative_device_path_from_folder("Music", "Music/A/B/01 - Song.flac"),
+            "A/B/01 - Song.flac"
+        );
+    }
+
     #[tokio::test]
     async fn test_generate_m3u_basic() {
         let tmp_dir = tempfile::tempdir().unwrap();
@@ -4145,6 +4332,113 @@ mod tests {
             .unwrap();
         assert_eq!(entry1.track_count, 3);
         assert_eq!(entry1.track_ids, vec!["t1", "t2", "t3"]);
+    }
+
+    #[tokio::test]
+    async fn test_generate_m3u_uses_custom_playlist_folder_and_relative_track_paths() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let device_path = tmp_dir.path();
+        let managed_path = device_path.join("Music");
+        tokio::fs::create_dir_all(&managed_path).await.unwrap();
+
+        let playlist_items = vec![PlaylistSyncItem {
+            jellyfin_id: "pl1".to_string(),
+            name: "Road".to_string(),
+            tracks: vec![PlaylistTrackInfo {
+                jellyfin_id: "t1".to_string(),
+                artist: Some("Artist".to_string()),
+                run_time_seconds: 120,
+            }],
+        }];
+        let all_synced = vec![make_playlist_synced_item(
+            "t1",
+            "Music/Artist/Album/01 - Song.flac",
+        )];
+        let mut manifest = empty_manifest();
+        manifest.playlist_path = Some("Playlists".to_string());
+        let device_io =
+            std::sync::Arc::new(crate::device_io::MscBackend::new(device_path.to_path_buf()));
+
+        let warnings = generate_m3u_files(
+            &playlist_items,
+            device_path,
+            &managed_path,
+            &all_synced,
+            &mut manifest,
+            device_io,
+        )
+        .await;
+
+        assert!(warnings.is_empty(), "No warnings expected: {:?}", warnings);
+        let m3u_path = device_path.join("Playlists").join("Road.m3u");
+        assert!(
+            m3u_path.exists(),
+            "playlist should be written to Playlists/"
+        );
+        assert!(
+            !managed_path.join("Road.m3u").exists(),
+            "playlist should not be written to Music/"
+        );
+        let content = tokio::fs::read_to_string(&m3u_path).await.unwrap();
+        assert!(
+            content.contains("../Music/Artist/Album/01 - Song.flac"),
+            "track path should be relative from playlist folder: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_m3u_removes_legacy_playlist_from_music_folder() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let device_path = tmp_dir.path();
+        let managed_path = device_path.join("Music");
+        tokio::fs::create_dir_all(&managed_path).await.unwrap();
+        tokio::fs::write(managed_path.join("Road.m3u"), b"#EXTM3U\n")
+            .await
+            .unwrap();
+
+        let playlist_items = vec![PlaylistSyncItem {
+            jellyfin_id: "pl1".to_string(),
+            name: "Road".to_string(),
+            tracks: vec![PlaylistTrackInfo {
+                jellyfin_id: "t1".to_string(),
+                artist: None,
+                run_time_seconds: 120,
+            }],
+        }];
+        let all_synced = vec![make_playlist_synced_item(
+            "t1",
+            "Music/Artist/Album/01 - Song.flac",
+        )];
+        let mut manifest = empty_manifest();
+        manifest.playlist_path = Some("Playlists".to_string());
+        manifest
+            .playlists
+            .push(crate::device::PlaylistManifestEntry {
+                jellyfin_id: "pl1".to_string(),
+                filename: "Road.m3u".to_string(),
+                track_count: 1,
+                track_ids: vec!["t1".to_string()],
+                last_modified: "2026-01-01T00:00:00Z".to_string(),
+            });
+        let device_io =
+            std::sync::Arc::new(crate::device_io::MscBackend::new(device_path.to_path_buf()));
+
+        let warnings = generate_m3u_files(
+            &playlist_items,
+            device_path,
+            &managed_path,
+            &all_synced,
+            &mut manifest,
+            device_io,
+        )
+        .await;
+
+        assert!(warnings.is_empty(), "No warnings expected: {:?}", warnings);
+        assert!(
+            !managed_path.join("Road.m3u").exists(),
+            "old Music/ playlist should be removed"
+        );
+        assert!(device_path.join("Playlists").join("Road.m3u").exists());
     }
 
     #[tokio::test]
