@@ -114,6 +114,128 @@
         ],
         "CodecProfiles": []
       }
+    },
+    {
+      "id": "modern-dap-lossless",
+      "name": "Modern DAP — Lossless Friendly",
+      "description": "For modern digital audio players with broad codec support. Passes through MP3, AAC/M4A, FLAC, ALAC, OGG, Opus, and WAV directly; transcodes other formats to FLAC.",
+      "defaultMusicFolder": "Music",
+      "defaultPlaylistFolder": "Playlists",
+      "deviceProfile": {
+        "Name": "HifiMule-Modern-DAP-Lossless",
+        "MaxStreamingBitrate": 9216000,
+        "MusicStreamingTranscodingBitrate": 9216000,
+        "MaxAudioChannels": 2,
+        "MaxAudioSampleRate": 192000,
+        "MaxAudioBitDepth": 24,
+        "DirectPlayProfiles": [
+          { "Container": "mp3", "Type": "Audio", "AudioCodec": "mp3" },
+          { "Container": "mp4", "Type": "Audio", "AudioCodec": "aac" },
+          { "Container": "m4a", "Type": "Audio", "AudioCodec": "aac" },
+          { "Container": "m4a", "Type": "Audio", "AudioCodec": "alac" },
+          { "Container": "flac", "Type": "Audio", "AudioCodec": "flac" },
+          { "Container": "ogg", "Type": "Audio", "AudioCodec": "vorbis" },
+          { "Container": "opus", "Type": "Audio", "AudioCodec": "opus" },
+          { "Container": "wav", "Type": "Audio", "AudioCodec": "pcm_s16le" }
+        ],
+        "TranscodingProfiles": [
+          {
+            "Container": "flac",
+            "Type": "Audio",
+            "AudioCodec": "flac",
+            "Protocol": "http",
+            "EstimateContentLength": true,
+            "EnableMpegtsM2TsMode": false
+          }
+        ],
+        "CodecProfiles": []
+      }
+    },
+    {
+      "id": "sony-walkman-aac-flac",
+      "name": "Sony Walkman — AAC / FLAC",
+      "description": "For Sony Walkman players with MUSIC storage. Passes through MP3, AAC/M4A, FLAC, and WAV directly; transcodes OGG, Opus, and other formats to AAC 256 kbps.",
+      "defaultMusicFolder": "MUSIC",
+      "defaultPlaylistFolder": "MUSIC",
+      "deviceProfile": {
+        "Name": "HifiMule-Sony-Walkman",
+        "MaxStreamingBitrate": 256000,
+        "MusicStreamingTranscodingBitrate": 256000,
+        "MaxAudioChannels": 2,
+        "MaxAudioSampleRate": 48000,
+        "DirectPlayProfiles": [
+          { "Container": "mp3", "Type": "Audio", "AudioCodec": "mp3" },
+          { "Container": "mp4", "Type": "Audio", "AudioCodec": "aac" },
+          { "Container": "m4a", "Type": "Audio", "AudioCodec": "aac" },
+          { "Container": "flac", "Type": "Audio", "AudioCodec": "flac" },
+          { "Container": "wav", "Type": "Audio", "AudioCodec": "pcm_s16le" }
+        ],
+        "TranscodingProfiles": [
+          {
+            "Container": "mp4",
+            "Type": "Audio",
+            "AudioCodec": "aac",
+            "Protocol": "http",
+            "EstimateContentLength": true,
+            "EnableMpegtsM2TsMode": false
+          }
+        ],
+        "CodecProfiles": []
+      }
+    },
+    {
+      "id": "car-usb-mp3",
+      "name": "Car Stereo USB — MP3 256 kbps",
+      "description": "For car stereos and FAT32 USB sticks where predictable MP3 compatibility matters more than preserving original formats. Transcodes all audio to stereo MP3 256 kbps.",
+      "defaultMusicFolder": "Music",
+      "defaultPlaylistFolder": "Music",
+      "deviceProfile": {
+        "Name": "HifiMule-Car-USB",
+        "MaxStreamingBitrate": 256000,
+        "MusicStreamingTranscodingBitrate": 256000,
+        "MaxAudioChannels": 2,
+        "MaxAudioSampleRate": 44100,
+        "MaxAudioBitDepth": 16,
+        "DirectPlayProfiles": [],
+        "TranscodingProfiles": [
+          {
+            "Container": "mp3",
+            "Type": "Audio",
+            "AudioCodec": "mp3",
+            "Protocol": "http",
+            "EstimateContentLength": true,
+            "EnableMpegtsM2TsMode": false
+          }
+        ],
+        "CodecProfiles": []
+      }
+    },
+    {
+      "id": "spoken-word-mp3-96",
+      "name": "Audiobooks / Podcasts — MP3 96 kbps",
+      "description": "For speech-heavy libraries and small storage devices. Transcodes everything to compact stereo MP3 96 kbps.",
+      "defaultMusicFolder": "Audiobooks",
+      "defaultPlaylistFolder": "Playlists",
+      "deviceProfile": {
+        "Name": "HifiMule-Spoken-Word",
+        "MaxStreamingBitrate": 96000,
+        "MusicStreamingTranscodingBitrate": 96000,
+        "MaxAudioChannels": 2,
+        "MaxAudioSampleRate": 44100,
+        "MaxAudioBitDepth": 16,
+        "DirectPlayProfiles": [],
+        "TranscodingProfiles": [
+          {
+            "Container": "mp3",
+            "Type": "Audio",
+            "AudioCodec": "mp3",
+            "Protocol": "http",
+            "EstimateContentLength": true,
+            "EnableMpegtsM2TsMode": false
+          }
+        ],
+        "CodecProfiles": []
+      }
     }
   ]
 }
