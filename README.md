@@ -25,6 +25,29 @@ HifiMule is a desktop application that bridges open source media servers and leg
 - **Hardware-aware** — Validates path lengths and filename character sets for legacy devices
 - **Secure credentials** — Stores server credentials in the OS keyring, never on disk
 
+## Screenshots
+
+### Connect to your media server
+
+![Jellyfin server detected on the login screen](docs/images/login-jellyfin-detected.png)
+
+![OpenSubsonic server detected on the login screen](docs/images/login-opensubsonic-detected.png)
+
+### Browse, configure, and sync
+
+![Artist library with an empty sync basket](docs/images/library-artists-and-basket.png)
+
+![Genre library view with device controls](docs/images/library-genres-view.png)
+
+![Device settings modal](docs/images/device-settings-modal.png)
+
+![Device selection and managed folders](docs/images/device-selection-and-folders.png)
+
+![Basket ready to sync](docs/images/basket-ready-to-sync.png)
+
+![Sync starting state](docs/images/sync-starting-state.png)
+
+
 ## Disclaimer
 
 This software was developed with the assistance of AI and the BMAD Method. As an experienced software developer, I have thoroughly validated the code to ensure its quality and reliability.
