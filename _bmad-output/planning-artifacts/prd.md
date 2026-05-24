@@ -50,7 +50,7 @@ workflowType: 'prd'
 - **Profile Selection:** UI/CLI support for selecting the correct Jellyfin user account for playlist/scrobble routing.
 - **Auto-Fill Sync Mode:** Intelligent device-filling using a virtual basket slot. Enabling Auto-Fill places a single slot in the basket representing remaining capacity; the priority algorithm (favorites → play count → creation date) runs at sync time, not at basket-build time. Always uses the freshest library state. Can be mixed with manual basket selections.
 - **Auto-Sync on Connect:** Known devices with auto-sync enabled trigger synchronization automatically on detection, requiring zero user interaction.
-- **Device Identity:** During device initialization, users can assign a custom display name and select an icon from a built-in library. The name and icon are stored in the device manifest and displayed in the device hub for instant visual recognition.
+- **Device Configuration:** During device initialization, users can assign a custom display name, select an icon from a built-in library, and choose device folders for music and playlists. Playlist location defaults to the music folder. Existing managed devices can later be edited for name, icon, music folder, and playlist folder, with folder changes surfaced as cleanup/resync work before the next sync.
 
 - **Transcoding Handshake:** Per-device profile selection for server-side re-encoding via Jellyfin PlaybackInfo API. Profiles stored in an editable `device-profiles.json` in the app data directory; passthrough (direct download) is the default.
 
@@ -147,7 +147,7 @@ As a cross-platform desktop application, HifiMule consists of a performance-crit
 - **FR3:** The system can identify the presence of a `.hifimule.json` manifest on discovery.
 - **FR4:** The system can read persistent hardware identifiers to link devices across different sessions. When multiple managed devices are connected simultaneously, the system tracks all of them and allows the user to select the active device context.
 - **FR33:** The system presents a persistent device hub showing all connected managed devices, each identified by its name and icon. The user can switch the active device context at any time. When no device is selected, the basket is empty and adding items is disabled.
-- **FR26:** The system can initialize a new `.hifimule.json` manifest on a connected device that has not previously been managed, capturing a hardware identifier, a designated sync folder path, an associated Jellyfin user profile, a user-provided display name, and an optional icon identifier selected from a built-in library.
+- **FR26:** The system can initialize a new `.hifimule.json` manifest on a connected device that has not previously been managed, capturing a hardware identifier, a designated music sync folder path, a playlist folder path that defaults to the music folder, an associated media-server user profile, a user-provided display name, and an optional icon identifier selected from a built-in library.
 
 ### 2. Server & Profile Management
 - **FR5:** Users can configure media server credentials (URL, server type, username, and either an API token for Jellyfin or username+password for Subsonic/OpenSubsonic servers). The system auto-detects the server type by pinging the URL when the user enters it.
@@ -184,6 +184,7 @@ As a cross-platform desktop application, HifiMule consists of a performance-crit
 - **FR23:** The system can send OS-native notifications for sync completion or errors.
 - **FR25:** The system retrieves and displays only music-centric content (Playlists, Albums, Artists, Tracks). For Jellyfin: applies `IncludeItemTypes` filter to exclude movies, series, and books. For Subsonic/Navidrome: uses music-specific endpoints (`getArtists`, `getAlbum`, `getPlaylists`) which are inherently music-only.
 - **FR35:** The system supports Jellyfin, Navidrome, Subsonic, and any OpenSubsonic-compatible media server. Server type is auto-detected at connection time by pinging the server URL. Detected capability extensions (OpenSubsonic) are cached and used to enable per-server features.
+- **FR36:** The system can edit an existing managed device manifest, allowing users to change device name, icon, music folder, and playlist folder. Folder changes are reflected in the next sync preview and trigger managed relocation cleanup before new items are written.
 
 ### 7. Packaging & Distribution
 - **FR27:** The system can be packaged into platform-native installers (MSI for Windows, DMG for macOS, AppImage/.deb for Linux) using the Tauri v2 bundler.

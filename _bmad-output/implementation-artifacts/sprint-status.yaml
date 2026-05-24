@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-05-23  # Story 4.9 review complete
+last_updated: 2026-05-24  # Device configuration improvement stories added
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -127,3 +127,7 @@ development_status:
   9-4-history-and-favorites-browse-modes: done
   9-5-hierarchical-favorites-navigation: done
   9-6-navidrome-subsonic-browse-parity-hardening: done
+
+  epic-10: in-progress
+  10-1-device-manifest-editing-identity-and-folder-settings: ready-for-dev
+  10-2-separate-playlist-folder-and-relocation-cleanup: ready-for-dev

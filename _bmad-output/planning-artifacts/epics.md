@@ -103,6 +103,7 @@ FR26: Epic 2 - Device Identity (Story 2.9)
 FR33: Epic 2 - Enhanced Multi-Device Hub (Story 2.8)
 FR34: Epic 3 - Artist Entity Basket Item (Story 3.9)
 FR35: Epic 8 - Multi-Provider Server Support (Stories 8.1–8.6)
+FR36: Epic 10 - Device Configuration Editing (Stories 10.1-10.2)
 
 ## Epic List
 
@@ -820,7 +821,8 @@ So that my DAP or Rockbox player can natively load and play the playlist in the 
 
 **Given** at least one basket item has `item_type = "Playlist"` and sync runs successfully
 **When** sync completes
-**Then** a `.m3u` file is written to the managed sync folder for each playlist.
+**Then** a `.m3u` file is written to `manifest.playlistPath` for each playlist.
+**And** if `playlistPath` is absent, null, or empty for an older manifest, the daemon writes playlists to `manifest.managed_paths[0]`.
 **And** the filename is sanitized via `sanitize_path_component()` and truncated to 255 characters if needed.
 
 **Given** a playlist `.m3u` is being written
@@ -828,6 +830,10 @@ So that my DAP or Rockbox player can natively load and play the playlist in the 
 **Then** the file begins with `#EXTM3U`.
 **And** each track has an `#EXTINF:<seconds>,<Artist> - <Title>` line followed by its relative path (relative to the `.m3u` file location, forward slashes).
 **And** duration is `RunTimeTicks ÷ 10,000,000`; absent ticks → `-1`.
+
+**Given** the playlist folder differs from the music folder
+**When** generating `.m3u` entries
+**Then** each track path is relative from the playlist file location to the synced track file location, using forward slashes.
 
 **Given** a playlist's track list is unchanged from the previous sync (same `trackCount` and `trackIds` hash in manifest)
 **Then** the `.m3u` is not rewritten. If changed, it is regenerated atomically (Write-Temp-Rename).
@@ -1836,3 +1842,94 @@ So that switching from Jellyfin does not remove core curation workflows.
 - Keep the UI provider-neutral; it should consume `browse.listModes` and existing `browse.*` RPCs only.
 - Prefer OpenSubsonic/Navidrome endpoints that expose ordered recent/frequent data reliably; hide modes rather than synthesizing misleading lists.
 - Tests should cover capability lists for OpenSubsonic/Navidrome versus classic Subsonic, recently added sorting, frequently played sorting, recently played sorting, and album letter filtering.
+
+## Epic 10: Device Configuration Editing
+
+Allow existing managed devices to be edited after initialization, including identity and folder configuration. Support separate playlist output folders for devices such as Rockbox players, while preserving managed-file safety and backward compatibility with existing manifests.
+
+### Story 10.1: Device Manifest Editing - Identity and Folder Settings
+
+As a System Admin (Alexis),
+I want to edit an existing managed device manifest,
+So that I can correct device identity and folder layout without reinitializing the device.
+
+**Acceptance Criteria:**
+
+**Given** a managed device is selected
+**When** I open Device Settings
+**Then** I can edit name, icon, music folder, and playlist folder.
+
+**Given** I clear playlist folder
+**When** I save
+**Then** the daemon stores it as null/omitted and resolves it to the music folder.
+
+**Given** I change only name or icon
+**When** I save
+**Then** no sync relocation is required.
+**And** the device hub refreshes without requiring device reconnect.
+
+**Given** I change music folder or playlist folder
+**When** I save
+**Then** the daemon returns `relocationRequired = true`.
+**And** the UI marks the next sync preview as requiring cleanup/resync.
+
+**Given** an invalid folder path is entered
+**When** I save
+**Then** the daemon rejects absolute paths, parent traversal, root-only unsafe values, and empty path components.
+
+**Given** an MTP device uses cached folder IDs
+**When** a folder path changes
+**Then** stale folder ID cache entries for affected paths are cleared or recomputed.
+
+**Technical Notes:**
+- `DeviceManifest` gains `playlist_path: Option<String>` with `#[serde(default)]`; JSON uses `playlistPath`.
+- Add `device.update_manifest` RPC for editable manifest fields.
+- All manifest writes use `DeviceIO::write_with_verify()` through `device::write_manifest()`.
+- Folder paths must remain device-relative and must not contain absolute roots or parent traversal.
+- Name/icon-only updates should not dirty sync state or trigger cleanup.
+
+### Story 10.2: Separate Playlist Folder and Relocation Cleanup
+
+As a Rockbox/DAP user,
+I want playlist files to be written to the folder my device expects,
+So that native playlist browsing works while HifiMule still manages music safely.
+
+**Acceptance Criteria:**
+
+**Given** a manifest has no `playlistPath`
+**When** playlist sync runs
+**Then** playlist files are written to `managed_paths[0]` as before.
+
+**Given** `playlistPath` is set
+**When** playlist sync runs
+**Then** `.m3u` files are written to that folder.
+
+**Given** `playlistPath` differs from the music folder
+**When** playlist content is generated
+**Then** M3U track entries are relative from the playlist folder to the track files, using forward slashes.
+
+**Given** the music folder changes
+**When** sync preview is calculated
+**Then** existing manifest-owned tracks outside the new music folder are shown as cleanup/removal before rewrite.
+
+**Given** the playlist folder changes
+**When** sync preview is calculated
+**Then** existing manifest-owned playlist files outside the new playlist folder are shown as cleanup/removal before rewrite.
+
+**Given** cleanup deletes a manifest-owned file that is already missing
+**When** sync cleanup runs
+**Then** deletion is treated as successful and the stale manifest entry is removed.
+
+**Given** cleanup would delete more than the configured destructive safety threshold
+**When** sync starts
+**Then** the UI requires explicit confirmation before sync proceeds.
+
+**Given** unmanaged files exist in old or new folders
+**When** relocation cleanup runs
+**Then** they are not deleted or modified.
+
+**Technical Notes:**
+- Reuse existing idempotent managed-delete behavior from Story 4.10.
+- M3U generation must calculate relative paths from `playlistPath` to each track's `local_path`, not assume both live under the same folder.
+- Sync preview must distinguish managed relocation cleanup from ordinary content removal.
+- Auto-sync must not perform threshold-exceeding relocation cleanup without prior user confirmation.

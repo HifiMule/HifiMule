@@ -139,7 +139,7 @@ hifimule-daemon/src/
 - **Daemon State:** Managed via a local SQLite database to ensure atomic scrobble commits and robust history tracking.
 - **UI Preferences:** Stored in standard JSON configuration files for ease of access from the Tauri frontend.
 - **Device Profile Fields:** `auto_fill_enabled BOOLEAN DEFAULT false`, `max_fill_bytes INTEGER NULL` (null = fill to capacity), `auto_sync_on_connect BOOLEAN DEFAULT false`, `transcoding_profile_id TEXT NULL` (references id in `device-profiles.json`; null = passthrough).
-- **Manifest Extension:** `.hifimule.json` includes `auto_sync_on_connect` (boolean), `auto_fill` block (`{ "enabled": bool, "maxBytes": number | null }`), `transcoding_profile_id` (string | null), `name` (string | null), `icon` (string | null), and `server_id` (string | null — normalized server URL for multi-server manifests). All new fields use `#[serde(default)]` for backward compatibility.
+- **Manifest Extension:** `.hifimule.json` includes `auto_sync_on_connect` (boolean), `auto_fill` block (`{ "enabled": bool, "maxBytes": number | null }`), `transcoding_profile_id` (string | null), `name` (string | null), `icon` (string | null), `playlist_path` (string | null; defaults to the first managed music path), and `server_id` (string | null — normalized server URL for multi-server manifests). All new fields use `#[serde(default)]` for backward compatibility.
 - **device-profiles.json:** Seeded to `{app_data_dir}/device-profiles.json` on first daemon startup from an embedded binary asset (`include_bytes!`). User-editable post-install. Contains named `DeviceProfile` payloads for Jellyfin PlaybackInfo negotiation. A `passthrough` profile (`deviceProfile: null`) explicitly disables transcoding.
 
 ### DeviceManager Struct
@@ -170,7 +170,8 @@ unrecognized_device_path: Option<PathBuf>            // device awaiting initiali
 - **Multi-Device IPC:**
   - `device.list` → `Array<{ path: string, deviceId: string, name: string | null, icon: string | null }>` — all connected managed devices.
   - `device.select(params: { path: string })` → `{ ok: true }` — sets the active device context for all operations.
-  - `device.initialize(params: { folderPath: string, profileId: string, name: string, icon: string | null })` → `{ ok: true }` — writes manifest including name and icon.
+  - `device.initialize(params: { folderPath: string, playlistFolderPath?: string | null, profileId: string, name: string, icon: string | null })` → `{ ok: true }` — writes manifest including name, icon, music folder, and playlist folder. If `playlistFolderPath` is omitted or null, it resolves to `folderPath`.
+  - `device.update_manifest(params: { deviceId: string, name?: string, icon?: string | null, musicFolderPath?: string, playlistFolderPath?: string | null })` → `{ ok: true, relocationRequired: boolean, cleanupPreview?: { tracksToRemove: number, playlistsToRemove: number, bytesToRemove: number } }` — edits the selected managed device manifest. Name/icon-only changes are metadata updates. Folder changes are validated as device-relative paths and surface relocation cleanup for the next sync preview.
   - `get_daemon_state` response extended with `connectedDevices: Array<{path, deviceId, name, icon}>` and `selectedDevicePath: string | null`.
 - **Transcoding IPC:**
   - `device_profiles.list` → `Array<{ id, name, description, deviceProfile: object | null }>` — reads from `device-profiles.json`.
