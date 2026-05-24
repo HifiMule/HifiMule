@@ -213,6 +213,68 @@ async fn process_delete_item(
     }
 }
 
+async fn cleanup_replaced_file_after_write(
+    delete_item: &SyncDeleteItem,
+    new_local_path: &str,
+    device_path: &Path,
+    managed_path: &Path,
+    managed_subfolder: Option<&str>,
+    is_mtp: bool,
+    device_io: &Arc<dyn crate::device_io::DeviceIO>,
+    operation_manager: &Arc<SyncOperationManager>,
+    operation_id: &str,
+) -> Option<SyncFileError> {
+    if delete_item.local_path == new_local_path {
+        if let Some(mut operation) = operation_manager.get_operation(operation_id).await {
+            operation.files_completed += 1;
+            operation_manager
+                .update_operation(operation_id, operation)
+                .await;
+        }
+        return None;
+    }
+
+    if let Err(error_message) = validate_delete_path_for_managed_zone(
+        device_path,
+        managed_path,
+        managed_subfolder,
+        &delete_item.local_path,
+        is_mtp,
+    ) {
+        return Some(SyncFileError {
+            jellyfin_id: delete_item.jellyfin_id.clone(),
+            filename: delete_item.name.clone(),
+            error_message,
+        });
+    }
+
+    match device_io.delete_file(&delete_item.local_path).await {
+        Ok(_) => {
+            if let Some(mut operation) = operation_manager.get_operation(operation_id).await {
+                operation.files_completed += 1;
+                operation_manager
+                    .update_operation(operation_id, operation)
+                    .await;
+            }
+            None
+        }
+        Err(e) if is_missing_delete_error(&e) => {
+            if let Some(mut operation) = operation_manager.get_operation(operation_id).await {
+                operation.files_completed += 1;
+                operation_manager
+                    .update_operation(operation_id, operation)
+                    .await;
+            }
+            None
+        }
+        Err(e) => Some(SyncFileError {
+            jellyfin_id: delete_item.jellyfin_id.clone(),
+            filename: delete_item.name.clone(),
+            error_message: format!("Failed to remove replaced file: {}", e),
+        }),
+    }
+}
+
 /// Status of a sync operation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -1164,27 +1226,12 @@ pub async fn execute_sync(
         .iter()
         .map(|add| add.jellyfin_id.as_str())
         .collect();
-    for delete_item in delta
+    let readd_delete_by_id: HashMap<&str, &SyncDeleteItem> = delta
         .deletes
         .iter()
         .filter(|delete| readd_ids.contains(delete.jellyfin_id.as_str()))
-    {
-        if let Some(error) = process_delete_item(
-            delete_item,
-            device_path,
-            &managed_path,
-            managed_subfolder_for_delete.as_deref(),
-            is_mtp,
-            &device_io,
-            &operation_manager,
-            &operation_id,
-            &device_manager,
-        )
-        .await
-        {
-            errors.push(error);
-        }
-    }
+        .map(|delete| (delete.jellyfin_id.as_str(), delete))
+        .collect();
 
     // Pre-fetch all item details for adds to avoid N+1 queries
     let mut fetched_items = std::collections::HashMap::new();
@@ -1420,9 +1467,29 @@ pub async fn execute_sync(
 
                 // Per-file manifest update for dirty-resume support (Story 4.4)
                 // Per-file writes ensure manifest always reflects completed work for true delta resume.
+                if let Some(delete_item) = readd_delete_by_id.get(add_item.jellyfin_id.as_str()) {
+                    if let Some(error) = cleanup_replaced_file_after_write(
+                        delete_item,
+                        &rel_path,
+                        device_path,
+                        &managed_path,
+                        managed_subfolder_for_delete.as_deref(),
+                        is_mtp,
+                        &device_io,
+                        &operation_manager,
+                        &operation_id,
+                    )
+                    .await
+                    {
+                        errors.push(error);
+                    }
+                }
                 let synced_item = synced_items.last().unwrap().clone();
+                let id_to_replace = add_item.jellyfin_id.clone();
                 if let Err(e) = device_manager
                     .update_manifest(|m| {
+                        m.synced_items
+                            .retain(|item| item.jellyfin_id != id_to_replace);
                         m.synced_items.push(synced_item);
                     })
                     .await
@@ -1710,27 +1777,12 @@ pub async fn execute_provider_sync(
         .iter()
         .map(|add| add.jellyfin_id.as_str())
         .collect();
-    for delete_item in delta
+    let readd_delete_by_id: HashMap<&str, &SyncDeleteItem> = delta
         .deletes
         .iter()
         .filter(|delete| readd_ids.contains(delete.jellyfin_id.as_str()))
-    {
-        if let Some(error) = process_delete_item(
-            delete_item,
-            device_path,
-            &managed_path,
-            managed_subfolder_for_delete.as_deref(),
-            is_mtp,
-            &device_io,
-            &operation_manager,
-            &operation_id,
-            &device_manager,
-        )
-        .await
-        {
-            errors.push(error);
-        }
-    }
+        .map(|delete| (delete.jellyfin_id.as_str(), delete))
+        .collect();
 
     for add_item in delta.adds.iter() {
         let source_format = provider_audio_format(
@@ -1968,8 +2020,28 @@ pub async fn execute_provider_sync(
                         .await;
                 }
                 let synced_item = synced_items.last().unwrap().clone();
+                if let Some(delete_item) = readd_delete_by_id.get(add_item.jellyfin_id.as_str()) {
+                    if let Some(error) = cleanup_replaced_file_after_write(
+                        delete_item,
+                        &rel_path,
+                        device_path,
+                        &managed_path,
+                        managed_subfolder_for_delete.as_deref(),
+                        is_mtp,
+                        &device_io,
+                        &operation_manager,
+                        &operation_id,
+                    )
+                    .await
+                    {
+                        errors.push(error);
+                    }
+                }
+                let id_to_replace = add_item.jellyfin_id.clone();
                 if let Err(e) = device_manager
                     .update_manifest(|m| {
+                        m.synced_items
+                            .retain(|item| item.jellyfin_id != id_to_replace);
                         m.synced_items.push(synced_item);
                     })
                     .await
@@ -2434,9 +2506,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
     let current_ids: HashSet<&str> = manifest
         .synced_items
         .iter()
-        .filter(|i| {
-            !profile_dirty || !desired_items.iter().any(|d| d.jellyfin_id == i.jellyfin_id)
-        })
+        .filter(|i| !profile_dirty || !desired_items.iter().any(|d| d.jellyfin_id == i.jellyfin_id))
         .map(|i| i.jellyfin_id.as_str())
         .collect();
 
@@ -2475,8 +2545,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
         .collect();
 
     for item in &manifest.synced_items {
-        let stale_for_profile =
-            profile_dirty && desired_ids.contains(item.jellyfin_id.as_str());
+        let stale_for_profile = profile_dirty && desired_ids.contains(item.jellyfin_id.as_str());
         if stale_for_profile || !desired_ids.contains(item.jellyfin_id.as_str()) {
             let idx = deletes.len();
             deletes.push(SyncDeleteItem {

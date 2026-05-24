@@ -3071,8 +3071,7 @@ async fn handle_sync_execute(
                         m.dirty = false;
                         m.pending_item_ids = vec![];
                         if errors.is_empty() {
-                            m.last_synced_transcoding_profile_id =
-                                m.transcoding_profile_id.clone();
+                            m.last_synced_transcoding_profile_id = m.transcoding_profile_id.clone();
                             m.transcoding_profile_dirty = false;
                         }
                     })
@@ -3422,21 +3421,37 @@ fn normalize_editable_folder_path(value: &str) -> Result<String, JsonRpcError> {
             data: None,
         });
     }
-    if trimmed
-        .split('/')
-        .any(|component| component.is_empty() || component == "." || component == "..")
-    {
+    if trimmed.split('/').any(|component| {
+        component.is_empty() || component == "." || component == ".." || component.contains(':')
+    }) {
         return Err(JsonRpcError {
             code: ERR_INVALID_PARAMS,
-            message: "Folder path must not contain empty, current, or parent components"
-                .to_string(),
+            message:
+                "Folder path must not contain empty, current, parent, or drive-prefix components"
+                    .to_string(),
             data: None,
         });
     }
     Ok(trimmed)
 }
 
-fn validate_device_name_and_icon(name: Option<&str>, icon: Option<&str>) -> Result<(), JsonRpcError> {
+fn string_param<'a>(params: &'a Value, key: &str) -> Result<Option<&'a str>, JsonRpcError> {
+    match params.get(key) {
+        None => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.as_str())),
+        Some(Value::Null) => Ok(None),
+        Some(_) => Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: format!("{} must be a string or null", key),
+            data: None,
+        }),
+    }
+}
+
+fn validate_device_name_and_icon(
+    name: Option<&str>,
+    icon: Option<&str>,
+) -> Result<(), JsonRpcError> {
     if let Some(name) = name {
         if name.trim().is_empty() {
             return Err(JsonRpcError {
@@ -3465,7 +3480,9 @@ fn validate_device_name_and_icon(name: Option<&str>, icon: Option<&str>) -> Resu
     Ok(())
 }
 
-fn validate_transcoding_profile_id(profile_id: Option<&str>) -> Result<Option<String>, JsonRpcError> {
+fn validate_transcoding_profile_id(
+    profile_id: Option<&str>,
+) -> Result<Option<String>, JsonRpcError> {
     match profile_id {
         None | Some("passthrough") => Ok(None),
         Some(id) => {
@@ -3538,8 +3555,11 @@ fn apply_manifest_settings_update(
     }
     if let Some(transcoding_profile_id) = transcoding_profile_id {
         if manifest.transcoding_profile_id != transcoding_profile_id {
-            manifest.transcoding_profile_dirty = match &manifest.last_synced_transcoding_profile_id {
-                Some(last_synced) => transcoding_profile_id.as_deref() != Some(last_synced.as_str()),
+            manifest.transcoding_profile_dirty = match &manifest.last_synced_transcoding_profile_id
+            {
+                Some(last_synced) => {
+                    transcoding_profile_id.as_deref() != Some(last_synced.as_str())
+                }
                 None => !manifest.synced_items.is_empty(),
             };
         }
@@ -3632,11 +3652,15 @@ async fn handle_device_update_manifest(
         message: "Missing deviceId".to_string(),
         data: None,
     })?;
-    let current = state.device_manager.get_current_device().await.ok_or(JsonRpcError {
-        code: ERR_NOT_FOUND,
-        message: "No selected device".to_string(),
-        data: None,
-    })?;
+    let current = state
+        .device_manager
+        .get_current_device()
+        .await
+        .ok_or(JsonRpcError {
+            code: ERR_NOT_FOUND,
+            message: "No selected device".to_string(),
+            data: None,
+        })?;
     if current.device_id != device_id {
         return Err(JsonRpcError {
             code: ERR_INVALID_PARAMS,
@@ -3645,19 +3669,29 @@ async fn handle_device_update_manifest(
         });
     }
 
-    let name = params.get("name").and_then(Value::as_str);
-    let icon = params
-        .get("icon")
-        .map(|value| value.as_str().unwrap_or("").to_string());
-    validate_device_name_and_icon(name, icon.as_deref())?;
+    let name = string_param(&params, "name")?;
+    let icon = match params.get("icon") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::String(value)) => Some(Some(value.clone())),
+        Some(_) => {
+            return Err(JsonRpcError {
+                code: ERR_INVALID_PARAMS,
+                message: "icon must be a string or null".to_string(),
+                data: None,
+            });
+        }
+    };
+    let icon_for_validation = icon.as_ref().and_then(|icon| icon.as_deref());
+    validate_device_name_and_icon(name, icon_for_validation)?;
 
-    let music_folder_path = params
-        .get("musicFolderPath")
-        .and_then(Value::as_str)
+    let music_folder_path = string_param(&params, "musicFolderPath")?
         .map(normalize_editable_folder_path)
         .transpose()?;
     let playlist_folder_path = if params.get("playlistFolderPath").is_some() {
-        let raw = params["playlistFolderPath"].as_str().unwrap_or("").trim();
+        let raw = string_param(&params, "playlistFolderPath")?
+            .unwrap_or("")
+            .trim();
         Some(if raw.is_empty() {
             None
         } else {
@@ -3667,11 +3701,12 @@ async fn handle_device_update_manifest(
         None
     };
     let name_update = name.map(str::to_string);
-    let icon_update = params.get("icon").map(|_| icon);
+    let icon_update = icon;
     let transcoding_profile_update = if params.get("transcodingProfileId").is_some() {
-        Some(validate_transcoding_profile_id(
-            params["transcodingProfileId"].as_str(),
-        )?)
+        Some(validate_transcoding_profile_id(string_param(
+            &params,
+            "transcodingProfileId",
+        )?)?)
     } else {
         None
     };
@@ -3682,6 +3717,17 @@ async fn handle_device_update_manifest(
         playlists_to_remove: 0,
         bytes_to_remove: 0,
     };
+
+    if let Some(profile_update) = transcoding_profile_for_db {
+        state
+            .db
+            .set_transcoding_profile(device_id, profile_update.as_deref())
+            .map_err(|e| JsonRpcError {
+                code: ERR_STORAGE_ERROR,
+                message: format!("Failed to store transcoding profile: {}", e),
+                data: None,
+            })?;
+    }
 
     state
         .device_manager
@@ -3696,22 +3742,18 @@ async fn handle_device_update_manifest(
             );
         })
         .await
-        .map_err(|e| JsonRpcError {
-            code: ERR_STORAGE_ERROR,
-            message: format!("Failed to update device manifest: {}", e),
-            data: None,
-        })?;
-
-    if let Some(profile_update) = transcoding_profile_for_db {
-        state
-            .db
-            .set_transcoding_profile(device_id, profile_update.as_deref())
-            .map_err(|e| JsonRpcError {
+        .map_err(|e| {
+            if params.get("transcodingProfileId").is_some() {
+                let _ = state
+                    .db
+                    .set_transcoding_profile(device_id, current.transcoding_profile_id.as_deref());
+            }
+            JsonRpcError {
                 code: ERR_STORAGE_ERROR,
-                message: format!("Failed to store transcoding profile: {}", e),
+                message: format!("Failed to update device manifest: {}", e),
                 data: None,
-            })?;
-    }
+            }
+        })?;
 
     broadcast_device_state(state).await;
     Ok(serde_json::json!({
@@ -4350,7 +4392,17 @@ mod tests {
 
     #[test]
     fn editable_folder_path_rejects_unsafe_values() {
-        for invalid in ["", "/Music", "C:/Music", "Music//Rock", "Music/../Rock", ".", "Music/./Rock"] {
+        for invalid in [
+            "",
+            "/Music",
+            "C:/Music",
+            "C:Music",
+            "Music:Rock",
+            "Music//Rock",
+            "Music/../Rock",
+            ".",
+            "Music/./Rock",
+        ] {
             assert!(
                 normalize_editable_folder_path(invalid).is_err(),
                 "{invalid} must be rejected"
@@ -4449,6 +4501,40 @@ mod tests {
         assert_eq!(updated.managed_paths, vec!["Audio".to_string()]);
         assert_eq!(updated.playlist_path, None);
         assert_eq!(updated.resolved_playlist_path(), Some("Audio"));
+    }
+
+    #[tokio::test]
+    async fn device_update_manifest_rpc_rejects_non_string_edit_fields() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = manifest_for_update();
+        crate::device::write_manifest(
+            Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())),
+            &manifest,
+        )
+        .await
+        .unwrap();
+        state
+            .device_manager
+            .handle_device_detected(
+                dir.path().to_path_buf(),
+                manifest,
+                Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())),
+            )
+            .await
+            .unwrap();
+
+        for params in [
+            json!({ "deviceId": "dev-1", "icon": 7 }),
+            json!({ "deviceId": "dev-1", "playlistFolderPath": false }),
+            json!({ "deviceId": "dev-1", "transcodingProfileId": { "id": "passthrough" } }),
+        ] {
+            let err = handle_device_update_manifest(&state, Some(params))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, ERR_INVALID_PARAMS);
+        }
     }
 
     #[tokio::test]

@@ -1123,7 +1123,14 @@ async fn test_initialize_device_root() {
 
     // Initialize with root (empty folder_path)
     let manifest = manager
-        .initialize_device("", None, None, "My Device".to_string(), None, msc(dir.path()))
+        .initialize_device(
+            "",
+            None,
+            None,
+            "My Device".to_string(),
+            None,
+            msc(dir.path()),
+        )
         .await
         .unwrap();
 
@@ -1187,7 +1194,14 @@ async fn test_initialize_device_requires_unrecognized_path() {
 
     // No unrecognized path set → should fail even when a backend is provided
     let res = manager
-        .initialize_device("", None, None, "My Device".to_string(), None, msc(dir.path()))
+        .initialize_device(
+            "",
+            None,
+            None,
+            "My Device".to_string(),
+            None,
+            msc(dir.path()),
+        )
         .await;
     assert!(res.is_err());
     assert!(

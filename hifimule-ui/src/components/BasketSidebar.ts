@@ -169,7 +169,7 @@ export class BasketSidebar {
     private deviceSwitchInFlight: boolean = false;
     private pendingDeviceFriendlyName: string | undefined = undefined;
     private currentDevice: any = null;
-    private syncPreviewRequiresCleanup: boolean = false;
+    private syncPreviewCleanupDevicePath: string | null = null;
 
     constructor(container: HTMLElement) {
         this.container = container;
@@ -486,15 +486,20 @@ export class BasketSidebar {
             if (saveButton) saveButton.loading = true;
             if (error) error.style.display = 'none';
             try {
-                const result = await rpcCall('device.update_manifest', {
+                const musicFolderValue = ((dialog.querySelector('#device-settings-music') as any)?.value ?? '').trim();
+                const playlistFolderValue = ((dialog.querySelector('#device-settings-playlist') as any)?.value ?? '').trim();
+                const payload: Record<string, unknown> = {
                     deviceId: selected.deviceId,
                     name: (dialog.querySelector('#device-settings-name') as any)?.value ?? '',
                     icon: selectedIcon || null,
                     transcodingProfileId: (dialog.querySelector('#device-settings-transcoding-profile') as any)?.value ?? 'passthrough',
-                    musicFolderPath: (dialog.querySelector('#device-settings-music') as any)?.value ?? '',
-                    playlistFolderPath: (dialog.querySelector('#device-settings-playlist') as any)?.value ?? '',
-                }) as any;
-                this.syncPreviewRequiresCleanup = result?.relocationRequired === true;
+                    playlistFolderPath: playlistFolderValue,
+                };
+                if (musicFolderValue !== '') {
+                    payload.musicFolderPath = musicFolderValue;
+                }
+                const result = await rpcCall('device.update_manifest', payload) as any;
+                this.syncPreviewCleanupDevicePath = result?.relocationRequired === true ? selected.path : null;
                 dialog.hide();
                 await this.refreshAndRender();
             } catch (err) {
@@ -602,6 +607,9 @@ export class BasketSidebar {
                         : this.selectedDevicePath;
                 const deviceCountChanged = newConnectedDevices.length !== this.connectedDevices.length;
                 const selectedDeviceChanged = newSelectedDevicePath !== this.selectedDevicePath;
+                if (selectedDeviceChanged || deviceDisconnected || activeOperationId) {
+                    this.syncPreviewCleanupDevicePath = null;
+                }
                 const autoPrefsChanged = currentDevice
                     && (
                         (daemonStateResult?.autoFill?.enabled ?? false) !== this.autoFillEnabled
@@ -680,7 +688,7 @@ export class BasketSidebar {
             `;
         }
 
-        const relocationBanner = this.syncPreviewRequiresCleanup ? `
+        const relocationBanner = this.syncPreviewCleanupDevicePath === this.folderInfo.devicePath ? `
             <div class="dirty-manifest-banner device-relocation-banner">
                 <sl-icon name="arrow-repeat"></sl-icon>
                 <div class="dirty-manifest-banner-text">

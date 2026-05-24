@@ -1,6 +1,6 @@
 # Story 10.1: Device Manifest Editing - Identity and Folder Settings
 
-Status: review
+Status: done
 
 ## Story
 
@@ -29,6 +29,15 @@ So that I can correct device identity and folder layout without reinitializing t
 - [x] Add Device Settings UI entry from the selected device hub card.
 - [x] Add UI fields for name, icon, transcoding profile, music folder, and playlist folder.
 - [x] Add tests for manifest backward compatibility, path validation, metadata-only updates, folder-change relocation flag, and MTP folder ID invalidation.
+
+### Review Findings
+
+- [x] [Review][Patch] Root-managed devices cannot save settings from Device Settings [hifimule-ui/src/components/BasketSidebar.ts:489]
+- [x] [Review][Patch] Profile-change rewrites delete the existing file before replacement succeeds [hifimule-daemon/src/sync.rs:1167]
+- [x] [Review][Patch] Windows drive-relative folder paths can bypass validation [hifimule-daemon/src/rpc.rs:3397]
+- [x] [Review][Patch] Non-string update fields silently clear manifest settings [hifimule-daemon/src/rpc.rs:3648]
+- [x] [Review][Patch] Manifest and SQLite transcoding profile updates can diverge on partial failure [hifimule-daemon/src/rpc.rs:3686]
+- [x] [Review][Patch] Relocation cleanup warning can stick to the wrong device or vanish before sync [hifimule-ui/src/components/BasketSidebar.ts:497]
 
 ## Dev Notes
 
