@@ -4268,6 +4268,8 @@ async fn handle_device_profiles_list() -> Result<Value, JsonRpcError> {
                 "id": p.id,
                 "name": p.name,
                 "description": p.description,
+                "defaultMusicFolder": p.default_music_folder,
+                "defaultPlaylistFolder": p.default_playlist_folder,
             })
         })
         .collect();

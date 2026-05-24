@@ -4,6 +4,14 @@
 
 import { rpcCall } from '../rpc';
 
+interface DeviceProfileSummary {
+    id: string;
+    name: string;
+    description?: string;
+    defaultMusicFolder?: string | null;
+    defaultPlaylistFolder?: string | null;
+}
+
 export class InitDeviceModal {
     private dialog: HTMLElement | null = null;
     private onComplete: (() => void) | null = null;
@@ -88,7 +96,7 @@ export class InitDeviceModal {
         }
     }
 
-    private renderContent(body: HTMLElement, userId: string | null, profiles: any[]) {
+    private renderContent(body: HTMLElement, userId: string | null, profiles: DeviceProfileSummary[]) {
         if (!userId) {
             body.innerHTML = `
                 <div class="init-device-no-login">
@@ -103,6 +111,7 @@ export class InitDeviceModal {
             `<sl-option value="${this.escapeHtml(p.id)}">${this.escapeHtml(p.name)}</sl-option>`
         ).join('');
         const defaultPassthroughDesc = (profiles || []).find(p => p.id === 'passthrough')?.description || '';
+        const defaultPassthrough = (profiles || []).find(p => p.id === 'passthrough');
 
         let selectedIcon = 'usb-drive';
 
@@ -110,7 +119,7 @@ export class InitDeviceModal {
             <div class="init-device-form">
                 <p style="margin-bottom: 1rem; opacity: 0.8;">
                     A new device has been detected with no sync configuration.
-                    Set up the sync folder to get started.
+                    Choose a device profile, then adjust folders if needed.
                 </p>
                 <div style="margin-bottom: 1.25rem;">
                     <label style="font-size: 0.8rem; opacity: 0.7; display: block; margin-bottom: 0.25rem;">
@@ -149,11 +158,23 @@ export class InitDeviceModal {
                 </div>
                 <div style="margin-bottom: 1.25rem;">
                     <label style="font-size: 0.8rem; opacity: 0.7; display: block; margin-bottom: 0.25rem;">
+                        Transcoding Profile
+                    </label>
+                    <sl-select id="init-transcoding-profile" value="passthrough">
+                        ${profileOptions}
+                    </sl-select>
+                    <div style="font-size: 0.75rem; opacity: 0.55; margin-top: 0.3rem;" id="init-transcoding-desc">
+                        ${this.escapeHtml(defaultPassthroughDesc)}
+                    </div>
+                </div>
+                <div style="margin-bottom: 1.25rem;">
+                    <label style="font-size: 0.8rem; opacity: 0.7; display: block; margin-bottom: 0.25rem;">
                         Music Folder Name (optional)
                     </label>
                     <sl-input
                         id="init-folder-input"
                         placeholder="Leave empty to sync to device root"
+                        value="${this.escapeHtml(defaultPassthrough?.defaultMusicFolder ?? '')}"
                         clearable
                     ></sl-input>
                     <div style="font-size: 0.75rem; opacity: 0.55; margin-top: 0.3rem;">
@@ -167,19 +188,9 @@ export class InitDeviceModal {
                     <sl-input
                         id="init-playlist-folder-input"
                         placeholder="Defaults to music folder"
+                        value="${this.escapeHtml(defaultPassthrough?.defaultPlaylistFolder ?? '')}"
                         clearable
                     ></sl-input>
-                </div>
-                <div style="margin-bottom: 1.25rem;">
-                    <label style="font-size: 0.8rem; opacity: 0.7; display: block; margin-bottom: 0.25rem;">
-                        Transcoding Profile
-                    </label>
-                    <sl-select id="init-transcoding-profile" value="passthrough">
-                        ${profileOptions}
-                    </sl-select>
-                    <div style="font-size: 0.75rem; opacity: 0.55; margin-top: 0.3rem;" id="init-transcoding-desc">
-                        ${this.escapeHtml(defaultPassthroughDesc)}
-                    </div>
                 </div>
                 <div style="padding: 0.75rem; background: rgba(255,255,255,0.04); border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);">
                     <div style="font-size: 0.75rem; opacity: 0.55; margin-bottom: 0.25rem;">Linked Jellyfin Profile</div>
@@ -194,11 +205,22 @@ export class InitDeviceModal {
         // Update description when selection changes
         const selectEl = body.querySelector('#init-transcoding-profile') as any;
         const descEl = body.querySelector('#init-transcoding-desc') as HTMLElement;
+        const musicFolderInput = body.querySelector('#init-folder-input') as any;
+        const playlistFolderInput = body.querySelector('#init-playlist-folder-input') as any;
+        let foldersEdited = false;
+        musicFolderInput?.addEventListener('sl-input', () => { foldersEdited = true; });
+        playlistFolderInput?.addEventListener('sl-input', () => { foldersEdited = true; });
         if (selectEl && descEl) {
             selectEl.addEventListener('sl-change', (e: any) => {
                 const selectedId = e.target.value;
                 const profile = (profiles || []).find(p => p.id === selectedId);
-                if (profile) descEl.innerHTML = this.escapeHtml(profile.description);
+                if (profile) {
+                    descEl.innerHTML = this.escapeHtml(profile.description ?? '');
+                    if (!foldersEdited) {
+                        musicFolderInput.value = profile.defaultMusicFolder ?? '';
+                        playlistFolderInput.value = profile.defaultPlaylistFolder ?? '';
+                    }
+                }
             });
         }
 

@@ -100,9 +100,9 @@ graph TD
 *   **Device Identity, Profile, and Folders** (shown in the Initialize Device dialog and Device Settings):
     *   `<sl-input>` labelled "Device Name" — required, max 40 chars, prefilled with volume label or "My Device".
     *   Icon picker: a grid of ~6–8 icon options (iPod Classic, Generic DAP, SD Card, USB Drive, Watch, Phone, etc.) rendered as selectable tiles with a highlighted border on selection.
-    *   Music folder input: device-relative folder path used for managed track files.
-    *   Playlist folder input: optional device-relative folder path used for `.m3u` files. When empty, it inherits the music folder.
-    *   Transcoding profile selector: populated from `device_profiles.list`, with passthrough/direct sync as the default.
+    *   Transcoding profile selector: populated from `device_profiles.list`, with passthrough/direct sync as the default. This appears before folder inputs because profiles can prefill folder defaults.
+    *   Music folder input: device-relative folder path used for managed track files. When the selected profile provides `defaultMusicFolder`, it is prefilled unless the user has already edited folders.
+    *   Playlist folder input: optional device-relative folder path used for `.m3u` files. When the selected profile provides `defaultPlaylistFolder`, it is prefilled unless the user has already edited folders; otherwise, empty inherits the music folder.
     *   Selected icon, name, transcoding profile, music folder, and playlist folder are confirmed with the existing action button and written to the manifest.
 
 ### 5.5 Headless Sync Feedback

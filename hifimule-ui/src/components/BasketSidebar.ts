@@ -40,6 +40,14 @@ interface ConnectedDeviceSummary {
     transcodingProfileId?: string | null;
 }
 
+interface DeviceProfileSummary {
+    id: string;
+    name: string;
+    description?: string;
+    defaultMusicFolder?: string | null;
+    defaultPlaylistFolder?: string | null;
+}
+
 interface SyncOperation {
     id: string;
     status: 'running' | 'complete' | 'failed';
@@ -403,9 +411,9 @@ export class BasketSidebar {
         const current = this.currentDevice ?? {};
         if (!selected) return;
 
-        let profiles: Array<{ id: string; name: string; description?: string }> = [];
+        let profiles: DeviceProfileSummary[] = [];
         try {
-            profiles = await rpcCall('device_profiles.list') as Array<{ id: string; name: string; description?: string }>;
+            profiles = await rpcCall('device_profiles.list') as DeviceProfileSummary[];
         } catch (err) {
             profiles = [{ id: 'passthrough', name: 'No Transcoding', description: 'Sync audio files as-is without transcoding.' }];
         }
@@ -446,14 +454,14 @@ export class BasketSidebar {
                         `).join('')}
                     </div>
                 </div>
-                <sl-input id="device-settings-music" label="Music folder" value="${this.escapeHtml(musicFolder)}"></sl-input>
-                <sl-input id="device-settings-playlist" label="Playlist folder" placeholder="${this.escapeHtml(musicFolder)}" value="${this.escapeHtml(playlistFolder ?? '')}"></sl-input>
                 <sl-select id="device-settings-transcoding-profile" label="Transcoding Profile" value="${this.escapeHtml(selectedProfileId)}">
                     ${profileOptions}
                 </sl-select>
                 <div id="device-settings-transcoding-desc" class="device-settings-description">
                     ${this.escapeHtml(selectedProfile?.description ?? '')}
                 </div>
+                <sl-input id="device-settings-music" label="Music folder" value="${this.escapeHtml(musicFolder)}"></sl-input>
+                <sl-input id="device-settings-playlist" label="Playlist folder" placeholder="${this.escapeHtml(musicFolder)}" value="${this.escapeHtml(playlistFolder ?? '')}"></sl-input>
                 <sl-alert id="device-settings-error" variant="danger" closable style="display:none;"></sl-alert>
             </div>
             <sl-button slot="footer" variant="default" id="device-settings-cancel">Cancel</sl-button>
@@ -475,9 +483,19 @@ export class BasketSidebar {
         });
         const profileSelect = dialog.querySelector('#device-settings-transcoding-profile') as any;
         const profileDesc = dialog.querySelector('#device-settings-transcoding-desc') as HTMLElement | null;
+        const musicInput = dialog.querySelector('#device-settings-music') as any;
+        const playlistInput = dialog.querySelector('#device-settings-playlist') as any;
+        let foldersEdited = false;
+        musicInput?.addEventListener('sl-input', () => { foldersEdited = true; });
+        playlistInput?.addEventListener('sl-input', () => { foldersEdited = true; });
         profileSelect?.addEventListener('sl-change', (event: any) => {
             const profile = profiles.find(p => p.id === event.target.value);
             if (profileDesc) profileDesc.textContent = profile?.description ?? '';
+            if (!foldersEdited && profile) {
+                musicInput.value = profile.defaultMusicFolder ?? musicInput.value ?? '';
+                playlistInput.value = profile.defaultPlaylistFolder ?? playlistInput.value ?? '';
+                playlistInput.placeholder = profile.defaultMusicFolder ?? musicInput.value ?? '';
+            }
         });
         dialog.querySelector('#device-settings-cancel')?.addEventListener('click', () => dialog.hide());
         dialog.querySelector('#device-settings-save')?.addEventListener('click', async () => {

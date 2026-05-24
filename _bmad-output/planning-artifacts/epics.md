@@ -1933,3 +1933,38 @@ So that native playlist browsing works while HifiMule still manages music safely
 - M3U generation must calculate relative paths from `playlistPath` to each track's `local_path`, not assume both live under the same folder.
 - Sync preview must distinguish managed relocation cleanup from ordinary content removal.
 - Auto-sync must not perform threshold-exceeding relocation cleanup without prior user confirmation.
+
+### Story 10.3: Profile-Based Default Folders and Setup Ordering
+
+As a System Admin (Alexis),
+I want device profiles to prefill recommended music and playlist folders before I edit folder paths,
+So that Rockbox and Garmin-style devices start with sensible folder layouts without manual typing.
+
+**Acceptance Criteria:**
+
+**Given** `device-profiles.json` contains `defaultMusicFolder` and `defaultPlaylistFolder`
+**When** the UI lists device profiles
+**Then** `device_profiles.list` returns those default folder fields along with id, name, and description.
+
+**Given** a Rockbox profile is selected during device initialization
+**When** the folder fields have not been manually edited
+**Then** music folder defaults to `Music` and playlist folder defaults to `Playlists`.
+
+**Given** the Garmin Music Watch profile is selected during device initialization
+**When** the folder fields have not been manually edited
+**Then** music folder defaults to `Music` and playlist folder defaults to `Music`.
+
+**Given** Device Settings is opened for an existing managed device
+**Then** the profile selector appears before music and playlist folder inputs.
+
+**Given** the user changes profile in Device Settings without editing folder fields
+**Then** the UI applies the selected profile's folder defaults.
+
+**Given** the user has edited either folder field
+**When** the selected profile changes
+**Then** the UI preserves the user's folder edits.
+
+**Technical Notes:**
+- Extend `DeviceProfileEntry` with optional `default_music_folder` / `default_playlist_folder` mapped to camelCase JSON.
+- Built-in defaults: Rockbox profiles use `Music` + `Playlists`; Garmin Music Watch uses `Music` + `Music`.
+- Keep `device-profiles.json` user-editable and backward compatible when fields are absent.

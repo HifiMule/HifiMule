@@ -10,6 +10,10 @@ pub struct DeviceProfileEntry {
     pub id: String,
     pub name: String,
     pub description: String,
+    #[serde(rename = "defaultMusicFolder", default)]
+    pub default_music_folder: Option<String>,
+    #[serde(rename = "defaultPlaylistFolder", default)]
+    pub default_playlist_folder: Option<String>,
     #[serde(rename = "deviceProfile")]
     pub device_profile: Option<Value>,
 }
@@ -66,7 +70,7 @@ mod tests {
     const VALID_JSON: &str = r#"{
         "profiles": [
             {"id": "passthrough", "name": "No Transcoding", "description": "Pass.", "deviceProfile": null},
-            {"id": "rockbox-mp3-320", "name": "Rockbox 320", "description": "MP3 320", "deviceProfile": {"Name": "Test"}}
+            {"id": "rockbox-mp3-320", "name": "Rockbox 320", "description": "MP3 320", "defaultMusicFolder": "Music", "defaultPlaylistFolder": "Playlists", "deviceProfile": {"Name": "Test"}}
         ]
     }"#;
 
@@ -78,6 +82,11 @@ mod tests {
         assert_eq!(profiles[0].id, "passthrough");
         assert!(profiles[0].device_profile.is_none());
         assert_eq!(profiles[1].id, "rockbox-mp3-320");
+        assert_eq!(profiles[1].default_music_folder.as_deref(), Some("Music"));
+        assert_eq!(
+            profiles[1].default_playlist_folder.as_deref(),
+            Some("Playlists")
+        );
         assert!(profiles[1].device_profile.is_some());
     }
 
