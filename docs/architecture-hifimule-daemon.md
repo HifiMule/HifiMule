@@ -142,11 +142,14 @@ pub struct DeviceManifest {
     pub synced_items: Vec<SyncedItem>,          // files confirmed on device
     pub basket_items: Vec<BasketItem>,          // user's selection for next sync
     pub managed_paths: Vec<String>,             // folders owned by HifiMule
+    pub playlist_path: Option<String>,          // null = inherit first managed music path
     pub dirty: bool,                            // true if sync was interrupted
     pub pending_item_ids: Vec<String>,          // IDs being synced when dirty was set
     pub auto_fill: AutoFillPrefs,               // auto-fill configuration
     pub auto_sync_on_connect: bool,
     pub transcoding_profile_id: Option<String>,
+    pub last_synced_transcoding_profile_id: Option<String>,
+    pub transcoding_profile_dirty: bool,        // true = rewrite matching tracks next sync
     pub playlists: Vec<PlaylistManifestEntry>,
     pub storage_id: Option<String>,             // cached MTP storage object ID
     pub folder_ids: HashMap<String, u32>,        // cached libmtp folder IDs by relative path

@@ -210,13 +210,31 @@ Bottom status bar showing daemon health. Polls `GET http://localhost:19140` (dir
 **Form fields:**
 - Device name (`sl-input`, max 40 chars, required)
 - Icon picker (6 tile options: usb-drive, phone-fill, watch, sd-card, headphones, music-note-list)
-- Sync folder path (`sl-input`, optional — blank = device root)
+- Music folder path (`sl-input`, optional - blank = device root)
+- Playlist folder path (`sl-input`, optional - blank = music folder)
 - Transcoding profile (`sl-select`, populated from `device_profiles.list`)
 - Linked media-server user display (read-only, from `get_credentials`)
 
-**Submits:** `device_initialize(folderPath, profileId, transcodingProfileId?, name, icon?)`
+**Submits:** `device_initialize(folderPath, playlistFolderPath?, profileId, transcodingProfileId?, name, icon?)`
 
 **States:** loading → form → submitting → success (close) / error (retry + dismiss)
+
+---
+
+### `Device Settings`
+
+Dialog opened from the selected device hub card.
+
+**Fields:**
+- Device name (`sl-input`, max 40 chars, required)
+- Icon picker using the same six tile options as initialization
+- Music folder path (`sl-input`)
+- Playlist folder path (`sl-input`, blank = music folder)
+- Transcoding profile (`sl-select`, populated from `device_profiles.list`)
+
+**Submits:** `device.update_manifest(deviceId, name, icon, transcodingProfileId, musicFolderPath, playlistFolderPath)`
+
+**States:** form -> saving -> success (close + refresh) / inline error
 
 ---
 

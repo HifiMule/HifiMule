@@ -1857,16 +1857,16 @@ So that I can correct device identity and folder layout without reinitializing t
 
 **Given** a managed device is selected
 **When** I open Device Settings
-**Then** I can edit name, icon, music folder, and playlist folder.
+**Then** I can edit name, icon, transcoding profile, music folder, and playlist folder.
+
+**Given** I change only name, icon, or transcoding profile
+**When** I save
+**Then** no sync relocation is required.
+**And** the device hub refreshes without requiring device reconnect.
 
 **Given** I clear playlist folder
 **When** I save
 **Then** the daemon stores it as null/omitted and resolves it to the music folder.
-
-**Given** I change only name or icon
-**When** I save
-**Then** no sync relocation is required.
-**And** the device hub refreshes without requiring device reconnect.
 
 **Given** I change music folder or playlist folder
 **When** I save
@@ -1883,10 +1883,10 @@ So that I can correct device identity and folder layout without reinitializing t
 
 **Technical Notes:**
 - `DeviceManifest` gains `playlist_path: Option<String>` with `#[serde(default)]`; JSON uses `playlistPath`.
-- Add `device.update_manifest` RPC for editable manifest fields.
+- Add `device.update_manifest` RPC for editable manifest fields, including `transcodingProfileId`.
 - All manifest writes use `DeviceIO::write_with_verify()` through `device::write_manifest()`.
 - Folder paths must remain device-relative and must not contain absolute roots or parent traversal.
-- Name/icon-only updates should not dirty sync state or trigger cleanup.
+- Name/icon/profile-only updates should not dirty sync state or trigger cleanup.
 
 ### Story 10.2: Separate Playlist Folder and Relocation Cleanup
 

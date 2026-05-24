@@ -30,6 +30,16 @@ interface RootFoldersResponse {
     pendingDeviceFriendlyName?: string;
 }
 
+interface ConnectedDeviceSummary {
+    path: string;
+    deviceId: string;
+    name: string;
+    icon?: string | null;
+    managedPaths?: string[];
+    playlistPath?: string | null;
+    transcodingProfileId?: string | null;
+}
+
 interface SyncOperation {
     id: string;
     status: 'running' | 'complete' | 'failed';
@@ -154,10 +164,12 @@ export class BasketSidebar {
     private autoSyncOnConnect: boolean = false;
     private etaText: string = 'Calculating\u2026';
     // Multi-device hub state
-    private connectedDevices: Array<{ path: string; deviceId: string; name: string; icon?: string | null }> = [];
+    private connectedDevices: ConnectedDeviceSummary[] = [];
     private selectedDevicePath: string | null = null;
     private deviceSwitchInFlight: boolean = false;
     private pendingDeviceFriendlyName: string | undefined = undefined;
+    private currentDevice: any = null;
+    private syncPreviewRequiresCleanup: boolean = false;
 
     constructor(container: HTMLElement) {
         this.container = container;
@@ -217,6 +229,7 @@ export class BasketSidebar {
                 this.selectedDevicePath = state.selectedDevicePath;
             }
             const currentDevice = state.currentDevice;
+            this.currentDevice = currentDevice ?? null;
             const currentDeviceId = this.getCurrentDeviceId(currentDevice);
             if (currentDeviceId && currentDeviceId !== this.lastHydratedDeviceId) {
                 this.lastHydratedDeviceId = currentDeviceId;
@@ -353,7 +366,8 @@ export class BasketSidebar {
 
     private bindDeviceHubEvents(): void {
         this.container.querySelectorAll('.device-hub-card').forEach(card => {
-            card.addEventListener('click', async () => {
+            card.addEventListener('click', async (event) => {
+                if ((event.target as HTMLElement | null)?.closest('.device-settings-btn')) return;
                 if (this.deviceSwitchInFlight) return;
                 const path = (card as HTMLElement).dataset.path;
                 if (!path) return;
@@ -372,6 +386,137 @@ export class BasketSidebar {
                 }
             });
         });
+        this.container.querySelectorAll('.device-settings-btn').forEach(btn => {
+            btn.addEventListener('click', (event) => {
+                event.stopPropagation();
+                void this.openDeviceSettings();
+            });
+        });
+    }
+
+    private selectedDeviceSummary(): ConnectedDeviceSummary | null {
+        return this.connectedDevices.find(d => d.path === this.selectedDevicePath) ?? this.connectedDevices[0] ?? null;
+    }
+
+    private async openDeviceSettings(): Promise<void> {
+        const selected = this.selectedDeviceSummary();
+        const current = this.currentDevice ?? {};
+        if (!selected) return;
+
+        let profiles: Array<{ id: string; name: string; description?: string }> = [];
+        try {
+            profiles = await rpcCall('device_profiles.list') as Array<{ id: string; name: string; description?: string }>;
+        } catch (err) {
+            profiles = [{ id: 'passthrough', name: 'No Transcoding', description: 'Sync audio files as-is without transcoding.' }];
+        }
+
+        const musicFolder = selected.managedPaths?.[0]
+            ?? current.managed_paths?.[0]
+            ?? current.managedPaths?.[0]
+            ?? '';
+        const playlistFolder = selected.playlistPath
+            ?? current.playlistPath
+            ?? current.playlist_path
+            ?? '';
+        let selectedIcon = selected.icon || 'usb-drive';
+        const selectedProfileId = selected.transcodingProfileId
+            ?? current.transcodingProfileId
+            ?? current.transcoding_profile_id
+            ?? 'passthrough';
+        const profileOptions = profiles
+            .map(profile => `<sl-option value="${this.escapeHtml(profile.id)}">${this.escapeHtml(profile.name)}</sl-option>`)
+            .join('');
+        const selectedProfile = profiles.find(profile => profile.id === selectedProfileId)
+            ?? profiles.find(profile => profile.id === 'passthrough');
+        const dialog = document.createElement('sl-dialog') as any;
+        dialog.label = 'Device Settings';
+        dialog.className = 'device-settings-dialog';
+        dialog.innerHTML = `
+            <div class="device-settings-form">
+                <sl-input id="device-settings-name" label="Name" value="${this.escapeHtml(selected.name || selected.deviceId)}"></sl-input>
+                <div>
+                    <label class="device-settings-label">Icon</label>
+                    <div id="device-settings-icon-picker" class="device-settings-icon-picker">
+                        ${['usb-drive', 'phone-fill', 'watch', 'sd-card', 'headphones', 'music-note-list'].map(icon => `
+                            <div class="init-icon-tile ${icon === selectedIcon ? 'selected' : ''}"
+                                 data-icon="${icon}">
+                                <sl-icon name="${icon}"></sl-icon>
+                                <span>${this.iconLabel(icon)}</span>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+                <sl-input id="device-settings-music" label="Music folder" value="${this.escapeHtml(musicFolder)}"></sl-input>
+                <sl-input id="device-settings-playlist" label="Playlist folder" placeholder="${this.escapeHtml(musicFolder)}" value="${this.escapeHtml(playlistFolder ?? '')}"></sl-input>
+                <sl-select id="device-settings-transcoding-profile" label="Transcoding Profile" value="${this.escapeHtml(selectedProfileId)}">
+                    ${profileOptions}
+                </sl-select>
+                <div id="device-settings-transcoding-desc" class="device-settings-description">
+                    ${this.escapeHtml(selectedProfile?.description ?? '')}
+                </div>
+                <sl-alert id="device-settings-error" variant="danger" closable style="display:none;"></sl-alert>
+            </div>
+            <sl-button slot="footer" variant="default" id="device-settings-cancel">Cancel</sl-button>
+            <sl-button slot="footer" variant="primary" id="device-settings-save">
+                <sl-icon slot="prefix" name="check2"></sl-icon>
+                Save
+            </sl-button>
+        `;
+        document.body.appendChild(dialog);
+        dialog.querySelectorAll('.init-icon-tile').forEach((tile: Element) => {
+            tile.addEventListener('click', () => {
+                selectedIcon = (tile as HTMLElement).dataset.icon ?? 'usb-drive';
+                dialog.querySelectorAll('.init-icon-tile').forEach((t: Element) => {
+                    const el = t as HTMLElement;
+                    const isSelected = el.dataset.icon === selectedIcon;
+                    el.classList.toggle('selected', isSelected);
+                });
+            });
+        });
+        const profileSelect = dialog.querySelector('#device-settings-transcoding-profile') as any;
+        const profileDesc = dialog.querySelector('#device-settings-transcoding-desc') as HTMLElement | null;
+        profileSelect?.addEventListener('sl-change', (event: any) => {
+            const profile = profiles.find(p => p.id === event.target.value);
+            if (profileDesc) profileDesc.textContent = profile?.description ?? '';
+        });
+        dialog.querySelector('#device-settings-cancel')?.addEventListener('click', () => dialog.hide());
+        dialog.querySelector('#device-settings-save')?.addEventListener('click', async () => {
+            const saveButton = dialog.querySelector('#device-settings-save') as any;
+            const error = dialog.querySelector('#device-settings-error') as HTMLElement | null;
+            if (saveButton) saveButton.loading = true;
+            if (error) error.style.display = 'none';
+            try {
+                const result = await rpcCall('device.update_manifest', {
+                    deviceId: selected.deviceId,
+                    name: (dialog.querySelector('#device-settings-name') as any)?.value ?? '',
+                    icon: selectedIcon || null,
+                    transcodingProfileId: (dialog.querySelector('#device-settings-transcoding-profile') as any)?.value ?? 'passthrough',
+                    musicFolderPath: (dialog.querySelector('#device-settings-music') as any)?.value ?? '',
+                    playlistFolderPath: (dialog.querySelector('#device-settings-playlist') as any)?.value ?? '',
+                }) as any;
+                this.syncPreviewRequiresCleanup = result?.relocationRequired === true;
+                dialog.hide();
+                await this.refreshAndRender();
+            } catch (err) {
+                const message = typeof err === 'string' ? err : (err instanceof Error ? err.message : String(err));
+                if (error) {
+                    error.textContent = message;
+                    error.style.display = '';
+                    (error as any).open = true;
+                }
+            } finally {
+                if (saveButton) saveButton.loading = false;
+            }
+        });
+        dialog.addEventListener('sl-after-hide', (event: Event) => {
+            if (event.target === dialog) {
+                dialog.remove();
+            }
+        });
+        await customElements.whenDefined('sl-dialog');
+        await customElements.whenDefined('sl-select');
+        await (dialog as any).updateComplete;
+        dialog.show();
     }
 
     private renderAutoFillControls(): string {
@@ -439,6 +584,7 @@ export class BasketSidebar {
                 const hasPendingDevice = newPendingPath !== null;
 
                 const currentDevice = daemonStateResult?.currentDevice;
+                this.currentDevice = currentDevice ?? null;
                 this.serverType = daemonStateResult?.serverType ?? null;
                 this.currentServerId = daemonStateResult?.currentServer?.serverId ?? null;
                 basketStore.setActiveServerId(this.currentServerId);
@@ -448,8 +594,7 @@ export class BasketSidebar {
                 const activeOperationId = daemonStateResult?.activeOperationId ?? null;
 
                 // Detect multi-device changes
-                const newConnectedDevices: Array<{ path: string; deviceId: string; name: string; icon?: string | null }> =
-                    daemonStateResult?.connectedDevices ?? [];
+                const newConnectedDevices: ConnectedDeviceSummary[] = daemonStateResult?.connectedDevices ?? [];
                 // Use explicit null check so that selectedDevicePath: null from daemon clears local state
                 const newSelectedDevicePath: string | null =
                     'selectedDevicePath' in (daemonStateResult ?? {})
@@ -494,6 +639,9 @@ export class BasketSidebar {
                             <sl-icon name="${this.escapeHtml(d.icon || 'usb-drive')}"
                                      class="device-hub-icon"></sl-icon>
                             <span class="device-hub-name">${this.escapeHtml(d.name || d.deviceId)}</span>
+                            ${d.path === this.selectedDevicePath ? `
+                                <sl-icon-button name="gear" label="Device settings" class="device-settings-btn"></sl-icon-button>
+                            ` : ''}
                         </div>
                     `).join('')}
                 </div>
@@ -532,6 +680,16 @@ export class BasketSidebar {
             `;
         }
 
+        const relocationBanner = this.syncPreviewRequiresCleanup ? `
+            <div class="dirty-manifest-banner device-relocation-banner">
+                <sl-icon name="arrow-repeat"></sl-icon>
+                <div class="dirty-manifest-banner-text">
+                    <strong>Folder layout changed</strong>
+                    Next sync preview will include cleanup and resync work
+                </div>
+            </div>
+        ` : '';
+
         const isMtp = this.folderInfo.devicePath.toLowerCase().startsWith('mtp://');
         const unmanagedSummary = isMtp
             ? 'MTP — folder enumeration not available'
@@ -539,6 +697,7 @@ export class BasketSidebar {
 
         let content = `
             <div class="device-folders-panel">
+                ${relocationBanner}
                 <div class="device-folders-header" id="device-folders-toggle">
                     <h3>Device Folders</h3>
                     <div style="display: flex; align-items: center; gap: 0.5rem;">
@@ -1232,5 +1391,17 @@ export class BasketSidebar {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML.replace(/"/g, '&quot;');
+    }
+
+    private iconLabel(icon: string): string {
+        const labels: Record<string, string> = {
+            'usb-drive': 'USB Drive',
+            'phone-fill': 'Phone',
+            'watch': 'Watch',
+            'sd-card': 'SD Card',
+            'headphones': 'Headphones',
+            'music-note-list': 'Music Player',
+        };
+        return labels[icon] ?? icon;
     }
 }

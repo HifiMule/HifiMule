@@ -53,14 +53,14 @@ PRD needs small requirement additions:
 Architecture needs additions:
 
 - `DeviceManifest` extension: add `playlist_path: Option<String>` or a structured `folders` object.
-- IPC: add a device update RPC for editable manifest fields.
+- IPC: add a device update RPC for editable manifest fields, including the selected transcoding profile.
 - Sync: treat folder changes as a planned relocation cleanup before writes.
 - Device IO rule remains unchanged: all device file operations use `DeviceIO`.
 
 UX spec needs additions:
 
 - Device hub or device settings panel gets an edit action.
-- Edit form supports name, icon, music folder, and playlist folder.
+- Edit form supports name, icon, transcoding profile, music folder, and playlist folder.
 - Folder change confirmation must preview cleanup/resync impact before applying.
 
 ### Technical Impact
@@ -127,7 +127,7 @@ FR26: The system can initialize a new `.hifimule.json` manifest on a connected d
 Add new FR:
 
 ```markdown
-FR36: The system can edit an existing managed device manifest, allowing users to change device name, icon, music folder, and playlist folder. Folder changes are reflected in the next sync preview and trigger managed relocation cleanup before new items are written.
+FR36: The system can edit an existing managed device manifest, allowing users to change device name, icon, transcoding profile, music folder, and playlist folder. Folder changes are reflected in the next sync preview and trigger managed relocation cleanup before new items are written.
 ```
 
 ### Architecture Changes
@@ -155,6 +155,7 @@ device.update_manifest(params: {
   deviceId: string,
   name?: string,
   icon?: string | null,
+  transcodingProfileId?: string | null,
   musicFolderPath?: string,
   playlistFolderPath?: string | null
 }) -> {
@@ -170,7 +171,8 @@ device.update_manifest(params: {
 
 Rules:
 
-- Name and icon update the manifest immediately.
+- Name, icon, and transcoding profile update the manifest immediately without sync relocation.
+- `transcodingProfileId` is validated against `device-profiles.json`; null or passthrough clears the device transcoding profile.
 - Folder fields are validated as device-relative paths with no absolute path, parent traversal, or empty component.
 - `playlistFolderPath` defaults to `musicFolderPath` when omitted.
 - Folder updates persist both the new field values and enough prior-location context for the next sync preview, or update manifest entries so the delta planner can detect old-path cleanup from current `local_path` and `playlists.filename` values.
@@ -182,7 +184,7 @@ Section: Device Hub
 Add:
 
 ```markdown
-Each selected device exposes an edit action that opens Device Settings. The settings form allows changing device name and icon immediately. It also allows changing music folder and playlist folder, with playlist folder defaulting to the music folder. When a folder value changes, the UI presents a cleanup/resync preview before sync starts.
+Each selected device exposes an edit action that opens Device Settings. The settings form allows changing device name, icon, and transcoding profile immediately. It also allows changing music folder and playlist folder, with playlist folder defaulting to the music folder. When a folder value changes, the UI presents a cleanup/resync preview before sync starts.
 ```
 
 ### Story Changes
@@ -234,9 +236,9 @@ New Story 10.1: Device Manifest Editing - Identity and Folder Settings
 
 Acceptance criteria:
 
-1. Given a managed device is selected, when I open Device Settings, then I can edit name, icon, music folder, and playlist folder.
+1. Given a managed device is selected, when I open Device Settings, then I can edit name, icon, transcoding profile, music folder, and playlist folder.
 2. Given I clear playlist folder, when I save, then the daemon stores it as null/omitted and resolves it to the music folder.
-3. Given I change only name or icon, when I save, then no sync relocation is required.
+3. Given I change only name, icon, or transcoding profile, when I save, then no sync relocation is required.
 4. Given I change music folder or playlist folder, when I save, then the daemon returns relocationRequired = true and the UI marks the next sync preview as requiring cleanup/resync.
 5. Given an invalid folder path is entered, when I save, then the daemon rejects absolute paths, parent traversal, root-only unsafe values, and empty path components.
 6. Given an MTP device uses cached folder IDs, when a folder path changes, then stale folder ID cache entries for affected paths are cleared or recomputed.

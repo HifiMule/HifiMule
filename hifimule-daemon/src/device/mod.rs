@@ -68,6 +68,13 @@ pub struct DeviceManifest {
     pub version: String,
     #[serde(default)]
     pub managed_paths: Vec<String>,
+    #[serde(
+        default,
+        rename = "playlistPath",
+        alias = "playlist_path",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub playlist_path: Option<String>,
     #[serde(default)]
     pub synced_items: Vec<SyncedItem>,
     #[serde(default)]
@@ -84,6 +91,12 @@ pub struct DeviceManifest {
     /// ID referencing an entry in device-profiles.json. None = no transcoding (passthrough).
     #[serde(default)]
     pub transcoding_profile_id: Option<String>,
+    /// Last profile that produced the synced files currently recorded in the manifest.
+    #[serde(default)]
+    pub last_synced_transcoding_profile_id: Option<String>,
+    /// True when the active profile changed and matching tracks must be rewritten.
+    #[serde(default)]
+    pub transcoding_profile_dirty: bool,
     #[serde(default)]
     pub playlists: Vec<PlaylistManifestEntry>,
     /// WPD storage object ID for MTP devices. When set, WPD calls skip first-child
@@ -98,6 +111,13 @@ pub struct DeviceManifest {
 }
 
 impl DeviceManifest {
+    pub fn resolved_playlist_path(&self) -> Option<&str> {
+        self.playlist_path
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+            .or_else(|| self.managed_paths.first().map(String::as_str))
+    }
+
     pub fn provider_change_context(&self) -> ProviderChangeContext {
         let synced_album_ids: BTreeSet<String> = self
             .basket_items
@@ -603,6 +623,7 @@ impl DeviceManager {
     pub async fn initialize_device(
         &self,
         folder_path: &str,
+        playlist_folder_path: Option<&str>,
         transcoding_profile_id: Option<String>,
         name: String,
         icon: Option<String>,
@@ -698,12 +719,29 @@ impl DeviceManager {
             },
         };
 
+        let playlist_path = playlist_folder_path
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(str::to_string)
+            .or_else(|| managed_paths.first().cloned());
+        if let Some(path) = playlist_path.as_deref() {
+            if !path.is_empty() && managed_paths.first().map(String::as_str) != Some(path) {
+                device_io.ensure_dir(path).await.with_context(|| {
+                    format!(
+                        "Failed to create playlist folder '{}' on device {}",
+                        path, device_path
+                    )
+                })?;
+            }
+        }
+
         let manifest = DeviceManifest {
             device_id,
             name: Some(name).filter(|s| !s.is_empty()),
             icon,
             version: "1.0".to_string(),
             managed_paths,
+            playlist_path,
             synced_items: vec![],
             dirty: false,
             pending_item_ids: vec![],
@@ -711,6 +749,8 @@ impl DeviceManager {
             auto_sync_on_connect: false,
             auto_fill: AutoFillPrefs::default(),
             transcoding_profile_id, // stored in .hifimule.json; read back on sync to apply transcoding
+            last_synced_transcoding_profile_id: None,
+            transcoding_profile_dirty: false,
             playlists: vec![],
             storage_id,
             folder_ids: std::collections::HashMap::new(),

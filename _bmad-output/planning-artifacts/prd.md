@@ -50,7 +50,7 @@ workflowType: 'prd'
 - **Profile Selection:** UI/CLI support for selecting the correct Jellyfin user account for playlist/scrobble routing.
 - **Auto-Fill Sync Mode:** Intelligent device-filling using a virtual basket slot. Enabling Auto-Fill places a single slot in the basket representing remaining capacity; the priority algorithm (favorites → play count → creation date) runs at sync time, not at basket-build time. Always uses the freshest library state. Can be mixed with manual basket selections.
 - **Auto-Sync on Connect:** Known devices with auto-sync enabled trigger synchronization automatically on detection, requiring zero user interaction.
-- **Device Configuration:** During device initialization, users can assign a custom display name, select an icon from a built-in library, and choose device folders for music and playlists. Playlist location defaults to the music folder. Existing managed devices can later be edited for name, icon, music folder, and playlist folder, with folder changes surfaced as cleanup/resync work before the next sync.
+- **Device Configuration:** During device initialization, users can assign a custom display name, select an icon from a built-in library, choose a transcoding profile, and choose device folders for music and playlists. Playlist location defaults to the music folder. Existing managed devices can later be edited for name, icon, transcoding profile, music folder, and playlist folder, with folder changes surfaced as cleanup/resync work before the next sync.
 
 - **Transcoding Handshake:** Per-device profile selection for server-side re-encoding via Jellyfin PlaybackInfo API. Profiles stored in an editable `device-profiles.json` in the app data directory; passthrough (direct download) is the default.
 
@@ -184,7 +184,7 @@ As a cross-platform desktop application, HifiMule consists of a performance-crit
 - **FR23:** The system can send OS-native notifications for sync completion or errors.
 - **FR25:** The system retrieves and displays only music-centric content (Playlists, Albums, Artists, Tracks). For Jellyfin: applies `IncludeItemTypes` filter to exclude movies, series, and books. For Subsonic/Navidrome: uses music-specific endpoints (`getArtists`, `getAlbum`, `getPlaylists`) which are inherently music-only.
 - **FR35:** The system supports Jellyfin, Navidrome, Subsonic, and any OpenSubsonic-compatible media server. Server type is auto-detected at connection time by pinging the server URL. Detected capability extensions (OpenSubsonic) are cached and used to enable per-server features.
-- **FR36:** The system can edit an existing managed device manifest, allowing users to change device name, icon, music folder, and playlist folder. Folder changes are reflected in the next sync preview and trigger managed relocation cleanup before new items are written.
+- **FR36:** The system can edit an existing managed device manifest, allowing users to change device name, icon, transcoding profile, music folder, and playlist folder. Folder changes are reflected in the next sync preview and trigger managed relocation cleanup before new items are written.
 
 ### 7. Packaging & Distribution
 - **FR27:** The system can be packaged into platform-native installers (MSI for Windows, DMG for macOS, AppImage/.deb for Linux) using the Tauri v2 bundler.

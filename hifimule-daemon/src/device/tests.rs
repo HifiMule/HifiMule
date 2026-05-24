@@ -1123,7 +1123,7 @@ async fn test_initialize_device_root() {
 
     // Initialize with root (empty folder_path)
     let manifest = manager
-        .initialize_device("", None, "My Device".to_string(), None, msc(dir.path()))
+        .initialize_device("", None, None, "My Device".to_string(), None, msc(dir.path()))
         .await
         .unwrap();
 
@@ -1157,6 +1157,7 @@ async fn test_initialize_device_subfolder() {
         .initialize_device(
             "Music",
             None,
+            None,
             "My Device".to_string(),
             None,
             msc(dir.path()),
@@ -1186,7 +1187,7 @@ async fn test_initialize_device_requires_unrecognized_path() {
 
     // No unrecognized path set → should fail even when a backend is provided
     let res = manager
-        .initialize_device("", None, "My Device".to_string(), None, msc(dir.path()))
+        .initialize_device("", None, None, "My Device".to_string(), None, msc(dir.path()))
         .await;
     assert!(res.is_err());
     assert!(
@@ -1210,6 +1211,7 @@ async fn test_initialize_device_persists_storage_id_from_device_io() {
     let manifest = manager
         .initialize_device(
             "Music",
+            None,
             None,
             "My Device".to_string(),
             None,
@@ -1241,6 +1243,7 @@ async fn test_initialize_device_rejects_path_traversal() {
         .initialize_device(
             "../escape",
             None,
+            None,
             "My Device".to_string(),
             None,
             msc(dir.path()),
@@ -1254,6 +1257,7 @@ async fn test_initialize_device_rejects_path_traversal() {
         .initialize_device(
             "/etc/hacked",
             None,
+            None,
             "My Device".to_string(),
             None,
             msc(dir.path()),
@@ -1265,6 +1269,7 @@ async fn test_initialize_device_rejects_path_traversal() {
     let res = manager
         .initialize_device(
             "Music/SubFolder",
+            None,
             None,
             "My Device".to_string(),
             None,
@@ -1356,7 +1361,7 @@ async fn test_initialize_device_uses_stored_io_and_clears_it() {
 
     let device_io = manager.get_unrecognized_device_io().await.unwrap();
     manager
-        .initialize_device("", None, "My Device".to_string(), None, device_io)
+        .initialize_device("", None, None, "My Device".to_string(), None, device_io)
         .await
         .unwrap();
 
@@ -1393,6 +1398,7 @@ async fn test_initialize_device_uses_coherent_pending_snapshot_not_stale_caller_
     manager
         .initialize_device(
             "",
+            None,
             None,
             "My Device".to_string(),
             None,

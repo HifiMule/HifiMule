@@ -17,11 +17,14 @@ pub struct DeviceManifest {
     pub synced_items: Vec<SyncedItem>,             // files confirmed present on device
     pub basket_items: Vec<BasketItem>,             // user's curation for next sync
     pub managed_paths: Vec<String>,                // relative paths owned by HifiMule
+    pub playlist_path: Option<String>,             // null = inherit first managed music path
     pub dirty: bool,                               // true if sync was interrupted mid-operation
     pub pending_item_ids: Vec<String>,             // Jellyfin IDs being processed when dirty was set
     pub auto_fill: AutoFillPrefs,
     pub auto_sync_on_connect: bool,
     pub transcoding_profile_id: Option<String>,   // null = passthrough (no transcoding)
+    pub last_synced_transcoding_profile_id: Option<String>,
+    pub transcoding_profile_dirty: bool,          // true = rewrite matching tracks next sync
     pub playlists: Vec<PlaylistManifestEntry>,
     pub storage_id: Option<String>,                // MTP storage object ID cache
     pub folder_ids: HashMap<String, u32>,          // libmtp folder object ID cache

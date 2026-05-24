@@ -151,6 +151,7 @@ Initializes a newly detected device that has no `.hifimule.json` manifest.
 ```json
 {
   "folderPath": string,              // managed folder name ("Music") or "" for device root
+  "playlistFolderPath": string | null, // optional playlist folder; defaults to folderPath
   "profileId": string,               // provider user/profile ID
   "transcodingProfileId": string | null,
   "name": string,                    // 1–40 characters
@@ -165,6 +166,7 @@ Initializes a newly detected device that has no `.hifimule.json` manifest.
     "deviceId": string,
     "version": string,
     "managedPaths": string[],
+    "playlistPath": string | null,
     "transcodingProfileId": string | null
   }
 }
@@ -182,6 +184,40 @@ Enables or disables automatic sync when this device is connected.
 
 ---
 
+### `device.update_manifest`
+
+Updates the selected managed device manifest from Device Settings. Identity and transcoding profile changes are metadata-only. Folder changes return a relocation signal for the next sync preview.
+
+**Params:**
+```json
+{
+  "deviceId": string,
+  "name": string,
+  "icon": string | null,
+  "transcodingProfileId": string | null,
+  "musicFolderPath": string,
+  "playlistFolderPath": string | null
+}
+```
+`transcodingProfileId` must match `device-profiles.json`; `null` or `"passthrough"` clears device transcoding.
+
+**Returns:**
+```json
+{
+  "ok": true,
+  "relocationRequired": bool,
+  "cleanupPreview": {
+    "tracksToRemove": number,
+    "playlistsToRemove": number,
+    "bytesToRemove": number
+  }
+}
+```
+
+**Errors:** `-32602` (invalid device, icon, profile, or folder path), `-3` (manifest/profile persistence failed)
+
+---
+
 ### `device.select`
 
 Switches the "current device" to the given path (multi-device hub).
@@ -196,7 +232,7 @@ Switches the "current device" to the given path (multi-device hub).
 Returns connected managed devices.
 
 **Params:** none  
-**Returns:** `{ "status": "success", "data": Array<{ path: string, deviceId: string, name: string, icon: string | null, deviceClass: "msc" | "mtp" }> }`
+**Returns:** `{ "status": "success", "data": Array<{ path: string, deviceId: string, name: string, icon: string | null, managedPaths: string[], playlistPath: string | null, transcodingProfileId: string | null, deviceClass: "msc" | "mtp" }> }`
 
 ---
 

@@ -149,7 +149,7 @@ export class InitDeviceModal {
                 </div>
                 <div style="margin-bottom: 1.25rem;">
                     <label style="font-size: 0.8rem; opacity: 0.7; display: block; margin-bottom: 0.25rem;">
-                        Sync Folder Name (optional)
+                        Music Folder Name (optional)
                     </label>
                     <sl-input
                         id="init-folder-input"
@@ -159,6 +159,16 @@ export class InitDeviceModal {
                     <div style="font-size: 0.75rem; opacity: 0.55; margin-top: 0.3rem;">
                         Example: "Music" — leave empty to use the entire device
                     </div>
+                </div>
+                <div style="margin-bottom: 1.25rem;">
+                    <label style="font-size: 0.8rem; opacity: 0.7; display: block; margin-bottom: 0.25rem;">
+                        Playlist Folder Name (optional)
+                    </label>
+                    <sl-input
+                        id="init-playlist-folder-input"
+                        placeholder="Defaults to music folder"
+                        clearable
+                    ></sl-input>
                 </div>
                 <div style="margin-bottom: 1.25rem;">
                     <label style="font-size: 0.8rem; opacity: 0.7; display: block; margin-bottom: 0.25rem;">
@@ -269,6 +279,8 @@ export class InitDeviceModal {
 
         const folderInput = this.dialog?.querySelector('#init-folder-input') as any;
         const folderPath: string = folderInput?.value?.trim() ?? '';
+        const playlistFolderInput = this.dialog?.querySelector('#init-playlist-folder-input') as any;
+        const playlistFolderPath: string = playlistFolderInput?.value?.trim() ?? '';
 
         const profileSelect = this.dialog?.querySelector('#init-transcoding-profile') as any;
         let transcodingProfileId = profileSelect?.value;
@@ -281,6 +293,7 @@ export class InitDeviceModal {
         try {
             await rpcCall('device_initialize', {
                 folderPath,
+                playlistFolderPath,
                 profileId: userId,
                 transcodingProfileId,
                 name: deviceName,

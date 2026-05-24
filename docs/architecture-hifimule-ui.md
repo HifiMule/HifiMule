@@ -183,8 +183,15 @@ Shows daemon health at the bottom of the window. Polls `get_daemon_state` every 
 
 `sl-dialog`-based wizard for initializing a new unrecognized device:
 - Loads profiles from `device_profiles.list` and credentials from `get_credentials`
-- Fields: device name (max 40 chars), icon picker (6 icons), sync folder path (optional), transcoding profile
-- Calls `device_initialize(folderPath, profileId, transcodingProfileId?, name, icon?)` on confirm
+- Fields: device name (max 40 chars), tile icon picker (6 icons), music folder path (optional), playlist folder path (optional), transcoding profile
+- Calls `device_initialize(folderPath, playlistFolderPath?, profileId, transcodingProfileId?, name, icon?)` on confirm
+
+### `Device Settings`
+
+`sl-dialog` opened from the selected device card in the device hub:
+- Fields: device name, the same tile icon picker used by creation, music folder, playlist folder, and transcoding profile
+- Calls `device.update_manifest(deviceId, name, icon, transcodingProfileId, musicFolderPath, playlistFolderPath)` on save
+- Name, icon, and transcoding profile edits refresh the hub without requiring reconnect; folder edits mark the next sync preview for cleanup/resync
 
 ### `RepairModal`
 

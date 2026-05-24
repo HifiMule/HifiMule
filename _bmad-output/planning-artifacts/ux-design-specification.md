@@ -97,12 +97,13 @@ graph TD
 
 ### 5.4 Device Profile Settings
 *   **Auto-sync on connect toggle:** `<sl-switch>` in the device profile panel with helper text: "Automatically start syncing when this device is connected. Works with or without the UI open."
-*   **Device Identity and Folders** (shown in the Initialize Device dialog and Device Settings):
+*   **Device Identity, Profile, and Folders** (shown in the Initialize Device dialog and Device Settings):
     *   `<sl-input>` labelled "Device Name" — required, max 40 chars, prefilled with volume label or "My Device".
     *   Icon picker: a grid of ~6–8 icon options (iPod Classic, Generic DAP, SD Card, USB Drive, Watch, Phone, etc.) rendered as selectable tiles with a highlighted border on selection.
     *   Music folder input: device-relative folder path used for managed track files.
     *   Playlist folder input: optional device-relative folder path used for `.m3u` files. When empty, it inherits the music folder.
-    *   Selected icon, name, music folder, and playlist folder are confirmed with the existing action button and written to the manifest.
+    *   Transcoding profile selector: populated from `device_profiles.list`, with passthrough/direct sync as the default.
+    *   Selected icon, name, transcoding profile, music folder, and playlist folder are confirmed with the existing action button and written to the manifest.
 
 ### 5.5 Headless Sync Feedback
 *   **Without UI:** Tray icon animation (Syncing state) + OS-native notification on completion.
@@ -113,7 +114,7 @@ graph TD
 The device hub is a persistent panel displayed whenever at least one managed device is connected. It replaces the conditional `<sl-select>` picker from Story 2.7.
 
 *   **Device cards:** Each connected device is shown as a compact card containing its icon (from the built-in library; fallback: generic USB Drive icon) and its display name (fallback: device_id). The currently selected device card is highlighted with an active border/accent. Clicking any card calls `device.select` and reloads the basket for that device.
-*   **Device settings:** The selected device exposes an edit action that opens Device Settings. Name and icon changes apply immediately. Music folder or playlist folder changes show cleanup/resync impact in the next sync preview before writes occur.
+*   **Device settings:** The selected device exposes an edit action that opens Device Settings. Name, icon, and transcoding profile changes apply without requiring device reconnect. Music folder or playlist folder changes show cleanup/resync impact in the next sync preview before writes occur.
 *   **No-device-selected state:** When `selectedDevicePath === null`, the hub shows a placeholder: "Select a device to start curating". The basket renders as empty with no storage projection bar. All (+) add buttons in the library browser render as disabled (greyed out, no click interaction). The "Start Sync" button is disabled.
 *   **Single device:** The hub is still visible with a single device (not hidden). The single device is auto-selected by the daemon; its card renders as active.
 

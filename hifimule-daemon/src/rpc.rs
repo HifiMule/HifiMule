@@ -325,6 +325,7 @@ async fn handler(
         "manifest_get_basket" => handle_manifest_get_basket(&state).await,
         "manifest_save_basket" => handle_manifest_save_basket(&state, payload.params).await,
         "device_initialize" => handle_device_initialize(&state, payload.params).await,
+        "device.update_manifest" => handle_device_update_manifest(&state, payload.params).await,
         "device_set_auto_sync_on_connect" => {
             handle_device_set_auto_sync_on_connect(&state, payload.params).await
         }
@@ -1137,6 +1138,9 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
                 "deviceId": m.device_id,
                 "name": m.name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| m.device_id.clone()),
                 "icon": m.icon.clone(),
+                "managedPaths": m.managed_paths.clone(),
+                "playlistPath": m.playlist_path.clone(),
+                "transcodingProfileId": m.transcoding_profile_id.clone(),
                 "deviceClass": match class {
                     crate::device::DeviceClass::Msc => "msc",
                     crate::device::DeviceClass::Mtp => "mtp",
@@ -2949,6 +2953,11 @@ async fn handle_sync_execute(
                         .update_manifest(|m| {
                             m.dirty = false;
                             m.pending_item_ids = vec![];
+                            if errors.is_empty() {
+                                m.last_synced_transcoding_profile_id =
+                                    m.transcoding_profile_id.clone();
+                                m.transcoding_profile_dirty = false;
+                            }
                         })
                         .await
                     {
@@ -3061,6 +3070,11 @@ async fn handle_sync_execute(
                     .update_manifest(|m| {
                         m.dirty = false;
                         m.pending_item_ids = vec![];
+                        if errors.is_empty() {
+                            m.last_synced_transcoding_profile_id =
+                                m.transcoding_profile_id.clone();
+                            m.transcoding_profile_dirty = false;
+                        }
                     })
                     .await
                 {
@@ -3363,6 +3377,354 @@ async fn handle_manifest_clear_dirty(state: &AppState) -> Result<Value, JsonRpcE
     }
 }
 
+const VALID_DEVICE_ICONS: &[&str] = &[
+    "usb-drive",
+    "phone-fill",
+    "watch",
+    "sd-card",
+    "headphones",
+    "music-note-list",
+];
+
+#[derive(Debug, Clone, PartialEq)]
+struct ManifestUpdateOutcome {
+    relocation_required: bool,
+    tracks_to_remove: usize,
+    playlists_to_remove: usize,
+    bytes_to_remove: u64,
+}
+
+fn normalize_editable_folder_path(value: &str) -> Result<String, JsonRpcError> {
+    let trimmed = value.trim().replace('\\', "/");
+    if trimmed.is_empty() {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Folder path cannot be empty".to_string(),
+            data: None,
+        });
+    }
+    if trimmed == "." || trimmed == "/" || trimmed.starts_with('/') {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Folder path must be device-relative and below a folder".to_string(),
+            data: None,
+        });
+    }
+    if std::path::Path::new(&trimmed).is_absolute()
+        || trimmed
+            .split('/')
+            .next()
+            .is_some_and(|component| component.ends_with(':'))
+    {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Folder path must not be absolute".to_string(),
+            data: None,
+        });
+    }
+    if trimmed
+        .split('/')
+        .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Folder path must not contain empty, current, or parent components"
+                .to_string(),
+            data: None,
+        });
+    }
+    Ok(trimmed)
+}
+
+fn validate_device_name_and_icon(name: Option<&str>, icon: Option<&str>) -> Result<(), JsonRpcError> {
+    if let Some(name) = name {
+        if name.trim().is_empty() {
+            return Err(JsonRpcError {
+                code: ERR_INVALID_PARAMS,
+                message: "Name cannot be empty".to_string(),
+                data: None,
+            });
+        }
+        if name.chars().count() > 40 {
+            return Err(JsonRpcError {
+                code: ERR_INVALID_PARAMS,
+                message: "Device name exceeds 40 characters".to_string(),
+                data: None,
+            });
+        }
+    }
+    if let Some(icon) = icon.filter(|icon| !icon.is_empty()) {
+        if !VALID_DEVICE_ICONS.contains(&icon) {
+            return Err(JsonRpcError {
+                code: ERR_INVALID_PARAMS,
+                message: format!("Invalid icon '{}'", icon),
+                data: None,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_transcoding_profile_id(profile_id: Option<&str>) -> Result<Option<String>, JsonRpcError> {
+    match profile_id {
+        None | Some("passthrough") => Ok(None),
+        Some(id) => {
+            let path = crate::paths::get_device_profiles_path().map_err(|e| JsonRpcError {
+                code: ERR_STORAGE_ERROR,
+                message: e.to_string(),
+                data: None,
+            })?;
+            let profiles = crate::transcoding::load_profiles(&path).map_err(|e| JsonRpcError {
+                code: ERR_STORAGE_ERROR,
+                message: e.to_string(),
+                data: None,
+            })?;
+            if profiles.iter().any(|p| p.id == id) {
+                Ok(Some(id.to_string()))
+            } else {
+                Err(JsonRpcError {
+                    code: ERR_INVALID_PARAMS,
+                    message: format!("Profile '{}' not found in device-profiles.json", id),
+                    data: None,
+                })
+            }
+        }
+    }
+}
+
+fn path_in_or_equal(path: &str, folder: &str) -> bool {
+    let path = path.replace('\\', "/");
+    let folder = folder.trim_matches('/').replace('\\', "/");
+    if folder.is_empty() {
+        return true;
+    }
+    path == folder || path.starts_with(&format!("{folder}/"))
+}
+
+fn remove_folder_id_cache_for_path_change(
+    folder_ids: &mut HashMap<String, u32>,
+    old_path: Option<&str>,
+    new_path: Option<&str>,
+) {
+    let affected: Vec<String> = folder_ids
+        .keys()
+        .filter(|path| {
+            old_path.is_some_and(|old| path_in_or_equal(path, old))
+                || new_path.is_some_and(|new| path_in_or_equal(path, new))
+        })
+        .cloned()
+        .collect();
+    for path in affected {
+        folder_ids.remove(&path);
+    }
+}
+
+fn apply_manifest_settings_update(
+    manifest: &mut crate::device::DeviceManifest,
+    name: Option<String>,
+    icon: Option<Option<String>>,
+    transcoding_profile_id: Option<Option<String>>,
+    music_folder_path: Option<String>,
+    playlist_folder_path: Option<Option<String>>,
+) -> ManifestUpdateOutcome {
+    let old_music = manifest.managed_paths.first().cloned();
+    let old_playlist = manifest.resolved_playlist_path().map(str::to_string);
+
+    if let Some(name) = name {
+        manifest.name = Some(name.trim().to_string()).filter(|name| !name.is_empty());
+    }
+    if let Some(icon) = icon {
+        manifest.icon = icon.filter(|icon| !icon.is_empty());
+    }
+    if let Some(transcoding_profile_id) = transcoding_profile_id {
+        if manifest.transcoding_profile_id != transcoding_profile_id {
+            manifest.transcoding_profile_dirty = match &manifest.last_synced_transcoding_profile_id {
+                Some(last_synced) => transcoding_profile_id.as_deref() != Some(last_synced.as_str()),
+                None => !manifest.synced_items.is_empty(),
+            };
+        }
+        manifest.transcoding_profile_id = transcoding_profile_id;
+    }
+    if let Some(music_folder_path) = music_folder_path {
+        if manifest.managed_paths.is_empty() {
+            manifest.managed_paths.push(music_folder_path);
+        } else {
+            manifest.managed_paths[0] = music_folder_path;
+        }
+    }
+    if let Some(playlist_folder_path) = playlist_folder_path {
+        manifest.playlist_path = playlist_folder_path.filter(|path| !path.trim().is_empty());
+    }
+
+    let new_music = manifest.managed_paths.first().cloned();
+    let new_playlist = manifest.resolved_playlist_path().map(str::to_string);
+    let music_changed = old_music != new_music;
+    let playlist_changed = old_playlist != new_playlist;
+
+    if music_changed || playlist_changed {
+        remove_folder_id_cache_for_path_change(
+            &mut manifest.folder_ids,
+            old_music.as_deref(),
+            new_music.as_deref(),
+        );
+        remove_folder_id_cache_for_path_change(
+            &mut manifest.folder_ids,
+            old_playlist.as_deref(),
+            new_playlist.as_deref(),
+        );
+    }
+
+    let tracks_to_remove = if music_changed {
+        new_music
+            .as_deref()
+            .map(|folder| {
+                manifest
+                    .synced_items
+                    .iter()
+                    .filter(|item| !path_in_or_equal(&item.local_path, folder))
+                    .count()
+            })
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let bytes_to_remove = if music_changed {
+        new_music
+            .as_deref()
+            .map(|folder| {
+                manifest
+                    .synced_items
+                    .iter()
+                    .filter(|item| !path_in_or_equal(&item.local_path, folder))
+                    .map(|item| item.size_bytes)
+                    .sum()
+            })
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let playlists_to_remove = if playlist_changed {
+        manifest.playlists.len()
+    } else {
+        0
+    };
+
+    ManifestUpdateOutcome {
+        relocation_required: music_changed || playlist_changed,
+        tracks_to_remove,
+        playlists_to_remove,
+        bytes_to_remove,
+    }
+}
+
+async fn handle_device_update_manifest(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let device_id = params["deviceId"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing deviceId".to_string(),
+        data: None,
+    })?;
+    let current = state.device_manager.get_current_device().await.ok_or(JsonRpcError {
+        code: ERR_NOT_FOUND,
+        message: "No selected device".to_string(),
+        data: None,
+    })?;
+    if current.device_id != device_id {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Selected device does not match deviceId".to_string(),
+            data: None,
+        });
+    }
+
+    let name = params.get("name").and_then(Value::as_str);
+    let icon = params
+        .get("icon")
+        .map(|value| value.as_str().unwrap_or("").to_string());
+    validate_device_name_and_icon(name, icon.as_deref())?;
+
+    let music_folder_path = params
+        .get("musicFolderPath")
+        .and_then(Value::as_str)
+        .map(normalize_editable_folder_path)
+        .transpose()?;
+    let playlist_folder_path = if params.get("playlistFolderPath").is_some() {
+        let raw = params["playlistFolderPath"].as_str().unwrap_or("").trim();
+        Some(if raw.is_empty() {
+            None
+        } else {
+            Some(normalize_editable_folder_path(raw)?)
+        })
+    } else {
+        None
+    };
+    let name_update = name.map(str::to_string);
+    let icon_update = params.get("icon").map(|_| icon);
+    let transcoding_profile_update = if params.get("transcodingProfileId").is_some() {
+        Some(validate_transcoding_profile_id(
+            params["transcodingProfileId"].as_str(),
+        )?)
+    } else {
+        None
+    };
+    let transcoding_profile_for_db = transcoding_profile_update.clone();
+    let mut outcome = ManifestUpdateOutcome {
+        relocation_required: false,
+        tracks_to_remove: 0,
+        playlists_to_remove: 0,
+        bytes_to_remove: 0,
+    };
+
+    state
+        .device_manager
+        .update_manifest(|manifest| {
+            outcome = apply_manifest_settings_update(
+                manifest,
+                name_update,
+                icon_update,
+                transcoding_profile_update,
+                music_folder_path,
+                playlist_folder_path,
+            );
+        })
+        .await
+        .map_err(|e| JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: format!("Failed to update device manifest: {}", e),
+            data: None,
+        })?;
+
+    if let Some(profile_update) = transcoding_profile_for_db {
+        state
+            .db
+            .set_transcoding_profile(device_id, profile_update.as_deref())
+            .map_err(|e| JsonRpcError {
+                code: ERR_STORAGE_ERROR,
+                message: format!("Failed to store transcoding profile: {}", e),
+                data: None,
+            })?;
+    }
+
+    broadcast_device_state(state).await;
+    Ok(serde_json::json!({
+        "ok": true,
+        "relocationRequired": outcome.relocation_required,
+        "cleanupPreview": {
+            "tracksToRemove": outcome.tracks_to_remove,
+            "playlistsToRemove": outcome.playlists_to_remove,
+            "bytesToRemove": outcome.bytes_to_remove,
+        }
+    }))
+}
+
 async fn handle_device_initialize(
     state: &AppState,
     params: Option<Value>,
@@ -3378,6 +3740,13 @@ async fn handle_device_initialize(
         message: "Missing folderPath".to_string(),
         data: None,
     })?;
+    let playlist_folder_path = params
+        .get("playlistFolderPath")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(normalize_editable_folder_path)
+        .transpose()?;
 
     let profile_id = params["profileId"].as_str().ok_or(JsonRpcError {
         code: ERR_INVALID_PARAMS,
@@ -3398,41 +3767,11 @@ async fn handle_device_initialize(
             data: None,
         })?
         .to_string();
-    if device_name.trim().is_empty() {
-        return Err(JsonRpcError {
-            code: ERR_INVALID_PARAMS,
-            message: "Name cannot be empty".to_string(),
-            data: None,
-        });
-    }
-    if device_name.chars().count() > 40 {
-        return Err(JsonRpcError {
-            code: ERR_INVALID_PARAMS,
-            message: "Device name exceeds 40 characters".to_string(),
-            data: None,
-        });
-    }
-    const VALID_ICONS: &[&str] = &[
-        "usb-drive",
-        "phone-fill",
-        "watch",
-        "sd-card",
-        "headphones",
-        "music-note-list",
-    ];
     let device_icon = params["icon"]
         .as_str()
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
-    if let Some(ref ic) = device_icon {
-        if !VALID_ICONS.contains(&ic.as_str()) {
-            return Err(JsonRpcError {
-                code: ERR_INVALID_PARAMS,
-                message: format!("Invalid icon '{}'", ic),
-                data: None,
-            });
-        }
-    }
+    validate_device_name_and_icon(Some(&device_name), device_icon.as_deref())?;
 
     // Validate the transcoding profile ID exists in device-profiles.json (if provided)
     if let Some(ref tpid) = transcoding_profile_id {
@@ -3473,6 +3812,7 @@ async fn handle_device_initialize(
         .device_manager
         .initialize_device(
             folder_path,
+            playlist_folder_path.as_deref(),
             transcoding_profile_id.clone(),
             device_name,
             device_icon,
@@ -3524,6 +3864,7 @@ async fn handle_device_initialize(
             "deviceId": manifest.device_id,
             "version": manifest.version,
             "managedPaths": manifest.managed_paths,
+            "playlistPath": manifest.playlist_path,
             "transcodingProfileId": manifest.transcoding_profile_id,
         }
     }))
@@ -3842,36 +4183,12 @@ async fn handle_set_transcoding_profile(
         data: None,
     })?;
 
-    // profile_id can be null to clear transcoding
-    let profile_id = params["profileId"].as_str();
-
-    // Validate profile_id exists in profiles file (unless null/passthrough)
-    if let Some(id) = profile_id {
-        if id != "passthrough" {
-            let path = crate::paths::get_device_profiles_path().map_err(|e| JsonRpcError {
-                code: ERR_STORAGE_ERROR,
-                message: e.to_string(),
-                data: None,
-            })?;
-            let profiles = crate::transcoding::load_profiles(&path).map_err(|e| JsonRpcError {
-                code: ERR_STORAGE_ERROR,
-                message: e.to_string(),
-                data: None,
-            })?;
-            if !profiles.iter().any(|p| p.id == id) {
-                return Err(JsonRpcError {
-                    code: ERR_INVALID_PARAMS,
-                    message: format!("Profile '{}' not found in device-profiles.json", id),
-                    data: None,
-                });
-            }
-        }
-    }
+    let profile_id = validate_transcoding_profile_id(params["profileId"].as_str())?;
 
     // Persist to SQLite DB
     state
         .db
-        .set_transcoding_profile(device_id, profile_id)
+        .set_transcoding_profile(device_id, profile_id.as_deref())
         .map_err(|e| JsonRpcError {
             code: ERR_STORAGE_ERROR,
             message: e.to_string(),
@@ -3882,7 +4199,13 @@ async fn handle_set_transcoding_profile(
     state
         .device_manager
         .update_manifest(|m| {
-            m.transcoding_profile_id = profile_id.map(|s| s.to_string());
+            if m.transcoding_profile_id != profile_id {
+                m.transcoding_profile_dirty = match &m.last_synced_transcoding_profile_id {
+                    Some(last_synced) => profile_id.as_deref() != Some(last_synced.as_str()),
+                    None => !m.synced_items.is_empty(),
+                };
+            }
+            m.transcoding_profile_id = profile_id.clone();
         })
         .await
         .map_err(|e| JsonRpcError {
@@ -3963,6 +4286,169 @@ mod tests {
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
         })
+    }
+
+    fn manifest_for_update() -> crate::device::DeviceManifest {
+        crate::device::DeviceManifest {
+            device_id: "dev-1".to_string(),
+            name: Some("Device".to_string()),
+            icon: Some("usb-drive".to_string()),
+            version: "1.0".to_string(),
+            managed_paths: vec!["Music".to_string()],
+            playlist_path: None,
+            synced_items: vec![crate::device::SyncedItem {
+                jellyfin_id: "song-1".to_string(),
+                name: "Track".to_string(),
+                album: None,
+                artist: None,
+                local_path: "Music/Artist/Track.flac".to_string(),
+                size_bytes: 123,
+                synced_at: "now".to_string(),
+                original_name: None,
+                etag: None,
+                provider_album_id: None,
+                provider_content_type: None,
+                provider_suffix: None,
+            }],
+            dirty: false,
+            pending_item_ids: vec![],
+            basket_items: vec![],
+            auto_sync_on_connect: false,
+            auto_fill: crate::device::AutoFillPrefs::default(),
+            transcoding_profile_id: Some("legacy-profile".to_string()),
+            last_synced_transcoding_profile_id: Some("legacy-profile".to_string()),
+            transcoding_profile_dirty: false,
+            playlists: vec![crate::device::PlaylistManifestEntry {
+                jellyfin_id: "playlist-1".to_string(),
+                filename: "Road Trip.m3u".to_string(),
+                track_count: 1,
+                track_ids: vec!["song-1".to_string()],
+                last_modified: "now".to_string(),
+            }],
+            storage_id: None,
+            folder_ids: HashMap::from([
+                ("Music".to_string(), 1),
+                ("Music/Artist".to_string(), 2),
+                ("Playlists".to_string(), 3),
+                ("Other".to_string(), 4),
+            ]),
+        }
+    }
+
+    #[test]
+    fn manifest_playlist_path_deserializes_missing_and_camel_case() {
+        let legacy = r#"{"device_id":"dev","version":"1.0","managed_paths":["Music"]}"#;
+        let manifest: crate::device::DeviceManifest = serde_json::from_str(legacy).unwrap();
+        assert_eq!(manifest.playlist_path, None);
+        assert_eq!(manifest.resolved_playlist_path(), Some("Music"));
+
+        let modern = r#"{"device_id":"dev","version":"1.0","managed_paths":["Music"],"playlistPath":"Playlists"}"#;
+        let manifest: crate::device::DeviceManifest = serde_json::from_str(modern).unwrap();
+        assert_eq!(manifest.playlist_path.as_deref(), Some("Playlists"));
+        assert_eq!(manifest.resolved_playlist_path(), Some("Playlists"));
+    }
+
+    #[test]
+    fn editable_folder_path_rejects_unsafe_values() {
+        for invalid in ["", "/Music", "C:/Music", "Music//Rock", "Music/../Rock", ".", "Music/./Rock"] {
+            assert!(
+                normalize_editable_folder_path(invalid).is_err(),
+                "{invalid} must be rejected"
+            );
+        }
+        assert_eq!(
+            normalize_editable_folder_path("Music\\Rock").unwrap(),
+            "Music/Rock"
+        );
+    }
+
+    #[test]
+    fn manifest_metadata_only_update_does_not_require_relocation() {
+        let mut manifest = manifest_for_update();
+        let outcome = apply_manifest_settings_update(
+            &mut manifest,
+            Some("Renamed".to_string()),
+            Some(Some("watch".to_string())),
+            None,
+            None,
+            None,
+        );
+
+        assert!(!outcome.relocation_required);
+        assert_eq!(manifest.name.as_deref(), Some("Renamed"));
+        assert_eq!(manifest.icon.as_deref(), Some("watch"));
+        assert_eq!(manifest.folder_ids.len(), 4);
+    }
+
+    #[test]
+    fn manifest_folder_update_requires_relocation_and_clears_folder_cache() {
+        let mut manifest = manifest_for_update();
+        let outcome = apply_manifest_settings_update(
+            &mut manifest,
+            None,
+            None,
+            None,
+            Some("Audio".to_string()),
+            Some(Some("Playlists".to_string())),
+        );
+
+        assert!(outcome.relocation_required);
+        assert_eq!(outcome.tracks_to_remove, 1);
+        assert_eq!(outcome.playlists_to_remove, 1);
+        assert_eq!(outcome.bytes_to_remove, 123);
+        assert_eq!(manifest.managed_paths, vec!["Audio".to_string()]);
+        assert_eq!(manifest.playlist_path.as_deref(), Some("Playlists"));
+        assert!(!manifest.folder_ids.contains_key("Music"));
+        assert!(!manifest.folder_ids.contains_key("Music/Artist"));
+        assert!(!manifest.folder_ids.contains_key("Playlists"));
+        assert!(manifest.folder_ids.contains_key("Other"));
+    }
+
+    #[tokio::test]
+    async fn device_update_manifest_rpc_persists_metadata_and_folder_changes() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = manifest_for_update();
+        crate::device::write_manifest(
+            Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())),
+            &manifest,
+        )
+        .await
+        .unwrap();
+        state
+            .device_manager
+            .handle_device_detected(
+                dir.path().to_path_buf(),
+                manifest,
+                Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())),
+            )
+            .await
+            .unwrap();
+
+        let result = handle_device_update_manifest(
+            &state,
+            Some(json!({
+                "deviceId": "dev-1",
+                "name": "Road Player",
+                "icon": "headphones",
+                "transcodingProfileId": "passthrough",
+                "musicFolderPath": "Audio",
+                "playlistFolderPath": ""
+            })),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["relocationRequired"], true);
+        let updated = state.device_manager.get_current_device().await.unwrap();
+        assert_eq!(updated.name.as_deref(), Some("Road Player"));
+        assert_eq!(updated.icon.as_deref(), Some("headphones"));
+        assert_eq!(updated.transcoding_profile_id, None);
+        assert!(updated.transcoding_profile_dirty);
+        assert_eq!(updated.managed_paths, vec!["Audio".to_string()]);
+        assert_eq!(updated.playlist_path, None);
+        assert_eq!(updated.resolved_playlist_path(), Some("Audio"));
     }
 
     #[tokio::test]
