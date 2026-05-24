@@ -468,10 +468,9 @@ fn run_interactive() -> Result<()> {
                 println!("'Open UI' clicked - Launching Tauri UI...");
 
                 let status = if cfg!(debug_assertions) {
-                    // Use CARGO_MANIFEST_DIR to find the workspace root reliably in development
-                    let manifest_dir =
-                        std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
-                    let ui_dir = std::path::Path::new(&manifest_dir)
+                    // Use Cargo's compile-time manifest path so Windows debug
+                    // launches do not depend on process env vars or cwd.
+                    let ui_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                         .parent()
                         .map(|p| p.join("hifimule-ui"))
                         .unwrap_or_else(|| std::path::PathBuf::from("../hifimule-ui"));
