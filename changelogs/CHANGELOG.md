@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.8.0 - 2026-05-24
+
+Device setup is much more flexible now. You can edit an already-managed device, change its name, icon, transcoding profile, music folder, or playlist folder, and HifiMule will clearly flag when the next sync needs cleanup/resync work. Playlists can now be written to their own folder, so Rockbox-style devices can use `Music` for tracks and `Playlists` for `.m3u` files.
+
+Device profiles also got smarter. Rockbox, Garmin, generic MP3 players, modern DAPs, Sony Walkman players, car USB sticks, and audiobook/podcast devices now have better built-in presets with recommended folder defaults. Folder changes are safer too: HifiMule only cleans up files it owns, previews large cleanup work, and asks before removing many managed files.
+
 ## v0.7.0 - 2026-05-24
 
 Favorites now browse naturally as Artists -> Albums -> Tracks, so you can sync favorite artists, favorite albums, or only the favorite tracks inside an album without accidentally pulling in more music than intended. Navidrome/OpenSubsonic users get better library parity too: supported servers can now show Recently Added, Frequently Played, and Recently Played, with more consistent album quick navigation.
