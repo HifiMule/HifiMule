@@ -332,7 +332,7 @@ export class BasketSidebar {
         const slider = this.container.querySelector('#auto-fill-slider');
         if (slider) {
             slider.addEventListener('sl-change', (e: Event) => {
-                const gb = (e.target as HTMLInputElement).valueAsNumber;
+                const gb = (e.target as any).value as number;
                 // Guard against NaN (non-numeric input) and negative values (P10).
                 if (isNaN(gb) || gb < 0) return;
                 this.autoFillMaxBytes = gb * 1024 * 1024 * 1024;
