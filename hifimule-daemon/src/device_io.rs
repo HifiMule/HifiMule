@@ -44,6 +44,17 @@ pub trait DeviceIO: Send + Sync + std::fmt::Debug {
     fn write_verifies_internally(&self) -> bool {
         false
     }
+    /// Returns true if the file at `path` (relative to device root) exists on the device.
+    /// The default implementation uses `list_files`, which may have Unicode normalization
+    /// issues on macOS. MSC backends override this with a direct `metadata` lookup that
+    /// is normalization-insensitive on all macOS filesystems (FAT32, HFS+, APFS).
+    async fn file_exists(&self, path: &str) -> bool {
+        let parent = path.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
+        self.list_files(parent)
+            .await
+            .map(|files| files.iter().any(|f| f.path == path))
+            .unwrap_or(false)
+    }
     async fn load_folder_hints(&self, _hints: std::collections::HashMap<String, u32>) {}
     async fn drain_folder_hints(&self) -> std::collections::HashMap<String, u32> {
         std::collections::HashMap::new()
@@ -263,6 +274,17 @@ impl DeviceIO for MscBackend {
         }
 
         Ok(entries)
+    }
+
+    async fn file_exists(&self, path: &str) -> bool {
+        // Direct metadata check: normalization-insensitive on macOS for all filesystem
+        // types (FAT32, HFS+, APFS), avoiding NFC/NFD comparison failures that occur
+        // when the OS returns a different Unicode normalization form than what was written.
+        if check_relative(path).is_err() {
+            return false;
+        }
+        let full = self.root.join(path);
+        tokio::fs::metadata(&full).await.is_ok()
     }
 
     async fn free_space(&self) -> Result<u64> {

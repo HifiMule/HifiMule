@@ -2408,16 +2408,7 @@ fn extract_display_name(rel_path: &str) -> &str {
 }
 
 async fn device_file_exists(device_io: &dyn crate::device_io::DeviceIO, rel_path: &str) -> bool {
-    let parent = rel_path
-        .rsplit_once('/')
-        .map(|(parent, _)| parent)
-        .unwrap_or("");
-
-    device_io
-        .list_files(parent)
-        .await
-        .map(|files| files.iter().any(|file| file.path == rel_path))
-        .unwrap_or(false)
+    device_io.file_exists(rel_path).await
 }
 
 /// Promotes "unchanged" manifest items that are missing on the device into `delta.adds`.
