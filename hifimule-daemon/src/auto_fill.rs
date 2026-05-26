@@ -243,6 +243,7 @@ mod tests {
                 size: Some(size_bytes),
                 container: None,
                 bitrate: None,
+                media_streams: None,
             }]),
             image_tags: None,
             etag: None,
@@ -277,6 +278,7 @@ mod tests {
             size: Some(3_000_000),
             container: Some("mp3".to_string()),
             bitrate: None,
+            media_streams: None,
         }]);
 
         let (result, _) = rank_and_truncate(vec![track], 5_000_000);
@@ -301,6 +303,7 @@ mod tests {
             size: Some(-1),
             container: None,
             bitrate: None,
+            media_streams: None,
         }]);
         let (result, _) = rank_and_truncate(vec![track], 10_000);
         assert!(

@@ -531,6 +531,8 @@ Led Zeppelin\tLed Zeppelin IV\tStairway to Heaven\t4\t482\tL\t1706752800\tsome-m
                 provider_album_id: Some("c5b1d7c3ba73c24813a80690e0b4a28c".to_string()),
                 provider_content_type: None,
                 provider_suffix: Some("mp3".to_string()),
+                original_bitrate: None,
+                original_container: None,
             }],
             ..DeviceManifest::default()
         };
@@ -797,6 +799,8 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
                 provider_album_id: None,
                 provider_content_type: None,
                 provider_suffix: Some("mp3".to_string()),
+                original_bitrate: None,
+                original_container: None,
             }],
             ..DeviceManifest::default()
         });

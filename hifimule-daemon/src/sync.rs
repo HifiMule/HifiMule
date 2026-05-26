@@ -59,6 +59,8 @@ pub struct DesiredItem {
     pub provider_album_id: Option<String>,
     pub provider_content_type: Option<String>,
     pub provider_suffix: Option<String>,
+    /// Current server-side bitrate in bps. Used to detect quality upgrades since last sync.
+    pub original_bitrate: Option<u32>,
 }
 
 /// An item to be added to the device.
@@ -77,6 +79,8 @@ pub struct SyncAddItem {
     pub provider_content_type: Option<String>,
     #[serde(default)]
     pub provider_suffix: Option<String>,
+    #[serde(default)]
+    pub original_bitrate: Option<u32>,
 }
 
 /// An item to be deleted from the device.
@@ -1577,6 +1581,8 @@ pub async fn execute_sync(
                     provider_album_id: add_item.provider_album_id.clone(),
                     provider_content_type: add_item.provider_content_type.clone(),
                     provider_suffix: add_item.provider_suffix.clone(),
+                    original_bitrate: add_item.original_bitrate,
+                    original_container: add_item.provider_suffix.clone(),
                 });
 
                 // Update operation progress and cumulative bytes
@@ -1759,6 +1765,8 @@ pub async fn execute_sync(
             provider_album_id: id_change.provider_album_id.clone(),
             provider_content_type: id_change.provider_content_type.clone(),
             provider_suffix: id_change.provider_suffix.clone(),
+            original_bitrate: None,
+            original_container: None,
         });
 
         // Update operation progress and cumulative bytes (an ID change is instantly completed)
@@ -2147,6 +2155,8 @@ pub async fn execute_provider_sync(
                     provider_album_id: add_item.provider_album_id.clone(),
                     provider_content_type: add_item.provider_content_type.clone(),
                     provider_suffix: add_item.provider_suffix.clone(),
+                    original_bitrate: add_item.original_bitrate,
+                    original_container: add_item.provider_suffix.clone(),
                 });
                 completed_bytes_arc
                     .fetch_add(add_item.size_bytes, std::sync::atomic::Ordering::Relaxed);
@@ -2289,6 +2299,8 @@ pub async fn execute_provider_sync(
             provider_album_id: id_change.provider_album_id.clone(),
             provider_content_type: id_change.provider_content_type.clone(),
             provider_suffix: id_change.provider_suffix.clone(),
+            original_bitrate: None,
+            original_container: None,
         });
         let synced_item = synced_items.last().unwrap().clone();
         let id_to_remove = id_change.old_jellyfin_id.clone();
@@ -2406,6 +2418,55 @@ async fn device_file_exists(device_io: &dyn crate::device_io::DeviceIO, rel_path
         .await
         .map(|files| files.iter().any(|file| file.path == rel_path))
         .unwrap_or(false)
+}
+
+/// Promotes "unchanged" manifest items that are missing on the device into `delta.adds`.
+///
+/// Called after `calculate_delta` so the UI preview correctly reflects files that were
+/// manually deleted from the device. Does NOT run during auto-sync (UI-preview concern only).
+pub async fn augment_delta_with_existence_check(
+    delta: &mut SyncDelta,
+    desired_items: &[DesiredItem],
+    manifest: &crate::device::DeviceManifest,
+    device_io: &dyn crate::device_io::DeviceIO,
+) {
+    let already_in_delta: HashSet<String> = delta
+        .adds
+        .iter()
+        .map(|a| a.jellyfin_id.clone())
+        .chain(delta.deletes.iter().map(|d| d.jellyfin_id.clone()))
+        .chain(delta.id_changes.iter().map(|c| c.new_jellyfin_id.clone()))
+        .collect();
+
+    let mut to_add: Vec<SyncAddItem> = Vec::new();
+    for item in &manifest.synced_items {
+        if already_in_delta.contains(&item.jellyfin_id) {
+            continue;
+        }
+        let Some(desired) = desired_items
+            .iter()
+            .find(|d| d.jellyfin_id == item.jellyfin_id)
+        else {
+            continue;
+        };
+        if !device_file_exists(device_io, &item.local_path).await {
+            to_add.push(SyncAddItem {
+                jellyfin_id: desired.jellyfin_id.clone(),
+                name: desired.name.clone(),
+                album: desired.album.clone(),
+                artist: desired.artist.clone(),
+                size_bytes: desired.size_bytes,
+                etag: desired.etag.clone(),
+                provider_album_id: desired.provider_album_id.clone(),
+                provider_content_type: desired.provider_content_type.clone(),
+                provider_suffix: desired.provider_suffix.clone(),
+                original_bitrate: desired.original_bitrate,
+            });
+        }
+    }
+    let recovered = to_add.len();
+    delta.adds.extend(to_add);
+    delta.unchanged = delta.unchanged.saturating_sub(recovered);
 }
 
 /// Generates, regenerates, or cleans up .m3u files for playlists in the sync basket.
@@ -2659,9 +2720,27 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
         .synced_items
         .iter()
         .filter(|i| {
-            let desired = desired_items.iter().any(|d| d.jellyfin_id == i.jellyfin_id);
+            let desired = desired_items.iter().find(|d| d.jellyfin_id == i.jellyfin_id);
             let outside_music_folder = !device_path_in_or_equal(&i.local_path, &music_folder);
-            (!profile_dirty || !desired) && !outside_music_folder
+            if outside_music_folder {
+                return false;
+            }
+            if profile_dirty && desired.is_some() {
+                return false;
+            }
+            // Quality-upgrade check: re-sync when server reports higher bitrate than recorded,
+            // or when the manifest entry has no bitrate recorded (old manifest, populate on next sync).
+            if let Some(desired) = desired {
+                let quality_upgrade = match (desired.original_bitrate, i.original_bitrate) {
+                    (Some(server), Some(local)) => server > local,
+                    (Some(_), None) => true, // old entry — re-sync to populate bitrate
+                    _ => false,
+                };
+                if quality_upgrade {
+                    return false;
+                }
+            }
+            true
         })
         .map(|i| i.jellyfin_id.as_str())
         .collect();
@@ -2685,6 +2764,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
             provider_album_id: i.provider_album_id.clone(),
             provider_content_type: i.provider_content_type.clone(),
             provider_suffix: i.provider_suffix.clone(),
+            original_bitrate: i.original_bitrate,
         })
         .collect();
 
@@ -2852,6 +2932,8 @@ mod tests {
             provider_album_id: None,
             provider_content_type: None,
             provider_suffix: None,
+            original_bitrate: None,
+            original_container: None,
         }
     }
 
@@ -3216,6 +3298,7 @@ mod tests {
             provider_album_id: None,
             provider_content_type: None,
             provider_suffix: None,
+            original_bitrate: None,
         }
     }
 
@@ -3339,6 +3422,7 @@ mod tests {
             provider_album_id: Some("album1".to_string()),
             provider_content_type: Some(content_type.to_string()),
             provider_suffix: Some(suffix.to_string()),
+            original_bitrate: None,
         }
     }
 
@@ -4195,6 +4279,8 @@ mod tests {
             provider_album_id: None,
             provider_content_type: None,
             provider_suffix: None,
+            original_bitrate: None,
+            original_container: None,
         };
 
         let value = serde_json::to_value(&item).unwrap();
@@ -4228,6 +4314,8 @@ mod tests {
             provider_album_id: None,
             provider_content_type: None,
             provider_suffix: None,
+            original_bitrate: None,
+            original_container: None,
         }
     }
 
@@ -4243,6 +4331,7 @@ mod tests {
             provider_album_id: None,
             provider_content_type: None,
             provider_suffix: Some("flac".to_string()),
+            original_bitrate: None,
         }];
         let mut manifest = empty_manifest();
         manifest.managed_paths = vec!["Audio".to_string()];
@@ -4302,6 +4391,7 @@ mod tests {
             provider_album_id: None,
             provider_content_type: None,
             provider_suffix: Some("flac".to_string()),
+            original_bitrate: None,
         }];
         let mut manifest = empty_manifest();
         manifest.managed_paths = vec!["Audio".to_string()];
@@ -4318,6 +4408,8 @@ mod tests {
             provider_album_id: None,
             provider_content_type: None,
             provider_suffix: Some("flac".to_string()),
+            original_bitrate: None,
+            original_container: None,
         }];
 
         let delta = calculate_delta(&desired, &manifest);

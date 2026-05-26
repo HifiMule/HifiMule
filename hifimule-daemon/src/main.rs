@@ -590,6 +590,7 @@ async fn run_auto_sync(
                             provider_album_id: item.provider_album_id,
                             provider_content_type: None,
                             provider_suffix: item.provider_suffix,
+                            original_bitrate: None,
                         });
                     }
                 }
@@ -914,6 +915,20 @@ fn to_desired_item(item: api::JellyfinItem) -> sync::DesiredItem {
         .and_then(|sources| sources.first())
         .and_then(|source| source.container.clone())
         .or_else(|| item.container.clone());
+    let original_bitrate = item
+        .media_sources
+        .as_ref()
+        .and_then(|sources| sources.first())
+        .and_then(|s| {
+            s.bitrate.or_else(|| {
+                s.media_streams
+                    .as_ref()?
+                    .iter()
+                    .find(|ms| ms.stream_type == "Audio")
+                    .and_then(|ms| ms.bit_rate)
+            })
+        })
+        .or(item.bitrate);
     sync::DesiredItem {
         jellyfin_id: item.id,
         name: item.name,
@@ -924,6 +939,7 @@ fn to_desired_item(item: api::JellyfinItem) -> sync::DesiredItem {
         provider_album_id: item.album_id,
         provider_content_type: None,
         provider_suffix,
+        original_bitrate,
     }
 }
 

@@ -1489,6 +1489,7 @@ fn provider_song_to_desired_item(song: &Song) -> crate::sync::DesiredItem {
         provider_album_id: song.album_id.clone(),
         provider_content_type: song.content_type.clone(),
         provider_suffix: song.suffix.clone(),
+        original_bitrate: song.bitrate_kbps.map(|kbps| kbps * 1000),
     }
 }
 
@@ -1766,6 +1767,17 @@ async fn provider_calculate_delta(
 
     let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
     delta.playlists = playlist_sync_items;
+
+    if let Some((_, device_io)) = _state.device_manager.get_manifest_and_io().await {
+        crate::sync::augment_delta_with_existence_check(
+            &mut delta,
+            &desired_items,
+            manifest,
+            device_io.as_ref(),
+        )
+        .await;
+    }
+
     Ok(delta_value_with_cleanup_metadata(&delta, manifest))
 }
 
@@ -1811,6 +1823,23 @@ fn jellyfin_item_to_desired_item(item: crate::api::JellyfinItem) -> crate::sync:
         .and_then(|sources| sources.first())
         .and_then(|source| source.container.clone())
         .or_else(|| item.container.clone());
+    let original_bitrate = item
+        .media_sources
+        .as_ref()
+        .and_then(|sources| sources.first())
+        .and_then(|s| {
+            // Prefer the container-level bitrate; fall back to the audio stream's
+            // BitRate, which Jellyfin populates even when the container field is
+            // absent (common for M4A/AAC files).
+            s.bitrate.or_else(|| {
+                s.media_streams
+                    .as_ref()?
+                    .iter()
+                    .find(|ms| ms.stream_type == "Audio")
+                    .and_then(|ms| ms.bit_rate)
+            })
+        })
+        .or(item.bitrate);
     crate::sync::DesiredItem {
         jellyfin_id: item.id,
         name: item.name,
@@ -1821,6 +1850,7 @@ fn jellyfin_item_to_desired_item(item: crate::api::JellyfinItem) -> crate::sync:
         provider_album_id: item.album_id,
         provider_content_type: None,
         provider_suffix,
+        original_bitrate,
     }
 }
 
@@ -2426,6 +2456,20 @@ async fn handle_sync_calculate_delta(
             .and_then(|sources| sources.first())
             .and_then(|source| source.container.clone())
             .or_else(|| item.container.clone());
+        let original_bitrate = item
+            .media_sources
+            .as_ref()
+            .and_then(|sources| sources.first())
+            .and_then(|s| {
+                s.bitrate.or_else(|| {
+                    s.media_streams
+                        .as_ref()?
+                        .iter()
+                        .find(|ms| ms.stream_type == "Audio")
+                        .and_then(|ms| ms.bit_rate)
+                })
+            })
+            .or(item.bitrate);
         crate::sync::DesiredItem {
             jellyfin_id: item.id,
             name: item.name,
@@ -2436,6 +2480,7 @@ async fn handle_sync_calculate_delta(
             provider_album_id: item.album_id,
             provider_content_type: None,
             provider_suffix,
+            original_bitrate,
         }
     };
 
@@ -2727,6 +2772,7 @@ async fn handle_sync_calculate_delta(
                                 provider_album_id: None,
                                 provider_content_type: None,
                                 provider_suffix: None,
+                                original_bitrate: None,
                             });
                         }
                     }
@@ -2744,6 +2790,16 @@ async fn handle_sync_calculate_delta(
 
     let mut delta = crate::sync::calculate_delta(&desired_items, &manifest);
     delta.playlists = playlist_sync_items;
+
+    if let Some((_, device_io)) = state.device_manager.get_manifest_and_io().await {
+        crate::sync::augment_delta_with_existence_check(
+            &mut delta,
+            &desired_items,
+            &manifest,
+            device_io.as_ref(),
+        )
+        .await;
+    }
 
     Ok(delta_value_with_cleanup_metadata(&delta, &manifest))
 }
@@ -2874,7 +2930,7 @@ async fn handle_sync_execute(
     })?;
 
     // Extract delta from params
-    let delta: crate::sync::SyncDelta =
+    let mut delta: crate::sync::SyncDelta =
         serde_json::from_value(params["delta"].clone()).map_err(|e| JsonRpcError {
             code: ERR_INVALID_PARAMS,
             message: format!("Invalid delta parameter: {}", e),
@@ -2882,6 +2938,10 @@ async fn handle_sync_execute(
         })?;
     let destructive_cleanup_confirmed = params
         .get("confirmDestructiveCleanup")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let force_sync = params
+        .get("force")
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let manifest = state
@@ -2893,6 +2953,41 @@ async fn handle_sync_execute(
             message: "No device connected".to_string(),
             data: None,
         })?;
+
+    // Force sync: promote all currently-synced items to adds+deletes, bypassing the delta.
+    if force_sync {
+        let delete_ids: std::collections::HashSet<String> =
+            delta.deletes.iter().map(|d| d.jellyfin_id.clone()).collect();
+        let mut force_adds: Vec<crate::sync::SyncAddItem> = Vec::new();
+        let mut force_deletes: Vec<crate::sync::SyncDeleteItem> = Vec::new();
+        for item in &manifest.synced_items {
+            if delete_ids.contains(&item.jellyfin_id) {
+                continue;
+            }
+            force_adds.push(crate::sync::SyncAddItem {
+                jellyfin_id: item.jellyfin_id.clone(),
+                name: item.name.clone(),
+                album: item.album.clone(),
+                artist: item.artist.clone(),
+                size_bytes: item.size_bytes,
+                etag: item.etag.clone(),
+                provider_album_id: item.provider_album_id.clone(),
+                provider_content_type: item.provider_content_type.clone(),
+                provider_suffix: item.provider_suffix.clone(),
+                original_bitrate: None,
+            });
+            force_deletes.push(crate::sync::SyncDeleteItem {
+                jellyfin_id: item.jellyfin_id.clone(),
+                local_path: item.local_path.clone(),
+                name: item.name.clone(),
+            });
+        }
+        delta.adds.extend(force_adds);
+        delta.deletes.extend(force_deletes);
+        delta.id_changes.clear();
+        delta.unchanged = 0;
+    }
+
     let destructive_cleanup_count = crate::sync::destructive_cleanup_count(&delta, &manifest);
     if destructive_cleanup_count > crate::sync::DESTRUCTIVE_CLEANUP_THRESHOLD
         && !destructive_cleanup_confirmed
@@ -4434,6 +4529,8 @@ mod tests {
                 provider_album_id: None,
                 provider_content_type: None,
                 provider_suffix: None,
+                original_bitrate: None,
+                original_container: None,
             }],
             dirty: false,
             pending_item_ids: vec![],
@@ -5676,6 +5773,83 @@ mod tests {
         assert_eq!(item.cumulative_run_time_ticks, Some(1000000));
         assert_eq!(item.etag, Some("some_etag".to_string()));
     }
+
+    /// Regression test: M4A/AAC items often have `MediaSource.Bitrate: null`
+    /// and only expose the bitrate inside `MediaSource.MediaStreams[Audio].BitRate`.
+    /// `jellyfin_item_to_desired_item` must fall back to the audio stream value.
+    #[test]
+    fn test_jellyfin_item_original_bitrate_falls_back_to_audio_media_stream() {
+        let json = serde_json::json!({
+            "Id": "m4a-track-1",
+            "Name": "AAC Track",
+            "Type": "Audio",
+            "MediaSources": [{
+                "Container": "m4a",
+                "Bitrate": null,          // absent at container level
+                "MediaStreams": [
+                    { "Type": "Audio", "BitRate": 256000 }
+                ]
+            }]
+        });
+        let item: crate::api::JellyfinItem = serde_json::from_value(json).unwrap();
+        let desired = jellyfin_item_to_desired_item(item);
+        assert_eq!(
+            desired.original_bitrate,
+            Some(256000),
+            "should fall back to audio MediaStream BitRate when MediaSource.Bitrate is null"
+        );
+    }
+
+    /// When both `MediaSource.Bitrate` and an audio stream `BitRate` are present,
+    /// the container-level bitrate must take precedence.
+    #[test]
+    fn test_jellyfin_item_original_bitrate_prefers_media_source_bitrate() {
+        let json = serde_json::json!({
+            "Id": "flac-track-1",
+            "Name": "FLAC Track",
+            "Type": "Audio",
+            "MediaSources": [{
+                "Container": "flac",
+                "Bitrate": 1411200,
+                "MediaStreams": [
+                    { "Type": "Audio", "BitRate": 1200000 }
+                ]
+            }]
+        });
+        let item: crate::api::JellyfinItem = serde_json::from_value(json).unwrap();
+        let desired = jellyfin_item_to_desired_item(item);
+        assert_eq!(
+            desired.original_bitrate,
+            Some(1411200),
+            "container-level bitrate should take precedence over audio stream bitrate"
+        );
+    }
+
+    /// When no bitrate is available at any level, `original_bitrate` must be `None` —
+    /// no spurious re-sync should be triggered.
+    #[test]
+    fn test_jellyfin_item_original_bitrate_none_when_fully_absent() {
+        let json = serde_json::json!({
+            "Id": "unknown-track",
+            "Name": "Track",
+            "Type": "Audio",
+            "MediaSources": [{
+                "Container": "m4a",
+                "Bitrate": null,
+                "MediaStreams": [
+                    { "Type": "Video", "BitRate": 4000000 }   // only a video stream, no audio
+                ]
+            }]
+        });
+        let item: crate::api::JellyfinItem = serde_json::from_value(json).unwrap();
+        let desired = jellyfin_item_to_desired_item(item);
+        assert_eq!(
+            desired.original_bitrate,
+            None,
+            "should be None when only non-audio streams are present"
+        );
+    }
+
     #[tokio::test]
     async fn test_rpc_get_items_params() {
         let db = Arc::new(crate::db::Database::memory().unwrap());
@@ -5887,6 +6061,8 @@ mod tests {
                 provider_album_id: Some("album1".to_string()),
                 provider_content_type: Some("audio/mpeg".to_string()),
                 provider_suffix: Some("mp3".to_string()),
+                original_bitrate: None,
+                original_container: None,
             }],
             dirty: false,
             pending_item_ids: vec![],
@@ -5982,6 +6158,8 @@ mod tests {
                     provider_album_id: None,
                     provider_content_type: None,
                     provider_suffix: None,
+                    original_bitrate: None,
+                    original_container: None,
                 },
                 crate::device::SyncedItem {
                     jellyfin_id: "item-b".to_string(),
@@ -5996,6 +6174,8 @@ mod tests {
                     provider_album_id: None,
                     provider_content_type: None,
                     provider_suffix: None,
+                    original_bitrate: None,
+                    original_container: None,
                 },
             ],
             dirty: false,

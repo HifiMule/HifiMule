@@ -30,6 +30,12 @@ pub struct SyncedItem {
     pub provider_content_type: Option<String>,
     #[serde(default)]
     pub provider_suffix: Option<String>,
+    /// Source bitrate at sync time in bps — used to detect quality upgrades on next sync.
+    #[serde(default)]
+    pub original_bitrate: Option<u32>,
+    /// Source container/codec at sync time (e.g. "flac", "mp3").
+    #[serde(default)]
+    pub original_container: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]

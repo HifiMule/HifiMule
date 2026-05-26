@@ -179,6 +179,7 @@ export class BasketSidebar {
     private pendingDeviceFriendlyName: string | undefined = undefined;
     private currentDevice: any = null;
     private syncPreviewCleanupDevicePath: string | null = null;
+    private forceSyncMode: boolean = false;
 
     constructor(container: HTMLElement) {
         this.container = container;
@@ -940,11 +941,22 @@ export class BasketSidebar {
                         ${t('basket.actions.repair_manifest_first')}
                     </sl-button>
                 ` : `
-                    <sl-button id="start-sync-btn" variant="primary" style="width: 100%;"
-                               ${!this.selectedDevicePath ? 'disabled' : this.isSyncing ? 'loading disabled' : ''}>
-                        <sl-icon slot="prefix" name="cloud-download"></sl-icon>
-                        ${this.isSyncing ? t('basket.sync.syncing') : t('basket.actions.start_sync')}
-                    </sl-button>
+                    <sl-button-group style="width: 100%;">
+                        <sl-button id="start-sync-btn" variant="primary" style="flex: 1;"
+                                   ${!this.selectedDevicePath ? 'disabled' : this.isSyncing ? 'loading disabled' : ''}>
+                            <sl-icon slot="prefix" name="cloud-download"></sl-icon>
+                            ${this.isSyncing ? t('basket.sync.syncing') : t('basket.actions.start_sync')}
+                        </sl-button>
+                        <sl-dropdown id="sync-mode-dropdown" placement="bottom-end" ${!this.selectedDevicePath || this.isSyncing ? 'disabled' : ''}>
+                            <sl-button slot="trigger" variant="primary" caret ${!this.selectedDevicePath || this.isSyncing ? 'disabled' : ''}></sl-button>
+                            <sl-menu>
+                                <sl-menu-item id="force-sync-item">
+                                    <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
+                                    ${t('basket.actions.force_sync')}
+                                </sl-menu-item>
+                            </sl-menu>
+                        </sl-dropdown>
+                    </sl-button-group>
                 `}
                 <sl-button variant="text" size="small" class="clear-basket-btn" style="width: 100%;">
                     ${t('basket.actions.clear_all')}
@@ -974,6 +986,11 @@ export class BasketSidebar {
         });
 
         this.container.querySelector('#start-sync-btn')?.addEventListener('click', () => {
+            this.handleStartSync();
+        });
+
+        this.container.querySelector('#force-sync-item')?.addEventListener('click', () => {
+            this.forceSyncMode = true;
             this.handleStartSync();
         });
 
@@ -1061,7 +1078,9 @@ export class BasketSidebar {
                 this.render();
                 return;
             }
-            const result = await rpcCall('sync_execute', { delta, confirmDestructiveCleanup });
+            const force = this.forceSyncMode;
+            this.forceSyncMode = false;
+            const result = await rpcCall('sync_execute', { delta, confirmDestructiveCleanup, force });
             this.currentOperationId = result.operationId as string;
 
             this.startPolling();

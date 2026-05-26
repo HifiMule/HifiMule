@@ -785,6 +785,7 @@ mod tests {
                 size: Some(5_242_880),
                 container: Some("flac".to_string()),
                 bitrate: Some(1_411_200),
+                media_streams: None,
             }]),
             image_tags: Some(std::collections::HashMap::from([(
                 "Primary".to_string(),

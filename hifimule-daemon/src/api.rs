@@ -66,14 +66,30 @@ pub struct JellyfinView {
     pub collection_type: Option<String>,
 }
 
+/// A single stream inside a `MediaSource` (audio, video, subtitle, …).
+/// We only need `Type` and `BitRate`; all other fields are ignored.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "PascalCase")]
+pub struct MediaStream {
+    #[serde(rename = "Type")]
+    pub stream_type: String,
+    /// Bitrate in bps (Jellyfin already reports bps here).
+    #[serde(default)]
+    pub bit_rate: Option<u32>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct MediaSource {
     #[serde(default)]
     pub size: Option<i64>,
     pub container: Option<String>,
+    /// Overall container bitrate in bps.  May be absent for some formats
+    /// (e.g. M4A/AAC) — fall back to the audio `MediaStream.BitRate`.
     #[serde(default)]
     pub bitrate: Option<u32>,
+    #[serde(default)]
+    pub media_streams: Option<Vec<MediaStream>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
