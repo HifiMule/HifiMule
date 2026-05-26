@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.8.2 - 2026-05-26
+
+HifiMule now tracks the bitrate of every file it writes to your device and automatically re-downloads tracks when a higher-quality version appears on your server. If you manually delete a synced file from the device, the next sync preview detects the gap and adds it back to the download queue. A new "Force Sync" option in the sync button dropdown lets you wipe and re-download everything in one click. M4A/AAC tracks from Jellyfin now have their bitrate recorded correctly, so they benefit from the quality-upgrade check too. On macOS, files with accented or non-Latin characters in their name are no longer incorrectly treated as missing during the sync preview. The A–Z letter navigation bar on the Albums tab no longer disappears after switching to another tab and coming back, and the "Load More" button now works correctly when browsing by letter — you can page through large filtered results without losing the active letter.
+
 ## v0.8.1 - 2026-05-24
 
 Added support for multilanguage with french and spanish translation.
