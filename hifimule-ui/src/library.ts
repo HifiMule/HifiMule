@@ -501,7 +501,7 @@ function renderGrid(items: BrowseDisplayItem[]) {
 
     container.appendChild(grid);
 
-    if (state.activeLetter === null && state.items.length < state.pagination.total) {
+    if (state.items.length < state.pagination.total) {
         const loadMoreContainer = document.createElement('div');
         loadMoreContainer.className = 'load-more-container';
 
@@ -656,6 +656,8 @@ async function loadArtistsByLetter(letter: string) {
     try {
         const result = await fetchBrowseArtists(letter, undefined, 0, 200);
         state.items = mapArtists(result.artists);
+        state.pagination.total = result.total;
+        state.pagination.startIndex = result.artists.length;
         renderGrid(state.items);
     } catch (e) {
         renderError(e as Error);
@@ -690,6 +692,7 @@ async function loadAlbumsByLetter(letter: string) {
         const result = await fetchBrowseAlbums(letter, undefined, 0, 200);
         state.items = mapAlbums(result.albums);
         state.pagination.total = result.total;
+        state.pagination.startIndex = result.albums.length;
         renderGrid(state.items);
     } catch (e) {
         renderError(e as Error);
@@ -711,7 +714,7 @@ async function loadAlbums(reset: boolean) {
             state.items = cached.items;
             state.pagination.total = cached.total;
             state.pagination.startIndex = 0;
-            state.artistViewTotal = 0;
+            state.albumViewTotal = cached.total;
             renderGrid(state.items);
             restoreScroll(key);
             return;
@@ -1357,17 +1360,52 @@ async function reloadCurrentLevel() {
 
 // --- Load More ---
 
+async function appendByLetter(mode: 'artists' | 'albums', letter: string) {
+    const container = document.getElementById('library-content');
+    if (!container) return;
+    state.loading = true;
+    renderModeBar();
+    try {
+        const startIndex = state.pagination.startIndex;
+        const limit = state.pagination.limit;
+        if (mode === 'artists') {
+            const result = await fetchBrowseArtists(letter, undefined, startIndex, limit);
+            if (!container.isConnected) return;
+            state.items = [...state.items, ...mapArtists(result.artists)];
+            state.pagination.total = result.total;
+        } else {
+            const result = await fetchBrowseAlbums(letter, undefined, startIndex, limit);
+            if (!container.isConnected) return;
+            state.items = [...state.items, ...mapAlbums(result.albums)];
+            state.pagination.total = result.total;
+        }
+        state.pagination.startIndex = state.items.length;
+        renderGrid(state.items);
+    } catch (e) {
+        renderError(e as Error);
+    } finally {
+        state.loading = false;
+        renderModeBar();
+    }
+}
+
 async function loadMore() {
     if (state.loading) return;
     if (state.browseMode === 'favorites') return;
 
-    state.pagination.startIndex += state.pagination.limit;
+    state.pagination.startIndex = state.items.length;
 
     const depth = state.breadcrumbStack.length;
     if (depth === 0) {
         switch (state.browseMode) {
-            case 'artists': await loadArtists(false); break;
-            case 'albums': await loadAlbums(false); break;
+            case 'artists':
+                if (state.activeLetter) await appendByLetter('artists', state.activeLetter);
+                else await loadArtists(false);
+                break;
+            case 'albums':
+                if (state.activeLetter) await appendByLetter('albums', state.activeLetter);
+                else await loadAlbums(false);
+                break;
             case 'genres': await loadGenres(false); break;
             case 'recentlyAdded':
                 await loadRecentlyAddedAlbums(false);
