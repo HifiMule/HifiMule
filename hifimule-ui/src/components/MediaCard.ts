@@ -144,15 +144,55 @@ export class MediaCard {
                     basketStore.remove(itemId);
                 } else if (isBrowseItem) {
                     const bi = item as BrowseDisplayItem;
-                    basketStore.add({
-                        id: bi.basketId ?? bi.id,
-                        name: bi.name,
-                        type: bi.basketType ?? bi.type,
-                        artist: bi.subtitle ?? undefined,
-                        childCount: bi.childCount ?? 0,
-                        sizeTicks: bi.sizeTicks ?? 0,
-                        sizeBytes: bi.sizeBytes ?? 0,
-                    });
+                    const resolvedType = bi.basketType ?? bi.type;
+                    const CONTAINER_TYPES = ['MusicArtist', 'MusicAlbum', 'MusicGenre', 'Playlist'];
+                    const isFavoriteScoped = resolvedType === 'FavoriteArtist' || resolvedType === 'FavoriteAlbum';
+                    const needsFetch = CONTAINER_TYPES.includes(resolvedType) && !isFavoriteScoped && (!bi.childCount || !bi.sizeBytes);
+
+                    if (needsFetch) {
+                        toggleBtn.loading = true;
+                        let overlay: HTMLElement | null = null;
+                        if (cardImage) {
+                            overlay = document.createElement('div');
+                            overlay.className = 'nav-loading-overlay';
+                            const spinner = document.createElement('sl-spinner');
+                            overlay.appendChild(spinner);
+                            cardImage.appendChild(overlay);
+                        }
+                        try {
+                            const resolvedId = bi.basketId ?? bi.id;
+                            const [metadata, sizeData] = await Promise.all([
+                                rpcCall('jellyfin_get_item_counts', { itemIds: [resolvedId] }),
+                                rpcCall('jellyfin_get_item_sizes', { itemIds: [resolvedId] }),
+                            ]);
+                            const info = metadata[0] || { recursiveItemCount: 0, cumulativeRunTimeTicks: 0 };
+                            const sizeInfo = sizeData[0] || { totalSizeBytes: 0 };
+                            basketStore.add({
+                                id: resolvedId,
+                                name: bi.name,
+                                type: resolvedType,
+                                artist: bi.subtitle ?? undefined,
+                                childCount: info.recursiveItemCount,
+                                sizeTicks: bi.sizeTicks || info.cumulativeRunTimeTicks,
+                                sizeBytes: sizeInfo.totalSizeBytes,
+                            });
+                        } catch (err) {
+                            console.error('Failed to fetch item count:', err);
+                        } finally {
+                            toggleBtn.loading = false;
+                            if (overlay) overlay.remove();
+                        }
+                    } else {
+                        basketStore.add({
+                            id: bi.basketId ?? bi.id,
+                            name: bi.name,
+                            type: resolvedType,
+                            artist: bi.subtitle ?? undefined,
+                            childCount: bi.childCount ?? 0,
+                            sizeTicks: bi.sizeTicks ?? 0,
+                            sizeBytes: bi.sizeBytes ?? 0,
+                        });
+                    }
                 } else {
                     // Fetch metadata (track count + file size) from daemon (Jellyfin-specific)
                     toggleBtn.loading = true;

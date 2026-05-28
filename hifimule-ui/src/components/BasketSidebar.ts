@@ -1342,6 +1342,13 @@ export class BasketSidebar {
         this.renderSyncError(this.syncErrorMessages);
     }
 
+    private itemTypeLabel(type: string): string {
+        if (type === 'MusicAlbum' || type === 'FavoriteAlbum') return t('basket.item.type.album');
+        if (type === 'Playlist') return t('basket.item.type.playlist');
+        if (type === 'FavoriteArtist') return t('basket.item.type.favorites');
+        return type;
+    }
+
     private renderPriorityLabel(reason: string): string {
         if (reason === 'favorite') return t('basket.priority.favorite');
         if (reason.startsWith('playCount:')) {
@@ -1431,7 +1438,7 @@ export class BasketSidebar {
                         ${this.escapeHtml(item.name)}
                     </div>
                     <div class="basket-item-meta">
-                        ${t('basket.item.track_count_type', { count: item.childCount, type: item.type })}
+                        ${t('basket.item.meta', { label: this.itemTypeLabel(item.type), count: item.childCount ?? 0, size: formatSize(item.sizeBytes ?? 0) })}
                         ${priorityLabel}
                     </div>
                 </div>

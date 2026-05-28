@@ -212,7 +212,7 @@ impl MediaProvider for JellyfinProvider {
     async fn get_album(&self, album_id: &str) -> Result<AlbumWithTracks, ProviderError> {
         let album = self
             .client
-            .get_item_with_media_sources(self.url(), self.token(), self.user_id(), album_id)
+            .get_item_details(self.url(), self.token(), self.user_id(), album_id)
             .await
             .map_err(|err| Self::map_not_found(err, "album", album_id))?;
         let tracks = self
@@ -904,7 +904,7 @@ mod tests {
             .mock("GET", "/Items/album1")
             .match_query(Matcher::AllOf(vec![
                 Matcher::UrlEncoded("userId".into(), USER_ID.into()),
-                Matcher::UrlEncoded("Fields".into(), "MediaSources".into()),
+                Matcher::UrlEncoded("Fields".into(), "RecursiveItemCount,CumulativeRunTimeTicks".into()),
             ]))
             .match_header("X-Emby-Token", TOKEN)
             .with_status(200)

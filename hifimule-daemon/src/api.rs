@@ -343,7 +343,7 @@ impl JellyfinClient {
         );
 
         let endpoint = format!(
-            "{}/Items/{}?userId={}",
+            "{}/Items/{}?userId={}&Fields=RecursiveItemCount,CumulativeRunTimeTicks",
             url.trim_end_matches('/'),
             item_id,
             user_id
@@ -1782,7 +1782,7 @@ mod tests {
         let token = "test-token-1234567890";
 
         let _mock = server
-            .mock("GET", "/Items/album1?userId=user1")
+            .mock("GET", "/Items/album1?userId=user1&Fields=RecursiveItemCount,CumulativeRunTimeTicks")
             .match_header("X-Emby-Token", token)
             .with_status(200)
             .with_header("content-type", "application/json")
