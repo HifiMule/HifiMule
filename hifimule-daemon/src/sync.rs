@@ -61,6 +61,7 @@ pub struct DesiredItem {
     pub provider_suffix: Option<String>,
     /// Current server-side bitrate in bps. Used to detect quality upgrades since last sync.
     pub original_bitrate: Option<u32>,
+    pub track_number: Option<u32>,
 }
 
 /// An item to be added to the device.
@@ -81,6 +82,8 @@ pub struct SyncAddItem {
     pub provider_suffix: Option<String>,
     #[serde(default)]
     pub original_bitrate: Option<u32>,
+    #[serde(default)]
+    pub track_number: Option<u32>,
 }
 
 /// An item to be deleted from the device.
@@ -457,7 +460,11 @@ fn construct_desired_file_path(
     loop {
         let artist_final = truncate_component(&artist_clean, current_max_component);
         let album_final = truncate_component(&album_clean, current_max_component);
-        let filename_base = format!("00 - {}", track_name_clean);
+        let track_num = item
+            .track_number
+            .map(|n| format!("{:02}", n))
+            .unwrap_or_else(|| "00".to_string());
+        let filename_base = format!("{} - {}", track_num, track_name_clean);
         let filename_candidate = format!("{}.{}", filename_base, extension);
         let (filename, original_name) =
             if filename_candidate.chars().count() > current_max_component {
@@ -1273,7 +1280,14 @@ pub fn destructive_cleanup_count(delta: &SyncDelta, manifest: &DeviceManifest) -
         }
     }
 
-    delta.deletes.len() + playlist_cleanup_paths.len()
+    // Readd pairs (same jellyfin_id in both adds and deletes) are file replacements, not removals.
+    let readd_ids: HashSet<&str> = delta.adds.iter().map(|a| a.jellyfin_id.as_str()).collect();
+    let net_deletes = delta
+        .deletes
+        .iter()
+        .filter(|d| !readd_ids.contains(d.jellyfin_id.as_str()))
+        .count();
+    net_deletes + playlist_cleanup_paths.len()
 }
 
 /// Executes a sync operation by downloading adds and deleting removals.
@@ -1583,6 +1597,7 @@ pub async fn execute_sync(
                     provider_suffix: add_item.provider_suffix.clone(),
                     original_bitrate: add_item.original_bitrate,
                     original_container: add_item.provider_suffix.clone(),
+                    track_number: add_item.track_number,
                 });
 
                 // Update operation progress and cumulative bytes
@@ -1767,6 +1782,7 @@ pub async fn execute_sync(
             provider_suffix: id_change.provider_suffix.clone(),
             original_bitrate: None,
             original_container: None,
+            track_number: None,
         });
 
         // Update operation progress and cumulative bytes (an ID change is instantly completed)
@@ -2157,6 +2173,7 @@ pub async fn execute_provider_sync(
                     provider_suffix: add_item.provider_suffix.clone(),
                     original_bitrate: add_item.original_bitrate,
                     original_container: add_item.provider_suffix.clone(),
+                    track_number: add_item.track_number,
                 });
                 completed_bytes_arc
                     .fetch_add(add_item.size_bytes, std::sync::atomic::Ordering::Relaxed);
@@ -2301,6 +2318,7 @@ pub async fn execute_provider_sync(
             provider_suffix: id_change.provider_suffix.clone(),
             original_bitrate: None,
             original_container: None,
+            track_number: None,
         });
         let synced_item = synced_items.last().unwrap().clone();
         let id_to_remove = id_change.old_jellyfin_id.clone();
@@ -2452,6 +2470,7 @@ pub async fn augment_delta_with_existence_check(
                 provider_content_type: desired.provider_content_type.clone(),
                 provider_suffix: desired.provider_suffix.clone(),
                 original_bitrate: desired.original_bitrate,
+                track_number: desired.track_number,
             });
         }
     }
@@ -2756,6 +2775,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
             provider_content_type: i.provider_content_type.clone(),
             provider_suffix: i.provider_suffix.clone(),
             original_bitrate: i.original_bitrate,
+            track_number: i.track_number,
         })
         .collect();
 
@@ -2775,8 +2795,18 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
     for item in &manifest.synced_items {
         let stale_for_profile = profile_dirty && desired_ids.contains(item.jellyfin_id.as_str());
         let stale_for_relocation = !device_path_in_or_equal(&item.local_path, &music_folder);
+        let stale_for_quality = desired_items
+            .iter()
+            .find(|d| d.jellyfin_id == item.jellyfin_id)
+            .map(|desired| match (desired.original_bitrate, item.original_bitrate) {
+                (Some(server), Some(local)) => server > local,
+                (Some(_), None) => true,
+                _ => false,
+            })
+            .unwrap_or(false);
         if stale_for_profile
             || stale_for_relocation
+            || stale_for_quality
             || !desired_ids.contains(item.jellyfin_id.as_str())
         {
             let idx = deletes.len();
@@ -2925,6 +2955,7 @@ mod tests {
             provider_suffix: None,
             original_bitrate: None,
             original_container: None,
+            track_number: None,
         }
     }
 
@@ -3290,6 +3321,7 @@ mod tests {
             provider_content_type: None,
             provider_suffix: None,
             original_bitrate: None,
+            track_number: None,
         }
     }
 
@@ -3414,6 +3446,7 @@ mod tests {
             provider_content_type: Some(content_type.to_string()),
             provider_suffix: Some(suffix.to_string()),
             original_bitrate: None,
+            track_number: None,
         }
     }
 
@@ -4272,6 +4305,7 @@ mod tests {
             provider_suffix: None,
             original_bitrate: None,
             original_container: None,
+            track_number: None,
         };
 
         let value = serde_json::to_value(&item).unwrap();
@@ -4307,6 +4341,7 @@ mod tests {
             provider_suffix: None,
             original_bitrate: None,
             original_container: None,
+            track_number: None,
         }
     }
 
@@ -4323,6 +4358,7 @@ mod tests {
             provider_content_type: None,
             provider_suffix: Some("flac".to_string()),
             original_bitrate: None,
+            track_number: None,
         }];
         let mut manifest = empty_manifest();
         manifest.managed_paths = vec!["Audio".to_string()];
@@ -4383,6 +4419,7 @@ mod tests {
             provider_content_type: None,
             provider_suffix: Some("flac".to_string()),
             original_bitrate: None,
+            track_number: None,
         }];
         let mut manifest = empty_manifest();
         manifest.managed_paths = vec!["Audio".to_string()];
@@ -4401,6 +4438,7 @@ mod tests {
             provider_suffix: Some("flac".to_string()),
             original_bitrate: None,
             original_container: None,
+            track_number: None,
         }];
 
         let delta = calculate_delta(&desired, &manifest);

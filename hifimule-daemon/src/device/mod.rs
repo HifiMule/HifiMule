@@ -36,6 +36,8 @@ pub struct SyncedItem {
     /// Source container/codec at sync time (e.g. "flac", "mp3").
     #[serde(default)]
     pub original_container: Option<String>,
+    #[serde(default)]
+    pub track_number: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]

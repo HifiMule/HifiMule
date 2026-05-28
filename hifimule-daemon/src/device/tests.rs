@@ -485,6 +485,7 @@ async fn test_write_manifest_creates_files() {
             provider_suffix: None,
             original_bitrate: None,
             original_container: None,
+            track_number: None,
         }],
         dirty: false,
         pending_item_ids: vec![],
@@ -568,6 +569,7 @@ async fn test_write_manifest_overwrites_existing() {
             provider_suffix: None,
             original_bitrate: None,
             original_container: None,
+            track_number: None,
         }],
         dirty: false,
         pending_item_ids: vec![],
@@ -620,6 +622,7 @@ async fn test_get_discrepancies_missing_file() {
             provider_suffix: None,
             original_bitrate: None,
             original_container: None,
+            track_number: None,
         }],
         dirty: true,
         pending_item_ids: vec![],
@@ -731,6 +734,7 @@ async fn test_get_discrepancies_no_issues() {
             provider_suffix: None,
             original_bitrate: None,
             original_container: None,
+            track_number: None,
         }],
         dirty: false,
         pending_item_ids: vec![],
@@ -784,6 +788,7 @@ async fn test_prune_items() {
                 provider_suffix: None,
                 original_bitrate: None,
                 original_container: None,
+                track_number: None,
             },
             SyncedItem {
                 jellyfin_id: "item-2".to_string(),
@@ -800,6 +805,7 @@ async fn test_prune_items() {
                 provider_suffix: None,
                 original_bitrate: None,
                 original_container: None,
+                track_number: None,
             },
         ],
         dirty: true,
@@ -861,6 +867,7 @@ async fn test_relink_item() {
             provider_suffix: None,
             original_bitrate: None,
             original_container: None,
+            track_number: None,
         }],
         dirty: true,
         pending_item_ids: vec![],
@@ -2222,6 +2229,7 @@ fn test_synced_item_provider_metadata_serializes_camel_case_and_builds_context()
         provider_suffix: Some("mp3".to_string()),
         original_bitrate: None,
         original_container: None,
+        track_number: None,
     };
     let value = serde_json::to_value(&item).expect("synced item json");
 

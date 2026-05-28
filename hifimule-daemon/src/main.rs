@@ -591,6 +591,7 @@ async fn run_auto_sync(
                             provider_content_type: None,
                             provider_suffix: item.provider_suffix,
                             original_bitrate: None,
+                            track_number: None,
                         });
                     }
                 }
@@ -940,6 +941,7 @@ fn to_desired_item(item: api::JellyfinItem) -> sync::DesiredItem {
         provider_content_type: None,
         provider_suffix,
         original_bitrate,
+        track_number: item.index_number,
     }
 }
 

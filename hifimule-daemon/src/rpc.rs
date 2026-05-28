@@ -1490,6 +1490,7 @@ fn provider_song_to_desired_item(song: &Song) -> crate::sync::DesiredItem {
         provider_content_type: song.content_type.clone(),
         provider_suffix: song.suffix.clone(),
         original_bitrate: song.bitrate_kbps.map(|kbps| kbps * 1000),
+        track_number: song.track_number,
     }
 }
 
@@ -1851,6 +1852,7 @@ fn jellyfin_item_to_desired_item(item: crate::api::JellyfinItem) -> crate::sync:
         provider_content_type: None,
         provider_suffix,
         original_bitrate,
+        track_number: item.index_number,
     }
 }
 
@@ -2481,6 +2483,7 @@ async fn handle_sync_calculate_delta(
             provider_content_type: None,
             provider_suffix,
             original_bitrate,
+            track_number: item.index_number,
         }
     };
 
@@ -2773,6 +2776,7 @@ async fn handle_sync_calculate_delta(
                                 provider_content_type: None,
                                 provider_suffix: None,
                                 original_bitrate: None,
+                                track_number: None,
                             });
                         }
                     }
@@ -2975,6 +2979,7 @@ async fn handle_sync_execute(
                 provider_content_type: item.provider_content_type.clone(),
                 provider_suffix: item.provider_suffix.clone(),
                 original_bitrate: None,
+                track_number: item.track_number,
             });
             force_deletes.push(crate::sync::SyncDeleteItem {
                 jellyfin_id: item.jellyfin_id.clone(),
@@ -4531,6 +4536,7 @@ mod tests {
                 provider_suffix: None,
                 original_bitrate: None,
                 original_container: None,
+                track_number: None,
             }],
             dirty: false,
             pending_item_ids: vec![],
@@ -6063,6 +6069,7 @@ mod tests {
                 provider_suffix: Some("mp3".to_string()),
                 original_bitrate: None,
                 original_container: None,
+                track_number: None,
             }],
             dirty: false,
             pending_item_ids: vec![],
@@ -6160,6 +6167,7 @@ mod tests {
                     provider_suffix: None,
                     original_bitrate: None,
                     original_container: None,
+                    track_number: None,
                 },
                 crate::device::SyncedItem {
                     jellyfin_id: "item-b".to_string(),
@@ -6176,6 +6184,7 @@ mod tests {
                     provider_suffix: None,
                     original_bitrate: None,
                     original_container: None,
+                    track_number: None,
                 },
             ],
             dirty: false,
