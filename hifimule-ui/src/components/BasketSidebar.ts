@@ -880,7 +880,7 @@ export class BasketSidebar {
                     ${this.renderDeviceFolders()}
                 </div>
                 <div class="basket-actions">
-                    <sl-button id="start-sync-btn" variant="primary" style="width: 100%;" ${(!basketStore.isDirty() && !this.autoFillEnabled) || !this.selectedDevicePath ? 'disabled' : ''}>
+                    <sl-button id="start-sync-btn" variant="primary" style="width: 100%;" ${(!basketStore.isDirty() && !this.autoFillEnabled && !(this.currentDevice?.synced_items?.length > 0)) || !this.selectedDevicePath ? 'disabled' : ''}>
                         <sl-icon slot="prefix" name="cloud-download"></sl-icon>
                         ${t('basket.actions.start_sync')}
                     </sl-button>
@@ -1067,7 +1067,7 @@ export class BasketSidebar {
             const rawThreshold = (delta as any)?.destructiveCleanupThreshold;
             const destructiveThreshold = typeof rawThreshold === 'number' ? rawThreshold : Number.POSITIVE_INFINITY;
             const confirmDestructiveCleanup = deleteCount > destructiveThreshold
-                ? window.confirm(t('basket.confirm.remove_managed_files', { count: deleteCount }))
+                ? await this.confirmDestructiveCleanup(deleteCount)
                 : false;
             if (deleteCount > destructiveThreshold && !confirmDestructiveCleanup) {
                 this.stopPolling();
@@ -1091,6 +1091,29 @@ export class BasketSidebar {
             this.currentOperation = null;
             this.showError(t('basket.sync.failed_to_start', { message: (err as Error).message }));
         }
+    }
+
+    private confirmDestructiveCleanup(count: number): Promise<boolean> {
+        return new Promise((resolve) => {
+            const dialog = document.createElement('sl-dialog') as any;
+            dialog.innerHTML = `
+                <p>${t('basket.confirm.remove_managed_files', { count })}</p>
+                <sl-button slot="footer" variant="default" id="cleanup-cancel">${t('basket.actions.cancel')}</sl-button>
+                <sl-button slot="footer" variant="danger" id="cleanup-confirm">${t('basket.actions.start_sync')}</sl-button>
+            `;
+            document.body.appendChild(dialog);
+            let confirmed = false;
+            dialog.querySelector('#cleanup-cancel')?.addEventListener('click', () => dialog.hide());
+            dialog.querySelector('#cleanup-confirm')?.addEventListener('click', () => {
+                confirmed = true;
+                dialog.hide();
+            });
+            dialog.addEventListener('sl-after-hide', () => {
+                dialog.remove();
+                resolve(confirmed);
+            }, { once: true });
+            customElements.whenDefined('sl-dialog').then(() => dialog.show());
+        });
     }
 
     private isSubsonicServer(): boolean {

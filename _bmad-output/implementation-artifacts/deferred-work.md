@@ -18,6 +18,12 @@ Last updated: 2026-05-12
 - **`LIBMTP_File_t.filename` null-dereference in file traversal** [`hifimule-daemon/src/device/mtp.rs:1587, 1625, 1662`] — Three call sites in `path_to_object_id_raw`, `path_to_object_and_storage_raw`, and `ensure_path_raw` dereference `(*cur).filename` via `CStr::from_ptr` without checking for null. libmtp documents that `filename` can be NULL for unnamed objects on some Android MTP implementations. Would cause SIGSEGV during any directory walk if a device returns a null-named entry. Fix: check `(*cur).filename.is_null()` and skip/substitute the entry.
 - **`device_id.clone()` pointless allocation** [`hifimule-daemon/src/device/mtp.rs:1920`] — `format!("{}:{}", r.bus_location, r.devnum)` is immediately cloned and the original moved into the struct, allocating an extra unused `String`. Trivial to remove.
 
+## Deferred from: fix empty-basket sync blocked (2026-05-29)
+
+- **`DaemonState::Idle` not sent before early-return in `run_auto_sync` at line 731** [`hifimule-daemon/src/main.rs`] — When basket items fail to resolve (`desired_items.is_empty() && !basket_items.is_empty()`) the function returns `Ok(())` without sending `DaemonState::Idle`, leaving the UI in `DaemonState::Syncing` until the next state poll. Pre-existing; not introduced by the empty-basket fix.
+- **Auto-fill returns empty result but device has stale synced items** [`hifimule-daemon/src/main.rs:575-578`] — When `auto_fill.enabled` is true and `run_auto_fill` returns an empty list, `run_auto_sync` returns early with `DaemonState::Idle` regardless of `synced_items`. Files synced by a prior manual sync are never cleaned up on auto-fill-enabled devices. Pre-existing gap; out of scope for the empty-basket fix.
+- **`currentDevice: any` untyped in BasketSidebar** [`hifimule-ui/src/components/BasketSidebar.ts:180`] — `synced_items` is accessed via optional chaining on an `any`-typed field; a Rust-side rename would silently break button state with no compile-time error. Consider typing the daemon state response.
+
 ## Deferred from: hide daemon Dock icon (2026-05-11)
 
 - **`ActivationPolicy::Accessory` prevents in-process windows from receiving keyboard focus** [`hifimule-daemon/src/main.rs`] — With the Accessory policy active, any future in-process `NSWindow` (e.g., a settings dialog) will not be able to receive keyboard focus by default. The current code opens no windows; if one is ever added, the policy must be promoted to `Regular` at runtime via `set_activation_policy_at_runtime` before the window opens.

@@ -221,6 +221,7 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                             let auto_sync_enabled = manifest.auto_sync_on_connect;
                             let has_basket = !manifest.basket_items.is_empty();
                             let auto_fill_enabled = manifest.auto_fill.enabled;
+                            let has_synced_items = !manifest.synced_items.is_empty();
                             let manifest_device_id = manifest.device_id.clone();
                             let scrobble_manifest = Arc::new(manifest.clone());
                             match device_manager.handle_device_detected(path.clone(), manifest, device_io).await {
@@ -269,7 +270,7 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
 
                             // Auto-sync trigger: the connected manifest is the source of truth.
                             // SQLite may be stale or absent when the UI has not opened yet.
-                            if auto_sync_enabled && (has_basket || auto_fill_enabled) {
+                            if auto_sync_enabled && (has_basket || auto_fill_enabled || has_synced_items) {
                                 let has_active_sync = som_events.has_active_operation().await;
 
                                 if !has_active_sync {
@@ -601,10 +602,13 @@ async fn run_auto_sync(
                     return Ok(());
                 }
             }
-        } else {
-            daemon_log!("[AutoSync] No basket items configured, skipping");
+        } else if manifest.synced_items.is_empty() {
+            daemon_log!("[AutoSync] No basket items and no synced items, skipping");
             let _ = state_tx.send(DaemonState::Idle);
             return Ok(());
+        } else {
+            daemon_log!("[AutoSync] Basket empty but device has {} synced item(s) — running cleanup sync", manifest.synced_items.len());
+            // desired_items stays empty; calculate_delta will mark all synced items for deletion.
         }
     } else {
         // Manual basket: resolve basket items to desired items via Jellyfin API
@@ -723,8 +727,8 @@ async fn run_auto_sync(
     let mut seen_desired_ids = std::collections::HashSet::new();
     desired_items.retain(|item| seen_desired_ids.insert(item.jellyfin_id.clone()));
 
-    if desired_items.is_empty() {
-        daemon_log!("[AutoSync] No downloadable items resolved, skipping");
+    if desired_items.is_empty() && !manifest.basket_items.is_empty() {
+        daemon_log!("[AutoSync] No downloadable items resolved from basket, skipping");
         return Ok(());
     }
 
