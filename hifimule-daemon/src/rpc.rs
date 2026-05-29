@@ -6,7 +6,7 @@ use crate::providers::{
 };
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{DefaultBodyLimit, Path, State},
     response::IntoResponse,
     routing::{get, post},
 };
@@ -199,6 +199,7 @@ pub async fn run_server(
     let app = Router::new()
         .route("/", post(handler))
         .route("/jellyfin/image/{id}", get(handle_proxy_image))
+        .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
         .layer(
             tower_http::cors::CorsLayer::new()
                 .allow_origin([
@@ -2934,8 +2935,8 @@ async fn handle_sync_execute(
     })?;
 
     // Extract delta from params
-    let mut delta: crate::sync::SyncDelta =
-        serde_json::from_value(params["delta"].clone()).map_err(|e| JsonRpcError {
+    let mut delta: crate::sync::SyncDelta = serde_json::from_value(params["delta"].clone())
+        .map_err(|e| JsonRpcError {
             code: ERR_INVALID_PARAMS,
             message: format!("Invalid delta parameter: {}", e),
             data: None,
@@ -2960,8 +2961,11 @@ async fn handle_sync_execute(
 
     // Force sync: promote all currently-synced items to adds+deletes, bypassing the delta.
     if force_sync {
-        let delete_ids: std::collections::HashSet<String> =
-            delta.deletes.iter().map(|d| d.jellyfin_id.clone()).collect();
+        let delete_ids: std::collections::HashSet<String> = delta
+            .deletes
+            .iter()
+            .map(|d| d.jellyfin_id.clone())
+            .collect();
         let mut force_adds: Vec<crate::sync::SyncAddItem> = Vec::new();
         let mut force_deletes: Vec<crate::sync::SyncDeleteItem> = Vec::new();
         for item in &manifest.synced_items {
@@ -5850,8 +5854,7 @@ mod tests {
         let item: crate::api::JellyfinItem = serde_json::from_value(json).unwrap();
         let desired = jellyfin_item_to_desired_item(item);
         assert_eq!(
-            desired.original_bitrate,
-            None,
+            desired.original_bitrate, None,
             "should be None when only non-audio streams are present"
         );
     }

@@ -2730,7 +2730,9 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
         .synced_items
         .iter()
         .filter(|i| {
-            let desired = desired_items.iter().find(|d| d.jellyfin_id == i.jellyfin_id);
+            let desired = desired_items
+                .iter()
+                .find(|d| d.jellyfin_id == i.jellyfin_id);
             let outside_music_folder = !device_path_in_or_equal(&i.local_path, &music_folder);
             if outside_music_folder {
                 return false;
@@ -2798,11 +2800,13 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
         let stale_for_quality = desired_items
             .iter()
             .find(|d| d.jellyfin_id == item.jellyfin_id)
-            .map(|desired| match (desired.original_bitrate, item.original_bitrate) {
-                (Some(server), Some(local)) => server > local,
-                (Some(_), None) => true,
-                _ => false,
-            })
+            .map(
+                |desired| match (desired.original_bitrate, item.original_bitrate) {
+                    (Some(server), Some(local)) => server > local,
+                    (Some(_), None) => true,
+                    _ => false,
+                },
+            )
             .unwrap_or(false);
         if stale_for_profile
             || stale_for_relocation
