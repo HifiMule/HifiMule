@@ -6,8 +6,11 @@
 ///   3. DateCreated DESC (newest last)
 /// Stops paginating as soon as the device capacity budget is filled.
 use crate::api::{CredentialManager, JellyfinClient, JellyfinItem, JellyfinItemsResponse};
+use crate::providers::{MediaProvider, ProviderError};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::sync::Arc;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -249,6 +252,178 @@ pub fn rank_and_truncate(
     }
 
     (result, false)
+}
+
+/// Accumulates auto-fill items for the provider path, tracking budget and dedup state.
+struct ProviderFillState {
+    exclude_set: HashSet<String>,
+    seen_ids: HashSet<String>,
+    result: Vec<AutoFillItem>,
+    cumulative_bytes: u64,
+    max_fill_bytes: u64,
+}
+
+impl ProviderFillState {
+    fn new(exclude_set: HashSet<String>, max_fill_bytes: u64) -> Self {
+        Self {
+            exclude_set,
+            seen_ids: HashSet::new(),
+            result: Vec::new(),
+            cumulative_bytes: 0,
+            max_fill_bytes,
+        }
+    }
+
+    /// Attempts to add a song. Returns `false` if the budget is full (caller should stop iterating).
+    fn try_add(&mut self, song: crate::domain::models::Song, priority_reason: String) -> bool {
+        if self.exclude_set.contains(&song.id) || !self.seen_ids.insert(song.id.clone()) {
+            return true; // skip duplicate/excluded, budget still open
+        }
+        let size_bytes = song
+            .bitrate_kbps
+            .map(|kbps| (u64::from(kbps) * 1_000 / 8) * u64::from(song.duration_seconds))
+            .unwrap_or(0);
+        if size_bytes == 0 {
+            return true; // skip unknown-size song
+        }
+        if self.cumulative_bytes + size_bytes > self.max_fill_bytes {
+            return false; // budget full
+        }
+        self.cumulative_bytes += size_bytes;
+        self.result.push(AutoFillItem {
+            id: song.id,
+            name: song.title,
+            album: song.album_title,
+            artist: song.artist_name,
+            provider_album_id: song.album_id,
+            provider_suffix: song.suffix,
+            size_bytes,
+            priority_reason,
+        });
+        true
+    }
+
+    fn into_result(self) -> Vec<AutoFillItem> {
+        self.result
+    }
+}
+
+/// Runs the auto-fill algorithm for any MediaProvider (Subsonic, Navidrome, Jellyfin).
+///
+/// Priority order:
+///   1. Favorites (list_favorites) — supported by all servers
+///   2. Frequently played (list_frequently_played) — OpenSubsonic / Jellyfin only
+///   3. Recently played (list_recently_played) — OpenSubsonic / Jellyfin only
+///   4. Full library pagination (list_all_songs_page) — fills remaining space
+///
+/// Song size is estimated as `(bitrate_kbps * 1_000 / 8) * duration_seconds`.
+/// Songs with unknown bitrate (size estimate = 0) are skipped.
+/// Stops paginating as soon as `params.max_fill_bytes` is reached.
+pub async fn run_auto_fill_provider(
+    provider: Arc<dyn MediaProvider>,
+    params: AutoFillParams,
+) -> Result<Vec<AutoFillItem>> {
+    const MAX_PER_LIST: u32 = 2000;
+    const PAGE_SIZE: u32 = 500;
+    // Guard against runaway pagination if the server never returns a partial page.
+    const MAX_BULK_PAGES: u32 = 200;
+
+    let AutoFillParams { exclude_item_ids, max_fill_bytes } = params;
+    let exclude_set: HashSet<String> = exclude_item_ids.into_iter().collect();
+    let mut state = ProviderFillState::new(exclude_set, max_fill_bytes);
+
+    // Phase 1: Priority lists (favorites → frequently played → recently played).
+    // These are small targeted lists; fetch them all at once then consume in order.
+    let mut priority_songs: Vec<(crate::domain::models::Song, String)> = Vec::new();
+
+    match provider.list_favorites(None, 0, MAX_PER_LIST).await {
+        Ok((songs, _)) => {
+            crate::daemon_log!("[AutoFill] list_favorites returned {} songs", songs.len());
+            for s in songs { priority_songs.push((s, "favorite".to_string())); }
+        }
+        Err(ProviderError::UnsupportedCapability(_)) => {
+            crate::daemon_log!("[AutoFill] list_favorites: UnsupportedCapability, skipping");
+        }
+        Err(e) => {
+            crate::daemon_log!("[AutoFill] list_favorites failed: {}", e);
+            return Err(e.into());
+        }
+    }
+
+    match provider.list_frequently_played(None, 0, MAX_PER_LIST).await {
+        Ok((songs, _)) => {
+            crate::daemon_log!("[AutoFill] list_frequently_played returned {} songs", songs.len());
+            for s in songs {
+                let reason = format!("playCount:{}", s.play_count.unwrap_or(0));
+                priority_songs.push((s, reason));
+            }
+        }
+        Err(ProviderError::UnsupportedCapability(_)) => {
+            crate::daemon_log!("[AutoFill] list_frequently_played: UnsupportedCapability, skipping");
+        }
+        Err(e) => crate::daemon_log!("[AutoFill] list_frequently_played failed (non-fatal): {}", e),
+    }
+
+    match provider.list_recently_played(None, 0, MAX_PER_LIST).await {
+        Ok((songs, _)) => {
+            crate::daemon_log!("[AutoFill] list_recently_played returned {} songs", songs.len());
+            for s in songs { priority_songs.push((s, "recentlyPlayed".to_string())); }
+        }
+        Err(ProviderError::UnsupportedCapability(_)) => {
+            crate::daemon_log!("[AutoFill] list_recently_played: UnsupportedCapability, skipping");
+        }
+        Err(e) => crate::daemon_log!("[AutoFill] list_recently_played failed (non-fatal): {}", e),
+    }
+
+    crate::daemon_log!(
+        "[AutoFill] priority candidates: {}, max_fill_bytes: {}",
+        priority_songs.len(), max_fill_bytes
+    );
+
+    for (song, reason) in priority_songs {
+        if !state.try_add(song, reason) {
+            break; // budget full
+        }
+    }
+
+    // Phase 2: Bulk fill — paginate through the full library until budget is met.
+    // Mirrors Jellyfin's paginated /Items?IncludeItemTypes=Audio approach.
+    // Songs already consumed in phase 1 are skipped via seen_ids.
+    let mut offset = 0u32;
+    let mut pages_fetched = 0u32;
+    'bulk: loop {
+        match provider.list_all_songs_page(None, offset, PAGE_SIZE).await {
+            Ok((songs, _)) => {
+                let page_count = songs.len() as u32;
+                crate::daemon_log!(
+                    "[AutoFill] bulk page {} ({} songs, offset {})",
+                    pages_fetched + 1, page_count, offset
+                );
+                for song in songs {
+                    if !state.try_add(song, "library".to_string()) {
+                        break 'bulk; // budget full
+                    }
+                }
+                pages_fetched += 1;
+                if page_count < PAGE_SIZE || pages_fetched >= MAX_BULK_PAGES {
+                    break 'bulk;
+                }
+                offset += PAGE_SIZE;
+            }
+            Err(ProviderError::UnsupportedCapability(_)) => {
+                crate::daemon_log!("[AutoFill] list_all_songs_page: UnsupportedCapability, bulk fill skipped");
+                break 'bulk;
+            }
+            Err(e) => {
+                crate::daemon_log!("[AutoFill] list_all_songs_page failed (non-fatal): {}", e);
+                break 'bulk;
+            }
+        }
+    }
+
+    let result = state.into_result();
+    crate::daemon_log!("[AutoFill] done: {} tracks", result.len());
+    Ok(result)
 }
 
 #[cfg(test)]

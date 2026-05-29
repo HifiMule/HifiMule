@@ -183,6 +183,19 @@ pub trait MediaProvider: Send + Sync {
         ))
     }
 
+    /// Paginated listing of all songs in the library, in any server-defined order.
+    /// Used as the bulk-fill pass in provider auto-fill, after priority lists are exhausted.
+    async fn list_all_songs_page(
+        &self,
+        _library_id: Option<&str>,
+        _offset: u32,
+        _limit: u32,
+    ) -> Result<(Vec<Song>, u32), ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "list_all_songs_page is not supported by this provider".to_string(),
+        ))
+    }
+
     fn change_metadata(&self, _event: &ChangeEvent) -> Option<ProviderChangeMetadata> {
         None
     }

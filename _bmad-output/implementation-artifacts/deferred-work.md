@@ -1,7 +1,17 @@
 # Deferred Work
 
 Status: open
-Last updated: 2026-05-12
+Last updated: 2026-05-29
+
+## Deferred from: autosync-subsonic-navidrome (2026-05-29)
+
+- **`get_non_jellyfin_provider` case-sensitive server_type matching** [`hifimule-daemon/src/main.rs`] — `matches!(config.server_type.as_str(), "subsonic" | "openSubsonic")` silently skips configs stored with different capitalisation. Pre-existing pattern also used in `restore_provider_from_config` in `rpc.rs`. Fix: `.to_lowercase()` normalisation on both sides.
+- **`run_auto_fill_provider` MAX_PER_LIST=2000 hard-coded** [`hifimule-daemon/src/auto_fill.rs`] — Servers with more than 2000 favorites/frequently-played tracks silently return a truncated priority list. No configuration path and no relationship to `max_fill_bytes`. Fix: paginate until capacity is filled or list exhausted, similar to Jellyfin `run_auto_fill`.
+- **`run_auto_fill_provider` no free-space safety margin** [`hifimule-daemon/src/auto_fill.rs`, `hifimule-daemon/src/rpc.rs`] — When `maxBytes` is absent, `free_bytes` from `get_device_storage()` is used as the full fill budget with no headroom reserved. Pre-existing behavior in Jellyfin `run_auto_sync` too. Fix: apply a minimum headroom (e.g. 5% or a fixed reserve) if device type supports it.
+- **Sequential album fetches in artist basket resolution** [`hifimule-daemon/src/main.rs:resolve_provider_item`] — Artist with many albums triggers sequential `get_album` HTTP calls with no concurrency limit or timeout. Pre-existing pattern in `rpc.rs`'s `provider_sync_items_for_id`. Fix: `futures::join_all` with a concurrency cap.
+- **Orphaned SyncOperation on `update_manifest` failure** [`hifimule-daemon/src/main.rs:run_auto_sync_via_provider`] — If `update_manifest(dirty=true)` fails (disk full, device disconnected), the function propagates the error but leaves the `SyncOperation` entry in the manager without a status update. Pre-existing pattern in `run_auto_sync` too. Fix: mark the operation as Failed in the error path before returning.
+- **Rapid device-connect race in auto-sync trigger** [`hifimule-daemon/src/main.rs:270-310`] — `has_active_sync` is checked before spawning but the spawn is non-blocking. Two rapid connect events can both pass the check before either spawned task registers an active operation. Pre-existing race. Fix: atomically check-and-set via a `Mutex`-guarded flag or a `Semaphore`.
+- **No unit tests for `run_auto_fill_provider`** [`hifimule-daemon/src/auto_fill.rs`] — The new provider-based auto-fill path has zero dedicated tests. AC2 and AC3 are only verified by code reading. Fix: add mock-provider tests for capacity truncation, dedup, and UnsupportedCapability fallback.
 
 ## Deferred from: fix MTP create-folder existing-dir (2026-05-12)
 

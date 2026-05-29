@@ -611,6 +611,26 @@ impl MediaProvider for SubsonicProvider {
         Ok((page, total))
     }
 
+    async fn list_all_songs_page(
+        &self,
+        _library_id: Option<&str>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<Song>, u32), ProviderError> {
+        let response = self
+            .client
+            .search3_paged("", Some(limit as usize), Some(offset as usize))
+            .await?;
+        let songs: Vec<Song> = response
+            .search_result3
+            .song
+            .into_iter()
+            .map(song_from_dto)
+            .collect();
+        let count = songs.len() as u32;
+        Ok((songs, count))
+    }
+
     async fn list_favorite_items(
         &self,
         _library_id: Option<&str>,

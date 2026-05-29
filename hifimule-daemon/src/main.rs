@@ -274,16 +274,34 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                                 let has_active_sync = som_events.has_active_operation().await;
 
                                 if !has_active_sync {
-                                    if let Ok((url, token, user_id)) =
+                                    let dm = Arc::clone(&device_manager);
+                                    let som = Arc::clone(&som_events);
+                                    let state_tx_sync = state_tx_clone.clone();
+                                    let device_path = path.clone();
+
+                                    let subsonic_in_db = db.get_server_config()
+                                        .ok().flatten()
+                                        .map(|c| matches!(c.server_type.as_str(), "subsonic" | "openSubsonic"))
+                                        .unwrap_or(false);
+
+                                    if subsonic_in_db {
+                                        if let Some(provider) = get_non_jellyfin_provider(&db).await {
+                                            tokio::spawn(async move {
+                                                daemon_log!("[AutoSync] Starting auto-sync via provider");
+                                                if let Err(e) = run_auto_sync_via_provider(
+                                                    provider, dm, som, state_tx_sync, device_path,
+                                                ).await {
+                                                    daemon_log!("[AutoSync] Provider auto-sync failed: {}", e);
+                                                }
+                                            });
+                                        } else {
+                                            daemon_log!("[AutoSync] Skipped: could not connect to Subsonic/Navidrome server");
+                                        }
+                                    } else if let Ok((url, token, user_id)) =
                                         api::CredentialManager::get_credentials()
                                     {
                                         let user_id = user_id.unwrap_or_else(|| "Me".to_string());
                                         let client = Arc::clone(&jellyfin_client);
-                                        let dm = Arc::clone(&device_manager);
-                                        let som = Arc::clone(&som_events);
-                                        let state_tx_sync = state_tx_clone.clone();
-                                        let device_path = path.clone();
-
                                         tokio::spawn(async move {
                                             daemon_log!("[AutoSync] Starting auto-sync for device");
                                             if let Err(e) = run_auto_sync(
@@ -1024,6 +1042,484 @@ async fn resolve_jellyfin_favorite_basket_item(
             Ok(desired_items)
         }
         _ => Ok(Vec::new()),
+    }
+}
+
+/// Returns an active Subsonic/OpenSubsonic provider if the DB config indicates a non-Jellyfin
+/// server. Returns `None` for Jellyfin, unknown types, or on credential/connection failure.
+async fn get_non_jellyfin_provider(
+    db: &Arc<db::Database>,
+) -> Option<Arc<dyn providers::MediaProvider>> {
+    let config = db.get_server_config().ok()??;
+    if !matches!(config.server_type.as_str(), "subsonic" | "openSubsonic") {
+        return None;
+    }
+    // Try stored password aliases in preference order
+    let candidates: Vec<String> = {
+        let mut out = Vec::new();
+        for alias in [config.server_type.as_str(), "openSubsonic", "subsonic"] {
+            if let Ok(secret) = api::CredentialManager::get_server_secret(alias) {
+                if !out.contains(&secret) {
+                    out.push(secret);
+                }
+            }
+        }
+        out
+    };
+    for password in candidates {
+        let credentials = providers::ProviderCredentials {
+            server_url: config.url.clone(),
+            credential: providers::CredentialKind::Password {
+                username: config.username.clone(),
+                password,
+            },
+        };
+        if let Ok(provider) =
+            providers::connect(&config.url, &credentials, providers::ServerTypeHint::Subsonic).await
+        {
+            return Some(provider);
+        }
+    }
+    daemon_log!("[AutoSync] Could not connect to Subsonic provider — skipping provider path");
+    None
+}
+
+/// Provider-based auto-sync: resolves basket items via MediaProvider, runs auto-fill if needed,
+/// then executes sync via execute_provider_sync. Used for Subsonic/Navidrome devices.
+async fn run_auto_sync_via_provider(
+    provider: Arc<dyn providers::MediaProvider>,
+    device_manager: Arc<device::DeviceManager>,
+    sync_op_manager: Arc<sync::SyncOperationManager>,
+    state_tx: std::sync::mpsc::Sender<DaemonState>,
+    device_path: std::path::PathBuf,
+) -> anyhow::Result<()> {
+    let _ = state_tx.send(DaemonState::Syncing);
+
+    let manifest = device_manager
+        .get_current_device()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("No device connected"))?;
+
+    let mut desired_items: Vec<sync::DesiredItem> = Vec::new();
+    let mut playlist_sync_items: Vec<sync::PlaylistSyncItem> = Vec::new();
+
+    if manifest.basket_items.is_empty() && !manifest.auto_fill.enabled {
+        if manifest.synced_items.is_empty() {
+            daemon_log!("[AutoSync] No basket items and no synced items, skipping");
+            let _ = state_tx.send(DaemonState::Idle);
+            return Ok(());
+        } else {
+            daemon_log!(
+                "[AutoSync] Basket empty but device has {} synced item(s) — running cleanup sync",
+                manifest.synced_items.len()
+            );
+        }
+    }
+
+    // Resolve basket items (always, even when auto-fill is also enabled).
+    if !manifest.basket_items.is_empty() {
+        let (items, playlists) =
+            resolve_provider_basket_items(provider.clone(), &manifest.basket_items).await;
+        desired_items = items;
+        playlist_sync_items = playlists;
+    }
+
+    // Auto-fill: fill remaining space after basket items (or fill entirely when basket is empty).
+    if manifest.auto_fill.enabled {
+        let synced_bytes: u64 = manifest.synced_items.iter().map(|s| s.size_bytes).sum();
+        let total_budget = if let Some(mb) = manifest.auto_fill.max_bytes {
+            mb
+        } else {
+            match device_manager.get_device_storage().await {
+                Some(info) => info.free_bytes.saturating_add(synced_bytes),
+                None => {
+                    daemon_log!("[AutoSync] Cannot determine device capacity for auto-fill");
+                    let _ = state_tx.send(DaemonState::Idle);
+                    return Ok(());
+                }
+            }
+        };
+        let basket_size: u64 = desired_items.iter().map(|i| i.size_bytes).sum();
+        let auto_fill_budget = total_budget.saturating_sub(basket_size);
+        if auto_fill_budget > 0 {
+            let exclude_item_ids: Vec<String> =
+                desired_items.iter().map(|i| i.jellyfin_id.clone()).collect();
+            let fill_params = auto_fill::AutoFillParams { exclude_item_ids, max_fill_bytes: auto_fill_budget };
+            match auto_fill::run_auto_fill_provider(provider.clone(), fill_params).await {
+                Ok(items) if items.is_empty() && desired_items.is_empty() => {
+                    daemon_log!("[AutoSync] Provider auto-fill returned no items, skipping");
+                    let _ = state_tx.send(DaemonState::Idle);
+                    return Ok(());
+                }
+                Ok(items) => {
+                    daemon_log!("[AutoSync] Provider auto-fill resolved {} items", items.len());
+                    for item in items {
+                        desired_items.push(sync::DesiredItem {
+                            jellyfin_id: item.id,
+                            name: item.name,
+                            album: item.album,
+                            artist: item.artist,
+                            size_bytes: item.size_bytes,
+                            etag: None,
+                            provider_album_id: item.provider_album_id,
+                            provider_content_type: None,
+                            provider_suffix: item.provider_suffix,
+                            original_bitrate: None,
+                            track_number: None,
+                        });
+                    }
+                }
+                Err(e) => {
+                    daemon_log!("[AutoSync] Provider auto-fill failed: {}", e);
+                    let _ = state_tx.send(DaemonState::Error);
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    let mut seen_ids = std::collections::HashSet::new();
+    desired_items.retain(|item| seen_ids.insert(item.jellyfin_id.clone()));
+
+    if desired_items.is_empty() && !manifest.basket_items.is_empty() {
+        daemon_log!("[AutoSync] No downloadable items resolved from basket, skipping");
+        return Ok(());
+    }
+
+    let mut delta = sync::calculate_delta(&desired_items, &manifest);
+    delta.playlists = playlist_sync_items;
+    let total_files = delta.adds.len() + delta.deletes.len();
+
+    if total_files == 0 && delta.id_changes.is_empty() {
+        daemon_log!("[AutoSync] Device already in sync, nothing to do");
+        let _ = state_tx.send(DaemonState::Idle);
+        return Ok(());
+    }
+    let destructive_cleanup_count = sync::destructive_cleanup_count(&delta, &manifest);
+    if destructive_cleanup_count > sync::DESTRUCTIVE_CLEANUP_THRESHOLD {
+        daemon_log!(
+            "[AutoSync] Skipped: sync would delete {} managed files, exceeding threshold of {}",
+            destructive_cleanup_count,
+            sync::DESTRUCTIVE_CLEANUP_THRESHOLD
+        );
+        let _ = state_tx.send(DaemonState::Idle);
+        return Ok(());
+    }
+
+    daemon_log!(
+        "[AutoSync] Delta: {} adds, {} deletes, {} id-changes",
+        delta.adds.len(),
+        delta.deletes.len(),
+        delta.id_changes.len()
+    );
+
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    sync_op_manager
+        .create_operation(operation_id.clone(), total_files)
+        .await;
+
+    let pending_ids: Vec<String> = delta
+        .adds
+        .iter()
+        .map(|a| a.jellyfin_id.clone())
+        .chain(delta.id_changes.iter().map(|c| c.new_jellyfin_id.clone()))
+        .collect();
+
+    device_manager
+        .update_manifest(|m| {
+            m.dirty = true;
+            m.pending_item_ids = pending_ids;
+        })
+        .await?;
+
+    let (current_manifest, device_io) = match device_manager.get_manifest_and_io().await {
+        Some(pair) => pair,
+        None => {
+            daemon_log!("[AutoSync] Device disconnected before sync started — aborting");
+            let _ = state_tx.send(DaemonState::Error);
+            return Ok(());
+        }
+    };
+
+    let transcoding_profile = if let Some(ref profile_id) = current_manifest.transcoding_profile_id
+    {
+        match crate::paths::get_device_profiles_path()
+            .and_then(|p| crate::transcoding::find_device_profile(&p, profile_id))
+        {
+            Ok(profile) => profile,
+            Err(e) => {
+                daemon_log!(
+                    "[AutoSync] Failed to load transcoding profile '{}': {}",
+                    profile_id,
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let result = sync::execute_provider_sync(
+        &delta,
+        &device_path,
+        sync::ProviderSyncSource { provider, transcoding_profile },
+        sync_op_manager.clone(),
+        operation_id.clone(),
+        device_manager.clone(),
+        device_io,
+    )
+    .await;
+
+    match result {
+        Ok((_synced_items, errors)) => {
+            if let Err(e) = device_manager
+                .update_manifest(|m| {
+                    m.dirty = false;
+                    m.pending_item_ids = vec![];
+                })
+                .await
+            {
+                daemon_log!("[AutoSync] Failed to clear dirty flag: {}", e);
+            }
+
+            if let Some(mut operation) = sync_op_manager.get_operation(&operation_id).await {
+                operation.status = if errors.is_empty() {
+                    sync::SyncStatus::Complete
+                } else {
+                    sync::SyncStatus::Failed
+                };
+                operation.errors = errors.clone();
+                sync_op_manager.update_operation(&operation_id, operation).await;
+            }
+
+            if errors.is_empty() {
+                daemon_log!("[AutoSync] Sync completed successfully");
+                let _ = tokio::task::spawn_blocking(|| {
+                    if let Err(e) = notify_rust::Notification::new()
+                        .summary(&hifimule_i18n::t("app.name"))
+                        .body(&hifimule_i18n::t("notification.sync_complete_safe"))
+                        .show()
+                    {
+                        daemon_log!("[AutoSync] Notification failed: {}", e);
+                    }
+                });
+                let _ = state_tx.send(DaemonState::Idle);
+            } else {
+                daemon_log!("[AutoSync] Sync completed with {} errors", errors.len());
+                let error_msg = format!("Sync completed with {} error(s)", errors.len());
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Err(e) = notify_rust::Notification::new()
+                        .summary("HifiMule")
+                        .body(&error_msg)
+                        .show()
+                    {
+                        daemon_log!("[AutoSync] Notification failed: {}", e);
+                    }
+                });
+                let _ = state_tx.send(DaemonState::Error);
+            }
+        }
+        Err(e) => {
+            daemon_log!("[AutoSync] Sync failed: {}", e);
+            if let Some(mut operation) = sync_op_manager.get_operation(&operation_id).await {
+                operation.status = sync::SyncStatus::Failed;
+                operation.errors.push(sync::SyncFileError {
+                    jellyfin_id: String::new(),
+                    filename: "auto_sync_provider".to_string(),
+                    error_message: e.to_string(),
+                });
+                sync_op_manager.update_operation(&operation_id, operation).await;
+            }
+            let error_msg = format!("Sync failed: {}", e);
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Err(e) = notify_rust::Notification::new()
+                    .summary("HifiMule")
+                    .body(&error_msg)
+                    .show()
+                {
+                    daemon_log!("[AutoSync] Notification failed: {}", e);
+                }
+            });
+            let _ = state_tx.send(DaemonState::Error);
+        }
+    }
+
+    Ok(())
+}
+
+/// Resolves a list of BasketItems to DesiredItems + PlaylistSyncItems using the MediaProvider.
+async fn resolve_provider_basket_items(
+    provider: Arc<dyn providers::MediaProvider>,
+    basket_items: &[device::BasketItem],
+) -> (Vec<sync::DesiredItem>, Vec<sync::PlaylistSyncItem>) {
+    let mut desired_items: Vec<sync::DesiredItem> = Vec::new();
+    let mut playlist_sync_items: Vec<sync::PlaylistSyncItem> = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
+
+    let favorite_items: Vec<&device::BasketItem> = basket_items
+        .iter()
+        .filter(|b| matches!(b.item_type.as_str(), "FavoriteArtist" | "FavoriteAlbum"))
+        .collect();
+    let normal_items: Vec<&device::BasketItem> = basket_items
+        .iter()
+        .filter(|b| !matches!(b.item_type.as_str(), "FavoriteArtist" | "FavoriteAlbum"))
+        .collect();
+
+    for basket_item in favorite_items {
+        match resolve_provider_favorite_item(provider.clone(), basket_item).await {
+            Ok(items) => {
+                for item in items {
+                    if seen_ids.insert(item.jellyfin_id.clone()) {
+                        desired_items.push(item);
+                    }
+                }
+            }
+            Err(e) => {
+                daemon_log!("[AutoSync] Failed to resolve favorite item {}: {}", basket_item.id, e);
+            }
+        }
+    }
+
+    for basket_item in normal_items {
+        match resolve_provider_item(provider.clone(), &basket_item.id).await {
+            Ok((tracks, playlist)) => {
+                if let Some(p) = playlist {
+                    playlist_sync_items.push(p);
+                }
+                for item in tracks {
+                    if seen_ids.insert(item.jellyfin_id.clone()) {
+                        desired_items.push(item);
+                    }
+                }
+            }
+            Err(e) => {
+                daemon_log!("[AutoSync] Failed to resolve item {}: {}", basket_item.id, e);
+            }
+        }
+    }
+
+    (desired_items, playlist_sync_items)
+}
+
+async fn resolve_provider_favorite_item(
+    provider: Arc<dyn providers::MediaProvider>,
+    basket_item: &device::BasketItem,
+) -> anyhow::Result<Vec<sync::DesiredItem>> {
+    let favorites = provider
+        .list_favorite_items(None)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    match basket_item.item_type.as_str() {
+        "FavoriteAlbum" => {
+            let album_id = scoped_favorite_target_id(basket_item, "favorites:album:");
+            Ok(favorites
+                .songs
+                .iter()
+                .filter(|song| song.album_id.as_deref() == Some(album_id))
+                .map(provider_song_to_desired)
+                .collect())
+        }
+        "FavoriteArtist" => {
+            let artist_id = scoped_favorite_target_id(basket_item, "favorites:artist:");
+            let mut desired_items = Vec::new();
+            for album in favorites
+                .albums
+                .iter()
+                .filter(|album| album.artist_id.as_deref() == Some(artist_id))
+            {
+                match provider.get_album(&album.id).await {
+                    Ok(album_with_tracks) => {
+                        desired_items
+                            .extend(album_with_tracks.tracks.iter().map(provider_song_to_desired));
+                    }
+                    Err(e) => {
+                        daemon_log!("[AutoSync] Failed to expand favorite album {}: {}", album.id, e);
+                    }
+                }
+            }
+            desired_items.extend(
+                favorites
+                    .songs
+                    .iter()
+                    .filter(|song| song.artist_id.as_deref() == Some(artist_id))
+                    .map(provider_song_to_desired),
+            );
+            Ok(desired_items)
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
+async fn resolve_provider_item(
+    provider: Arc<dyn providers::MediaProvider>,
+    item_id: &str,
+) -> anyhow::Result<(Vec<sync::DesiredItem>, Option<sync::PlaylistSyncItem>)> {
+    if let Ok(album) = provider.get_album(item_id).await {
+        return Ok((album.tracks.iter().map(provider_song_to_desired).collect(), None));
+    }
+
+    if let Ok(playlist) = provider.get_playlist(item_id).await {
+        let tracks = playlist.tracks.iter().map(provider_song_to_desired).collect::<Vec<_>>();
+        let playlist_item = sync::PlaylistSyncItem {
+            jellyfin_id: playlist.playlist.id.clone(),
+            name: playlist.playlist.name.clone(),
+            tracks: playlist
+                .tracks
+                .iter()
+                .map(|t| sync::PlaylistTrackInfo {
+                    jellyfin_id: t.id.clone(),
+                    artist: t.artist_name.clone(),
+                    run_time_seconds: i64::from(t.duration_seconds),
+                })
+                .collect(),
+        };
+        return Ok((tracks, Some(playlist_item)));
+    }
+
+    if let Ok(artist) = provider.get_artist(item_id).await {
+        let mut tracks = Vec::new();
+        for album in artist.albums {
+            match provider.get_album(&album.id).await {
+                Ok(album_with_tracks) => {
+                    tracks.extend(album_with_tracks.tracks.iter().map(provider_song_to_desired));
+                }
+                Err(e) => {
+                    daemon_log!("[AutoSync] Failed to expand artist album {}: {}", album.id, e);
+                }
+            }
+        }
+        return Ok((tracks, None));
+    }
+
+    match provider.get_song(item_id).await {
+        Ok(song) => return Ok((vec![provider_song_to_desired(&song)], None)),
+        Err(providers::ProviderError::UnsupportedCapability(_))
+        | Err(providers::ProviderError::NotFound { .. }) => {}
+        Err(e) => return Err(anyhow::anyhow!("{}", e)),
+    }
+
+    Err(anyhow::anyhow!("Item {} not found via provider", item_id))
+}
+
+fn provider_song_to_desired(song: &crate::domain::models::Song) -> sync::DesiredItem {
+    let size_bytes = song
+        .bitrate_kbps
+        .map(|kbps| (u64::from(kbps) * 1_000 / 8) * u64::from(song.duration_seconds))
+        .unwrap_or(0);
+    sync::DesiredItem {
+        jellyfin_id: song.id.clone(),
+        name: song.title.clone(),
+        album: song.album_title.clone(),
+        artist: song.artist_name.clone(),
+        size_bytes,
+        etag: None,
+        provider_album_id: song.album_id.clone(),
+        provider_content_type: song.content_type.clone(),
+        provider_suffix: song.suffix.clone(),
+        original_bitrate: song.bitrate_kbps.map(|kbps| kbps * 1000),
+        track_number: song.track_number,
     }
 }
 

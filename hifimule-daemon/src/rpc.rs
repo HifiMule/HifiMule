@@ -1738,23 +1738,17 @@ async fn provider_calculate_delta(
     manifest: &crate::device::DeviceManifest,
     params: &Value,
 ) -> Result<Value, JsonRpcError> {
-    if params
+    let auto_fill_enabled = params
         .get("autoFill")
         .and_then(|auto_fill| auto_fill.get("enabled"))
         .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return Err(JsonRpcError {
-            code: ERR_CONNECTION_FAILED,
-            message: "Auto-fill sync is not available for Subsonic servers yet".to_string(),
-            data: None,
-        });
-    }
+        .unwrap_or(false);
 
     let mut desired_items = Vec::new();
     let mut playlist_sync_items = Vec::new();
     let mut seen_ids = HashSet::new();
 
+    // Step 1: Resolve basket items (always, regardless of auto-fill).
     let basket_items = basket_items_from_params_or_manifest(params, manifest);
     let favorite_basket_by_id: HashMap<String, crate::device::BasketItem> = basket_items
         .into_iter()
@@ -1781,6 +1775,76 @@ async fn provider_calculate_delta(
         for item in tracks {
             if seen_ids.insert(item.jellyfin_id.clone()) {
                 desired_items.push(item);
+            }
+        }
+    }
+
+    // Step 2: If auto-fill is enabled, fill remaining space after basket items.
+    // When basket is empty this is a pure auto-fill (device fully managed by auto-fill).
+    // When basket has items this augments them — playlists/albums stay, free space is filled.
+    if auto_fill_enabled {
+        // If the UI provided maxBytes, use it directly — it already represents the intended
+        // auto-fill budget (UI subtracted manual-item sizes from free space). If not provided,
+        // compute server-side as (free + existing synced - basket).
+        let auto_fill_budget: u64 = if let Some(mb) = params
+            .get("autoFill")
+            .and_then(|af| af.get("maxBytes"))
+            .and_then(Value::as_u64)
+        {
+            crate::daemon_log!("[AutoFill] budget from UI maxBytes: {} bytes ({:.1} GB)", mb, mb as f64 / 1_073_741_824.0);
+            mb
+        } else {
+            let synced_bytes: u64 = manifest.synced_items.iter().map(|s| s.size_bytes).sum();
+            let basket_size: u64 = desired_items.iter().map(|i| i.size_bytes).sum();
+            let budget = match _state.device_manager.get_device_storage().await {
+                Some(info) => {
+                    crate::daemon_log!(
+                        "[AutoFill] no maxBytes from UI — server fallback: free={} synced={} basket_est={} -> budget={}",
+                        info.free_bytes, synced_bytes, basket_size,
+                        info.free_bytes.saturating_add(synced_bytes).saturating_sub(basket_size)
+                    );
+                    info.free_bytes.saturating_add(synced_bytes).saturating_sub(basket_size)
+                }
+                None => {
+                    return Err(JsonRpcError {
+                        code: ERR_CONNECTION_FAILED,
+                        message: "Cannot determine device capacity for auto-fill".to_string(),
+                        data: None,
+                    });
+                }
+            };
+            budget
+        };
+        crate::daemon_log!("[AutoFill] basket_items={} desired_items={} auto_fill_budget={} bytes", item_ids.len(), desired_items.len(), auto_fill_budget);
+        if auto_fill_budget > 0 {
+            let exclude_ids: Vec<String> =
+                desired_items.iter().map(|i| i.jellyfin_id.clone()).collect();
+            let fill_params =
+                crate::auto_fill::AutoFillParams { exclude_item_ids: exclude_ids, max_fill_bytes: auto_fill_budget };
+            let fill_items = crate::auto_fill::run_auto_fill_provider(provider, fill_params)
+                .await
+                .map_err(|e| JsonRpcError {
+                    code: ERR_CONNECTION_FAILED,
+                    message: format!("Auto-fill failed: {}", e),
+                    data: None,
+                })?;
+            crate::daemon_log!("[AutoFill] run_auto_fill_provider returned {} tracks", fill_items.len());
+            for item in fill_items {
+                if seen_ids.insert(item.id.clone()) {
+                    desired_items.push(crate::sync::DesiredItem {
+                        jellyfin_id: item.id,
+                        name: item.name,
+                        album: item.album,
+                        artist: item.artist,
+                        size_bytes: item.size_bytes,
+                        etag: None,
+                        provider_album_id: item.provider_album_id,
+                        provider_content_type: None,
+                        provider_suffix: item.provider_suffix,
+                        original_bitrate: None,
+                        track_number: None,
+                    });
+                }
             }
         }
     }

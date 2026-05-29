@@ -266,7 +266,7 @@
     "basket.device.managed": "Géré",
     "basket.device.protected": "Protégé",
     "basket.manifest.open_repair": "Ouvrir la réparation du manifeste",
-    "basket.manifest.dirty": "Manifeste sale",
+    "basket.manifest.dirty": "Manifeste endommagé",
     "basket.manifest.interrupted": "Synchronisation interrompue détectée - cliquez pour réparer",
     "basket.sync.proposed": "Synchronisation proposée - panier modifié",
     "basket.sync.starting": "Démarrage...",
