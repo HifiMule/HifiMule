@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.8.4 - 2026-05-29
+
+Fixed RPC error when synching a large playlist or genre.
+
 ## v0.8.3 - 2026-05-28
 
 Synced filenames from Navidrome, Subsonic, and Jellyfin (without transcoding) now carry the correct track number prefix — `03 - Title.flac` instead of the previous `00 - Title.flac` for every track. Albums, playlists, and other collections added to the basket now show their approximate track count and total file size; if that data isn't already loaded, HifiMule fetches it from the server the moment you add the item.
