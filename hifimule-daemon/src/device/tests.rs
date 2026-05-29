@@ -985,6 +985,48 @@ async fn test_clear_dirty_flag() {
     assert!(loaded.pending_item_ids.is_empty());
 }
 
+#[tokio::test]
+async fn test_clear_dirty_flag_with_orphaned_files() {
+    // Orphaned files (on disk but not in manifest) must NOT block clearing the dirty flag.
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir(root.join("Music")).unwrap();
+    fs::write(root.join("Music").join("orphan.flac"), b"audio").unwrap();
+
+    let manifest = DeviceManifest {
+        device_id: "dev-1".to_string(),
+        name: None,
+        icon: None,
+        version: "1.0".to_string(),
+        managed_paths: vec!["Music".to_string()],
+        synced_items: vec![], // nothing tracked — orphan.flac is an orphan
+        dirty: true,
+        pending_item_ids: vec!["pending-1".to_string()],
+        basket_items: vec![],
+        auto_sync_on_connect: false,
+        auto_fill: crate::device::AutoFillPrefs::default(),
+        transcoding_profile_id: None,
+        playlists: vec![],
+        storage_id: None,
+        ..Default::default()
+    };
+    write_manifest(msc(root), &manifest).await.unwrap();
+
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let manager = DeviceManager::new(db);
+    manager
+        .handle_device_detected(root.to_path_buf(), manifest, msc(root))
+        .await
+        .unwrap();
+
+    // Should succeed: no missing files even though orphan.flac exists
+    manager.clear_dirty_flag().await.unwrap();
+
+    let device = manager.get_current_device().await.unwrap();
+    assert!(!device.dirty);
+    assert!(device.pending_item_ids.is_empty());
+}
+
 // ===== Story 2.6 Tests =====
 
 #[tokio::test]

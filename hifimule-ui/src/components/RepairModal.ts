@@ -111,9 +111,15 @@ export class RepairModal {
                         <h4>Orphaned Files <sl-badge variant="warning" pill>${orphaned.length}</sl-badge></h4>
                     </div>
                     <p class="repair-col-desc">On device but not in manifest</p>
+                    ${missing.length === 0 && orphaned.length > 0 ? `
+                    <p class="repair-orphan-note">
+                        <sl-icon name="info-circle"></sl-icon>
+                        No missing entries to link to. These files will be left in place —
+                        click <strong>Finish &amp; Clear Dirty</strong> to proceed.
+                    </p>` : ''}
                     <div class="repair-item-list" id="repair-orphaned-list">
                         ${orphaned.length === 0 ? '<div class="repair-no-items">No orphaned files</div>' :
-                orphaned.map(item => this.renderOrphanedItem(item)).join('')}
+                orphaned.map(item => this.renderOrphanedItem(item, missing.length > 0)).join('')}
                     </div>
                 </div>
             </div>
@@ -156,10 +162,13 @@ export class RepairModal {
         `;
     }
 
-    private renderOrphanedItem(item: DiscrepancyItem): string {
+    private renderOrphanedItem(item: DiscrepancyItem, hasMissing: boolean): string {
         const pathParts = item.localPath.split('/');
         const filename = pathParts[pathParts.length - 1];
         const folder = pathParts.slice(0, -1).join('/');
+        const relinkTitle = hasMissing
+            ? 'Re-link to a missing manifest entry'
+            : 'No missing entries available — prune missing files first or click Finish &amp; Clear Dirty';
 
         return `
             <div class="repair-item orphaned" data-path="${this.escapeAttr(item.localPath)}">
@@ -170,7 +179,8 @@ export class RepairModal {
                 <div class="repair-item-actions">
                     <sl-button class="relink-btn" size="small" variant="warning" outline
                                data-path="${this.escapeAttr(item.localPath)}"
-                               title="Re-link to a missing manifest entry">
+                               ${!hasMissing ? 'disabled' : ''}
+                               title="${relinkTitle}">
                         <sl-icon name="link-45deg" slot="prefix"></sl-icon>
                         Re-link
                     </sl-button>

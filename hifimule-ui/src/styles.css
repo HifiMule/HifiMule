@@ -912,6 +912,24 @@ h2 {
   text-align: center;
 }
 
+.repair-orphan-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+  color: var(--sl-color-warning-700);
+  background: rgba(var(--sl-color-warning-500-rgb, 234, 179, 8), 0.08);
+  border: 1px solid rgba(var(--sl-color-warning-500-rgb, 234, 179, 8), 0.2);
+  border-radius: var(--sl-border-radius-small);
+  padding: 0.5rem 0.6rem;
+  margin-bottom: 0.5rem;
+}
+
+.repair-orphan-note sl-icon {
+  flex-shrink: 0;
+  margin-top: 0.1rem;
+}
+
 .repair-actions {
   display: flex;
   justify-content: flex-end;

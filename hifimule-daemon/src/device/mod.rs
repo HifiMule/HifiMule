@@ -1100,15 +1100,18 @@ impl DeviceManager {
         Ok(found)
     }
 
-    /// Clears the dirty flag on the manifest if no discrepancies remain.
+    /// Clears the dirty flag on the manifest once all missing files are resolved.
+    /// Orphaned files (on disk but not in manifest) are not required to be cleared —
+    /// they will be handled by the next sync.
     pub async fn clear_dirty_flag(&self) -> Result<()> {
         let discrepancies = self
             .get_discrepancies()
             .await?
             .ok_or_else(|| anyhow::anyhow!("No device connected"))?;
-        if !discrepancies.missing.is_empty() || !discrepancies.orphaned.is_empty() {
+        if !discrepancies.missing.is_empty() {
             return Err(anyhow::anyhow!(
-                "Cannot clear dirty flag: discrepancies still exist"
+                "Cannot clear dirty flag: {} missing file(s) still need to be resolved",
+                discrepancies.missing.len()
             ));
         }
 
