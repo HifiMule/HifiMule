@@ -595,6 +595,24 @@ impl JellyfinClient {
             .get_item_with_media_sources(url, token, user_id, item_id)
             .await?;
 
+        if item.item_type == "MusicGenre" {
+            let response = self
+                .get_songs_by_genre(url, token, user_id, item_id, 0, 10_000)
+                .await?;
+            let total: u64 = response
+                .items
+                .iter()
+                .filter_map(|i| {
+                    i.media_sources
+                        .as_ref()
+                        .and_then(|sources| sources.first())
+                        .and_then(|source| source.size)
+                        .map(|s| s as u64)
+                })
+                .sum();
+            return Ok(total);
+        }
+
         if CONTAINER_TYPES.contains(&item.item_type.as_str()) {
             // Container item: fetch children and sum their sizes
             let children = self

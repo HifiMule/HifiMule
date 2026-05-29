@@ -1434,6 +1434,13 @@ async fn provider_legacy_item_size(
             "totalSizeBytes": total,
         }));
     }
+    if let Ok((tracks, _)) = provider.get_genre_tracks(item_id, 0, 10_000).await {
+        let total = tracks.iter().map(|track| provider_track_size(track)).sum::<u64>();
+        return Ok(serde_json::json!({
+            "id": item_id,
+            "totalSizeBytes": total,
+        }));
+    }
     Ok(serde_json::json!({
         "id": item_id,
         "totalSizeBytes": 0,
@@ -1465,6 +1472,17 @@ async fn provider_legacy_item_count(
         return Ok(serde_json::json!({
             "id": item_id,
             "recursiveItemCount": playlist.tracks.len() as u64,
+            "cumulativeRunTimeTicks": duration * JELLYFIN_TICKS_PER_SECOND,
+        }));
+    }
+    if let Ok((tracks, _)) = provider.get_genre_tracks(item_id, 0, 10_000).await {
+        let duration = tracks
+            .iter()
+            .map(|track| u64::from(track.duration_seconds))
+            .sum::<u64>();
+        return Ok(serde_json::json!({
+            "id": item_id,
+            "recursiveItemCount": tracks.len() as u64,
             "cumulativeRunTimeTicks": duration * JELLYFIN_TICKS_PER_SECOND,
         }));
     }
@@ -2266,11 +2284,29 @@ async fn handle_jellyfin_get_item_counts(
             let user_id = &user_id;
             async move {
                 match client.get_item_details(url, token, user_id, id).await {
-                    Ok(item) => Some(serde_json::json!({
-                        "id": item.id,
-                        "recursiveItemCount": item.recursive_item_count.unwrap_or(0),
-                        "cumulativeRunTimeTicks": item.cumulative_run_time_ticks.unwrap_or(0),
-                    })),
+                    Ok(item) => {
+                        if item.item_type == "MusicGenre" {
+                            match client.get_songs_by_genre(url, token, user_id, id, 0, 10_000).await {
+                                Ok(response) => Some(serde_json::json!({
+                                    "id": id,
+                                    "recursiveItemCount": response.items.len() as u64,
+                                    "cumulativeRunTimeTicks": response.items.iter()
+                                        .filter_map(|t| t.run_time_ticks)
+                                        .sum::<u64>(),
+                                })),
+                                Err(e) => {
+                                    println!("Warning: Failed to fetch genre tracks for {}: {}", id, e);
+                                    None
+                                }
+                            }
+                        } else {
+                            Some(serde_json::json!({
+                                "id": item.id,
+                                "recursiveItemCount": item.recursive_item_count.unwrap_or(0),
+                                "cumulativeRunTimeTicks": item.cumulative_run_time_ticks.unwrap_or(0),
+                            }))
+                        }
+                    },
                     Err(e) => {
                         println!("Warning: Failed to fetch metadata for item {}: {}", id, e);
                         None
