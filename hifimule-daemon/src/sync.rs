@@ -2447,15 +2447,15 @@ pub async fn augment_delta_with_existence_check(
         .chain(delta.id_changes.iter().map(|c| c.new_jellyfin_id.clone()))
         .collect();
 
+    let desired_by_id: std::collections::HashMap<&str, &DesiredItem> =
+        desired_items.iter().map(|d| (d.jellyfin_id.as_str(), d)).collect();
+
     let mut to_add: Vec<SyncAddItem> = Vec::new();
     for item in &manifest.synced_items {
         if already_in_delta.contains(&item.jellyfin_id) {
             continue;
         }
-        let Some(desired) = desired_items
-            .iter()
-            .find(|d| d.jellyfin_id == item.jellyfin_id)
-        else {
+        let Some(desired) = desired_by_id.get(item.jellyfin_id.as_str()).copied() else {
             continue;
         };
         if !device_file_exists(device_io, &item.local_path).await {
@@ -2726,13 +2726,14 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
         .first()
         .map(|path| normalized_device_folder(path))
         .unwrap_or_default();
+    // Pre-index desired items for O(1) lookup — avoids O(N×M) scans in both passes below.
+    let desired_by_id: std::collections::HashMap<&str, &DesiredItem> =
+        desired_items.iter().map(|d| (d.jellyfin_id.as_str(), d)).collect();
     let current_ids: HashSet<&str> = manifest
         .synced_items
         .iter()
         .filter(|i| {
-            let desired = desired_items
-                .iter()
-                .find(|d| d.jellyfin_id == i.jellyfin_id);
+            let desired = desired_by_id.get(i.jellyfin_id.as_str()).copied();
             let outside_music_folder = !device_path_in_or_equal(&i.local_path, &music_folder);
             if outside_music_folder {
                 return false;
@@ -2797,9 +2798,9 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
     for item in &manifest.synced_items {
         let stale_for_profile = profile_dirty && desired_ids.contains(item.jellyfin_id.as_str());
         let stale_for_relocation = !device_path_in_or_equal(&item.local_path, &music_folder);
-        let stale_for_quality = desired_items
-            .iter()
-            .find(|d| d.jellyfin_id == item.jellyfin_id)
+        let stale_for_quality = desired_by_id
+            .get(item.jellyfin_id.as_str())
+            .copied()
             .map(
                 |desired| match (desired.original_bitrate, item.original_bitrate) {
                     (Some(server), Some(local)) => server > local,

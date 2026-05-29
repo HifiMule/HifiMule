@@ -2800,6 +2800,12 @@ async fn handle_sync_calculate_delta(
             };
             match crate::auto_fill::run_auto_fill(&state.jellyfin_client, fill_params).await {
                 Ok(af_items) => {
+                    let af_total_bytes: u64 = af_items.iter().map(|i| i.size_bytes).sum();
+                    crate::daemon_log!(
+                        "[AutoFill] Pagination complete: {} tracks, {} MB",
+                        af_items.len(),
+                        af_total_bytes / 1_048_576,
+                    );
                     for item in af_items {
                         if seen_ids.insert(item.id.clone()) {
                             desired_items.push(crate::sync::DesiredItem {
@@ -2829,10 +2835,26 @@ async fn handle_sync_calculate_delta(
         }
     }
 
+    crate::daemon_log!(
+        "[Sync] Computing delta: {} desired items vs {} synced in manifest",
+        desired_items.len(),
+        manifest.synced_items.len(),
+    );
     let mut delta = crate::sync::calculate_delta(&desired_items, &manifest);
     delta.playlists = playlist_sync_items;
+    crate::daemon_log!(
+        "[Sync] Delta computed: {} adds, {} deletes, {} id-changes, {} unchanged",
+        delta.adds.len(),
+        delta.deletes.len(),
+        delta.id_changes.len(),
+        delta.unchanged,
+    );
 
     if let Some((_, device_io)) = state.device_manager.get_manifest_and_io().await {
+        crate::daemon_log!(
+            "[Sync] Checking device file existence for {} synced items",
+            manifest.synced_items.len(),
+        );
         crate::sync::augment_delta_with_existence_check(
             &mut delta,
             &desired_items,
@@ -2840,6 +2862,10 @@ async fn handle_sync_calculate_delta(
             device_io.as_ref(),
         )
         .await;
+        crate::daemon_log!(
+            "[Sync] Existence check complete: {} adds after recovery",
+            delta.adds.len(),
+        );
     }
 
     Ok(delta_value_with_cleanup_metadata(&delta, &manifest))

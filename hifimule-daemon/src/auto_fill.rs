@@ -5,9 +5,7 @@
 ///   2. PlayCount DESC (most-played next)
 ///   3. DateCreated DESC (newest last)
 /// Stops paginating as soon as the device capacity budget is filled.
-use crate::api::{
-    CredentialManager, JellyfinClient, JellyfinItem, JellyfinItemsResponse, url_encode,
-};
+use crate::api::{CredentialManager, JellyfinClient, JellyfinItem, JellyfinItemsResponse};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
@@ -36,8 +34,14 @@ pub struct AutoFillParams {
     pub max_fill_bytes: u64,
 }
 
-/// Runs the auto-fill algorithm: fetches Audio tracks from Jellyfin pre-sorted by priority,
-/// passing exclusions server-side, and stops paginating as soon as `max_fill_bytes` is filled.
+/// Retry delays (ms) for transient 5xx server errors. Two entries = up to 3 total attempts.
+const PAGE_RETRY_DELAYS_MS: &[u64] = &[1_000, 2_000];
+
+/// Runs the auto-fill algorithm: fetches Audio tracks from Jellyfin pre-sorted by priority
+/// and stops paginating as soon as `max_fill_bytes` is filled.
+///
+/// Already-selected items in `params.exclude_item_ids` are filtered client-side rather than
+/// passed as URL parameters, avoiding server/proxy URL-length limits on large baskets.
 ///
 /// Returns a capacity-truncated list of tracks ready to populate the basket.
 pub async fn run_auto_fill(
@@ -61,16 +65,11 @@ pub async fn run_auto_fill(
             .map_err(|_| anyhow::anyhow!("Invalid token format"))?,
     );
 
-    let exclude_param = if params.exclude_item_ids.is_empty() {
-        String::new()
-    } else {
-        let encoded_ids: Vec<String> = params
-            .exclude_item_ids
-            .iter()
-            .map(|id| url_encode(id))
-            .collect();
-        format!("&ExcludeItemIds={}", encoded_ids.join(","))
-    };
+    // Build a HashSet for O(1) client-side exclusion. Sending ExcludeItemIds in the URL
+    // explodes to tens of kilobytes on large baskets, causing Cloudflare/nginx 520/414 errors.
+    let AutoFillParams { exclude_item_ids, max_fill_bytes } = params;
+    let exclude_count = exclude_item_ids.len();
+    let exclude_set: std::collections::HashSet<String> = exclude_item_ids.into_iter().collect();
 
     const PAGE_SIZE: u32 = 500;
     // Guard against runaway pagination in case the server misbehaves.
@@ -83,42 +82,87 @@ pub async fn run_auto_fill(
     let mut total_record_count: Option<u32> = None;
 
     'pages: loop {
+        let page_num = start_index / PAGE_SIZE + 1;
         let endpoint = format!(
             "{}/Items?userId={}&IncludeItemTypes=Audio&Recursive=true\
              &Fields=MediaSources,UserData,DateCreated\
              &SortBy=IsFavoriteOrLiked,PlayCount,DateCreated\
              &SortOrder=Descending,Descending,Descending\
-             {}&StartIndex={}&Limit={}",
+             &StartIndex={}&Limit={}",
             url.trim_end_matches('/'),
             user_id,
-            exclude_param,
             start_index,
             PAGE_SIZE,
         );
+        crate::daemon_log!(
+            "[AutoFill] Page {}: fetching {} tracks (URL: {} bytes, {} IDs excluded client-side)",
+            page_num,
+            PAGE_SIZE,
+            endpoint.len(),
+            exclude_count,
+        );
 
-        let response = client
-            .http_client()
-            .get(&endpoint)
-            .headers(headers.clone())
-            .send()
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await?;
-            return Err(anyhow::anyhow!(
-                "Server returned status: {} - {}",
-                status,
-                text
-            ));
-        }
-        let text = response.text().await?;
-        let page: JellyfinItemsResponse = serde_json::from_str(&text)?;
+        let page_text = {
+            let mut attempt = 0usize;
+            loop {
+                let response = match client
+                    .http_client()
+                    .get(&endpoint)
+                    .headers(headers.clone())
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) if e.is_connect() || e.is_timeout() => {
+                        if let Some(&delay_ms) = PAGE_RETRY_DELAYS_MS.get(attempt) {
+                            crate::daemon_log!(
+                                "[AutoFill] Page {}: transport error ({}), retrying in {}ms (attempt {}/{})",
+                                page_num, e, delay_ms, attempt + 2, PAGE_RETRY_DELAYS_MS.len() + 1
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                            attempt += 1;
+                            continue;
+                        }
+                        return Err(e.into());
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                let status = response.status();
+                if !status.is_success() {
+                    let body = response.text().await?;
+                    if status.is_server_error() {
+                        if let Some(&delay_ms) = PAGE_RETRY_DELAYS_MS.get(attempt) {
+                            crate::daemon_log!(
+                                "[AutoFill] Page {}: server error {} (URL: {} bytes), retrying in {}ms (attempt {}/{})",
+                                page_num, status, endpoint.len(), delay_ms,
+                                attempt + 2, PAGE_RETRY_DELAYS_MS.len() + 1
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                            attempt += 1;
+                            continue;
+                        }
+                    }
+                    return Err(anyhow::anyhow!(
+                        "Page {}: server returned status: {} (URL: {} bytes, {} IDs excluded client-side) - {}",
+                        page_num, status, endpoint.len(), exclude_count, body
+                    ));
+                }
+                break response.text().await?;
+            }
+        };
+        let page: JellyfinItemsResponse = serde_json::from_str(&page_text)?;
 
         let fetched = page.items.len() as u32;
         let total = *total_record_count.get_or_insert(page.total_record_count);
 
-        let remaining_budget = params.max_fill_bytes.saturating_sub(cumulative_bytes);
-        let (new_items, capacity_reached) = rank_and_truncate(page.items, remaining_budget);
+        // Filter already-selected items client-side to keep the request URL short.
+        let page_items: Vec<JellyfinItem> = page
+            .items
+            .into_iter()
+            .filter(|item| !exclude_set.contains(&item.id))
+            .collect();
+        let remaining_budget = max_fill_bytes.saturating_sub(cumulative_bytes);
+        let (new_items, capacity_reached) = rank_and_truncate(page_items, remaining_budget);
         cumulative_bytes += new_items.iter().map(|i| i.size_bytes).sum::<u64>();
         result.extend(new_items);
 
@@ -126,7 +170,6 @@ pub async fn run_auto_fill(
         // non-zero value. If total defaulted to 0 (server omitted the field), rely
         // solely on fetched < PAGE_SIZE (partial page = end of results).
         let total_known = total > 0;
-        let page_num = start_index / PAGE_SIZE + 1;
         if capacity_reached
             || fetched < PAGE_SIZE
             || (total_known && start_index + fetched >= total)
