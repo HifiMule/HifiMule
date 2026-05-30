@@ -67,11 +67,11 @@ mod domain;
 mod paths;
 #[allow(dead_code)]
 mod providers;
-mod vault;
 mod rpc;
 mod scrobbler;
 mod sync;
 mod transcoding;
+mod vault;
 
 #[cfg(test)]
 mod tests;
@@ -632,7 +632,10 @@ async fn run_auto_sync(
             let _ = state_tx.send(DaemonState::Idle);
             return Ok(());
         } else {
-            daemon_log!("[AutoSync] Basket empty but device has {} synced item(s) — running cleanup sync", manifest.synced_items.len());
+            daemon_log!(
+                "[AutoSync] Basket empty but device has {} synced item(s) — running cleanup sync",
+                manifest.synced_items.len()
+            );
             // desired_items stays empty; calculate_delta will mark all synced items for deletion.
         }
     } else {
@@ -1081,8 +1084,12 @@ async fn get_non_jellyfin_provider(
                 password,
             },
         };
-        if let Ok(provider) =
-            providers::connect(&config.url, &credentials, providers::ServerTypeHint::Subsonic).await
+        if let Ok(provider) = providers::connect(
+            &config.url,
+            &credentials,
+            providers::ServerTypeHint::Subsonic,
+        )
+        .await
         {
             return Some(provider);
         }
@@ -1155,9 +1162,14 @@ async fn run_auto_sync_via_provider(
         let basket_size: u64 = desired_items.iter().map(|i| i.size_bytes).sum();
         let auto_fill_budget = total_budget.saturating_sub(basket_size);
         if auto_fill_budget > 0 {
-            let exclude_item_ids: Vec<String> =
-                desired_items.iter().map(|i| i.jellyfin_id.clone()).collect();
-            let fill_params = auto_fill::AutoFillParams { exclude_item_ids, max_fill_bytes: auto_fill_budget };
+            let exclude_item_ids: Vec<String> = desired_items
+                .iter()
+                .map(|i| i.jellyfin_id.clone())
+                .collect();
+            let fill_params = auto_fill::AutoFillParams {
+                exclude_item_ids,
+                max_fill_bytes: auto_fill_budget,
+            };
             match auto_fill::run_auto_fill_provider(provider.clone(), fill_params).await {
                 Ok(items) if items.is_empty() && desired_items.is_empty() => {
                     daemon_log!("[AutoSync] Provider auto-fill returned no items, skipping");
@@ -1165,7 +1177,10 @@ async fn run_auto_sync_via_provider(
                     return Ok(());
                 }
                 Ok(items) => {
-                    daemon_log!("[AutoSync] Provider auto-fill resolved {} items", items.len());
+                    daemon_log!(
+                        "[AutoSync] Provider auto-fill resolved {} items",
+                        items.len()
+                    );
                     for item in items {
                         desired_items.push(sync::DesiredItem {
                             jellyfin_id: item.id,
@@ -1276,7 +1291,10 @@ async fn run_auto_sync_via_provider(
     let result = sync::execute_provider_sync(
         &delta,
         &device_path,
-        sync::ProviderSyncSource { provider, transcoding_profile },
+        sync::ProviderSyncSource {
+            provider,
+            transcoding_profile,
+        },
         sync_op_manager.clone(),
         operation_id.clone(),
         device_manager.clone(),
@@ -1303,7 +1321,9 @@ async fn run_auto_sync_via_provider(
                     sync::SyncStatus::Failed
                 };
                 operation.errors = errors.clone();
-                sync_op_manager.update_operation(&operation_id, operation).await;
+                sync_op_manager
+                    .update_operation(&operation_id, operation)
+                    .await;
             }
 
             if errors.is_empty() {
@@ -1342,7 +1362,9 @@ async fn run_auto_sync_via_provider(
                     filename: "auto_sync_provider".to_string(),
                     error_message: e.to_string(),
                 });
-                sync_op_manager.update_operation(&operation_id, operation).await;
+                sync_op_manager
+                    .update_operation(&operation_id, operation)
+                    .await;
             }
             let error_msg = format!("Sync failed: {}", e);
             let _ = tokio::task::spawn_blocking(move || {
@@ -1389,7 +1411,11 @@ async fn resolve_provider_basket_items(
                 }
             }
             Err(e) => {
-                daemon_log!("[AutoSync] Failed to resolve favorite item {}: {}", basket_item.id, e);
+                daemon_log!(
+                    "[AutoSync] Failed to resolve favorite item {}: {}",
+                    basket_item.id,
+                    e
+                );
             }
         }
     }
@@ -1407,7 +1433,11 @@ async fn resolve_provider_basket_items(
                 }
             }
             Err(e) => {
-                daemon_log!("[AutoSync] Failed to resolve item {}: {}", basket_item.id, e);
+                daemon_log!(
+                    "[AutoSync] Failed to resolve item {}: {}",
+                    basket_item.id,
+                    e
+                );
             }
         }
     }
@@ -1444,11 +1474,19 @@ async fn resolve_provider_favorite_item(
             {
                 match provider.get_album(&album.id).await {
                     Ok(album_with_tracks) => {
-                        desired_items
-                            .extend(album_with_tracks.tracks.iter().map(provider_song_to_desired));
+                        desired_items.extend(
+                            album_with_tracks
+                                .tracks
+                                .iter()
+                                .map(provider_song_to_desired),
+                        );
                     }
                     Err(e) => {
-                        daemon_log!("[AutoSync] Failed to expand favorite album {}: {}", album.id, e);
+                        daemon_log!(
+                            "[AutoSync] Failed to expand favorite album {}: {}",
+                            album.id,
+                            e
+                        );
                     }
                 }
             }
@@ -1470,11 +1508,18 @@ async fn resolve_provider_item(
     item_id: &str,
 ) -> anyhow::Result<(Vec<sync::DesiredItem>, Option<sync::PlaylistSyncItem>)> {
     if let Ok(album) = provider.get_album(item_id).await {
-        return Ok((album.tracks.iter().map(provider_song_to_desired).collect(), None));
+        return Ok((
+            album.tracks.iter().map(provider_song_to_desired).collect(),
+            None,
+        ));
     }
 
     if let Ok(playlist) = provider.get_playlist(item_id).await {
-        let tracks = playlist.tracks.iter().map(provider_song_to_desired).collect::<Vec<_>>();
+        let tracks = playlist
+            .tracks
+            .iter()
+            .map(provider_song_to_desired)
+            .collect::<Vec<_>>();
         let playlist_item = sync::PlaylistSyncItem {
             jellyfin_id: playlist.playlist.id.clone(),
             name: playlist.playlist.name.clone(),
@@ -1496,10 +1541,19 @@ async fn resolve_provider_item(
         for album in artist.albums {
             match provider.get_album(&album.id).await {
                 Ok(album_with_tracks) => {
-                    tracks.extend(album_with_tracks.tracks.iter().map(provider_song_to_desired));
+                    tracks.extend(
+                        album_with_tracks
+                            .tracks
+                            .iter()
+                            .map(provider_song_to_desired),
+                    );
                 }
                 Err(e) => {
-                    daemon_log!("[AutoSync] Failed to expand artist album {}: {}", album.id, e);
+                    daemon_log!(
+                        "[AutoSync] Failed to expand artist album {}: {}",
+                        album.id,
+                        e
+                    );
                 }
             }
         }

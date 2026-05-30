@@ -966,6 +966,22 @@ async fn mark_operation_item_handled(
     }
 }
 
+async fn mark_operation_preparing_file(
+    operation_manager: &Arc<SyncOperationManager>,
+    operation_id: &str,
+    file_name: &str,
+    bytes_total: u64,
+) {
+    if let Some(mut operation) = operation_manager.get_operation(operation_id).await {
+        operation.current_file = Some(file_name.to_string());
+        operation.bytes_current = 0;
+        operation.bytes_total = bytes_total;
+        operation_manager
+            .update_operation(operation_id, operation)
+            .await;
+    }
+}
+
 /// Sanitizes a path component by removing/replacing invalid filesystem characters.
 ///
 /// Also strips trailing dots and spaces — forbidden by FAT32/Windows for both
@@ -1372,6 +1388,14 @@ pub async fn execute_sync(
         println!("[Sync] Executing empty sync to clear device managed paths");
     }
 
+    crate::daemon_log!(
+        "[Sync] execute_sync preparing: adds={} deletes={} id_changes={} playlists={}",
+        delta.adds.len(),
+        delta.deletes.len(),
+        delta.id_changes.len(),
+        delta.playlists.len()
+    );
+
     // Compute total bytes for ETA (adds + id_changes both contribute bytes)
     let total_job_bytes: u64 = delta.adds.iter().map(|a| a.size_bytes).sum::<u64>()
         + delta.id_changes.iter().map(|c| c.size_bytes).sum::<u64>();
@@ -1429,7 +1453,14 @@ pub async fn execute_sync(
     // Pre-fetch all item details for adds to avoid N+1 queries
     let mut fetched_items = std::collections::HashMap::new();
     let add_ids: Vec<&str> = delta.adds.iter().map(|a| a.jellyfin_id.as_str()).collect();
-    for chunk in add_ids.chunks(100) {
+    let total_chunks = add_ids.len().div_ceil(100);
+    for (chunk_index, chunk) in add_ids.chunks(100).enumerate() {
+        crate::daemon_log!(
+            "[Sync] Preparing: fetching Jellyfin metadata chunk {}/{} ({} item(s))",
+            chunk_index + 1,
+            total_chunks,
+            chunk.len()
+        );
         match jellyfin_client
             .get_items_by_ids(jellyfin_url, jellyfin_token, jellyfin_user_id, chunk)
             .await
@@ -1458,7 +1489,23 @@ pub async fn execute_sync(
     }
 
     // Process adds (downloads)
-    for add_item in delta.adds.iter() {
+    for (index, add_item) in delta.adds.iter().enumerate() {
+        crate::daemon_log!(
+            "[Sync] Preparing file {}/{}: '{}' ({}, {} bytes)",
+            index + 1,
+            delta.adds.len(),
+            add_item.name,
+            add_item.jellyfin_id,
+            add_item.size_bytes
+        );
+        mark_operation_preparing_file(
+            &operation_manager,
+            &operation_id,
+            &add_item.name,
+            add_item.size_bytes,
+        )
+        .await;
+
         // Find prefetched item
         let item = match fetched_items.get(&add_item.jellyfin_id) {
             Some(i) => i,
@@ -1489,6 +1536,11 @@ pub async fn execute_sync(
         // Resolve stream via PlaybackInfo if a profile is set, else direct /Download.
         // is_transcoded tells us whether the server actually transcodes the content,
         // which determines whether the profile's target container applies as the file extension.
+        crate::daemon_log!(
+            "[Sync] Preparing '{}': resolving stream (profile={})",
+            add_item.name,
+            stream_profile.is_some()
+        );
         let stream_result = jellyfin_client
             .get_item_stream(
                 jellyfin_url,
@@ -1535,6 +1587,10 @@ pub async fn execute_sync(
         );
 
         // Construct target path (includes legacy hardware path length validation)
+        crate::daemon_log!(
+            "[Sync] Preparing '{}': constructing target path",
+            add_item.name
+        );
         let construction =
             match construct_file_path_with_extension(&managed_path, &item, extension_override) {
                 Ok(result) => result,
@@ -1591,6 +1647,7 @@ pub async fn execute_sync(
             .replace('\\', "/");
 
         // Buffer the stream into memory, reporting progress during download
+        crate::daemon_log!("[Sync] Downloading '{}'", add_item.name);
         let t_download = std::time::Instant::now();
         let buffer_result = buffer_stream(stream, total_size, progress_callback).await;
         let download_timing = transfer_timing(add_item.size_bytes, t_download.elapsed());
@@ -1607,6 +1664,7 @@ pub async fn execute_sync(
         };
 
         // Write file via device IO abstraction
+        crate::daemon_log!("[Sync] Writing '{}'", add_item.name);
         let t_write = std::time::Instant::now();
         let write_result = device_io.write_with_verify(&rel_path, &buffer).await;
         let write_timing = transfer_timing(add_item.size_bytes, t_write.elapsed());
@@ -1954,6 +2012,14 @@ pub async fn execute_provider_sync(
         });
     }
 
+    crate::daemon_log!(
+        "[Sync] execute_provider_sync preparing: adds={} deletes={} id_changes={} playlists={}",
+        delta.adds.len(),
+        delta.deletes.len(),
+        delta.id_changes.len(),
+        delta.playlists.len()
+    );
+
     let total_job_bytes: u64 = delta.adds.iter().map(|a| a.size_bytes).sum::<u64>()
         + delta.id_changes.iter().map(|c| c.size_bytes).sum::<u64>();
     if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
@@ -2009,7 +2075,23 @@ pub async fn execute_provider_sync(
         .map(|delete| (delete.jellyfin_id.as_str(), delete))
         .collect();
 
-    for add_item in delta.adds.iter() {
+    for (index, add_item) in delta.adds.iter().enumerate() {
+        crate::daemon_log!(
+            "[Sync] Preparing file {}/{}: '{}' ({}, {} bytes)",
+            index + 1,
+            delta.adds.len(),
+            add_item.name,
+            add_item.jellyfin_id,
+            add_item.size_bytes
+        );
+        mark_operation_preparing_file(
+            &operation_manager,
+            &operation_id,
+            &add_item.name,
+            add_item.size_bytes,
+        )
+        .await;
+
         let source_format = provider_audio_format(
             add_item.provider_suffix.as_deref(),
             add_item.provider_content_type.as_deref(),
@@ -2035,6 +2117,11 @@ pub async fn execute_provider_sync(
         } else {
             None
         };
+        crate::daemon_log!(
+            "[Sync] Preparing '{}': resolving provider download URL (transcode={})",
+            add_item.name,
+            profile.is_some()
+        );
         let url = match provider
             .download_url(&add_item.jellyfin_id, profile.as_ref())
             .await
@@ -2062,6 +2149,7 @@ pub async fn execute_provider_sync(
                 continue;
             }
         };
+        crate::daemon_log!("[Sync] Preparing '{}': opening HTTP stream", add_item.name);
         let response = match reqwest::Client::new().get(url).send().await {
             Ok(response) => response,
             Err(e) => {
@@ -2156,6 +2244,10 @@ pub async fn execute_provider_sync(
                 .or_else(|| response_format.extension.clone())
         };
 
+        crate::daemon_log!(
+            "[Sync] Preparing '{}': constructing target path",
+            add_item.name
+        );
         let construction = match construct_desired_file_path(
             &managed_path,
             add_item,
@@ -2198,6 +2290,7 @@ pub async fn execute_provider_sync(
             });
         }) as ProgressCallback;
 
+        crate::daemon_log!("[Sync] Downloading '{}'", add_item.name);
         let t_download = std::time::Instant::now();
         let buffer =
             match buffer_stream(response.bytes_stream(), total_size, progress_callback).await {
@@ -2219,6 +2312,7 @@ pub async fn execute_provider_sync(
             .to_string_lossy()
             .replace('\\', "/");
 
+        crate::daemon_log!("[Sync] Writing '{}'", add_item.name);
         let t_write = std::time::Instant::now();
         match device_io.write_with_verify(&rel_path, &buffer).await {
             Ok(_) => {
@@ -2522,8 +2616,10 @@ pub async fn augment_delta_with_existence_check(
         .chain(delta.id_changes.iter().map(|c| c.new_jellyfin_id.clone()))
         .collect();
 
-    let desired_by_id: std::collections::HashMap<&str, &DesiredItem> =
-        desired_items.iter().map(|d| (d.jellyfin_id.as_str(), d)).collect();
+    let desired_by_id: std::collections::HashMap<&str, &DesiredItem> = desired_items
+        .iter()
+        .map(|d| (d.jellyfin_id.as_str(), d))
+        .collect();
 
     let mut to_add: Vec<SyncAddItem> = Vec::new();
     for item in &manifest.synced_items {
@@ -2802,8 +2898,10 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
         .map(|path| normalized_device_folder(path))
         .unwrap_or_default();
     // Pre-index desired items for O(1) lookup — avoids O(N×M) scans in both passes below.
-    let desired_by_id: std::collections::HashMap<&str, &DesiredItem> =
-        desired_items.iter().map(|d| (d.jellyfin_id.as_str(), d)).collect();
+    let desired_by_id: std::collections::HashMap<&str, &DesiredItem> = desired_items
+        .iter()
+        .map(|d| (d.jellyfin_id.as_str(), d))
+        .collect();
     let current_ids: HashSet<&str> = manifest
         .synced_items
         .iter()

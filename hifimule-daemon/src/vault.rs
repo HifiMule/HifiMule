@@ -1,8 +1,8 @@
 use chacha20poly1305::{
-    aead::{Aead, KeyInit},
     ChaCha20Poly1305, Nonce,
+    aead::{Aead, KeyInit},
 };
-use rand::{rngs::OsRng, RngCore};
+use rand::{RngCore, rngs::OsRng};
 use secrecy::{ExposeSecret, Secret};
 use std::fs::{self, File};
 use std::io::Write;

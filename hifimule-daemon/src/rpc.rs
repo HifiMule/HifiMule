@@ -1436,7 +1436,10 @@ async fn provider_legacy_item_size(
         }));
     }
     if let Ok((tracks, _)) = provider.get_genre_tracks(item_id, 0, 10_000).await {
-        let total = tracks.iter().map(|track| provider_track_size(track)).sum::<u64>();
+        let total = tracks
+            .iter()
+            .map(|track| provider_track_size(track))
+            .sum::<u64>();
         return Ok(serde_json::json!({
             "id": item_id,
             "totalSizeBytes": total,
@@ -1792,7 +1795,11 @@ async fn provider_calculate_delta(
             .and_then(|af| af.get("maxBytes"))
             .and_then(Value::as_u64)
         {
-            crate::daemon_log!("[AutoFill] budget from UI maxBytes: {} bytes ({:.1} GB)", mb, mb as f64 / 1_073_741_824.0);
+            crate::daemon_log!(
+                "[AutoFill] budget from UI maxBytes: {} bytes ({:.1} GB)",
+                mb,
+                mb as f64 / 1_073_741_824.0
+            );
             mb
         } else {
             let synced_bytes: u64 = manifest.synced_items.iter().map(|s| s.size_bytes).sum();
@@ -1801,10 +1808,16 @@ async fn provider_calculate_delta(
                 Some(info) => {
                     crate::daemon_log!(
                         "[AutoFill] no maxBytes from UI — server fallback: free={} synced={} basket_est={} -> budget={}",
-                        info.free_bytes, synced_bytes, basket_size,
-                        info.free_bytes.saturating_add(synced_bytes).saturating_sub(basket_size)
+                        info.free_bytes,
+                        synced_bytes,
+                        basket_size,
+                        info.free_bytes
+                            .saturating_add(synced_bytes)
+                            .saturating_sub(basket_size)
                     );
-                    info.free_bytes.saturating_add(synced_bytes).saturating_sub(basket_size)
+                    info.free_bytes
+                        .saturating_add(synced_bytes)
+                        .saturating_sub(basket_size)
                 }
                 None => {
                     return Err(JsonRpcError {
@@ -1816,12 +1829,21 @@ async fn provider_calculate_delta(
             };
             budget
         };
-        crate::daemon_log!("[AutoFill] basket_items={} desired_items={} auto_fill_budget={} bytes", item_ids.len(), desired_items.len(), auto_fill_budget);
+        crate::daemon_log!(
+            "[AutoFill] basket_items={} desired_items={} auto_fill_budget={} bytes",
+            item_ids.len(),
+            desired_items.len(),
+            auto_fill_budget
+        );
         if auto_fill_budget > 0 {
-            let exclude_ids: Vec<String> =
-                desired_items.iter().map(|i| i.jellyfin_id.clone()).collect();
-            let fill_params =
-                crate::auto_fill::AutoFillParams { exclude_item_ids: exclude_ids, max_fill_bytes: auto_fill_budget };
+            let exclude_ids: Vec<String> = desired_items
+                .iter()
+                .map(|i| i.jellyfin_id.clone())
+                .collect();
+            let fill_params = crate::auto_fill::AutoFillParams {
+                exclude_item_ids: exclude_ids,
+                max_fill_bytes: auto_fill_budget,
+            };
             let fill_items = crate::auto_fill::run_auto_fill_provider(provider, fill_params)
                 .await
                 .map_err(|e| JsonRpcError {
@@ -1829,7 +1851,10 @@ async fn provider_calculate_delta(
                     message: format!("Auto-fill failed: {}", e),
                     data: None,
                 })?;
-            crate::daemon_log!("[AutoFill] run_auto_fill_provider returned {} tracks", fill_items.len());
+            crate::daemon_log!(
+                "[AutoFill] run_auto_fill_provider returned {} tracks",
+                fill_items.len()
+            );
             for item in fill_items {
                 if seen_ids.insert(item.id.clone()) {
                     desired_items.push(crate::sync::DesiredItem {
@@ -1850,10 +1875,27 @@ async fn provider_calculate_delta(
         }
     }
 
+    crate::daemon_log!(
+        "[Delta] Provider desired set prepared: desired_items={} playlists={}; calculating manifest delta",
+        desired_items.len(),
+        playlist_sync_items.len()
+    );
     let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
     delta.playlists = playlist_sync_items;
+    crate::daemon_log!(
+        "[Delta] Provider delta calculated: adds={} deletes={} id_changes={} unchanged={} playlists={}",
+        delta.adds.len(),
+        delta.deletes.len(),
+        delta.id_changes.len(),
+        delta.unchanged,
+        delta.playlists.len()
+    );
 
     if let Some((_, device_io)) = _state.device_manager.get_manifest_and_io().await {
+        crate::daemon_log!(
+            "[Delta] Provider existence check starting for {} desired item(s)",
+            desired_items.len()
+        );
         crate::sync::augment_delta_with_existence_check(
             &mut delta,
             &desired_items,
@@ -1861,6 +1903,13 @@ async fn provider_calculate_delta(
             device_io.as_ref(),
         )
         .await;
+        crate::daemon_log!(
+            "[Delta] Provider existence check complete: adds={} deletes={} id_changes={} unchanged={}",
+            delta.adds.len(),
+            delta.deletes.len(),
+            delta.id_changes.len(),
+            delta.unchanged
+        );
     }
 
     Ok(delta_value_with_cleanup_metadata(&delta, manifest))
@@ -2507,14 +2556,15 @@ async fn handle_sync_calculate_delta(
 ) -> Result<Value, JsonRpcError> {
     // Claim the pipeline lock for the full duration of this call (auto-fill can run for
     // several seconds; without this, a concurrent auto-sync would double-paginate the library).
-    let _pipeline_guard = state
-        .sync_operation_manager
-        .try_start_pipeline()
-        .ok_or(JsonRpcError {
-            code: ERR_SYNC_IN_PROGRESS,
-            message: "A sync operation is already in progress".to_string(),
-            data: None,
-        })?;
+    let _pipeline_guard =
+        state
+            .sync_operation_manager
+            .try_start_pipeline()
+            .ok_or(JsonRpcError {
+                code: ERR_SYNC_IN_PROGRESS,
+                message: "A sync operation is already in progress".to_string(),
+                data: None,
+            })?;
 
     let params = params.ok_or(JsonRpcError {
         code: ERR_INVALID_PARAMS,

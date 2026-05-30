@@ -70,7 +70,10 @@ pub async fn run_auto_fill(
 
     // Build a HashSet for O(1) client-side exclusion. Sending ExcludeItemIds in the URL
     // explodes to tens of kilobytes on large baskets, causing Cloudflare/nginx 520/414 errors.
-    let AutoFillParams { exclude_item_ids, max_fill_bytes } = params;
+    let AutoFillParams {
+        exclude_item_ids,
+        max_fill_bytes,
+    } = params;
     let exclude_count = exclude_item_ids.len();
     let exclude_set: std::collections::HashSet<String> = exclude_item_ids.into_iter().collect();
 
@@ -120,7 +123,11 @@ pub async fn run_auto_fill(
                         if let Some(&delay_ms) = PAGE_RETRY_DELAYS_MS.get(attempt) {
                             crate::daemon_log!(
                                 "[AutoFill] Page {}: transport error ({}), retrying in {}ms (attempt {}/{})",
-                                page_num, e, delay_ms, attempt + 2, PAGE_RETRY_DELAYS_MS.len() + 1
+                                page_num,
+                                e,
+                                delay_ms,
+                                attempt + 2,
+                                PAGE_RETRY_DELAYS_MS.len() + 1
                             );
                             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                             attempt += 1;
@@ -137,8 +144,12 @@ pub async fn run_auto_fill(
                         if let Some(&delay_ms) = PAGE_RETRY_DELAYS_MS.get(attempt) {
                             crate::daemon_log!(
                                 "[AutoFill] Page {}: server error {} (URL: {} bytes), retrying in {}ms (attempt {}/{})",
-                                page_num, status, endpoint.len(), delay_ms,
-                                attempt + 2, PAGE_RETRY_DELAYS_MS.len() + 1
+                                page_num,
+                                status,
+                                endpoint.len(),
+                                delay_ms,
+                                attempt + 2,
+                                PAGE_RETRY_DELAYS_MS.len() + 1
                             );
                             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                             attempt += 1;
@@ -147,7 +158,11 @@ pub async fn run_auto_fill(
                     }
                     return Err(anyhow::anyhow!(
                         "Page {}: server returned status: {} (URL: {} bytes, {} IDs excluded client-side) - {}",
-                        page_num, status, endpoint.len(), exclude_count, body
+                        page_num,
+                        status,
+                        endpoint.len(),
+                        exclude_count,
+                        body
                     ));
                 }
                 break response.text().await?;
@@ -328,7 +343,10 @@ pub async fn run_auto_fill_provider(
     // Guard against runaway pagination if the server never returns a partial page.
     const MAX_BULK_PAGES: u32 = 200;
 
-    let AutoFillParams { exclude_item_ids, max_fill_bytes } = params;
+    let AutoFillParams {
+        exclude_item_ids,
+        max_fill_bytes,
+    } = params;
     let exclude_set: HashSet<String> = exclude_item_ids.into_iter().collect();
     let mut state = ProviderFillState::new(exclude_set, max_fill_bytes);
 
@@ -339,7 +357,9 @@ pub async fn run_auto_fill_provider(
     match provider.list_favorites(None, 0, MAX_PER_LIST).await {
         Ok((songs, _)) => {
             crate::daemon_log!("[AutoFill] list_favorites returned {} songs", songs.len());
-            for s in songs { priority_songs.push((s, "favorite".to_string())); }
+            for s in songs {
+                priority_songs.push((s, "favorite".to_string()));
+            }
         }
         Err(ProviderError::UnsupportedCapability(_)) => {
             crate::daemon_log!("[AutoFill] list_favorites: UnsupportedCapability, skipping");
@@ -352,22 +372,35 @@ pub async fn run_auto_fill_provider(
 
     match provider.list_frequently_played(None, 0, MAX_PER_LIST).await {
         Ok((songs, _)) => {
-            crate::daemon_log!("[AutoFill] list_frequently_played returned {} songs", songs.len());
+            crate::daemon_log!(
+                "[AutoFill] list_frequently_played returned {} songs",
+                songs.len()
+            );
             for s in songs {
                 let reason = format!("playCount:{}", s.play_count.unwrap_or(0));
                 priority_songs.push((s, reason));
             }
         }
         Err(ProviderError::UnsupportedCapability(_)) => {
-            crate::daemon_log!("[AutoFill] list_frequently_played: UnsupportedCapability, skipping");
+            crate::daemon_log!(
+                "[AutoFill] list_frequently_played: UnsupportedCapability, skipping"
+            );
         }
-        Err(e) => crate::daemon_log!("[AutoFill] list_frequently_played failed (non-fatal): {}", e),
+        Err(e) => crate::daemon_log!(
+            "[AutoFill] list_frequently_played failed (non-fatal): {}",
+            e
+        ),
     }
 
     match provider.list_recently_played(None, 0, MAX_PER_LIST).await {
         Ok((songs, _)) => {
-            crate::daemon_log!("[AutoFill] list_recently_played returned {} songs", songs.len());
-            for s in songs { priority_songs.push((s, "recentlyPlayed".to_string())); }
+            crate::daemon_log!(
+                "[AutoFill] list_recently_played returned {} songs",
+                songs.len()
+            );
+            for s in songs {
+                priority_songs.push((s, "recentlyPlayed".to_string()));
+            }
         }
         Err(ProviderError::UnsupportedCapability(_)) => {
             crate::daemon_log!("[AutoFill] list_recently_played: UnsupportedCapability, skipping");
@@ -377,7 +410,8 @@ pub async fn run_auto_fill_provider(
 
     crate::daemon_log!(
         "[AutoFill] priority candidates: {}, max_fill_bytes: {}",
-        priority_songs.len(), max_fill_bytes
+        priority_songs.len(),
+        max_fill_bytes
     );
 
     for (song, reason) in priority_songs {
@@ -397,7 +431,9 @@ pub async fn run_auto_fill_provider(
                 let page_count = songs.len() as u32;
                 crate::daemon_log!(
                     "[AutoFill] bulk page {} ({} songs, offset {})",
-                    pages_fetched + 1, page_count, offset
+                    pages_fetched + 1,
+                    page_count,
+                    offset
                 );
                 for song in songs {
                     if !state.try_add(song, "library".to_string()) {
@@ -411,7 +447,9 @@ pub async fn run_auto_fill_provider(
                 offset += PAGE_SIZE;
             }
             Err(ProviderError::UnsupportedCapability(_)) => {
-                crate::daemon_log!("[AutoFill] list_all_songs_page: UnsupportedCapability, bulk fill skipped");
+                crate::daemon_log!(
+                    "[AutoFill] list_all_songs_page: UnsupportedCapability, bulk fill skipped"
+                );
                 break 'bulk;
             }
             Err(e) => {
