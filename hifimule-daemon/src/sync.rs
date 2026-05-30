@@ -1542,7 +1542,9 @@ pub async fn execute_sync(
             .replace('\\', "/");
 
         // Buffer the stream into memory, reporting progress during download
+        let t_download = std::time::Instant::now();
         let buffer_result = buffer_stream(stream, total_size, progress_callback).await;
+        let download_ms = t_download.elapsed().as_millis();
         let buffer = match buffer_result {
             Ok(b) => b,
             Err(e) => {
@@ -1556,10 +1558,18 @@ pub async fn execute_sync(
         };
 
         // Write file via device IO abstraction
+        let t_write = std::time::Instant::now();
         let write_result = device_io.write_with_verify(&rel_path, &buffer).await;
+        let write_ms = t_write.elapsed().as_millis();
 
         match write_result {
             Ok(_) => {
+                let dl_speed = if download_ms > 0 { add_item.size_bytes as f64 / download_ms as f64 * 1000.0 / 1_000_000.0 } else { 0.0 };
+                let wr_speed = if write_ms > 0 { add_item.size_bytes as f64 / write_ms as f64 * 1000.0 / 1_000_000.0 } else { 0.0 };
+                crate::daemon_log!(
+                    "[Sync] '{}' size={}B download={}ms({:.1}MB/s) write={}ms({:.1}MB/s)",
+                    add_item.name, add_item.size_bytes, download_ms, dl_speed, write_ms, wr_speed
+                );
                 // For backends that do not verify internally (MSC), confirm the file
                 // actually landed before marking it synced. Backends like MTP already
                 // verify via LIBMTP_Get_Filemetadata (direct object-ID lookup) inside
@@ -2136,6 +2146,7 @@ pub async fn execute_provider_sync(
             });
         }) as ProgressCallback;
 
+        let t_download = std::time::Instant::now();
         let buffer =
             match buffer_stream(response.bytes_stream(), total_size, progress_callback).await {
                 Ok(buffer) => buffer,
@@ -2148,6 +2159,7 @@ pub async fn execute_provider_sync(
                     continue;
                 }
             };
+        let download_ms = t_download.elapsed().as_millis();
         let rel_path = construction
             .path
             .strip_prefix(device_path)
@@ -2155,8 +2167,16 @@ pub async fn execute_provider_sync(
             .to_string_lossy()
             .replace('\\', "/");
 
+        let t_write = std::time::Instant::now();
         match device_io.write_with_verify(&rel_path, &buffer).await {
             Ok(_) => {
+                let write_ms = t_write.elapsed().as_millis();
+                let dl_speed = if download_ms > 0 { add_item.size_bytes as f64 / download_ms as f64 * 1000.0 / 1_000_000.0 } else { 0.0 };
+                let wr_speed = if write_ms > 0 { add_item.size_bytes as f64 / write_ms as f64 * 1000.0 / 1_000_000.0 } else { 0.0 };
+                crate::daemon_log!(
+                    "[Sync] '{}' size={}B download={}ms({:.1}MB/s) write={}ms({:.1}MB/s)",
+                    add_item.name, add_item.size_bytes, download_ms, dl_speed, write_ms, wr_speed
+                );
                 let synced_at = now_iso8601();
                 synced_items.push(crate::device::SyncedItem {
                     jellyfin_id: add_item.jellyfin_id.clone(),
