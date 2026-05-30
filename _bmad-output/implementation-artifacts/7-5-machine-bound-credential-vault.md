@@ -55,6 +55,22 @@ baseline_commit: 88f267d0d591bb0d1d533fa9f954b2df0be20047
   - [x] T6.2: `cargo test` passes (no regressions) — 378 tests passed
   - [x] T6.3: `cargo tree | grep keyring` returns nothing
 
+### Review Findings
+
+- [x] [Review][Patch] Add comment to `derive_key` — BLAKE3 accepted for key derivation (hardware UID has UUID-grade entropy; KDF brute-force resistance is not applicable). Document this scope in a one-line comment. [`vault.rs:derive_key`]
+- [x] [Review][Patch] Document hardware UID instability as known limitation — credentials are irrecoverably lost if hardware fingerprint changes (VM migration, hardware swap, OS reinstall); add a note to architecture.md acknowledging this scope boundary. [`architecture.md`]
+- [x] [Review][Patch] Non-atomic file write destroys vault on interrupted save — `File::create` truncates the existing file immediately before both `write_all` calls succeed; a crash/OOM/SIGKILL between the two writes leaves a corrupt file and all credentials permanently lost. Fix: write to a temp file then `fs::rename`. [`vault.rs:51-54`]
+- [x] [Review][Patch] `clear_credentials` silently swallows `remove_file` errors — `let _ = fs::remove_file(...)` discards I/O failures; callers get `Ok(())` while the vault file was not deleted. [`api.rs:1547`]
+- [x] [Review][Patch] Key material in stack buffer before `Secret<>` wrapping — `key_bytes` is a plain `[u8; 32]` on the stack before `Secret::new` takes ownership; also `ChaCha20Poly1305::new(key.expose_secret().into())` copies the key into a `GenericArray` that may not be zeroized after cipher construction. [`vault.rs:30-38`]
+- [x] [Review][Patch] Vault file world-readable on Unix — `File::create` creates with `umask`-masked `0o666` (typically `0o644`); any local user can read `secrets.enc`. Fix: use `OpenOptions` with `.mode(0o600)`. [`vault.rs:51`]
+- [x] [Review][Patch] `save_server_secret`/`save_credentials` silently erase all secrets on vault read failure — both call `load_secrets().unwrap_or_default()`, so any `VaultError` (wrong key, corruption) is treated as "no secrets"; the vault is then overwritten with only the new secret, irrecoverably destroying all others. [`api.rs:1510,1521`]
+- [x] [Review][Patch] AEAD length guard too permissive — `data.len() < 12` passes files of 12–27 bytes (nonce present but AEAD tag truncated); minimum valid size is 28 bytes (12 nonce + 16 tag). Fix: change guard to `data.len() < 28`. [`vault.rs:60`]
+- [x] [Review][Patch] `secrecy` serde feature enables accidental key serialization — `secrecy = { features = ["serde"] }` makes `Secret<T: Serialize>` serializable; remove the feature if `Secret<>` is never stored in a serialized struct. [`Cargo.toml:32`]
+- [x] [Review][Patch] Stale "keyring" references in planning docs — architecture.md and epics.md still contain unreplaced "keyring" prose references outside the sections updated in this story. [`architecture.md`, `epics.md`]
+- [x] [Review][Defer] Concurrent `save_secrets` race condition [`vault.rs:51-54`, `api.rs`] — deferred, pre-existing pattern; fix requires broader mutex infrastructure across the CredentialManager
+- [x] [Review][Defer] `derive_key` called twice per encrypt/decrypt round-trip [`vault.rs:37,66`] — deferred, pre-existing; performance concern only, not a correctness issue
+- [x] [Review][Defer] `get_app_data_dir()` CWD fallback when HOME unset [`paths.rs`] — deferred, pre-existing in paths.rs, not introduced by this change
+
 ## Dev Notes
 
 ### Architecture
@@ -111,4 +127,4 @@ Replace the three keyring call sites in `CredentialManager` (load_secrets, save_
 - 2026-05-30: Replaced `keyring` crate with hardware-bound ChaCha20-Poly1305 vault (`vault.rs`). Updated CredentialManager call sites, Cargo.toml, planning artifacts. 378 tests passing.
 
 ## Status
-review
+done

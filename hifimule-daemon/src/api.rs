@@ -1507,7 +1507,7 @@ impl CredentialManager {
         let path = Self::get_config_path()?;
         fs::write(&path, json).map_err(|e| anyhow!("Failed to write config file: {}", e))?;
 
-        let mut secrets = Self::load_secrets().unwrap_or_default();
+        let mut secrets = Self::load_secrets()?;
         secrets.token = Some(token.to_string());
         Self::save_secrets(&secrets)?;
 
@@ -1518,7 +1518,7 @@ impl CredentialManager {
         if secret.trim().is_empty() {
             return Err(anyhow!("Secret cannot be empty"));
         }
-        let mut secrets = Self::load_secrets().unwrap_or_default();
+        let mut secrets = Self::load_secrets()?;
         secrets
             .server_secrets
             .insert(server_type.to_string(), secret.to_string());
@@ -1544,7 +1544,8 @@ impl CredentialManager {
         {
             if let Ok(vault_path) = Self::get_vault_path() {
                 if vault_path.exists() {
-                    let _ = fs::remove_file(&vault_path);
+                    fs::remove_file(&vault_path)
+                        .map_err(|e| anyhow!("Failed to remove vault file: {}", e))?;
                 }
             }
         }

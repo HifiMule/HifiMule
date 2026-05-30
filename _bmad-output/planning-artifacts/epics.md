@@ -75,7 +75,7 @@ FR3: Epic 2 - Manifest Presence Check
 FR4: Epic 2 - Persistent Hardware ID
 FR5: Epic 2 - Server Credential Entry
 FR6: Epic 2 - User Profile Select
-FR7: Epic 2 - Persistent Server Token (Keyring)
+FR7: Epic 2 - Persistent Server Token (Encrypted Vault)
 FR8: Epic 3 - Jellyfin Library Browser; Epic 9 - Rich Library Navigation
 FR9: Epic 3 - Entity Selection Logic
 FR10: Epic 3 - Real-time Disk Projection
