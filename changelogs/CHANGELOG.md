@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.9.0 - 2026-05-30
+
+Subsonic and Navidrome users get a much better sync experience: devices can now auto-sync when connected, and auto-fill works in both sync previews and automatic syncs. Sync is also safer and more resilient: empty baskets can clean old HifiMule-managed files from a device, concurrent syncs are blocked, large-library preparation is steadier, and temporary server errors are retried instead of immediately failing the whole sync.
+
+This release also improves lossless-friendly DAP syncing by avoiding unnecessary transcoding when originals are already compatible, adds clearer sync speed/preparation logging, improves genre size/count estimates, and stores server credentials in a local machine-bound encrypted vault.
+
 ## v0.8.4 - 2026-05-29
 
 Fixed RPC error when synching a large playlist or genre.
