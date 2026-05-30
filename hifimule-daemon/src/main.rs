@@ -559,6 +559,12 @@ async fn run_auto_sync(
     // Signal syncing state immediately so tray icon updates before any network activity
     let _ = state_tx.send(DaemonState::Syncing);
 
+    // Claim the pipeline lock so concurrent manual syncs or a second auto-sync
+    // cannot run their auto-fill in parallel while we are calculating the delta.
+    let _pipeline_guard = sync_op_manager
+        .try_start_pipeline()
+        .ok_or_else(|| anyhow::anyhow!("[AutoSync] Aborting: sync pipeline already active"))?;
+
     let manifest = device_manager
         .get_current_device()
         .await
@@ -1095,6 +1101,12 @@ async fn run_auto_sync_via_provider(
     device_path: std::path::PathBuf,
 ) -> anyhow::Result<()> {
     let _ = state_tx.send(DaemonState::Syncing);
+
+    // Claim the pipeline lock so concurrent manual syncs or a second auto-sync
+    // cannot run their auto-fill in parallel while we are calculating the delta.
+    let _pipeline_guard = sync_op_manager
+        .try_start_pipeline()
+        .ok_or_else(|| anyhow::anyhow!("[AutoSync] Aborting: sync pipeline already active"))?;
 
     let manifest = device_manager
         .get_current_device()

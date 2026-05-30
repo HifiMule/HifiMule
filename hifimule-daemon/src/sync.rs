@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
 
 use crate::device::DeviceManifest;
@@ -255,16 +256,40 @@ pub struct SyncOperation {
 /// Progress callback function signature for streaming file writes.
 pub type ProgressCallback = Arc<dyn Fn(u64, u64) + Send + Sync>;
 
+/// RAII guard that releases the pipeline lock when dropped.
+/// Obtained via [`SyncOperationManager::try_start_pipeline`].
+pub struct PipelineGuard(Arc<AtomicBool>);
+impl Drop for PipelineGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 /// Manager for tracking active sync operations in memory.
 pub struct SyncOperationManager {
     operations: Arc<RwLock<HashMap<String, SyncOperation>>>,
+    /// True while a sync pipeline (delta calculation or execution) is active.
+    /// Covers the window between pipeline start and the first `create_operation` call,
+    /// where `has_active_operation` would otherwise return false.
+    pipeline_active: Arc<AtomicBool>,
 }
 
 impl SyncOperationManager {
     pub fn new() -> Self {
         Self {
             operations: Arc::new(RwLock::new(HashMap::new())),
+            pipeline_active: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Atomically claim the sync pipeline. Returns a [`PipelineGuard`] that releases
+    /// the lock on drop. Returns `None` if a pipeline is already active — the caller
+    /// must treat this as a concurrency conflict and abort.
+    pub fn try_start_pipeline(&self) -> Option<PipelineGuard> {
+        let flag = Arc::clone(&self.pipeline_active);
+        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| PipelineGuard(flag))
     }
 
     pub async fn create_operation(
@@ -305,7 +330,10 @@ impl SyncOperationManager {
     }
 
     pub async fn has_active_operation(&self) -> bool {
-        self.get_active_operation_id().await.is_some()
+        // Check pipeline flag first (covers the delta-calculation phase before any
+        // operation is registered) then fall back to the operations map.
+        self.pipeline_active.load(Ordering::Acquire)
+            || self.get_active_operation_id().await.is_some()
     }
 
     pub async fn get_active_operation_id(&self) -> Option<String> {

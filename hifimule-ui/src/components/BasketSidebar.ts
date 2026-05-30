@@ -1021,6 +1021,32 @@ export class BasketSidebar {
 
     private async handleStartSync() {
         if (this.isSyncing) return;
+
+        // Disable the button immediately so a second click can't slip through
+        // while the async daemon-state check or delta calculation is in flight.
+        this.isSyncing = true;
+        this.showSyncComplete = false;
+        this.syncErrorMessages = null;
+        this.currentOperation = null;
+        this.currentOperationId = null;
+        this.etaText = t('basket.sync.calculating');
+        this.render();
+
+        // Check daemon for a sync started outside this window (e.g. auto-sync on connect).
+        // If one is already running, attach to it instead of starting a new one.
+        try {
+            const daemonState = await rpcCall('get_daemon_state') as any;
+            const activeOpId = daemonState?.activeOperationId as string | null;
+            if (activeOpId) {
+                this.currentOperationId = activeOpId;
+                this.startPolling();
+                return;
+            }
+        } catch {
+            // Ignore — if daemon state can't be fetched, let the sync attempt proceed and
+            // the server-side guard will reject it if a concurrent sync is truly running.
+        }
+
         const currentItems = basketStore.getItems();
 
         // Detect and extract the auto-fill slot
@@ -1051,13 +1077,6 @@ export class BasketSidebar {
         }
 
         try {
-            this.isSyncing = true;
-            this.showSyncComplete = false;
-            this.syncErrorMessages = null;
-            this.currentOperation = null;
-            this.currentOperationId = null;
-            this.etaText = t('basket.sync.calculating');
-            this.render();
 
             const delta = await rpcCall('sync_calculate_delta', deltaParams);
             const rawCleanupCount = (delta as any)?.destructiveCleanupCount;

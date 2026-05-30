@@ -34,6 +34,7 @@ const ERR_INVALID_CREDENTIALS: i32 = -2;
 const ERR_STORAGE_ERROR: i32 = -3;
 const ERR_NOT_FOUND: i32 = -4;
 const ERR_UNSUPPORTED_CAPABILITY: i32 = -5;
+const ERR_SYNC_IN_PROGRESS: i32 = -6;
 const JELLYFIN_TICKS_PER_SECOND: u64 = 10_000_000;
 const GENRE_TRACK_PAGE_SIZE: u32 = 500;
 const GENRE_TRACK_MAX_PAGES: u32 = 200;
@@ -2504,6 +2505,17 @@ async fn handle_sync_calculate_delta(
     state: &AppState,
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
+    // Claim the pipeline lock for the full duration of this call (auto-fill can run for
+    // several seconds; without this, a concurrent auto-sync would double-paginate the library).
+    let _pipeline_guard = state
+        .sync_operation_manager
+        .try_start_pipeline()
+        .ok_or(JsonRpcError {
+            code: ERR_SYNC_IN_PROGRESS,
+            message: "A sync operation is already in progress".to_string(),
+            data: None,
+        })?;
+
     let params = params.ok_or(JsonRpcError {
         code: ERR_INVALID_PARAMS,
         message: "Missing params".to_string(),
@@ -3160,6 +3172,15 @@ async fn handle_sync_execute(
             message: "No device connected".to_string(),
             data: None,
         })?;
+
+    // Guard: reject if a sync is already running (covers the auto-sync race window)
+    if state.sync_operation_manager.has_active_operation().await {
+        return Err(JsonRpcError {
+            code: ERR_SYNC_IN_PROGRESS,
+            message: "A sync operation is already in progress".to_string(),
+            data: None,
+        });
+    }
 
     // Generate unique operation ID
     let operation_id = uuid::Uuid::new_v4().to_string();
