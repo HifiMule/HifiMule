@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tokio::sync::RwLock;
 
 use crate::device::DeviceManifest;
@@ -46,6 +47,26 @@ fn now_iso8601() -> String {
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
         y, m, d, hours, minutes, seconds
     )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TransferTiming {
+    elapsed_ms: f64,
+    speed_mb_s: f64,
+}
+
+fn transfer_timing(size_bytes: u64, elapsed: Duration) -> TransferTiming {
+    let elapsed_secs = elapsed.as_secs_f64();
+    let speed_mb_s = if elapsed_secs > 0.0 {
+        size_bytes as f64 / elapsed_secs / 1_000_000.0
+    } else {
+        0.0
+    };
+
+    TransferTiming {
+        elapsed_ms: elapsed_secs * 1000.0,
+        speed_mb_s,
+    }
 }
 
 /// An item desired for sync (from the UI basket / Jellyfin API).
@@ -1572,7 +1593,7 @@ pub async fn execute_sync(
         // Buffer the stream into memory, reporting progress during download
         let t_download = std::time::Instant::now();
         let buffer_result = buffer_stream(stream, total_size, progress_callback).await;
-        let download_ms = t_download.elapsed().as_millis();
+        let download_timing = transfer_timing(add_item.size_bytes, t_download.elapsed());
         let buffer = match buffer_result {
             Ok(b) => b,
             Err(e) => {
@@ -1588,15 +1609,18 @@ pub async fn execute_sync(
         // Write file via device IO abstraction
         let t_write = std::time::Instant::now();
         let write_result = device_io.write_with_verify(&rel_path, &buffer).await;
-        let write_ms = t_write.elapsed().as_millis();
+        let write_timing = transfer_timing(add_item.size_bytes, t_write.elapsed());
 
         match write_result {
             Ok(_) => {
-                let dl_speed = if download_ms > 0 { add_item.size_bytes as f64 / download_ms as f64 * 1000.0 / 1_000_000.0 } else { 0.0 };
-                let wr_speed = if write_ms > 0 { add_item.size_bytes as f64 / write_ms as f64 * 1000.0 / 1_000_000.0 } else { 0.0 };
                 crate::daemon_log!(
-                    "[Sync] '{}' size={}B download={}ms({:.1}MB/s) write={}ms({:.1}MB/s)",
-                    add_item.name, add_item.size_bytes, download_ms, dl_speed, write_ms, wr_speed
+                    "[Sync] '{}' size={}B download={:.2}ms({:.1}MB/s) write={:.2}ms({:.1}MB/s)",
+                    add_item.name,
+                    add_item.size_bytes,
+                    download_timing.elapsed_ms,
+                    download_timing.speed_mb_s,
+                    write_timing.elapsed_ms,
+                    write_timing.speed_mb_s
                 );
                 // For backends that do not verify internally (MSC), confirm the file
                 // actually landed before marking it synced. Backends like MTP already
@@ -2187,7 +2211,7 @@ pub async fn execute_provider_sync(
                     continue;
                 }
             };
-        let download_ms = t_download.elapsed().as_millis();
+        let download_timing = transfer_timing(add_item.size_bytes, t_download.elapsed());
         let rel_path = construction
             .path
             .strip_prefix(device_path)
@@ -2198,12 +2222,15 @@ pub async fn execute_provider_sync(
         let t_write = std::time::Instant::now();
         match device_io.write_with_verify(&rel_path, &buffer).await {
             Ok(_) => {
-                let write_ms = t_write.elapsed().as_millis();
-                let dl_speed = if download_ms > 0 { add_item.size_bytes as f64 / download_ms as f64 * 1000.0 / 1_000_000.0 } else { 0.0 };
-                let wr_speed = if write_ms > 0 { add_item.size_bytes as f64 / write_ms as f64 * 1000.0 / 1_000_000.0 } else { 0.0 };
+                let write_timing = transfer_timing(add_item.size_bytes, t_write.elapsed());
                 crate::daemon_log!(
-                    "[Sync] '{}' size={}B download={}ms({:.1}MB/s) write={}ms({:.1}MB/s)",
-                    add_item.name, add_item.size_bytes, download_ms, dl_speed, write_ms, wr_speed
+                    "[Sync] '{}' size={}B download={:.2}ms({:.1}MB/s) write={:.2}ms({:.1}MB/s)",
+                    add_item.name,
+                    add_item.size_bytes,
+                    download_timing.elapsed_ms,
+                    download_timing.speed_mb_s,
+                    write_timing.elapsed_ms,
+                    write_timing.speed_mb_s
                 );
                 let synced_at = now_iso8601();
                 synced_items.push(crate::device::SyncedItem {
@@ -2985,6 +3012,22 @@ mod tests {
             storage_id: None,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn transfer_timing_keeps_sub_millisecond_speed() {
+        let timing = transfer_timing(1_000_000, std::time::Duration::from_micros(500));
+
+        assert_eq!(timing.elapsed_ms, 0.5);
+        assert_eq!(timing.speed_mb_s, 2000.0);
+    }
+
+    #[test]
+    fn transfer_timing_handles_zero_duration() {
+        let timing = transfer_timing(1_000_000, std::time::Duration::ZERO);
+
+        assert_eq!(timing.elapsed_ms, 0.0);
+        assert_eq!(timing.speed_mb_s, 0.0);
     }
 
     fn make_synced_item(
