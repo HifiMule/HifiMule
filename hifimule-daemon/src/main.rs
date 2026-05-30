@@ -67,6 +67,7 @@ mod domain;
 mod paths;
 #[allow(dead_code)]
 mod providers;
+mod vault;
 mod rpc;
 mod scrobbler;
 mod sync;

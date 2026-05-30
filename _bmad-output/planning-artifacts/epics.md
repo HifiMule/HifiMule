@@ -50,7 +50,7 @@ NFR7: Graceful "Interrupted" session marking and repair utility trigger on mid-s
 NFR8: 100% feature parity between Windows, Linux, and macOS.
 NFR9: macOS sandbox compliance (no root/sudo required).
 NFR10: Resource usage within 15% delta across OS environments.
-NFR11: Encrypted credential storage via OS-native vaults using the `keyring` crate.
+NFR11: Encrypted credential storage using hardware-bound encryption (machine-uid + blake3 + ChaCha20-Poly1305). Secrets are stored as `secrets.enc` in the app data directory, bound to the host machine's hardware fingerprint.
 NFR12: Pure local media synchronization (zero third-party data transmission).
 NFR13: CLI-first architecture for the core sync engine.
 
@@ -160,7 +160,7 @@ Implement secure Jellyfin authentication and automated hardware identification.
 ### Story 2.1: Secure Media Server Link
 
 As a System Admin (Alexis),
-I want to securely store my media server URL and credentials in the OS-native keyring,
+I want to securely store my media server URL and credentials in the encrypted local vault,
 So that I don't have to re-enter them and my credentials are safe from other users.
 
 **Acceptance Criteria:**
@@ -168,8 +168,8 @@ So that I don't have to re-enter them and my credentials are safe from other use
 **Given** the UI is open in "Settings"
 **When** I enter a server URL
 **Then** the daemon auto-detects the server type (Story 8.4 factory: Subsonic ping → Jellyfin `/System/Info` fallback).
-**And** for Jellyfin: I enter a Username and Password → daemon authenticates and stores the access token in the system Keyring.
-**And** for Subsonic/Navidrome: I enter a Username and Password → daemon stores the password (encrypted) in the system Keyring for per-request MD5 signing.
+**And** for Jellyfin: I enter a Username and Password → daemon authenticates and stores the access token in the encrypted local vault (`secrets.enc`).
+**And** for Subsonic/Navidrome: I enter a Username and Password → daemon stores the password in the encrypted local vault (`secrets.enc`) for per-request MD5 signing.
 **And** the connection is validated by a successful ping/library query.
 
 ### Story 2.2: Mass Storage Heartbeat (Autodetection)
@@ -244,7 +244,7 @@ So that I can easily connect to my library without manually copying API tokens.
 **Then** the daemon calls the factory (Story 8.4) to auto-detect server type and authenticate.
 **And** for Jellyfin: retrieves and stores an access token via `POST /Users/AuthenticateByName`.
 **And** for Subsonic: verifies credentials via `GET /rest/ping.view` (no token — stateless auth).
-**And** the token or password is securely stored in the system Keyring (replacing any existing credential).
+**And** the token or password is securely stored in the encrypted local vault (replacing any existing credential).
 **And** the UI transitions to the main Library Browser on success.
 **When** authentication fails
 **Then** a clear error message is shown (e.g., "Invalid Credentials", "Server Unreachable", or "Unknown server type at this URL").

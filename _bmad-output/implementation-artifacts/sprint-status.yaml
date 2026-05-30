@@ -110,7 +110,7 @@ development_status:
   7-2-devicemanager-concurrency-refactor: done
   7-3-device-ui-and-identity-polish: done
   7-4-packaging-and-cicd-hardening: done
-  7-5-machine-bound-credential-vault: ready-for-dev
+  7-5-machine-bound-credential-vault: review
   epic-7-retrospective: done
 
   epic-8: done

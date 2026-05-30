@@ -1409,10 +1409,7 @@ pub(crate) fn credential_test_lock() -> std::sync::MutexGuard<'static, ()> {
     guard
 }
 
-#[cfg(not(test))]
-const KEYRING_SERVICE: &str = "hifimule.github.io";
-#[cfg(not(test))]
-const KEYRING_SECRETS_ACCOUNT: &str = "secrets";
+const VAULT_APP_SALT: &str = "hifimule.github.io/secrets/v1";
 
 #[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
 struct Secrets {
@@ -1423,16 +1420,21 @@ struct Secrets {
 }
 
 impl CredentialManager {
+    fn get_vault_path() -> Result<PathBuf> {
+        Ok(crate::paths::get_app_data_dir()?.join("secrets.enc"))
+    }
+
     fn load_secrets() -> Result<Secrets> {
         #[cfg(not(test))]
         {
-            let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_SECRETS_ACCOUNT)
-                .map_err(|e| anyhow!("Failed to access keyring: {}", e))?;
-            return match entry.get_password() {
-                Ok(json) => serde_json::from_str(&json)
-                    .map_err(|e| anyhow!("Failed to parse secrets blob: {}", e)),
-                Err(_) => Ok(Secrets::default()),
-            };
+            let path = Self::get_vault_path()?;
+            if !path.exists() {
+                return Ok(Secrets::default());
+            }
+            let json = crate::vault::decrypt_file(&path, VAULT_APP_SALT)
+                .map_err(|e| anyhow!("Failed to decrypt secrets vault: {}", e))?;
+            return serde_json::from_str(&json)
+                .map_err(|e| anyhow!("Failed to parse secrets blob: {}", e));
         }
         #[cfg(test)]
         {
@@ -1444,12 +1446,10 @@ impl CredentialManager {
     fn save_secrets(secrets: &Secrets) -> Result<()> {
         #[cfg(not(test))]
         {
-            let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_SECRETS_ACCOUNT)
-                .map_err(|e| anyhow!("Failed to access keyring: {}", e))?;
+            let path = Self::get_vault_path()?;
             let json = serde_json::to_string(secrets)?;
-            return entry
-                .set_password(&json)
-                .map_err(|e| anyhow!("Failed to save secrets to keyring: {}", e));
+            return crate::vault::encrypt_file(&path, &json, VAULT_APP_SALT)
+                .map_err(|e| anyhow!("Failed to save secrets vault: {}", e));
         }
         #[cfg(test)]
         {
@@ -1531,7 +1531,7 @@ impl CredentialManager {
             .server_secrets
             .get(server_type)
             .cloned()
-            .ok_or_else(|| anyhow!("No server secret found in keyring: {}", server_type))
+            .ok_or_else(|| anyhow!("No server secret found in vault: {}", server_type))
     }
 
     pub fn clear_credentials() -> Result<()> {
@@ -1541,8 +1541,12 @@ impl CredentialManager {
         }
 
         #[cfg(not(test))]
-        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_SECRETS_ACCOUNT) {
-            let _ = entry.delete_password();
+        {
+            if let Ok(vault_path) = Self::get_vault_path() {
+                if vault_path.exists() {
+                    let _ = fs::remove_file(&vault_path);
+                }
+            }
         }
 
         #[cfg(test)]
@@ -1574,7 +1578,7 @@ impl CredentialManager {
         let secrets = Self::load_secrets()?;
         let token = secrets
             .token
-            .ok_or_else(|| anyhow!("No token found in keyring"))?;
+            .ok_or_else(|| anyhow!("No token found in vault"))?;
 
         Ok((config.url, token, config.user_id))
     }

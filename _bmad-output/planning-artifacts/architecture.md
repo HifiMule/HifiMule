@@ -66,7 +66,7 @@ npx create-tauri-app@latest hifimule-ui --template vanilla-ts
 **Critical Decisions (Block Implementation):**
 - **Architecture Style:** Detached Multi-Process (Rust Daemon + Tauri UI).
 - **IPC Mechanism:** JSON-RPC over Localhost (HTTP).
-- **Secure Storage:** `keyring` crate for OS-native credential management.
+- **Secure Storage:** Hardware-bound encryption vault (`machine-uid` + `blake3` + `chacha20poly1305`) — credentials stored as `secrets.enc` in the app data directory, bound to the host machine's hardware fingerprint.
 
 **Important Decisions (Shape Architecture):**
 - **Data Persistence:** SQLite (`rusqlite`) for daemon state and scrobble history.
@@ -151,9 +151,9 @@ unrecognized_device_path: Option<PathBuf>            // device awaiting initiali
 `get_current_device()` returns the manifest for `selected_device_path`. All existing callers (basket, sync, manifest, storage) are unchanged. When only one device is connected it is auto-selected.
 
 ### Authentication & Security
-- **Credential Management:** Server credentials are stored in the OS-native secure vault (Windows Credential Manager, macOS Keychain, Linux Secret Service) using the `keyring` crate.
+- **Credential Management:** Server credentials are stored in a hardware-bound encrypted vault (`secrets.enc`) in the app data directory. The encryption key is derived from the host machine's hardware fingerprint (via `machine-uid`) mixed with an app-specific salt using `blake3`, then used with `chacha20poly1305` (AEAD). This protects against offline disk/backup exfiltration; root compromise is out of scope.
   - **Jellyfin:** Stores a rotatable access token. Re-authenticates on 401.
-  - **Subsonic/OpenSubsonic:** Stores the user password (encrypted). Auth is stateless — credentials are sent on every request as `t=md5(password+salt)` + `s=salt`. The password is used only to compute per-request tokens; it is never stored in plaintext.
+  - **Subsonic/OpenSubsonic:** Stores the user password (encrypted at rest). Auth is stateless — credentials are sent on every request as `t=md5(password+salt)` + `s=salt`. The password is used only to compute per-request tokens; it is never stored in plaintext.
 - **Process Isolation:** The UI and Daemon communicate over a restricted local loopback, minimizing system exposure.
 
 ### API & Communication Patterns
@@ -480,7 +480,7 @@ pub struct AppState {
 
 ### Server Config Persistence
 
-Server URL, detected type, and username are persisted in SQLite so the daemon can reconnect on restart. Credentials remain exclusively in the OS keyring.
+Server URL, detected type, and username are persisted in SQLite so the daemon can reconnect on restart. Credentials remain exclusively in the encrypted local vault (`secrets.enc`).
 
 **Schema:**
 ```sql
@@ -493,11 +493,11 @@ CREATE TABLE IF NOT EXISTS server_config (
 );
 ```
 
-On daemon startup: if a `server_config` row exists, the daemon calls `connect()` with the stored URL, fetches credentials from keyring, and restores the active provider before the RPC server starts accepting requests.
+On daemon startup: if a `server_config` row exists, the daemon calls `connect()` with the stored URL, fetches credentials from the encrypted local vault (`secrets.enc`), and restores the active provider before the RPC server starts accepting requests.
 
 ### Subsonic Auth Internals
 
-`SubsonicProvider` fetches the password from keyring **once at construction time** and holds it in memory for the session lifetime of the struct.
+`SubsonicProvider` fetches the password from the encrypted local vault **once at construction time** and holds it in memory for the session lifetime of the struct.
 
 Every outgoing HTTP request appends auth params:
 ```
