@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-05-24  # Story 10.3 implemented profile-based folder defaults
+last_updated: 2026-05-30  # Story 7.5 added — replace keyring with machine-bound encryption vault
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -105,11 +105,12 @@ development_status:
   6-7-macos-daemon-launchd-agent: done
   epic-6-retrospective: done
 
-  epic-7: done
+  epic-7: in-progress
   7-1-mtp-io-and-wpd-hardening: done
   7-2-devicemanager-concurrency-refactor: done
   7-3-device-ui-and-identity-polish: done
   7-4-packaging-and-cicd-hardening: done
+  7-5-machine-bound-credential-vault: ready-for-dev
   epic-7-retrospective: done
 
   epic-8: done

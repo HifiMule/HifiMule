@@ -1477,6 +1477,44 @@ So that every release artifact is verifiable, installable on clean machines, and
 - Xvfb display: `Xvfb -displayfd fd` writes the chosen display number to a file descriptor — avoids hardcoded `:99`
 - Windows install path registry key: written by the WiX installer via `<RegistryValue>` in the product `.wxs`
 
+### Story 7.5: Machine-Bound Credential Vault (Replace Keyring)
+
+As a System Admin (Alexis),
+I want media credentials to be stored in a hardware-bound encrypted file rather than the OS-native keyring,
+So that the daemon works reliably in headless and minimal Linux environments without D-Bus or Secret Service dependencies.
+
+**Acceptance Criteria:**
+
+**Given** `CredentialManager::save_secrets()` is called with a Jellyfin token or Subsonic password
+**When** the write completes
+**Then** a `secrets.enc` file is written to `get_app_data_dir()` (alongside `config.json`).
+**And** no OS credential vault (Keychain, Credential Manager, Secret Service) is accessed.
+
+**Given** `CredentialManager::load_secrets()` is called on a machine that saved the vault
+**When** the read completes
+**Then** the correct `Secrets` blob is returned (covering both Jellyfin token and Subsonic password).
+
+**Given** `secrets.enc` is copied to a different machine
+**When** `load_secrets()` is called on the second machine
+**Then** decryption fails (hardware fingerprint mismatch) and `Secrets::default()` is returned.
+
+**Given** `CredentialManager::clear_credentials()` is called
+**When** the call completes
+**Then** `secrets.enc` is deleted from disk.
+**And** `config.json` is also removed (existing behaviour unchanged).
+
+**Given** the test suite runs (`cargo test`)
+**When** the `#[cfg(test)]` mock seam (`TEST_SECRETS: Mutex<Option<Secrets>>`) is active
+**Then** all existing `CredentialManager` tests pass without modification.
+
+**Technical Notes:**
+- New module `hifimule-daemon/src/vault.rs`: `derive_key(app_salt)` (machine-uid + blake3) + `encrypt_file(path, plaintext, salt)` + `decrypt_file(path, salt)` (ChaCha20-Poly1305)
+- Nonce: **random per write** via `OsRng` (not a deterministic hash) — prepended as first 12 bytes of `secrets.enc`
+- Key material wrapped in `secrecy::Secret<[u8; 32]>` and zeroized after use
+- Remove `keyring = "2.3"` from `Cargo.toml`; add `machine-uid = "0.5"`, `blake3 = "1.5"`, `chacha20poly1305 = "0.10"`, `secrecy = { version = "0.8", features = ["serde"] }`, and `rand` (if not already present) for `OsRng`
+- `VAULT_APP_SALT: &str = "hifimule.github.io/secrets/v1"`
+- Reference: `_bmad-output/planning-artifacts/research/encryption.md` + `sprint-change-proposal-2026-05-30-keyring-to-machine-bound-encryption.md`
+
 ## Epic 8: Multi-Provider Media Server Support
 
 > **Prerequisite for modified Stories 2.1, 2.5, 3.1, 4.8, 5.1.**
