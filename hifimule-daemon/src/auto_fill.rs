@@ -24,6 +24,8 @@ pub struct AutoFillItem {
     #[serde(default)]
     pub provider_album_id: Option<String>,
     #[serde(default)]
+    pub provider_content_type: Option<String>,
+    #[serde(default)]
     pub provider_suffix: Option<String>,
     pub size_bytes: u64,
     pub priority_reason: String,
@@ -255,6 +257,13 @@ pub fn rank_and_truncate(
                 .album_artist
                 .or_else(|| track.artists.and_then(|a| a.into_iter().next())),
             provider_album_id: track.album_id,
+            provider_content_type: track
+                .media_sources
+                .as_ref()
+                .and_then(|sources| sources.first())
+                .and_then(|source| source.container.clone())
+                .or_else(|| track.container.clone())
+                .map(|suffix| format!("audio/{suffix}")),
             provider_suffix: track
                 .media_sources
                 .as_ref()
@@ -311,6 +320,7 @@ impl ProviderFillState {
             album: song.album_title,
             artist: song.artist_name,
             provider_album_id: song.album_id,
+            provider_content_type: song.content_type,
             provider_suffix: song.suffix,
             size_bytes,
             priority_reason,
@@ -541,6 +551,10 @@ mod tests {
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].provider_album_id.as_deref(), Some("album1"));
+        assert_eq!(
+            result[0].provider_content_type.as_deref(),
+            Some("audio/mp3")
+        );
         assert_eq!(result[0].provider_suffix.as_deref(), Some("mp3"));
     }
 

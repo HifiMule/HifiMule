@@ -621,7 +621,23 @@ impl AudioFormatRequirement {
         let container_matches =
             self.containers.is_empty() || !format.containers.is_disjoint(&self.containers);
         let codec_matches = self.codecs.is_empty() || !format.codecs.is_disjoint(&self.codecs);
-        container_matches && codec_matches
+        container_matches && (codec_matches || self.matches_ambiguous_mp4_audio(format))
+    }
+
+    fn matches_ambiguous_mp4_audio(&self, format: &AudioFormat) -> bool {
+        if !format.codecs.is_empty() || self.codecs.is_empty() {
+            return false;
+        }
+        let source_is_mp4_audio =
+            format.containers.contains("m4a") || format.containers.contains("mp4");
+        let requirement_is_mp4_audio =
+            self.containers.contains("m4a") || self.containers.contains("mp4");
+        let requirement_accepts_common_mp4_audio = self
+            .codecs
+            .iter()
+            .all(|codec| matches!(codec.as_str(), "aac" | "alac"));
+
+        source_is_mp4_audio && requirement_is_mp4_audio && requirement_accepts_common_mp4_audio
     }
 }
 
@@ -665,6 +681,41 @@ fn audio_compatibility_profile(
     device_profile: Option<&serde_json::Value>,
     preferred_audio_container: Option<&str>,
 ) -> AudioCompatibilityProfile {
+    if let Some(profile) = device_profile {
+        let mut direct_formats = Vec::new();
+        if let Some(profiles) = profile["DirectPlayProfiles"].as_array() {
+            for direct in profiles {
+                if direct["Type"]
+                    .as_str()
+                    .is_some_and(|kind| !kind.eq_ignore_ascii_case("Audio"))
+                {
+                    continue;
+                }
+                if let Some(requirement) =
+                    audio_requirement(direct["Container"].as_str(), direct["AudioCodec"].as_str())
+                {
+                    direct_formats.push(requirement);
+                }
+            }
+        }
+
+        let transcode_profile = transcode_profile_from_device_profile(profile);
+        let mut output_formats = direct_formats.clone();
+        if let Some(profile) = &transcode_profile {
+            if let Some(requirement) =
+                audio_requirement(profile.container.as_deref(), profile.audio_codec.as_deref())
+            {
+                output_formats.push(requirement);
+            }
+        }
+
+        return AudioCompatibilityProfile {
+            direct_formats,
+            output_formats,
+            transcode_profile,
+        };
+    }
+
     if let Some(container) = preferred_audio_container {
         let direct_requirement: Vec<AudioFormatRequirement> =
             audio_requirement(Some(container), Some(container))
@@ -686,42 +737,7 @@ fn audio_compatibility_profile(
         };
     }
 
-    let Some(profile) = device_profile else {
-        return AudioCompatibilityProfile::default();
-    };
-
-    let mut direct_formats = Vec::new();
-    if let Some(profiles) = profile["DirectPlayProfiles"].as_array() {
-        for direct in profiles {
-            if direct["Type"]
-                .as_str()
-                .is_some_and(|kind| !kind.eq_ignore_ascii_case("Audio"))
-            {
-                continue;
-            }
-            if let Some(requirement) =
-                audio_requirement(direct["Container"].as_str(), direct["AudioCodec"].as_str())
-            {
-                direct_formats.push(requirement);
-            }
-        }
-    }
-
-    let transcode_profile = transcode_profile_from_device_profile(profile);
-    let mut output_formats = direct_formats.clone();
-    if let Some(profile) = &transcode_profile {
-        if let Some(requirement) =
-            audio_requirement(profile.container.as_deref(), profile.audio_codec.as_deref())
-        {
-            output_formats.push(requirement);
-        }
-    }
-
-    AudioCompatibilityProfile {
-        direct_formats,
-        output_formats,
-        transcode_profile,
-    }
+    AudioCompatibilityProfile::default()
 }
 
 fn transcode_profile_from_device_profile(profile: &serde_json::Value) -> Option<TranscodeProfile> {
@@ -805,7 +821,7 @@ fn add_content_type_format(format: &mut AudioFormat, value: &str) {
             continue;
         };
         match key.as_str() {
-            "mp3" | "flac" | "aac" | "opus" => {
+            "mp3" | "flac" | "aac" | "opus" | "wav" => {
                 add_audio_container_key(&mut format.containers, &key);
                 add_audio_codec_key(&mut format.codecs, &key);
             }
@@ -858,6 +874,9 @@ fn add_audio_container_key(keys: &mut HashSet<String>, key: &str) {
         "opus" => {
             keys.insert("opus".to_string());
         }
+        "wav" | "wave" | "audio/wav" | "audio/x-wav" => {
+            keys.insert("wav".to_string());
+        }
         other => {
             keys.insert(other.to_string());
         }
@@ -881,6 +900,10 @@ fn add_audio_codec_key(keys: &mut HashSet<String>, key: &str) {
         "opus" => {
             keys.insert("opus".to_string());
         }
+        "wav" | "wave" | "audio/wav" | "audio/x-wav" | "pcm_s16le" | "pcm" => {
+            keys.insert("pcm_s16le".to_string());
+            keys.insert("pcm".to_string());
+        }
         other => {
             keys.insert(other.to_string());
         }
@@ -888,7 +911,7 @@ fn add_audio_codec_key(keys: &mut HashSet<String>, key: &str) {
 }
 
 fn is_self_describing_audio_key(key: &str) -> bool {
-    matches!(key, "mp3" | "flac" | "aac" | "opus")
+    matches!(key, "mp3" | "flac" | "aac" | "opus" | "wav" | "wave")
 }
 
 fn normalized_audio_key(value: &str) -> Option<String> {
@@ -911,6 +934,7 @@ fn normalized_audio_key(value: &str) -> Option<String> {
             "audio/aac" | "audio/aacp" => "aac",
             "audio/ogg" | "application/ogg" => "ogg",
             "audio/opus" => "opus",
+            "audio/wav" | "audio/x-wav" | "audio/wave" | "audio/vnd.wave" => "wav",
             "application/octet-stream" | "binary/octet-stream" => return None,
             other => other,
         }
@@ -933,6 +957,7 @@ fn extension_from_content_type(content_type: &str) -> Option<&'static str> {
         "flac" | "x-flac" => Some("flac"),
         "ogg" | "oga" | "vorbis" => Some("ogg"),
         "opus" => Some("opus"),
+        "wav" | "wave" => Some("wav"),
         "mp4" | "m4a" | "aac" => Some("m4a"),
         _ => None,
     }
@@ -1524,11 +1549,22 @@ pub async fn execute_sync(
             }
         };
 
-        let preferred_audio_container = device_io.preferred_audio_container();
+        let device_preferred_audio_container = device_io.preferred_audio_container();
+        let preferred_audio_container = if transcoding_profile.is_some() {
+            None
+        } else {
+            device_preferred_audio_container
+        };
         let effective_transcoding_profile;
+        let compatibility =
+            audio_compatibility_profile(transcoding_profile.as_ref(), preferred_audio_container);
+        let source_format = provider_audio_format(source_container(item), None);
+        let source_direct_compatible = compatibility.source_is_direct_compatible(&source_format);
         let stream_profile = if let Some(container) = preferred_audio_container {
             effective_transcoding_profile = forced_audio_profile(container);
             Some(&effective_transcoding_profile)
+        } else if compatibility.is_constrained() && source_direct_compatible {
+            None
         } else {
             transcoding_profile.as_ref()
         };
@@ -1578,10 +1614,11 @@ pub async fn execute_sync(
         };
         let extension_override = preferred_audio_container.or(profile_container);
         eprintln!(
-            "[Sync] item={} extension_override={:?} (preferred_audio_container={:?}, profile_container={:?}, is_transcoded={})",
+            "[Sync] item={} extension_override={:?} (preferred_audio_container={:?}, device_preferred_audio_container={:?}, profile_container={:?}, is_transcoded={})",
             add_item.jellyfin_id,
             extension_override,
             preferred_audio_container,
+            device_preferred_audio_container,
             profile_container,
             is_transcoded
         );
@@ -2060,7 +2097,12 @@ pub async fn execute_provider_sync(
                 .to_string()
         });
 
-    let preferred_audio_container = device_io.preferred_audio_container();
+    let device_preferred_audio_container = device_io.preferred_audio_container();
+    let preferred_audio_container = if transcoding_profile.is_some() {
+        None
+    } else {
+        device_preferred_audio_container
+    };
     let compatibility =
         audio_compatibility_profile(transcoding_profile.as_ref(), preferred_audio_container);
     let readd_ids: HashSet<&str> = delta
@@ -2118,9 +2160,14 @@ pub async fn execute_provider_sync(
             None
         };
         crate::daemon_log!(
-            "[Sync] Preparing '{}': resolving provider download URL (transcode={})",
+            "[Sync] Preparing '{}': resolving provider download URL (transcode={}, source_suffix={:?}, source_content_type={:?}, direct_compatible={}, preferred_audio_container={:?}, device_preferred_audio_container={:?})",
             add_item.name,
-            profile.is_some()
+            profile.is_some(),
+            add_item.provider_suffix,
+            add_item.provider_content_type,
+            source_direct_compatible,
+            preferred_audio_container,
+            device_preferred_audio_container
         );
         let url = match provider
             .download_url(&add_item.jellyfin_id, profile.as_ref())
@@ -3586,6 +3633,35 @@ mod tests {
         })
     }
 
+    fn modern_dap_lossless_profile() -> serde_json::Value {
+        serde_json::json!({
+            "Name": "Test Modern DAP Lossless",
+            "MaxStreamingBitrate": 9216000,
+            "MusicStreamingTranscodingBitrate": 9216000,
+            "DirectPlayProfiles": [
+                { "Container": "mp3", "Type": "Audio", "AudioCodec": "mp3" },
+                { "Container": "mp4", "Type": "Audio", "AudioCodec": "aac" },
+                { "Container": "m4a", "Type": "Audio", "AudioCodec": "aac" },
+                { "Container": "m4a", "Type": "Audio", "AudioCodec": "alac" },
+                { "Container": "flac", "Type": "Audio", "AudioCodec": "flac" },
+                { "Container": "ogg", "Type": "Audio", "AudioCodec": "vorbis" },
+                { "Container": "opus", "Type": "Audio", "AudioCodec": "opus" },
+                { "Container": "wav", "Type": "Audio", "AudioCodec": "pcm_s16le" }
+            ],
+            "TranscodingProfiles": [
+                {
+                    "Container": "flac",
+                    "Type": "Audio",
+                    "AudioCodec": "flac",
+                    "Protocol": "http",
+                    "EstimateContentLength": true,
+                    "EnableMpegtsM2TsMode": false
+                }
+            ],
+            "CodecProfiles": []
+        })
+    }
+
     fn provider_credentials(server_url: String) -> crate::providers::ProviderCredentials {
         crate::providers::ProviderCredentials {
             server_url,
@@ -3608,18 +3684,87 @@ mod tests {
     }
 
     #[test]
-    fn test_audio_compatibility_requires_distinct_codec_confirmation() {
+    fn test_audio_compatibility_accepts_mp4_container_when_profile_supports_common_mp4_audio() {
         let compatibility = audio_compatibility_profile(Some(&m4a_aac_direct_profile()), None);
         let m4a_container_only = provider_audio_format(Some("m4a"), Some("audio/mp4"));
         let confirmed_aac = provider_audio_format(Some("m4a"), Some("audio/aac"));
 
         assert!(
-            !compatibility.source_is_direct_compatible(&m4a_container_only),
-            "m4a/mp4 container metadata alone must not prove AAC compatibility"
+            compatibility.source_is_direct_compatible(&m4a_container_only),
+            "m4a/mp4 container metadata should direct-download when the profile supports AAC/M4A"
         );
         assert!(
             compatibility.source_is_direct_compatible(&confirmed_aac),
             "explicit AAC metadata with an M4A suffix should satisfy the profile"
+        );
+    }
+
+    #[test]
+    fn test_modern_dap_direct_formats_are_detected_from_expanded_metadata() {
+        let compatibility = audio_compatibility_profile(Some(&modern_dap_lossless_profile()), None);
+
+        assert!(
+            compatibility.source_is_direct_compatible(&provider_audio_format(
+                Some("flac"),
+                Some("audio/flac")
+            )),
+            "FLAC metadata should direct-download for Modern DAP"
+        );
+        assert!(
+            compatibility.source_is_direct_compatible(&provider_audio_format(
+                Some("mp3"),
+                Some("audio/mpeg")
+            )),
+            "MP3 metadata should direct-download for Modern DAP"
+        );
+        assert!(
+            compatibility.source_is_direct_compatible(&provider_audio_format(
+                Some("m4a"),
+                Some("audio/mp4")
+            )),
+            "M4A/MP4 metadata should direct-download for Modern DAP"
+        );
+        assert!(
+            compatibility.source_is_direct_compatible(&provider_audio_format(
+                Some("wav"),
+                Some("audio/wav")
+            )),
+            "WAV metadata should direct-download for Modern DAP"
+        );
+    }
+
+    #[test]
+    fn test_explicit_device_profile_takes_precedence_over_mtp_preferred_container() {
+        let compatibility =
+            audio_compatibility_profile(Some(&modern_dap_lossless_profile()), Some("mp3"));
+
+        assert!(
+            compatibility.source_is_direct_compatible(&provider_audio_format(
+                Some("flac"),
+                Some("audio/flac")
+            )),
+            "Modern DAP FLAC direct-play support should not be overridden by an MTP mp3 preference"
+        );
+        assert_eq!(compatibility.transcode_target_label(), "flac");
+    }
+
+    #[test]
+    fn test_mtp_preferred_container_still_applies_without_device_profile() {
+        let compatibility = audio_compatibility_profile(None, Some("mp3"));
+
+        assert!(
+            compatibility.source_is_direct_compatible(&provider_audio_format(
+                Some("mp3"),
+                Some("audio/mpeg")
+            )),
+            "MP3 should remain direct-compatible for the MTP fallback"
+        );
+        assert!(
+            !compatibility.source_is_direct_compatible(&provider_audio_format(
+                Some("flac"),
+                Some("audio/flac")
+            )),
+            "The MTP fallback should still force non-MP3 sources to transcode when no profile is selected"
         );
     }
 
