@@ -1085,8 +1085,9 @@ export class BasketSidebar {
                 : Array.isArray((delta as any)?.deletes) ? (delta as any).deletes.length : 0;
             const rawThreshold = (delta as any)?.destructiveCleanupThreshold;
             const destructiveThreshold = typeof rawThreshold === 'number' ? rawThreshold : Number.POSITIVE_INFINITY;
+            const changeReasons = this.changeReasonSummary(delta);
             const confirmDestructiveCleanup = deleteCount > destructiveThreshold
-                ? await this.confirmDestructiveCleanup(deleteCount)
+                ? await this.confirmDestructiveCleanup(deleteCount, changeReasons)
                 : false;
             if (deleteCount > destructiveThreshold && !confirmDestructiveCleanup) {
                 this.stopPolling();
@@ -1112,11 +1113,32 @@ export class BasketSidebar {
         }
     }
 
-    private confirmDestructiveCleanup(count: number): Promise<boolean> {
+    private changeReasonSummary(delta: unknown): Array<{ reason: string; count: number }> {
+        const raw = (delta as any)?.changeReasons;
+        if (!Array.isArray(raw)) return [];
+        return raw
+            .map((entry) => ({
+                reason: typeof entry?.reason === 'string' ? entry.reason : '',
+                count: typeof entry?.count === 'number' ? entry.count : 0,
+            }))
+            .filter((entry) => entry.reason && entry.count > 0);
+    }
+
+    private confirmDestructiveCleanup(
+        count: number,
+        reasons: Array<{ reason: string; count: number }> = [],
+    ): Promise<boolean> {
         return new Promise((resolve) => {
             const dialog = document.createElement('sl-dialog') as any;
+            const reasonList = reasons.length > 0
+                ? `<p><strong>${t('basket.confirm.reason_summary')}</strong></p>
+                <ul class="cleanup-reasons">${reasons.map((entry) => `
+                    <li><strong>${entry.count}</strong> ${this.escapeHtml(entry.reason)}</li>
+                `).join('')}</ul>`
+                : '';
             dialog.innerHTML = `
                 <p>${t('basket.confirm.remove_managed_files', { count })}</p>
+                ${reasonList}
                 <sl-button slot="footer" variant="default" id="cleanup-cancel">${t('basket.actions.cancel')}</sl-button>
                 <sl-button slot="footer" variant="danger" id="cleanup-confirm">${t('basket.actions.start_sync')}</sl-button>
             `;

@@ -106,6 +106,10 @@ pub struct SyncAddItem {
     pub original_bitrate: Option<u32>,
     #[serde(default)]
     pub track_number: Option<u32>,
+    #[serde(default)]
+    pub reason_code: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// An item to be deleted from the device.
@@ -115,6 +119,10 @@ pub struct SyncDeleteItem {
     pub jellyfin_id: String,
     pub local_path: String,
     pub name: String,
+    #[serde(default)]
+    pub reason_code: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// An item whose Jellyfin ID changed but file remains identical.
@@ -138,6 +146,10 @@ pub struct SyncIdChangeItem {
     /// Preserved from the old manifest entry — set if the filename was previously truncated.
     #[serde(default)]
     pub original_name: Option<String>,
+    #[serde(default)]
+    pub reason_code: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// Metadata for a single track within a playlist, for M3U generation.
@@ -168,6 +180,106 @@ pub struct SyncDelta {
     pub unchanged: usize,
     #[serde(default)]
     pub playlists: Vec<PlaylistSyncItem>, // playlist basket items with ordered tracks
+}
+
+fn change_reason(code: &str) -> String {
+    match code {
+        "new-selection" => "new selection".to_string(),
+        "removed-selection" => "removed from sync selection".to_string(),
+        "transcoding-profile-change" => "transcoding profile changed".to_string(),
+        "music-folder-change" => "music folder changed".to_string(),
+        "bitrate-increase" => "source bitrate increased".to_string(),
+        "bitrate-missing" => "previous sync did not record source bitrate".to_string(),
+        "device-file-missing" => "device file is missing".to_string(),
+        "server-id-change" => "server item ID changed".to_string(),
+        "force-sync" => "force sync requested".to_string(),
+        other => other.replace('-', " "),
+    }
+}
+
+fn bitrate_stale_reason(server: Option<u32>, local: Option<u32>) -> Option<&'static str> {
+    match (server, local) {
+        (Some(server), Some(local)) if server > local => Some("bitrate-increase"),
+        (Some(_), None) => Some("bitrate-missing"),
+        _ => None,
+    }
+}
+
+fn annotate_add(mut item: SyncAddItem, code: &str) -> SyncAddItem {
+    item.reason_code = Some(code.to_string());
+    item.reason = Some(change_reason(code));
+    item
+}
+
+fn annotate_delete(mut item: SyncDeleteItem, code: &str) -> SyncDeleteItem {
+    item.reason_code = Some(code.to_string());
+    item.reason = Some(change_reason(code));
+    item
+}
+
+fn annotate_id_change(mut item: SyncIdChangeItem, code: &str) -> SyncIdChangeItem {
+    item.reason_code = Some(code.to_string());
+    item.reason = Some(change_reason(code));
+    item
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncReasonSummary {
+    pub reason_code: String,
+    pub reason: String,
+    pub count: usize,
+}
+
+pub fn change_reason_summary(delta: &SyncDelta) -> Vec<SyncReasonSummary> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for code in delta
+        .adds
+        .iter()
+        .filter_map(|item| item.reason_code.as_deref())
+        .chain(
+            delta
+                .deletes
+                .iter()
+                .filter_map(|item| item.reason_code.as_deref()),
+        )
+        .chain(
+            delta
+                .id_changes
+                .iter()
+                .filter_map(|item| item.reason_code.as_deref()),
+        )
+    {
+        *counts.entry(code.to_string()).or_insert(0) += 1;
+    }
+
+    let mut summary: Vec<SyncReasonSummary> = counts
+        .into_iter()
+        .map(|(reason_code, count)| SyncReasonSummary {
+            reason: change_reason(&reason_code),
+            reason_code,
+            count,
+        })
+        .collect();
+    summary.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.reason.cmp(&right.reason))
+    });
+    summary
+}
+
+pub fn format_change_reason_summary(delta: &SyncDelta) -> String {
+    let summary = change_reason_summary(delta);
+    if summary.is_empty() {
+        return "none".to_string();
+    }
+    summary
+        .iter()
+        .map(|entry| format!("{} {}", entry.count, entry.reason))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 async fn cleanup_replaced_file_after_write(
@@ -2677,19 +2789,24 @@ pub async fn augment_delta_with_existence_check(
             continue;
         };
         if !device_file_exists(device_io, &item.local_path).await {
-            to_add.push(SyncAddItem {
-                jellyfin_id: desired.jellyfin_id.clone(),
-                name: desired.name.clone(),
-                album: desired.album.clone(),
-                artist: desired.artist.clone(),
-                size_bytes: desired.size_bytes,
-                etag: desired.etag.clone(),
-                provider_album_id: desired.provider_album_id.clone(),
-                provider_content_type: desired.provider_content_type.clone(),
-                provider_suffix: desired.provider_suffix.clone(),
-                original_bitrate: desired.original_bitrate,
-                track_number: desired.track_number,
-            });
+            to_add.push(annotate_add(
+                SyncAddItem {
+                    jellyfin_id: desired.jellyfin_id.clone(),
+                    name: desired.name.clone(),
+                    album: desired.album.clone(),
+                    artist: desired.artist.clone(),
+                    size_bytes: desired.size_bytes,
+                    etag: desired.etag.clone(),
+                    provider_album_id: desired.provider_album_id.clone(),
+                    provider_content_type: desired.provider_content_type.clone(),
+                    provider_suffix: desired.provider_suffix.clone(),
+                    original_bitrate: desired.original_bitrate,
+                    track_number: desired.track_number,
+                    reason_code: None,
+                    reason: None,
+                },
+                "device-file-missing",
+            ));
         }
     }
     let recovered = to_add.len();
@@ -2964,12 +3081,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
             // Quality-upgrade check: re-sync when server reports higher bitrate than recorded,
             // or when the manifest entry has no bitrate recorded (old manifest, populate on next sync).
             if let Some(desired) = desired {
-                let quality_upgrade = match (desired.original_bitrate, i.original_bitrate) {
-                    (Some(server), Some(local)) => server > local,
-                    (Some(_), None) => true, // old entry — re-sync to populate bitrate
-                    _ => false,
-                };
-                if quality_upgrade {
+                if bitrate_stale_reason(desired.original_bitrate, i.original_bitrate).is_some() {
                     return false;
                 }
             }
@@ -2987,18 +3099,39 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
     let adds: Vec<SyncAddItem> = desired_items
         .iter()
         .filter(|i| !current_ids.contains(i.jellyfin_id.as_str()))
-        .map(|i| SyncAddItem {
-            jellyfin_id: i.jellyfin_id.clone(),
-            name: i.name.clone(),
-            album: i.album.clone(),
-            artist: i.artist.clone(),
-            size_bytes: i.size_bytes,
-            etag: i.etag.clone(),
-            provider_album_id: i.provider_album_id.clone(),
-            provider_content_type: i.provider_content_type.clone(),
-            provider_suffix: i.provider_suffix.clone(),
-            original_bitrate: i.original_bitrate,
-            track_number: i.track_number,
+        .map(|i| {
+            let reason_code = manifest
+                .synced_items
+                .iter()
+                .find(|item| item.jellyfin_id == i.jellyfin_id)
+                .and_then(|item| {
+                    if profile_dirty {
+                        return Some("transcoding-profile-change");
+                    }
+                    if !device_path_in_or_equal(&item.local_path, &music_folder) {
+                        return Some("music-folder-change");
+                    }
+                    bitrate_stale_reason(i.original_bitrate, item.original_bitrate)
+                })
+                .unwrap_or("new-selection");
+            annotate_add(
+                SyncAddItem {
+                    jellyfin_id: i.jellyfin_id.clone(),
+                    name: i.name.clone(),
+                    album: i.album.clone(),
+                    artist: i.artist.clone(),
+                    size_bytes: i.size_bytes,
+                    etag: i.etag.clone(),
+                    provider_album_id: i.provider_album_id.clone(),
+                    provider_content_type: i.provider_content_type.clone(),
+                    provider_suffix: i.provider_suffix.clone(),
+                    original_bitrate: i.original_bitrate,
+                    track_number: i.track_number,
+                    reason_code: None,
+                    reason: None,
+                },
+                reason_code,
+            )
         })
         .collect();
 
@@ -3021,25 +3154,41 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
         let stale_for_quality = desired_by_id
             .get(item.jellyfin_id.as_str())
             .copied()
-            .map(
-                |desired| match (desired.original_bitrate, item.original_bitrate) {
-                    (Some(server), Some(local)) => server > local,
-                    (Some(_), None) => true,
-                    _ => false,
-                },
-            )
-            .unwrap_or(false);
+            .and_then(|desired| {
+                bitrate_stale_reason(desired.original_bitrate, item.original_bitrate)
+            })
+            .is_some();
+        let reason_code = if stale_for_profile {
+            "transcoding-profile-change"
+        } else if stale_for_relocation {
+            "music-folder-change"
+        } else if let Some(reason) = desired_by_id
+            .get(item.jellyfin_id.as_str())
+            .copied()
+            .and_then(|desired| {
+                bitrate_stale_reason(desired.original_bitrate, item.original_bitrate)
+            })
+        {
+            reason
+        } else {
+            "removed-selection"
+        };
         if stale_for_profile
             || stale_for_relocation
             || stale_for_quality
             || !desired_ids.contains(item.jellyfin_id.as_str())
         {
             let idx = deletes.len();
-            deletes.push(SyncDeleteItem {
-                jellyfin_id: item.jellyfin_id.clone(),
-                local_path: item.local_path.clone(),
-                name: item.name.clone(),
-            });
+            deletes.push(annotate_delete(
+                SyncDeleteItem {
+                    jellyfin_id: item.jellyfin_id.clone(),
+                    local_path: item.local_path.clone(),
+                    name: item.name.clone(),
+                    reason_code: None,
+                    reason: None,
+                },
+                reason_code,
+            ));
             if stale_for_relocation {
                 relocation_delete_indices.insert(idx);
             }
@@ -3087,20 +3236,25 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
                     .get(del.jellyfin_id.as_str())
                     .and_then(|&v| v)
                     .map(|s| s.to_string());
-                id_changes.push(SyncIdChangeItem {
-                    old_jellyfin_id: del.jellyfin_id.clone(),
-                    new_jellyfin_id: add.jellyfin_id.clone(),
-                    old_local_path: del.local_path.clone(),
-                    name: add.name.clone(),
-                    album: add.album.clone(),
-                    artist: add.artist.clone(),
-                    size_bytes: add.size_bytes,
-                    etag: add.etag.clone(),
-                    provider_album_id: add.provider_album_id.clone(),
-                    provider_content_type: add.provider_content_type.clone(),
-                    provider_suffix: add.provider_suffix.clone(),
-                    original_name: preserved_original_name,
-                });
+                id_changes.push(annotate_id_change(
+                    SyncIdChangeItem {
+                        old_jellyfin_id: del.jellyfin_id.clone(),
+                        new_jellyfin_id: add.jellyfin_id.clone(),
+                        old_local_path: del.local_path.clone(),
+                        name: add.name.clone(),
+                        album: add.album.clone(),
+                        artist: add.artist.clone(),
+                        size_bytes: add.size_bytes,
+                        etag: add.etag.clone(),
+                        provider_album_id: add.provider_album_id.clone(),
+                        provider_content_type: add.provider_content_type.clone(),
+                        provider_suffix: add.provider_suffix.clone(),
+                        original_name: preserved_original_name,
+                        reason_code: None,
+                        reason: None,
+                    },
+                    "server-id-change",
+                ));
             }
         }
     }
@@ -3278,6 +3432,8 @@ mod tests {
                 jellyfin_id: "stale-id".to_string(),
                 local_path: "Music/Artist/Missing Track.flac".to_string(),
                 name: "Missing Track".to_string(),
+                reason_code: Some("removed-selection".to_string()),
+                reason: Some("removed from sync selection".to_string()),
             }],
             id_changes: vec![],
             unchanged: 0,
@@ -3352,6 +3508,8 @@ mod tests {
                 jellyfin_id: "stale-id".to_string(),
                 local_path: "Music/Artist/Missing Track.flac".to_string(),
                 name: "Missing Track".to_string(),
+                reason_code: Some("removed-selection".to_string()),
+                reason: Some("removed from sync selection".to_string()),
             }],
             id_changes: vec![],
             unchanged: 0,
@@ -3786,6 +3944,8 @@ mod tests {
             provider_suffix: Some(suffix.to_string()),
             original_bitrate: None,
             track_number: None,
+            reason_code: Some("new-selection".to_string()),
+            reason: Some("new selection".to_string()),
         }
     }
 
@@ -4157,9 +4317,43 @@ mod tests {
         let delta = calculate_delta(&desired, &manifest);
         assert_eq!(delta.adds.len(), 1);
         assert_eq!(delta.adds[0].jellyfin_id, "a");
+        assert_eq!(
+            delta.adds[0].reason_code.as_deref(),
+            Some("transcoding-profile-change")
+        );
         assert_eq!(delta.deletes.len(), 1);
         assert_eq!(delta.deletes[0].jellyfin_id, "a");
+        assert_eq!(
+            delta.deletes[0].reason_code.as_deref(),
+            Some("transcoding-profile-change")
+        );
         assert_eq!(delta.unchanged, 0);
+    }
+
+    #[test]
+    fn test_delta_bitrate_backfill_reason_explains_rewrite() {
+        let mut manifest = empty_manifest();
+        manifest.synced_items = vec![make_synced_item(
+            "a",
+            "Track A",
+            Some("Album"),
+            Some("Artist"),
+        )];
+        let mut desired = make_desired("a", "Track A", Some("Album"), Some("Artist"));
+        desired.original_bitrate = Some(320_000);
+
+        let delta = calculate_delta(&[desired], &manifest);
+
+        assert_eq!(delta.adds.len(), 1);
+        assert_eq!(delta.deletes.len(), 1);
+        assert_eq!(
+            delta.adds[0].reason_code.as_deref(),
+            Some("bitrate-missing")
+        );
+        assert_eq!(
+            delta.deletes[0].reason.as_deref(),
+            Some("previous sync did not record source bitrate")
+        );
     }
 
     #[test]
@@ -4229,6 +4423,10 @@ mod tests {
         assert_eq!(delta.id_changes.len(), 1);
         assert_eq!(delta.id_changes[0].new_jellyfin_id, "new-id-1");
         assert_eq!(delta.id_changes[0].old_jellyfin_id, "old-id-1");
+        assert_eq!(
+            delta.id_changes[0].reason_code.as_deref(),
+            Some("server-id-change")
+        );
         assert_eq!(delta.unchanged, 0);
     }
 

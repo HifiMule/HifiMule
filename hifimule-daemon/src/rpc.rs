@@ -1883,12 +1883,13 @@ async fn provider_calculate_delta(
     let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
     delta.playlists = playlist_sync_items;
     crate::daemon_log!(
-        "[Delta] Provider delta calculated: adds={} deletes={} id_changes={} unchanged={} playlists={}",
+        "[Delta] Provider delta calculated: adds={} deletes={} id_changes={} unchanged={} playlists={} reasons={}",
         delta.adds.len(),
         delta.deletes.len(),
         delta.id_changes.len(),
         delta.unchanged,
-        delta.playlists.len()
+        delta.playlists.len(),
+        crate::sync::format_change_reason_summary(&delta)
     );
 
     if let Some((_, device_io)) = _state.device_manager.get_manifest_and_io().await {
@@ -1904,11 +1905,12 @@ async fn provider_calculate_delta(
         )
         .await;
         crate::daemon_log!(
-            "[Delta] Provider existence check complete: adds={} deletes={} id_changes={} unchanged={}",
+            "[Delta] Provider existence check complete: adds={} deletes={} id_changes={} unchanged={} reasons={}",
             delta.adds.len(),
             delta.deletes.len(),
             delta.id_changes.len(),
-            delta.unchanged
+            delta.unchanged,
+            crate::sync::format_change_reason_summary(&delta)
         );
     }
 
@@ -1928,6 +1930,10 @@ fn delta_value_with_cleanup_metadata(
         object.insert(
             "destructiveCleanupThreshold".to_string(),
             serde_json::json!(crate::sync::DESTRUCTIVE_CLEANUP_THRESHOLD),
+        );
+        object.insert(
+            "changeReasons".to_string(),
+            serde_json::to_value(crate::sync::change_reason_summary(delta)).unwrap(),
         );
     }
     value
@@ -2969,11 +2975,12 @@ async fn handle_sync_calculate_delta(
     let mut delta = crate::sync::calculate_delta(&desired_items, &manifest);
     delta.playlists = playlist_sync_items;
     crate::daemon_log!(
-        "[Sync] Delta computed: {} adds, {} deletes, {} id-changes, {} unchanged",
+        "[Sync] Delta computed: {} adds, {} deletes, {} id-changes, {} unchanged, reasons={}",
         delta.adds.len(),
         delta.deletes.len(),
         delta.id_changes.len(),
         delta.unchanged,
+        crate::sync::format_change_reason_summary(&delta)
     );
 
     if let Some((_, device_io)) = state.device_manager.get_manifest_and_io().await {
@@ -2989,8 +2996,9 @@ async fn handle_sync_calculate_delta(
         )
         .await;
         crate::daemon_log!(
-            "[Sync] Existence check complete: {} adds after recovery",
+            "[Sync] Existence check complete: {} adds after recovery, reasons={}",
             delta.adds.len(),
+            crate::sync::format_change_reason_summary(&delta)
         );
     }
 
@@ -3172,11 +3180,15 @@ async fn handle_sync_execute(
                 provider_suffix: item.provider_suffix.clone(),
                 original_bitrate: None,
                 track_number: item.track_number,
+                reason_code: Some("force-sync".to_string()),
+                reason: Some("force sync requested".to_string()),
             });
             force_deletes.push(crate::sync::SyncDeleteItem {
                 jellyfin_id: item.jellyfin_id.clone(),
                 local_path: item.local_path.clone(),
                 name: item.name.clone(),
+                reason_code: Some("force-sync".to_string()),
+                reason: Some("force sync requested".to_string()),
             });
         }
         delta.adds.extend(force_adds);
