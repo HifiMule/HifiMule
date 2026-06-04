@@ -1891,6 +1891,12 @@ async fn provider_calculate_delta(
         delta.playlists.len(),
         crate::sync::format_change_reason_summary(&delta)
     );
+    if !delta.id_changes.is_empty() {
+        crate::daemon_log!(
+            "[Delta] Provider id-change sample: {}",
+            crate::sync::format_id_change_diagnostics(&delta, 5)
+        );
+    }
 
     if let Some((_, device_io)) = _state.device_manager.get_manifest_and_io().await {
         crate::daemon_log!(
@@ -1912,6 +1918,12 @@ async fn provider_calculate_delta(
             delta.unchanged,
             crate::sync::format_change_reason_summary(&delta)
         );
+        if !delta.id_changes.is_empty() {
+            crate::daemon_log!(
+                "[Delta] Provider id-change sample after existence check: {}",
+                crate::sync::format_id_change_diagnostics(&delta, 5)
+            );
+        }
     }
 
     Ok(delta_value_with_cleanup_metadata(&delta, manifest))
@@ -2982,6 +2994,12 @@ async fn handle_sync_calculate_delta(
         delta.unchanged,
         crate::sync::format_change_reason_summary(&delta)
     );
+    if !delta.id_changes.is_empty() {
+        crate::daemon_log!(
+            "[Sync] Id-change sample: {}",
+            crate::sync::format_id_change_diagnostics(&delta, 5)
+        );
+    }
 
     if let Some((_, device_io)) = state.device_manager.get_manifest_and_io().await {
         crate::daemon_log!(

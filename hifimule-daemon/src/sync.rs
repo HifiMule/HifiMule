@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::RwLock;
 
-use crate::device::DeviceManifest;
+use crate::device::{DeviceManifest, SyncedItem};
 use crate::providers::{MediaProvider, TranscodeProfile};
 
 pub const DESTRUCTIVE_CLEANUP_THRESHOLD: usize = 25;
@@ -200,7 +200,6 @@ fn change_reason(code: &str) -> String {
 fn bitrate_stale_reason(server: Option<u32>, local: Option<u32>) -> Option<&'static str> {
     match (server, local) {
         (Some(server), Some(local)) if server > local => Some("bitrate-increase"),
-        (Some(_), None) => Some("bitrate-missing"),
         _ => None,
     }
 }
@@ -233,24 +232,39 @@ pub struct SyncReasonSummary {
 
 pub fn change_reason_summary(delta: &SyncDelta) -> Vec<SyncReasonSummary> {
     let mut counts: HashMap<String, usize> = HashMap::new();
-    for code in delta
-        .adds
+
+    let delete_reasons_by_id: HashMap<&str, &str> = delta
+        .deletes
         .iter()
-        .filter_map(|item| item.reason_code.as_deref())
-        .chain(
-            delta
-                .deletes
-                .iter()
-                .filter_map(|item| item.reason_code.as_deref()),
-        )
-        .chain(
-            delta
-                .id_changes
-                .iter()
-                .filter_map(|item| item.reason_code.as_deref()),
-        )
-    {
+        .filter_map(|item| {
+            item.reason_code
+                .as_deref()
+                .map(|code| (item.jellyfin_id.as_str(), code))
+        })
+        .collect();
+    let mut paired_delete_ids: HashSet<&str> = HashSet::new();
+
+    for add in &delta.adds {
+        let Some(code) = add.reason_code.as_deref() else {
+            continue;
+        };
+        if delete_reasons_by_id.contains_key(add.jellyfin_id.as_str()) {
+            paired_delete_ids.insert(add.jellyfin_id.as_str());
+        }
         *counts.entry(code.to_string()).or_insert(0) += 1;
+    }
+    for delete in &delta.deletes {
+        if paired_delete_ids.contains(delete.jellyfin_id.as_str()) {
+            continue;
+        }
+        if let Some(code) = delete.reason_code.as_deref() {
+            *counts.entry(code.to_string()).or_insert(0) += 1;
+        }
+    }
+    for id_change in &delta.id_changes {
+        if let Some(code) = id_change.reason_code.as_deref() {
+            *counts.entry(code.to_string()).or_insert(0) += 1;
+        }
     }
 
     let mut summary: Vec<SyncReasonSummary> = counts
@@ -280,6 +294,55 @@ pub fn format_change_reason_summary(delta: &SyncDelta) -> String {
         .map(|entry| format!("{} {}", entry.count, entry.reason))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+pub fn format_id_change_diagnostics(delta: &SyncDelta, limit: usize) -> String {
+    if delta.id_changes.is_empty() || limit == 0 {
+        return "none".to_string();
+    }
+
+    let shown = delta
+        .id_changes
+        .iter()
+        .take(limit)
+        .map(|change| {
+            format!(
+                "{} -> {} name={:?} album={:?} artist={:?} provider_album_id={:?} format={:?}/{:?} source_size={} old_path={:?}",
+                change.old_jellyfin_id,
+                change.new_jellyfin_id,
+                change.name,
+                change.album,
+                change.artist,
+                change.provider_album_id,
+                change.provider_content_type,
+                change.provider_suffix,
+                change.size_bytes,
+                change.old_local_path
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    let omitted = delta.id_changes.len().saturating_sub(limit);
+    if omitted > 0 {
+        format!("{shown}; ... {omitted} more")
+    } else {
+        shown
+    }
+}
+
+fn compatible_optional_eq<T: PartialEq>(left: &Option<T>, right: &Option<T>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left == right,
+        _ => true,
+    }
+}
+
+fn id_change_candidate_matches(add: &SyncAddItem, old: &SyncedItem) -> bool {
+    compatible_optional_eq(&add.provider_album_id, &old.provider_album_id)
+        && compatible_optional_eq(&add.provider_content_type, &old.provider_content_type)
+        && compatible_optional_eq(&add.provider_suffix, &old.provider_suffix)
+        && compatible_optional_eq(&add.track_number, &old.track_number)
 }
 
 async fn cleanup_replaced_file_after_write(
@@ -3141,6 +3204,11 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
     let mut delete_by_metadata: HashMap<(String, Option<String>, Option<String>), Vec<usize>> =
         HashMap::new();
     let mut relocation_delete_indices: HashSet<usize> = HashSet::new();
+    let synced_by_id: HashMap<&str, &SyncedItem> = manifest
+        .synced_items
+        .iter()
+        .map(|i| (i.jellyfin_id.as_str(), i))
+        .collect();
     // Index original_name by jellyfin_id for ID-change preservation (AC #4 requirement)
     let original_name_by_id: HashMap<&str, Option<&str>> = manifest
         .synced_items
@@ -3220,7 +3288,15 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
         if let Some(del_indices) = delete_by_metadata.get(&key) {
             // Find the first unmatched delete for this metadata
             if let Some(&del_idx) = del_indices.iter().find(|&&idx| {
-                !matched_delete_indices.contains(&idx) && !relocation_delete_indices.contains(&idx)
+                if matched_delete_indices.contains(&idx) || relocation_delete_indices.contains(&idx)
+                {
+                    return false;
+                }
+                let del = &deletes[idx];
+                synced_by_id
+                    .get(del.jellyfin_id.as_str())
+                    .map(|old| id_change_candidate_matches(add, old))
+                    .unwrap_or(true)
             }) {
                 matched_add_indices.insert(add_idx);
                 matched_delete_indices.insert(del_idx);
@@ -4331,7 +4407,7 @@ mod tests {
     }
 
     #[test]
-    fn test_delta_bitrate_backfill_reason_explains_rewrite() {
+    fn test_delta_missing_local_bitrate_does_not_force_rewrite() {
         let mut manifest = empty_manifest();
         manifest.synced_items = vec![make_synced_item(
             "a",
@@ -4344,16 +4420,10 @@ mod tests {
 
         let delta = calculate_delta(&[desired], &manifest);
 
-        assert_eq!(delta.adds.len(), 1);
-        assert_eq!(delta.deletes.len(), 1);
-        assert_eq!(
-            delta.adds[0].reason_code.as_deref(),
-            Some("bitrate-missing")
-        );
-        assert_eq!(
-            delta.deletes[0].reason.as_deref(),
-            Some("previous sync did not record source bitrate")
-        );
+        assert_eq!(delta.adds.len(), 0);
+        assert_eq!(delta.deletes.len(), 0);
+        assert_eq!(delta.id_changes.len(), 0);
+        assert_eq!(delta.unchanged, 1);
     }
 
     #[test]
@@ -4823,6 +4893,99 @@ mod tests {
             delta.id_changes[0].original_name.is_none(),
             "original_name must stay None when no truncation occurred"
         );
+    }
+
+    #[test]
+    fn test_calculate_delta_does_not_infer_id_change_when_provider_album_differs() {
+        let mut synced = make_synced_item("old-id", "Same Song", Some("Album"), Some("Artist"));
+        synced.provider_album_id = Some("album-old".to_string());
+
+        let mut desired = make_desired("new-id", "Same Song", Some("Album"), Some("Artist"));
+        desired.provider_album_id = Some("album-new".to_string());
+
+        let mut manifest = empty_manifest();
+        manifest.synced_items = vec![synced];
+
+        let delta = calculate_delta(&[desired], &manifest);
+
+        assert_eq!(delta.id_changes.len(), 0);
+        assert_eq!(delta.adds.len(), 1);
+        assert_eq!(delta.deletes.len(), 1);
+    }
+
+    #[test]
+    fn test_calculate_delta_does_not_infer_id_change_when_track_number_differs() {
+        let mut synced = make_synced_item("old-id", "Same Song", Some("Album"), Some("Artist"));
+        synced.track_number = Some(1);
+
+        let mut desired = make_desired("new-id", "Same Song", Some("Album"), Some("Artist"));
+        desired.track_number = Some(2);
+
+        let mut manifest = empty_manifest();
+        manifest.synced_items = vec![synced];
+
+        let delta = calculate_delta(&[desired], &manifest);
+
+        assert_eq!(delta.id_changes.len(), 0);
+        assert_eq!(delta.adds.len(), 1);
+        assert_eq!(delta.deletes.len(), 1);
+    }
+
+    #[test]
+    fn test_format_id_change_diagnostics_includes_sample_and_omitted_count() {
+        let delta = SyncDelta {
+            adds: vec![],
+            deletes: vec![],
+            id_changes: vec![
+                annotate_id_change(
+                    SyncIdChangeItem {
+                        old_jellyfin_id: "old-1".to_string(),
+                        new_jellyfin_id: "new-1".to_string(),
+                        old_local_path: "Music/A/Track.flac".to_string(),
+                        name: "Track".to_string(),
+                        album: Some("Album".to_string()),
+                        artist: Some("Artist".to_string()),
+                        size_bytes: 123,
+                        etag: None,
+                        provider_album_id: Some("album-1".to_string()),
+                        provider_content_type: Some("audio/flac".to_string()),
+                        provider_suffix: Some("flac".to_string()),
+                        original_name: None,
+                        reason_code: None,
+                        reason: None,
+                    },
+                    "server-id-change",
+                ),
+                annotate_id_change(
+                    SyncIdChangeItem {
+                        old_jellyfin_id: "old-2".to_string(),
+                        new_jellyfin_id: "new-2".to_string(),
+                        old_local_path: "Music/A/Other.flac".to_string(),
+                        name: "Other".to_string(),
+                        album: None,
+                        artist: None,
+                        size_bytes: 456,
+                        etag: None,
+                        provider_album_id: None,
+                        provider_content_type: None,
+                        provider_suffix: None,
+                        original_name: None,
+                        reason_code: None,
+                        reason: None,
+                    },
+                    "server-id-change",
+                ),
+            ],
+            unchanged: 0,
+            playlists: vec![],
+        };
+
+        let diagnostics = format_id_change_diagnostics(&delta, 1);
+
+        assert!(diagnostics.contains("old-1 -> new-1"));
+        assert!(diagnostics.contains("provider_album_id=Some(\"album-1\")"));
+        assert!(diagnostics.contains("... 1 more"));
+        assert!(!diagnostics.contains("old-2 -> new-2"));
     }
 
     #[test]
@@ -5314,6 +5477,78 @@ mod tests {
         };
 
         assert_eq!(destructive_cleanup_count(&delta, &manifest), 1);
+    }
+
+    #[test]
+    fn test_change_reason_summary_counts_replacement_pair_once() {
+        let delta = SyncDelta {
+            adds: vec![annotate_add(
+                SyncAddItem {
+                    jellyfin_id: "track-1".to_string(),
+                    name: "Track".to_string(),
+                    album: None,
+                    artist: None,
+                    size_bytes: 1,
+                    etag: None,
+                    provider_album_id: None,
+                    provider_content_type: None,
+                    provider_suffix: None,
+                    original_bitrate: None,
+                    track_number: None,
+                    reason_code: None,
+                    reason: None,
+                },
+                "bitrate-increase",
+            )],
+            deletes: vec![annotate_delete(
+                SyncDeleteItem {
+                    jellyfin_id: "track-1".to_string(),
+                    local_path: "Music/Track.flac".to_string(),
+                    name: "Track".to_string(),
+                    reason_code: None,
+                    reason: None,
+                },
+                "bitrate-increase",
+            )],
+            id_changes: vec![annotate_id_change(
+                SyncIdChangeItem {
+                    old_jellyfin_id: "old".to_string(),
+                    new_jellyfin_id: "new".to_string(),
+                    old_local_path: "Music/Other.flac".to_string(),
+                    name: "Other".to_string(),
+                    album: None,
+                    artist: None,
+                    size_bytes: 1,
+                    etag: None,
+                    provider_album_id: None,
+                    provider_content_type: None,
+                    provider_suffix: None,
+                    original_name: None,
+                    reason_code: None,
+                    reason: None,
+                },
+                "server-id-change",
+            )],
+            unchanged: 0,
+            playlists: vec![],
+        };
+
+        let summary = change_reason_summary(&delta);
+
+        assert_eq!(
+            summary
+                .iter()
+                .find(|entry| entry.reason_code == "bitrate-increase")
+                .map(|entry| entry.count),
+            Some(1)
+        );
+        assert_eq!(
+            summary
+                .iter()
+                .find(|entry| entry.reason_code == "server-id-change")
+                .map(|entry| entry.count),
+            Some(1)
+        );
     }
 
     #[tokio::test]
