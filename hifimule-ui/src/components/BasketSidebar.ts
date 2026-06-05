@@ -51,7 +51,7 @@ interface DeviceProfileSummary {
 
 interface SyncOperation {
     id: string;
-    status: 'running' | 'complete' | 'failed';
+    status: 'running' | 'complete' | 'failed' | 'cancelled';
     startedAt: string;
     currentFile: string | null;
     bytesCurrent: number;
@@ -180,6 +180,11 @@ export class BasketSidebar {
     private currentDevice: any = null;
     private syncPreviewCleanupDevicePath: string | null = null;
     private forceSyncMode: boolean = false;
+    // Cancel state
+    private isCancelling: boolean = false;
+    // Transfer stats captured at completion for the sync-complete screen
+    private completedFilesCount: number = 0;
+    private completedBytesCount: number = 0;
 
     constructor(container: HTMLElement) {
         this.container = container;
@@ -845,11 +850,16 @@ export class BasketSidebar {
                     <sl-spinner style="font-size: 2rem;"></sl-spinner>
                 </div>
                 <div class="basket-footer">
-                    <sl-button variant="primary" style="width: 100%;" disabled loading>
-                        ${t('basket.sync.syncing')}
+                    <sl-button id="cancel-sync-btn" variant="default" style="width: 100%;"
+                               ${this.isCancelling ? 'loading disabled' : ''}>
+                        <sl-icon slot="prefix" name="x-circle"></sl-icon>
+                        ${this.isCancelling ? t('basket.sync.cancelling') : t('basket.actions.cancel_sync')}
                     </sl-button>
                 </div>
             `;
+            this.container.querySelector('#cancel-sync-btn')?.addEventListener('click', () => {
+                this.handleCancelSync();
+            });
             return;
         }
 
@@ -982,7 +992,7 @@ export class BasketSidebar {
         });
 
         this.container.querySelector('.clear-basket-btn')?.addEventListener('click', () => {
-            basketStore.clear();
+            this.confirmClearAll();
         });
 
         this.container.querySelector('#start-sync-btn')?.addEventListener('click', () => {
@@ -1025,6 +1035,7 @@ export class BasketSidebar {
         // Disable the button immediately so a second click can't slip through
         // while the async daemon-state check or delta calculation is in flight.
         this.isSyncing = true;
+        this.isCancelling = false;
         this.showSyncComplete = false;
         this.syncErrorMessages = null;
         this.currentOperation = null;
@@ -1215,6 +1226,9 @@ export class BasketSidebar {
                 } else if (op.status === 'failed') {
                     this.stopPolling();
                     this.handleSyncFailed(op);
+                } else if (op.status === 'cancelled' || this.isCancelling) {
+                    this.stopPolling();
+                    this.handleSyncCancelled();
                 }
             } catch (err) {
                 console.error('[Sync] Progress poll failed:', err);
@@ -1285,15 +1299,26 @@ export class BasketSidebar {
                 <div class="sync-eta">${this.escapeHtml(this.etaText)}</div>
             </div>
             <div class="basket-footer">
-                <sl-button variant="primary" style="width: 100%;" disabled loading>
-                    <sl-icon slot="prefix" name="cloud-download"></sl-icon>
-                    ${t('basket.sync.syncing')}
+                <sl-button id="cancel-sync-btn" variant="default" style="width: 100%;"
+                           ${this.isCancelling ? 'loading disabled' : ''}>
+                    <sl-icon slot="prefix" name="x-circle"></sl-icon>
+                    ${this.isCancelling ? t('basket.sync.cancelling') : t('basket.actions.cancel_sync')}
                 </sl-button>
             </div>
         `;
+
+        this.container.querySelector('#cancel-sync-btn')?.addEventListener('click', () => {
+            this.handleCancelSync();
+        });
     }
 
     private renderSyncComplete() {
+        const summary = this.completedFilesCount > 0
+            ? t('basket.sync.complete_summary', {
+                files: this.completedFilesCount,
+                size: formatSize(this.completedBytesCount),
+              })
+            : '';
         this.container.innerHTML = `
             <div class="basket-header">
                 <h2>${t('basket.title')}</h2>
@@ -1303,6 +1328,7 @@ export class BasketSidebar {
                 <sl-icon name="check-circle-fill"
                     style="font-size: 2.5rem; color: var(--sl-color-success-600);"></sl-icon>
                 <p class="sync-status-label">${t('basket.sync.complete')}</p>
+                ${summary ? `<p class="sync-summary-label">${this.escapeHtml(summary)}</p>` : ''}
             </div>
             <div class="basket-footer">
                 <sl-button id="sync-done-btn" variant="primary" style="width: 100%;">
@@ -1334,12 +1360,20 @@ export class BasketSidebar {
                 <ul class="sync-error-list">${errorList}</ul>
             </div>
             <div class="basket-footer">
+                <sl-button id="sync-retry-btn" variant="primary" style="width: 100%; margin-bottom: 0.5rem;">
+                    <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
+                    ${t('basket.actions.retry_sync')}
+                </sl-button>
                 <sl-button id="sync-dismiss-btn" variant="text" style="width: 100%;">
                     ${t('basket.actions.dismiss')}
                 </sl-button>
             </div>
         `;
 
+        this.container.querySelector('#sync-retry-btn')?.addEventListener('click', () => {
+            this.syncErrorMessages = null;
+            this.handleStartSync();
+        });
         this.container.querySelector('#sync-dismiss-btn')?.addEventListener('click', () => {
             this.syncErrorMessages = null;
             this.refreshAndRender();
@@ -1349,6 +1383,10 @@ export class BasketSidebar {
     private async handleSyncComplete() {
         if (this.isDestroyed) return;
         this.isSyncing = false;
+
+        // Capture transfer stats before clearing the operation reference
+        this.completedFilesCount = this.currentOperation?.filesCompleted ?? 0;
+        this.completedBytesCount = this.currentOperation?.bytesTransferred ?? 0;
 
         // Fetch fresh storage info so capacity bar is accurate immediately after sync
         try {
@@ -1383,6 +1421,7 @@ export class BasketSidebar {
     private handleSyncFailed(operation: SyncOperation) {
         if (this.isDestroyed) return;
         this.isSyncing = false;
+        this.isCancelling = false;
         this.currentOperationId = null;
         this.currentOperation = null;
         this.showSyncComplete = false;
@@ -1521,6 +1560,54 @@ export class BasketSidebar {
                 el.style.backgroundImage = `url('${dataUrl}')`;
             }).catch(() => { /* image load failed, leave blank */ });
         }
+    }
+
+    private async handleCancelSync(): Promise<void> {
+        if (this.isCancelling) return;
+        this.isCancelling = true;
+        this.renderSyncProgress(); // show Cancelling... state immediately
+        if (this.currentOperationId) {
+            try {
+                await rpcCall('sync_cancel', { operationId: this.currentOperationId });
+            } catch (err) {
+                console.error('[Sync] Cancel request failed:', err);
+            }
+        }
+        // The polling loop will detect the terminal status and call handleSyncCancelled
+    }
+
+    private handleSyncCancelled(): void {
+        if (this.isDestroyed) return;
+        this.isSyncing = false;
+        this.isCancelling = false;
+        this.currentOperationId = null;
+        this.currentOperation = null;
+        this.showSyncComplete = false;
+        this.syncErrorMessages = null;
+        this.etaText = t('basket.sync.calculating');
+        this.refreshAndRender();
+    }
+
+    private confirmClearAll(): void {
+        const count = basketStore.getItems().length;
+        if (count === 0) return;
+        const dialog = document.createElement('sl-dialog') as any;
+        dialog.label = t('basket.actions.clear_all');
+        dialog.innerHTML = `
+            <p>${t('basket.confirm.clear_all', { count })}</p>
+            <sl-button slot="footer" variant="default" id="clear-cancel">${t('basket.actions.cancel')}</sl-button>
+            <sl-button slot="footer" variant="danger" id="clear-confirm">${t('basket.actions.clear_all')}</sl-button>
+        `;
+        document.body.appendChild(dialog);
+        dialog.querySelector('#clear-cancel')?.addEventListener('click', () => dialog.hide());
+        dialog.querySelector('#clear-confirm')?.addEventListener('click', () => {
+            basketStore.clear();
+            dialog.hide();
+        });
+        dialog.addEventListener('sl-after-hide', (event: Event) => {
+            if (event.target === dialog) dialog.remove();
+        });
+        customElements.whenDefined('sl-dialog').then(() => dialog.show());
     }
 
     private escapeHtml(text: string): string {

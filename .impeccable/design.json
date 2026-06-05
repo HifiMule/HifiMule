@@ -1,0 +1,193 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-06-05T00:00:00Z",
+  "title": "Design System: HifiMule",
+  "extensions": {
+    "colorMeta": {
+      "void": {
+        "role": "neutral",
+        "displayName": "Void",
+        "canonical": "oklch(8% 0.03 265)",
+        "tonalRamp": ["#060810", "#0b1020", "#101827", "#141d2e", "#1a2540", "#243052", "#2e3c64", "#3a4a78"]
+      },
+      "panel": {
+        "role": "neutral",
+        "displayName": "Panel",
+        "canonical": "oklch(14% 0.04 265)",
+        "tonalRamp": ["#0a0f1c", "#151d31", "#1a2440", "#202c50", "#2a3860", "#364870", "#445888", "#5468a0"]
+      },
+      "panel-strong": {
+        "role": "neutral",
+        "displayName": "Panel Strong",
+        "canonical": "oklch(12% 0.04 265)",
+        "tonalRamp": ["#080d18", "#10182b", "#151f38", "#1c2848", "#243258", "#2e3e6a", "#3a4c7e", "#4a5e94"]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "Surface",
+        "canonical": "oklch(18% 0.01 270)",
+        "tonalRamp": ["#141416", "#24252b", "#2e2f36", "#383940", "#44454e", "#52535c", "#62636e", "#747580"]
+      },
+      "signal-cyan": {
+        "role": "primary",
+        "displayName": "Signal Cyan",
+        "canonical": "oklch(72% 0.14 218)",
+        "tonalRamp": ["#083040", "#0e5068", "#147090", "#1a90b8", "#22b8f0", "#56c8f4", "#8ad8f6", "#bee8fb"]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Ink",
+        "canonical": "oklch(97% 0.01 245)",
+        "tonalRamp": ["#1c2030", "#2c3448", "#3e4860", "#505c78", "#687090", "#8890a8", "#b0b8c8", "#f1f5f9"]
+      },
+      "ink-dim": {
+        "role": "neutral",
+        "displayName": "Ink Dim",
+        "canonical": "oklch(75% 0.02 245)",
+        "tonalRamp": ["#1c2030", "#2c3448", "#3e4860", "#505c78", "#687090", "#8890a8", "#b0bac6", "#d0d8e4"]
+      },
+      "amber-warn": {
+        "role": "tertiary",
+        "displayName": "Amber Warn",
+        "canonical": "oklch(80% 0.16 85)",
+        "tonalRamp": ["#3a2800", "#5c4000", "#806000", "#a48000", "#c8a010", "#ebb334", "#f4ca6a", "#f9dfa2"]
+      }
+    },
+    "typographyMeta": {
+      "body": { "displayName": "Body", "purpose": "Form labels, descriptions, basket item metadata, modal body text." },
+      "label": { "displayName": "Label", "purpose": "Metadata chips, capacity status, sync counters, browse mode filter text, folder type badges." },
+      "title": { "displayName": "Title", "purpose": "Card title text, panel sub-headers, component group labels." },
+      "headline": { "displayName": "Headline", "purpose": "Library view h1, basket sidebar heading, dialog titles." }
+    },
+    "shadows": [
+      {
+        "name": "card-hover",
+        "value": "0 10px 24px rgba(0,0,0,0.28)",
+        "purpose": "Media card hover lift. Applied only on :hover, never at rest."
+      },
+      {
+        "name": "card-rest",
+        "value": "0 12px 28px rgba(0,0,0,0.16)",
+        "purpose": "Media card at rest (ambient depth). Subtle — mostly serves as anti-aliasing against the dark background."
+      }
+    ],
+    "motion": [
+      {
+        "name": "ease-standard",
+        "value": "ease",
+        "purpose": "Default for state transitions (hover, border-color, opacity). 0.15–0.2s duration."
+      },
+      {
+        "name": "card-hover-lift",
+        "value": "transform 0.18s ease, box-shadow 0.18s ease",
+        "purpose": "Media card hover: translateY(-2px) + shadow in. Matches the product register's 150–200ms window."
+      },
+      {
+        "name": "fade-in-up",
+        "value": "opacity 0.3s ease-out, transform 0.3s ease-out",
+        "purpose": "Sync proposed banner entrance: fadeIn keyframe from opacity 0 + translateY(-4px)."
+      }
+    ],
+    "breakpoints": [
+      { "name": "compact", "value": "980px", "purpose": "Library header collapses from row to column; server chip goes full width." },
+      { "name": "narrow", "value": "1120px", "purpose": "Padding reduction on library view; media grid min card width decreases." },
+      { "name": "mobile", "value": "768px", "purpose": "Media grid min card width drops to 140px." }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Main action trigger. Signal Cyan background, void text. Used for Connect, Sync now, Save changes.",
+      "html": "<button class=\"ds-btn-primary\">Sync now</button>",
+      "css": ".ds-btn-primary { background: #22b8f0; color: #0b1020; padding: 0 1rem; height: 2.5rem; font-family: Inter, system-ui, sans-serif; font-size: 0.875rem; font-weight: 600; border: none; border-radius: 4px; cursor: pointer; transition: filter 0.15s ease, transform 0.15s ease; } .ds-btn-primary:hover { filter: brightness(1.1); } .ds-btn-primary:active { transform: translateY(1px); } .ds-btn-primary:focus-visible { outline: 2px solid #22b8f0; outline-offset: 2px; } .ds-btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }"
+    },
+    {
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "Secondary actions and filter chips. Transparent background, subtle border.",
+      "html": "<button class=\"ds-btn-ghost\">Cancel</button>",
+      "css": ".ds-btn-ghost { background: transparent; color: #f1f5f9; padding: 0 1rem; height: 2.5rem; font-family: Inter, system-ui, sans-serif; font-size: 0.875rem; font-weight: 500; border: 1px solid rgba(255,255,255,0.18); border-radius: 4px; cursor: pointer; transition: background 0.15s ease, border-color 0.15s ease; } .ds-btn-ghost:hover { background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.28); } .ds-btn-ghost:focus-visible { outline: 2px solid #22b8f0; outline-offset: 2px; } .ds-btn-ghost:disabled { opacity: 0.35; cursor: not-allowed; }"
+    },
+    {
+      "name": "Media Card",
+      "kind": "card",
+      "refersTo": "card-media",
+      "description": "Primary library browsing unit. Album art top, title + subtitle below. Hover lifts; selection applies a cyan ring.",
+      "html": "<div class=\"ds-media-card\"><div class=\"ds-media-card-image\"></div><div class=\"ds-media-card-body\"><strong class=\"ds-media-card-title\">Kind of Blue</strong><span class=\"ds-media-card-sub\">Miles Davis · 1959</span></div></div>",
+      "css": ".ds-media-card { background: #24252b; border: 1px solid rgba(255,255,255,0.10); border-radius: 8px; cursor: pointer; transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease; overflow: hidden; width: 190px; } .ds-media-card:hover { transform: translateY(-2px); box-shadow: 0 10px 24px rgba(0,0,0,0.28); border-color: rgba(34,184,240,0.35); } .ds-media-card-image { width: 100%; aspect-ratio: 1/1; background: #1a2540; } .ds-media-card-body { padding: 0.65rem 0.75rem 0.7rem; } .ds-media-card-title { display: block; font-family: Inter, system-ui, sans-serif; font-size: 0.9rem; font-weight: 600; color: #f1f5f9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .ds-media-card-sub { display: block; font-size: 0.8rem; color: #b0bac6; margin-top: 0.1rem; }"
+    },
+    {
+      "name": "Basket Item",
+      "kind": "card",
+      "refersTo": "card-basket-item",
+      "description": "Item row in the sync basket sidebar. Thumbnail left, title and meta center, remove action right.",
+      "html": "<div class=\"ds-basket-item\"><div class=\"ds-basket-thumb\"></div><div class=\"ds-basket-info\"><span class=\"ds-basket-name\">Kind of Blue</span><span class=\"ds-basket-meta\">Album · 1 item</span></div></div>",
+      "css": ".ds-basket-item { display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem; background: rgba(255,255,255,0.045); border: 1px solid rgba(255,255,255,0.075); border-radius: 8px; transition: background 0.2s ease, border-color 0.2s ease; } .ds-basket-item:hover { background: rgba(255,255,255,0.07); border-color: rgba(34,184,240,0.26); } .ds-basket-thumb { width: 48px; height: 48px; background: #1a2540; border-radius: 4px; flex-shrink: 0; } .ds-basket-info { flex: 1; overflow: hidden; } .ds-basket-name { display: block; font-family: Inter, system-ui, sans-serif; font-size: 0.85rem; font-weight: 500; color: #f1f5f9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .ds-basket-meta { display: block; font-size: 0.75rem; color: #b0bac6; }"
+    },
+    {
+      "name": "Capacity Bar",
+      "kind": "custom",
+      "description": "Storage visualization in the basket sidebar. A segmented 8px bar: used (white), pending selection (cyan), free (transparent).",
+      "html": "<div class=\"ds-capacity\"><div class=\"ds-capacity-bar\"><div class=\"ds-cap-used\" style=\"width:40%\"></div><div class=\"ds-cap-pending\" style=\"width:15%\"></div><div class=\"ds-cap-free\" style=\"flex:1\"></div></div><span class=\"ds-capacity-label\">14.2 GB free of 32 GB</span></div>",
+      "css": ".ds-capacity { display: flex; flex-direction: column; gap: 0.4rem; } .ds-capacity-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: rgba(255,255,255,0.08); } .ds-cap-used { background: rgba(255,255,255,0.25); transition: width 0.3s ease; } .ds-cap-pending { background: #22b8f0; opacity: 0.7; transition: width 0.3s ease; } .ds-cap-free { background: transparent; } .ds-capacity-label { font-family: Inter, system-ui, sans-serif; font-size: 0.8rem; color: #b0bac6; }"
+    },
+    {
+      "name": "Server Connection Chip",
+      "kind": "chip",
+      "description": "Compact server status indicator in the library header. URL + server type badge, truncated. Indicates the active connection.",
+      "html": "<div class=\"ds-server-chip\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#22b8f0\" stroke-width=\"2\"><circle cx=\"12\" cy=\"12\" r=\"10\"/><path d=\"M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z\"/></svg><span class=\"ds-server-chip-url\">http://nas.local:8096</span><span class=\"ds-server-chip-badge\">Jellyfin</span></div>",
+      "css": ".ds-server-chip { display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0.45rem 0.35rem 0.6rem; border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; background: rgba(10,16,30,0.62); font-size: 0.78rem; color: #b0bac6; max-width: 380px; } .ds-server-chip-url { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ds-server-chip-badge { flex-shrink: 0; background: rgba(34,184,240,0.18); color: #22b8f0; border: 1px solid rgba(34,184,240,0.35); border-radius: 4px; padding: 0.1rem 0.4rem; font-size: 0.72rem; font-weight: 600; }"
+    },
+    {
+      "name": "Warning Banner",
+      "kind": "custom",
+      "description": "Inline warning strip for real problems: dirty manifest, sync warnings. Amber only; never decorative.",
+      "html": "<div class=\"ds-warn-banner\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><path d=\"M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z\"/><line x1=\"12\" y1=\"9\" x2=\"12\" y2=\"13\"/><line x1=\"12\" y1=\"17\" x2=\"12.01\" y2=\"17\"/></svg><div class=\"ds-warn-body\"><strong>Manifest out of sync</strong><span>3 files on device are not tracked.</span></div></div>",
+      "css": ".ds-warn-banner { display: flex; align-items: flex-start; gap: 0.5rem; padding: 0.5rem 0.75rem; background: rgba(235,179,52,0.12); border: 1px solid rgba(235,179,52,0.3); border-radius: 4px; color: #EBB334; cursor: pointer; transition: background 0.2s ease; } .ds-warn-banner:hover { background: rgba(235,179,52,0.2); } .ds-warn-body { display: flex; flex-direction: column; gap: 0.1rem; font-size: 0.8rem; } .ds-warn-body strong { font-size: 0.85rem; font-weight: 600; } .ds-warn-body span { opacity: 0.85; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Record Crate",
+    "overview": "HifiMule is the quiet room where a serious listener manages their collection. The interface is dark by necessity and conviction: audiophiles work at their desk with a device in hand, focused. There are no recommendations, no discovery nudges, no promotional surfaces. The UI holds the library the way a crate holds records: organized, accessible, non-intrusive.\n\nThe visual language is deep navy and silence. A very dark blue-tinted void (#0b1020) recedes behind layered panel surfaces. The only color that speaks is Signal Cyan (#22b8f0): one live wire in an otherwise dark board, used exclusively on primary actions, active states, and real-time indicators.\n\nThe system explicitly rejects the iTunes paradigm: no glossy gradients, no cover-flow showmanship, no paternalistic smart features. It also rejects the streaming-app aesthetic — no discovery carousels, no algorithmic surfaces.",
+    "keyCharacteristics": [
+      "Deep dark void with a cold blue tint — not generic dark mode, but a specific nautical-instrument depth",
+      "Single accent color (Signal Cyan) used only on actionable and live-state elements",
+      "Shoelace web components for consistent interactive primitives",
+      "Tonal depth through transparency stacking over the gradient base rather than hard shadows",
+      "Inter at fixed sizes: legibility over expression",
+      "Density-comfortable: primary view is a full media grid with a persistent basket sidebar"
+    ],
+    "rules": [
+      { "name": "The One Wire Rule", "body": "Signal Cyan appears on ≤10% of any given screen. Only active and actionable elements carry it. Decorative use is prohibited by definition.", "section": "colors" },
+      { "name": "The Amber Threshold", "body": "Amber (#EBB334) appears only when the user needs to act or be warned. If you are tempted to use it for visual interest, choose a neutral instead.", "section": "colors" },
+      { "name": "The Fixed-Scale Rule", "body": "No fluid/clamp typography. HifiMule runs as a desktop Tauri app at consistent DPI. All sizes are fixed rem.", "section": "typography" },
+      { "name": "The No-Display Rule", "body": "Inter is body and label. Do not introduce a display or serif family.", "section": "typography" },
+      { "name": "The Flat-At-Rest Rule", "body": "Shadows appear only in response to hover or selection state. A shadow on an interactive element at rest reads as noise, not depth.", "section": "elevation" },
+      { "name": "The Blur-Is-Structural Rule", "body": "backdrop-filter: blur() is used only on sticky/pinned layers that need to separate from content scrolling beneath them. Never on cards, list items, or anything rendered mid-scroll.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do use Signal Cyan exclusively for actionable and live-state elements.",
+      "Do convey depth through background color steps (Void → Panel → Surface), not shadow stacks.",
+      "Do use Amber (#EBB334) only for warnings that require user attention.",
+      "Do keep type at fixed rem sizes.",
+      "Do maintain WCAG 2.1 AA contrast (≥4.5:1 for body text).",
+      "Do use backdrop-filter: blur() only on sticky/pinned layers.",
+      "Do use Shoelace's native button states. Do not override the focus ring.",
+      "Do show hover lift on media cards as a state signal, not a structural treatment."
+    ],
+    "donts": [
+      "Don't use Signal Cyan decoratively.",
+      "Don't add a second typeface.",
+      "Don't build a glassmorphism card system.",
+      "Don't import the iTunes paradigm: no cover-flow, no smart auto-curated sections, no gradient hero.",
+      "Don't use streaming-app aesthetics: no discovery carousels, no recommendation surfaces.",
+      "Don't use SaaS dashboard patterns: no hero-metric cards.",
+      "Don't add shadows at rest.",
+      "Don't use uppercase for body copy or titles.",
+      "Don't introduce a new accent color without removing one."
+    ]
+  }
+}

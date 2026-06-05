@@ -152,7 +152,13 @@
     "basket.icon.watch": "Watch",
     "basket.icon.sd_card": "SD Card",
     "basket.icon.headphones": "Headphones",
-    "basket.icon.music_player": "Music Player"
+    "basket.icon.music_player": "Music Player",
+    "basket.actions.cancel_sync": "Cancel sync",
+    "basket.sync.cancelling": "Cancelling...",
+    "basket.sync.cancelled": "Sync cancelled",
+    "basket.confirm.clear_all": "Clear basket? This will remove {count} items.",
+    "basket.actions.retry_sync": "Retry sync",
+    "basket.sync.complete_summary": "{files} files transferred ({size})"
   },
   "fr": {
     "app.name": "HifiMule",
@@ -307,7 +313,13 @@
     "basket.icon.watch": "Montre",
     "basket.icon.sd_card": "Carte SD",
     "basket.icon.headphones": "Casque",
-    "basket.icon.music_player": "Lecteur de musique"
+    "basket.icon.music_player": "Lecteur de musique",
+    "basket.actions.cancel_sync": "Annuler la synchronisation",
+    "basket.sync.cancelling": "Annulation...",
+    "basket.sync.cancelled": "Synchronisation annulée",
+    "basket.confirm.clear_all": "Vider le panier ? Cela supprimera {count} éléments.",
+    "basket.actions.retry_sync": "Réessayer la synchronisation",
+    "basket.sync.complete_summary": "{files} fichiers transférés ({size})"
   },
   "es": {
     "app.name": "HifiMule",
@@ -462,6 +474,12 @@
     "basket.icon.watch": "Reloj",
     "basket.icon.sd_card": "Tarjeta SD",
     "basket.icon.headphones": "Auriculares",
-    "basket.icon.music_player": "Reproductor de música"
+    "basket.icon.music_player": "Reproductor de música",
+    "basket.actions.cancel_sync": "Cancelar sincronización",
+    "basket.sync.cancelling": "Cancelando...",
+    "basket.sync.cancelled": "Sincronización cancelada",
+    "basket.confirm.clear_all": "¿Vaciar la cesta? Se eliminarán {count} elementos.",
+    "basket.actions.retry_sync": "Reintentar sincronización",
+    "basket.sync.complete_summary": "{files} archivos transferidos ({size})"
   }
 }
