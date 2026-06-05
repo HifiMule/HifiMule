@@ -886,6 +886,14 @@ async fn handle_playlist_create(
         }
     }
 
+    if !item_ids.is_empty() && track_ids.is_empty() {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "No valid tracks found in selection to create a playlist".to_string(),
+            data: None,
+        });
+    }
+
     let playlist_id = provider
         .create_playlist(&name, &track_ids)
         .await

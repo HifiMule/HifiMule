@@ -164,6 +164,12 @@ impl MediaProvider for JellyfinProvider {
             .get_item_details(self.url(), self.token(), self.user_id(), artist_id)
             .await
             .map_err(|err| Self::map_not_found(err, "artist", artist_id))?;
+        if item.item_type != "MusicArtist" {
+            return Err(ProviderError::NotFound {
+                item_type: "artist".to_string(),
+                id: artist_id.to_string(),
+            });
+        }
         let albums = self
             .client
             .get_albums_by_artist(self.url(), self.token(), self.user_id(), artist_id)
@@ -216,6 +222,12 @@ impl MediaProvider for JellyfinProvider {
             .get_item_details(self.url(), self.token(), self.user_id(), album_id)
             .await
             .map_err(|err| Self::map_not_found(err, "album", album_id))?;
+        if album.item_type != "MusicAlbum" {
+            return Err(ProviderError::NotFound {
+                item_type: "album".to_string(),
+                id: album_id.to_string(),
+            });
+        }
         let tracks = self
             .client
             .get_child_items_with_sizes(self.url(), self.token(), self.user_id(), album_id)
@@ -257,6 +269,12 @@ impl MediaProvider for JellyfinProvider {
             .get_item_details(self.url(), self.token(), self.user_id(), playlist_id)
             .await
             .map_err(|err| Self::map_not_found(err, "playlist", playlist_id))?;
+        if playlist.item_type != "Playlist" {
+            return Err(ProviderError::NotFound {
+                item_type: "playlist".to_string(),
+                id: playlist_id.to_string(),
+            });
+        }
         let tracks = self
             .client
             .get_child_items_with_sizes(self.url(), self.token(), self.user_id(), playlist_id)
@@ -270,6 +288,21 @@ impl MediaProvider for JellyfinProvider {
             playlist: playlist_from_item(playlist),
             tracks,
         })
+    }
+
+    async fn get_song(&self, song_id: &str) -> Result<Song, ProviderError> {
+        let item = self
+            .client
+            .get_item_details(self.url(), self.token(), self.user_id(), song_id)
+            .await
+            .map_err(|err| Self::map_not_found(err, "song", song_id))?;
+        if item.item_type != "Audio" && item.item_type != "MusicVideo" {
+            return Err(ProviderError::NotFound {
+                item_type: "song".to_string(),
+                id: song_id.to_string(),
+            });
+        }
+        Ok(song_from_item(item))
     }
 
     async fn create_playlist(
