@@ -444,6 +444,27 @@ so that I can persist and reuse my curated selections across sessions.
     - Right-click an album card — confirm context menu appears.
     - Right-click a genre card — confirm no context menu appears (genre type is excluded).
 
+### Review Findings
+
+_Code review 2026-06-06 — 3 layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor). 1 decision-needed (resolved → patch), 10 patch (all applied), 1 defer, 8 dismissed._
+
+**Patch:**
+
+- [x] [Review][Patch] AC7 — created playlist not visible in browser without reload — Both create handlers call `playlist.create` then only `dialog.hide()`. `loadPlaylists()` (library.ts:1079) returns the cached page early and the playlists `pageCache` key is never invalidated. **Decision (2026-06-06): invalidate the playlists pageCache on successful create** so the new playlist appears on next navigation [hifimule-ui/src/library.ts + create handlers]
+- [x] [Review][Patch] Attribute-injection: `escapeHtml` (textContent-based) does not escape `"`, but `itemName` is interpolated into `value="..."` of `ctx-playlist-name` — an item name containing `"` breaks out of the attribute [hifimule-ui/src/components/MediaCard.ts:288]
+- [x] [Review][Patch] Capture-phase `document` click listener leaked: `dismiss` is only removed on the outside-click path, not when the menu is closed via the menu-item click or replaced by a new menu [hifimule-ui/src/components/MediaCard.ts:showContextMenu]
+- [x] [Review][Patch] Context-menu strings hardcoded in English; the spec-added `library.context.*` i18n keys are dead — wire `t()` (basket dialog path already does) [hifimule-ui/src/components/MediaCard.ts:showContextMenu/openCreatePlaylistDialog]
+- [x] [Review][Patch] `handleSaveAsPlaylist` allows creating an empty playlist when basket holds only an Auto-Fill slot (`manualIds == []`); only `name` is guarded — add itemIds-length guard [hifimule-ui/src/components/BasketSidebar.ts:handleSaveAsPlaylist]
+- [x] [Review][Patch] Double-submit: Create button sets `loading` but not `disabled`/in-flight flag — fast double-click fires two `playlist.create` calls (both dialogs) [hifimule-ui/src/components/BasketSidebar.ts + MediaCard.ts create handlers]
+- [x] [Review][Patch] Enter key in the name input does not submit (no keydown handler / form wrapper) — silent dead-end given autofocus [both dialogs]
+- [x] [Review][Patch] Dead i18n key `basket.playlist.creating` — added but never referenced (loading state uses spinner only) [hifimule-i18n/catalog.json]
+- [x] [Review][Patch] Context-menu viewport clamp uses hardcoded `MENU_W=200`/`MENU_H=44` instead of the menu's measured size — latent overflow if label localizes longer or an item is added [hifimule-ui/src/components/MediaCard.ts:showContextMenu]
+- [x] [Review][Patch] Context menu (position:fixed) not dismissed on scroll/resize/Escape — detaches from card on scroll [hifimule-ui/src/components/MediaCard.ts:showContextMenu]
+
+**Deferred:**
+
+- [x] [Review][Defer] No server-side empty/whitespace `name` validation in `playlist.create` handler [hifimule-daemon/src/rpc.rs:844] — deferred, pre-existing (Story 11.4 handler, untouched by this diff; current UI trims client-side)
+
 ## Dev Notes
 
 ### Two-file implementation split: daemon + UI
@@ -606,4 +627,4 @@ claude-sonnet-4-6
 
 ## Status
 
-review
+done

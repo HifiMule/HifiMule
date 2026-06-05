@@ -130,3 +130,7 @@ If future review findings need follow-up, add them as new story scope or reopen 
 
 - **Input-validation leniency at playlist RPC handlers** (`hifimule-daemon/src/rpc.rs`): The four new playlist handlers accept empty `name`, empty `playlistId`, and silently drop non-string elements from `itemIds`/`trackIds` arrays via `filter_map`. This matches the established rpc.rs param-parsing convention (e.g. `rpc.rs:581` checks only `.as_str()` presence, not emptiness) and the only client is the trusted HifiMule UI, so it is consistent rather than a regression. A future codebase-wide param-validation hardening pass could reject empty/malformed values with `ERR_INVALID_PARAMS`.
 - **Large `itemIds`/`trackIds` may exceed Subsonic GET URL length** (`hifimule-daemon/src/providers/subsonic.rs`): `playlist.create`/`addTracks` with very large resolved lists feed one query param per track into a single GET, which can hit ~8KB URL limits. Pre-existing provider-layer concern already noted in the 11.3 review deferral; the new RPC entry points make it reachable from larger basket selections. Chunking should be considered before bulk playlist operations ship.
+
+## Deferred from: code review of story-11.5 (2026-06-06)
+
+- No server-side empty/whitespace `name` validation in the `playlist.create` RPC handler (`hifimule-daemon/src/rpc.rs:844`). Pre-existing from Story 11.4; the daemon forwards any non-null string to the provider. Both 11.5 UI paths trim client-side, so the current UI is safe — defense-in-depth gap only, not introduced by this change.

@@ -3,6 +3,7 @@
 
 import { basketStore } from '../state/basket';
 import { getImageUrl, rpcCall } from '../rpc';
+import { t } from '../i18n';
 
 export interface JellyfinItem {
     Id: string;
@@ -268,12 +269,12 @@ export class MediaCard {
     }
 
     private static activeContextMenu: HTMLElement | null = null;
+    private static dismissActiveMenu: (() => void) | null = null;
 
     static showContextMenu(x: number, y: number, itemId: string, itemName: string): void {
-        // Dismiss any existing context menu first
-        if (MediaCard.activeContextMenu) {
-            MediaCard.activeContextMenu.remove();
-            MediaCard.activeContextMenu = null;
+        // Dismiss any existing context menu first (and tear down its listeners)
+        if (MediaCard.dismissActiveMenu) {
+            MediaCard.dismissActiveMenu();
         }
 
         const menu = document.createElement('div');
@@ -287,18 +288,8 @@ export class MediaCard {
             box-shadow: var(--sl-shadow-large);
             padding: 4px 0;
             min-width: 180px;
+            visibility: hidden;
         `;
-
-        // Clamp position to viewport
-        const MARGIN = 8;
-        const viewW = window.innerWidth;
-        const viewH = window.innerHeight;
-        const MENU_W = 200;
-        const MENU_H = 44;
-        const left = Math.min(x, viewW - MENU_W - MARGIN);
-        const top = Math.min(y, viewH - MENU_H - MARGIN);
-        menu.style.left = `${left}px`;
-        menu.style.top = `${top}px`;
 
         const sendItem = document.createElement('div');
         sendItem.className = 'hm-context-menu-item';
@@ -311,7 +302,7 @@ export class MediaCard {
             align-items: center;
             gap: 8px;
         `;
-        sendItem.innerHTML = `<sl-icon name="collection-play"></sl-icon> Send to playlist…`;
+        sendItem.innerHTML = `<sl-icon name="collection-play"></sl-icon> ${t('library.context.send_to_playlist')}`;
 
         sendItem.addEventListener('mouseover', () => {
             sendItem.style.background = 'var(--sl-color-primary-50, #eff6ff)';
@@ -320,42 +311,64 @@ export class MediaCard {
             sendItem.style.background = '';
         });
 
-        sendItem.addEventListener('click', () => {
-            menu.remove();
-            MediaCard.activeContextMenu = null;
-            MediaCard.openCreatePlaylistDialog(itemId, itemName);
-        });
-
         menu.appendChild(sendItem);
         document.body.appendChild(menu);
         MediaCard.activeContextMenu = menu;
 
-        // Dismiss on any click outside the menu
-        const dismiss = (ev: MouseEvent) => {
-            if (!menu.contains(ev.target as Node)) {
-                menu.remove();
-                MediaCard.activeContextMenu = null;
-                document.removeEventListener('click', dismiss, true);
-            }
+        // Clamp using the menu's measured size now that it is in the DOM
+        const MARGIN = 8;
+        const rect = menu.getBoundingClientRect();
+        const left = Math.max(MARGIN, Math.min(x, window.innerWidth - rect.width - MARGIN));
+        const top = Math.max(MARGIN, Math.min(y, window.innerHeight - rect.height - MARGIN));
+        menu.style.left = `${left}px`;
+        menu.style.top = `${top}px`;
+        menu.style.visibility = 'visible';
+
+        // Single cleanup path: removes the menu AND every listener it registered.
+        const cleanup = () => {
+            menu.remove();
+            MediaCard.activeContextMenu = null;
+            MediaCard.dismissActiveMenu = null;
+            document.removeEventListener('click', onDocClick, true);
+            window.removeEventListener('scroll', cleanup, true);
+            window.removeEventListener('resize', cleanup);
+            document.removeEventListener('keydown', onKeyDown, true);
         };
+        MediaCard.dismissActiveMenu = cleanup;
+
+        const onDocClick = (ev: MouseEvent) => {
+            if (!menu.contains(ev.target as Node)) cleanup();
+        };
+        const onKeyDown = (ev: KeyboardEvent) => {
+            if (ev.key === 'Escape') cleanup();
+        };
+
+        sendItem.addEventListener('click', () => {
+            cleanup();
+            MediaCard.openCreatePlaylistDialog(itemId, itemName);
+        });
+
         // Use capture=true so outside clicks register before propagation stops them
-        document.addEventListener('click', dismiss, true);
+        document.addEventListener('click', onDocClick, true);
+        window.addEventListener('scroll', cleanup, true);
+        window.addEventListener('resize', cleanup);
+        document.addEventListener('keydown', onKeyDown, true);
     }
 
     static openCreatePlaylistDialog(itemId: string, itemName: string): void {
         const dialog = document.createElement('sl-dialog') as any;
-        dialog.label = 'Send to New Playlist';
+        dialog.label = t('library.context.create_playlist_title');
         dialog.innerHTML = `
             <sl-input
                 id="ctx-playlist-name"
-                placeholder="My playlist…"
+                placeholder="${t('basket.playlist.name_placeholder')}"
                 autofocus
                 clearable
                 value="${MediaCard.escapeHtml(itemName)}"
             ></sl-input>
             <sl-alert id="ctx-playlist-error" variant="danger" closable style="display:none; margin-top: 0.75rem;"></sl-alert>
-            <sl-button slot="footer" variant="default" id="ctx-playlist-cancel">Cancel</sl-button>
-            <sl-button slot="footer" variant="primary" id="ctx-playlist-create">Create</sl-button>
+            <sl-button slot="footer" variant="default" id="ctx-playlist-cancel">${t('basket.actions.cancel')}</sl-button>
+            <sl-button slot="footer" variant="primary" id="ctx-playlist-create">${t('library.context.create_btn')}</sl-button>
         `;
 
         document.body.appendChild(dialog);
@@ -363,29 +376,42 @@ export class MediaCard {
         const dismissDialog = () => dialog.hide();
         dialog.querySelector('#ctx-playlist-cancel')?.addEventListener('click', dismissDialog);
 
-        dialog.querySelector('#ctx-playlist-create')?.addEventListener('click', async () => {
+        const submit = async () => {
             const createBtn = dialog.querySelector('#ctx-playlist-create') as any;
             const errorEl = dialog.querySelector('#ctx-playlist-error') as HTMLElement | null;
             const nameInput = dialog.querySelector('#ctx-playlist-name') as any;
             const name = (nameInput?.value ?? '').trim();
             if (!name) return;
+            if (createBtn?.loading) return; // guard against double-submit
 
             createBtn.loading = true;
+            createBtn.disabled = true;
             if (errorEl) errorEl.style.display = 'none';
 
             try {
                 const { rpcCall } = await import('../rpc');
                 await rpcCall('playlist.create', { name, itemIds: [itemId] });
+                const { invalidatePlaylistsCache } = await import('../library');
+                invalidatePlaylistsCache();
                 dialog.hide();
             } catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
                 if (errorEl) {
-                    errorEl.textContent = `Failed to create playlist: ${msg}`;
+                    errorEl.textContent = t('basket.playlist.error', { message: msg });
                     errorEl.style.display = '';
                     (errorEl as any).open = true;
                 }
             } finally {
                 createBtn.loading = false;
+                createBtn.disabled = false;
+            }
+        };
+
+        dialog.querySelector('#ctx-playlist-create')?.addEventListener('click', submit);
+        dialog.querySelector('#ctx-playlist-name')?.addEventListener('keydown', (e: KeyboardEvent) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                submit();
             }
         });
 
@@ -399,6 +425,7 @@ export class MediaCard {
     private static escapeHtml(text: string): string {
         const div = document.createElement('div');
         div.textContent = text;
-        return div.innerHTML;
+        // Escape double-quotes too — value is interpolated into a quoted HTML attribute.
+        return div.innerHTML.replace(/"/g, '&quot;');
     }
 }

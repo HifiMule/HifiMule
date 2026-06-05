@@ -83,6 +83,15 @@ function cacheKey(parentId?: string): string {
     return `${state.browseMode}:${parentId ?? 'root'}`;
 }
 
+// Drop cached playlist pages so a newly created playlist appears on next navigation.
+export function invalidatePlaylistsCache(): void {
+    for (const key of Array.from(state.pageCache.keys())) {
+        if (key.startsWith('playlists:')) {
+            state.pageCache.delete(key);
+        }
+    }
+}
+
 export function clearNavigationCache() {
     state.scrollCache = new Map();
     state.pageCache = new Map();

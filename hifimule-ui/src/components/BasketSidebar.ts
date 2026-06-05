@@ -6,7 +6,7 @@ import { rpcCall, getImageUrl } from '../rpc';
 import { RepairModal } from './RepairModal';
 import { InitDeviceModal } from './InitDeviceModal';
 import { t } from '../i18n';
-import { setPlaylistWriteCapability } from '../library';
+import { setPlaylistWriteCapability, invalidatePlaylistsCache } from '../library';
 
 interface StorageInfo {
     totalBytes: number;
@@ -1687,28 +1687,50 @@ export class BasketSidebar {
 
         dialog.querySelector('#playlist-cancel-btn')?.addEventListener('click', () => dialog.hide());
 
-        dialog.querySelector('#playlist-create-btn')?.addEventListener('click', async () => {
+        const submit = async () => {
             const createBtn = dialog.querySelector('#playlist-create-btn') as any;
             const errorEl = dialog.querySelector('#playlist-create-error') as HTMLElement | null;
             const nameInput = dialog.querySelector('#playlist-name-input') as any;
             const name = (nameInput?.value ?? '').trim();
             if (!name) return;
+            if (createBtn?.loading) return; // guard against double-submit
+
+            const showError = (text: string) => {
+                if (errorEl) {
+                    errorEl.textContent = text;
+                    errorEl.style.display = '';
+                    (errorEl as any).open = true;
+                }
+            };
+
+            // Nothing to save if the basket holds only an Auto-Fill slot
+            if (manualIds.length === 0) {
+                showError(t('basket.playlist.empty_error'));
+                return;
+            }
 
             createBtn.loading = true;
+            createBtn.disabled = true;
             if (errorEl) errorEl.style.display = 'none';
 
             try {
                 await rpcCall('playlist.create', { name, itemIds: manualIds });
+                invalidatePlaylistsCache();
                 dialog.hide();
             } catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
-                if (errorEl) {
-                    errorEl.textContent = t('basket.playlist.error', { message: msg });
-                    errorEl.style.display = '';
-                    (errorEl as any).open = true;
-                }
+                showError(t('basket.playlist.error', { message: msg }));
             } finally {
                 createBtn.loading = false;
+                createBtn.disabled = false;
+            }
+        };
+
+        dialog.querySelector('#playlist-create-btn')?.addEventListener('click', submit);
+        dialog.querySelector('#playlist-name-input')?.addEventListener('keydown', (e: KeyboardEvent) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                submit();
             }
         });
 
