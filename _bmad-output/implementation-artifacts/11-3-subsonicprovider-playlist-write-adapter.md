@@ -28,8 +28,8 @@ so that my Navidrome/Subsonic server playlists reflect my HifiMule selections re
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Add four new methods to `SubsonicClient` (AC: 1–4)
-  - [ ] In `hifimule-daemon/src/providers/subsonic.rs`, after `get_playlist` at line 785 (before `search3` at line 788), add:
+- [x] Task 1: Add four new methods to `SubsonicClient` (AC: 1–4)
+  - [x] In `hifimule-daemon/src/providers/subsonic.rs`, after `get_playlist` at line 785 (before `search3` at line 788), add:
 
     ```rust
     async fn create_playlist(
@@ -85,18 +85,18 @@ so that my Navidrome/Subsonic server playlists reflect my HifiMule selections re
     - `PlaylistWithSongsBody` is already defined at line ~1445. The `createPlaylist` response body has the same shape as `getPlaylist` (a `playlist` object with `id`, `name`, etc.).
     - `NoBody` (line 1323) is the existing empty-body sentinel — used for `updatePlaylist` and `deletePlaylist` which return no payload beyond the status envelope.
 
-- [ ] Task 2: Flip `supports_playlist_write` to `true` in `SubsonicProvider.capabilities()` (AC: 6)
-  - [ ] In `hifimule-daemon/src/providers/subsonic.rs` at line 477: remove the gate comment and change the value:
+- [x] Task 2: Flip `supports_playlist_write` to `true` in `SubsonicProvider.capabilities()` (AC: 6)
+  - [x] In `hifimule-daemon/src/providers/subsonic.rs` at line 477: remove the gate comment and change the value:
     ```rust
     supports_playlist_write: true,
     ```
-  - [ ] In the test `connect_pings_once_and_caches_capabilities` at line 1715: change the assertion value:
+  - [x] In the test `connect_pings_once_and_caches_capabilities` at line 1715: change the assertion value:
     ```rust
     supports_playlist_write: true,
     ```
 
-- [ ] Task 3: Implement the four `MediaProvider` write methods in `SubsonicProvider` (AC: 1–4)
-  - [ ] Add immediately after `get_playlist` (ending at line ~359, before `search` at line 361):
+- [x] Task 3: Implement the four `MediaProvider` write methods in `SubsonicProvider` (AC: 1–4)
+  - [x] Add immediately after `get_playlist` (ending at line ~359, before `search` at line 361):
 
     ```rust
     async fn create_playlist(
@@ -161,8 +161,8 @@ so that my Navidrome/Subsonic server playlists reflect my HifiMule selections re
     - If a requested track ID appears zero times in the current playlist, it is silently skipped (no error). If `indices` is empty, short-circuit before calling `updatePlaylist`.
     - The `SubsonicProvider` does NOT have `map_error` like `JellyfinProvider`; errors propagate directly since `SubsonicClient.get()` already maps to `ProviderError`.
 
-- [ ] Task 4: Add tests (AC: 1–6)
-  - [ ] Add after the last test `list_albums_letter_filter_matches_alpha_and_hash_quick_nav` (before the closing `}` of the `mod tests` block at line 3133):
+- [x] Task 4: Add tests (AC: 1–6)
+  - [x] Add after the last test `list_albums_letter_filter_matches_alpha_and_hash_quick_nav` (before the closing `}` of the `mod tests` block at line 3133):
 
     ```rust
     #[tokio::test]
@@ -320,9 +320,9 @@ so that my Navidrome/Subsonic server playlists reflect my HifiMule selections re
     - The "no match" test registers only a GET mock, no UPDATE mock. In mockito, an unmatched request causes the test to fail — so the absence of an UPDATE mock is the assertion.
     - All tests use `provider(&server).await` (defined at line 1598) which creates an OpenSubsonic provider.
 
-- [ ] Task 5: Verify compilation and tests (AC: all)
-  - [ ] Run `rtk cargo check` — zero errors.
-  - [ ] Run `rtk cargo test` — all existing tests pass; all five new tests pass.
+- [x] Task 5: Verify compilation and tests (AC: all)
+  - [x] Run `rtk cargo check` — zero errors.
+  - [x] Run `rtk cargo test` — all existing tests pass; all five new tests pass.
 
 ## Dev Notes
 
@@ -450,14 +450,26 @@ claude-sonnet-4-6
 
 ### Debug Log References
 
+- `Matcher::UrlEncoded` in mockito 1.7.1 uses `HashMap<String, String>` internally (`serde_urlencoded::from_str`), which silently drops all but the last value for repeated query params. This caused `?songId=song1&songId=song2` to only retain `song2`, breaking the `song1` assertion. Fixed by using `Matcher::Regex("songId=song1")` for repeated-key params in tests — `is_match` on the raw query string correctly finds all occurrences.
+
 ### Completion Notes List
 
+- Implemented 4 `SubsonicClient` methods: `create_playlist`, `update_playlist_add`, `update_playlist_remove_by_indices`, `delete_playlist`. All use `self.get()` → `signed_url()` for auth and URL encoding.
+- Implemented 4 `MediaProvider` trait methods on `SubsonicProvider`: `create_playlist`, `add_to_playlist`, `remove_from_playlist`, `delete_playlist`. Both `add_to_playlist` and `remove_from_playlist` short-circuit with `Ok(())` for empty `track_ids`. `remove_from_playlist` resolves 0-based indices via `get_playlist`, skips `updatePlaylist` call if no matching tracks found.
+- Flipped `supports_playlist_write: false → true` in `capabilities()` and its test assertion.
+- Added 5 tests covering all 4 write operations plus the no-match short-circuit case.
+- Used `Matcher::Regex` (not `Matcher::UrlEncoded`) for repeated query params in tests due to the HashMap limitation in mockito's `UrlEncoded` matcher.
+- 404 tests pass total (399 existing + 5 new).
+
 ### File List
+
+- hifimule-daemon/src/providers/subsonic.rs
 
 ## Change Log
 
 - 2026-06-05: Story 11.3 created — SubsonicProvider playlist write adapter ready for dev.
+- 2026-06-05: Story 11.3 implemented — all tasks complete, 404 tests pass.
 
 ## Status
 
-ready-for-dev
+review
