@@ -416,6 +416,8 @@ pub enum SyncStatus {
     Running,
     Complete,
     Failed,
+    #[serde(rename = "cancelled")]
+    Cancelled,
 }
 
 /// Error details for a failed file operation.
@@ -468,6 +470,10 @@ pub struct SyncOperationManager {
     /// Covers the window between pipeline start and the first `create_operation` call,
     /// where `has_active_operation` would otherwise return false.
     pipeline_active: Arc<AtomicBool>,
+    /// Per-operation cancellation flags. Set to `true` by `request_cancel`; polled by
+    /// the sync loop between files via `is_cancelled`. Never removed — old entries for
+    /// completed operations are harmless and naturally sized (one AtomicBool per UUID).
+    cancel_tokens: Arc<RwLock<HashMap<String, Arc<AtomicBool>>>>,
 }
 
 impl SyncOperationManager {
@@ -475,6 +481,7 @@ impl SyncOperationManager {
         Self {
             operations: Arc::new(RwLock::new(HashMap::new())),
             pipeline_active: Arc::new(AtomicBool::new(false)),
+            cancel_tokens: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -511,8 +518,34 @@ impl SyncOperationManager {
         };
 
         let mut ops = self.operations.write().await;
-        ops.insert(operation_id, operation.clone());
+        ops.insert(operation_id.clone(), operation.clone());
+        drop(ops);
+
+        let mut tokens = self.cancel_tokens.write().await;
+        tokens.insert(operation_id, Arc::new(AtomicBool::new(false)));
         operation
+    }
+
+    /// Signals the sync loop for the given operation to stop after the current file.
+    /// Returns `true` if the operation was found (whether running or already terminal),
+    /// `false` if the operation ID is unknown.
+    pub async fn request_cancel(&self, id: &str) -> bool {
+        let tokens = self.cancel_tokens.read().await;
+        if let Some(token) = tokens.get(id) {
+            token.store(true, Ordering::Release);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns `true` if cancellation has been requested for the given operation.
+    pub async fn is_cancelled(&self, id: &str) -> bool {
+        let tokens = self.cancel_tokens.read().await;
+        tokens
+            .get(id)
+            .map(|t| t.load(Ordering::Acquire))
+            .unwrap_or(false)
     }
 
     pub async fn update_operation(&self, operation_id: &str, operation: SyncOperation) {
@@ -1690,6 +1723,9 @@ pub async fn execute_sync(
 
     // Process adds (downloads)
     for (index, add_item) in delta.adds.iter().enumerate() {
+        if operation_manager.is_cancelled(&operation_id).await {
+            break;
+        }
         crate::daemon_log!(
             "[Sync] Preparing file {}/{}: '{}' ({}, {} bytes)",
             index + 1,
@@ -2012,6 +2048,9 @@ pub async fn execute_sync(
         .iter()
         .filter(|delete| !readd_ids.contains(delete.jellyfin_id.as_str()))
     {
+        if operation_manager.is_cancelled(&operation_id).await {
+            break;
+        }
         // Verify file is in managed zone (security check)
         if let Err(error_message) = validate_delete_path_for_managed_zone(
             device_path,
@@ -2097,6 +2136,9 @@ pub async fn execute_sync(
 
     // Process ID changes (virtual adds: we don't download, just update manifest records)
     for id_change in &delta.id_changes {
+        if operation_manager.is_cancelled(&operation_id).await {
+            break;
+        }
         let synced_at = now_iso8601(); // Or we could try to preserve original synced_at if we wanted
 
         synced_items.push(crate::device::SyncedItem {
@@ -2293,6 +2335,9 @@ pub async fn execute_provider_sync(
         .collect();
 
     for (index, add_item) in delta.adds.iter().enumerate() {
+        if operation_manager.is_cancelled(&operation_id).await {
+            break;
+        }
         crate::daemon_log!(
             "[Sync] Preparing file {}/{}: '{}' ({}, {} bytes)",
             index + 1,
@@ -2622,6 +2667,9 @@ pub async fn execute_provider_sync(
         .iter()
         .filter(|delete| !readd_ids.contains(delete.jellyfin_id.as_str()))
     {
+        if operation_manager.is_cancelled(&operation_id).await {
+            break;
+        }
         if let Err(error_message) = validate_delete_path_for_managed_zone(
             device_path,
             &managed_path,
@@ -2693,6 +2741,9 @@ pub async fn execute_provider_sync(
     }
 
     for id_change in &delta.id_changes {
+        if operation_manager.is_cancelled(&operation_id).await {
+            break;
+        }
         let synced_at = now_iso8601();
         synced_items.push(crate::device::SyncedItem {
             jellyfin_id: id_change.new_jellyfin_id.clone(),
