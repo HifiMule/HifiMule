@@ -23,6 +23,7 @@ import {
     rpcCall,
 } from './rpc';
 import { MediaCard, BrowseDisplayItem } from './components/MediaCard';
+import { PlaylistCurationView } from './components/PlaylistCurationView';
 import { basketStore } from './state/basket';
 import { t } from './i18n';
 
@@ -505,7 +506,7 @@ function renderQuickNav(): HTMLElement | null {
     return navBar;
 }
 
-function renderGrid(items: BrowseDisplayItem[]) {
+function renderGrid(items: BrowseDisplayItem[], onCurate?: (id: string, name: string) => void) {
     const container = document.getElementById('library-content');
     if (!container) return;
 
@@ -525,7 +526,7 @@ function renderGrid(items: BrowseDisplayItem[]) {
     items.forEach(item => {
         const selEnabled = true;
 
-        const card = MediaCard.create(item, 'items', false, () => navigateToBrowseItem(item), selEnabled, _supportsPlaylistWrite);
+        const card = MediaCard.create(item, 'items', false, () => navigateToBrowseItem(item), selEnabled, _supportsPlaylistWrite, onCurate);
         card.setAttribute('data-name', item.name);
         grid.appendChild(card);
     });
@@ -1085,6 +1086,31 @@ async function loadAlbums(reset: boolean) {
     }
 }
 
+function openCurationView(playlistId: string, playlistName: string): void {
+    const container = document.getElementById('library-content');
+    if (!container) return;
+
+    saveScroll();
+
+    const view = new PlaylistCurationView(
+        container,
+        playlistId,
+        playlistName,
+        () => {
+            // On close: invalidate this playlist's track cache and the playlists list cache
+            for (const key of Array.from(state.pageCache.keys())) {
+                if (key.includes(playlistId) || key.startsWith('playlists:')) {
+                    state.pageCache.delete(key);
+                }
+            }
+            // Restore the playlist list view
+            loadPlaylists();
+        },
+    );
+
+    view.load();
+}
+
 async function loadPlaylists() {
     const container = document.getElementById('library-content');
     if (!container) return;
@@ -1096,7 +1122,7 @@ async function loadPlaylists() {
         state.items = cached.items;
         state.pagination.total = cached.total;
         state.artistViewTotal = 0;
-        renderGrid(state.items);
+        renderGrid(state.items, _supportsPlaylistWrite ? openCurationView : undefined);
         restoreScroll(key);
         return;
     }
@@ -1115,7 +1141,7 @@ async function loadPlaylists() {
         state.pagination.startIndex = mapped.length;
         state.artistViewTotal = 0;
         state.pageCache.set(key, { items: state.items, total: mapped.length });
-        renderGrid(state.items);
+        renderGrid(state.items, _supportsPlaylistWrite ? openCurationView : undefined);
         restoreScroll(key);
     } catch (e) {
         renderError(e as Error);

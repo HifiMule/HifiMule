@@ -44,6 +44,7 @@ export class MediaCard {
         onNavigate: () => void | Promise<void>,
         deviceSelectionEnabled?: boolean,
         supportsPlaylistWrite?: boolean,
+        onCurate?: (id: string, name: string) => void,
     ): HTMLElement {
         const isBrowseItem = !('Id' in item);
         const itemId = isBrowseItem ? ((item as BrowseDisplayItem).basketId ?? (item as BrowseDisplayItem).id) : (item as JellyfinItem | JellyfinView).Id;
@@ -262,6 +263,22 @@ export class MediaCard {
                     e.preventDefault();
                     MediaCard.showContextMenu(e.clientX, e.clientY, itemId, itemName);
                 });
+            }
+        }
+
+        // Curate button: appears on Playlist cards when playlist write is supported
+        if (onCurate) {
+            const itemType = 'Type' in item ? (item as JellyfinItem).Type : (item as BrowseDisplayItem).type;
+            if (itemType === 'Playlist') {
+                const curateBtn = document.createElement('sl-icon-button') as any;
+                curateBtn.name = 'pencil-square';
+                curateBtn.label = t('playlist.curation.curate_btn');
+                curateBtn.style.cssText = 'font-size: 1rem; margin-left: auto;';
+                curateBtn.addEventListener('click', (e: MouseEvent) => {
+                    e.stopPropagation();
+                    onCurate(itemId, itemName);
+                });
+                card.appendChild(curateBtn);
             }
         }
 
