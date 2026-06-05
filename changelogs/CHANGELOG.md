@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.9.1 - 2026-06-05
+
+You can now cancel a running sync — a **Cancel Sync** button appears while a sync is in progress. Cancellation stops cleanly after the current file transfer and keeps the device marked for resume, so the next time you connect it picks up where it left off.
+
+The sync preview now tells you *why* each file is being added or removed. Instead of a raw file count, you'll see a breakdown: "3 files — new selection, 1 file — bitrate increased, 2 files — device file missing". This makes it easy to understand large syncs at a glance and spot unexpected changes.
+
+Labels across the basket and repair flow have been rewritten in plain language. "Manifest Dirty" is now "Repair needed", "Open Manifest Repair" is "Open sync repair", and "Sync Proposed" is "Basket changed — ready to sync". Clearing the basket now asks for confirmation. The repair modal is also fully translated into French and Spanish.
+
+A bug where Navidrome/Subsonic devices incorrectly showed "sync not needed" even when files were pending is fixed.
+
 ## v0.9.0 - 2026-05-30
 
 Subsonic and Navidrome users get a much better sync experience: devices can now auto-sync when connected, and auto-fill works in both sync previews and automatic syncs. Sync is also safer and more resilient: empty baskets can clean old HifiMule-managed files from a device, concurrent syncs are blocked, large-library preparation is steadier, and temporary server errors are retried instead of immediately failing the whole sync.
