@@ -315,6 +315,7 @@ async fn handler(
         "sync_calculate_delta" => handle_sync_calculate_delta(&state, payload.params).await,
         "sync_detect_changes" => handle_sync_detect_changes(&state, payload.params).await,
         "sync_execute" => handle_sync_execute(&state, payload.params).await,
+        "sync_cancel" => handle_sync_cancel(&state, payload.params).await,
         "sync_get_operation_status" => {
             handle_sync_get_operation_status(&state, payload.params).await
         }
@@ -3344,6 +3345,15 @@ async fn handle_sync_execute(
 
             match result {
                 Ok((_synced_items, errors)) => {
+                    if op_manager.is_cancelled(&op_id).await {
+                        if let Some(mut operation) = op_manager.get_operation(&op_id).await {
+                            operation.status = crate::sync::SyncStatus::Cancelled;
+                            op_manager.update_operation(&op_id, operation).await;
+                        }
+                        let _ = state_tx.send(crate::DaemonState::Idle);
+                        return;
+                    }
+
                     if let Err(e) = device_manager
                         .update_manifest(|m| {
                             m.dirty = false;
@@ -3460,6 +3470,15 @@ async fn handle_sync_execute(
 
         match result {
             Ok((_synced_items, errors)) => {
+                if op_manager.is_cancelled(&op_id).await {
+                    if let Some(mut operation) = op_manager.get_operation(&op_id).await {
+                        operation.status = crate::sync::SyncStatus::Cancelled;
+                        op_manager.update_operation(&op_id, operation).await;
+                    }
+                    let _ = state_tx.send(crate::DaemonState::Idle);
+                    return;
+                }
+
                 // Clear dirty flag after sync completes — per-file updates already wrote all items (Story 4.4)
                 if let Err(e) = device_manager
                     .update_manifest(|m| {
@@ -3545,6 +3564,38 @@ async fn handle_sync_get_operation_status(
             message: "Operation not found".to_string(),
             data: None,
         }),
+    }
+}
+
+async fn handle_sync_cancel(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let operation_id = params["operationId"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing operationId".to_string(),
+        data: None,
+    })?;
+
+    let found = state
+        .sync_operation_manager
+        .request_cancel(operation_id)
+        .await;
+
+    if found {
+        Ok(serde_json::json!({ "cancelled": true }))
+    } else {
+        Err(JsonRpcError {
+            code: ERR_NOT_FOUND,
+            message: format!("No operation with id '{}'", operation_id),
+            data: None,
+        })
     }
 }
 

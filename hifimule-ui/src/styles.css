@@ -5,7 +5,33 @@
   --panel-bg: #151d31;
   --panel-bg-strong: #10182b;
   --surface-bg: #24252b;
+  /* White-alpha surface system on the dark theme:
+     border = strong hairline, border-soft = standard divider,
+     fill = subtle panel wash, fill-hover = interactive surface. */
   --surface-border: rgba(255, 255, 255, 0.1);
+  --surface-border-soft: rgba(255, 255, 255, 0.08);
+  --surface-fill: rgba(255, 255, 255, 0.03);
+  --surface-fill-hover: rgba(255, 255, 255, 0.06);
+  /* Card / panel corner radius (distinct from Shoelace's 6px input radius). */
+  --radius: 8px;
+  /* Spacing scale (4pt-based). One rhythm across the dense sidebar. */
+  --space-2xs: 0.25rem;
+  --space-xs: 0.5rem;
+  --space-sm: 0.75rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  /* Text: ink is primary copy, ink-dim is secondary/metadata.
+     ink-dim is a cool-tinted neutral (toward the cyan brand hue) that clears
+     WCAG AA (8.5:1) on the dark panels, unlike Shoelace neutral-300/400/500. */
+  --ink: #f1f5f9;
+  --ink-dim: #b0bac6;
+  /* Warning accent (interrupted sync / repair states) */
+  --amber-warn: #ebb334;
+  /* Motion: confident deceleration, product-paced. Calm, never bouncy. */
+  --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 140ms;
+  --dur-base: 200ms;
 }
 
 body {
@@ -15,7 +41,7 @@ body {
   background:
     radial-gradient(circle at 12% 0%, rgba(34, 184, 240, 0.12), transparent 32rem),
     linear-gradient(135deg, #101827 0%, var(--app-bg) 58%, #0a0d16 100%);
-  color: #f1f5f9;
+  color: var(--ink);
   height: 100vh;
   overflow: hidden;
 }
@@ -36,7 +62,6 @@ body {
 
 .library-view {
   background: rgba(21, 29, 49, 0.86);
-  backdrop-filter: blur(10px);
   height: 100%;
   box-sizing: border-box;
   display: flex;
@@ -53,10 +78,9 @@ body {
 
 #browse-mode-bar {
   flex-shrink: 0;
-  padding: 0.5rem 2rem;
+  padding: var(--space-xs) 2rem;
   background: rgba(26, 39, 59, 0.96);
-  backdrop-filter: blur(8px);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--surface-border-soft);
 }
 
 .browse-mode-bar {
@@ -90,7 +114,7 @@ body {
 .library-title-block p {
   margin: 0;
   white-space: nowrap;
-  color: rgba(241, 245, 249, 0.88);
+  color: color-mix(in srgb, var(--ink) 88%, transparent);
   font-weight: 600;
 }
 
@@ -105,7 +129,7 @@ body {
   border-radius: var(--sl-border-radius-medium);
   background: rgba(10, 16, 30, 0.62);
   font-size: 0.78rem;
-  color: var(--sl-color-neutral-300);
+  color: var(--ink-dim);
 }
 
 .server-connection-chip span {
@@ -117,9 +141,9 @@ body {
 
 .basket-view {
   min-width: 330px;
-  padding: 1.55rem 1.5rem 1.25rem;
+  padding: var(--space-lg) var(--space-lg) var(--space-md);
   background: rgba(12, 18, 33, 0.94);
-  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  border-left: 1px solid var(--surface-border);
   height: 100vh;
   box-sizing: border-box;
   display: flex;
@@ -131,7 +155,7 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 1.5rem;
+  margin-bottom: var(--space-lg);
 }
 
 .basket-header h2 {
@@ -145,7 +169,7 @@ body {
   align-items: center;
   justify-content: center;
   text-align: center;
-  color: rgba(241, 245, 249, 0.72);
+  color: color-mix(in srgb, var(--ink) 72%, transparent);
 }
 
 .basket-items-list {
@@ -154,25 +178,26 @@ body {
   overflow-y: auto;
   margin-right: -1rem;
   padding-right: 1rem;
-  margin-bottom: 1rem;
+  margin-bottom: var(--space-md);
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: var(--space-sm);
 }
 
 .basket-item-card {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-  padding: 0.5rem;
+  gap: var(--space-sm);
+  padding: var(--space-xs);
   background: rgba(255, 255, 255, 0.045);
   border: 1px solid rgba(255, 255, 255, 0.075);
-  border-radius: 8px;
-  transition: background 0.2s ease, border-color 0.2s ease;
+  border-radius: var(--radius);
+  transition: background var(--dur-base) var(--ease-out-quart),
+              border-color var(--dur-base) var(--ease-out-quart);
 }
 
 .basket-item-card:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--surface-fill-hover);
   border-color: rgba(34, 184, 240, 0.26);
 }
 
@@ -200,47 +225,55 @@ body {
 
 .basket-item-meta {
   font-size: 0.75rem;
-  color: var(--sl-color-neutral-400);
+  color: var(--ink-dim);
 }
 
+/* One spacing rhythm for the whole footer stack: a single gap drives the
+   separation between summary, capacity, auto-fill, status, and device modules.
+   Per-module margins are removed so spacing lives in exactly one place. */
 .basket-footer {
   flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
 }
 
 .basket-actions {
   flex-shrink: 0;
-  padding-top: 0.75rem;
-  margin-top: 0.25rem;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  padding-top: var(--space-sm);
+  margin-top: var(--space-2xs);
+  border-top: 1px solid var(--surface-border);
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: var(--space-2xs);
 }
 
 .basket-summary {
-  margin-bottom: 0.75rem;
   font-size: 0.9rem;
 }
 
+/* Only present in the DOM when the basket is dirty (collapses otherwise). */
 .basket-status-zone {
-  height: 38px;
   display: flex;
   align-items: center;
-  margin-bottom: 0.75rem;
 }
 
+/* "Ready to sync" is an actionable prompt, not a warning: neutral surface with
+   a cyan signal icon (per the One Wire Rule), not amber (Amber Threshold rule).
+   The previous rgba(var(--sl-color-warning-rgb)) had no fallback and rendered
+   with no background at all, since Shoelace ships no *-rgb channel vars. */
 .sync-proposed-banner {
   display: flex;
   align-items: center;
   gap: 0.6rem;
-  padding: 0.5rem 0.75rem;
-  background: rgba(var(--sl-color-warning-rgb), 0.1);
-  border: 1px solid rgba(var(--sl-color-warning-rgb), 0.3);
+  padding: var(--space-xs) var(--space-sm);
+  background: var(--surface-fill);
+  border: 1px solid var(--surface-border-soft);
   border-radius: var(--sl-border-radius-medium);
-  color: var(--sl-color-warning-700);
+  color: var(--ink-dim);
   font-size: 0.8rem;
   width: 100%;
-  animation: fadeIn 0.3s ease-out;
+  animation: fadeIn var(--dur-base) var(--ease-out-quart);
 }
 
 @keyframes fadeIn {
@@ -258,15 +291,12 @@ body {
 .sync-proposed-banner sl-icon {
   font-size: 1rem;
   flex-shrink: 0;
+  color: var(--sl-color-primary-600);
 }
 
 /* Capacity Bar */
-.capacity-section {
-  margin-bottom: 0.85rem;
-}
-
 .capacity-bar-container {
-  margin-bottom: 0.5rem;
+  margin-bottom: var(--space-xs);
 }
 
 .capacity-bar {
@@ -278,7 +308,7 @@ body {
 }
 
 .capacity-segment {
-  transition: width 0.3s ease;
+  transition: width 0.3s var(--ease-out-quart);
 }
 
 .capacity-used {
@@ -308,7 +338,7 @@ body {
 }
 
 .capacity-zone-amber .capacity-status {
-  color: #EBB334;
+  color: var(--amber-warn);
 }
 
 .capacity-zone-red .capacity-status {
@@ -336,14 +366,6 @@ h2 {
   letter-spacing: 0;
 }
 
-.glass-card {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
-  padding: 1rem;
-  margin-bottom: 1rem;
-}
-
 /* Media Grid Styles */
 .media-grid {
   display: grid;
@@ -356,8 +378,15 @@ h2 {
 .media-card {
   --border-radius: var(--sl-border-radius-medium);
   cursor: pointer;
-  transition: transform 0.18s ease, box-shadow 0.18s ease, opacity 0.15s ease;
-  border-radius: 8px;
+  transition: transform var(--dur-base) var(--ease-out-expo),
+              box-shadow var(--dur-base) var(--ease-out-expo),
+              opacity var(--dur-fast) var(--ease-out-quart);
+  border-radius: var(--radius);
+}
+
+.media-card:active {
+  transform: translateY(0);
+  transition-duration: 80ms;
 }
 
 .media-card:hover {
@@ -368,7 +397,7 @@ h2 {
 .media-card::part(base) {
   background: var(--surface-bg);
   border: 1px solid var(--surface-border);
-  border-radius: 8px;
+  border-radius: var(--radius);
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.16);
   overflow: hidden;
 }
@@ -384,7 +413,7 @@ h2 {
   background-color: var(--sl-color-neutral-800);
   background-size: cover;
   background-position: center;
-  border-radius: 8px 8px 0 0;
+  border-radius: var(--radius) var(--radius) 0 0;
   overflow: hidden;
 }
 
@@ -399,7 +428,7 @@ h2 {
   justify-content: center;
   align-items: center;
   opacity: 0;
-  transition: opacity 0.2s ease;
+  transition: opacity var(--dur-base) var(--ease-out-quart);
   z-index: 10;
 }
 
@@ -472,7 +501,7 @@ h2 {
 
 .card-subtitle {
   font-size: 0.8rem;
-  color: var(--sl-color-neutral-400);
+  color: var(--ink-dim);
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
@@ -481,7 +510,7 @@ h2 {
 
 .card-year {
   font-size: 0.75rem;
-  color: var(--sl-color-neutral-500);
+  color: var(--ink-dim);
   margin-top: 0.25rem;
 }
 
@@ -531,7 +560,7 @@ h2 {
 .pagination-info {
   text-align: center;
   padding: 1rem;
-  color: var(--sl-color-neutral-400);
+  color: var(--ink-dim);
   font-size: 0.9rem;
 }
 
@@ -553,11 +582,12 @@ h2 {
   top: 0;
   z-index: 10;
   background: rgba(30, 41, 59, 0.92);
+  /* Sticky over the scrolling library list: the blur is a real frosted-header
+     effect (content passes underneath), not decorative glass. */
   backdrop-filter: blur(8px);
-  padding: 0.4rem 0.25rem;
   margin: -1rem -2rem 1rem;
-  padding: 0.5rem 2rem;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding: var(--space-xs) 2rem;
+  border-bottom: 1px solid var(--surface-border-soft);
 }
 
 .quick-nav-bar sl-button::part(base) {
@@ -576,11 +606,11 @@ h2 {
   gap: 0.25rem;
   margin-bottom: 1rem;
   padding-bottom: 1rem;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 1px solid var(--surface-border);
 }
 
 .breadcrumbs .separator {
-  color: var(--sl-color-neutral-500);
+  color: var(--ink-dim);
   margin: 0 0.25rem;
 }
 
@@ -613,10 +643,9 @@ h2 {
 
 /* Device Folders Panel (Story 3.4) */
 .device-folders-panel {
-  margin: 0.85rem 0;
-  padding: 0.75rem;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: var(--space-sm);
+  background: var(--surface-fill);
+  border: 1px solid var(--surface-border-soft);
   border-radius: var(--sl-border-radius-medium);
 }
 
@@ -639,13 +668,13 @@ h2 {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: var(--sl-color-neutral-400);
+  color: var(--ink-dim);
   transition: color 0.2s ease;
 }
 
 .device-folders-summary {
   font-size: 0.75rem;
-  color: var(--sl-color-neutral-500);
+  color: var(--ink-dim);
 }
 
 .device-folders-list {
@@ -688,12 +717,11 @@ h2 {
 }
 
 .folder-protected {
-  opacity: 0.7;
-  color: var(--sl-color-neutral-400);
+  color: var(--ink-dim);
 }
 
 .folder-protected .folder-icon {
-  color: var(--sl-color-neutral-400);
+  color: var(--ink-dim);
 }
 
 .folder-managed {
@@ -703,19 +731,6 @@ h2 {
 .folder-managed .folder-icon {
   color: var(--sl-color-primary-400);
   filter: drop-shadow(0 0 2px var(--sl-color-primary-700));
-}
-
-.device-empty-banner {
-  margin-top: 0.5rem;
-  padding: 0.5rem;
-  background: rgba(var(--sl-color-info-rgb), 0.1);
-  border: 1px solid rgba(var(--sl-color-info-rgb), 0.2);
-  border-radius: var(--sl-border-radius-small);
-  font-size: 0.75rem;
-  color: var(--sl-color-info-600);
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
 }
 
 /* ========================
@@ -761,12 +776,36 @@ h2 {
   gap: 0.5rem;
   padding: 1.5rem 1rem;
   text-align: center;
+  /* Fires once when the terminal state renders, confirming a high-stakes sync. */
+  animation: resultEnter var(--dur-base) var(--ease-out-quart);
+}
+
+/* The result icon settles in to acknowledge a completed transfer. No bounce. */
+.sync-success-panel sl-icon,
+.sync-error-panel sl-icon {
+  animation: resultIcon 360ms var(--ease-out-expo);
+}
+
+@keyframes resultEnter {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes resultIcon {
+  from { opacity: 0; transform: scale(0.82); }
+  to   { opacity: 1; transform: scale(1); }
 }
 
 .sync-status-label {
   margin: 0;
   font-size: 0.95rem;
   font-weight: 500;
+}
+
+.sync-summary-label {
+  margin: 0.25rem 0 0;
+  font-size: 0.8rem;
+  color: var(--ink-dim);
 }
 
 .sync-error-list {
@@ -821,8 +860,8 @@ h2 {
 }
 
 .repair-column {
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--surface-fill);
+  border: 1px solid var(--surface-border-soft);
   border-radius: var(--sl-border-radius-medium);
   padding: 0.75rem;
   min-height: 150px;
@@ -863,14 +902,14 @@ h2 {
   justify-content: space-between;
   gap: 0.5rem;
   padding: 0.5rem;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--surface-fill);
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: var(--sl-border-radius-small);
   transition: background 0.15s ease;
 }
 
 .repair-item:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--surface-fill-hover);
 }
 
 .repair-item-info {
@@ -917,9 +956,9 @@ h2 {
   align-items: flex-start;
   gap: 0.4rem;
   font-size: 0.75rem;
-  color: var(--sl-color-warning-700);
-  background: rgba(var(--sl-color-warning-500-rgb, 234, 179, 8), 0.08);
-  border: 1px solid rgba(var(--sl-color-warning-500-rgb, 234, 179, 8), 0.2);
+  color: var(--amber-warn);
+  background: color-mix(in srgb, var(--amber-warn) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--amber-warn) 20%, transparent);
   border-radius: var(--sl-border-radius-small);
   padding: 0.5rem 0.6rem;
   margin-bottom: 0.5rem;
@@ -935,7 +974,7 @@ h2 {
   justify-content: flex-end;
   gap: 0.5rem;
   padding-top: 0.75rem;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid var(--surface-border-soft);
 }
 
 /* Dirty manifest warning banner */
@@ -945,19 +984,19 @@ h2 {
   gap: 0.5rem;
   padding: 0.5rem 0.75rem;
   margin: 0.75rem 0;
-  background: rgba(235, 179, 52, 0.12);
-  border: 1px solid rgba(235, 179, 52, 0.3);
+  background: color-mix(in srgb, var(--amber-warn) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--amber-warn) 30%, transparent);
   border-radius: var(--sl-border-radius-medium);
   cursor: pointer;
   transition: background 0.2s ease;
 }
 
 .dirty-manifest-banner:hover {
-  background: rgba(235, 179, 52, 0.2);
+  background: color-mix(in srgb, var(--amber-warn) 20%, transparent);
 }
 
 .dirty-manifest-banner sl-icon {
-  color: #EBB334;
+  color: var(--amber-warn);
   font-size: 1rem;
   flex-shrink: 0;
 }
@@ -965,12 +1004,41 @@ h2 {
 .dirty-manifest-banner-text {
   flex: 1;
   font-size: 0.8rem;
-  color: #EBB334;
+  color: var(--amber-warn);
 }
 
 .dirty-manifest-banner-text strong {
   display: block;
   font-size: 0.85rem;
+}
+
+/* Auto-fill configuration: a contained module so its switches + slider read
+   as one settings group, matching the device-folders panel treatment. */
+.auto-fill-controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  padding: var(--space-sm);
+  background: var(--surface-fill);
+  border: 1px solid var(--surface-border-soft);
+  border-radius: var(--sl-border-radius-medium);
+}
+
+.auto-fill-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-xs);
+}
+
+.auto-fill-caption {
+  font-size: 0.75rem;
+  color: var(--ink-dim);
+}
+
+.auto-fill-caption--sub {
+  font-size: 0.7rem;
+  padding-left: var(--space-xs);
 }
 
 .basket-item-auto-fill-slot {
@@ -980,7 +1048,7 @@ h2 {
 
 .basket-item-artist,
 .basket-item-genre {
-  border: 1.5px solid var(--sl-color-neutral-300);
+  border: 1.5px solid var(--sl-color-neutral-600);
   background: color-mix(in srgb, var(--sl-color-neutral-100) 30%, transparent);
 }
 
@@ -992,20 +1060,22 @@ h2 {
   align-items: center;
   justify-content: center;
   font-size: 1.5rem;
-  color: var(--sl-color-neutral-500);
+  color: var(--ink-dim);
   flex-shrink: 0;
 }
 
 /* Device Hub */
+/* Top border marks the boundary between the "what you're sending" group
+   (summary, capacity, auto-fill) and the "where it goes" group (devices). */
 .device-hub-panel {
-  padding: 0.5rem 0;
-  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--surface-border);
 }
 .device-hub-cards {
   display: flex;
   flex-direction: row;
   flex-wrap: wrap;
-  gap: 0.4rem;
+  gap: var(--space-xs);
 }
 .device-hub-card {
   position: relative;
@@ -1014,16 +1084,32 @@ h2 {
   align-items: center;
   gap: 0.2rem;
   padding: 0.4rem 0.6rem;
-  border-radius: 8px;
+  border-radius: var(--radius);
   border: 1px solid rgba(255, 255, 255, 0.16);
   cursor: pointer;
   min-width: 60px;
   max-width: 90px;
   overflow: hidden;
-  transition: background 0.15s, border-color 0.15s;
+  transition: background var(--dur-fast) var(--ease-out-quart),
+              border-color var(--dur-fast) var(--ease-out-quart),
+              transform var(--dur-fast) var(--ease-out-quart);
 }
 .device-hub-card:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--surface-fill-hover);
+}
+.device-hub-card:active {
+  transform: scale(0.97);
+  transition-duration: 80ms;
+}
+
+/* Keyboard focus for the custom role="button" affordances (device cards,
+   folder toggle, repair banner). Outline (not box-shadow) so it survives
+   Windows high-contrast mode. */
+.device-hub-card:focus-visible,
+.device-folders-header:focus-visible,
+.dirty-manifest-banner[role="button"]:focus-visible {
+  outline: 2px solid var(--sl-color-primary-600);
+  outline-offset: 2px;
 }
 .device-hub-card.active {
   border-color: var(--sl-color-primary-500);
@@ -1072,7 +1158,7 @@ h2 {
   align-items: center;
   gap: 0.3rem;
   padding: 0.5rem 0.7rem;
-  border-radius: 8px;
+  border-radius: var(--radius);
   border: 2px solid var(--sl-color-neutral-200);
   cursor: pointer;
   min-width: 52px;
@@ -1116,9 +1202,9 @@ h2 {
 #repair-dialog::part(panel),
 .device-settings-dialog::part(panel) {
   max-width: min(92vw, 720px);
-  border-radius: 8px;
-  background: #24252b;
-  color: #f1f5f9;
+  border-radius: var(--radius);
+  background: var(--surface-bg);
+  color: var(--ink);
 }
 
 #init-device-dialog {
@@ -1184,5 +1270,20 @@ h2 {
   .server-connection-chip {
     width: 100%;
     max-width: 100%;
+  }
+}
+
+/* Reduced motion: required by PRODUCT.md. Honor the OS setting by collapsing
+   every entrance, hover lift, and state transition to an instant change.
+   State still updates (icons appear, panels swap, hovers highlight) with no
+   perceived movement, so nothing is hidden from motion-sensitive users. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

@@ -51,7 +51,7 @@ interface DeviceProfileSummary {
 
 interface SyncOperation {
     id: string;
-    status: 'running' | 'complete' | 'failed';
+    status: 'running' | 'complete' | 'failed' | 'cancelled';
     startedAt: string;
     currentFile: string | null;
     bytesCurrent: number;
@@ -180,13 +180,35 @@ export class BasketSidebar {
     private currentDevice: any = null;
     private syncPreviewCleanupDevicePath: string | null = null;
     private forceSyncMode: boolean = false;
+    // Cancel state
+    private isCancelling: boolean = false;
+    // Transfer stats captured at completion for the sync-complete screen
+    private completedFilesCount: number = 0;
+    private completedBytesCount: number = 0;
 
     constructor(container: HTMLElement) {
         this.container = container;
         this.updateListener = () => this.refreshAndRender();
+        // Custom clickable divs (device cards, folder toggle, repair banner) are
+        // rendered as role="button". One delegated handler makes them keyboard-
+        // operable; it lives on the persistent container, so it survives the
+        // innerHTML re-renders that replace those elements.
+        this.container.addEventListener('keydown', this.keyActivateHandler);
         this.init();
         this.startDaemonStatePolling();
     }
+
+    // Enter/Space activates a synthetic (role="button") div, matching native
+    // button semantics. Skips real interactive children so we never double-fire.
+    private keyActivateHandler = (event: KeyboardEvent): void => {
+        if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return;
+        const target = event.target as HTMLElement | null;
+        const btn = target?.closest('[role="button"]') as HTMLElement | null;
+        if (!btn || !this.container.contains(btn)) return;
+        if (target !== btn && target?.closest('sl-button, sl-icon-button, button, a, input')) return;
+        event.preventDefault();
+        btn.click();
+    };
 
     private init() {
         basketStore.addEventListener('update', this.updateListener);
@@ -296,6 +318,7 @@ export class BasketSidebar {
 
     public destroy() {
         this.isDestroyed = true;
+        this.container.removeEventListener('keydown', this.keyActivateHandler);
         this.stopPolling();
         if (this.daemonStateInterval !== null) {
             clearInterval(this.daemonStateInterval);
@@ -564,18 +587,14 @@ export class BasketSidebar {
                     <sl-switch id="auto-fill-toggle" size="small" ${this.autoFillEnabled ? 'checked' : ''}>
                         ${t('basket.autofill.name')}
                     </sl-switch>
-                    <span class="auto-fill-hint" style="font-size:0.75rem; opacity:0.6;">
-                        ${t('basket.autofill.hint')}
-                    </span>
+                    <span class="auto-fill-caption">${t('basket.autofill.hint')}</span>
                 </div>
                 ${this.autoFillEnabled && deviceFull ? `
-                    <div class="auto-fill-full-notice" style="margin-top:0.5rem; font-size:0.75rem; opacity:0.7;">
-                        ${t('basket.autofill.full')}
-                    </div>
+                    <div class="auto-fill-caption">${t('basket.autofill.full')}</div>
                 ` : ''}
                 ${this.autoFillEnabled && !deviceFull ? `
-                    <div class="auto-fill-slider-row" style="margin-top:0.5rem;">
-                        <label style="font-size:0.75rem; opacity:0.7; display:block; margin-bottom:0.25rem;">
+                    <div class="auto-fill-slider-row">
+                        <label class="auto-fill-caption" style="display:block; margin-bottom:var(--space-2xs);">
                             ${t('basket.autofill.max_fill_size', { size: `${sliderValue} GB` })}
                         </label>
                         <sl-range id="auto-fill-slider"
@@ -584,12 +603,12 @@ export class BasketSidebar {
                         </sl-range>
                     </div>
                 ` : ''}
-                <div class="auto-fill-toggle-row" style="margin-top:0.5rem;">
+                <div class="auto-fill-toggle-row">
                     <sl-switch id="auto-sync-toggle" size="small" ${this.autoSyncOnConnect ? 'checked' : ''}>
                         ${t('basket.autofill.auto_sync_on_connect')}
                     </sl-switch>
                 </div>
-                <div style="font-size:0.7rem; opacity:0.55; margin-top:0.2rem; padding-left:0.5rem;">
+                <div class="auto-fill-caption auto-fill-caption--sub">
                     ${t('basket.autofill.auto_sync_hint')}
                 </div>
             </div>
@@ -663,7 +682,9 @@ export class BasketSidebar {
                 <div class="device-hub-cards">
                     ${this.connectedDevices.map(d => `
                         <div class="device-hub-card ${d.path === this.selectedDevicePath ? 'active' : ''}"
-                             data-path="${this.escapeHtml(d.path)}">
+                             data-path="${this.escapeHtml(d.path)}"
+                             role="button" tabindex="0"
+                             aria-pressed="${d.path === this.selectedDevicePath ? 'true' : 'false'}">
                             <sl-icon name="${this.escapeHtml(d.icon || 'usb-drive')}"
                                      class="device-hub-icon"></sl-icon>
                             <span class="device-hub-name">${this.escapeHtml(d.name || d.deviceId)}</span>
@@ -726,7 +747,8 @@ export class BasketSidebar {
         let content = `
             <div class="device-folders-panel">
                 ${relocationBanner}
-                <div class="device-folders-header" id="device-folders-toggle">
+                <div class="device-folders-header" id="device-folders-toggle"
+                     role="button" tabindex="0" aria-expanded="${this.isFoldersExpanded ? 'true' : 'false'}">
                     <h3>${t('basket.device.folders')}</h3>
                     <div style="display: flex; align-items: center; gap: 0.5rem;">
                         <span class="device-folders-summary">${t('basket.device.managed_count', { count: managedCount })} | ${unmanagedSummary}</span>
@@ -753,7 +775,8 @@ export class BasketSidebar {
         // Show dirty manifest banner if flagged
         if (this.isDirtyManifest) {
             content += `
-                <div class="dirty-manifest-banner" id="open-repair-btn" title="${t('basket.manifest.open_repair')}">
+                <div class="dirty-manifest-banner" id="open-repair-btn" title="${t('basket.manifest.open_repair')}"
+                    role="button" tabindex="0" aria-label="${t('basket.manifest.open_repair')}">
                     <sl-icon name="exclamation-triangle-fill"></sl-icon>
                     <div class="dirty-manifest-banner-text">
                         <strong>${t('basket.manifest.dirty')}</strong>
@@ -769,8 +792,10 @@ export class BasketSidebar {
     }
 
     private renderStatusZone(): string {
+        // Collapse entirely when clean; the footer's flex gap closes the space.
+        // The banner fades in on appear, so the small reflow reads as intentional.
         if (!basketStore.isDirty()) {
-            return '<div class="basket-status-zone"></div>';
+            return '';
         }
 
         return `
@@ -806,7 +831,7 @@ export class BasketSidebar {
             </div>
             <div class="basket-actions">
                 <sl-button id="start-sync-btn" variant="primary" style="width: 100%;" disabled>
-                    <sl-icon slot="prefix" name="cloud-download"></sl-icon>
+                    <sl-icon slot="prefix" name="box-arrow-in-down"></sl-icon>
                     ${t('basket.actions.start_sync')}
                 </sl-button>
             </div>
@@ -845,11 +870,16 @@ export class BasketSidebar {
                     <sl-spinner style="font-size: 2rem;"></sl-spinner>
                 </div>
                 <div class="basket-footer">
-                    <sl-button variant="primary" style="width: 100%;" disabled loading>
-                        ${t('basket.sync.syncing')}
+                    <sl-button id="cancel-sync-btn" variant="default" style="width: 100%;"
+                               ${this.isCancelling ? 'loading disabled' : ''}>
+                        <sl-icon slot="prefix" name="x-circle"></sl-icon>
+                        ${this.isCancelling ? t('basket.sync.cancelling') : t('basket.actions.cancel_sync')}
                     </sl-button>
                 </div>
             `;
+            this.container.querySelector('#cancel-sync-btn')?.addEventListener('click', () => {
+                this.handleCancelSync();
+            });
             return;
         }
 
@@ -881,7 +911,7 @@ export class BasketSidebar {
                 </div>
                 <div class="basket-actions">
                     <sl-button id="start-sync-btn" variant="primary" style="width: 100%;" ${(!basketStore.isDirty() && !this.autoFillEnabled && !(this.currentDevice?.synced_items?.length > 0)) || !this.selectedDevicePath ? 'disabled' : ''}>
-                        <sl-icon slot="prefix" name="cloud-download"></sl-icon>
+                        <sl-icon slot="prefix" name="box-arrow-in-down"></sl-icon>
                         ${t('basket.actions.start_sync')}
                     </sl-button>
                 </div>
@@ -944,7 +974,7 @@ export class BasketSidebar {
                     <sl-button-group style="width: 100%;">
                         <sl-button id="start-sync-btn" variant="primary" style="flex: 1;"
                                    ${!this.selectedDevicePath ? 'disabled' : this.isSyncing ? 'loading disabled' : ''}>
-                            <sl-icon slot="prefix" name="cloud-download"></sl-icon>
+                            <sl-icon slot="prefix" name="box-arrow-in-down"></sl-icon>
                             ${this.isSyncing ? t('basket.sync.syncing') : t('basket.actions.start_sync')}
                         </sl-button>
                         <sl-dropdown id="sync-mode-dropdown" placement="bottom-end" ${!this.selectedDevicePath || this.isSyncing ? 'disabled' : ''}>
@@ -982,7 +1012,7 @@ export class BasketSidebar {
         });
 
         this.container.querySelector('.clear-basket-btn')?.addEventListener('click', () => {
-            basketStore.clear();
+            this.confirmClearAll();
         });
 
         this.container.querySelector('#start-sync-btn')?.addEventListener('click', () => {
@@ -1025,6 +1055,7 @@ export class BasketSidebar {
         // Disable the button immediately so a second click can't slip through
         // while the async daemon-state check or delta calculation is in flight.
         this.isSyncing = true;
+        this.isCancelling = false;
         this.showSyncComplete = false;
         this.syncErrorMessages = null;
         this.currentOperation = null;
@@ -1215,6 +1246,9 @@ export class BasketSidebar {
                 } else if (op.status === 'failed') {
                     this.stopPolling();
                     this.handleSyncFailed(op);
+                } else if (op.status === 'cancelled' || this.isCancelling) {
+                    this.stopPolling();
+                    this.handleSyncCancelled();
                 }
             } catch (err) {
                 console.error('[Sync] Progress poll failed:', err);
@@ -1285,15 +1319,26 @@ export class BasketSidebar {
                 <div class="sync-eta">${this.escapeHtml(this.etaText)}</div>
             </div>
             <div class="basket-footer">
-                <sl-button variant="primary" style="width: 100%;" disabled loading>
-                    <sl-icon slot="prefix" name="cloud-download"></sl-icon>
-                    ${t('basket.sync.syncing')}
+                <sl-button id="cancel-sync-btn" variant="default" style="width: 100%;"
+                           ${this.isCancelling ? 'loading disabled' : ''}>
+                    <sl-icon slot="prefix" name="x-circle"></sl-icon>
+                    ${this.isCancelling ? t('basket.sync.cancelling') : t('basket.actions.cancel_sync')}
                 </sl-button>
             </div>
         `;
+
+        this.container.querySelector('#cancel-sync-btn')?.addEventListener('click', () => {
+            this.handleCancelSync();
+        });
     }
 
     private renderSyncComplete() {
+        const summary = this.completedFilesCount > 0
+            ? t('basket.sync.complete_summary', {
+                files: this.completedFilesCount,
+                size: formatSize(this.completedBytesCount),
+              })
+            : '';
         this.container.innerHTML = `
             <div class="basket-header">
                 <h2>${t('basket.title')}</h2>
@@ -1303,6 +1348,7 @@ export class BasketSidebar {
                 <sl-icon name="check-circle-fill"
                     style="font-size: 2.5rem; color: var(--sl-color-success-600);"></sl-icon>
                 <p class="sync-status-label">${t('basket.sync.complete')}</p>
+                ${summary ? `<p class="sync-summary-label">${this.escapeHtml(summary)}</p>` : ''}
             </div>
             <div class="basket-footer">
                 <sl-button id="sync-done-btn" variant="primary" style="width: 100%;">
@@ -1334,12 +1380,20 @@ export class BasketSidebar {
                 <ul class="sync-error-list">${errorList}</ul>
             </div>
             <div class="basket-footer">
+                <sl-button id="sync-retry-btn" variant="primary" style="width: 100%; margin-bottom: 0.5rem;">
+                    <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
+                    ${t('basket.actions.retry_sync')}
+                </sl-button>
                 <sl-button id="sync-dismiss-btn" variant="text" style="width: 100%;">
                     ${t('basket.actions.dismiss')}
                 </sl-button>
             </div>
         `;
 
+        this.container.querySelector('#sync-retry-btn')?.addEventListener('click', () => {
+            this.syncErrorMessages = null;
+            this.handleStartSync();
+        });
         this.container.querySelector('#sync-dismiss-btn')?.addEventListener('click', () => {
             this.syncErrorMessages = null;
             this.refreshAndRender();
@@ -1349,6 +1403,10 @@ export class BasketSidebar {
     private async handleSyncComplete() {
         if (this.isDestroyed) return;
         this.isSyncing = false;
+
+        // Capture transfer stats before clearing the operation reference
+        this.completedFilesCount = this.currentOperation?.filesCompleted ?? 0;
+        this.completedBytesCount = this.currentOperation?.bytesTransferred ?? 0;
 
         // Fetch fresh storage info so capacity bar is accurate immediately after sync
         try {
@@ -1383,6 +1441,7 @@ export class BasketSidebar {
     private handleSyncFailed(operation: SyncOperation) {
         if (this.isDestroyed) return;
         this.isSyncing = false;
+        this.isCancelling = false;
         this.currentOperationId = null;
         this.currentOperation = null;
         this.showSyncComplete = false;
@@ -1521,6 +1580,54 @@ export class BasketSidebar {
                 el.style.backgroundImage = `url('${dataUrl}')`;
             }).catch(() => { /* image load failed, leave blank */ });
         }
+    }
+
+    private async handleCancelSync(): Promise<void> {
+        if (this.isCancelling) return;
+        this.isCancelling = true;
+        this.renderSyncProgress(); // show Cancelling... state immediately
+        if (this.currentOperationId) {
+            try {
+                await rpcCall('sync_cancel', { operationId: this.currentOperationId });
+            } catch (err) {
+                console.error('[Sync] Cancel request failed:', err);
+            }
+        }
+        // The polling loop will detect the terminal status and call handleSyncCancelled
+    }
+
+    private handleSyncCancelled(): void {
+        if (this.isDestroyed) return;
+        this.isSyncing = false;
+        this.isCancelling = false;
+        this.currentOperationId = null;
+        this.currentOperation = null;
+        this.showSyncComplete = false;
+        this.syncErrorMessages = null;
+        this.etaText = t('basket.sync.calculating');
+        this.refreshAndRender();
+    }
+
+    private confirmClearAll(): void {
+        const count = basketStore.getItems().length;
+        if (count === 0) return;
+        const dialog = document.createElement('sl-dialog') as any;
+        dialog.label = t('basket.actions.clear_all');
+        dialog.innerHTML = `
+            <p>${t('basket.confirm.clear_all', { count })}</p>
+            <sl-button slot="footer" variant="default" id="clear-cancel">${t('basket.actions.cancel')}</sl-button>
+            <sl-button slot="footer" variant="danger" id="clear-confirm">${t('basket.actions.clear_all')}</sl-button>
+        `;
+        document.body.appendChild(dialog);
+        dialog.querySelector('#clear-cancel')?.addEventListener('click', () => dialog.hide());
+        dialog.querySelector('#clear-confirm')?.addEventListener('click', () => {
+            basketStore.clear();
+            dialog.hide();
+        });
+        dialog.addEventListener('sl-after-hide', (event: Event) => {
+            if (event.target === dialog) dialog.remove();
+        });
+        customElements.whenDefined('sl-dialog').then(() => dialog.show());
     }
 
     private escapeHtml(text: string): string {

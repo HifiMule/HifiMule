@@ -2,6 +2,7 @@
 // Provides a side-by-side discrepancy view for fixing dirty manifests.
 
 import { rpcCall } from '../rpc';
+import { t } from '../i18n';
 
 interface DiscrepancyItem {
     jellyfinId: string;
@@ -51,13 +52,13 @@ export class RepairModal {
 
         const dialogEl = document.createElement('sl-dialog');
         dialogEl.id = 'repair-dialog';
-        dialogEl.setAttribute('label', 'Manifest Repair');
+        dialogEl.setAttribute('label', t('repair.title'));
         dialogEl.setAttribute('style', 'max-width: 90vw; --width: 720px;');
         dialogEl.innerHTML = `
             <div class="repair-body">
                 <div class="repair-loading">
                     <sl-spinner style="font-size: 2rem;"></sl-spinner>
-                    <p>Scanning device for discrepancies...</p>
+                    <p>${t('repair.scanning')}</p>
                 </div>
             </div>
         `;
@@ -80,11 +81,11 @@ export class RepairModal {
             body.innerHTML = `
                 <div class="repair-clean">
                     <sl-icon name="check-circle-fill" style="font-size: 3rem; color: var(--sl-color-success-600);"></sl-icon>
-                    <h3>No Discrepancies Found</h3>
-                    <p>The manifest matches the files on your device.</p>
+                    <h3>${t('repair.no_discrepancies')}</h3>
+                    <p>${t('repair.manifest_matches')}</p>
                     <sl-button id="repair-clear-dirty-btn" variant="primary" style="margin-top: 1rem;">
                         <sl-icon slot="prefix" name="check"></sl-icon>
-                        Clear Dirty Flag
+                        ${t('repair.clear_dirty_flag')}
                     </sl-button>
                 </div>
             `;
@@ -97,28 +98,27 @@ export class RepairModal {
                 <div class="repair-column repair-missing-col">
                     <div class="repair-col-header">
                         <sl-icon name="file-earmark-x" style="color: var(--sl-color-danger-500);"></sl-icon>
-                        <h4>Missing Files <sl-badge variant="danger" pill>${missing.length}</sl-badge></h4>
+                        <h4>${t('repair.missing_files')} <sl-badge variant="danger" pill>${missing.length}</sl-badge></h4>
                     </div>
-                    <p class="repair-col-desc">In manifest but not on device</p>
+                    <p class="repair-col-desc">${t('repair.missing_desc')}</p>
                     <div class="repair-item-list" id="repair-missing-list">
-                        ${missing.length === 0 ? '<div class="repair-no-items">No missing files</div>' :
+                        ${missing.length === 0 ? `<div class="repair-no-items">${t('repair.no_missing')}</div>` :
                 missing.map(item => this.renderMissingItem(item)).join('')}
                     </div>
                 </div>
                 <div class="repair-column repair-orphaned-col">
                     <div class="repair-col-header">
                         <sl-icon name="file-earmark-plus" style="color: var(--sl-color-warning-500);"></sl-icon>
-                        <h4>Orphaned Files <sl-badge variant="warning" pill>${orphaned.length}</sl-badge></h4>
+                        <h4>${t('repair.orphaned_files')} <sl-badge variant="warning" pill>${orphaned.length}</sl-badge></h4>
                     </div>
-                    <p class="repair-col-desc">On device but not in manifest</p>
+                    <p class="repair-col-desc">${t('repair.orphaned_desc')}</p>
                     ${missing.length === 0 && orphaned.length > 0 ? `
                     <p class="repair-orphan-note">
                         <sl-icon name="info-circle"></sl-icon>
-                        No missing entries to link to. These files will be left in place —
-                        click <strong>Finish &amp; Clear Dirty</strong> to proceed.
+                        ${t('repair.orphan_note')}
                     </p>` : ''}
                     <div class="repair-item-list" id="repair-orphaned-list">
-                        ${orphaned.length === 0 ? '<div class="repair-no-items">No orphaned files</div>' :
+                        ${orphaned.length === 0 ? `<div class="repair-no-items">${t('repair.no_orphaned')}</div>` :
                 orphaned.map(item => this.renderOrphanedItem(item, missing.length > 0)).join('')}
                     </div>
                 </div>
@@ -127,11 +127,11 @@ export class RepairModal {
                 <sl-button id="repair-prune-all-btn" variant="danger" size="small"
                            ${missing.length === 0 ? 'disabled' : ''}>
                     <sl-icon slot="prefix" name="trash"></sl-icon>
-                    Prune All Missing (${missing.length})
+                    ${t('repair.prune_all', { count: missing.length })}
                 </sl-button>
                 <sl-button id="repair-done-btn" variant="primary" size="small">
                     <sl-icon slot="prefix" name="check"></sl-icon>
-                    Finish & Clear Dirty
+                    ${t('repair.finish_clear_dirty')}
                 </sl-button>
             </div>
         `;
@@ -153,9 +153,9 @@ export class RepairModal {
                 <div class="repair-item-actions">
                     <sl-button class="prune-single-btn" size="small" variant="danger" outline
                                data-id="${this.escapeAttr(item.jellyfinId)}"
-                               title="Remove from manifest">
+                               title="${this.escapeAttr(t('repair.remove_from_manifest'))}">
                         <sl-icon name="trash" slot="prefix"></sl-icon>
-                        Prune
+                        ${t('repair.prune')}
                     </sl-button>
                 </div>
             </div>
@@ -166,9 +166,9 @@ export class RepairModal {
         const pathParts = item.localPath.split('/');
         const filename = pathParts[pathParts.length - 1];
         const folder = pathParts.slice(0, -1).join('/');
-        const relinkTitle = hasMissing
-            ? 'Re-link to a missing manifest entry'
-            : 'No missing entries available — prune missing files first or click Finish &amp; Clear Dirty';
+        const relinkTitle = this.escapeAttr(hasMissing
+            ? t('repair.relink_title')
+            : t('repair.relink_unavailable'));
 
         return `
             <div class="repair-item orphaned" data-path="${this.escapeAttr(item.localPath)}">
@@ -182,7 +182,7 @@ export class RepairModal {
                                ${!hasMissing ? 'disabled' : ''}
                                title="${relinkTitle}">
                         <sl-icon name="link-45deg" slot="prefix"></sl-icon>
-                        Re-link
+                        ${t('repair.relink')}
                     </sl-button>
                 </div>
             </div>
@@ -196,8 +196,8 @@ export class RepairModal {
         body.innerHTML = `
             <div class="repair-error">
                 <sl-icon name="exclamation-triangle-fill" style="font-size: 2.5rem; color: var(--sl-color-danger-500);"></sl-icon>
-                <p>Failed to scan device: ${this.escapeHtml(message)}</p>
-                <sl-button id="repair-retry-btn" variant="primary" size="small">Retry</sl-button>
+                <p>${t('repair.scan_failed', { message: this.escapeHtml(message) })}</p>
+                <sl-button id="repair-retry-btn" variant="primary" size="small">${t('repair.retry')}</sl-button>
             </div>
         `;
 
@@ -269,7 +269,7 @@ export class RepairModal {
 
         actionsDiv.innerHTML = `
             <select class="relink-select" style="font-size: 0.75rem; padding: 0.2rem; background: #1e293b; color: #f1f5f9; border: 1px solid rgba(255,255,255,0.2); border-radius: 4px;">
-                <option value="">Link to...</option>
+                <option value="">${t('repair.link_to')}</option>
                 ${this.discrepancies.missing.map(m =>
             `<option value="${this.escapeAttr(m.jellyfinId)}">${this.escapeHtml(m.name)}</option>`
         ).join('')}
