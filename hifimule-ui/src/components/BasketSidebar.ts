@@ -189,9 +189,26 @@ export class BasketSidebar {
     constructor(container: HTMLElement) {
         this.container = container;
         this.updateListener = () => this.refreshAndRender();
+        // Custom clickable divs (device cards, folder toggle, repair banner) are
+        // rendered as role="button". One delegated handler makes them keyboard-
+        // operable; it lives on the persistent container, so it survives the
+        // innerHTML re-renders that replace those elements.
+        this.container.addEventListener('keydown', this.keyActivateHandler);
         this.init();
         this.startDaemonStatePolling();
     }
+
+    // Enter/Space activates a synthetic (role="button") div, matching native
+    // button semantics. Skips real interactive children so we never double-fire.
+    private keyActivateHandler = (event: KeyboardEvent): void => {
+        if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return;
+        const target = event.target as HTMLElement | null;
+        const btn = target?.closest('[role="button"]') as HTMLElement | null;
+        if (!btn || !this.container.contains(btn)) return;
+        if (target !== btn && target?.closest('sl-button, sl-icon-button, button, a, input')) return;
+        event.preventDefault();
+        btn.click();
+    };
 
     private init() {
         basketStore.addEventListener('update', this.updateListener);
@@ -301,6 +318,7 @@ export class BasketSidebar {
 
     public destroy() {
         this.isDestroyed = true;
+        this.container.removeEventListener('keydown', this.keyActivateHandler);
         this.stopPolling();
         if (this.daemonStateInterval !== null) {
             clearInterval(this.daemonStateInterval);
@@ -668,7 +686,9 @@ export class BasketSidebar {
                 <div class="device-hub-cards">
                     ${this.connectedDevices.map(d => `
                         <div class="device-hub-card ${d.path === this.selectedDevicePath ? 'active' : ''}"
-                             data-path="${this.escapeHtml(d.path)}">
+                             data-path="${this.escapeHtml(d.path)}"
+                             role="button" tabindex="0"
+                             aria-pressed="${d.path === this.selectedDevicePath ? 'true' : 'false'}">
                             <sl-icon name="${this.escapeHtml(d.icon || 'usb-drive')}"
                                      class="device-hub-icon"></sl-icon>
                             <span class="device-hub-name">${this.escapeHtml(d.name || d.deviceId)}</span>
@@ -731,7 +751,8 @@ export class BasketSidebar {
         let content = `
             <div class="device-folders-panel">
                 ${relocationBanner}
-                <div class="device-folders-header" id="device-folders-toggle">
+                <div class="device-folders-header" id="device-folders-toggle"
+                     role="button" tabindex="0" aria-expanded="${this.isFoldersExpanded ? 'true' : 'false'}">
                     <h3>${t('basket.device.folders')}</h3>
                     <div style="display: flex; align-items: center; gap: 0.5rem;">
                         <span class="device-folders-summary">${t('basket.device.managed_count', { count: managedCount })} | ${unmanagedSummary}</span>
@@ -758,7 +779,8 @@ export class BasketSidebar {
         // Show dirty manifest banner if flagged
         if (this.isDirtyManifest) {
             content += `
-                <div class="dirty-manifest-banner" id="open-repair-btn" title="${t('basket.manifest.open_repair')}">
+                <div class="dirty-manifest-banner" id="open-repair-btn" title="${t('basket.manifest.open_repair')}"
+                    role="button" tabindex="0" aria-label="${t('basket.manifest.open_repair')}">
                     <sl-icon name="exclamation-triangle-fill"></sl-icon>
                     <div class="dirty-manifest-banner-text">
                         <strong>${t('basket.manifest.dirty')}</strong>

@@ -105,6 +105,23 @@ One accent, eight shades of dark, and a warning amber for real problems.
 - **Amber-Warn** (`#EBB334`): Reserved strictly for real problems: dirty manifest warning, capacity amber zone, sync warning banners. Not used for emphasis or decoration.
 - **Border-Subtle** (`rgba(255,255,255,0.10)`): The default border for all surfaces. White transparency over dark backgrounds reads as a lift, not a line.
 
+### Implemented Tokens (`:root` in `styles.css`)
+
+The values above are declared as CSS custom properties. Reference these names; do **not** reach for Shoelace `--sl-color-neutral-*` for text or surfaces (its dark-theme ramp fails contrast below stop 600).
+
+| Token | Value | Use |
+|-------|-------|-----|
+| `--ink` | `#f1f5f9` | Primary text |
+| `--ink-dim` | `#b0bac6` | Secondary text / metadata (8.5:1 on panels) |
+| `--amber-warn` | `#ebb334` | Warnings only |
+| `--surface-border` | `rgba(255,255,255,0.10)` | Strong hairline (panel edges, action dividers) |
+| `--surface-border-soft` | `rgba(255,255,255,0.08)` | Standard divider |
+| `--surface-fill` | `rgba(255,255,255,0.03)` | Subtle panel/card wash |
+| `--surface-fill-hover` | `rgba(255,255,255,0.06)` | Interactive surface (hover) |
+| `--radius` | `8px` | Card / panel corners (Shoelace's 6px stays for inputs) |
+| `--ease-out-quart` / `--ease-out-expo` | cubic-beziers | State / spatial motion curves |
+| `--dur-fast` / `--dur-base` | `140ms` / `200ms` | Transition durations |
+
 ### Named Rules
 **The One Wire Rule.** Signal Cyan appears on ≤10% of any given screen. Only active and actionable elements carry it. A card grid where 40% of items glow cyan means 40% are selected; it conveys real state. Decorative use is prohibited by definition.
 

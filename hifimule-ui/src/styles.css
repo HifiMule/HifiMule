@@ -5,7 +5,27 @@
   --panel-bg: #151d31;
   --panel-bg-strong: #10182b;
   --surface-bg: #24252b;
+  /* White-alpha surface system on the dark theme:
+     border = strong hairline, border-soft = standard divider,
+     fill = subtle panel wash, fill-hover = interactive surface. */
   --surface-border: rgba(255, 255, 255, 0.1);
+  --surface-border-soft: rgba(255, 255, 255, 0.08);
+  --surface-fill: rgba(255, 255, 255, 0.03);
+  --surface-fill-hover: rgba(255, 255, 255, 0.06);
+  /* Card / panel corner radius (distinct from Shoelace's 6px input radius). */
+  --radius: 8px;
+  /* Text: ink is primary copy, ink-dim is secondary/metadata.
+     ink-dim is a cool-tinted neutral (toward the cyan brand hue) that clears
+     WCAG AA (8.5:1) on the dark panels, unlike Shoelace neutral-300/400/500. */
+  --ink: #f1f5f9;
+  --ink-dim: #b0bac6;
+  /* Warning accent (interrupted sync / repair states) */
+  --amber-warn: #ebb334;
+  /* Motion: confident deceleration, product-paced. Calm, never bouncy. */
+  --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 140ms;
+  --dur-base: 200ms;
 }
 
 body {
@@ -15,7 +35,7 @@ body {
   background:
     radial-gradient(circle at 12% 0%, rgba(34, 184, 240, 0.12), transparent 32rem),
     linear-gradient(135deg, #101827 0%, var(--app-bg) 58%, #0a0d16 100%);
-  color: #f1f5f9;
+  color: var(--ink);
   height: 100vh;
   overflow: hidden;
 }
@@ -56,7 +76,7 @@ body {
   padding: 0.5rem 2rem;
   background: rgba(26, 39, 59, 0.96);
   backdrop-filter: blur(8px);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--surface-border-soft);
 }
 
 .browse-mode-bar {
@@ -90,7 +110,7 @@ body {
 .library-title-block p {
   margin: 0;
   white-space: nowrap;
-  color: rgba(241, 245, 249, 0.88);
+  color: color-mix(in srgb, var(--ink) 88%, transparent);
   font-weight: 600;
 }
 
@@ -105,7 +125,7 @@ body {
   border-radius: var(--sl-border-radius-medium);
   background: rgba(10, 16, 30, 0.62);
   font-size: 0.78rem;
-  color: var(--sl-color-neutral-300);
+  color: var(--ink-dim);
 }
 
 .server-connection-chip span {
@@ -119,7 +139,7 @@ body {
   min-width: 330px;
   padding: 1.55rem 1.5rem 1.25rem;
   background: rgba(12, 18, 33, 0.94);
-  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  border-left: 1px solid var(--surface-border);
   height: 100vh;
   box-sizing: border-box;
   display: flex;
@@ -145,7 +165,7 @@ body {
   align-items: center;
   justify-content: center;
   text-align: center;
-  color: rgba(241, 245, 249, 0.72);
+  color: color-mix(in srgb, var(--ink) 72%, transparent);
 }
 
 .basket-items-list {
@@ -167,12 +187,13 @@ body {
   padding: 0.5rem;
   background: rgba(255, 255, 255, 0.045);
   border: 1px solid rgba(255, 255, 255, 0.075);
-  border-radius: 8px;
-  transition: background 0.2s ease, border-color 0.2s ease;
+  border-radius: var(--radius);
+  transition: background var(--dur-base) var(--ease-out-quart),
+              border-color var(--dur-base) var(--ease-out-quart);
 }
 
 .basket-item-card:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--surface-fill-hover);
   border-color: rgba(34, 184, 240, 0.26);
 }
 
@@ -200,7 +221,7 @@ body {
 
 .basket-item-meta {
   font-size: 0.75rem;
-  color: var(--sl-color-neutral-400);
+  color: var(--ink-dim);
 }
 
 .basket-footer {
@@ -211,7 +232,7 @@ body {
   flex-shrink: 0;
   padding-top: 0.75rem;
   margin-top: 0.25rem;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: 1px solid var(--surface-border);
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
@@ -240,7 +261,7 @@ body {
   color: var(--sl-color-warning-700);
   font-size: 0.8rem;
   width: 100%;
-  animation: fadeIn 0.3s ease-out;
+  animation: fadeIn var(--dur-base) var(--ease-out-quart);
 }
 
 @keyframes fadeIn {
@@ -278,7 +299,7 @@ body {
 }
 
 .capacity-segment {
-  transition: width 0.3s ease;
+  transition: width 0.3s var(--ease-out-quart);
 }
 
 .capacity-used {
@@ -308,7 +329,7 @@ body {
 }
 
 .capacity-zone-amber .capacity-status {
-  color: #EBB334;
+  color: var(--amber-warn);
 }
 
 .capacity-zone-red .capacity-status {
@@ -338,8 +359,8 @@ h2 {
 
 .glass-card {
   background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius);
   padding: 1rem;
   margin-bottom: 1rem;
 }
@@ -356,8 +377,15 @@ h2 {
 .media-card {
   --border-radius: var(--sl-border-radius-medium);
   cursor: pointer;
-  transition: transform 0.18s ease, box-shadow 0.18s ease, opacity 0.15s ease;
-  border-radius: 8px;
+  transition: transform var(--dur-base) var(--ease-out-expo),
+              box-shadow var(--dur-base) var(--ease-out-expo),
+              opacity var(--dur-fast) var(--ease-out-quart);
+  border-radius: var(--radius);
+}
+
+.media-card:active {
+  transform: translateY(0);
+  transition-duration: 80ms;
 }
 
 .media-card:hover {
@@ -368,7 +396,7 @@ h2 {
 .media-card::part(base) {
   background: var(--surface-bg);
   border: 1px solid var(--surface-border);
-  border-radius: 8px;
+  border-radius: var(--radius);
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.16);
   overflow: hidden;
 }
@@ -384,7 +412,7 @@ h2 {
   background-color: var(--sl-color-neutral-800);
   background-size: cover;
   background-position: center;
-  border-radius: 8px 8px 0 0;
+  border-radius: var(--radius) var(--radius) 0 0;
   overflow: hidden;
 }
 
@@ -399,7 +427,7 @@ h2 {
   justify-content: center;
   align-items: center;
   opacity: 0;
-  transition: opacity 0.2s ease;
+  transition: opacity var(--dur-base) var(--ease-out-quart);
   z-index: 10;
 }
 
@@ -472,7 +500,7 @@ h2 {
 
 .card-subtitle {
   font-size: 0.8rem;
-  color: var(--sl-color-neutral-400);
+  color: var(--ink-dim);
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
@@ -481,7 +509,7 @@ h2 {
 
 .card-year {
   font-size: 0.75rem;
-  color: var(--sl-color-neutral-500);
+  color: var(--ink-dim);
   margin-top: 0.25rem;
 }
 
@@ -531,7 +559,7 @@ h2 {
 .pagination-info {
   text-align: center;
   padding: 1rem;
-  color: var(--sl-color-neutral-400);
+  color: var(--ink-dim);
   font-size: 0.9rem;
 }
 
@@ -557,7 +585,7 @@ h2 {
   padding: 0.4rem 0.25rem;
   margin: -1rem -2rem 1rem;
   padding: 0.5rem 2rem;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--surface-border-soft);
 }
 
 .quick-nav-bar sl-button::part(base) {
@@ -576,11 +604,11 @@ h2 {
   gap: 0.25rem;
   margin-bottom: 1rem;
   padding-bottom: 1rem;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 1px solid var(--surface-border);
 }
 
 .breadcrumbs .separator {
-  color: var(--sl-color-neutral-500);
+  color: var(--ink-dim);
   margin: 0 0.25rem;
 }
 
@@ -615,8 +643,8 @@ h2 {
 .device-folders-panel {
   margin: 0.85rem 0;
   padding: 0.75rem;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--surface-fill);
+  border: 1px solid var(--surface-border-soft);
   border-radius: var(--sl-border-radius-medium);
 }
 
@@ -639,13 +667,13 @@ h2 {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: var(--sl-color-neutral-400);
+  color: var(--ink-dim);
   transition: color 0.2s ease;
 }
 
 .device-folders-summary {
   font-size: 0.75rem;
-  color: var(--sl-color-neutral-500);
+  color: var(--ink-dim);
 }
 
 .device-folders-list {
@@ -688,12 +716,11 @@ h2 {
 }
 
 .folder-protected {
-  opacity: 0.7;
-  color: var(--sl-color-neutral-400);
+  color: var(--ink-dim);
 }
 
 .folder-protected .folder-icon {
-  color: var(--sl-color-neutral-400);
+  color: var(--ink-dim);
 }
 
 .folder-managed {
@@ -761,6 +788,24 @@ h2 {
   gap: 0.5rem;
   padding: 1.5rem 1rem;
   text-align: center;
+  /* Fires once when the terminal state renders, confirming a high-stakes sync. */
+  animation: resultEnter var(--dur-base) var(--ease-out-quart);
+}
+
+/* The result icon settles in to acknowledge a completed transfer. No bounce. */
+.sync-success-panel sl-icon,
+.sync-error-panel sl-icon {
+  animation: resultIcon 360ms var(--ease-out-expo);
+}
+
+@keyframes resultEnter {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes resultIcon {
+  from { opacity: 0; transform: scale(0.82); }
+  to   { opacity: 1; transform: scale(1); }
 }
 
 .sync-status-label {
@@ -772,7 +817,7 @@ h2 {
 .sync-summary-label {
   margin: 0.25rem 0 0;
   font-size: 0.8rem;
-  color: var(--sl-color-neutral-500);
+  color: var(--ink-dim);
 }
 
 .sync-error-list {
@@ -827,8 +872,8 @@ h2 {
 }
 
 .repair-column {
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--surface-fill);
+  border: 1px solid var(--surface-border-soft);
   border-radius: var(--sl-border-radius-medium);
   padding: 0.75rem;
   min-height: 150px;
@@ -869,14 +914,14 @@ h2 {
   justify-content: space-between;
   gap: 0.5rem;
   padding: 0.5rem;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--surface-fill);
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: var(--sl-border-radius-small);
   transition: background 0.15s ease;
 }
 
 .repair-item:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--surface-fill-hover);
 }
 
 .repair-item-info {
@@ -941,7 +986,7 @@ h2 {
   justify-content: flex-end;
   gap: 0.5rem;
   padding-top: 0.75rem;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid var(--surface-border-soft);
 }
 
 /* Dirty manifest warning banner */
@@ -951,19 +996,19 @@ h2 {
   gap: 0.5rem;
   padding: 0.5rem 0.75rem;
   margin: 0.75rem 0;
-  background: rgba(235, 179, 52, 0.12);
-  border: 1px solid rgba(235, 179, 52, 0.3);
+  background: color-mix(in srgb, var(--amber-warn) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--amber-warn) 30%, transparent);
   border-radius: var(--sl-border-radius-medium);
   cursor: pointer;
   transition: background 0.2s ease;
 }
 
 .dirty-manifest-banner:hover {
-  background: rgba(235, 179, 52, 0.2);
+  background: color-mix(in srgb, var(--amber-warn) 20%, transparent);
 }
 
 .dirty-manifest-banner sl-icon {
-  color: #EBB334;
+  color: var(--amber-warn);
   font-size: 1rem;
   flex-shrink: 0;
 }
@@ -971,7 +1016,7 @@ h2 {
 .dirty-manifest-banner-text {
   flex: 1;
   font-size: 0.8rem;
-  color: #EBB334;
+  color: var(--amber-warn);
 }
 
 .dirty-manifest-banner-text strong {
@@ -986,7 +1031,7 @@ h2 {
 
 .basket-item-artist,
 .basket-item-genre {
-  border: 1.5px solid var(--sl-color-neutral-300);
+  border: 1.5px solid var(--sl-color-neutral-600);
   background: color-mix(in srgb, var(--sl-color-neutral-100) 30%, transparent);
 }
 
@@ -998,7 +1043,7 @@ h2 {
   align-items: center;
   justify-content: center;
   font-size: 1.5rem;
-  color: var(--sl-color-neutral-500);
+  color: var(--ink-dim);
   flex-shrink: 0;
 }
 
@@ -1020,16 +1065,32 @@ h2 {
   align-items: center;
   gap: 0.2rem;
   padding: 0.4rem 0.6rem;
-  border-radius: 8px;
+  border-radius: var(--radius);
   border: 1px solid rgba(255, 255, 255, 0.16);
   cursor: pointer;
   min-width: 60px;
   max-width: 90px;
   overflow: hidden;
-  transition: background 0.15s, border-color 0.15s;
+  transition: background var(--dur-fast) var(--ease-out-quart),
+              border-color var(--dur-fast) var(--ease-out-quart),
+              transform var(--dur-fast) var(--ease-out-quart);
 }
 .device-hub-card:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--surface-fill-hover);
+}
+.device-hub-card:active {
+  transform: scale(0.97);
+  transition-duration: 80ms;
+}
+
+/* Keyboard focus for the custom role="button" affordances (device cards,
+   folder toggle, repair banner). Outline (not box-shadow) so it survives
+   Windows high-contrast mode. */
+.device-hub-card:focus-visible,
+.device-folders-header:focus-visible,
+.dirty-manifest-banner[role="button"]:focus-visible {
+  outline: 2px solid var(--sl-color-primary-600);
+  outline-offset: 2px;
 }
 .device-hub-card.active {
   border-color: var(--sl-color-primary-500);
@@ -1078,7 +1139,7 @@ h2 {
   align-items: center;
   gap: 0.3rem;
   padding: 0.5rem 0.7rem;
-  border-radius: 8px;
+  border-radius: var(--radius);
   border: 2px solid var(--sl-color-neutral-200);
   cursor: pointer;
   min-width: 52px;
@@ -1122,9 +1183,9 @@ h2 {
 #repair-dialog::part(panel),
 .device-settings-dialog::part(panel) {
   max-width: min(92vw, 720px);
-  border-radius: 8px;
-  background: #24252b;
-  color: #f1f5f9;
+  border-radius: var(--radius);
+  background: var(--surface-bg);
+  color: var(--ink);
 }
 
 #init-device-dialog {
@@ -1190,5 +1251,20 @@ h2 {
   .server-connection-chip {
     width: 100%;
     max-width: 100%;
+  }
+}
+
+/* Reduced motion: required by PRODUCT.md. Honor the OS setting by collapsing
+   every entrance, hover lift, and state transition to an instant change.
+   State still updates (icons appear, panels swap, hovers highlight) with no
+   perceived movement, so nothing is hidden from motion-sensitive users. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
