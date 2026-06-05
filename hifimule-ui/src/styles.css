@@ -62,7 +62,6 @@ body {
 
 .library-view {
   background: rgba(21, 29, 49, 0.86);
-  backdrop-filter: blur(10px);
   height: 100%;
   box-sizing: border-box;
   display: flex;
@@ -79,9 +78,8 @@ body {
 
 #browse-mode-bar {
   flex-shrink: 0;
-  padding: 0.5rem 2rem;
+  padding: var(--space-xs) 2rem;
   background: rgba(26, 39, 59, 0.96);
-  backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--surface-border-soft);
 }
 
@@ -260,15 +258,19 @@ body {
   align-items: center;
 }
 
+/* "Ready to sync" is an actionable prompt, not a warning: neutral surface with
+   a cyan signal icon (per the One Wire Rule), not amber (Amber Threshold rule).
+   The previous rgba(var(--sl-color-warning-rgb)) had no fallback and rendered
+   with no background at all, since Shoelace ships no *-rgb channel vars. */
 .sync-proposed-banner {
   display: flex;
   align-items: center;
   gap: 0.6rem;
-  padding: 0.5rem 0.75rem;
-  background: rgba(var(--sl-color-warning-rgb), 0.1);
-  border: 1px solid rgba(var(--sl-color-warning-rgb), 0.3);
+  padding: var(--space-xs) var(--space-sm);
+  background: var(--surface-fill);
+  border: 1px solid var(--surface-border-soft);
   border-radius: var(--sl-border-radius-medium);
-  color: var(--sl-color-warning-700);
+  color: var(--ink-dim);
   font-size: 0.8rem;
   width: 100%;
   animation: fadeIn var(--dur-base) var(--ease-out-quart);
@@ -289,6 +291,7 @@ body {
 .sync-proposed-banner sl-icon {
   font-size: 1rem;
   flex-shrink: 0;
+  color: var(--sl-color-primary-600);
 }
 
 /* Capacity Bar */
@@ -361,14 +364,6 @@ h2 {
   margin-top: 0;
   font-weight: 600;
   letter-spacing: 0;
-}
-
-.glass-card {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid var(--surface-border);
-  border-radius: var(--radius);
-  padding: 1rem;
-  margin-bottom: 1rem;
 }
 
 /* Media Grid Styles */
@@ -587,10 +582,11 @@ h2 {
   top: 0;
   z-index: 10;
   background: rgba(30, 41, 59, 0.92);
+  /* Sticky over the scrolling library list: the blur is a real frosted-header
+     effect (content passes underneath), not decorative glass. */
   backdrop-filter: blur(8px);
-  padding: 0.4rem 0.25rem;
   margin: -1rem -2rem 1rem;
-  padding: 0.5rem 2rem;
+  padding: var(--space-xs) 2rem;
   border-bottom: 1px solid var(--surface-border-soft);
 }
 
@@ -735,19 +731,6 @@ h2 {
 .folder-managed .folder-icon {
   color: var(--sl-color-primary-400);
   filter: drop-shadow(0 0 2px var(--sl-color-primary-700));
-}
-
-.device-empty-banner {
-  margin-top: 0.5rem;
-  padding: 0.5rem;
-  background: rgba(var(--sl-color-info-rgb), 0.1);
-  border: 1px solid rgba(var(--sl-color-info-rgb), 0.2);
-  border-radius: var(--sl-border-radius-small);
-  font-size: 0.75rem;
-  color: var(--sl-color-info-600);
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
 }
 
 /* ========================
@@ -973,9 +956,9 @@ h2 {
   align-items: flex-start;
   gap: 0.4rem;
   font-size: 0.75rem;
-  color: var(--sl-color-warning-700);
-  background: rgba(var(--sl-color-warning-500-rgb, 234, 179, 8), 0.08);
-  border: 1px solid rgba(var(--sl-color-warning-500-rgb, 234, 179, 8), 0.2);
+  color: var(--amber-warn);
+  background: color-mix(in srgb, var(--amber-warn) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--amber-warn) 20%, transparent);
   border-radius: var(--sl-border-radius-small);
   padding: 0.5rem 0.6rem;
   margin-bottom: 0.5rem;
