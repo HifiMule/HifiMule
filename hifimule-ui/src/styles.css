@@ -81,6 +81,8 @@ body {
   padding: var(--space-xs) 2rem;
   background: rgba(26, 39, 59, 0.96);
   border-bottom: 1px solid var(--surface-border-soft);
+  display: flex;
+  align-items: center;
 }
 
 .browse-mode-bar {
@@ -1286,4 +1288,72 @@ h2 {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* ========================
+   List / Table Browse View (Story 9.7)
+   ======================== */
+
+.view-toggle-group {
+  display: flex;
+  gap: 0.25rem;
+  margin-left: auto;
+}
+
+.media-list {
+  position: relative;
+  width: 100%;
+}
+
+.media-list-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0 0.5rem;
+  cursor: pointer;
+  border-bottom: 1px solid var(--surface-border-soft);
+  transition: background var(--dur-fast) var(--ease-out-quart);
+}
+
+.media-list-row:hover {
+  background: var(--surface-fill-hover);
+}
+
+.media-list-row.is-selected {
+  background: rgba(34, 184, 240, 0.08);
+}
+
+.media-list-row__thumb {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--sl-border-radius-small);
+  background-size: cover;
+  background-position: center;
+  flex-shrink: 0;
+  background-color: var(--sl-color-neutral-800);
+}
+
+.media-list-row__info {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.media-list-row__name {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.media-list-row__subtitle {
+  font-size: 0.8rem;
+  color: var(--ink-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }

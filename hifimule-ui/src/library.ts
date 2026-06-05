@@ -19,13 +19,18 @@ import {
     fetchBrowseRecentlyPlayed,
     fetchBrowseFavorites,
     fetchBrowseFavoriteItems,
+    getImageUrl,
 } from './rpc';
 import { MediaCard, BrowseDisplayItem } from './components/MediaCard';
+import { basketStore } from './state/basket';
 import { t } from './i18n';
 
 function modeLabel(mode: BrowseMode): string {
     return t(`library.mode.${mode}`);
 }
+
+const VIRTUAL_ROW_HEIGHT = 56;
+const OVERSCAN = 3;
 
 interface AppState {
     browseMode: BrowseMode;
@@ -41,6 +46,7 @@ interface AppState {
     albumViewTotal: number;
     activeLetter: string | null;
     favoriteTree: FavoriteTree | null;
+    listViewModes: Map<BrowseMode, 'grid' | 'list'>;
 }
 
 interface FavoriteTree {
@@ -64,6 +70,7 @@ let state: AppState = {
     albumViewTotal: 0,
     activeLetter: null,
     favoriteTree: null,
+    listViewModes: new Map(),
 };
 
 function cacheKey(parentId?: string): string {
@@ -81,7 +88,7 @@ export function clearNavigationCache() {
     state.activeLetter = null;
     state.parentId = undefined;
     state.favoriteTree = null;
-    // browseMode and availableModes are intentionally preserved
+    // browseMode, availableModes, and listViewModes are intentionally preserved
 }
 
 // --- Scroll helpers ---
@@ -389,6 +396,7 @@ function renderModeBar() {
             (btn as any).variant = mode === state.browseMode ? 'primary' : 'default';
             (btn as any).disabled = state.loading;
         });
+        renderViewToggle();
         return;
     }
 
@@ -408,6 +416,7 @@ function renderModeBar() {
     });
 
     container.appendChild(bar);
+    renderViewToggle();
 }
 
 function createBreadcrumbs(): HTMLElement {
@@ -466,8 +475,14 @@ function renderQuickNav(): HTMLElement | null {
         btn.variant = letter === state.activeLetter ? 'primary' : 'text';
         btn.textContent = letter;
         btn.addEventListener('click', () => {
-            if (isArtists) loadArtistsByLetter(letter);
-            else loadAlbumsByLetter(letter);
+            const inListView = (state.listViewModes.get(state.browseMode) ?? 'grid') === 'list';
+            if (inListView) {
+                scrollToLetter(letter);
+            } else if (isArtists) {
+                loadArtistsByLetter(letter);
+            } else {
+                loadAlbumsByLetter(letter);
+            }
         });
         navBar.appendChild(btn);
     }
@@ -479,6 +494,7 @@ function renderGrid(items: BrowseDisplayItem[]) {
     const container = document.getElementById('library-content');
     if (!container) return;
 
+    teardownListScrollHandler();
     container.innerHTML = '';
 
     if (state.breadcrumbStack.length > 0) {
@@ -512,6 +528,216 @@ function renderGrid(items: BrowseDisplayItem[]) {
 
         loadMoreContainer.appendChild(loadMoreBtn);
         container.appendChild(loadMoreContainer);
+    }
+}
+
+function teardownListScrollHandler() {
+    const c = document.getElementById('library-content');
+    if (c) {
+        if ((c as any).__listScrollHandler) {
+            c.removeEventListener('scroll', (c as any).__listScrollHandler);
+            delete (c as any).__listScrollHandler;
+        }
+        if ((c as any).__listBasketHandler) {
+            basketStore.removeEventListener('update', (c as any).__listBasketHandler);
+            delete (c as any).__listBasketHandler;
+        }
+    }
+}
+
+function renderViewToggle() {
+    const container = document.getElementById('browse-mode-bar');
+    if (!container) return;
+    const existing = container.querySelector('.view-toggle-group');
+    if (existing) existing.remove();
+    const showToggle =
+        (state.browseMode === 'artists' || state.browseMode === 'albums') &&
+        state.breadcrumbStack.length === 0 &&
+        !state.loading;
+    if (!showToggle) return;
+    const currentMode = state.listViewModes.get(state.browseMode) ?? 'grid';
+    const group = document.createElement('div');
+    group.className = 'view-toggle-group';
+    const gridBtn = document.createElement('sl-button') as any;
+    gridBtn.size = 'small';
+    gridBtn.variant = currentMode === 'grid' ? 'primary' : 'default';
+    gridBtn.title = t('library.viewToggle.grid');
+    gridBtn.innerHTML = '<sl-icon name="grid"></sl-icon>';
+    gridBtn.addEventListener('click', () => setViewMode('grid'));
+    const listBtn = document.createElement('sl-button') as any;
+    listBtn.size = 'small';
+    listBtn.variant = currentMode === 'list' ? 'primary' : 'default';
+    listBtn.title = t('library.viewToggle.list');
+    listBtn.innerHTML = '<sl-icon name="list"></sl-icon>';
+    listBtn.addEventListener('click', () => setViewMode('list'));
+    group.appendChild(gridBtn);
+    group.appendChild(listBtn);
+    container.appendChild(group);
+}
+
+async function setViewMode(mode: 'grid' | 'list') {
+    if (state.loading) return;
+    state.listViewModes.set(state.browseMode, mode);
+    if (
+        mode === 'list' &&
+        (state.browseMode === 'artists' || state.browseMode === 'albums') &&
+        state.items.length < state.pagination.total &&
+        !state.activeLetter
+    ) {
+        state.loading = true;
+        renderModeBar();
+        try {
+            await loadAllForListView(state.browseMode as 'artists' | 'albums');
+        } finally {
+            state.loading = false;
+            renderModeBar();
+        }
+    }
+    renderCurrentView();
+}
+
+function scrollToLetter(letter: string) {
+    const container = document.getElementById('library-content');
+    if (!container) return;
+    const isHash = letter === '#';
+    const idx = state.items.findIndex(item => {
+        const first = item.name.charAt(0).toUpperCase();
+        return isHash ? /[0-9]/.test(first) : first === letter;
+    });
+    if (idx >= 0) container.scrollTop = idx * VIRTUAL_ROW_HEIGHT;
+}
+
+function renderListRow(item: BrowseDisplayItem, index: number): HTMLElement {
+    const itemId = item.basketId ?? item.id;
+    const isSelected = basketStore.has(itemId);
+    const row = document.createElement('div');
+    row.className = 'media-list-row';
+    if (isSelected) row.classList.add('is-selected');
+    row.dataset.idx = String(index);
+    row.style.top = `${index * VIRTUAL_ROW_HEIGHT}px`;
+    const thumb = document.createElement('div');
+    thumb.className = 'media-list-row__thumb';
+    getImageUrl(item.coverArtId ?? item.id, 64, 90).then(url => {
+        thumb.style.backgroundImage = `url('${url}')`;
+    }).catch(() => {});
+    const info = document.createElement('div');
+    info.className = 'media-list-row__info';
+    const nameEl = document.createElement('div');
+    nameEl.className = 'media-list-row__name';
+    nameEl.textContent = item.name;
+    info.appendChild(nameEl);
+    if (item.subtitle) {
+        const subtitleEl = document.createElement('div');
+        subtitleEl.className = 'media-list-row__subtitle';
+        subtitleEl.textContent = item.subtitle;
+        info.appendChild(subtitleEl);
+    }
+    const toggleBtn = document.createElement('sl-icon-button') as any;
+    toggleBtn.name = isSelected ? 'dash-circle-fill' : 'plus-circle-fill';
+    toggleBtn.label = isSelected ? 'Remove from basket' : 'Add to basket';
+    toggleBtn.style.fontSize = '1.25rem';
+    toggleBtn.addEventListener('click', (e: Event) => {
+        e.stopPropagation();
+        if (basketStore.has(itemId)) {
+            basketStore.remove(itemId);
+        } else {
+            const resolvedType = item.basketType ?? item.type;
+            const CONTAINER_TYPES = ['MusicArtist', 'MusicAlbum', 'MusicGenre', 'Playlist'];
+            const isFavoriteScoped = resolvedType === 'FavoriteArtist' || resolvedType === 'FavoriteAlbum';
+            const needsFetch = CONTAINER_TYPES.includes(resolvedType) && !isFavoriteScoped && (!item.childCount || !item.sizeBytes);
+            if (!needsFetch) {
+                basketStore.add({
+                    id: itemId,
+                    name: item.name,
+                    type: resolvedType,
+                    artist: item.subtitle ?? undefined,
+                    childCount: item.childCount ?? 0,
+                    sizeTicks: item.sizeTicks ?? 0,
+                    sizeBytes: item.sizeBytes ?? 0,
+                });
+            }
+        }
+    });
+    row.addEventListener('click', (e) => {
+        const path = e.composedPath();
+        const isBtn = path.some(el => (el as HTMLElement).tagName === 'SL-ICON-BUTTON');
+        if (!isBtn) navigateToBrowseItem(item);
+    });
+    row.appendChild(thumb);
+    row.appendChild(info);
+    row.appendChild(toggleBtn);
+    return row;
+}
+
+function renderList(items: BrowseDisplayItem[]) {
+    const container = document.getElementById('library-content');
+    if (!container) return;
+    teardownListScrollHandler();
+    container.innerHTML = '';
+    if (state.breadcrumbStack.length > 0) container.appendChild(createBreadcrumbs());
+    const qn = renderQuickNav();
+    if (qn) container.appendChild(qn);
+    const totalHeight = items.length * VIRTUAL_ROW_HEIGHT;
+    const scroller = document.createElement('div');
+    scroller.className = 'media-list';
+    scroller.style.height = `${totalHeight}px`;
+    function paint() {
+        const scrollTop = container.scrollTop;
+        const viewportH = container.clientHeight;
+        const first = Math.max(0, Math.floor(scrollTop / VIRTUAL_ROW_HEIGHT) - OVERSCAN);
+        const last = Math.min(items.length - 1, Math.ceil((scrollTop + viewportH) / VIRTUAL_ROW_HEIGHT) + OVERSCAN);
+        scroller.querySelectorAll<HTMLElement>('.media-list-row').forEach(row => {
+            const idx = Number(row.dataset.idx);
+            if (idx < first || idx > last) row.remove();
+        });
+        const existing = new Set(
+            [...scroller.querySelectorAll<HTMLElement>('.media-list-row')].map(r => Number(r.dataset.idx))
+        );
+        for (let i = first; i <= last; i++) {
+            if (!existing.has(i)) scroller.appendChild(renderListRow(items[i], i));
+        }
+    }
+    const scrollHandler = () => paint();
+    container.addEventListener('scroll', scrollHandler);
+    (container as any).__listScrollHandler = scrollHandler;
+    const basketUpdateHandler = () => {
+        scroller.querySelectorAll('.media-list-row').forEach(r => r.remove());
+        paint();
+    };
+    basketStore.addEventListener('update', basketUpdateHandler);
+    (container as any).__listBasketHandler = basketUpdateHandler;
+    container.appendChild(scroller);
+    paint();
+}
+
+async function loadAllForListView(mode: 'artists' | 'albums') {
+    const container = document.getElementById('library-content');
+    if (!container) return;
+    container.innerHTML = '<sl-spinner style="font-size: 3rem;"></sl-spinner>';
+    while (state.items.length < state.pagination.total) {
+        const startIndex = state.items.length;
+        if (mode === 'artists') {
+            const r = await fetchBrowseArtists(undefined, undefined, startIndex, 200);
+            state.items = [...state.items, ...mapArtists(r.artists)];
+            state.pagination.total = r.total;
+        } else {
+            const r = await fetchBrowseAlbums(undefined, undefined, startIndex, 200);
+            state.items = [...state.items, ...mapAlbums(r.albums)];
+            state.pagination.total = r.total;
+        }
+    }
+}
+
+function renderCurrentView() {
+    const mode = state.listViewModes.get(state.browseMode) ?? 'grid';
+    if (
+        mode === 'list' &&
+        (state.browseMode === 'artists' || state.browseMode === 'albums') &&
+        state.breadcrumbStack.length === 0
+    ) {
+        renderList(state.items);
+    } else {
+        renderGrid(state.items);
     }
 }
 
@@ -595,7 +821,7 @@ async function loadArtists(reset: boolean) {
             state.pagination.total = cached.total;
             state.pagination.startIndex = 0;
             state.artistViewTotal = cached.total;
-            renderGrid(state.items);
+            renderCurrentView();
             restoreScroll(key);
             return;
         }
@@ -622,7 +848,7 @@ async function loadArtists(reset: boolean) {
             state.items = [...state.items, ...mapped];
         }
 
-        renderGrid(state.items);
+        renderCurrentView();
         if (reset) restoreScroll(key);
     } catch (e) {
         renderError(e as Error);
@@ -658,7 +884,7 @@ async function loadArtistsByLetter(letter: string) {
         state.items = mapArtists(result.artists);
         state.pagination.total = result.total;
         state.pagination.startIndex = result.artists.length;
-        renderGrid(state.items);
+        renderCurrentView();
     } catch (e) {
         renderError(e as Error);
     } finally {
@@ -693,7 +919,7 @@ async function loadAlbumsByLetter(letter: string) {
         state.items = mapAlbums(result.albums);
         state.pagination.total = result.total;
         state.pagination.startIndex = result.albums.length;
-        renderGrid(state.items);
+        renderCurrentView();
     } catch (e) {
         renderError(e as Error);
     } finally {
@@ -715,7 +941,7 @@ async function loadAlbums(reset: boolean) {
             state.pagination.total = cached.total;
             state.pagination.startIndex = 0;
             state.albumViewTotal = cached.total;
-            renderGrid(state.items);
+            renderCurrentView();
             restoreScroll(key);
             return;
         }
@@ -742,7 +968,7 @@ async function loadAlbums(reset: boolean) {
             state.items = [...state.items, ...mapped];
         }
 
-        renderGrid(state.items);
+        renderCurrentView();
         if (reset) restoreScroll(key);
     } catch (e) {
         renderError(e as Error);
