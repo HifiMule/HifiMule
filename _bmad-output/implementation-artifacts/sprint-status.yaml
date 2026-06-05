@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-06-05  # Story 9.7 done
+last_updated: 2026-06-05  # Story 11.1 ready-for-dev
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -136,8 +136,8 @@ development_status:
   10-3-profile-based-default-folders-and-setup-ordering: done
 
   # Epic 11 — Selection-as-Playlist & Curation (sprint-change-proposal-2026-06-05)
-  epic-11: backlog
-  11-1-mediaprovider-playlist-write-trait-amendment: backlog
+  epic-11: in-progress
+  11-1-mediaprovider-playlist-write-trait-amendment: ready-for-dev
   11-2-jellyfinprovider-playlist-write-adapter: backlog
   11-3-subsonicprovider-playlist-write-adapter: backlog
   11-4-playlist-rpcs-and-selection-to-tracks-resolution: backlog
