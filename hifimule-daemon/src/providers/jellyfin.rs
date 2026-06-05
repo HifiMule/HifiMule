@@ -369,6 +369,7 @@ impl MediaProvider for JellyfinProvider {
             open_subsonic: false,
             supports_changes_since: true,
             supports_server_transcoding: true,
+            supports_playlist_write: true,
             browse: BrowseCapabilities {
                 list_modes: vec![
                     BrowseMode::Artists,
@@ -858,6 +859,7 @@ mod tests {
                 open_subsonic: false,
                 supports_changes_since: true,
                 supports_server_transcoding: true,
+                supports_playlist_write: true,
                 browse: BrowseCapabilities {
                     list_modes: vec![
                         BrowseMode::Artists,

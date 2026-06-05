@@ -473,6 +473,7 @@ impl MediaProvider for SubsonicProvider {
             open_subsonic: self.open_subsonic,
             supports_changes_since: true,
             supports_server_transcoding: self.open_subsonic,
+            supports_playlist_write: true,
             browse: BrowseCapabilities { list_modes },
         }
     }
@@ -1710,6 +1711,7 @@ mod tests {
                 open_subsonic: true,
                 supports_changes_since: true,
                 supports_server_transcoding: true,
+                supports_playlist_write: true,
                 browse: BrowseCapabilities {
                     list_modes: vec![
                         BrowseMode::Artists,

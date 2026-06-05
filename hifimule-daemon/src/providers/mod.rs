@@ -196,6 +196,45 @@ pub trait MediaProvider: Send + Sync {
         ))
     }
 
+    async fn create_playlist(
+        &self,
+        _name: &str,
+        _track_ids: &[String],
+    ) -> Result<String, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "create_playlist is not supported by this provider".to_string(),
+        ))
+    }
+
+    async fn add_to_playlist(
+        &self,
+        _playlist_id: &str,
+        _track_ids: &[String],
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "add_to_playlist is not supported by this provider".to_string(),
+        ))
+    }
+
+    async fn remove_from_playlist(
+        &self,
+        _playlist_id: &str,
+        _track_ids: &[String],
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "remove_from_playlist is not supported by this provider".to_string(),
+        ))
+    }
+
+    async fn delete_playlist(
+        &self,
+        _playlist_id: &str,
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "delete_playlist is not supported by this provider".to_string(),
+        ))
+    }
+
     fn change_metadata(&self, _event: &ChangeEvent) -> Option<ProviderChangeMetadata> {
         None
     }
@@ -257,6 +296,7 @@ pub struct Capabilities {
     pub open_subsonic: bool,
     pub supports_changes_since: bool,
     pub supports_server_transcoding: bool,
+    pub supports_playlist_write: bool,
     pub browse: BrowseCapabilities,
 }
 
@@ -848,5 +888,120 @@ mod tests {
         assert_eq!(modes[0], "artists");
         assert_eq!(modes[1], "albums");
         assert_eq!(modes[2], "playlists");
+    }
+
+    struct MinimalProvider;
+
+    #[async_trait]
+    impl MediaProvider for MinimalProvider {
+        fn server_type(&self) -> ServerType {
+            ServerType::Unknown
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                open_subsonic: false,
+                supports_changes_since: false,
+                supports_server_transcoding: false,
+                supports_playlist_write: false,
+                browse: BrowseCapabilities { list_modes: vec![] },
+            }
+        }
+
+        async fn list_libraries(&self) -> Result<Vec<crate::domain::models::Library>, ProviderError> {
+            Err(ProviderError::UnsupportedCapability("list_libraries".to_string()))
+        }
+
+        async fn list_artists(
+            &self,
+            _library_id: Option<&str>,
+            _letter: Option<&str>,
+            _offset: u32,
+            _limit: u32,
+        ) -> Result<(Vec<crate::domain::models::Artist>, u32), ProviderError> {
+            Err(ProviderError::UnsupportedCapability("list_artists".to_string()))
+        }
+
+        async fn get_artist(&self, _artist_id: &str) -> Result<crate::domain::models::ArtistWithAlbums, ProviderError> {
+            Err(ProviderError::UnsupportedCapability("get_artist".to_string()))
+        }
+
+        async fn list_albums(
+            &self,
+            _library_id: Option<&str>,
+            _letter: Option<&str>,
+            _offset: u32,
+            _limit: u32,
+        ) -> Result<(Vec<crate::domain::models::Album>, u32), ProviderError> {
+            Err(ProviderError::UnsupportedCapability("list_albums".to_string()))
+        }
+
+        async fn get_album(&self, _album_id: &str) -> Result<crate::domain::models::AlbumWithTracks, ProviderError> {
+            Err(ProviderError::UnsupportedCapability("get_album".to_string()))
+        }
+
+        async fn list_playlists(&self) -> Result<Vec<crate::domain::models::Playlist>, ProviderError> {
+            Err(ProviderError::UnsupportedCapability("list_playlists".to_string()))
+        }
+
+        async fn get_playlist(&self, _playlist_id: &str) -> Result<crate::domain::models::PlaylistWithTracks, ProviderError> {
+            Err(ProviderError::UnsupportedCapability("get_playlist".to_string()))
+        }
+
+        async fn search(&self, _query: &str) -> Result<crate::domain::models::SearchResult, ProviderError> {
+            Err(ProviderError::UnsupportedCapability("search".to_string()))
+        }
+
+        async fn download_url(
+            &self,
+            _song_id: &str,
+            _profile: Option<&TranscodeProfile>,
+        ) -> Result<String, ProviderError> {
+            Err(ProviderError::UnsupportedCapability("download_url".to_string()))
+        }
+
+        async fn cover_art_url(&self, _cover_art_id: &str) -> Result<String, ProviderError> {
+            Err(ProviderError::UnsupportedCapability("cover_art_url".to_string()))
+        }
+
+        async fn changes_since_with_context(
+            &self,
+            _token: Option<&str>,
+            _context: &ProviderChangeContext,
+        ) -> Result<Vec<crate::domain::models::ChangeEvent>, ProviderError> {
+            Err(ProviderError::UnsupportedCapability("changes_since_with_context".to_string()))
+        }
+
+        async fn scrobble(&self, _request: ScrobbleRequest) -> Result<(), ProviderError> {
+            Err(ProviderError::UnsupportedCapability("scrobble".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn trait_default_create_playlist_returns_unsupported() {
+        let provider = MinimalProvider;
+        let result = provider.create_playlist("My Playlist", &[]).await;
+        assert!(matches!(result, Err(ProviderError::UnsupportedCapability(_))));
+    }
+
+    #[tokio::test]
+    async fn trait_default_add_to_playlist_returns_unsupported() {
+        let provider = MinimalProvider;
+        let result = provider.add_to_playlist("playlist-1", &[]).await;
+        assert!(matches!(result, Err(ProviderError::UnsupportedCapability(_))));
+    }
+
+    #[tokio::test]
+    async fn trait_default_remove_from_playlist_returns_unsupported() {
+        let provider = MinimalProvider;
+        let result = provider.remove_from_playlist("playlist-1", &[]).await;
+        assert!(matches!(result, Err(ProviderError::UnsupportedCapability(_))));
+    }
+
+    #[tokio::test]
+    async fn trait_default_delete_playlist_returns_unsupported() {
+        let provider = MinimalProvider;
+        let result = provider.delete_playlist("playlist-1").await;
+        assert!(matches!(result, Err(ProviderError::UnsupportedCapability(_))));
     }
 }

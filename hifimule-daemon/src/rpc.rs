@@ -8080,6 +8080,7 @@ mod tests {
                 open_subsonic: false,
                 supports_changes_since: false,
                 supports_server_transcoding: false,
+                supports_playlist_write: false,
                 browse: crate::providers::BrowseCapabilities {
                     list_modes: self.modes.clone(),
                 },
