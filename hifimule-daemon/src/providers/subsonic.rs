@@ -473,7 +473,8 @@ impl MediaProvider for SubsonicProvider {
             open_subsonic: self.open_subsonic,
             supports_changes_since: true,
             supports_server_transcoding: self.open_subsonic,
-            supports_playlist_write: true,
+            // Gated false until the playlist-write adapter lands (Story 11.3).
+            supports_playlist_write: false,
             browse: BrowseCapabilities { list_modes },
         }
     }
@@ -1711,7 +1712,7 @@ mod tests {
                 open_subsonic: true,
                 supports_changes_since: true,
                 supports_server_transcoding: true,
-                supports_playlist_write: true,
+                supports_playlist_write: false,
                 browse: BrowseCapabilities {
                     list_modes: vec![
                         BrowseMode::Artists,

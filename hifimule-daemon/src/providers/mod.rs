@@ -981,27 +981,39 @@ mod tests {
     async fn trait_default_create_playlist_returns_unsupported() {
         let provider = MinimalProvider;
         let result = provider.create_playlist("My Playlist", &[]).await;
-        assert!(matches!(result, Err(ProviderError::UnsupportedCapability(_))));
+        let Err(ProviderError::UnsupportedCapability(msg)) = result else {
+            panic!("expected UnsupportedCapability, got {result:?}");
+        };
+        assert!(msg.contains("create_playlist"), "message should name the method: {msg}");
     }
 
     #[tokio::test]
     async fn trait_default_add_to_playlist_returns_unsupported() {
         let provider = MinimalProvider;
         let result = provider.add_to_playlist("playlist-1", &[]).await;
-        assert!(matches!(result, Err(ProviderError::UnsupportedCapability(_))));
+        let Err(ProviderError::UnsupportedCapability(msg)) = result else {
+            panic!("expected UnsupportedCapability, got {result:?}");
+        };
+        assert!(msg.contains("add_to_playlist"), "message should name the method: {msg}");
     }
 
     #[tokio::test]
     async fn trait_default_remove_from_playlist_returns_unsupported() {
         let provider = MinimalProvider;
         let result = provider.remove_from_playlist("playlist-1", &[]).await;
-        assert!(matches!(result, Err(ProviderError::UnsupportedCapability(_))));
+        let Err(ProviderError::UnsupportedCapability(msg)) = result else {
+            panic!("expected UnsupportedCapability, got {result:?}");
+        };
+        assert!(msg.contains("remove_from_playlist"), "message should name the method: {msg}");
     }
 
     #[tokio::test]
     async fn trait_default_delete_playlist_returns_unsupported() {
         let provider = MinimalProvider;
         let result = provider.delete_playlist("playlist-1").await;
-        assert!(matches!(result, Err(ProviderError::UnsupportedCapability(_))));
+        let Err(ProviderError::UnsupportedCapability(msg)) = result else {
+            panic!("expected UnsupportedCapability, got {result:?}");
+        };
+        assert!(msg.contains("delete_playlist"), "message should name the method: {msg}");
     }
 }

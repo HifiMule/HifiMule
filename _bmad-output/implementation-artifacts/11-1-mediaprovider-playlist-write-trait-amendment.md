@@ -4,7 +4,7 @@ baseline_commit: 4e7a543
 
 # Story 11.1: MediaProvider Playlist-Write Trait Amendment
 
-Status: review
+Status: done
 
 ## Story
 
@@ -118,6 +118,12 @@ so that the daemon can create, modify, and delete server playlists in a provider
 - [x] Task 4: Verify compilation (AC: all)
   - [x] Run `rtk cargo check` from the workspace root — zero errors.
   - [x] Run `rtk cargo test` — all existing tests pass; new tests pass.
+
+### Review Findings
+
+- [x] [Review][Decision→Patch] Providers advertised `supports_playlist_write: true` before write methods were implemented (flagged High by Blind Hunter + Edge Case Hunter as a "capability lie"). **Resolved (option 2): gated to `false`** in `jellyfin.rs` and `subsonic.rs` `capabilities()` (with `// Gated false until the playlist-write adapter lands` comments) and matching test assertions updated. **⚠️ Stories 11.2/11.3 MUST flip these flags back to `true`** when they implement the adapters.
+- [x] [Review][Patch] Strengthen default-impl tests to assert the error message, not just the variant [hifimule-daemon/src/providers/mod.rs:980-1019] — all four tests now extract the `UnsupportedCapability` message and assert it contains the method name, catching a future copy-paste regression. Applied.
+- [x] [Review][Defer] Empty `track_ids` boundary unhandled/untested for real providers [hifimule-daemon/src/providers/mod.rs] — no provider overrides the write methods yet, so empty-slice behavior belongs to Stories 11.2/11.3. Deferred, not in scope for 11.1.
 
 ## Dev Notes
 
