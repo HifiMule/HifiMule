@@ -26,8 +26,8 @@ so that the UI can create and edit server playlists from the device selection ba
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Add four playlist handler functions to `rpc.rs` (AC: 1–5)
-  - [ ] Add the following four functions immediately before `async fn handle_server_connect` (line 823 in the baseline). Insert them as a block at line ~822:
+- [x] Task 1: Add four playlist handler functions to `rpc.rs` (AC: 1–5)
+  - [x] Add the following four functions immediately before `async fn handle_server_connect` (line 823 in the baseline). Insert them as a block at line ~822:
 
     ```rust
     async fn handle_playlist_create(
@@ -209,8 +209,8 @@ so that the UI can create and edit server playlists from the device selection ba
     - `playlist.addTracks` and `playlist.removeTracks` pass `trackIds` directly to the provider with **no entity resolution**. Callers supply concrete track IDs.
     - All four handlers check capability before parsing params — matching the pattern used by browse handlers.
 
-- [ ] Task 2: Wire the four new RPCs into the dispatch match in `handler()` (AC: 1–5)
-  - [ ] In `handler()` at `rpc.rs:292`, add four new arms immediately before the `_ =>` fallback (currently at line 367). Place them after the last `"browse.listFavoriteItems"` arm (lines 364–366):
+- [x] Task 2: Wire the four new RPCs into the dispatch match in `handler()` (AC: 1–5)
+  - [x] In `handler()` at `rpc.rs:292`, add four new arms immediately before the `_ =>` fallback (currently at line 367). Place them after the last `"browse.listFavoriteItems"` arm (lines 364–366):
 
     ```rust
     "playlist.create" => handle_playlist_create(&state, payload.params).await,
@@ -219,8 +219,8 @@ so that the UI can create and edit server playlists from the device selection ba
     "playlist.delete" => handle_playlist_delete(&state, payload.params).await,
     ```
 
-- [ ] Task 3: Add tests (AC: 1–5)
-  - [ ] Add at the end of the `mod tests` block (before the closing `}` at line 8300). First define `FakePlaylistProvider`, then add six tests.
+- [x] Task 3: Add tests (AC: 1–5)
+  - [x] Add at the end of the `mod tests` block (before the closing `}` at line 8300). First define `FakePlaylistProvider`, then add six tests.
 
     ```rust
     // --- FakePlaylistProvider for playlist RPC tests ---
@@ -487,9 +487,9 @@ so that the UI can create and edit server playlists from the device selection ba
     - `use std::sync::Mutex;` is already imported in the `rpc.rs` test module or available from std — no new import needed in the test module.
     - `make_test_state(db)` is the existing test helper in `mod tests`. Use it as-is.
 
-- [ ] Task 4: Verify compilation and tests (AC: all)
-  - [ ] Run `rtk cargo check` — zero errors.
-  - [ ] Run `rtk cargo test` — all existing tests pass; all six new tests pass.
+- [x] Task 4: Verify compilation and tests (AC: all)
+  - [x] Run `rtk cargo check` — zero errors.
+  - [x] Run `rtk cargo test` — all existing tests pass; all six new tests pass.
 
 ## Dev Notes
 
@@ -593,11 +593,22 @@ No architectural conflicts. The handlers follow the exact same structure as ever
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+claude-sonnet-4-6
 
 ### Debug Log References
 
+- `std::sync::Mutex` was not in scope in `mod tests` (only `tokio::sync::Mutex` was). Added `use std::sync::Mutex;` to the test module imports to resolve the compile error.
+
 ### Completion Notes List
+
+- Implemented `handle_playlist_create`, `handle_playlist_add_tracks`, `handle_playlist_remove_tracks`, `handle_playlist_delete` in `rpc.rs` before `handle_server_connect`.
+- All four handlers check `capabilities().supports_playlist_write` first; return `ERR_UNSUPPORTED_CAPABILITY` if false.
+- `handle_playlist_create` uses `provider_sync_items_for_id` to expand container entities to tracks, filters `__auto_fill_slot__` before resolution, and deduplicates via `HashSet<String>` on `jellyfin_id`.
+- `handle_playlist_add_tracks` and `handle_playlist_remove_tracks` pass track IDs directly with no entity resolution.
+- Four dispatch arms wired into `handler()` match block before `_ =>` fallback.
+- `FakePlaylistProvider` struct added with 6 tests covering: song resolution, auto-fill slot exclusion, addTracks passthrough, removeTracks passthrough, delete passthrough, and unsupported-capability rejection for all four RPCs.
+- `cargo check`: 0 errors, 2 pre-existing warnings (mtp.rs dead code, unrelated).
+- `cargo test`: 412 passed (all existing + 6 new playlist tests).
 
 ### File List
 
@@ -606,7 +617,8 @@ No architectural conflicts. The handlers follow the exact same structure as ever
 ## Change Log
 
 - 2026-06-05: Story 11.4 created — Playlist RPCs and selection-to-tracks resolution ready for dev.
+- 2026-06-05: Story 11.4 implemented — four playlist RPCs added to rpc.rs with tests; 412/412 tests pass.
 
 ## Status
 
-ready-for-dev
+review
