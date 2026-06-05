@@ -4,7 +4,7 @@ baseline_commit: 968209c
 
 # Story 11.6: Dual-Panel Playlist Curation View
 
-Status: ready-for-dev
+Status: done
 
 ## Story
 
@@ -507,6 +507,12 @@ so that I can remove specific artists or albums from a playlist without rebuildi
     - Re-open the curated playlist. Confirm the removed tracks are gone (server reflects changes — requires re-fetching via `browse.getPlaylist`).
     - Click the playlist card body (not the curate button). Confirm it still navigates to the flat track view as before.
 
+### Review Findings
+
+- [x] [Review][Patch] Error alert never shown — `doRemove` calls `render()` unconditionally after the catch block, replacing `#curation-error` with a freshly-rendered hidden state; the error message is never visible to the user [`hifimule-ui/src/components/PlaylistCurationView.ts`]
+- [x] [Review][Patch] Cache key substring collision — `key.includes(playlistId)` in the `openCurationView` close callback may evict unrelated cache entries when playlist IDs are short or share substrings with other browse cache keys (e.g. Subsonic numeric IDs) [`hifimule-ui/src/library.ts`]
+- [x] [Review][Defer] `basketStore` event listener leak compounded by curation close pattern [`hifimule-ui/src/components/MediaCard.ts`] — deferred, pre-existing
+
 ## Dev Notes
 
 ### UI-only story — no Rust changes
@@ -657,4 +663,4 @@ claude-sonnet-4-6
 
 ## Status
 
-review
+done

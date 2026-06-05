@@ -1,7 +1,7 @@
 # Deferred Work
 
 Status: open
-Last updated: 2026-05-29
+Last updated: 2026-06-06
 
 ## Deferred from: autosync-subsonic-navidrome (2026-05-29)
 
@@ -134,3 +134,7 @@ If future review findings need follow-up, add them as new story scope or reopen 
 ## Deferred from: code review of story-11.5 (2026-06-06)
 
 - No server-side empty/whitespace `name` validation in the `playlist.create` RPC handler (`hifimule-daemon/src/rpc.rs:844`). Pre-existing from Story 11.4; the daemon forwards any non-null string to the provider. Both 11.5 UI paths trim client-side, so the current UI is safe — defense-in-depth gap only, not introduced by this change.
+
+## Deferred from: code review of 11-6-dual-panel-playlist-curation-view-and-stats (2026-06-06)
+
+- **`basketStore` event listener leak compounded by curation close pattern** [`hifimule-ui/src/components/MediaCard.ts`] — `MediaCard.create()` attaches a `basketStore 'update'` listener for every card rendered and never removes it when the card is discarded from the DOM. Each `loadPlaylists()` call (including the one triggered on close from `openCurationView`) rebuilds all playlist cards and attaches fresh listeners, while prior listeners remain held by `basketStore`. Pre-existing issue across all browse modes; the curation close path adds one more cycle that reproduces it.

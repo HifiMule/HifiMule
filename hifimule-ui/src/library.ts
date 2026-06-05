@@ -1099,7 +1099,7 @@ function openCurationView(playlistId: string, playlistName: string): void {
         () => {
             // On close: invalidate this playlist's track cache and the playlists list cache
             for (const key of Array.from(state.pageCache.keys())) {
-                if (key.includes(playlistId) || key.startsWith('playlists:')) {
+                if (key === `playlists:${playlistId}` || key.startsWith('playlists:')) {
                     state.pageCache.delete(key);
                 }
             }

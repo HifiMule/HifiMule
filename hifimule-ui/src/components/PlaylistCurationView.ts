@@ -252,28 +252,30 @@ export class PlaylistCurationView {
     }
 
     private async doRemove(trackIds: string[]): Promise<void> {
-        const errorEl = this.container.querySelector('#curation-error') as HTMLElement | null;
-        if (errorEl) errorEl.style.display = 'none';
-
         // Optimistic local update — removes from local state before RPC returns
         const removedSet = new Set(trackIds);
         this.tracks = this.tracks.filter(t => !removedSet.has(t.id));
 
+        let errorMsg: string | null = null;
         try {
             await rpcCall('playlist.removeTracks', {
                 playlistId: this.playlistId,
                 trackIds,
             });
         } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
+            errorMsg = err instanceof Error ? err.message : String(err);
+        }
+
+        this.render();
+
+        if (errorMsg !== null) {
+            const errorEl = this.container.querySelector('#curation-error') as HTMLElement | null;
             if (errorEl) {
-                errorEl.textContent = t('playlist.curation.error', { message: msg });
+                errorEl.textContent = t('playlist.curation.error', { message: errorMsg });
                 errorEl.style.display = '';
                 (errorEl as any).open = true;
             }
         }
-
-        this.render();
     }
 
     private escapeHtml(s: string): string {
