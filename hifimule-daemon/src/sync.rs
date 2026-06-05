@@ -3827,6 +3827,7 @@ mod tests {
             etag: None,
             user_data: None,
             date_created: None,
+            playlist_item_id: None,
         }
     }
 
@@ -4580,6 +4581,7 @@ mod tests {
             etag: None,
             user_data: None,
             date_created: None,
+            playlist_item_id: None,
         };
 
         let path = construct_file_path(&managed, &item).unwrap().path;
@@ -4617,6 +4619,7 @@ mod tests {
             etag: None,
             user_data: None,
             date_created: None,
+            playlist_item_id: None,
         };
 
         let path = construct_file_path(&managed, &item).unwrap().path;

@@ -271,6 +271,75 @@ impl MediaProvider for JellyfinProvider {
         })
     }
 
+    async fn create_playlist(
+        &self,
+        name: &str,
+        track_ids: &[String],
+    ) -> Result<String, ProviderError> {
+        self.client
+            .create_playlist(self.url(), self.token(), self.user_id(), name, track_ids)
+            .await
+            .map_err(Self::map_error)
+    }
+
+    async fn add_to_playlist(
+        &self,
+        playlist_id: &str,
+        track_ids: &[String],
+    ) -> Result<(), ProviderError> {
+        if track_ids.is_empty() {
+            return Ok(());
+        }
+        self.client
+            .add_tracks_to_playlist(
+                self.url(),
+                self.token(),
+                self.user_id(),
+                playlist_id,
+                track_ids,
+            )
+            .await
+            .map_err(Self::map_error)
+    }
+
+    async fn remove_from_playlist(
+        &self,
+        playlist_id: &str,
+        track_ids: &[String],
+    ) -> Result<(), ProviderError> {
+        if track_ids.is_empty() {
+            return Ok(());
+        }
+
+        let items = self
+            .client
+            .get_playlist_items(self.url(), self.token(), self.user_id(), playlist_id)
+            .await
+            .map_err(Self::map_error)?;
+
+        let entry_ids: Vec<String> = items
+            .into_iter()
+            .filter(|item| track_ids.contains(&item.id))
+            .filter_map(|item| item.playlist_item_id)
+            .collect();
+
+        if entry_ids.is_empty() {
+            return Ok(());
+        }
+
+        self.client
+            .delete_playlist_items(self.url(), self.token(), playlist_id, &entry_ids)
+            .await
+            .map_err(Self::map_error)
+    }
+
+    async fn delete_playlist(&self, playlist_id: &str) -> Result<(), ProviderError> {
+        self.client
+            .delete_item(self.url(), self.token(), playlist_id)
+            .await
+            .map_err(Self::map_error)
+    }
+
     async fn search(&self, query: &str) -> Result<SearchResult, ProviderError> {
         let songs = self
             .client
@@ -369,8 +438,7 @@ impl MediaProvider for JellyfinProvider {
             open_subsonic: false,
             supports_changes_since: true,
             supports_server_transcoding: true,
-            // Gated false until the playlist-write adapter lands (Story 11.2).
-            supports_playlist_write: false,
+            supports_playlist_write: true,
             browse: BrowseCapabilities {
                 list_modes: vec![
                     BrowseMode::Artists,
@@ -796,6 +864,7 @@ mod tests {
             etag: Some("song-etag".to_string()),
             user_data: None,
             date_created: None,
+            playlist_item_id: None,
         };
 
         let song = song_from_item(item);
@@ -836,6 +905,7 @@ mod tests {
             etag: None,
             user_data: None,
             date_created: None,
+            playlist_item_id: None,
         };
 
         let song = song_from_item(item);
@@ -860,7 +930,7 @@ mod tests {
                 open_subsonic: false,
                 supports_changes_since: true,
                 supports_server_transcoding: true,
-                supports_playlist_write: false,
+                supports_playlist_write: true,
                 browse: BrowseCapabilities {
                     list_modes: vec![
                         BrowseMode::Artists,
@@ -1019,6 +1089,127 @@ mod tests {
         assert_eq!(playlists[0].name, "Road Trip");
         assert_eq!(playlist.playlist.duration_seconds, Some(10));
         assert_eq!(playlist.tracks[0].id, "song1");
+    }
+
+    #[tokio::test]
+    async fn provider_creates_playlist_returns_server_id() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _mock = server
+            .mock("POST", "/Playlists")
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Id":"playlist99","Name":"Road Trip"}"#)
+            .create_async()
+            .await;
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+        let id = provider
+            .create_playlist("Road Trip", &["song1".to_string(), "song2".to_string()])
+            .await
+            .expect("create_playlist");
+
+        assert_eq!(id, "playlist99");
+    }
+
+    #[tokio::test]
+    async fn provider_add_to_playlist_posts_ids() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _mock = server
+            .mock("POST", "/Playlists/playlist99/Items")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("Ids".into(), "song1,song2".into()),
+            ]))
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(204)
+            .create_async()
+            .await;
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+        provider
+            .add_to_playlist("playlist99", &["song1".to_string(), "song2".to_string()])
+            .await
+            .expect("add_to_playlist");
+    }
+
+    #[tokio::test]
+    async fn provider_remove_from_playlist_resolves_entry_ids_then_deletes() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _get = server
+            .mock("GET", "/Playlists/playlist99/Items")
+            .match_query(Matcher::UrlEncoded("userId".into(), USER_ID.into()))
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"Items":[
+                    {"Id":"song1","Name":"Track 1","Type":"Audio","PlaylistItemId":"entry-a"},
+                    {"Id":"song2","Name":"Track 2","Type":"Audio","PlaylistItemId":"entry-b"},
+                    {"Id":"song3","Name":"Track 3","Type":"Audio","PlaylistItemId":"entry-c"}
+                ],"TotalRecordCount":3,"StartIndex":0}"#,
+            )
+            .create_async()
+            .await;
+        let _delete = server
+            .mock("DELETE", "/Playlists/playlist99/Items")
+            .match_query(Matcher::UrlEncoded("EntryIds".into(), "entry-a,entry-b".into()))
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(204)
+            .create_async()
+            .await;
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+        provider
+            .remove_from_playlist(
+                "playlist99",
+                &["song1".to_string(), "song2".to_string()],
+            )
+            .await
+            .expect("remove_from_playlist");
+    }
+
+    #[tokio::test]
+    async fn provider_remove_from_playlist_skips_delete_when_no_entries_match() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _get = server
+            .mock("GET", "/Playlists/playlist99/Items")
+            .match_query(Matcher::UrlEncoded("userId".into(), USER_ID.into()))
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Items":[{"Id":"song3","Name":"Track 3","Type":"Audio","PlaylistItemId":"entry-c"}],"TotalRecordCount":1,"StartIndex":0}"#)
+            .create_async()
+            .await;
+        // No DELETE mock — if DELETE is issued the test would fail (unexpected request)
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+        // Removing tracks that are NOT in the playlist → should silently succeed
+        provider
+            .remove_from_playlist("playlist99", &["song1".to_string()])
+            .await
+            .expect("remove_from_playlist when no match should succeed");
+    }
+
+    #[tokio::test]
+    async fn provider_delete_playlist_issues_delete_items_endpoint() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _mock = server
+            .mock("DELETE", "/Items/playlist99")
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(204)
+            .create_async()
+            .await;
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+        provider
+            .delete_playlist("playlist99")
+            .await
+            .expect("delete_playlist");
     }
 
     #[tokio::test]

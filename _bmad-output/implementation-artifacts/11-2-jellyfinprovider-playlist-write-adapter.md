@@ -4,7 +4,7 @@ baseline_commit: 9aaf386
 
 # Story 11.2: JellyfinProvider Playlist Write Adapter
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -26,16 +26,16 @@ so that my Jellyfin server playlists reflect my HifiMule selections.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Add `playlist_item_id` field to `JellyfinItem` (AC: 3)
-  - [ ] In `hifimule-daemon/src/api.rs`, add to the `JellyfinItem` struct (after `date_created`, before the closing `}` of the struct):
+- [x] Task 1: Add `playlist_item_id` field to `JellyfinItem` (AC: 3)
+  - [x] In `hifimule-daemon/src/api.rs`, add to the `JellyfinItem` struct (after `date_created`, before the closing `}` of the struct):
     ```rust
     #[serde(default)]
     pub playlist_item_id: Option<String>,
     ```
   - No other changes needed — existing construction sites are unaffected because the field has `#[serde(default)]` and `JellyfinItem` is constructed from deserialization, not struct literals.
 
-- [ ] Task 2: Add five new HTTP methods to `JellyfinClient` in `api.rs` (AC: 1–4)
-  - [ ] Add `create_playlist` — issues `POST /Playlists` with a JSON body:
+- [x] Task 2: Add five new HTTP methods to `JellyfinClient` in `api.rs` (AC: 1–4)
+  - [x] Add `create_playlist` — issues `POST /Playlists` with a JSON body:
     ```rust
     pub async fn create_playlist(
         &self,
@@ -83,7 +83,7 @@ so that my Jellyfin server playlists reflect my HifiMule selections.
             .ok_or_else(|| anyhow!("Playlist create response missing Id field"))
     }
     ```
-  - [ ] Add `add_tracks_to_playlist` — issues `POST /Playlists/{id}/Items?Ids=…`:
+  - [x] Add `add_tracks_to_playlist` — issues `POST /Playlists/{id}/Items?Ids=…`:
     ```rust
     pub async fn add_tracks_to_playlist(
         &self,
@@ -120,7 +120,7 @@ so that my Jellyfin server playlists reflect my HifiMule selections.
         Ok(())
     }
     ```
-  - [ ] Add `get_playlist_items` — issues `GET /Playlists/{id}/Items?userId=…`:
+  - [x] Add `get_playlist_items` — issues `GET /Playlists/{id}/Items?userId=…`:
     ```rust
     pub async fn get_playlist_items(
         &self,
@@ -156,7 +156,7 @@ so that my Jellyfin server playlists reflect my HifiMule selections.
         Ok(items_response.items)
     }
     ```
-  - [ ] Add `delete_playlist_items` — issues `DELETE /Playlists/{id}/Items?EntryIds=…`:
+  - [x] Add `delete_playlist_items` — issues `DELETE /Playlists/{id}/Items?EntryIds=…`:
     ```rust
     pub async fn delete_playlist_items(
         &self,
@@ -191,7 +191,7 @@ so that my Jellyfin server playlists reflect my HifiMule selections.
         Ok(())
     }
     ```
-  - [ ] Add `delete_item` — issues `DELETE /Items/{id}`:
+  - [x] Add `delete_item` — issues `DELETE /Items/{id}`:
     ```rust
     pub async fn delete_item(
         &self,
@@ -220,18 +220,18 @@ so that my Jellyfin server playlists reflect my HifiMule selections.
     }
     ```
 
-- [ ] Task 3: Flip `supports_playlist_write` to `true` in `jellyfin.rs` (AC: 5)
-  - [ ] In `hifimule-daemon/src/providers/jellyfin.rs` at line 372–373: Remove the "Gated false" comment and change the value:
+- [x] Task 3: Flip `supports_playlist_write` to `true` in `jellyfin.rs` (AC: 5)
+  - [x] In `hifimule-daemon/src/providers/jellyfin.rs` at line 372–373: Remove the "Gated false" comment and change the value:
     ```rust
     supports_playlist_write: true,
     ```
-  - [ ] In the test at line 863 (inside `provider_exposes_capabilities`): Change the assertion value:
+  - [x] In the test at line 863 (inside `provider_exposes_capabilities`): Change the assertion value:
     ```rust
     supports_playlist_write: true,
     ```
 
-- [ ] Task 4: Implement the four `MediaProvider` write methods in `jellyfin.rs` (AC: 1–4)
-  - [ ] Add immediately after the existing `get_playlist` method (around line 272) — all four methods call the new api.rs helpers via `self.client.*` and map errors with `Self::map_error`:
+- [x] Task 4: Implement the four `MediaProvider` write methods in `jellyfin.rs` (AC: 1–4)
+  - [x] Add immediately after the existing `get_playlist` method (around line 272) — all four methods call the new api.rs helpers via `self.client.*` and map errors with `Self::map_error`:
     ```rust
     async fn create_playlist(
         &self,
@@ -303,8 +303,8 @@ so that my Jellyfin server playlists reflect my HifiMule selections.
     }
     ```
 
-- [ ] Task 5: Add tests in `jellyfin.rs` (AC: 1–5)
-  - [ ] Add after the existing `provider_lists_and_gets_playlist_tracks` test (around line 1023). All four operations plus an edge-case test for `remove_from_playlist` with no match:
+- [x] Task 5: Add tests in `jellyfin.rs` (AC: 1–5)
+  - [x] Add after the existing `provider_lists_and_gets_playlist_tracks` test (around line 1023). All four operations plus an edge-case test for `remove_from_playlist` with no match:
     ```rust
     #[tokio::test]
     async fn provider_creates_playlist_returns_server_id() {
@@ -428,9 +428,9 @@ so that my Jellyfin server playlists reflect my HifiMule selections.
     }
     ```
 
-- [ ] Task 6: Verify compilation and tests (AC: all)
-  - [ ] Run `rtk cargo check` — zero errors.
-  - [ ] Run `rtk cargo test` — all existing tests pass; all new tests pass.
+- [x] Task 6: Verify compilation and tests (AC: all)
+  - [x] Run `rtk cargo check` — zero errors.
+  - [x] Run `rtk cargo test` — all existing tests pass; all new tests pass.
 
 ## Dev Notes
 
@@ -518,4 +518,24 @@ claude-sonnet-4-6
 
 ### Completion Notes List
 
+- Added `playlist_item_id: Option<String>` to `JellyfinItem` struct with `#[serde(default)]`. Also patched 6 test-code struct literal construction sites in `auto_fill.rs`, `providers/jellyfin.rs`, and `sync.rs` that used struct syntax rather than deserialization (contrary to story note, these did exist).
+- Added 5 new public async methods to `JellyfinClient` in `api.rs`: `create_playlist`, `add_tracks_to_playlist`, `get_playlist_items`, `delete_playlist_items`, `delete_item`.
+- Flipped `supports_playlist_write: false → true` in `capabilities()` and in the `provider_exposes_capabilities` test assertion.
+- Added 4 `MediaProvider` trait implementations in `jellyfin.rs` after `get_playlist`: `create_playlist`, `add_to_playlist`, `remove_from_playlist`, `delete_playlist`. Both `add_to_playlist` and `remove_from_playlist` short-circuit with `Ok(())` on empty `track_ids`.
+- Added 5 new mockito tests: `provider_creates_playlist_returns_server_id`, `provider_add_to_playlist_posts_ids`, `provider_remove_from_playlist_resolves_entry_ids_then_deletes`, `provider_remove_from_playlist_skips_delete_when_no_entries_match`, `provider_delete_playlist_issues_delete_items_endpoint`.
+- All 393 tests pass; zero compilation errors.
+
 ### File List
+
+- `hifimule-daemon/src/api.rs` — added `playlist_item_id` field to `JellyfinItem`; added 5 new `JellyfinClient` methods
+- `hifimule-daemon/src/providers/jellyfin.rs` — flipped `supports_playlist_write` to `true` (capabilities + test); added 4 `MediaProvider` trait methods; added 5 new tests
+- `hifimule-daemon/src/auto_fill.rs` — added `playlist_item_id: None` to test helper struct literal
+- `hifimule-daemon/src/sync.rs` — added `playlist_item_id: None` to 3 test helper struct literals
+
+## Change Log
+
+- 2026-06-05: Story 11.2 implemented — JellyfinProvider playlist write adapter complete. Added `playlist_item_id` to `JellyfinItem`, 5 HTTP client methods, 4 `MediaProvider` trait implementations, `supports_playlist_write: true`, and 5 new tests (393 total, all passing).
+
+## Status
+
+review

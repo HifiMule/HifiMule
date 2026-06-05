@@ -519,6 +519,7 @@ mod tests {
                 last_played_date: None,
             }),
             date_created: Some(date_created.to_string()),
+            playlist_item_id: None,
         }
     }
 

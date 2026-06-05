@@ -147,6 +147,8 @@ pub struct JellyfinItem {
     pub user_data: Option<JellyfinUserData>,
     #[serde(default)]
     pub date_created: Option<String>,
+    #[serde(default)]
+    pub playlist_item_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1323,6 +1325,180 @@ impl JellyfinClient {
             limit,
         )
         .await
+    }
+
+    pub async fn create_playlist(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        name: &str,
+        track_ids: &[String],
+    ) -> Result<String> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let endpoint = format!("{}/Playlists", url.trim_end_matches('/'));
+        let body = serde_json::json!({
+            "Name": name,
+            "MediaType": "Audio",
+            "Ids": track_ids,
+            "UserId": user_id,
+        });
+
+        let response = self
+            .client
+            .post(&endpoint)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        let text = response.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("Server returned status: {}", status));
+        }
+
+        let value: serde_json::Value = serde_json::from_str(&text)?;
+        value["Id"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow!("Playlist create response missing Id field"))
+    }
+
+    pub async fn add_tracks_to_playlist(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        playlist_id: &str,
+        track_ids: &[String],
+    ) -> Result<()> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let ids_param = track_ids.join(",");
+        let endpoint = format!(
+            "{}/Playlists/{}/Items?Ids={}&userId={}",
+            url.trim_end_matches('/'),
+            playlist_id,
+            ids_param,
+            user_id
+        );
+
+        let response = self.client.post(&endpoint).headers(headers).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!("Server returned status: {} — {}", status, text));
+        }
+        Ok(())
+    }
+
+    pub async fn get_playlist_items(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        playlist_id: &str,
+    ) -> Result<Vec<JellyfinItem>> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let endpoint = format!(
+            "{}/Playlists/{}/Items?userId={}",
+            url.trim_end_matches('/'),
+            playlist_id,
+            user_id
+        );
+
+        let response = self.client.get(&endpoint).headers(headers).send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("Server returned status: {}", status));
+        }
+
+        let items_response = serde_json::from_str::<JellyfinItemsResponse>(&text)?;
+        Ok(items_response.items)
+    }
+
+    pub async fn delete_playlist_items(
+        &self,
+        url: &str,
+        token: &str,
+        playlist_id: &str,
+        entry_ids: &[String],
+    ) -> Result<()> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let entry_ids_param = entry_ids.join(",");
+        let endpoint = format!(
+            "{}/Playlists/{}/Items?EntryIds={}",
+            url.trim_end_matches('/'),
+            playlist_id,
+            entry_ids_param
+        );
+
+        let response = self.client.delete(&endpoint).headers(headers).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!("Server returned status: {} — {}", status, text));
+        }
+        Ok(())
+    }
+
+    pub async fn delete_item(
+        &self,
+        url: &str,
+        token: &str,
+        item_id: &str,
+    ) -> Result<()> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let endpoint = format!("{}/Items/{}", url.trim_end_matches('/'), item_id);
+
+        let response = self.client.delete(&endpoint).headers(headers).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!("Server returned status: {} — {}", status, text));
+        }
+        Ok(())
     }
 
     async fn get_music_items(
