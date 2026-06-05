@@ -6,6 +6,7 @@ import { rpcCall, getImageUrl } from '../rpc';
 import { RepairModal } from './RepairModal';
 import { InitDeviceModal } from './InitDeviceModal';
 import { t } from '../i18n';
+import { setPlaylistWriteCapability } from '../library';
 
 interface StorageInfo {
     totalBytes: number;
@@ -185,6 +186,7 @@ export class BasketSidebar {
     // Transfer stats captured at completion for the sync-complete screen
     private completedFilesCount: number = 0;
     private completedBytesCount: number = 0;
+    private supportsPlaylistWrite: boolean = false;
 
     constructor(container: HTMLElement) {
         this.container = container;
@@ -295,6 +297,9 @@ export class BasketSidebar {
                 this.autoFillMaxBytes = null;
                 this.autoSyncOnConnect = false;
             }
+            const newSupportsPlaylist = (state.supportsPlaylistWrite === true);
+            this.supportsPlaylistWrite = newSupportsPlaylist;
+            setPlaylistWriteCapability(newSupportsPlaylist);
         }
 
         // Attach to daemon-initiated sync if one is running and we're not already tracking it
@@ -630,6 +635,11 @@ export class BasketSidebar {
                 const currentDevice = daemonStateResult?.currentDevice;
                 this.currentDevice = currentDevice ?? null;
                 this.serverType = daemonStateResult?.serverType ?? null;
+                const newSupportsPlaylist = daemonStateResult?.supportsPlaylistWrite === true;
+                if (newSupportsPlaylist !== this.supportsPlaylistWrite) {
+                    this.supportsPlaylistWrite = newSupportsPlaylist;
+                    setPlaylistWriteCapability(newSupportsPlaylist);
+                }
                 this.currentServerId = daemonStateResult?.currentServer?.serverId ?? null;
                 basketStore.setActiveServerId(this.currentServerId);
                 const currentDeviceId = this.getCurrentDeviceId(currentDevice);
@@ -943,6 +953,14 @@ export class BasketSidebar {
             <div class="basket-header">
                 <h2>${t('basket.title')}</h2>
                 <sl-badge variant="primary" pill>${items.length}</sl-badge>
+                ${this.supportsPlaylistWrite ? `
+                    <sl-icon-button
+                        id="save-as-playlist-btn"
+                        name="collection-play"
+                        label="${t('basket.actions.save_as_playlist')}"
+                        style="font-size: 1.1rem; margin-left: auto;">
+                    </sl-icon-button>
+                ` : ''}
             </div>
 
             <div class="basket-items-list">
@@ -1013,6 +1031,10 @@ export class BasketSidebar {
 
         this.container.querySelector('.clear-basket-btn')?.addEventListener('click', () => {
             this.confirmClearAll();
+        });
+
+        this.container.querySelector('#save-as-playlist-btn')?.addEventListener('click', () => {
+            this.handleSaveAsPlaylist();
         });
 
         this.container.querySelector('#start-sync-btn')?.addEventListener('click', () => {
@@ -1627,6 +1649,73 @@ export class BasketSidebar {
         dialog.addEventListener('sl-after-hide', (event: Event) => {
             if (event.target === dialog) dialog.remove();
         });
+        customElements.whenDefined('sl-dialog').then(() => dialog.show());
+    }
+
+    private handleSaveAsPlaylist(): void {
+        const allItems = basketStore.getItems();
+        const hasAutoFill = allItems.some(i => i.id === AUTO_FILL_SLOT_ID);
+        const manualIds = allItems
+            .filter(i => i.id !== AUTO_FILL_SLOT_ID)
+            .map(i => i.id);
+
+        const autoFillNoticeHtml = hasAutoFill ? `
+            <sl-alert variant="warning" open style="margin-bottom: 0.75rem;">
+                <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+                ${t('basket.playlist.auto_fill_notice')}
+            </sl-alert>
+        ` : '';
+
+        const dialog = document.createElement('sl-dialog') as any;
+        dialog.label = t('basket.playlist.create_title');
+        dialog.innerHTML = `
+            ${autoFillNoticeHtml}
+            <sl-input
+                id="playlist-name-input"
+                placeholder="${t('basket.playlist.name_placeholder')}"
+                autofocus
+                clearable>
+            </sl-input>
+            <sl-alert id="playlist-create-error" variant="danger" closable style="display:none; margin-top: 0.75rem;"></sl-alert>
+            <sl-button slot="footer" variant="default" id="playlist-cancel-btn">${t('basket.actions.cancel')}</sl-button>
+            <sl-button slot="footer" variant="primary" id="playlist-create-btn">
+                ${t('basket.playlist.create_btn')}
+            </sl-button>
+        `;
+
+        document.body.appendChild(dialog);
+
+        dialog.querySelector('#playlist-cancel-btn')?.addEventListener('click', () => dialog.hide());
+
+        dialog.querySelector('#playlist-create-btn')?.addEventListener('click', async () => {
+            const createBtn = dialog.querySelector('#playlist-create-btn') as any;
+            const errorEl = dialog.querySelector('#playlist-create-error') as HTMLElement | null;
+            const nameInput = dialog.querySelector('#playlist-name-input') as any;
+            const name = (nameInput?.value ?? '').trim();
+            if (!name) return;
+
+            createBtn.loading = true;
+            if (errorEl) errorEl.style.display = 'none';
+
+            try {
+                await rpcCall('playlist.create', { name, itemIds: manualIds });
+                dialog.hide();
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                if (errorEl) {
+                    errorEl.textContent = t('basket.playlist.error', { message: msg });
+                    errorEl.style.display = '';
+                    (errorEl as any).open = true;
+                }
+            } finally {
+                createBtn.loading = false;
+            }
+        });
+
+        dialog.addEventListener('sl-after-hide', (event: Event) => {
+            if (event.target === dialog) dialog.remove();
+        });
+
         customElements.whenDefined('sl-dialog').then(() => dialog.show());
     }
 

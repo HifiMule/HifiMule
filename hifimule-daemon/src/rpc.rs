@@ -1354,6 +1354,14 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         })
         .collect();
 
+    let supports_playlist_write = {
+        let guard = state.provider.read().await;
+        guard
+            .as_ref()
+            .map(|p| p.capabilities().supports_playlist_write)
+            .unwrap_or(false)
+    };
+
     Ok(serde_json::json!({
         "currentDevice": device,
         "deviceMapping": mapping,
@@ -1369,6 +1377,7 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         "activeOperationId": active_operation_id,
         "connectedDevices": connected_devices_json,
         "selectedDevicePath": selected_device_path,
+        "supportsPlaylistWrite": supports_playlist_write,
     }))
 }
 

@@ -26,6 +26,11 @@ import { MediaCard, BrowseDisplayItem } from './components/MediaCard';
 import { basketStore } from './state/basket';
 import { t } from './i18n';
 
+let _supportsPlaylistWrite = false;
+export function setPlaylistWriteCapability(v: boolean): void {
+    _supportsPlaylistWrite = v;
+}
+
 function modeLabel(mode: BrowseMode): string {
     return t(`library.mode.${mode}`);
 }
@@ -511,7 +516,7 @@ function renderGrid(items: BrowseDisplayItem[]) {
     items.forEach(item => {
         const selEnabled = true;
 
-        const card = MediaCard.create(item, 'items', false, () => navigateToBrowseItem(item), selEnabled);
+        const card = MediaCard.create(item, 'items', false, () => navigateToBrowseItem(item), selEnabled, _supportsPlaylistWrite);
         card.setAttribute('data-name', item.name);
         grid.appendChild(card);
     });
@@ -702,6 +707,14 @@ function renderListRow(item: BrowseDisplayItem, index: number): HTMLElement {
             }
         }
     });
+    // Context menu for artist/album rows
+    if (_supportsPlaylistWrite && (item.type === 'MusicArtist' || item.type === 'MusicAlbum')) {
+        const rowItemId = item.basketId ?? item.id;
+        row.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            MediaCard.showContextMenu(e.clientX, e.clientY, rowItemId, item.name);
+        });
+    }
     row.appendChild(thumb);
     row.appendChild(info);
     row.appendChild(toggleBtn);

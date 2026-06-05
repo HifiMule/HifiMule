@@ -42,6 +42,7 @@ export class MediaCard {
         isSynced: boolean,
         onNavigate: () => void | Promise<void>,
         deviceSelectionEnabled?: boolean,
+        supportsPlaylistWrite?: boolean,
     ): HTMLElement {
         const isBrowseItem = !('Id' in item);
         const itemId = isBrowseItem ? ((item as BrowseDisplayItem).basketId ?? (item as BrowseDisplayItem).id) : (item as JellyfinItem | JellyfinView).Id;
@@ -248,7 +249,151 @@ export class MediaCard {
             }
         });
 
+        // Context menu: "Send to playlist…" on artist/album cards when supported
+        if (supportsPlaylistWrite) {
+            const isBrowseDisplayItem = !('Id' in item);
+            const isArtistOrAlbum = isBrowseDisplayItem
+                ? ((item as BrowseDisplayItem).type === 'MusicArtist' || (item as BrowseDisplayItem).type === 'MusicAlbum')
+                : false;
+
+            if (isArtistOrAlbum) {
+                card.addEventListener('contextmenu', (e) => {
+                    e.preventDefault();
+                    MediaCard.showContextMenu(e.clientX, e.clientY, itemId, itemName);
+                });
+            }
+        }
+
         return card;
+    }
+
+    private static activeContextMenu: HTMLElement | null = null;
+
+    static showContextMenu(x: number, y: number, itemId: string, itemName: string): void {
+        // Dismiss any existing context menu first
+        if (MediaCard.activeContextMenu) {
+            MediaCard.activeContextMenu.remove();
+            MediaCard.activeContextMenu = null;
+        }
+
+        const menu = document.createElement('div');
+        menu.className = 'hm-context-menu';
+        menu.style.cssText = `
+            position: fixed;
+            z-index: 9999;
+            background: var(--sl-panel-background-color, #fff);
+            border: 1px solid var(--sl-color-neutral-200, #e2e8f0);
+            border-radius: var(--sl-border-radius-medium, 4px);
+            box-shadow: var(--sl-shadow-large);
+            padding: 4px 0;
+            min-width: 180px;
+        `;
+
+        // Clamp position to viewport
+        const MARGIN = 8;
+        const viewW = window.innerWidth;
+        const viewH = window.innerHeight;
+        const MENU_W = 200;
+        const MENU_H = 44;
+        const left = Math.min(x, viewW - MENU_W - MARGIN);
+        const top = Math.min(y, viewH - MENU_H - MARGIN);
+        menu.style.left = `${left}px`;
+        menu.style.top = `${top}px`;
+
+        const sendItem = document.createElement('div');
+        sendItem.className = 'hm-context-menu-item';
+        sendItem.style.cssText = `
+            padding: 8px 16px;
+            cursor: pointer;
+            font-size: var(--sl-font-size-small, 0.875rem);
+            color: var(--sl-color-neutral-900);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        `;
+        sendItem.innerHTML = `<sl-icon name="collection-play"></sl-icon> Send to playlist…`;
+
+        sendItem.addEventListener('mouseover', () => {
+            sendItem.style.background = 'var(--sl-color-primary-50, #eff6ff)';
+        });
+        sendItem.addEventListener('mouseout', () => {
+            sendItem.style.background = '';
+        });
+
+        sendItem.addEventListener('click', () => {
+            menu.remove();
+            MediaCard.activeContextMenu = null;
+            MediaCard.openCreatePlaylistDialog(itemId, itemName);
+        });
+
+        menu.appendChild(sendItem);
+        document.body.appendChild(menu);
+        MediaCard.activeContextMenu = menu;
+
+        // Dismiss on any click outside the menu
+        const dismiss = (ev: MouseEvent) => {
+            if (!menu.contains(ev.target as Node)) {
+                menu.remove();
+                MediaCard.activeContextMenu = null;
+                document.removeEventListener('click', dismiss, true);
+            }
+        };
+        // Use capture=true so outside clicks register before propagation stops them
+        document.addEventListener('click', dismiss, true);
+    }
+
+    static openCreatePlaylistDialog(itemId: string, itemName: string): void {
+        const dialog = document.createElement('sl-dialog') as any;
+        dialog.label = 'Send to New Playlist';
+        dialog.innerHTML = `
+            <sl-input
+                id="ctx-playlist-name"
+                placeholder="My playlist…"
+                autofocus
+                clearable
+                value="${MediaCard.escapeHtml(itemName)}"
+            ></sl-input>
+            <sl-alert id="ctx-playlist-error" variant="danger" closable style="display:none; margin-top: 0.75rem;"></sl-alert>
+            <sl-button slot="footer" variant="default" id="ctx-playlist-cancel">Cancel</sl-button>
+            <sl-button slot="footer" variant="primary" id="ctx-playlist-create">Create</sl-button>
+        `;
+
+        document.body.appendChild(dialog);
+
+        const dismissDialog = () => dialog.hide();
+        dialog.querySelector('#ctx-playlist-cancel')?.addEventListener('click', dismissDialog);
+
+        dialog.querySelector('#ctx-playlist-create')?.addEventListener('click', async () => {
+            const createBtn = dialog.querySelector('#ctx-playlist-create') as any;
+            const errorEl = dialog.querySelector('#ctx-playlist-error') as HTMLElement | null;
+            const nameInput = dialog.querySelector('#ctx-playlist-name') as any;
+            const name = (nameInput?.value ?? '').trim();
+            if (!name) return;
+
+            createBtn.loading = true;
+            if (errorEl) errorEl.style.display = 'none';
+
+            try {
+                const { rpcCall } = await import('../rpc');
+                await rpcCall('playlist.create', { name, itemIds: [itemId] });
+                dialog.hide();
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                if (errorEl) {
+                    errorEl.textContent = `Failed to create playlist: ${msg}`;
+                    errorEl.style.display = '';
+                    (errorEl as any).open = true;
+                }
+            } finally {
+                createBtn.loading = false;
+            }
+        });
+
+        dialog.addEventListener('sl-after-hide', (event: Event) => {
+            if (event.target === dialog) dialog.remove();
+        });
+
+        customElements.whenDefined('sl-dialog').then(() => dialog.show());
     }
 
     private static escapeHtml(text: string): string {
