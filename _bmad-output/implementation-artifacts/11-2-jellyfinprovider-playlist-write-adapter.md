@@ -4,7 +4,7 @@ baseline_commit: 9aaf386
 
 # Story 11.2: JellyfinProvider Playlist Write Adapter
 
-Status: review
+Status: done
 
 ## Story
 
@@ -432,6 +432,13 @@ so that my Jellyfin server playlists reflect my HifiMule selections.
   - [x] Run `rtk cargo check` — zero errors.
   - [x] Run `rtk cargo test` — all existing tests pass; all new tests pass.
 
+### Review Findings
+
+- [x] [Review][Patch] Duplicate track removal must respect requested counts [hifimule-daemon/src/providers/jellyfin.rs:320]
+- [x] [Review][Patch] Missing PlaylistItemId is reported as successful removal [hifimule-daemon/src/providers/jellyfin.rs:320]
+- [x] [Review][Patch] Playlist write endpoints build paths and query strings without URL encoding [hifimule-daemon/src/api.rs:1393]
+- [x] [Review][Patch] Tests do not assert the create/add request contract fully [hifimule-daemon/src/providers/jellyfin.rs:1098]
+
 ## Dev Notes
 
 ### Critical: flip `supports_playlist_write` from `false` → `true`
@@ -523,7 +530,8 @@ claude-sonnet-4-6
 - Flipped `supports_playlist_write: false → true` in `capabilities()` and in the `provider_exposes_capabilities` test assertion.
 - Added 4 `MediaProvider` trait implementations in `jellyfin.rs` after `get_playlist`: `create_playlist`, `add_to_playlist`, `remove_from_playlist`, `delete_playlist`. Both `add_to_playlist` and `remove_from_playlist` short-circuit with `Ok(())` on empty `track_ids`.
 - Added 5 new mockito tests: `provider_creates_playlist_returns_server_id`, `provider_add_to_playlist_posts_ids`, `provider_remove_from_playlist_resolves_entry_ids_then_deletes`, `provider_remove_from_playlist_skips_delete_when_no_entries_match`, `provider_delete_playlist_issues_delete_items_endpoint`.
-- All 393 tests pass; zero compilation errors.
+- Review patches applied: duplicate removal now respects requested counts; matching playlist items missing `PlaylistItemId` now return a deserialization error instead of false success; playlist-write URLs now encode path/query components and reject comma-bearing comma-joined IDs; create/add tests assert request body/query contracts.
+- All 399 tests pass; zero compilation errors.
 
 ### File List
 
@@ -535,7 +543,8 @@ claude-sonnet-4-6
 ## Change Log
 
 - 2026-06-05: Story 11.2 implemented — JellyfinProvider playlist write adapter complete. Added `playlist_item_id` to `JellyfinItem`, 5 HTTP client methods, 4 `MediaProvider` trait implementations, `supports_playlist_write: true`, and 5 new tests (393 total, all passing).
+- 2026-06-05: Code review patches complete — fixed duplicate-entry removal semantics, missing `PlaylistItemId` false success, playlist-write URL encoding, and request-contract test coverage (399 total, all passing).
 
 ## Status
 
-review
+done

@@ -9,6 +9,7 @@ use crate::providers::{
     ProviderError, ScrobbleRequest, ScrobbleSubmission, ServerType, TranscodeProfile,
 };
 use async_trait::async_trait;
+use std::collections::HashMap;
 
 const ARTIST_TYPES: &str = "MusicArtist";
 const ALBUM_TYPES: &str = "MusicAlbum";
@@ -317,11 +318,34 @@ impl MediaProvider for JellyfinProvider {
             .await
             .map_err(Self::map_error)?;
 
-        let entry_ids: Vec<String> = items
-            .into_iter()
-            .filter(|item| track_ids.contains(&item.id))
-            .filter_map(|item| item.playlist_item_id)
-            .collect();
+        let mut remaining_by_track_id: HashMap<&str, usize> = HashMap::new();
+        for track_id in track_ids {
+            *remaining_by_track_id.entry(track_id.as_str()).or_insert(0) += 1;
+        }
+
+        let mut entry_ids = Vec::new();
+        let mut missing_entry_ids = Vec::new();
+        for item in items {
+            let Some(remaining) = remaining_by_track_id.get_mut(item.id.as_str()) else {
+                continue;
+            };
+            if *remaining == 0 {
+                continue;
+            }
+            *remaining -= 1;
+
+            match item.playlist_item_id {
+                Some(entry_id) => entry_ids.push(entry_id),
+                None => missing_entry_ids.push(item.id),
+            }
+        }
+
+        if !missing_entry_ids.is_empty() {
+            return Err(ProviderError::Deserialization(format!(
+                "Playlist item(s) missing PlaylistItemId: {}",
+                missing_entry_ids.join(",")
+            )));
+        }
 
         if entry_ids.is_empty() {
             return Ok(());
@@ -1098,6 +1122,12 @@ mod tests {
         let _mock = server
             .mock("POST", "/Playlists")
             .match_header("X-Emby-Token", TOKEN)
+            .match_body(Matcher::PartialJson(serde_json::json!({
+                "Name": "Road Trip",
+                "MediaType": "Audio",
+                "Ids": ["song1", "song2"],
+                "UserId": USER_ID,
+            })))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Id":"playlist99","Name":"Road Trip"}"#)
@@ -1121,6 +1151,7 @@ mod tests {
             .mock("POST", "/Playlists/playlist99/Items")
             .match_query(Matcher::AllOf(vec![
                 Matcher::UrlEncoded("Ids".into(), "song1,song2".into()),
+                Matcher::UrlEncoded("userId".into(), USER_ID.into()),
             ]))
             .match_header("X-Emby-Token", TOKEN)
             .with_status(204)
@@ -1155,7 +1186,10 @@ mod tests {
             .await;
         let _delete = server
             .mock("DELETE", "/Playlists/playlist99/Items")
-            .match_query(Matcher::UrlEncoded("EntryIds".into(), "entry-a,entry-b".into()))
+            .match_query(Matcher::UrlEncoded(
+                "EntryIds".into(),
+                "entry-a,entry-b".into(),
+            ))
             .match_header("X-Emby-Token", TOKEN)
             .with_status(204)
             .create_async()
@@ -1163,12 +1197,73 @@ mod tests {
 
         let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
         provider
-            .remove_from_playlist(
-                "playlist99",
-                &["song1".to_string(), "song2".to_string()],
-            )
+            .remove_from_playlist("playlist99", &["song1".to_string(), "song2".to_string()])
             .await
             .expect("remove_from_playlist");
+    }
+
+    #[tokio::test]
+    async fn provider_remove_from_playlist_respects_requested_duplicate_count() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _get = server
+            .mock("GET", "/Playlists/playlist99/Items")
+            .match_query(Matcher::UrlEncoded("userId".into(), USER_ID.into()))
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"Items":[
+                    {"Id":"song1","Name":"Track 1","Type":"Audio","PlaylistItemId":"entry-a"},
+                    {"Id":"song1","Name":"Track 1","Type":"Audio","PlaylistItemId":"entry-b"},
+                    {"Id":"song2","Name":"Track 2","Type":"Audio","PlaylistItemId":"entry-c"}
+                ],"TotalRecordCount":3,"StartIndex":0}"#,
+            )
+            .create_async()
+            .await;
+        let _delete = server
+            .mock("DELETE", "/Playlists/playlist99/Items")
+            .match_query(Matcher::UrlEncoded("EntryIds".into(), "entry-a".into()))
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(204)
+            .create_async()
+            .await;
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+        provider
+            .remove_from_playlist("playlist99", &["song1".to_string()])
+            .await
+            .expect("remove_from_playlist should delete one duplicate");
+    }
+
+    #[tokio::test]
+    async fn provider_remove_from_playlist_errors_when_match_lacks_playlist_item_id() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _get = server
+            .mock("GET", "/Playlists/playlist99/Items")
+            .match_query(Matcher::UrlEncoded("userId".into(), USER_ID.into()))
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"Items":[
+                    {"Id":"song1","Name":"Track 1","Type":"Audio"}
+                ],"TotalRecordCount":1,"StartIndex":0}"#,
+            )
+            .create_async()
+            .await;
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+        let result = provider
+            .remove_from_playlist("playlist99", &["song1".to_string()])
+            .await;
+
+        assert!(
+            matches!(result, Err(ProviderError::Deserialization(_))),
+            "missing PlaylistItemId should be treated as malformed provider response, got: {:?}",
+            result
+        );
     }
 
     #[tokio::test]

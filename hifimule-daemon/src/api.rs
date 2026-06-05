@@ -1,5 +1,8 @@
 use anyhow::{Result, anyhow};
-use reqwest::header::{HeaderMap, HeaderValue};
+use reqwest::{
+    Url,
+    header::{HeaderMap, HeaderValue},
+};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -23,6 +26,22 @@ pub(crate) fn url_encode(s: &str) -> String {
         }
     }
     encoded
+}
+
+fn jellyfin_endpoint(url: &str, path_segments: &[&str]) -> Result<Url> {
+    let mut endpoint = Url::parse(url.trim_end_matches('/'))?;
+    endpoint
+        .path_segments_mut()
+        .map_err(|_| anyhow!("URL cannot be used as a Jellyfin API base"))?
+        .extend(path_segments);
+    Ok(endpoint)
+}
+
+fn comma_joined_query_value(kind: &str, ids: &[String]) -> Result<String> {
+    if let Some(id) = ids.iter().find(|id| id.contains(',')) {
+        return Err(anyhow!("{} cannot contain comma: {}", kind, id));
+    }
+    Ok(ids.join(","))
 }
 #[cfg(test)]
 const MUSIC_ITEM_TYPES: &str = "MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo";
@@ -1344,7 +1363,7 @@ impl JellyfinClient {
             HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
         );
 
-        let endpoint = format!("{}/Playlists", url.trim_end_matches('/'));
+        let endpoint = jellyfin_endpoint(url, &["Playlists"])?;
         let body = serde_json::json!({
             "Name": name,
             "MediaType": "Audio",
@@ -1354,7 +1373,7 @@ impl JellyfinClient {
 
         let response = self
             .client
-            .post(&endpoint)
+            .post(endpoint)
             .headers(headers)
             .json(&body)
             .send()
@@ -1390,16 +1409,14 @@ impl JellyfinClient {
             HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
         );
 
-        let ids_param = track_ids.join(",");
-        let endpoint = format!(
-            "{}/Playlists/{}/Items?Ids={}&userId={}",
-            url.trim_end_matches('/'),
-            playlist_id,
-            ids_param,
-            user_id
-        );
+        let ids_param = comma_joined_query_value("track ID", track_ids)?;
+        let mut endpoint = jellyfin_endpoint(url, &["Playlists", playlist_id, "Items"])?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("Ids", &ids_param)
+            .append_pair("userId", user_id);
 
-        let response = self.client.post(&endpoint).headers(headers).send().await?;
+        let response = self.client.post(endpoint).headers(headers).send().await?;
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
@@ -1424,14 +1441,10 @@ impl JellyfinClient {
             HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
         );
 
-        let endpoint = format!(
-            "{}/Playlists/{}/Items?userId={}",
-            url.trim_end_matches('/'),
-            playlist_id,
-            user_id
-        );
+        let mut endpoint = jellyfin_endpoint(url, &["Playlists", playlist_id, "Items"])?;
+        endpoint.query_pairs_mut().append_pair("userId", user_id);
 
-        let response = self.client.get(&endpoint).headers(headers).send().await?;
+        let response = self.client.get(endpoint).headers(headers).send().await?;
         let status = response.status();
         let text = response.text().await?;
         if !status.is_success() {
@@ -1458,15 +1471,13 @@ impl JellyfinClient {
             HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
         );
 
-        let entry_ids_param = entry_ids.join(",");
-        let endpoint = format!(
-            "{}/Playlists/{}/Items?EntryIds={}",
-            url.trim_end_matches('/'),
-            playlist_id,
-            entry_ids_param
-        );
+        let entry_ids_param = comma_joined_query_value("playlist entry ID", entry_ids)?;
+        let mut endpoint = jellyfin_endpoint(url, &["Playlists", playlist_id, "Items"])?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("EntryIds", &entry_ids_param);
 
-        let response = self.client.delete(&endpoint).headers(headers).send().await?;
+        let response = self.client.delete(endpoint).headers(headers).send().await?;
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
@@ -1475,12 +1486,7 @@ impl JellyfinClient {
         Ok(())
     }
 
-    pub async fn delete_item(
-        &self,
-        url: &str,
-        token: &str,
-        item_id: &str,
-    ) -> Result<()> {
+    pub async fn delete_item(&self, url: &str, token: &str, item_id: &str) -> Result<()> {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
@@ -1490,9 +1496,9 @@ impl JellyfinClient {
             HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
         );
 
-        let endpoint = format!("{}/Items/{}", url.trim_end_matches('/'), item_id);
+        let endpoint = jellyfin_endpoint(url, &["Items", item_id])?;
 
-        let response = self.client.delete(&endpoint).headers(headers).send().await?;
+        let response = self.client.delete(endpoint).headers(headers).send().await?;
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
