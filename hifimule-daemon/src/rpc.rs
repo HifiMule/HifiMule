@@ -862,9 +862,23 @@ async fn handle_playlist_create(
 
     let mut track_ids: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
+    let mut skipped_item_ids: Vec<String> = Vec::new();
     for item_id in &item_ids {
-        let (tracks, _playlist) =
-            provider_sync_items_for_id(provider.clone(), item_id).await?;
+        // Skip-and-continue: one unresolvable item (deleted entity, transient
+        // error, stale basket entry) must not abort the whole create. Record it
+        // and report the skipped IDs in the response instead.
+        let (tracks, _playlist) = match provider_sync_items_for_id(provider.clone(), item_id).await
+        {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                eprintln!(
+                    "[Playlist] Skipping unresolvable item '{}' during playlist.create: {}",
+                    item_id, e.message
+                );
+                skipped_item_ids.push(item_id.clone());
+                continue;
+            }
+        };
         for track in tracks {
             if seen.insert(track.jellyfin_id.clone()) {
                 track_ids.push(track.jellyfin_id);
@@ -876,7 +890,7 @@ async fn handle_playlist_create(
         .create_playlist(&name, &track_ids)
         .await
         .map_err(provider_error_to_rpc)?;
-    Ok(serde_json::json!({ "playlistId": playlist_id }))
+    Ok(serde_json::json!({ "playlistId": playlist_id, "skippedItemIds": skipped_item_ids }))
 }
 
 async fn handle_playlist_add_tracks(
@@ -8476,6 +8490,7 @@ mod tests {
 
     struct FakePlaylistProvider {
         songs: HashMap<String, crate::domain::models::Song>,
+        albums: HashMap<String, Vec<crate::domain::models::Song>>,
         playlist_return_id: String,
         create_calls: Mutex<Vec<(String, Vec<String>)>>,
         add_calls: Mutex<Vec<(String, Vec<String>)>>,
@@ -8487,6 +8502,7 @@ mod tests {
         fn new(playlist_return_id: &str) -> Arc<Self> {
             Arc::new(Self {
                 songs: HashMap::new(),
+                albums: HashMap::new(),
                 playlist_return_id: playlist_return_id.to_string(),
                 create_calls: Mutex::new(vec![]),
                 add_calls: Mutex::new(vec![]),
@@ -8500,6 +8516,31 @@ mod tests {
             songs.insert(song.id.clone(), song);
             Arc::new(Self {
                 songs,
+                albums: HashMap::new(),
+                playlist_return_id: playlist_return_id.to_string(),
+                create_calls: Mutex::new(vec![]),
+                add_calls: Mutex::new(vec![]),
+                remove_calls: Mutex::new(vec![]),
+                delete_calls: Mutex::new(vec![]),
+            })
+        }
+
+        /// Seeds a provider where `album_id` resolves (via `get_album`) to an
+        /// album containing `song`, and the same `song` is also resolvable
+        /// standalone (via `get_song`). Used to exercise cross-container dedup
+        /// in `playlist.create`.
+        fn with_album_and_song(
+            playlist_return_id: &str,
+            album_id: &str,
+            song: crate::domain::models::Song,
+        ) -> Arc<Self> {
+            let mut songs = HashMap::new();
+            songs.insert(song.id.clone(), song.clone());
+            let mut albums = HashMap::new();
+            albums.insert(album_id.to_string(), vec![song]);
+            Arc::new(Self {
+                songs,
+                albums,
                 playlist_return_id: playlist_return_id.to_string(),
                 create_calls: Mutex::new(vec![]),
                 add_calls: Mutex::new(vec![]),
@@ -8517,8 +8558,23 @@ mod tests {
             Err(ProviderError::UnsupportedCapability("no artists".to_string()))
         }
         async fn list_albums(&self, _: Option<&str>, _: Option<&str>, _: u32, _: u32) -> Result<(Vec<crate::domain::models::Album>, u32), ProviderError> { unimplemented!() }
-        async fn get_album(&self, _: &str) -> Result<crate::domain::models::AlbumWithTracks, ProviderError> {
-            Err(ProviderError::UnsupportedCapability("no albums".to_string()))
+        async fn get_album(&self, album_id: &str) -> Result<crate::domain::models::AlbumWithTracks, ProviderError> {
+            match self.albums.get(album_id) {
+                Some(tracks) => Ok(crate::domain::models::AlbumWithTracks {
+                    album: crate::domain::models::Album {
+                        id: album_id.to_string(),
+                        title: "Album".to_string(),
+                        artist_id: None,
+                        artist_name: None,
+                        year: None,
+                        song_count: Some(tracks.len() as u32),
+                        duration_seconds: None,
+                        cover_art_id: None,
+                    },
+                    tracks: tracks.clone(),
+                }),
+                None => Err(ProviderError::UnsupportedCapability("no albums".to_string())),
+            }
         }
         async fn get_song(&self, song_id: &str) -> Result<crate::domain::models::Song, ProviderError> {
             self.songs.get(song_id).cloned().ok_or(ProviderError::NotFound {
@@ -8538,8 +8594,14 @@ mod tests {
         async fn list_genres(&self, _: Option<&str>, _: u32, _: u32) -> Result<(Vec<crate::domain::models::Genre>, u64), ProviderError> {
             Ok((vec![], 0))
         }
-        async fn get_genre_tracks(&self, _: &str, _: u32, _: u32) -> Result<(Vec<crate::domain::models::Song>, u32), ProviderError> {
-            Ok((vec![], 0))
+        async fn get_genre_tracks(&self, genre_id: &str, _: u32, _: u32) -> Result<(Vec<crate::domain::models::Song>, u32), ProviderError> {
+            // No genres in this fake: an unknown id is genuinely unresolvable
+            // (NotFound), so `provider_sync_items_for_id` falls through to its
+            // final not-found error rather than returning an empty track list.
+            Err(ProviderError::NotFound {
+                item_type: "Genre".to_string(),
+                id: genre_id.to_string(),
+            })
         }
         fn server_type(&self) -> crate::providers::ServerType { crate::providers::ServerType::Subsonic }
         fn capabilities(&self) -> crate::providers::Capabilities {
@@ -8606,6 +8668,83 @@ mod tests {
         let calls = provider.create_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "My Playlist");
+        assert_eq!(calls[0].1, vec!["song1"]);
+    }
+
+    fn fake_song(id: &str) -> crate::domain::models::Song {
+        crate::domain::models::Song {
+            id: id.to_string(),
+            title: format!("Track {id}"),
+            artist_id: None,
+            artist_name: Some("Artist".to_string()),
+            album_id: Some("album-1".to_string()),
+            album_title: Some("Album".to_string()),
+            duration_seconds: 180,
+            bitrate_kbps: Some(320),
+            track_number: Some(1),
+            disc_number: Some(1),
+            cover_art_id: None,
+            date_added: None,
+            last_played_at: None,
+            play_count: None,
+            is_favorite: None,
+            content_type: Some("audio/mpeg".to_string()),
+            suffix: Some("mp3".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn playlist_create_dedups_overlapping_container_and_track() {
+        // "album-1" resolves to [song1]; "song1" also resolves standalone to the
+        // same track. AC1 dedup must collapse them to a single track id.
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let provider =
+            FakePlaylistProvider::with_album_and_song("playlist-7", "album-1", fake_song("song1"));
+        *state.provider.write().await = Some(provider.clone() as Arc<dyn MediaProvider>);
+
+        let result = handle_playlist_create(
+            &state,
+            Some(serde_json::json!({ "name": "Dedup", "itemIds": ["album-1", "song1"] })),
+        )
+        .await
+        .expect("playlist.create");
+
+        assert_eq!(result["playlistId"], "playlist-7");
+        let calls = provider.create_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].1,
+            vec!["song1"],
+            "overlapping container and track must dedup to one track id"
+        );
+    }
+
+    #[tokio::test]
+    async fn playlist_create_skips_unresolvable_items_and_reports_them() {
+        // One valid item ("song1") and one unresolvable item ("ghost"): the
+        // create must still succeed with the resolved track and report the
+        // skipped id rather than aborting the whole operation.
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let provider = FakePlaylistProvider::with_song("playlist-77", fake_song("song1"));
+        *state.provider.write().await = Some(provider.clone() as Arc<dyn MediaProvider>);
+
+        let result = handle_playlist_create(
+            &state,
+            Some(serde_json::json!({ "name": "Partial", "itemIds": ["song1", "ghost"] })),
+        )
+        .await
+        .expect("playlist.create should not abort on one unresolvable item");
+
+        assert_eq!(result["playlistId"], "playlist-77");
+        assert_eq!(
+            result["skippedItemIds"],
+            serde_json::json!(["ghost"]),
+            "unresolvable item must be reported in skippedItemIds"
+        );
+        let calls = provider.create_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].1, vec!["song1"]);
     }
 

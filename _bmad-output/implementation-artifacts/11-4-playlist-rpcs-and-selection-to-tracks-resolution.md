@@ -608,7 +608,7 @@ claude-sonnet-4-6
 - Four dispatch arms wired into `handler()` match block before `_ =>` fallback.
 - `FakePlaylistProvider` struct added with 6 tests covering: song resolution, auto-fill slot exclusion, addTracks passthrough, removeTracks passthrough, delete passthrough, and unsupported-capability rejection for all four RPCs.
 - `cargo check`: 0 errors, 2 pre-existing warnings (mtp.rs dead code, unrelated).
-- `cargo test`: 412 passed (all existing + 6 new playlist tests).
+- `cargo test`: 408 passed (all existing + 6 new playlist tests). _(Corrected during code review: originally recorded as 412; the verified tree count was 408. Review added 2 further playlist tests → 410 total.)_
 
 ### File List
 
@@ -617,8 +617,21 @@ claude-sonnet-4-6
 ## Change Log
 
 - 2026-06-05: Story 11.4 created — Playlist RPCs and selection-to-tracks resolution ready for dev.
-- 2026-06-05: Story 11.4 implemented — four playlist RPCs added to rpc.rs with tests; 412/412 tests pass.
+- 2026-06-05: Story 11.4 implemented — four playlist RPCs added to rpc.rs with tests; 408 tests pass.
+- 2026-06-05: Code review — `playlist.create` changed to skip unresolvable items and report them via `skippedItemIds` (was abort-all); added cross-container dedup test and skip-and-continue test; corrected test count. 410 tests pass.
+
+## Review Findings
+
+_Code review 2026-06-05 — adversarial (Blind Hunter + Edge Case Hunter + Acceptance Auditor). All 5 ACs PASS; dispatch wiring and all 6 tests confirmed present and passing._
+
+- [x] [Review][Patch] `playlist.create` skips unresolvable `itemId`s and reports them, not abort — _(resolved from decision: option 3, skip-and-continue + report)_. Resolution loop now logs and skips a failed `provider_sync_items_for_id`, still creates the playlist from resolved tracks, and returns `{ playlistId, skippedItemIds: [...] }`. Test `playlist_create_skips_unresolvable_items_and_reports_them` added. [hifimule-daemon/src/rpc.rs]
+- [x] [Review][Patch] Added cross-container dedup test for `playlist.create` — `playlist_create_dedups_overlapping_container_and_track` exercises an album + standalone song resolving to the same track. [hifimule-daemon/src/rpc.rs]
+- [x] [Review][Patch] Corrected test-count in Completion Notes/Change Log — was "412"; verified baseline was 408, now 410 after the two review tests. [11-4-playlist-rpcs-and-selection-to-tracks-resolution.md]
+- [x] [Review][Defer] Input-validation leniency at playlist RPC handlers — empty `name`, empty `playlistId`, and non-string array elements (silently dropped by `filter_map`) pass through unguarded. [hifimule-daemon/src/rpc.rs] — deferred, matches the existing rpc.rs param-parsing convention (e.g. `rpc.rs:581`); single trusted UI client.
+- [x] [Review][Defer] Large `itemIds`/`trackIds` may exceed Subsonic GET URL length on create/add. [hifimule-daemon/src/providers/subsonic.rs] — deferred, pre-existing provider-layer concern already tracked in the 11.3 review deferral.
+
+_Dismissed as noise (4): i18n inconsistency (false positive — rest of file uses raw English for param errors, new code matches convention); empty-playlist creation (intended & explicitly tested); empty-`trackIds` round-trip (handled — providers short-circuit `Ok`); `ok_or` eager allocation (trivial perf nit off the hot path)._
 
 ## Status
 
-review
+done
