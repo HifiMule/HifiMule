@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-06-05  # Story 9.7 ready-for-dev
+last_updated: 2026-06-05  # Story 9.7 done
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -128,7 +128,7 @@ development_status:
   9-4-history-and-favorites-browse-modes: done
   9-5-hierarchical-favorites-navigation: done
   9-6-navidrome-subsonic-browse-parity-hardening: done
-  9-7-virtualized-list-table-browse-views: review  # added via sprint-change-proposal-2026-06-05
+  9-7-virtualized-list-table-browse-views: done  # added via sprint-change-proposal-2026-06-05
 
   epic-10: done
   10-1-device-manifest-editing-identity-and-folder-settings: done

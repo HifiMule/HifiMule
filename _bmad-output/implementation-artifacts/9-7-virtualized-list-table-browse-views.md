@@ -4,7 +4,7 @@ baseline_commit: 17bd4932e1a736bca0d22c062beaae6dc12de79f
 
 # Story 9.7: Virtualized List/Table Browse Views
 
-Status: review
+Status: done
 
 ## Story
 
@@ -81,6 +81,15 @@ So that I can scan libraries of thousands of items quickly without waiting for p
   - [ ] Manually verify: toggle between grid and list — no re-fetch, instant switch.
   - [ ] Manually verify: toggle is hidden when drilled into artist albums.
   - [ ] Manually verify: Albums list view works identically to Artists list view.
+
+### Review Findings
+
+- [x] [Review][Patch] TypeScript build fails in virtual scroller closure [hifimule-ui/src/library.ts:685]
+- [x] [Review][Patch] List basket add no-ops for normal artists/albums that need metadata fetch [hifimule-ui/src/library.ts:647]
+- [x] [Review][Patch] Switching to list from an active letter filter leaves quick-nav searching only that subset [hifimule-ui/src/library.ts:581]
+- [x] [Review][Patch] Remembered list mode can render only the first cached root page [hifimule-ui/src/library.ts:824]
+- [x] [Review][Patch] Full-list loading lacks failure/progress guards and can leave the spinner stuck [hifimule-ui/src/library.ts:717]
+- [x] [Review][Patch] List row navigation lacks the grid card's in-flight navigation guard [hifimule-ui/src/library.ts:661]
 
 ## Dev Notes
 
