@@ -811,7 +811,7 @@ export class BasketSidebar {
             </div>
             <div class="basket-actions">
                 <sl-button id="start-sync-btn" variant="primary" style="width: 100%;" disabled>
-                    <sl-icon slot="prefix" name="cloud-download"></sl-icon>
+                    <sl-icon slot="prefix" name="box-arrow-in-down"></sl-icon>
                     ${t('basket.actions.start_sync')}
                 </sl-button>
             </div>
@@ -891,7 +891,7 @@ export class BasketSidebar {
                 </div>
                 <div class="basket-actions">
                     <sl-button id="start-sync-btn" variant="primary" style="width: 100%;" ${(!basketStore.isDirty() && !this.autoFillEnabled && !(this.currentDevice?.synced_items?.length > 0)) || !this.selectedDevicePath ? 'disabled' : ''}>
-                        <sl-icon slot="prefix" name="cloud-download"></sl-icon>
+                        <sl-icon slot="prefix" name="box-arrow-in-down"></sl-icon>
                         ${t('basket.actions.start_sync')}
                     </sl-button>
                 </div>
@@ -954,7 +954,7 @@ export class BasketSidebar {
                     <sl-button-group style="width: 100%;">
                         <sl-button id="start-sync-btn" variant="primary" style="flex: 1;"
                                    ${!this.selectedDevicePath ? 'disabled' : this.isSyncing ? 'loading disabled' : ''}>
-                            <sl-icon slot="prefix" name="cloud-download"></sl-icon>
+                            <sl-icon slot="prefix" name="box-arrow-in-down"></sl-icon>
                             ${this.isSyncing ? t('basket.sync.syncing') : t('basket.actions.start_sync')}
                         </sl-button>
                         <sl-dropdown id="sync-mode-dropdown" placement="bottom-end" ${!this.selectedDevicePath || this.isSyncing ? 'disabled' : ''}>
