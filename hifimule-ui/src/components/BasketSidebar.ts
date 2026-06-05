@@ -587,18 +587,14 @@ export class BasketSidebar {
                     <sl-switch id="auto-fill-toggle" size="small" ${this.autoFillEnabled ? 'checked' : ''}>
                         ${t('basket.autofill.name')}
                     </sl-switch>
-                    <span class="auto-fill-hint" style="font-size:0.75rem; opacity:0.6;">
-                        ${t('basket.autofill.hint')}
-                    </span>
+                    <span class="auto-fill-caption">${t('basket.autofill.hint')}</span>
                 </div>
                 ${this.autoFillEnabled && deviceFull ? `
-                    <div class="auto-fill-full-notice" style="margin-top:0.5rem; font-size:0.75rem; opacity:0.7;">
-                        ${t('basket.autofill.full')}
-                    </div>
+                    <div class="auto-fill-caption">${t('basket.autofill.full')}</div>
                 ` : ''}
                 ${this.autoFillEnabled && !deviceFull ? `
-                    <div class="auto-fill-slider-row" style="margin-top:0.5rem;">
-                        <label style="font-size:0.75rem; opacity:0.7; display:block; margin-bottom:0.25rem;">
+                    <div class="auto-fill-slider-row">
+                        <label class="auto-fill-caption" style="display:block; margin-bottom:var(--space-2xs);">
                             ${t('basket.autofill.max_fill_size', { size: `${sliderValue} GB` })}
                         </label>
                         <sl-range id="auto-fill-slider"
@@ -607,12 +603,12 @@ export class BasketSidebar {
                         </sl-range>
                     </div>
                 ` : ''}
-                <div class="auto-fill-toggle-row" style="margin-top:0.5rem;">
+                <div class="auto-fill-toggle-row">
                     <sl-switch id="auto-sync-toggle" size="small" ${this.autoSyncOnConnect ? 'checked' : ''}>
                         ${t('basket.autofill.auto_sync_on_connect')}
                     </sl-switch>
                 </div>
-                <div style="font-size:0.7rem; opacity:0.55; margin-top:0.2rem; padding-left:0.5rem;">
+                <div class="auto-fill-caption auto-fill-caption--sub">
                     ${t('basket.autofill.auto_sync_hint')}
                 </div>
             </div>
@@ -796,8 +792,10 @@ export class BasketSidebar {
     }
 
     private renderStatusZone(): string {
+        // Collapse entirely when clean; the footer's flex gap closes the space.
+        // The banner fades in on appear, so the small reflow reads as intentional.
         if (!basketStore.isDirty()) {
-            return '<div class="basket-status-zone"></div>';
+            return '';
         }
 
         return `

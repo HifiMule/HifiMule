@@ -14,6 +14,12 @@
   --surface-fill-hover: rgba(255, 255, 255, 0.06);
   /* Card / panel corner radius (distinct from Shoelace's 6px input radius). */
   --radius: 8px;
+  /* Spacing scale (4pt-based). One rhythm across the dense sidebar. */
+  --space-2xs: 0.25rem;
+  --space-xs: 0.5rem;
+  --space-sm: 0.75rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
   /* Text: ink is primary copy, ink-dim is secondary/metadata.
      ink-dim is a cool-tinted neutral (toward the cyan brand hue) that clears
      WCAG AA (8.5:1) on the dark panels, unlike Shoelace neutral-300/400/500. */
@@ -137,7 +143,7 @@ body {
 
 .basket-view {
   min-width: 330px;
-  padding: 1.55rem 1.5rem 1.25rem;
+  padding: var(--space-lg) var(--space-lg) var(--space-md);
   background: rgba(12, 18, 33, 0.94);
   border-left: 1px solid var(--surface-border);
   height: 100vh;
@@ -151,7 +157,7 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 1.5rem;
+  margin-bottom: var(--space-lg);
 }
 
 .basket-header h2 {
@@ -174,17 +180,17 @@ body {
   overflow-y: auto;
   margin-right: -1rem;
   padding-right: 1rem;
-  margin-bottom: 1rem;
+  margin-bottom: var(--space-md);
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: var(--space-sm);
 }
 
 .basket-item-card {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-  padding: 0.5rem;
+  gap: var(--space-sm);
+  padding: var(--space-xs);
   background: rgba(255, 255, 255, 0.045);
   border: 1px solid rgba(255, 255, 255, 0.075);
   border-radius: var(--radius);
@@ -224,30 +230,34 @@ body {
   color: var(--ink-dim);
 }
 
+/* One spacing rhythm for the whole footer stack: a single gap drives the
+   separation between summary, capacity, auto-fill, status, and device modules.
+   Per-module margins are removed so spacing lives in exactly one place. */
 .basket-footer {
   flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
 }
 
 .basket-actions {
   flex-shrink: 0;
-  padding-top: 0.75rem;
-  margin-top: 0.25rem;
+  padding-top: var(--space-sm);
+  margin-top: var(--space-2xs);
   border-top: 1px solid var(--surface-border);
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: var(--space-2xs);
 }
 
 .basket-summary {
-  margin-bottom: 0.75rem;
   font-size: 0.9rem;
 }
 
+/* Only present in the DOM when the basket is dirty (collapses otherwise). */
 .basket-status-zone {
-  height: 38px;
   display: flex;
   align-items: center;
-  margin-bottom: 0.75rem;
 }
 
 .sync-proposed-banner {
@@ -282,12 +292,8 @@ body {
 }
 
 /* Capacity Bar */
-.capacity-section {
-  margin-bottom: 0.85rem;
-}
-
 .capacity-bar-container {
-  margin-bottom: 0.5rem;
+  margin-bottom: var(--space-xs);
 }
 
 .capacity-bar {
@@ -641,8 +647,7 @@ h2 {
 
 /* Device Folders Panel (Story 3.4) */
 .device-folders-panel {
-  margin: 0.85rem 0;
-  padding: 0.75rem;
+  padding: var(--space-sm);
   background: var(--surface-fill);
   border: 1px solid var(--surface-border-soft);
   border-radius: var(--sl-border-radius-medium);
@@ -1024,6 +1029,35 @@ h2 {
   font-size: 0.85rem;
 }
 
+/* Auto-fill configuration: a contained module so its switches + slider read
+   as one settings group, matching the device-folders panel treatment. */
+.auto-fill-controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  padding: var(--space-sm);
+  background: var(--surface-fill);
+  border: 1px solid var(--surface-border-soft);
+  border-radius: var(--sl-border-radius-medium);
+}
+
+.auto-fill-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-xs);
+}
+
+.auto-fill-caption {
+  font-size: 0.75rem;
+  color: var(--ink-dim);
+}
+
+.auto-fill-caption--sub {
+  font-size: 0.7rem;
+  padding-left: var(--space-xs);
+}
+
 .basket-item-auto-fill-slot {
   border: 1.5px dashed var(--sl-color-primary-500);
   background: color-mix(in srgb, var(--sl-color-primary-100) 20%, transparent);
@@ -1048,15 +1082,17 @@ h2 {
 }
 
 /* Device Hub */
+/* Top border marks the boundary between the "what you're sending" group
+   (summary, capacity, auto-fill) and the "where it goes" group (devices). */
 .device-hub-panel {
-  padding: 0.5rem 0;
-  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--surface-border);
 }
 .device-hub-cards {
   display: flex;
   flex-direction: row;
   flex-wrap: wrap;
-  gap: 0.4rem;
+  gap: var(--space-xs);
 }
 .device-hub-card {
   position: relative;
