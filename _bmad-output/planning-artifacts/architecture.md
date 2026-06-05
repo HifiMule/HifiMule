@@ -2,8 +2,8 @@ stepsCompleted: ['step-01-init', 'step-02-context', 'step-03-starter', 'step-04-
 workflowType: 'architecture'
 status: 'complete'
 completedAt: '2026-01-26'
-lastAmended: '2026-05-08'
-amendments: ['epic-8-library-browsing-rpc-contract', 'epic-8-provider-layer-type-definitions', 'epic-8-factory-lifecycle-config', 'epic-8-subsonic-auth-scrobble-incremental-sync']
+lastAmended: '2026-06-05'
+amendments: ['epic-8-library-browsing-rpc-contract', 'epic-8-provider-layer-type-definitions', 'epic-8-factory-lifecycle-config', 'epic-8-subsonic-auth-scrobble-incremental-sync', 'epic-11-selection-as-playlist-write-trait']
 ---
 
 # Architecture Decision Document
@@ -519,3 +519,74 @@ where `salt` is a freshly generated random alphanumeric string **per request**.
 3. If `since == EPOCH` (initial sync): use `search3?query=&songCount=500&songOffset={n}` with pagination to enumerate all tracks instead of the index-based path.
 
 **Enforcement:** All AI agents MUST NOT add album-level drift detection outside `providers/subsonic.rs`. The sync engine calls `provider.changes_since()` and processes the returned `Vec<ChangeEvent>` only.
+
+## Epic 11: Selection-as-Playlist — Architectural Decisions
+
+### Playlist Write Extension to `MediaProvider` Trait
+
+Four new write methods are appended to the `MediaProvider` trait. All are capability-gated — callers **MUST** check `capabilities().supports_playlist_write` before calling.
+
+```rust
+// Playlist write operations (capability-gated)
+async fn create_playlist(&self, name: &str, track_ids: &[String]) -> Result<String, ProviderError>; // returns server-assigned playlist ID
+async fn add_to_playlist(&self, playlist_id: &str, track_ids: &[String]) -> Result<(), ProviderError>;
+async fn remove_from_playlist(&self, playlist_id: &str, track_ids: &[String]) -> Result<(), ProviderError>;
+async fn delete_playlist(&self, playlist_id: &str) -> Result<(), ProviderError>;
+```
+
+**Design decision:** The trait exposes **add/remove operations directly**, not a full-replace `update_playlist`. The daemon RPC layer computes the diff between the current server playlist state and the desired state, then calls `add_to_playlist` / `remove_from_playlist` as needed. Adapters implement each method as a single atomic server call.
+
+### `Capabilities` Amendment
+
+```rust
+pub struct Capabilities {
+    pub open_subsonic: bool,
+    pub supports_changes_since: bool,
+    pub supports_server_transcoding: bool,
+    pub supports_playlist_write: bool,  // NEW — true for Jellyfin and Subsonic/OpenSubsonic
+}
+```
+
+`supports_playlist_write` is set to `true` for both providers during `server.connect`. If a write call returns a server-side auth or capability error at runtime, the adapter returns `ProviderError::NotSupported`.
+
+### Adapter Implementations
+
+**JellyfinProvider:**
+- `create_playlist`: `POST /Playlists` → reads `Id` from response body → returns as playlist ID.
+- `add_to_playlist`: `POST /Playlists/{id}/Items?Ids={comma-separated track IDs}`.
+- `remove_from_playlist`: fetch entry IDs via `GET /Playlists/{id}/Items` (Jellyfin uses per-entry `PlaylistItemId`, not the item ID), match against requested track IDs, then `DELETE /Playlists/{id}/Items?EntryIds={comma-separated entry IDs}`.
+- `delete_playlist`: `DELETE /Items/{id}` (Jellyfin playlists are deleted as generic items).
+
+**SubsonicProvider:**
+- `create_playlist`: `GET /rest/createPlaylist.view?name={name}&songId[]={ids}` → reads `id` from response → returns as playlist ID.
+- `add_to_playlist`: `GET /rest/updatePlaylist.view?playlistId={id}&songIdToAdd[]={ids}`.
+- `remove_from_playlist`: fetch current song list via `GET /rest/getPlaylist.view`, resolve positions for the requested IDs, then `GET /rest/updatePlaylist.view?playlistId={id}&songIndexToRemove[]={indices}`.
+- `delete_playlist`: `GET /rest/deletePlaylist.view?id={id}`.
+
+### Daemon RPCs
+
+**New RPC methods:**
+
+| Method | Params | Returns |
+|---|---|---|
+| `playlist.create` | `{ name: string, itemIds: string[] }` | `{ playlistId: string }` |
+| `playlist.addTracks` | `{ playlistId: string, trackIds: string[] }` | `{ ok: true }` |
+| `playlist.removeTracks` | `{ playlistId: string, trackIds: string[] }` | `{ ok: true }` |
+| `playlist.delete` | `{ playlistId: string }` | `{ ok: true }` |
+
+**Selection→tracks resolution:**
+- `playlist.create`'s `itemIds` follow the same entity format as `sync.start`'s `itemIds`. The daemon resolves all entity types (albums, artists, genres, individual tracks) to a concrete flat track list using the existing container-expansion logic (`rpc.rs:807–866`).
+- Auto-Fill virtual slots (`id: '__auto_fill_slot__'`) are **excluded** from resolution. When present in the basket, the UI surfaces a notice to the user before saving; the daemon silently skips any slot if one is passed.
+- Track ordering within a resolved entity is left to implementation.
+- `playlist.create` calls `provider.create_playlist()` with the resolved track IDs and returns the server-assigned ID.
+- `playlist.addTracks` / `playlist.removeTracks` pass `trackIds` directly to `provider.add_to_playlist()` / `provider.remove_from_playlist()` — no entity resolution; callers supply concrete track IDs only.
+
+### Capability Gating
+
+**Enforcement:** The UI MUST hide or disable all "Save as playlist" affordances when `capabilities().supports_playlist_write == false`. This mirrors the existing capability-driven browse-mode hiding pattern.
+
+**All AI agents MUST:**
+- Check `capabilities().supports_playlist_write` before invoking any playlist write RPC or trait method.
+- Never construct Jellyfin or Subsonic playlist write URLs outside `providers/jellyfin.rs` and `providers/subsonic.rs`.
+- Exclude Auto-Fill slots from all `playlist.create` / `playlist.addTracks` calls.
+- Use `String` for playlist IDs — consistent with the project-wide ID type rule.

@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-05-30  # Story 7.5 code review complete — all patches applied
+last_updated: 2026-06-05  # Story 9.7 ready-for-dev
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -128,8 +128,18 @@ development_status:
   9-4-history-and-favorites-browse-modes: done
   9-5-hierarchical-favorites-navigation: done
   9-6-navidrome-subsonic-browse-parity-hardening: done
+  9-7-virtualized-list-table-browse-views: ready-for-dev  # added via sprint-change-proposal-2026-06-05
 
-  epic-10: in-progress
+  epic-10: done
   10-1-device-manifest-editing-identity-and-folder-settings: done
   10-2-separate-playlist-folder-and-relocation-cleanup: done
   10-3-profile-based-default-folders-and-setup-ordering: done
+
+  # Epic 11 — Selection-as-Playlist & Curation (sprint-change-proposal-2026-06-05)
+  epic-11: backlog
+  11-1-mediaprovider-playlist-write-trait-amendment: backlog
+  11-2-jellyfinprovider-playlist-write-adapter: backlog
+  11-3-subsonicprovider-playlist-write-adapter: backlog
+  11-4-playlist-rpcs-and-selection-to-tracks-resolution: backlog
+  11-5-save-selection-as-playlist-ui-and-context-menu: backlog
+  11-6-dual-panel-playlist-curation-view-and-stats: backlog
