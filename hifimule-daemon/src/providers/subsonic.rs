@@ -387,16 +387,28 @@ impl MediaProvider for SubsonicProvider {
         }
 
         let playlist = self.client.get_playlist(playlist_id).await?;
-        let track_id_set: std::collections::HashSet<&str> =
-            track_ids.iter().map(String::as_str).collect();
+
+        // Count requested occurrences per track id so a track passed N times removes
+        // exactly N entries — matching the Jellyfin adapter's count semantics rather
+        // than removing every matching entry. (Code review 11.3)
+        let mut remaining_by_track_id: HashMap<&str, usize> = HashMap::new();
+        for track_id in track_ids {
+            *remaining_by_track_id.entry(track_id.as_str()).or_insert(0) += 1;
+        }
 
         let indices: Vec<usize> = playlist
             .playlist
             .entry
             .iter()
             .enumerate()
-            .filter(|(_, song)| track_id_set.contains(song.id.as_str()))
-            .map(|(idx, _)| idx)
+            .filter_map(|(idx, song)| {
+                let remaining = remaining_by_track_id.get_mut(song.id.as_str())?;
+                if *remaining == 0 {
+                    return None;
+                }
+                *remaining -= 1;
+                Some(idx)
+            })
             .collect();
 
         if indices.is_empty() {
@@ -869,7 +881,12 @@ impl SubsonicClient {
         playlist_id: &str,
         indices: &[usize],
     ) -> Result<(), ProviderError> {
-        let index_strings: Vec<String> = indices.iter().map(|i| i.to_string()).collect();
+        // Emit indices high-to-low. Servers that apply songIndexToRemove sequentially
+        // against a mutating list would otherwise shift later positions and delete the
+        // wrong tracks; descending order is also correct for snapshot-based servers. (Code review 11.3)
+        let mut sorted_indices = indices.to_vec();
+        sorted_indices.sort_unstable_by(|a, b| b.cmp(a));
+        let index_strings: Vec<String> = sorted_indices.iter().map(|i| i.to_string()).collect();
         let mut params: Vec<(&str, &str)> = vec![("playlistId", playlist_id)];
         for s in &index_strings {
             params.push(("songIndexToRemove", s.as_str()));
@@ -3239,8 +3256,8 @@ mod tests {
                 matchers.push(Matcher::UrlEncoded("name".into(), "Road Trip".into()));
                 // Matcher::UrlEncoded uses HashMap and drops duplicate keys; use Regex for
                 // repeated params so both values are verified in the raw query string.
-                matchers.push(Matcher::Regex("songId=song1".into()));
-                matchers.push(Matcher::Regex("songId=song2".into()));
+                matchers.push(Matcher::Regex(r"[?&]songId=song1(&|$)".into()));
+                matchers.push(Matcher::Regex(r"[?&]songId=song2(&|$)".into()));
                 matchers
             }))
             .with_status(200)
@@ -3268,8 +3285,8 @@ mod tests {
             .match_query(Matcher::AllOf({
                 let mut matchers = auth_matchers();
                 matchers.push(Matcher::UrlEncoded("playlistId".into(), "playlist99".into()));
-                matchers.push(Matcher::Regex("songIdToAdd=song1".into()));
-                matchers.push(Matcher::Regex("songIdToAdd=song2".into()));
+                matchers.push(Matcher::Regex(r"[?&]songIdToAdd=song1(&|$)".into()));
+                matchers.push(Matcher::Regex(r"[?&]songIdToAdd=song2(&|$)".into()));
                 matchers
             }))
             .with_status(200)
@@ -3309,8 +3326,8 @@ mod tests {
             .match_query(Matcher::AllOf({
                 let mut matchers = auth_matchers();
                 matchers.push(Matcher::UrlEncoded("playlistId".into(), "playlist99".into()));
-                matchers.push(Matcher::Regex("songIndexToRemove=0".into()));
-                matchers.push(Matcher::Regex("songIndexToRemove=2".into()));
+                matchers.push(Matcher::Regex(r"[?&]songIndexToRemove=0(&|$)".into()));
+                matchers.push(Matcher::Regex(r"[?&]songIndexToRemove=2(&|$)".into()));
                 matchers
             }))
             .with_status(200)
@@ -3376,5 +3393,88 @@ mod tests {
             .delete_playlist("playlist99")
             .await
             .expect("delete_playlist");
+    }
+
+    #[tokio::test]
+    async fn provider_remove_from_playlist_removes_one_instance_per_requested_id() {
+        // Playlist contains song1 twice; requesting a single removal of song1 must
+        // remove exactly one entry (the first occurrence, index 0) — count semantics,
+        // matching the Jellyfin adapter — not every matching entry. (Code review 11.3)
+        let mut server = Server::new_async().await;
+        let _get = server
+            .mock("GET", "/rest/getPlaylist.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "playlist99".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(r#""playlist":{"id":"playlist99","name":"Road Trip","songCount":3,"duration":0,"entry":[
+                {"id":"song1","title":"Track 1"},
+                {"id":"song2","title":"Track 2"},
+                {"id":"song1","title":"Track 1 again"}
+            ]}"#))
+            .create_async()
+            .await;
+        let _update = server
+            .mock("GET", "/rest/updatePlaylist.view")
+            // Exactly one songIndexToRemove (index 0) and never index 2 — proves only one
+            // of the two song1 entries is removed.
+            .match_query(Matcher::AllOf(vec![
+                Matcher::Regex(r"[?&]songIndexToRemove=0(&|$)".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        provider
+            .remove_from_playlist("playlist99", &["song1".to_string()])
+            .await
+            .expect("remove_from_playlist removes one instance");
+    }
+
+    #[tokio::test]
+    async fn provider_remove_from_playlist_sends_indices_descending() {
+        // Removing adjacent entries song1 (index 0) and song2 (index 1) must emit
+        // songIndexToRemove in descending order (1 before 0) so a server applying
+        // removals sequentially does not shift positions onto the wrong track. (Code review 11.3)
+        let mut server = Server::new_async().await;
+        let _get = server
+            .mock("GET", "/rest/getPlaylist.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "playlist99".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(r#""playlist":{"id":"playlist99","name":"Road Trip","songCount":3,"duration":0,"entry":[
+                {"id":"song1","title":"Track 1"},
+                {"id":"song2","title":"Track 2"},
+                {"id":"song3","title":"Track 3"}
+            ]}"#))
+            .create_async()
+            .await;
+        let _update = server
+            .mock("GET", "/rest/updatePlaylist.view")
+            // Indices must appear contiguously as 1 then 0 (descending).
+            .match_query(Matcher::Regex(
+                r"songIndexToRemove=1&songIndexToRemove=0".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        provider
+            .remove_from_playlist("playlist99", &["song1".to_string(), "song2".to_string()])
+            .await
+            .expect("remove_from_playlist sends descending indices");
     }
 }

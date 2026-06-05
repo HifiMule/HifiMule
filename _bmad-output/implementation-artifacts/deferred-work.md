@@ -119,3 +119,9 @@ If future review findings need follow-up, add them as new story scope or reopen 
 ## Deferred from: code review of 11-1-mediaprovider-playlist-write-trait-amendment (2026-06-05)
 
 - Empty `track_ids` boundary unhandled/untested for real providers (hifimule-daemon/src/providers/mod.rs). No provider overrides the playlist-write methods yet; empty-slice validation/behavior belongs to Stories 11.2 (Jellyfin) and 11.3 (Subsonic).
+
+## Deferred from: code review of 11-3-subsonicprovider-playlist-write-adapter (2026-06-05)
+
+- Unbounded GET query-string length / HTTP 414 on large create/add/remove lists (hifimule-daemon/src/providers/subsonic.rs:841,854,867). All Subsonic playlist writes pack one query param per track/index into a single GET; very large playlists can exceed server/proxy URL limits (~8KB). Chunking is out of scope for 11.3 but should be considered before bulk playlist operations ship in later Epic 11 stories.
+- `create_playlist` returns an empty string silently if the server responds `ok` with a missing `playlist.id` (hifimule-daemon/src/providers/subsonic.rs:841). `PlaylistWithSongsDto.id` is a non-`Option` `String` with `Default`, so a malformed-but-ok response yields `""` rather than an error. Low likelihood; matches the existing pattern in other read methods.
+- `create_playlist` does not validate an empty/whitespace `name` (hifimule-daemon/src/providers/subsonic.rs:841). Not required by AC; the server rejects it and the error propagates.

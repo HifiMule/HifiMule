@@ -442,6 +442,19 @@ Use a raw JSON string for `updatePlaylist` and `deletePlaylist` mocks instead of
 - Test helpers (`ok()`, `provider()`, `auth_matchers()`): `hifimule-daemon/src/providers/subsonic.rs:1592–1610`
 - `HashSet` import: `hifimule-daemon/src/providers/subsonic.rs:19`
 
+## Review Findings
+
+_Code review 2026-06-05 — 3 adversarial layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor). All 6 ACs verified satisfied by the Acceptance Auditor; findings below are correctness/robustness concerns._
+
+- [x] [Review][Patch] Align `remove_from_playlist` duplicate-track semantics with the Jellyfin adapter [hifimule-daemon/src/providers/subsonic.rs:393] — Subsonic currently uses a `HashSet<&str>` so a requested track ID removes **all** matching playlist entries. The merged Jellyfin adapter ([jellyfin.rs:319-341](hifimule-daemon/src/providers/jellyfin.rs:319)) uses a per-id `HashMap<&str, usize>` count, removing exactly as many instances as requested. Both back the same `MediaProvider` trait and will be called polymorphically by Epic 11's curation layer. **Decision (2026-06-05): adopt Jellyfin's count semantics.** Replace the set with a per-id count map, decrement on match, and add a duplicate-entry test. (blind+edge)
+
+- [x] [Review][Patch] Sort `songIndexToRemove` indices descending before sending [hifimule-daemon/src/providers/subsonic.rs:867] — current order is ascending (from `enumerate()`). Correct under the snapshot/simultaneous removal interpretation used by Navidrome (the primary target), but on any OpenSubsonic-compatible server that applies removal indices **sequentially** against a mutating list, ascending order removes the wrong tracks. Descending order is correct under all interpretations at zero cost. Add a test covering adjacent indices (e.g. remove `[0,1]`), which the current `[0,2]` test cannot expose. (blind+edge)
+- [x] [Review][Patch] Tighten repeated-param test regexes [hifimule-daemon/src/providers/subsonic.rs:3242] — `Matcher::Regex("songId=song1")` is an unanchored substring that would also match `songId=song10`, and asserts presence not count. Anchor (e.g. `[?&]songId=song1(&|$)`) so the request contract is verified exactly, per the Story 11.2 test-contract learning. (blind+auditor)
+
+- [x] [Review][Defer] Unbounded GET query-string length / HTTP 414 on large create/add/remove lists [hifimule-daemon/src/providers/subsonic.rs:841] — deferred, Subsonic-protocol limitation (all writes are GET); chunking is out of scope for this story. (blind+edge)
+- [x] [Review][Defer] `create_playlist` returns empty string silently if server responds `ok` with missing `playlist.id` [hifimule-daemon/src/providers/subsonic.rs:841] — deferred, low likelihood and matches the existing non-`Option` `id` pattern used by other read methods. (edge)
+- [x] [Review][Defer] `create_playlist` does not validate empty/whitespace `name` [hifimule-daemon/src/providers/subsonic.rs:841] — deferred, not required by AC; server rejects and error propagates. (blind+edge)
+
 ## Dev Agent Record
 
 ### Agent Model Used
@@ -472,4 +485,4 @@ claude-sonnet-4-6
 
 ## Status
 
-review
+done
