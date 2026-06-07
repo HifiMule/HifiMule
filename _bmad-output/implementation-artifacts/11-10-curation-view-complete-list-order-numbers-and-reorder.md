@@ -4,7 +4,7 @@ baseline_commit: dc52e27
 
 # Story 11.10: Curation View — Complete Track List, Order Numbers & Reorder
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -32,7 +32,7 @@ so that I can fine-tune track sequence directly in the editor.
 
 > **Scope: frontend-only.** This story touches exactly two files: [PlaylistCurationView.ts](hifimule-ui/src/components/PlaylistCurationView.ts) and [catalog.json](hifimule-i18n/catalog.json). **No daemon/Rust changes** — the `playlist.reorder` RPC already exists (Story 11.9, baseline `dc52e27`). **No new `rpc.ts` helper** — call `rpcCall('playlist.reorder', …)` directly (matches how `playlist.rename`/`playlist.delete`/`playlist.removeTracks` are already called in this file).
 
-### Task 1: "All artists" selection state — make `selectedArtist = null` mean "All" (AC: #1)
+### Task 1: [x] "All artists" selection state — make `selectedArtist = null` mean "All" (AC: #1)
 
 **File:** [PlaylistCurationView.ts](hifimule-ui/src/components/PlaylistCurationView.ts)
 
@@ -54,7 +54,7 @@ const selectedArtist = this.selectedArtist; // null = All
 - Initial load now defaults to **All artists** (the constructor leaves `selectedArtist = null`, line 27 — keep it).
 - Downstream code that does `selectedArtist!` (lines 254, 270) only runs inside the per-artist album branch — guard it on `selectedArtist !== null` (see Task 4 rendering).
 
-### Task 2: `getTracksForPanel()` — All artists returns the full playlist in order (AC: #1, #2)
+### Task 2: [x] `getTracksForPanel()` — All artists returns the full playlist in order (AC: #1, #2)
 
 **File:** [PlaylistCurationView.ts](hifimule-ui/src/components/PlaylistCurationView.ts) (current method lines 89–96)
 
@@ -70,7 +70,7 @@ private getTracksForPanel(): BrowseTrack[] {
 ```
 - `this.tracks` is the **server playlist order** as returned by `browse.getPlaylist` (`fetchBrowsePlaylist`, [rpc.ts:197](hifimule-ui/src/rpc.ts#L197)). `Array.prototype.filter` preserves order, so a specific artist's panel is also in playlist order. **Do not sort tracks** — order is the whole point of this story.
 
-### Task 3: Absolute #N order numbers (AC: #2, #6)
+### Task 3: [x] Absolute #N order numbers (AC: #2, #6)
 
 **File:** [PlaylistCurationView.ts](hifimule-ui/src/components/PlaylistCurationView.ts) — inside `render()`, before building `panelTracks`’ HTML.
 
@@ -89,7 +89,7 @@ In each track row (current template lines 289–305), prepend the position. `#N`
 - #N is shown in **all** cases — capability-gated or not (AC6: order numbers still shown when write unsupported).
 - **Duplicate-id caveat:** if the same track id appears twice in a playlist, the map collapses to the last index. This is acceptable for #N display; the **swap logic (Task 5) must use panel position, not id**, to stay duplicate-safe.
 
-### Task 4: "All albums" entry + ↑/↓ controls in the track panel (AC: #1, #3, #6)
+### Task 4: [x] "All albums" entry + ↑/↓ controls in the track panel (AC: #1, #3, #6)
 
 **File:** [PlaylistCurationView.ts](hifimule-ui/src/components/PlaylistCurationView.ts)
 
@@ -128,7 +128,7 @@ ${panelTracks.map((track, panelIdx) => `
 - ↑ disabled on `panelIdx === 0`; ↓ disabled on `panelIdx === panelTracks.length - 1` (AC3 — *first/last **visible** row*).
 - The remove-track button (existing, lines 297–303) stays. Move controls are siblings, gated on capability.
 
-### Task 5: Reorder logic — swap visible neighbours, optimistic + persist + rollback (AC: #4, #5)
+### Task 5: [x] Reorder logic — swap visible neighbours, optimistic + persist + rollback (AC: #4, #5)
 
 **File:** [PlaylistCurationView.ts](hifimule-ui/src/components/PlaylistCurationView.ts)
 
@@ -203,7 +203,7 @@ this.container.querySelectorAll<HTMLElement>('.curation-move-down').forEach(btn 
 - "Swap with previous/next **currently-visible** track" (AC4): when a specific artist/album filter is active, the neighbour is the adjacent track *in the filtered panel*, which may be many positions away in the full playlist. `indexOf` on the panel's object references resolves both absolute positions correctly. The persisted `trackIds` is always the **entire** `this.tracks` in its new order (matches the 11.9 backend contract — it always receives the full live id list).
 - `isReordering` blocks concurrent moves (rapid ↑/↑ clicks) just like `isRemoving` blocks concurrent removes.
 
-### Task 6: i18n keys × en/fr/es (AC: #1, #3, #5)
+### Task 6: [x] i18n keys × en/fr/es (AC: #1, #3, #5)
 
 **File:** [catalog.json](hifimule-i18n/catalog.json)
 
@@ -220,7 +220,7 @@ Add these keys into **each** of the three language blocks (`en`, `fr`, `es` — 
 - The epic tech note lists `all_artists`, `all_albums`, `move_up`, `move_down`. **`reorder_error` is added beyond that list** because AC5 requires a distinct inline error — reusing `playlist.curation.error` ("Failed to **remove** tracks…") would be misleading. Keep the `{message}` placeholder, consistent with `playlist.curation.error`/`add_tracks_error`/`rename_error`.
 - After editing, validate the JSON is well-formed (`python3 -c "import json; json.load(open('hifimule-i18n/catalog.json'))"`).
 
-### Task 7: Artist-panel "All artists" entry (AC: #1)
+### Task 7: [x] Artist-panel "All artists" entry (AC: #1)
 
 **File:** [PlaylistCurationView.ts](hifimule-ui/src/components/PlaylistCurationView.ts) — artist panel template (current lines 218–243).
 
@@ -247,7 +247,7 @@ this.container.querySelector('.curation-all-artists')?.addEventListener('click',
 - Keep the existing per-artist rows and their remove buttons unchanged.
 - The "All albums" row (Task 4a) needs an analogous click binding: `this.container.querySelector('.curation-all-albums')?.addEventListener('click', () => { this.selectedAlbum = null; this.render(); });`
 
-### Task 8: Verify build & manual check (AC: all)
+### Task 8: [x] Verify build & manual check (AC: all)
 
 - `rtk tsc` (or the project's typecheck) — **zero new errors**. Note a pre-existing `TS5101 baseUrl deprecated` warning exists (per Story 11.8) — that is not new.
 - **No `cargo` work** — backend untouched. Do not run/modify Rust.
@@ -330,14 +330,30 @@ Recent commits (`dc52e27 Dev 11.9`, `161a1d3 Story 11.9`, `7a63bb5 Review 11.8`)
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+claude-sonnet-4-6
 
 ### Debug Log References
 
+- `rtk tsc` → 1 error (pre-existing TS5101 `baseUrl` deprecation from Story 11.8 — not new)
+- `python3 -c "import json; json.load(...)"` → JSON valid
+
 ### Completion Notes List
 
+- Task 1: Changed `selectedArtist = null` semantics — removed auto-coerce to `artists[0]`; a removed/invalid artist now falls back to `null` (All), matching AC1 default behavior. Constructor already leaves `selectedArtist = null`.
+- Task 2: `getTracksForPanel()` now returns `this.tracks` directly when `selectedArtist === null`, giving full playlist in playlist order. Specific-artist path unchanged.
+- Task 3: `positionById` map (id → 0-based index) precomputed once per `render()` call. Each track row shows `#${pos+1}` badge — absolute regardless of active filter (AC2, AC6).
+- Task 4: "All albums" row prepended in album panel when a specific artist is selected; highlighted when `selectedAlbum === null`. ↑/↓ `sl-icon-button` controls added to each track row, gated on `supportsPlaylistWrite`, with `data-panel-index` for event routing. ↑ disabled at `panelIdx === 0`; ↓ disabled at `panelIdx === panelTracks.length - 1` (AC3, AC6).
+- Task 5: `moveTrack(panelIdx, direction)` mirrors `doRemove` pattern exactly — snapshot, optimistic swap using `indexOf` on panel object references (duplicate-id safe), full-list RPC, rollback on failure, inline `#curation-error` alert. `isReordering` guard prevents concurrent moves (AC4, AC5).
+- Task 6: Added 5 keys (`all_artists`, `all_albums`, `move_up`, `move_down`, `reorder_error`) to all three language blocks (en/fr/es) in `catalog.json`. JSON validated with `python3`.
+- Task 7: "All artists" row (class `curation-all-artists`) prepended above artist list. Highlighted when `selectedArtist === null`. Dedicated click handler sets both `selectedArtist = null` and `selectedAlbum = null` before re-rendering. (AC1)
+- Task 8: `rtk tsc` clean (no new errors). No Rust changes. JSON valid.
+
 ### File List
+
+- hifimule-ui/src/components/PlaylistCurationView.ts
+- hifimule-i18n/catalog.json
 
 ## Change Log
 
 - 2026-06-07: Story 11.10 created — curation-view complete-list reorder UI: "All artists"/"All albums" entries, absolute #N order numbers, ↑/↓ move controls (capability-gated), optimistic swap persisted via `playlist.reorder` with full-list rollback on failure. Frontend-only (`PlaylistCurationView.ts` + `catalog.json`); consumes Story 11.9's backend RPC. Status → ready-for-dev.
+- 2026-06-08: Implementation complete. All 8 tasks done. `tsc` zero new errors. Status → review.
