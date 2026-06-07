@@ -1,10 +1,10 @@
 ---
-baseline_commit: 4b15ea1
+baseline_commit: d712ade
 ---
 
 # Story 11.8: Playlist Rename and Delete — Curation View Header
 
-Status: backlog
+Status: ready-for-dev
 
 ## Story
 
@@ -32,97 +32,286 @@ so that I can manage my library's playlist catalogue without leaving the edit co
 
 ## Tasks
 
-### Task 1: Extend MediaProvider trait with `rename_playlist`
+### Task 1: Extend `MediaProvider` trait with `rename_playlist`
 
-In `hifimule-daemon/src/providers/mod.rs`, add to the `MediaProvider` trait alongside the existing write methods:
+**File:** `hifimule-daemon/src/providers/mod.rs`
+
+Add after the existing `delete_playlist` default (line ~229), alongside all other playlist write methods:
 
 ```rust
-async fn rename_playlist(&self, playlist_id: &str, new_name: &str) -> Result<(), ProviderError>;
+async fn rename_playlist(
+    &self,
+    _playlist_id: &str,
+    _new_name: &str,
+) -> Result<(), ProviderError> {
+    Err(ProviderError::UnsupportedCapability(
+        "rename_playlist is not supported by this provider".to_string(),
+    ))
+}
 ```
 
-Add a default `NotSupported` implementation consistent with the existing pattern for providers that don't support playlist write.
+**Pattern:** Identical to `delete_playlist`'s default — `UnsupportedCapability` with a string naming the method.
 
-### Task 2: JellyfinProvider — implement `rename_playlist`
-
-In `hifimule-daemon/src/providers/jellyfin.rs`:
-
-2-step operation:
-1. `GET /Users/{user_id}/Items/{playlist_id}` — fetch the current item JSON
-2. Deserialize into the item DTO, update the `Name` field to `new_name`, then `POST /Items/{playlist_id}` with the full updated body
+Also add a unit test in the `#[cfg(test)]` block (same pattern as the four existing `trait_default_*_returns_unsupported` tests, lines ~981–1017):
 
 ```rust
-async fn rename_playlist(&self, playlist_id: &str, new_name: &str) -> Result<(), ProviderError> {
-    let item = self.get_item(playlist_id).await?;
-    let updated = ItemUpdateDto { name: new_name.to_string(), ..item };
-    self.client
-        .post(format!("{}/Items/{}", self.base_url, playlist_id))
-        .json(&updated)
+#[tokio::test]
+async fn trait_default_rename_playlist_returns_unsupported() {
+    let provider = MockProvider::default();
+    let result = provider.rename_playlist("playlist-1", "New Name").await;
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("rename_playlist"), "message should name the method: {msg}");
+}
+```
+
+### Task 2: Add `rename_item` to `JellyfinApiClient` in `api.rs`
+
+**File:** `hifimule-daemon/src/api.rs`
+
+Add a new method after `delete_item` (line ~1508). Performs a 2-step rename:
+1. GET `/Items/{id}` to fetch the full item JSON (reuses `get_item_details`)
+2. POST `/Items/{id}` with the full body with `Name` updated
+
+`JellyfinItem` is `#[serde(rename_all = "PascalCase")]` (confirmed line 122) so it round-trips correctly as the POST body.
+
+```rust
+pub async fn rename_item(
+    &self,
+    url: &str,
+    token: &str,
+    user_id: &str,
+    item_id: &str,
+    new_name: &str,
+) -> Result<()> {
+    CredentialManager::validate_url(url)?;
+    CredentialManager::validate_token(token)?;
+
+    // Step 1: fetch current item JSON
+    let mut item = self
+        .get_item_details(url, token, user_id, item_id)
+        .await?;
+
+    // Step 2: mutate name and POST back
+    item.name = new_name.to_string();
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "X-Emby-Token",
+        HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+    );
+
+    let endpoint = jellyfin_endpoint(url, &["Items", item_id])?;
+
+    let response = self
+        .client
+        .post(endpoint)
+        .headers(headers)
+        .json(&item)
         .send()
-        .await?
-        .error_for_status()?;
+        .await?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        return Err(anyhow!("Server returned status: {} — {}", status, text));
+    }
     Ok(())
 }
 ```
 
-### Task 3: SubsonicProvider — implement `rename_playlist`
+**Critical notes:**
+- `jellyfin_endpoint(url, &["Items", item_id])` is the same helper used by `delete_item` (line 1499) — use it.
+- `HeaderMap` and `HeaderValue` are already imported in api.rs — no new `use` needed.
+- `get_item_details` has a `println!("DEBUG: ...")` leftover (line 376) — don't remove it, it's pre-existing.
+- `JellyfinItem` has `#[serde(rename_all = "PascalCase")]` so `item.name` serializes as `"Name"` — correct for Jellyfin.
 
-In `hifimule-daemon/src/providers/subsonic.rs`:
+### Task 3: Implement `rename_playlist` in `JellyfinProvider`
 
-Single-step using the existing `updatePlaylist.view` endpoint:
+**File:** `hifimule-daemon/src/providers/jellyfin.rs`
+
+Add after `delete_playlist` (line ~393):
 
 ```rust
 async fn rename_playlist(&self, playlist_id: &str, new_name: &str) -> Result<(), ProviderError> {
-    self.get(
-        "updatePlaylist",
-        &[("playlistId", playlist_id), ("name", new_name)],
-    )
-    .await?;
+    self.client
+        .rename_item(self.url(), self.token(), self.user_id(), playlist_id, new_name)
+        .await
+        .map_err(Self::map_error)
+}
+```
+
+**Pattern:** Identical to `delete_playlist` (line 393-398) — delegate to `self.client`, map error with `Self::map_error`.
+
+### Task 4: Implement `rename_playlist` in `SubsonicProvider`
+
+**File:** `hifimule-daemon/src/providers/subsonic.rs`
+
+Add after `delete_playlist` (line ~423):
+
+```rust
+async fn rename_playlist(&self, playlist_id: &str, new_name: &str) -> Result<(), ProviderError> {
+    self.client
+        .update_playlist_rename(playlist_id, new_name)
+        .await
+}
+```
+
+Add the corresponding client method in `SubsonicApiClient` (after `delete_playlist` at line ~898):
+
+```rust
+async fn update_playlist_rename(
+    &self,
+    playlist_id: &str,
+    new_name: &str,
+) -> Result<(), ProviderError> {
+    let _: NoBody = self
+        .get("updatePlaylist", &[("playlistId", playlist_id), ("name", new_name)])
+        .await?;
     Ok(())
 }
 ```
 
-Apply `sanitize_subsonic_url()` for logging (same rule as other playlist write methods in this provider).
+**Critical notes:**
+- `sanitize_subsonic_url()` is applied inside `self.get()` already (line 1091 — all requests log through the same sanitizer). No extra `sanitize_subsonic_url()` call needed here.
+- `NoBody` and `self.get()` are the exact pattern used by `update_playlist_add` (line 875) and `update_playlist_remove_by_indices` (line 894).
+- `updatePlaylist` endpoint is idempotent for name changes — same `playlistId` param, only `name` changes.
 
-### Task 4: Daemon RPC — `playlist.rename`
+### Task 5: Add `playlist.rename` RPC handler
 
-In the playlist RPC handler (alongside existing `playlist.create`, `playlist.addTracks`, `playlist.removeTracks`, `playlist.delete`):
+**File:** `hifimule-daemon/src/rpc.rs`
 
-```typescript
-// Command: playlist.rename
-// Payload: { playlistId: string, name: string }
-// Returns: void
+**Step 5a:** Add to the match dispatch table (after `"playlist.delete"` at line 372):
+
+```rust
+"playlist.rename" => handle_playlist_rename(&state, payload.params).await,
 ```
 
-Rust side: parse payload, call `provider.rename_playlist(&playlist_id, &name).await`, return `Ok(())` or propagate `ProviderError`.
+**Step 5b:** Add handler function after `handle_playlist_delete` (after line ~1114):
 
-### Task 5: i18n keys
+```rust
+async fn handle_playlist_rename(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let provider = require_provider(state).await?;
+    if !provider.capabilities().supports_playlist_write {
+        return Err(JsonRpcError {
+            code: ERR_UNSUPPORTED_CAPABILITY,
+            message: "Connected provider does not support playlist write".to_string(),
+            data: None,
+        });
+    }
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let playlist_id = params["playlistId"]
+        .as_str()
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing playlistId".to_string(),
+            data: None,
+        })?
+        .to_owned();
+    let name = params["name"]
+        .as_str()
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing name".to_string(),
+            data: None,
+        })?
+        .to_owned();
+    provider
+        .rename_playlist(&playlist_id, &name)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    Ok(serde_json::json!({ "ok": true }))
+}
+```
 
-In `hifimule-i18n/catalog.json`, add to the `"en"`, `"fr"`, and `"es"` blocks (after existing `playlist.curation.*` keys):
+**Pattern:** `handle_playlist_delete` (line 1084) is the exact template — same `require_provider`, same `supports_playlist_write` guard, same `ERR_INVALID_PARAMS` extraction, same `provider_error_to_rpc` propagation.
+
+### Task 6: Add i18n keys
+
+**File:** `hifimule-i18n/catalog.json`
+
+Add to the `"en"` block after the existing `"playlist.curation.no_search_results"` entry (line ~192), and to the `"fr"` and `"es"` blocks in the same relative position:
 
 ```json
 "playlist.curation.rename_save": "Save name",
 "playlist.curation.rename_cancel": "Cancel rename",
 "playlist.curation.delete_title": "Delete playlist",
-"playlist.curation.delete_body": "Delete \"{{name}}\"? This cannot be undone.",
+"playlist.curation.delete_body": "Delete \"{name}\"? This cannot be undone.",
 "playlist.curation.delete_confirm": "Delete",
 "playlist.curation.delete_cancel_btn": "Cancel"
 ```
 
 6 keys × 3 languages = 18 additions.
 
-### Task 6: Rename — inline name editing in `PlaylistCurationView.ts`
+**Critical:** No trailing comma on the last key of each language object — validate JSON is well-formed after editing.
 
-Add state:
+**Note on `delete_body`:** Use `{name}` as the placeholder (not `{{name}}`). The `t()` function in `i18n.ts` uses `{key}` interpolation — check by searching `catalog.json` for existing body strings with placeholders (e.g. `add_tracks_error` uses `{message}`).
+
+### Task 7: Update `PlaylistCurationView` — add `supportsPlaylistWrite` field
+
+**File:** `hifimule-ui/src/components/PlaylistCurationView.ts`
+
+**Step 7a:** Add `private supportsPlaylistWrite: boolean = false;` field after `private isAddingTracks = false;` (line ~31).
+
+**Step 7b:** Update constructor signature to accept `supportsPlaylistWrite`:
+
+```typescript
+constructor(
+    container: HTMLElement,
+    playlistId: string,
+    playlistName: string,
+    onClose: () => void,
+    supportsPlaylistWrite = false,
+) {
+    this.container = container;
+    this.playlistId = playlistId;
+    this.playlistName = playlistName;
+    this.onClose = onClose;
+    this.supportsPlaylistWrite = supportsPlaylistWrite;
+}
+```
+
+Default value `= false` keeps the constructor backwards-compatible (no forced update elsewhere).
+
+**Step 7c:** Update call site in `library.ts` (line ~1101):
+
+```typescript
+const view = new PlaylistCurationView(
+    container,
+    playlistId,
+    playlistName,
+    () => {
+        invalidatePlaylistsCache();
+        loadPlaylists();
+    },
+    _supportsPlaylistWrite,
+);
+```
+
+### Task 8: Add rename — inline name editing in `PlaylistCurationView.ts`
+
+**File:** `hifimule-ui/src/components/PlaylistCurationView.ts`
+
+**Step 8a:** Add state field after `private supportsPlaylistWrite` (Task 7):
+
 ```typescript
 private isRenamingPlaylist = false;
 ```
 
-In `render()`, replace the static playlist name title with:
+**Step 8b:** In `render()`, replace the static playlist name `<span>` in the header (line ~157) with:
+
 ```typescript
 ${this.isRenamingPlaylist
     ? `<sl-input
            id="playlist-rename-input"
-           value="${escapeAttr(this.playlistName)}"
+           value="${this.escapeAttr(this.playlistName)}"
            size="small"
            style="flex: 1; max-width: 300px;"
        ></sl-input>
@@ -138,36 +327,42 @@ ${this.isRenamingPlaylist
        ></sl-icon-button>`
     : `<span
            class="playlist-name-title"
-           style="cursor: pointer; border-bottom: 1px dashed var(--sl-color-neutral-400);"
-           title="Click to rename"
-       >${escapeHtml(this.playlistName)}</span>`
+           style="font-weight: var(--sl-font-weight-semibold); font-size: var(--sl-font-size-medium); cursor: pointer; border-bottom: 1px dashed var(--sl-color-neutral-400);"
+           title="${t('playlist.curation.rename_save')}"
+       >${this.escapeHtml(this.playlistName)}</span>`
 }
 ```
 
-In `bindEvents()`, add:
+**Step 8c:** In `bindEvents()`, add after the existing `#curation-close-btn` listener (line ~279):
+
 ```typescript
+// Rename: click title → enter edit mode
 this.container.querySelector('.playlist-name-title')?.addEventListener('click', () => {
     this.isRenamingPlaylist = true;
     this.render();
-    (this.container.querySelector('#playlist-rename-input') as any)?.focus();
+    const input = this.container.querySelector('#playlist-rename-input') as any;
+    if (input) input.focus();
 });
 
+// Rename: save
 this.container.querySelector('.playlist-rename-save')?.addEventListener('click', async () => {
     const input = this.container.querySelector('#playlist-rename-input') as any;
     const newName = input?.value?.trim();
     if (newName && newName !== this.playlistName) {
-        await invoke('playlist.rename', { playlistId: this.playlistId, name: newName });
+        await rpcCall('playlist.rename', { playlistId: this.playlistId, name: newName });
         this.playlistName = newName;
     }
     this.isRenamingPlaylist = false;
     this.render();
 });
 
+// Rename: cancel
 this.container.querySelector('.playlist-rename-cancel')?.addEventListener('click', () => {
     this.isRenamingPlaylist = false;
     this.render();
 });
 
+// Rename: Escape key
 this.container.querySelector('#playlist-rename-input')?.addEventListener('keydown', (e) => {
     if ((e as KeyboardEvent).key === 'Escape') {
         this.isRenamingPlaylist = false;
@@ -176,12 +371,38 @@ this.container.querySelector('#playlist-rename-input')?.addEventListener('keydow
 });
 ```
 
-### Task 7: Delete — confirmation dialog and navigation in `PlaylistCurationView.ts`
+**Critical notes:**
+- Use `escapeAttr()` for the `value` attribute of `<sl-input>` (attribute context). Use `escapeHtml()` for the `<span>` text content. Both methods exist on `PlaylistCurationView` at line ~566-578.
+- Do NOT name any lambda parameter `t` — it shadows the imported `t()` i18n function. This was a learnt guard from Story 11.7.
+- `rpcCall` is already imported at the top of the file (line 1): `import { fetchBrowsePlaylist, fetchBrowseSearch, BrowseTrack, rpcCall } from '../rpc';`
+- No `e.stopPropagation()` needed here (title `<span>` and icon-buttons are not nested inside rows that have separate click handlers).
+- On save: update `this.playlistName` before `this.render()` so the header shows the new name immediately.
 
-Add delete dialog markup to `render()` (alongside existing dialogs):
+### Task 9: Add delete — confirmation dialog in `PlaylistCurationView.ts`
+
+**File:** `hifimule-ui/src/components/PlaylistCurationView.ts`
+
+**Step 9a:** In `render()`, add delete icon-button to the header (after the rename region, before the closing `</div>` of `.curation-header`):
+
+```typescript
+${this.supportsPlaylistWrite
+    ? `<sl-icon-button
+           class="playlist-delete-btn"
+           name="trash"
+           label="${t('playlist.curation.delete_title')}"
+           style="color: var(--sl-color-danger-600); margin-left: auto;"
+       ></sl-icon-button>`
+    : ''
+}
+```
+
+**Note:** `margin-left: auto` pushes the trash button to the far right of the header.
+
+**Step 9b:** Add delete confirmation dialog markup inside the main container HTML (e.g., at the end of the `curation-view` div, as a sibling to `.curation-panels`):
+
 ```typescript
 <sl-dialog id="playlist-delete-dialog" label="${t('playlist.curation.delete_title')}">
-    <p>${t('playlist.curation.delete_body').replace('{{name}}', escapeHtml(this.playlistName))}</p>
+    <p>${t('playlist.curation.delete_body').replace('{name}', this.escapeHtml(this.playlistName))}</p>
     <sl-button slot="footer" class="playlist-delete-cancel" variant="default">
         ${t('playlist.curation.delete_cancel_btn')}
     </sl-button>
@@ -191,38 +412,169 @@ Add delete dialog markup to `render()` (alongside existing dialogs):
 </sl-dialog>
 ```
 
-Add delete icon-button to header (visible only when `this.supportsPlaylistWrite`):
-```typescript
-${this.supportsPlaylistWrite
-    ? `<sl-icon-button
-           class="playlist-delete-btn"
-           name="trash"
-           label="${t('playlist.curation.delete_title')}"
-           style="color: var(--sl-color-danger-600);"
-       ></sl-icon-button>`
-    : ''
-}
-```
+**Step 9c:** In `bindEvents()`, add:
 
-In `bindEvents()`:
 ```typescript
+// Delete: open dialog
 this.container.querySelector('.playlist-delete-btn')?.addEventListener('click', () => {
     (this.container.querySelector('#playlist-delete-dialog') as any)?.show();
 });
 
+// Delete: cancel
 this.container.querySelector('.playlist-delete-cancel')?.addEventListener('click', () => {
     (this.container.querySelector('#playlist-delete-dialog') as any)?.hide();
 });
 
+// Delete: confirm
 this.container.querySelector('.playlist-delete-confirm')?.addEventListener('click', async () => {
-    await invoke('playlist.delete', { playlistId: this.playlistId });
-    this.navigateBack(); // existing back-navigation used by the ← button
+    await rpcCall('playlist.delete', { playlistId: this.playlistId });
+    this.onClose();
 });
 ```
 
+**Critical notes:**
+- `this.onClose()` is the existing back-navigation method — it invalidates the playlists cache and restores the list view (wired in `library.ts` at line 1101). Use it, not any non-existent `navigateBack()` method. `navigateBack()` does NOT exist on `PlaylistCurationView`.
+- `playlist.delete` RPC exists since Story 11.4 — no backend changes needed.
+- `sl-dialog` pattern follows the existing pattern in Story 11.5's `openCreatePlaylistDialog` (in `MediaCard.ts`): use `.show()` / `.hide()` on the Shoelace dialog element.
+- The dialog is inside `this.container.innerHTML` so it's re-created on every `render()` call — the `show()` call is safe because it's invoked after `render()` has already placed the dialog in the DOM.
+
+### Task 10: Verify compilation
+
+- `rtk cargo check` — zero new Rust errors (changes: `providers/mod.rs`, `api.rs`, `jellyfin.rs`, `subsonic.rs`, `rpc.rs`)
+- `rtk tsc` — zero TypeScript errors (changes: `PlaylistCurationView.ts`, `library.ts`)
+
 ## Key Notes
 
-- `doRemove`, `fetchPlaylist`, and `navigateBack` are existing methods — no changes needed.
-- The Subsonic `updatePlaylist.view` endpoint has been used for track add/remove (Story 11.3); `name` is an additional optional param on the same endpoint — no new auth or URL patterns.
-- The Jellyfin 2-step pattern (GET then POST `/Items/{id}`) mirrors the existing 2-step `remove_from_playlist` (GET then DELETE) from Story 11.2.
-- TypeScript must compile with zero errors (`rtk tsc`) before marking done.
+- `this.onClose()` is the back-navigation — it exists, it works, use it.
+- `navigateBack()` does NOT exist on `PlaylistCurationView` — don't create it or reference it.
+- `JellyfinItem` round-trips correctly for POST because it's `#[serde(rename_all = "PascalCase")]`.
+- `rename_item` is a NEW api.rs method — it does not exist yet; it must be added (Task 2).
+- The `supportsPlaylistWrite` constructor parameter is new — pass `_supportsPlaylistWrite` from `library.ts` (Task 7c).
+- `escapeAttr()` for attribute values (e.g., `<sl-input value="...">`), `escapeHtml()` for HTML text content.
+- `t()` interpolation uses `{key}` format (not `{{key}}`).
+- `playlist.delete` RPC from Story 11.4 is reused unchanged — no backend work for delete.
+
+## Dev Notes
+
+### Files to change
+
+| File | Change |
+|------|--------|
+| `hifimule-daemon/src/providers/mod.rs` | Add `rename_playlist` default + unit test |
+| `hifimule-daemon/src/api.rs` | Add `rename_item` method to `JellyfinApiClient` |
+| `hifimule-daemon/src/providers/jellyfin.rs` | Implement `rename_playlist` via `client.rename_item` |
+| `hifimule-daemon/src/providers/subsonic.rs` | Implement `rename_playlist` + `update_playlist_rename` client method |
+| `hifimule-daemon/src/rpc.rs` | Add `"playlist.rename"` dispatch + `handle_playlist_rename` handler |
+| `hifimule-ui/src/components/PlaylistCurationView.ts` | `supportsPlaylistWrite` field + constructor param + `isRenamingPlaylist` field + inline rename UI + delete button + delete dialog |
+| `hifimule-ui/src/library.ts` | Pass `_supportsPlaylistWrite` to `PlaylistCurationView` constructor |
+| `hifimule-i18n/catalog.json` | 6 new keys × 3 language blocks |
+
+No new files. No Cargo.toml or package.json changes.
+
+### Available RPCs (post-story)
+
+| RPC | Params | Returns | Status |
+|-----|--------|---------|--------|
+| `playlist.rename` | `{ playlistId: string, name: string }` | `{ ok: true }` | **NEW — Task 5** |
+| `playlist.delete` | `{ playlistId: string }` | `{ ok: true }` | Existing — Story 11.4 |
+
+### `PlaylistCurationView` constructor — before vs after
+
+**Before (Story 11.7):**
+```typescript
+constructor(
+    container: HTMLElement,
+    playlistId: string,
+    playlistName: string,
+    onClose: () => void,
+)
+```
+
+**After (Story 11.8):**
+```typescript
+constructor(
+    container: HTMLElement,
+    playlistId: string,
+    playlistName: string,
+    onClose: () => void,
+    supportsPlaylistWrite = false,  // ← new, default false
+)
+```
+
+The default `= false` means no other callsite breaks. Only `library.ts` (line ~1101) needs updating.
+
+### Shoelace patterns in this component
+
+From Story 11.7 learnings (confirmed in existing code):
+- `sl-input` fires `sl-input` custom event (not native `input`) — use `addEventListener('sl-input', ...)`
+- `sl-checkbox` fires `sl-change` (not native click) — but no checkboxes in this story
+- `sl-dialog` uses `.show()` / `.hide()` methods (not native open attribute)
+- `sl-icon-button` click events do NOT need `e.stopPropagation()` unless nested inside a parent that also handles click
+
+### `delete_body` interpolation
+
+`t('playlist.curation.delete_body').replace('{name}', this.escapeHtml(this.playlistName))`
+
+The `t()` function signature returns a string. The `.replace()` is applied after translation. Confirm by checking `add_tracks_error` in the existing component — same pattern: `t('playlist.curation.add_tracks_error', { message: msg })`. Actually, `t()` accepts an optional second arg for replacements — check the `i18n.ts` `t()` signature to decide which form to use.
+
+If `t()` supports `t(key, { name: value })` interpolation (likely, see `add_tracks_error` usage), use:
+```typescript
+t('playlist.curation.delete_body', { name: this.escapeHtml(this.playlistName) })
+```
+Otherwise fall back to `.replace('{name}', ...)`.
+
+### Learnings from Story 11.7 applied
+
+1. **`escapeAttr()` vs `escapeHtml()`**: attribute values use `escapeAttr`, HTML text content uses `escapeHtml`. Both methods exist on `PlaylistCurationView` (lines 566-578).
+2. **No `t` lambda params**: lambdas in this component must not name any param `t` — it shadows the imported `t()` i18n function.
+3. **`sl-input` event**: Shoelace fires `sl-input`, not native `input`. In the rename save handler, read `input.value` directly (it's already the current value after the event fired).
+4. **Pessimistic vs optimistic**: Rename is pessimistic — wait for `playlist.rename` RPC to succeed before updating `this.playlistName` and re-rendering.
+5. **`render()` is stateful**: After `this.isRenamingPlaylist = true; this.render()`, the container is fully re-rendered with the `<sl-input>` in place — safe to `.focus()` immediately after.
+6. **`rpcCall` is top-level imported**: Already imported at line 1. No lazy import needed here (unlike `MediaCard.ts`).
+
+### References
+
+- Story 11.7 (previous — add tracks): `_bmad-output/implementation-artifacts/11-7-add-tracks-to-playlist-browse-and-curation.md`
+- Story 11.6 (dual-panel curation view): `_bmad-output/implementation-artifacts/11-6-dual-panel-playlist-curation-view-and-stats.md`
+- Story 11.4 (`playlist.delete` RPC): `_bmad-output/implementation-artifacts/11-4-playlist-rpcs-and-selection-to-tracks-resolution.md`
+- Sprint change proposal: `_bmad-output/planning-artifacts/sprint-change-proposal-2026-06-07-playlist-rename-and-delete.md`
+- `MediaProvider` trait playlist write methods: `hifimule-daemon/src/providers/mod.rs:199–236`
+- `delete_playlist` default (template for `rename_playlist` default): `hifimule-daemon/src/providers/mod.rs:229`
+- `JellyfinItem` struct (PascalCase derive): `hifimule-daemon/src/api.rs:121–171`
+- `get_item_details` in api.rs: `hifimule-daemon/src/api.rs:350`
+- `delete_item` in api.rs (template for `rename_item`): `hifimule-daemon/src/api.rs:1489`
+- `jellyfin_endpoint` helper usage: `hifimule-daemon/src/api.rs:1499`
+- Jellyfin `delete_playlist` impl (template for `rename_playlist` impl): `hifimule-daemon/src/providers/jellyfin.rs:393`
+- Subsonic `update_playlist_add` (template for `update_playlist_rename`): `hifimule-daemon/src/providers/subsonic.rs:866`
+- Subsonic `delete_playlist` client method (template): `hifimule-daemon/src/providers/subsonic.rs:898`
+- `handle_playlist_delete` in rpc.rs (template for `handle_playlist_rename`): `hifimule-daemon/src/rpc.rs:1084`
+- RPC dispatch table: `hifimule-daemon/src/rpc.rs:368–372`
+- `PlaylistCurationView` constructor: `hifimule-ui/src/components/PlaylistCurationView.ts:33`
+- `PlaylistCurationView` render header (line with playlist name span): `hifimule-ui/src/components/PlaylistCurationView.ts:157`
+- `PlaylistCurationView` bindEvents: `hifimule-ui/src/components/PlaylistCurationView.ts:279`
+- `escapeHtml` / `escapeAttr`: `hifimule-ui/src/components/PlaylistCurationView.ts:566–578`
+- `openCurationView` call site in library.ts: `hifimule-ui/src/library.ts:1101`
+- `_supportsPlaylistWrite` module variable: `hifimule-ui/src/library.ts:30`
+- Existing `playlist.curation.*` i18n keys: `hifimule-i18n/catalog.json:173–192`
+
+## Dev Agent Record
+
+### Agent Model Used
+
+_TBD_
+
+### Debug Log References
+
+_None yet_
+
+### Completion Notes List
+
+_TBD_
+
+### File List
+
+_TBD_
+
+## Change Log
+
+- 2026-06-07: Story 11.8 created — playlist rename (new backend) and delete UI in curation view header ready for dev.
