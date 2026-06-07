@@ -202,7 +202,7 @@ As a cross-platform desktop application, HifiMule consists of a performance-crit
 - **Memory Footprint:** The headless Rust engine must consume < 10MB of RAM during idle states.
 - **Sync Overhead:** The system must complete a manifest audit and be "ready to sync" in < 5 seconds.
 - **Throughput:** Sync operations should be limited only by the target hardware's write speed or the network bandwidth to the Jellyfin server.
-- **List/Table View Rendering:** List and table browse views must use virtualized (windowed) rendering to remain responsive with libraries of thousands of items, avoiding pagination while keeping memory and scroll performance within the app's existing UI responsiveness targets.
+- **List/Table View Rendering:** List and table browse views must use virtualized (windowed) rendering to remain responsive with libraries of thousands of items. The list view uses autoload-on-scroll (next page fetches automatically as the user approaches the loaded boundary) rather than a "Load More" button, avoiding visible page-boundary friction while keeping memory and scroll performance within the app's existing UI responsiveness targets.
 
 ### 2. Reliability & Stability
 - **Write-Verify-Commit:** The system must utilize OS-level file sync primitives (e.g., `sync_all`) to ensure the directory structure and data are physically flushed to the device before marking a sync as complete in the manifest.

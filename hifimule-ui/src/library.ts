@@ -47,13 +47,14 @@ interface AppState {
     items: BrowseDisplayItem[];
     pagination: { startIndex: number; limit: number; total: number };
     loading: boolean;
+    listLoading: boolean;
     scrollCache: Map<string, number>;
     pageCache: Map<string, { items: BrowseDisplayItem[]; total: number }>;
     artistViewTotal: number;
     albumViewTotal: number;
     activeLetter: string | null;
     favoriteTree: FavoriteTree | null;
-    listViewModes: Map<BrowseMode, 'grid' | 'list'>;
+    listViewMode: 'grid' | 'list';
 }
 
 interface FavoriteTree {
@@ -71,13 +72,14 @@ let state: AppState = {
     items: [],
     pagination: { startIndex: 0, limit: 50, total: 0 },
     loading: false,
+    listLoading: false,
     scrollCache: new Map(),
     pageCache: new Map(),
     artistViewTotal: 0,
     albumViewTotal: 0,
     activeLetter: null,
     favoriteTree: null,
-    listViewModes: new Map(),
+    listViewMode: 'grid',
 };
 
 function cacheKey(parentId?: string): string {
@@ -104,7 +106,8 @@ export function clearNavigationCache() {
     state.activeLetter = null;
     state.parentId = undefined;
     state.favoriteTree = null;
-    // browseMode, availableModes, and listViewModes are intentionally preserved
+    state.listLoading = false;
+    // browseMode, availableModes, and listViewMode are intentionally preserved
 }
 
 // --- Scroll helpers ---
@@ -491,10 +494,7 @@ function renderQuickNav(): HTMLElement | null {
         btn.variant = letter === state.activeLetter ? 'primary' : 'text';
         btn.textContent = letter;
         btn.addEventListener('click', () => {
-            const inListView = (state.listViewModes.get(state.browseMode) ?? 'grid') === 'list';
-            if (inListView) {
-                scrollToLetter(letter);
-            } else if (isArtists) {
+            if (isArtists) {
                 loadArtistsByLetter(letter);
             } else {
                 loadAlbumsByLetter(letter);
@@ -558,6 +558,30 @@ function teardownListScrollHandler() {
             basketStore.removeEventListener('update', (c as any).__listBasketHandler);
             delete (c as any).__listBasketHandler;
         }
+        delete (c as any).__listScroller;
+        delete (c as any).__listPaint;
+        delete (c as any).__listSpinner;
+    }
+}
+
+function showListSpinner(content: HTMLElement, loadedCount: number) {
+    const scroller = (content as any).__listScroller as HTMLElement | undefined;
+    if (!scroller) return;
+    const existing = (content as any).__listSpinner as HTMLElement | undefined;
+    if (existing) return;
+    const loader = document.createElement('div');
+    loader.className = 'media-list-loader';
+    loader.style.top = `${loadedCount * VIRTUAL_ROW_HEIGHT}px`;
+    loader.innerHTML = '<sl-spinner></sl-spinner>';
+    scroller.appendChild(loader);
+    (content as any).__listSpinner = loader;
+}
+
+function removeListSpinner(content: HTMLElement) {
+    const existing = (content as any).__listSpinner as HTMLElement | undefined;
+    if (existing) {
+        existing.remove();
+        delete (content as any).__listSpinner;
     }
 }
 
@@ -571,7 +595,7 @@ function renderViewToggle() {
         state.breadcrumbStack.length === 0 &&
         !state.loading;
     if (!showToggle) return;
-    const currentMode = state.listViewModes.get(state.browseMode) ?? 'grid';
+    const currentMode = state.listViewMode;
     const group = document.createElement('div');
     group.className = 'view-toggle-group';
     const gridBtn = document.createElement('sl-button') as any;
@@ -591,44 +615,11 @@ function renderViewToggle() {
     container.appendChild(group);
 }
 
-async function setViewMode(mode: 'grid' | 'list') {
+function setViewMode(mode: 'grid' | 'list') {
     if (state.loading) return;
-    state.listViewModes.set(state.browseMode, mode);
-    const rootMode = state.browseMode === 'artists' || state.browseMode === 'albums'
-        ? state.browseMode
-        : null;
-    const rootTotal = rootMode === 'artists' ? state.artistViewTotal : state.albumViewTotal;
-    const shouldLoadAll = mode === 'list' && rootMode && (
-        state.activeLetter !== null ||
-        state.items.length < rootTotal ||
-        state.items.length < state.pagination.total
-    );
-
-    if (shouldLoadAll && rootMode) {
-        state.loading = true;
-        renderModeBar();
-        try {
-            await loadAllForListView(rootMode);
-        } catch (e) {
-            renderError(e as Error);
-            return;
-        } finally {
-            state.loading = false;
-            renderModeBar();
-        }
-    }
+    state.listViewMode = mode;
+    renderModeBar();
     renderCurrentView();
-}
-
-function scrollToLetter(letter: string) {
-    const container = document.getElementById('library-content');
-    if (!container) return;
-    const isHash = letter === '#';
-    const idx = state.items.findIndex(item => {
-        const first = item.name.charAt(0).toUpperCase();
-        return isHash ? /[0-9]/.test(first) : first === letter;
-    });
-    if (idx >= 0) container.scrollTop = idx * VIRTUAL_ROW_HEIGHT;
 }
 
 function renderListRow(item: BrowseDisplayItem, index: number): HTMLElement {
@@ -731,6 +722,8 @@ function renderListRow(item: BrowseDisplayItem, index: number): HTMLElement {
     return row;
 }
 
+const LOAD_AHEAD = 5;
+
 function renderList(items: BrowseDisplayItem[]) {
     const container = document.getElementById('library-content');
     if (!container) return;
@@ -740,15 +733,17 @@ function renderList(items: BrowseDisplayItem[]) {
     if (state.breadcrumbStack.length > 0) content.appendChild(createBreadcrumbs());
     const qn = renderQuickNav();
     if (qn) content.appendChild(qn);
-    const totalHeight = items.length * VIRTUAL_ROW_HEIGHT;
+    const expectedTotal = state.pagination.total > 0 ? state.pagination.total : items.length;
     const scroller = document.createElement('div');
     scroller.className = 'media-list';
-    scroller.style.height = `${totalHeight}px`;
+    scroller.style.height = `${expectedTotal * VIRTUAL_ROW_HEIGHT}px`;
+    (content as any).__listScroller = scroller;
     function paint() {
+        const currentItems = state.items;
         const scrollTop = content.scrollTop;
         const viewportH = content.clientHeight;
         const first = Math.max(0, Math.floor(scrollTop / VIRTUAL_ROW_HEIGHT) - OVERSCAN);
-        const last = Math.min(items.length - 1, Math.ceil((scrollTop + viewportH) / VIRTUAL_ROW_HEIGHT) + OVERSCAN);
+        const last = Math.min(currentItems.length - 1, Math.ceil((scrollTop + viewportH) / VIRTUAL_ROW_HEIGHT) + OVERSCAN);
         scroller.querySelectorAll<HTMLElement>('.media-list-row').forEach(row => {
             const idx = Number(row.dataset.idx);
             if (idx < first || idx > last) row.remove();
@@ -757,10 +752,30 @@ function renderList(items: BrowseDisplayItem[]) {
             [...scroller.querySelectorAll<HTMLElement>('.media-list-row')].map(r => Number(r.dataset.idx))
         );
         for (let i = first; i <= last; i++) {
-            if (!existing.has(i)) scroller.appendChild(renderListRow(items[i], i));
+            if (!existing.has(i)) scroller.appendChild(renderListRow(currentItems[i], i));
         }
     }
-    const scrollHandler = () => paint();
+    (content as any).__listPaint = paint;
+    const rootMode = state.browseMode === 'artists' || state.browseMode === 'albums'
+        ? state.browseMode as 'artists' | 'albums'
+        : null;
+    const scrollHandler = () => {
+        if (state.listLoading) {
+            const maxScroll = state.items.length * VIRTUAL_ROW_HEIGHT;
+            if (content.scrollTop > maxScroll) content.scrollTop = maxScroll;
+        }
+        paint();
+        if (
+            rootMode &&
+            !state.listLoading &&
+            state.items.length < state.pagination.total
+        ) {
+            const loadedBoundary = (state.items.length - LOAD_AHEAD) * VIRTUAL_ROW_HEIGHT;
+            if (content.scrollTop + content.clientHeight >= loadedBoundary) {
+                loadMoreForListView(rootMode);
+            }
+        }
+    };
     content.addEventListener('scroll', scrollHandler);
     (content as any).__listScrollHandler = scrollHandler;
     const basketUpdateHandler = () => {
@@ -773,40 +788,39 @@ function renderList(items: BrowseDisplayItem[]) {
     paint();
 }
 
-async function loadAllForListView(mode: 'artists' | 'albums') {
-    const container = document.getElementById('library-content');
-    if (!container) return;
-    container.innerHTML = '<sl-spinner style="font-size: 3rem;"></sl-spinner>';
-
-    if (state.activeLetter) {
-        state.activeLetter = null;
-        state.items = [];
-        state.pagination.startIndex = 0;
-        state.pagination.total = mode === 'artists' ? state.artistViewTotal : state.albumViewTotal;
-    }
-
-    while (state.items.length < state.pagination.total) {
-        const before = state.items.length;
+async function loadMoreForListView(mode: 'artists' | 'albums') {
+    if (state.listLoading || state.items.length >= state.pagination.total) return;
+    state.listLoading = true;
+    const content = document.getElementById('library-content');
+    if (content) showListSpinner(content, state.items.length);
+    try {
         const startIndex = state.items.length;
+        const letter = state.activeLetter ?? undefined;
         if (mode === 'artists') {
-            const r = await fetchBrowseArtists(undefined, undefined, startIndex, 200);
+            const r = await fetchBrowseArtists(letter, undefined, startIndex, 200);
             state.items = [...state.items, ...mapArtists(r.artists)];
             state.pagination.total = r.total;
         } else {
-            const r = await fetchBrowseAlbums(undefined, undefined, startIndex, 200);
+            const r = await fetchBrowseAlbums(letter, undefined, startIndex, 200);
             state.items = [...state.items, ...mapAlbums(r.albums)];
             state.pagination.total = r.total;
         }
         state.pagination.startIndex = state.items.length;
-        if (state.items.length === before) {
-            throw new Error('List view load made no progress before reaching the reported total.');
+        if (content) {
+            const scroller = (content as any).__listScroller as HTMLElement | undefined;
+            if (scroller) scroller.style.height = `${state.pagination.total * VIRTUAL_ROW_HEIGHT}px`;
+            (content as any).__listPaint?.();
         }
+    } catch (e) {
+        console.error('loadMoreForListView failed:', e);
+    } finally {
+        state.listLoading = false;
+        if (content) removeListSpinner(content);
     }
-    state.pageCache.set(cacheKey(undefined), { items: state.items, total: state.pagination.total });
 }
 
 function renderCurrentView() {
-    const mode = state.listViewModes.get(state.browseMode) ?? 'grid';
+    const mode = state.listViewMode;
     if (
         mode === 'list' &&
         (state.browseMode === 'artists' || state.browseMode === 'albums') &&
@@ -818,32 +832,6 @@ function renderCurrentView() {
     }
 }
 
-function isRootListMode(mode: 'artists' | 'albums'): boolean {
-    return state.breadcrumbStack.length === 0 && (state.listViewModes.get(mode) ?? 'grid') === 'list';
-}
-
-async function ensureRootListItemsLoaded(mode: 'artists' | 'albums'): Promise<boolean> {
-    if (!isRootListMode(mode) || state.items.length >= state.pagination.total) return true;
-
-    const wasLoading = state.loading;
-    if (!wasLoading) {
-        state.loading = true;
-        renderModeBar();
-    }
-
-    try {
-        await loadAllForListView(mode);
-        return true;
-    } catch (e) {
-        renderError(e as Error);
-        return false;
-    } finally {
-        if (!wasLoading) {
-            state.loading = false;
-            renderModeBar();
-        }
-    }
-}
 
 function renderError(error: Error) {
     const container = document.getElementById('library-content');
@@ -925,7 +913,6 @@ async function loadArtists(reset: boolean) {
             state.pagination.total = cached.total;
             state.pagination.startIndex = cached.items.length;
             state.artistViewTotal = cached.total;
-            if (!(await ensureRootListItemsLoaded('artists'))) return;
             renderCurrentView();
             restoreScroll(key);
             return;
@@ -953,7 +940,6 @@ async function loadArtists(reset: boolean) {
             state.items = [...state.items, ...mapped];
         }
 
-        if (reset && !(await ensureRootListItemsLoaded('artists'))) return;
         renderCurrentView();
         if (reset) restoreScroll(key);
     } catch (e) {
@@ -974,14 +960,23 @@ async function loadArtistsByLetter(letter: string) {
         return;
     }
 
+    const inListView = (state.listViewMode) === 'list';
+
     state.activeLetter = letter;
     state.loading = true;
     renderModeBar();
 
-    container.innerHTML = '<sl-spinner style="font-size: 3rem;"></sl-spinner>';
+    if (inListView) {
+        state.listLoading = true;
+        showListSpinner(container, state.items.length);
+    } else {
+        container.innerHTML = '<sl-spinner style="font-size: 3rem;"></sl-spinner>';
+    }
+
     await yieldTick();
     if (!container.isConnected) {
         state.loading = false;
+        state.listLoading = false;
         return;
     }
 
@@ -991,9 +986,11 @@ async function loadArtistsByLetter(letter: string) {
         state.pagination.total = result.total;
         state.pagination.startIndex = result.artists.length;
         renderCurrentView();
+        if (inListView) container.scrollTop = 0;
     } catch (e) {
         renderError(e as Error);
     } finally {
+        state.listLoading = false;
         state.loading = false;
         renderModeBar();
     }
@@ -1009,14 +1006,23 @@ async function loadAlbumsByLetter(letter: string) {
         return;
     }
 
+    const inListView = (state.listViewMode) === 'list';
+
     state.activeLetter = letter;
     state.loading = true;
     renderModeBar();
 
-    container.innerHTML = '<sl-spinner style="font-size: 3rem;"></sl-spinner>';
+    if (inListView) {
+        state.listLoading = true;
+        showListSpinner(container, state.items.length);
+    } else {
+        container.innerHTML = '<sl-spinner style="font-size: 3rem;"></sl-spinner>';
+    }
+
     await yieldTick();
     if (!container.isConnected) {
         state.loading = false;
+        state.listLoading = false;
         return;
     }
 
@@ -1026,9 +1032,11 @@ async function loadAlbumsByLetter(letter: string) {
         state.pagination.total = result.total;
         state.pagination.startIndex = result.albums.length;
         renderCurrentView();
+        if (inListView) container.scrollTop = 0;
     } catch (e) {
         renderError(e as Error);
     } finally {
+        state.listLoading = false;
         state.loading = false;
         renderModeBar();
     }
@@ -1047,7 +1055,6 @@ async function loadAlbums(reset: boolean) {
             state.pagination.total = cached.total;
             state.pagination.startIndex = cached.items.length;
             state.albumViewTotal = cached.total;
-            if (!(await ensureRootListItemsLoaded('albums'))) return;
             renderCurrentView();
             restoreScroll(key);
             return;
@@ -1075,7 +1082,6 @@ async function loadAlbums(reset: boolean) {
             state.items = [...state.items, ...mapped];
         }
 
-        if (reset && !(await ensureRootListItemsLoaded('albums'))) return;
         renderCurrentView();
         if (reset) restoreScroll(key);
     } catch (e) {

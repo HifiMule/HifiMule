@@ -1900,15 +1900,19 @@ So that I can scan libraries of thousands of items quickly without waiting for p
 
 **Given** the Artist or Album browse page is open
 **When** I toggle to list/table view
-**Then** all items render in a single scrollable list using virtualized windowed rendering.
+**Then** the list renders immediately with the currently loaded items using virtualized windowed rendering.
 **And** scroll performance remains smooth for libraries of thousands of items.
 
 **Given** I scroll the list
 **Then** only visible rows are mounted in the DOM at any time.
 
-**Given** the browse page has a quick-nav (A–Z) control
-**When** I am in list/table view
-**Then** selecting a letter scrolls the virtualized list to the matching position.
+**Given** I scroll toward the end of the loaded rows in list view
+**Then** the next page is fetched automatically from the daemon and appended to the list.
+**And** this continues until all items (up to `total`) are loaded.
+
+**Given** the browse page has an A–Z filter control
+**When** I select a letter in either grid or list view
+**Then** the view fetches and displays only items starting with that letter (server-side filter), identical in both views.
 
 **Given** I am in list/table view
 **When** I click an item
@@ -1919,9 +1923,11 @@ So that I can scan libraries of thousands of items quickly without waiting for p
 **Then** the view switches without re-fetching from the daemon.
 
 **Technical Notes:**
-- Implement windowed/virtualized rendering — no pagination; a single scroll surface for the full result set.
+- Implement windowed/virtualized rendering with autoload-on-scroll: render immediately with the loaded page; fetch the next page (200 items) when the user scrolls within 5 rows of the loaded boundary.
+- The scroller element height is set to `state.pagination.total × VIRTUAL_ROW_HEIGHT` from the start so the scrollbar reflects the full expected size; height is updated as the total is refined by responses.
 - View mode (grid vs list) is stored in local UI state per browse mode.
-- A–Z quick-nav must drive the virtualized list scroll offset correctly.
+- A–Z is a server-side filter in both grid and list view. There is no client-side scroll-to-letter behavior.
+- When an A–Z letter filter is active in list view, autoload-on-scroll is suppressed (the filtered set is already complete).
 - No new daemon RPCs or basket entity types; this is a pure UI rendering concern.
 - Both views share the same data model from the existing `browse.*` RPC layer.
 

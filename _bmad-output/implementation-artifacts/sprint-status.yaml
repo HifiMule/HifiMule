@@ -128,7 +128,7 @@ development_status:
   9-4-history-and-favorites-browse-modes: done
   9-5-hierarchical-favorites-navigation: done
   9-6-navidrome-subsonic-browse-parity-hardening: done
-  9-7-virtualized-list-table-browse-views: done  # added via sprint-change-proposal-2026-06-05
+  9-7-virtualized-list-table-browse-views: done  # revised via sprint-change-proposal-2026-06-07 (autoload-on-scroll)
 
   epic-10: done
   10-1-device-manifest-editing-identity-and-folder-settings: done
