@@ -279,3 +279,9 @@ export async function fetchBrowseFavoriteItems(
         ...(libraryId !== undefined && { libraryId }),
     });
 }
+
+export async function fetchBrowseSearch(
+    query: string,
+): Promise<{ tracks: BrowseTrack[] }> {
+    return await rpcCall('browse.search', { query });
+}

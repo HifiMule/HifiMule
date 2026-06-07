@@ -1,4 +1,4 @@
-import { fetchBrowsePlaylist, BrowseTrack, rpcCall } from '../rpc';
+import { fetchBrowsePlaylist, fetchBrowseSearch, BrowseTrack, rpcCall } from '../rpc';
 import { t } from '../i18n';
 
 function formatDuration(totalSecs: number): string {
@@ -27,6 +27,7 @@ export class PlaylistCurationView {
     private selectedAlbum: string | null = null;
     private onClose: () => void;
     private isRemoving = false;
+    private isAddingTracks = false;
 
     constructor(
         container: HTMLElement,
@@ -99,11 +100,21 @@ export class PlaylistCurationView {
                 font-size: var(--sl-font-size-small);
                 color: var(--sl-color-neutral-600);
                 display: flex;
+                align-items: center;
                 gap: 1.5rem;
             ">
                 <span>${count} track${count === 1 ? '' : 's'}</span>
                 <span>${formatDuration(totalSecs)}</span>
                 <span>${formatBytes(totalBytes)}</span>
+                <sl-button
+                    id="curation-add-tracks-btn"
+                    size="small"
+                    variant="default"
+                    style="margin-left: auto;"
+                >
+                    <sl-icon slot="prefix" name="plus-circle"></sl-icon>
+                    ${t('playlist.curation.add_tracks')}
+                </sl-button>
             </div>
         `;
     }
@@ -308,6 +319,12 @@ export class PlaylistCurationView {
             });
         });
 
+        // "Add tracks" button
+        this.container.querySelector('#curation-add-tracks-btn')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.openAddTracksDialog();
+        });
+
         // Track remove buttons
         this.container.querySelectorAll<HTMLElement>('.curation-remove-track').forEach(btn => {
             btn.addEventListener('click', async (e) => {
@@ -361,6 +378,176 @@ export class PlaylistCurationView {
                 (errorEl as any).open = true;
             }
         }
+    }
+
+    private openAddTracksDialog(): void {
+        const dialog = document.createElement('sl-dialog') as any;
+        dialog.label = t('playlist.curation.add_tracks');
+        dialog.innerHTML = `
+            <sl-input
+                id="add-tracks-query"
+                placeholder="${t('playlist.curation.add_tracks_placeholder')}"
+                clearable
+                autofocus
+            ></sl-input>
+            <div id="add-tracks-results" style="
+                margin-top: 0.75rem;
+                max-height: 300px;
+                overflow-y: auto;
+                display: flex;
+                flex-direction: column;
+                gap: 0.25rem;
+            "></div>
+            <sl-alert id="add-tracks-error" variant="danger" closable style="display:none; margin-top: 0.75rem;"></sl-alert>
+            <sl-button slot="footer" variant="default" id="add-tracks-cancel">${t('basket.actions.cancel')}</sl-button>
+            <sl-button slot="footer" variant="primary" id="add-tracks-confirm" disabled>${t('playlist.curation.add_tracks_confirm')}</sl-button>
+        `;
+
+        document.body.appendChild(dialog);
+
+        const selectedIds = new Set<string>();
+        let searchTimeout: ReturnType<typeof setTimeout> | null = null;
+
+        const queryInput = () => dialog.querySelector('#add-tracks-query') as any;
+        const resultsEl = () => dialog.querySelector('#add-tracks-results') as HTMLElement;
+        const errorEl = () => dialog.querySelector('#add-tracks-error') as HTMLElement | null;
+        const confirmBtn = () => dialog.querySelector('#add-tracks-confirm') as any;
+
+        const renderResults = (tracks: BrowseTrack[]) => {
+            const el = resultsEl();
+            el.innerHTML = '';
+            if (tracks.length === 0) {
+                el.innerHTML = `<p style="color: var(--sl-color-neutral-500); font-size: var(--sl-font-size-small);">${t('playlist.curation.no_search_results')}</p>`;
+                return;
+            }
+            for (const track of tracks) {
+                const row = document.createElement('div');
+                row.style.cssText = `
+                    display: flex; align-items: center; gap: 0.5rem;
+                    padding: 0.35rem 0.5rem;
+                    border-radius: var(--sl-border-radius-small);
+                    cursor: pointer;
+                    background: ${selectedIds.has(track.id) ? 'var(--sl-color-primary-50)' : 'transparent'};
+                    border: 1px solid ${selectedIds.has(track.id) ? 'var(--sl-color-primary-300)' : 'transparent'};
+                `;
+                row.dataset.trackId = track.id;
+
+                const cb = document.createElement('sl-checkbox') as any;
+                cb.checked = selectedIds.has(track.id);
+                cb.style.flexShrink = '0';
+
+                const info = document.createElement('div');
+                info.style.cssText = 'flex: 1; overflow: hidden;';
+                info.innerHTML = `
+                    <div style="font-size: var(--sl-font-size-small); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${this.escapeHtml(track.title)}</div>
+                    <div style="font-size: var(--sl-font-size-x-small); color: var(--sl-color-neutral-500); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${this.escapeHtml(track.artistName || '')} — ${this.escapeHtml(track.albumName || '')}</div>
+                `;
+
+                row.appendChild(cb);
+                row.appendChild(info);
+
+                const updateRow = (selected: boolean) => {
+                    row.style.background = selected ? 'var(--sl-color-primary-50)' : 'transparent';
+                    row.style.borderColor = selected ? 'var(--sl-color-primary-300)' : 'transparent';
+                    cb.checked = selected;
+                    const btn = confirmBtn();
+                    if (btn) btn.disabled = selectedIds.size === 0;
+                };
+
+                // Row click (text area): toggle selection and sync checkbox
+                row.addEventListener('click', (e) => {
+                    if ((e.target as HTMLElement).closest('sl-checkbox')) return;
+                    if (selectedIds.has(track.id)) {
+                        selectedIds.delete(track.id);
+                    } else {
+                        selectedIds.add(track.id);
+                    }
+                    updateRow(selectedIds.has(track.id));
+                });
+
+                // Checkbox click: Shoelace already toggled cb.checked, sync selectedIds to match
+                cb.addEventListener('sl-change', () => {
+                    if (cb.checked) {
+                        selectedIds.add(track.id);
+                    } else {
+                        selectedIds.delete(track.id);
+                    }
+                    updateRow(cb.checked);
+                });
+
+                row.appendChild(cb);
+                row.appendChild(info);
+                resultsEl().appendChild(row);
+            }
+        };
+
+        const doSearch = async (query: string) => {
+            if (!query.trim()) {
+                resultsEl().innerHTML = '';
+                return;
+            }
+            resultsEl().innerHTML = '<sl-spinner></sl-spinner>';
+            try {
+                const result = await fetchBrowseSearch(query);
+                renderResults(result.tracks);
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                resultsEl().innerHTML = '';
+                const err2 = errorEl();
+                if (err2) {
+                    err2.textContent = msg;
+                    err2.style.display = '';
+                    (err2 as any).open = true;
+                }
+            }
+        };
+
+        dialog.querySelector('#add-tracks-cancel')?.addEventListener('click', () => dialog.hide());
+
+        dialog.querySelector('#add-tracks-confirm')?.addEventListener('click', async () => {
+            if (selectedIds.size === 0 || this.isAddingTracks) return;
+            this.isAddingTracks = true;
+            const btn = confirmBtn();
+            if (btn) { btn.loading = true; btn.disabled = true; }
+            const err2 = errorEl();
+            if (err2) err2.style.display = 'none';
+            try {
+                await rpcCall('playlist.addTracks', {
+                    playlistId: this.playlistId,
+                    trackIds: Array.from(selectedIds),
+                });
+                dialog.hide();
+                const result = await fetchBrowsePlaylist(this.playlistId);
+                this.tracks = result.tracks;
+                this.render();
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                if (err2) {
+                    err2.textContent = t('playlist.curation.add_tracks_error', { message: msg });
+                    err2.style.display = '';
+                    (err2 as any).open = true;
+                }
+                if (btn) { btn.loading = false; btn.disabled = false; }
+            } finally {
+                this.isAddingTracks = false;
+            }
+        });
+
+        customElements.whenDefined('sl-dialog').then(() => {
+            dialog.show();
+            const inputEl = queryInput();
+            inputEl?.addEventListener('sl-input', () => {
+                if (searchTimeout) clearTimeout(searchTimeout);
+                searchTimeout = setTimeout(() => doSearch(inputEl.value ?? ''), 300);
+            });
+        });
+
+        dialog.addEventListener('sl-after-hide', (event: Event) => {
+            if (event.target === dialog) {
+                if (searchTimeout) clearTimeout(searchTimeout);
+                dialog.remove();
+            }
+        });
     }
 
     private escapeHtml(s: string): string {

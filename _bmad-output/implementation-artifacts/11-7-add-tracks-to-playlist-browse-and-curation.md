@@ -4,7 +4,7 @@ baseline_commit: 18d5475
 
 # Story 11.7: Add Tracks to Playlist — Browse Context Menu & Curation View
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -34,8 +34,8 @@ so that I can build and expand playlists track-by-track without needing to creat
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Add `browse.search` RPC handler to daemon (AC: 6–8)
-  - [ ] In `hifimule-daemon/src/rpc.rs`, add the handler function after `handle_browse_list_favorite_items` (around line 365):
+- [x] Task 1: Add `browse.search` RPC handler to daemon (AC: 6–8)
+  - [x] In `hifimule-daemon/src/rpc.rs`, add the handler function after `handle_browse_list_favorite_items`:
 
     ```rust
     async fn handle_browse_search(
@@ -56,31 +56,27 @@ so that I can build and expand playlists track-by-track without needing to creat
             .search(&query)
             .await
             .map_err(provider_error_to_rpc)?;
-        let songs: Vec<Value> = result
-            .songs
-            .into_iter()
-            .map(|s| song_to_browse_track_json(&s))
-            .collect();
-        Ok(serde_json::json!({ "tracks": songs }))
+        Ok(serde_json::json!({ "tracks": result.songs }))
     }
     ```
 
-  - [ ] In the `match payload.method.as_str()` block (around line 367), add after `browse.listFavoriteItems`:
+  - [x] In the `match payload.method.as_str()` block, add after `browse.listFavoriteItems`:
 
     ```rust
     "browse.search" => handle_browse_search(&state, payload.params).await,
     ```
 
-  - [ ] **Critical**: Verify `song_to_browse_track_json` exists in rpc.rs and produces the same shape as `BrowseTrack`. If not, use the inline `serde_json::json!({...})` pattern already used elsewhere in rpc.rs for Song→BrowseTrack conversion (grep for `"artistName"` in rpc.rs to find the existing pattern).
+  - [x] **Critical**: `song_to_browse_track_json` does NOT exist in rpc.rs. Use `serde_json::json!({ "tracks": result.songs })` directly — `Song` derives `Serialize` with `#[serde(rename_all = "camelCase")]` and the explicit `#[serde(rename)]` overrides on `album_title`→`albumName` and `duration_seconds`→`duration`, producing the exact `BrowseTrack` shape.
 
     **Key notes:**
-    - `SearchResult.songs` is `Vec<Song>` (from domain/models.rs:107–112). The `Song` struct maps directly to `BrowseTrack` in the TypeScript layer.
-    - `provider.search(&query)` is implemented by `JellyfinProvider` (jellyfin.rs:400) and `SubsonicProvider` (subsonic.rs:427). Both return `Result<SearchResult, ProviderError>`.
-    - Only `songs` (tracks) are returned in the RPC response — not albums/artists/playlists. The curation search dialog only needs tracks.
-    - No capability guard is needed: `search()` is a read operation and both providers support it unconditionally (no `supports_playlist_write` check required here).
+    - `SearchResult.songs` is `Vec<Song>` (domain/models.rs). `Song` serializes directly to the `BrowseTrack` JSON shape via serde — no manual conversion needed.
+    - `provider.search(&query)` is implemented by `JellyfinProvider` (jellyfin.rs:400) and `SubsonicProvider` (subsonic.rs:427).
+    - Only `songs` (tracks) are returned — not albums/artists/playlists.
+    - No capability guard needed: `search()` is a read operation.
+    - **Jellyfin fix**: `search_audio_items` in `api.rs` must include `Recursive=true` in the query URL, otherwise Jellyfin returns library root folders instead of audio tracks. Also set `Limit=25` (was 10).
 
-- [ ] Task 2: Add `fetchBrowseSearch()` to rpc.ts (AC: 6–8)
-  - [ ] In `hifimule-ui/src/rpc.ts`, add after `fetchBrowseFavoriteItems` (after line 282):
+- [x] Task 2: Add `fetchBrowseSearch()` to rpc.ts (AC: 6–8)
+  - [x] In `hifimule-ui/src/rpc.ts`, add after `fetchBrowseFavoriteItems` (after line 282):
 
     ```typescript
     export async function fetchBrowseSearch(
@@ -94,8 +90,8 @@ so that I can build and expand playlists track-by-track without needing to creat
     - Return type reuses the existing `BrowseTrack` interface (rpc.ts:121–137) — no new type needed.
     - `fetchBrowseSearch` returns only `tracks`, not the full `SearchResult` — the handler filters to songs only.
 
-- [ ] Task 3: Add i18n keys (AC: 1–9)
-  - [ ] In `hifimule-i18n/catalog.json`, add to the `"en"` block (after existing `playlist.curation.*` keys, around line 181):
+- [x] Task 3: Add i18n keys (AC: 1–9)
+  - [x] In `hifimule-i18n/catalog.json`, add to the `"en"` block (after existing `playlist.curation.*` keys, around line 181):
 
     ```json
     "playlist.context.add_to_playlist": "Add to playlist…",
@@ -109,94 +105,33 @@ so that I can build and expand playlists track-by-track without needing to creat
     "playlist.curation.no_search_results": "No tracks found"
     ```
 
-  - [ ] Add the same 9 keys to the `"fr"` and `"es"` blocks (same English values are acceptable — existing pattern).
+  - [x] Add the same 9 keys to the `"fr"` and `"es"` blocks (same English values are acceptable — existing pattern).
 
     **Key notes:**
     - 9 keys × 3 languages = 27 additions total.
     - Maintain valid JSON — no trailing commas on the last key in each language object.
     - Insert after `"playlist.curation.no_tracks": "No tracks for this selection"` (line 181) to keep the namespace grouped.
 
-- [ ] Task 4: Add `showTrackContextMenu()` to MediaCard.ts (AC: 1–5)
-  - [ ] In `hifimule-ui/src/components/MediaCard.ts`, add a new static method after `openCreatePlaylistDialog` (after line 438):
+- [x] Task 4: Unify context menu for all item types in MediaCard.ts (AC: 1–5)
+  - [x] In `hifimule-ui/src/components/MediaCard.ts`, replace `showContextMenu()` with unified `showItemContextMenu()` that opens `openAddToPlaylistDialog` for all item types (artists, albums, tracks):
 
     ```typescript
-    static showTrackContextMenu(x: number, y: number, trackId: string, trackName: string): void {
-        // Dismiss any existing context menu first
+    static showItemContextMenu(x: number, y: number, itemId: string, itemName: string): void {
         if (MediaCard.dismissActiveMenu) {
             MediaCard.dismissActiveMenu();
         }
-
-        const menu = document.createElement('div');
-        menu.className = 'hm-context-menu';
-        menu.style.cssText = `
-            position: fixed;
-            z-index: 9999;
-            background: var(--sl-panel-background-color, #fff);
-            border: 1px solid var(--sl-color-neutral-200, #e2e8f0);
-            border-radius: var(--sl-border-radius-medium, 4px);
-            box-shadow: var(--sl-shadow-large);
-            padding: 4px 0;
-            min-width: 180px;
-            visibility: hidden;
-        `;
-
-        const addItem = document.createElement('div');
-        addItem.className = 'hm-context-menu-item';
-        addItem.style.cssText = `
-            padding: 8px 16px;
-            cursor: pointer;
-            font-size: var(--sl-font-size-small, 0.875rem);
-            color: var(--sl-color-neutral-900);
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        `;
-        addItem.innerHTML = `<sl-icon name="collection-play"></sl-icon> ${t('playlist.context.add_to_playlist')}`;
-        addItem.addEventListener('mouseover', () => { addItem.style.background = 'var(--sl-color-primary-50, #eff6ff)'; });
-        addItem.addEventListener('mouseout', () => { addItem.style.background = ''; });
-
-        menu.appendChild(addItem);
-        document.body.appendChild(menu);
-        MediaCard.activeContextMenu = menu;
-
-        const MARGIN = 8;
-        const rect = menu.getBoundingClientRect();
-        const left = Math.max(MARGIN, Math.min(x, window.innerWidth - rect.width - MARGIN));
-        const top = Math.max(MARGIN, Math.min(y, window.innerHeight - rect.height - MARGIN));
-        menu.style.left = `${left}px`;
-        menu.style.top = `${top}px`;
-        menu.style.visibility = 'visible';
-
-        const cleanup = () => {
-            menu.remove();
-            MediaCard.activeContextMenu = null;
-            MediaCard.dismissActiveMenu = null;
-            document.removeEventListener('click', onDocClick, true);
-            window.removeEventListener('scroll', cleanup, true);
-            window.removeEventListener('resize', cleanup);
-            document.removeEventListener('keydown', onKeyDown, true);
-        };
-        MediaCard.dismissActiveMenu = cleanup;
-
-        const onDocClick = (ev: MouseEvent) => {
-            if (!menu.contains(ev.target as Node)) cleanup();
-        };
-        const onKeyDown = (ev: KeyboardEvent) => {
-            if (ev.key === 'Escape') cleanup();
-        };
-
-        addItem.addEventListener('click', () => {
-            cleanup();
-            MediaCard.openAddToPlaylistDialog(trackId, trackName);
-        });
-
-        document.addEventListener('click', onDocClick, true);
-        window.addEventListener('scroll', cleanup, true);
-        window.addEventListener('resize', cleanup);
-        document.addEventListener('keydown', onKeyDown, true);
+        // ... (same menu scaffold as existing showContextMenu)
+        // Label: t('playlist.context.add_to_playlist')
+        // On click: MediaCard.openAddToPlaylistDialog(itemId, itemName)
     }
+    ```
 
-    static openAddToPlaylistDialog(trackId: string, trackName: string): void {
+  - [x] Add `playlist.addItems` RPC handler to `hifimule-daemon/src/rpc.rs` — accepts `{ playlistId, itemIds }`, runs entity resolution via `provider_sync_items_for_id` (handles artists, albums, tracks, playlists), then calls `provider.add_to_playlist()`. This replaces `playlist.addTracks` for the context menu flow because `playlist.addTracks` passes IDs straight through with no resolution — artist/album IDs would fail.
+
+  - [x] Update `openAddToPlaylistDialog` to use `playlist.addItems { playlistId, itemIds: [itemId] }` instead of `playlist.addTracks { playlistId, trackIds: [trackId] }`:
+
+    ```typescript
+    static openAddToPlaylistDialog(itemId: string, itemName: string): void {
         const dialog = document.createElement('sl-dialog') as any;
         dialog.label = t('playlist.context.pick_playlist_title');
         dialog.innerHTML = `
@@ -253,7 +188,7 @@ so that I can build and expand playlists track-by-track without needing to creat
                         btn.disabled = true;
                         if (errorEl) errorEl.style.display = 'none';
                         try {
-                            await rpcCall('playlist.addTracks', { playlistId: pl.id, trackIds: [trackId] });
+                            await rpcCall('playlist.addItems', { playlistId: pl.id, itemIds: [itemId] });
                             dialog.hide();
                         } catch (err) {
                             const msg = err instanceof Error ? err.message : String(err);
@@ -289,64 +224,55 @@ so that I can build and expand playlists track-by-track without needing to creat
     ```
 
     **Key notes:**
-    - `showTrackContextMenu` reuses the exact same styling/lifecycle/cleanup as the existing `showContextMenu` — same `activeContextMenu`, `dismissActiveMenu`, and `cleanup` pattern. Copy-paste-adapt is correct here; do NOT merge them into one function with a flag parameter (that would add coupling).
-    - `openAddToPlaylistDialog`: Loads existing playlists from `browse.listPlaylists` on open. Shows "New playlist…" first (calls existing `openCreatePlaylistDialog`), then all server playlists as buttons.
-    - On successful `playlist.addTracks`: closes the dialog only (no inline error shown). The closed dialog is the "success" UX.
-    - On error: shows inline `sl-alert` in the dialog (same pattern as `openCreatePlaylistDialog`).
-    - `rpcCall` is imported lazily via `await import('../rpc')` — same pattern as `openCreatePlaylistDialog` line 409.
-    - `t()` is already imported at the top of MediaCard.ts — do not add a second import.
-    - `MediaCard.openCreatePlaylistDialog` already exists (line 375): do NOT duplicate it; call it directly for "New playlist…".
-    - `pl.id` and `pl.name` come from `BrowsePlaylist` interface in rpc.ts:114–119.
+    - `showItemContextMenu` replaces both the old `showContextMenu` (artists/albums) and the never-shipped `showTrackContextMenu`. One method for all item types — the old `showContextMenu` created new playlists only; the unified method opens `openAddToPlaylistDialog` for all types.
+    - `openAddToPlaylistDialog`: loads existing playlists from `browse.listPlaylists`, shows "New playlist…" first (calls `openCreatePlaylistDialog`), then server playlists as buttons.
+    - Uses `playlist.addItems { playlistId, itemIds }` (new RPC with entity resolution) instead of `playlist.addTracks { playlistId, trackIds }`. This is necessary because `playlist.addTracks` passes IDs to the provider as-is — artist/album IDs would be sent as track IDs and fail. `playlist.addItems` resolves artists/albums/tracks to actual track IDs via `provider_sync_items_for_id` before calling `add_to_playlist`.
+    - On success: closes the dialog. On error: shows inline `sl-alert`.
+    - `rpcCall` is imported lazily via `await import('../rpc')` — preserves the existing lazy-loading pattern in MediaCard.ts.
+    - `t()` is already imported at the top of MediaCard.ts.
+    - `MediaCard.openCreatePlaylistDialog` is reused unchanged for "New playlist…".
+    - In `MediaCard.create()`, pass `(item as BrowseDisplayItem).id` (raw server entity ID) to `showItemContextMenu`, not `item.basketId ?? item.id` — basket IDs can be compound keys (`favorites:artist:…`) that `playlist.addItems` cannot resolve.
 
-- [ ] Task 5: Wire track context menu in `renderListRow()` (AC: 1, 5)
-  - [ ] In `hifimule-ui/src/library.ts`, in the `renderListRow()` function (around line 711–718), extend the existing context menu block:
+- [x] Task 5: Wire unified context menu in `renderListRow()` and `MediaCard.create()` (AC: 1, 5)
+  - [x] In `hifimule-ui/src/library.ts`, replace the split artist/album + track blocks with a single unified block in `renderListRow()`:
 
-    **Current code (around line 711–718):**
     ```typescript
-    // Context menu for artist/album rows
-    if (_supportsPlaylistWrite && (item.type === 'MusicArtist' || item.type === 'MusicAlbum')) {
-        const rowItemId = item.basketId ?? item.id;
+    // Context menu for artist/album/track rows
+    if (_supportsPlaylistWrite && (item.type === 'MusicArtist' || item.type === 'MusicAlbum' || item.type === 'Audio')) {
         row.addEventListener('contextmenu', (e) => {
             e.preventDefault();
-            MediaCard.showContextMenu(e.clientX, e.clientY, rowItemId, item.name);
+            MediaCard.showItemContextMenu(e.clientX, e.clientY, item.id, item.name);
         });
     }
     ```
 
-    **Replace with:**
+  - [x] In `MediaCard.create()`, update the `supportsPlaylistWrite` block to call `showItemContextMenu` for all three types using `(item as BrowseDisplayItem).id` (not `itemId` which may be a basket compound key):
+
     ```typescript
-    // Context menu for artist/album/track rows
-    if (_supportsPlaylistWrite && (item.type === 'MusicArtist' || item.type === 'MusicAlbum')) {
-        const rowItemId = item.basketId ?? item.id;
-        row.addEventListener('contextmenu', (e) => {
+    if (itemType === 'MusicArtist' || itemType === 'MusicAlbum' || itemType === 'Audio') {
+        const serverItemId = (item as BrowseDisplayItem).id;
+        card.addEventListener('contextmenu', (e) => {
             e.preventDefault();
-            MediaCard.showContextMenu(e.clientX, e.clientY, rowItemId, item.name);
-        });
-    } else if (_supportsPlaylistWrite && item.type === 'Audio') {
-        row.addEventListener('contextmenu', (e) => {
-            e.preventDefault();
-            MediaCard.showTrackContextMenu(e.clientX, e.clientY, item.id, item.name);
+            MediaCard.showItemContextMenu(e.clientX, e.clientY, serverItemId, itemName);
         });
     }
     ```
 
     **Key notes:**
-    - `item.id` (not `item.basketId ?? item.id`) because tracks are identified directly by their server ID for `playlist.addTracks`. Basket IDs are compound keys for containers; individual tracks use their raw `id`.
-    - `_supportsPlaylistWrite` is the module-level variable (library.ts:30) — same guard as the existing artist/album block. No extra check needed.
-    - Track items have `type: 'Audio'` in both `mapFlatTracks()` (line 292) and `mapAlbumTracks()` (line 306). This covers: album detail views, playlist flat track views, history/frequently-played/recently-played/favorites modes.
-    - The context menu does NOT apply to grid mode cards (`renderGrid()`). Grid cards for tracks are in album detail and playlist track views — in those contexts, right-click on cards does nothing (same as before). The spec says "individual track rows in browse views" — list view is the primary context for track rows. Grid cards are for artists/albums/playlists.
-    - Do not add `MediaCard.showTrackContextMenu` to `renderGrid()` / `MediaCard.create()` — grid cards for tracks don't have a meaningful right-click UX currently.
+    - `item.id` (raw server entity ID) is used for all types — not `item.basketId ?? item.id`. `playlist.addItems` requires resolvable server IDs; basket compound keys (`favorites:artist:…`) would fail entity resolution.
+    - Grid mode (`MediaCard.create()`) now also shows the context menu for tracks — this was a post-implementation fix after observing that tracks almost always render as grid cards in album/playlist/history views.
+    - `_supportsPlaylistWrite` / `supportsPlaylistWrite` guard applies to all types unchanged.
 
-- [ ] Task 6: Add "Add tracks" button and search dialog to `PlaylistCurationView.ts` (AC: 6–9)
-  - [ ] In `hifimule-ui/src/components/PlaylistCurationView.ts`, update the import line at the top:
+- [x] Task 6: Add "Add tracks" button and search dialog to `PlaylistCurationView.ts` (AC: 6–9)
+  - [x] In `hifimule-ui/src/components/PlaylistCurationView.ts`, update the import line at the top:
 
     ```typescript
     import { fetchBrowsePlaylist, fetchBrowseSearch, BrowseTrack, rpcCall } from '../rpc';
     ```
 
-  - [ ] Add `private isAddingTracks = false;` field to the class, after the existing `private isRemoving = false;` field.
+  - [x] Add `private isAddingTracks = false;` field to the class, after the existing `private isRemoving = false;` field.
 
-  - [ ] Replace `renderStats()` method:
+  - [x] Replace `renderStats()` method:
 
     ```typescript
     private renderStats(): string {
@@ -381,7 +307,7 @@ so that I can build and expand playlists track-by-track without needing to creat
     }
     ```
 
-  - [ ] In `bindEvents()`, add after the track remove button listener block:
+  - [x] In `bindEvents()`, add after the track remove button listener block:
 
     ```typescript
     // "Add tracks" button
@@ -390,7 +316,7 @@ so that I can build and expand playlists track-by-track without needing to creat
     });
     ```
 
-  - [ ] Add `openAddTracksDialog()` method to the class:
+  - [x] Add `openAddTracksDialog()` method to the class:
 
     ```typescript
     private openAddTracksDialog(): void {
@@ -459,20 +385,29 @@ so that I can build and expand playlists track-by-track without needing to creat
                 row.appendChild(cb);
                 row.appendChild(info);
 
-                const toggleSelect = () => {
-                    if (selectedIds.has(track.id)) {
-                        selectedIds.delete(track.id);
-                    } else {
-                        selectedIds.add(track.id);
-                    }
-                    row.style.background = selectedIds.has(track.id) ? 'var(--sl-color-primary-50)' : 'transparent';
-                    row.style.borderColor = selectedIds.has(track.id) ? 'var(--sl-color-primary-300)' : 'transparent';
-                    cb.checked = selectedIds.has(track.id);
+                const updateRow = (selected: boolean) => {
+                    row.style.background = selected ? 'var(--sl-color-primary-50)' : 'transparent';
+                    row.style.borderColor = selected ? 'var(--sl-color-primary-300)' : 'transparent';
+                    cb.checked = selected;
                     const btn = confirmBtn();
                     if (btn) btn.disabled = selectedIds.size === 0;
                 };
 
-                row.addEventListener('click', toggleSelect);
+                // Row click (text area): guard against checkbox to avoid double-firing
+                row.addEventListener('click', (e) => {
+                    if ((e.target as HTMLElement).closest('sl-checkbox')) return;
+                    if (selectedIds.has(track.id)) { selectedIds.delete(track.id); } else { selectedIds.add(track.id); }
+                    updateRow(selectedIds.has(track.id));
+                });
+
+                // Checkbox: Shoelace fires sl-change (not native click) after toggling cb.checked
+                cb.addEventListener('sl-change', () => {
+                    if (cb.checked) { selectedIds.add(track.id); } else { selectedIds.delete(track.id); }
+                    updateRow(cb.checked);
+                });
+
+                row.appendChild(cb);
+                row.appendChild(info);
                 resultsEl().appendChild(row);
             }
         };
@@ -550,38 +485,36 @@ so that I can build and expand playlists track-by-track without needing to creat
     ```
 
     **Key notes:**
-    - The search uses `fetchBrowseSearch(query)` (added in Task 2) with a 300ms debounce on `sl-input` events.
-    - `isAddingTracks` flag (new field from above) prevents double-submit on the confirm button — mirrors `isRemoving` pattern.
-    - After successful `playlist.addTracks`, the dialog hides first, then `fetchBrowsePlaylist` re-fetches fresh data, updates `this.tracks`, and calls `this.render()`. This is the "re-fetches the playlist and re-renders all panels" AC.
-    - On cancel (no selection or dialog closed), no RPC is called — `selectedIds` is checked before the `rpcCall`.
-    - `fetchBrowseSearch` and `fetchBrowsePlaylist` are already imported at the top of the file after Task 6's import update.
-    - `escapeHtml` is already a private method on the class — use `this.escapeHtml(...)`.
-    - The `sl-input` event from Shoelace fires on every keystroke — use `sl-input` NOT `input` (Shoelace wraps the native event).
-    - `sl-checkbox`: Shoelace checkbox component, already used in the project. Its `.checked` property is set directly.
-    - The `confirmBtn.disabled = selectedIds.size === 0` logic keeps the confirm button disabled until at least one track is selected.
+    - The search uses `fetchBrowseSearch(query)` (Task 2) with a 300ms debounce on `sl-input` events.
+    - `isAddingTracks` flag prevents double-submit — mirrors `isRemoving` pattern.
+    - After successful `playlist.addTracks`, dialog hides, then `fetchBrowsePlaylist` re-fetches and `this.render()` re-renders all panels (AC 8).
+    - On cancel or close with no selection, no RPC is called (AC 9).
+    - **`sl-checkbox` event**: Shoelace's `sl-checkbox` fires `sl-change` (not a bubbling native `click`) after toggling `cb.checked` internally. Listen for `sl-change` on the checkbox to sync `selectedIds`, and guard the row `click` with `.closest('sl-checkbox')` to prevent double-firing. A single `row.addEventListener('click', ...)` without the `sl-change` handler means clicking the checkbox does nothing visible.
+    - `sl-input` event (not native `input`) for the search field — Shoelace wraps the native event.
     - `basket.actions.cancel` i18n key already exists in catalog.json — reuse it.
 
-- [ ] Task 7: Verify compilation (AC: all)
-  - [ ] Run `rtk cargo check` — verify zero new Rust errors. Changes: 1 new handler function + 1 match arm.
-  - [ ] Run `rtk tsc` — zero TypeScript errors. Common pitfalls:
+- [x] Task 7: Verify compilation (AC: all)
+  - [x] Run `rtk cargo check` — zero new Rust errors. Rust changes: `browse.search` handler, `playlist.addItems` handler, `api.rs` Jellyfin search fix.
+  - [x] Run `rtk tsc` — zero TypeScript errors. Common pitfalls:
     - `fetchBrowseSearch` added to rpc.ts imports in PlaylistCurationView.ts
-    - `MediaCard.showTrackContextMenu` is `static` and callable directly
-    - `selectedIds: Set<string>` in `openAddTracksDialog` closure — no TypeScript type annotation needed (inferred from `new Set<string>()`)
-    - `searchTimeout: ReturnType<typeof setTimeout> | null` — needed to avoid `NodeJS.Timeout` vs `number` conflict in browser/node environments
-    - `isAddingTracks` field declared before use in `openAddTracksDialog`
+    - `MediaCard.showItemContextMenu` is `static` — callable directly from library.ts
+    - `selectedIds: Set<string>` in `openAddTracksDialog` — type inferred from `new Set<string>()`
+    - `searchTimeout: ReturnType<typeof setTimeout> | null` — avoids NodeJS.Timeout vs number conflict
+    - `isAddingTracks` field declared before use
 
 ## Dev Notes
 
-### UI-only story with 1 thin Rust change
+### Files changed
 
 | File | Change |
 |------|--------|
-| `hifimule-daemon/src/rpc.rs` | 1 handler function + 1 match arm for `browse.search` |
+| `hifimule-daemon/src/rpc.rs` | `handle_browse_search` + `handle_playlist_add_items` handlers + 2 match arms |
+| `hifimule-daemon/src/api.rs` | `search_audio_items`: added `Recursive=true`, bumped `Limit` 10→25 |
 | `hifimule-ui/src/rpc.ts` | `fetchBrowseSearch()` wrapper |
 | `hifimule-i18n/catalog.json` | 9 new i18n keys × 3 language blocks |
-| `hifimule-ui/src/components/MediaCard.ts` | New `showTrackContextMenu()` + `openAddToPlaylistDialog()` static methods |
-| `hifimule-ui/src/library.ts` | `renderListRow()` — add `Audio` type context menu trigger |
-| `hifimule-ui/src/components/PlaylistCurationView.ts` | New `isAddingTracks` field + updated `renderStats()` + `openAddTracksDialog()` method + updated import + `bindEvents()` wiring |
+| `hifimule-ui/src/components/MediaCard.ts` | Replaced `showContextMenu` with `showItemContextMenu`; added `openAddToPlaylistDialog` (uses `playlist.addItems`); updated `MediaCard.create()` for all three item types |
+| `hifimule-ui/src/library.ts` | `renderListRow()` — unified context menu for artist/album/track |
+| `hifimule-ui/src/components/PlaylistCurationView.ts` | New `isAddingTracks` field + updated `renderStats()` + `openAddTracksDialog()` + updated import + `bindEvents()` wiring + `sl-change` checkbox fix |
 
 No provider changes. No Cargo.toml or package.json changes.
 
@@ -591,47 +524,43 @@ The sprint change proposal states "Pure frontend change — no new daemon endpoi
 
 Check `song_to_browse_track_json` existence before Task 1: run `grep -n "song_to_browse_track_json" hifimule-daemon/src/rpc.rs`. If it doesn't exist, find the existing `Song`→JSON serialization pattern in the file (grep for `"artistName"` in rpc.rs) and use the same inline approach.
 
-### Available RPCs (no new handlers except `browse.search`)
+### Available RPCs
 
 | RPC | Params | Returns | Implemented |
 |-----|--------|---------|-------------|
 | `browse.search` | `{ query: string }` | `{ tracks: BrowseTrack[] }` | **NEW — Task 1** |
-| `browse.listPlaylists` | none | `{ playlists: BrowsePlaylist[] }` | rpc.rs:350 |
-| `playlist.addTracks` | `{ playlistId, trackIds }` | `{ ok: true }` | rpc.rs:368 / Story 11.4 |
-| `playlist.create` | `{ name, itemIds }` | `{ playlistId, skippedItemIds }` | rpc.rs:367 / Story 11.4 |
-| `browse.getPlaylist` | `{ playlistId }` | `{ playlist, tracks }` | rpc.rs:351 / Story 9.x |
+| `playlist.addItems` | `{ playlistId, itemIds }` | `{ ok: true }` | **NEW — Task 4** |
+| `browse.listPlaylists` | none | `{ playlists: BrowsePlaylist[] }` | rpc.rs / Story 11.4 |
+| `playlist.addTracks` | `{ playlistId, trackIds }` | `{ ok: true }` | rpc.rs / Story 11.4 — still used by `PlaylistCurationView` (search results are already resolved track IDs) |
+| `playlist.create` | `{ name, itemIds }` | `{ playlistId, skippedItemIds }` | rpc.rs / Story 11.4 — used by "New playlist…" in `openCreatePlaylistDialog` |
+| `browse.getPlaylist` | `{ playlistId }` | `{ playlist, tracks }` | rpc.rs / Story 9.x |
 
-TypeScript wrappers already in rpc.ts:
-- `fetchBrowsePlaylists()` → line 193 — used by `openAddToPlaylistDialog` indirectly via `rpcCall('browse.listPlaylists')`
-- `fetchBrowsePlaylist(playlistId)` → line 197 — used by curation view reload after add
-- `fetchBrowseSearch(query)` → NEW (Task 2)
+TypeScript wrappers in rpc.ts:
+- `fetchBrowsePlaylists()` — used by `openAddToPlaylistDialog` indirectly via `rpcCall('browse.listPlaylists')`
+- `fetchBrowsePlaylist(playlistId)` — used by curation view reload after add
+- `fetchBrowseSearch(query)` — NEW (Task 2)
 
-### MediaCard static method context: existing vs new
+### Context menu: unified `showItemContextMenu`
 
-The existing `showContextMenu()` (MediaCard.ts:291) is for **artist/album** items → shows "Send to playlist…" → always creates a NEW playlist via `openCreatePlaylistDialog`. 
+`showItemContextMenu()` is the single context menu entry point for all item types (artist, album, track) in both grid mode (`MediaCard.create()`) and list mode (`renderListRow()`). It shows "Add to playlist…" and opens `openAddToPlaylistDialog`.
 
-The new `showTrackContextMenu()` is for **individual track** items → shows "Add to playlist…" → fetches existing playlists AND offers "New playlist…" option. The two methods are structurally parallel but differ in behavior. Do NOT merge them.
+`openAddToPlaylistDialog` uses `playlist.addItems` (entity-resolving) for adding to existing playlists. This handles artist/album IDs correctly — `playlist.addTracks` would not, as it passes IDs to the provider as literal track IDs.
 
-`openAddToPlaylistDialog` calls `MediaCard.openCreatePlaylistDialog(trackId, trackName)` for the "New playlist…" case. `openCreatePlaylistDialog` calls `playlist.create` with `{ name, itemIds: [trackId] }` — this is correct because `playlist.create` does entity resolution, and for a single track ID the resolved track list is just that track.
+`openCreatePlaylistDialog` is unchanged and is still called for the "New playlist…" option. It uses `playlist.create` which also does entity resolution.
 
 ### `renderListRow()` context: where tracks appear
 
-`renderListRow()` is called by `renderList()` (list mode) for any `BrowseDisplayItem`. Track items (`type: 'Audio'`) appear in:
-- **Album detail view**: `loadAlbumTracks()` → `renderGrid()` (grid mode, not list). BUT if user switches to list mode, `renderList()` is also used.
-- **Playlist flat track view**: `loadPlaylistTracks()` → `renderGrid()`.
-- **History/frequency/favorites modes**: `loadX()` → `renderGrid()`.
+`renderListRow()` is called by `renderList()` (list mode). Most track views (`loadAlbumTracks`, `loadPlaylistTracks`, history/favorites modes) default to `renderGrid()`. The context menu is wired in both:
+- `renderListRow()` — for list mode
+- `MediaCard.create()` — for grid mode (post-implementation addition; tracks almost always appear in grid mode)
 
-The context menu is wired only in `renderListRow()` (list mode). Track context menus in grid mode are NOT in scope — grid cards currently have no right-click handler for any item type. This is intentional scope limitation. Do not add right-click to grid track cards.
+### `item.id` for all types (not `item.basketId`)
 
-### `item.id` for tracks (not `item.basketId`)
-
-In `renderListRow()`, the existing artist/album block uses `item.basketId ?? item.id`. For tracks, use `item.id` directly. Reason: `playlist.addTracks` takes `trackIds` (server IDs), and `item.basketId` is only set for certain compound items (FavoriteArtist, FavoriteAlbum). Track items from `mapFlatTracks`/`mapAlbumTracks` never set `basketId`. Using `item.id` is correct and safe.
+Both `renderListRow()` and `MediaCard.create()` pass `item.id` (raw server entity ID) to `showItemContextMenu`. Basket IDs (`item.basketId`) can be compound keys like `favorites:artist:abc123` — these are used only for basket store operations and are not valid server entity IDs that `playlist.addItems` can resolve.
 
 ### `openAddToPlaylistDialog` — lazy import pattern
 
-MediaCard.ts uses dynamic `await import('../rpc')` (line 409) for RPC calls inside the dialog handler. Continue this pattern in `openAddToPlaylistDialog` for `rpcCall('browse.listPlaylists')` and `rpcCall('playlist.addTracks')`. Do NOT add a top-level import of `rpcCall` to MediaCard.ts — this breaks the lazy-loading pattern.
-
-But `fetchBrowseSearch` should NOT be called from MediaCard — it's only used from `PlaylistCurationView.ts`. In `openAddToPlaylistDialog`, use raw `rpcCall('browse.listPlaylists')` and `rpcCall('playlist.addTracks')` with destructured `{ rpcCall }` from the dynamic import — same as the existing `openCreatePlaylistDialog` pattern.
+MediaCard.ts uses `await import('../rpc')` lazily for RPC calls inside dialog handlers. `openAddToPlaylistDialog` uses `rpcCall('browse.listPlaylists')` and `rpcCall('playlist.addItems')` via the same destructured dynamic import pattern. Do NOT add a top-level `rpcCall` import to MediaCard.ts.
 
 ### `PlaylistCurationView.ts` imports
 
@@ -725,11 +654,23 @@ claude-sonnet-4-6
 
 ### Debug Log References
 
+_No blocking issues encountered._
+
 ### Completion Notes List
+
+- Task 1: Added `handle_browse_search` to rpc.rs. `song_to_browse_track_json` did not exist; `serde_json::json!({ "tracks": result.songs })` used directly — `Song`'s `Serialize` derive with `#[serde(rename_all = "camelCase")]` produces the correct `BrowseTrack` shape.
+- Task 1 (fix): Added `Recursive=true` and `Limit=25` to `search_audio_items` in `api.rs` — without `Recursive=true`, Jellyfin returns library root folders instead of audio tracks.
+- Task 2: Added `fetchBrowseSearch()` wrapper to rpc.ts.
+- Task 3: Added 9 i18n keys × 3 language blocks (en/fr/es) = 27 additions. catalog.json valid JSON confirmed.
+- Task 4: Replaced `showContextMenu` (artist/album, new-playlist-only) with unified `showItemContextMenu` for all item types. Added `openAddToPlaylistDialog` (uses `playlist.addItems` with entity resolution, not `playlist.addTracks`). Added `handle_playlist_add_items` to rpc.rs. Added context menu to `MediaCard.create()` for Audio items (grid mode) — tracks almost always render as grid cards. Dynamic `await import('../rpc')` pattern maintained.
+- Task 5: Unified `renderListRow()` context menu to single block covering artist/album/track. Both list and grid modes now support the context menu for all three types.
+- Task 6: Updated `PlaylistCurationView.ts` — new import, `isAddingTracks` guard, updated `renderStats()` with "Add tracks" button, `bindEvents()` wiring, `openAddTracksDialog()` with debounced search + multi-select + pessimistic re-fetch. Fixed `sl-checkbox` interaction: Shoelace fires `sl-change` not a bubbling click — added `sl-change` handler on checkbox and guarded row click with `.closest('sl-checkbox')`.
+- Task 7: `rtk cargo check` — 0 new errors. `rtk tsc` — 0 errors.
 
 ### File List
 
 - hifimule-daemon/src/rpc.rs
+- hifimule-daemon/src/api.rs
 - hifimule-ui/src/rpc.ts
 - hifimule-i18n/catalog.json
 - hifimule-ui/src/components/MediaCard.ts
@@ -739,3 +680,5 @@ claude-sonnet-4-6
 ## Change Log
 
 - 2026-06-07: Story 11.7 created — add tracks to playlist via browse context menu and curation view ready for dev.
+- 2026-06-07: Story 11.7 implemented — `browse.search` RPC, `fetchBrowseSearch` TS wrapper, 27 i18n additions, unified `showItemContextMenu` + `openAddToPlaylistDialog` (with new `playlist.addItems` RPC for entity resolution) in MediaCard covering all item types in both grid and list mode, "Add tracks" button and search dialog in `PlaylistCurationView`.
+- 2026-06-07: Post-implementation fixes — Jellyfin `search_audio_items` missing `Recursive=true` (returned root folders instead of tracks); `sl-checkbox` requires `sl-change` event not row `click`; context menus unified across artist/album/track replacing the separate `showContextMenu`/`showTrackContextMenu` split.

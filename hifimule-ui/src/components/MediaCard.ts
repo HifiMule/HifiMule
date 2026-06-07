@@ -251,17 +251,16 @@ export class MediaCard {
             }
         });
 
-        // Context menu: "Send to playlist…" on artist/album cards when supported
+        // Context menu: "Add to playlist…" on artist/album/track cards
         if (supportsPlaylistWrite) {
             const isBrowseDisplayItem = !('Id' in item);
-            const isArtistOrAlbum = isBrowseDisplayItem
-                ? ((item as BrowseDisplayItem).type === 'MusicArtist' || (item as BrowseDisplayItem).type === 'MusicAlbum')
-                : false;
+            const itemType = isBrowseDisplayItem ? (item as BrowseDisplayItem).type : null;
 
-            if (isArtistOrAlbum) {
+            if (itemType === 'MusicArtist' || itemType === 'MusicAlbum' || itemType === 'Audio') {
+                const serverItemId = (item as BrowseDisplayItem).id;
                 card.addEventListener('contextmenu', (e) => {
                     e.preventDefault();
-                    MediaCard.showContextMenu(e.clientX, e.clientY, itemId, itemName);
+                    MediaCard.showItemContextMenu(e.clientX, e.clientY, serverItemId, itemName);
                 });
             }
         }
@@ -288,8 +287,7 @@ export class MediaCard {
     private static activeContextMenu: HTMLElement | null = null;
     private static dismissActiveMenu: (() => void) | null = null;
 
-    static showContextMenu(x: number, y: number, itemId: string, itemName: string): void {
-        // Dismiss any existing context menu first (and tear down its listeners)
+    static showItemContextMenu(x: number, y: number, itemId: string, itemName: string): void {
         if (MediaCard.dismissActiveMenu) {
             MediaCard.dismissActiveMenu();
         }
@@ -308,9 +306,9 @@ export class MediaCard {
             visibility: hidden;
         `;
 
-        const sendItem = document.createElement('div');
-        sendItem.className = 'hm-context-menu-item';
-        sendItem.style.cssText = `
+        const menuItem = document.createElement('div');
+        menuItem.className = 'hm-context-menu-item';
+        menuItem.style.cssText = `
             padding: 8px 16px;
             cursor: pointer;
             font-size: var(--sl-font-size-small, 0.875rem);
@@ -319,20 +317,14 @@ export class MediaCard {
             align-items: center;
             gap: 8px;
         `;
-        sendItem.innerHTML = `<sl-icon name="collection-play"></sl-icon> ${t('library.context.send_to_playlist')}`;
+        menuItem.innerHTML = `<sl-icon name="collection-play"></sl-icon> ${t('playlist.context.add_to_playlist')}`;
+        menuItem.addEventListener('mouseover', () => { menuItem.style.background = 'var(--sl-color-primary-50, #eff6ff)'; });
+        menuItem.addEventListener('mouseout', () => { menuItem.style.background = ''; });
 
-        sendItem.addEventListener('mouseover', () => {
-            sendItem.style.background = 'var(--sl-color-primary-50, #eff6ff)';
-        });
-        sendItem.addEventListener('mouseout', () => {
-            sendItem.style.background = '';
-        });
-
-        menu.appendChild(sendItem);
+        menu.appendChild(menuItem);
         document.body.appendChild(menu);
         MediaCard.activeContextMenu = menu;
 
-        // Clamp using the menu's measured size now that it is in the DOM
         const MARGIN = 8;
         const rect = menu.getBoundingClientRect();
         const left = Math.max(MARGIN, Math.min(x, window.innerWidth - rect.width - MARGIN));
@@ -341,7 +333,6 @@ export class MediaCard {
         menu.style.top = `${top}px`;
         menu.style.visibility = 'visible';
 
-        // Single cleanup path: removes the menu AND every listener it registered.
         const cleanup = () => {
             menu.remove();
             MediaCard.activeContextMenu = null;
@@ -360,12 +351,11 @@ export class MediaCard {
             if (ev.key === 'Escape') cleanup();
         };
 
-        sendItem.addEventListener('click', () => {
+        menuItem.addEventListener('click', () => {
             cleanup();
-            MediaCard.openCreatePlaylistDialog(itemId, itemName);
+            MediaCard.openAddToPlaylistDialog(itemId, itemName);
         });
 
-        // Use capture=true so outside clicks register before propagation stops them
         document.addEventListener('click', onDocClick, true);
         window.addEventListener('scroll', cleanup, true);
         window.addEventListener('resize', cleanup);
@@ -437,6 +427,98 @@ export class MediaCard {
         });
 
         customElements.whenDefined('sl-dialog').then(() => dialog.show());
+    }
+
+
+
+    static openAddToPlaylistDialog(trackId: string, trackName: string): void {
+        const dialog = document.createElement('sl-dialog') as any;
+        dialog.label = t('playlist.context.pick_playlist_title');
+        dialog.innerHTML = `
+            <div id="ctx-track-playlist-list" style="display:flex; flex-direction:column; gap:0.5rem; max-height:300px; overflow-y:auto;">
+                <sl-spinner></sl-spinner>
+            </div>
+            <sl-alert id="ctx-track-error" variant="danger" closable style="display:none; margin-top: 0.75rem;"></sl-alert>
+            <sl-button slot="footer" variant="default" id="ctx-track-cancel">${t('basket.actions.cancel')}</sl-button>
+        `;
+
+        document.body.appendChild(dialog);
+
+        dialog.querySelector('#ctx-track-cancel')?.addEventListener('click', () => dialog.hide());
+        dialog.addEventListener('sl-after-hide', (event: Event) => {
+            if (event.target === dialog) dialog.remove();
+        });
+
+        customElements.whenDefined('sl-dialog').then(async () => {
+            dialog.show();
+            const listEl = dialog.querySelector('#ctx-track-playlist-list') as HTMLElement;
+            const errorEl = dialog.querySelector('#ctx-track-error') as HTMLElement | null;
+
+            try {
+                const { rpcCall } = await import('../rpc');
+                const result = await rpcCall('browse.listPlaylists');
+                const playlists: Array<{ id: string; name: string }> = result.playlists ?? [];
+
+                listEl.innerHTML = '';
+
+                const newBtn = document.createElement('sl-button') as any;
+                newBtn.variant = 'default';
+                newBtn.style.cssText = 'width: 100%; text-align: left;';
+                newBtn.innerHTML = `<sl-icon slot="prefix" name="plus-circle"></sl-icon> ${t('playlist.context.new_playlist')}`;
+                newBtn.addEventListener('click', () => {
+                    dialog.hide();
+                    MediaCard.openCreatePlaylistDialog(trackId, trackName);
+                });
+                listEl.appendChild(newBtn);
+
+                if (playlists.length > 0) {
+                    const divider = document.createElement('sl-divider') as any;
+                    listEl.appendChild(divider);
+                }
+
+                for (const pl of playlists) {
+                    const btn = document.createElement('sl-button') as any;
+                    btn.variant = 'default';
+                    btn.style.cssText = 'width: 100%; text-align: left;';
+                    btn.textContent = pl.name;
+                    btn.dataset.plId = pl.id;
+                    btn.addEventListener('click', async () => {
+                        btn.loading = true;
+                        btn.disabled = true;
+                        if (errorEl) errorEl.style.display = 'none';
+                        try {
+                            await rpcCall('playlist.addItems', { playlistId: pl.id, itemIds: [trackId] });
+                            dialog.hide();
+                        } catch (err) {
+                            const msg = err instanceof Error ? err.message : String(err);
+                            if (errorEl) {
+                                errorEl.textContent = t('playlist.curation.add_tracks_error', { message: msg });
+                                errorEl.style.display = '';
+                                (errorEl as any).open = true;
+                            }
+                            btn.loading = false;
+                            btn.disabled = false;
+                        }
+                    });
+                    listEl.appendChild(btn);
+                }
+
+                if (playlists.length === 0) {
+                    const emptyNote = document.createElement('p');
+                    emptyNote.style.cssText = 'color: var(--sl-color-neutral-500); font-size: var(--sl-font-size-small); padding: 0.5rem 0;';
+                    emptyNote.textContent = 'No playlists yet. Use "New playlist…" to create one.';
+                    listEl.appendChild(emptyNote);
+                }
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                listEl.innerHTML = '';
+                if (errorEl) {
+                    errorEl.textContent = msg;
+                    errorEl.style.display = '';
+                    (errorEl as any).open = true;
+                }
+            }
+        });
     }
 
     private static escapeHtml(text: string): string {

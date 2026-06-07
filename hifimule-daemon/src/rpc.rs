@@ -364,7 +364,9 @@ async fn handler(
         "browse.listFavoriteItems" => {
             handle_browse_list_favorite_items(&state, payload.params).await
         }
+        "browse.search" => handle_browse_search(&state, payload.params).await,
         "playlist.create" => handle_playlist_create(&state, payload.params).await,
+        "playlist.addItems" => handle_playlist_add_items(&state, payload.params).await,
         "playlist.addTracks" => handle_playlist_add_tracks(&state, payload.params).await,
         "playlist.removeTracks" => handle_playlist_remove_tracks(&state, payload.params).await,
         "playlist.delete" => handle_playlist_delete(&state, payload.params).await,
@@ -824,6 +826,27 @@ async fn handle_browse_list_favorite_items(
     }))
 }
 
+async fn handle_browse_search(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let provider = require_provider(state).await?;
+    let query = params
+        .as_ref()
+        .and_then(|p| p["query"].as_str())
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing query".to_string(),
+            data: None,
+        })?
+        .to_owned();
+    let result = provider
+        .search(&query)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    Ok(serde_json::json!({ "tracks": result.songs }))
+}
+
 async fn handle_playlist_create(
     state: &AppState,
     params: Option<Value>,
@@ -899,6 +922,76 @@ async fn handle_playlist_create(
         .await
         .map_err(provider_error_to_rpc)?;
     Ok(serde_json::json!({ "playlistId": playlist_id, "skippedItemIds": skipped_item_ids }))
+}
+
+async fn handle_playlist_add_items(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let provider = require_provider(state).await?;
+    if !provider.capabilities().supports_playlist_write {
+        return Err(JsonRpcError {
+            code: ERR_UNSUPPORTED_CAPABILITY,
+            message: "Connected provider does not support playlist write".to_string(),
+            data: None,
+        });
+    }
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let playlist_id = params["playlistId"]
+        .as_str()
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing playlistId".to_string(),
+            data: None,
+        })?
+        .to_owned();
+    let raw_ids = params["itemIds"].as_array().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing or invalid itemIds array".to_string(),
+        data: None,
+    })?;
+    let item_ids: Vec<String> = raw_ids
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect();
+
+    let mut track_ids: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for item_id in &item_ids {
+        let (tracks, _) = match provider_sync_items_for_id(provider.clone(), item_id).await {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                eprintln!(
+                    "[Playlist] Skipping unresolvable item '{}' during playlist.addItems: {}",
+                    item_id, e.message
+                );
+                continue;
+            }
+        };
+        for track in tracks {
+            if seen.insert(track.jellyfin_id.clone()) {
+                track_ids.push(track.jellyfin_id);
+            }
+        }
+    }
+
+    if track_ids.is_empty() {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "No valid tracks found in selection".to_string(),
+            data: None,
+        });
+    }
+
+    provider
+        .add_to_playlist(&playlist_id, &track_ids)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    Ok(serde_json::json!({ "ok": true }))
 }
 
 async fn handle_playlist_add_tracks(

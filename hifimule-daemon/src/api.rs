@@ -757,7 +757,7 @@ impl JellyfinClient {
 
         let encoded_title = url_encode(title);
         let endpoint = format!(
-            "{}/Items?userId={}&SearchTerm={}&IncludeItemTypes=Audio&Limit=10&Fields=Id,Name,Album,AlbumArtist,Artists,AlbumId",
+            "{}/Items?userId={}&SearchTerm={}&IncludeItemTypes=Audio&Recursive=true&Limit=25&Fields=Id,Name,Album,AlbumArtist,Artists,AlbumId",
             url.trim_end_matches('/'),
             user_id,
             encoded_title

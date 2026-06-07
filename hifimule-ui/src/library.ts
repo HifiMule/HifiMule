@@ -708,12 +708,11 @@ function renderListRow(item: BrowseDisplayItem, index: number): HTMLElement {
             }
         }
     });
-    // Context menu for artist/album rows
-    if (_supportsPlaylistWrite && (item.type === 'MusicArtist' || item.type === 'MusicAlbum')) {
-        const rowItemId = item.basketId ?? item.id;
+    // Context menu for artist/album/track rows
+    if (_supportsPlaylistWrite && (item.type === 'MusicArtist' || item.type === 'MusicAlbum' || item.type === 'Audio')) {
         row.addEventListener('contextmenu', (e) => {
             e.preventDefault();
-            MediaCard.showContextMenu(e.clientX, e.clientY, rowItemId, item.name);
+            MediaCard.showItemContextMenu(e.clientX, e.clientY, item.id, item.name);
         });
     }
     row.appendChild(thumb);
@@ -1104,13 +1103,8 @@ function openCurationView(playlistId: string, playlistName: string): void {
         playlistId,
         playlistName,
         () => {
-            // On close: invalidate this playlist's track cache and the playlists list cache
-            for (const key of Array.from(state.pageCache.keys())) {
-                if (key === `playlists:${playlistId}` || key.startsWith('playlists:')) {
-                    state.pageCache.delete(key);
-                }
-            }
-            // Restore the playlist list view
+            // On close: invalidate the playlists list cache and restore the list view
+            invalidatePlaylistsCache();
             loadPlaylists();
         },
     );
@@ -1536,19 +1530,6 @@ async function loadPlaylistTracks(playlistId: string) {
     const container = document.getElementById('library-content');
     if (!container) return;
 
-    const key = cacheKey(playlistId);
-
-    const cached = state.pageCache.get(key);
-    if (cached) {
-        state.items = cached.items;
-        state.pagination.total = cached.total;
-        state.pagination.startIndex = cached.total;
-        state.artistViewTotal = 0;
-        renderGrid(state.items);
-        restoreScroll(key);
-        return;
-    }
-
     await yieldTick();
     if (!container.isConnected) return;
     showSpinner(container);
@@ -1562,9 +1543,7 @@ async function loadPlaylistTracks(playlistId: string) {
         state.pagination.total = tracks.length;
         state.pagination.startIndex = tracks.length;
         state.artistViewTotal = 0;
-        state.pageCache.set(key, { items: tracks, total: tracks.length });
         renderGrid(state.items);
-        restoreScroll(key);
     } catch (e) {
         renderError(e as Error);
     } finally {

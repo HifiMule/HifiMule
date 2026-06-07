@@ -1083,7 +1083,8 @@ mod tests {
                 Matcher::UrlEncoded("userId".into(), USER_ID.into()),
                 Matcher::UrlEncoded("SearchTerm".into(), "Track".into()),
                 Matcher::UrlEncoded("IncludeItemTypes".into(), "Audio".into()),
-                Matcher::UrlEncoded("Limit".into(), "10".into()),
+                Matcher::UrlEncoded("Recursive".into(), "true".into()),
+                Matcher::UrlEncoded("Limit".into(), "25".into()),
                 Matcher::UrlEncoded("Fields".into(), "Id,Name,Album,AlbumArtist,Artists,AlbumId".into()),
             ]))
             .match_header("X-Emby-Token", TOKEN)
