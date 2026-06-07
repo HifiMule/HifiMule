@@ -1270,6 +1270,7 @@ fn song_from_dto(song: SongDto) -> Song {
         is_favorite: None,
         content_type: song.content_type,
         suffix: song.suffix,
+        size_bytes: song.size,
     }
 }
 

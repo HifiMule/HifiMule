@@ -8359,6 +8359,7 @@ mod tests {
                 is_favorite: None,
                 content_type: Some("audio/mpeg".to_string()),
                 suffix: Some("mp3".to_string()),
+                size_bytes: None,
             })
             .collect::<Vec<_>>();
         let provider = FakeBrowseProvider::with_genre_tracks("rock", tracks);
@@ -8397,6 +8398,7 @@ mod tests {
             is_favorite: None,
             content_type: Some("audio/flac".to_string()),
             suffix: Some("flac".to_string()),
+            size_bytes: None,
         });
 
         let (items, playlist) =
@@ -8450,6 +8452,7 @@ mod tests {
             is_favorite: None,
             content_type: Some("audio/mpeg".to_string()),
             suffix: Some("mp3".to_string()),
+            size_bytes: None,
         };
         let provider = FakeBrowseProvider::with_album_and_song(
             crate::domain::models::AlbumWithTracks {
@@ -8670,6 +8673,7 @@ mod tests {
             is_favorite: None,
             content_type: Some("audio/mpeg".to_string()),
             suffix: Some("mp3".to_string()),
+            size_bytes: None,
         };
         let provider = FakePlaylistProvider::with_song("playlist-42", song);
         *state.provider.write().await = Some(provider.clone() as Arc<dyn MediaProvider>);
@@ -8707,6 +8711,7 @@ mod tests {
             is_favorite: None,
             content_type: Some("audio/mpeg".to_string()),
             suffix: Some("mp3".to_string()),
+            size_bytes: None,
         }
     }
 

@@ -782,6 +782,12 @@ pub(crate) fn song_from_item(item: JellyfinItem) -> Song {
         is_favorite: item.user_data.as_ref().map(|ud| ud.is_favorite),
         content_type: None,
         suffix,
+        size_bytes: item
+            .media_sources
+            .as_ref()
+            .and_then(|sources| sources.first())
+            .and_then(|source| source.size)
+            .and_then(|s| u64::try_from(s).ok()),
     }
 }
 
