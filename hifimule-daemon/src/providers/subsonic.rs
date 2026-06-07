@@ -932,6 +932,23 @@ impl SubsonicClient {
         playlist_id: &str,
         ordered_track_ids: &[String],
     ) -> Result<(), ProviderError> {
+        // `createPlaylist` with an existing playlistId REPLACES the playlist contents, so a
+        // request whose id set differs from the current playlist would silently add/drop
+        // tracks (and an empty list would empty the playlist). Validate the request is a pure
+        // reorder — same tracks, same multiplicity — to match the Jellyfin contract and honor
+        // AC1 ("same track set, only the sequence changes"). (Code review 11.9)
+        let current = self.get_playlist(playlist_id).await?;
+        let mut current_ids: Vec<&str> =
+            current.playlist.entry.iter().map(|s| s.id.as_str()).collect();
+        let mut requested_ids: Vec<&str> = ordered_track_ids.iter().map(|s| s.as_str()).collect();
+        current_ids.sort_unstable();
+        requested_ids.sort_unstable();
+        if current_ids != requested_ids {
+            return Err(ProviderError::UnsupportedCapability(format!(
+                "reorder_playlist: requested track set does not match playlist {playlist_id} (reorder must preserve the same tracks)"
+            )));
+        }
+
         let mut params: Vec<(&str, &str)> = vec![("playlistId", playlist_id)];
         for id in ordered_track_ids {
             params.push(("songId", id.as_str()));
@@ -3522,6 +3539,22 @@ mod tests {
     #[tokio::test]
     async fn provider_reorder_playlist_calls_create_playlist_with_ordered_song_ids() {
         let mut server = Server::new_async().await;
+        // Reorder validates the requested set against the current playlist first.
+        let _get = server
+            .mock("GET", "/rest/getPlaylist.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "playlist99".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(r#""playlist":{"id":"playlist99","name":"Road Trip","songCount":2,"duration":0,"entry":[
+                {"id":"song1","title":"Track 1"},
+                {"id":"song2","title":"Track 2"}
+            ]}"#))
+            .create_async()
+            .await;
         let _mock = server
             .mock("GET", "/rest/createPlaylist.view")
             .match_query(Matcher::AllOf({
@@ -3544,5 +3577,40 @@ mod tests {
             .reorder_playlist("playlist99", &["song2".to_string(), "song1".to_string()])
             .await
             .expect("reorder_playlist");
+    }
+
+    #[tokio::test]
+    async fn provider_reorder_playlist_rejects_mismatched_track_set_without_replacing() {
+        let mut server = Server::new_async().await;
+        let _get = server
+            .mock("GET", "/rest/getPlaylist.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "playlist99".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(r#""playlist":{"id":"playlist99","name":"Road Trip","songCount":2,"duration":0,"entry":[
+                {"id":"song1","title":"Track 1"},
+                {"id":"song2","title":"Track 2"}
+            ]}"#))
+            .create_async()
+            .await;
+        // No createPlaylist mock: a destructive replace must NOT be issued for a mismatched set.
+        let _no_create = server
+            .mock("GET", "/rest/createPlaylist.view")
+            .expect(0)
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        // Requested set drops song2 — a subset request must be rejected, not silently applied.
+        let err = provider
+            .reorder_playlist("playlist99", &["song1".to_string()])
+            .await
+            .expect_err("mismatched track set must be rejected");
+        assert!(matches!(err, ProviderError::UnsupportedCapability(_)), "got {err:?}");
+        _no_create.assert_async().await;
     }
 }

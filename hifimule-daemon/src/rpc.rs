@@ -1193,10 +1193,17 @@ async fn handle_playlist_reorder(
         message: "Missing or invalid trackIds array".to_string(),
         data: None,
     })?;
-    let track_ids: Vec<String> = raw_ids
-        .iter()
-        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-        .collect();
+    // Reject non-string entries rather than silently dropping them: a dropped id would
+    // shrink the requested order and, on the Subsonic replace path, could remove a track.
+    let mut track_ids: Vec<String> = Vec::with_capacity(raw_ids.len());
+    for v in raw_ids {
+        let s = v.as_str().ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "trackIds must contain only strings".to_string(),
+            data: None,
+        })?;
+        track_ids.push(s.to_string());
+    }
     provider
         .reorder_playlist(&playlist_id, &track_ids)
         .await

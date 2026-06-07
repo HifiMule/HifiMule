@@ -155,3 +155,8 @@ If future review findings need follow-up, add them as new story scope or reopen 
 
 - **No Enter-to-save / blur-to-commit on rename input** [`hifimule-ui/src/components/PlaylistCurationView.ts`:354] — Only Escape and explicit Save/Cancel resolve the inline rename edit; pressing Enter does nothing and clicking away leaves uncommitted text. UX enhancement, outside AC1–AC3 scope.
 - **Re-render race during rename** [`hifimule-ui/src/components/PlaylistCurationView.ts`:127] — A concurrent `render()` (e.g. a track removal completing in another panel) rebuilds `innerHTML` and re-reads `this.playlistName`, wiping unsaved rename text and re-creating an open delete dialog. Low likelihood (requires editing the name while another async op completes).
+
+## Deferred from: code review of 11-9-playlist-reorder-provider-and-rpc (2026-06-08)
+
+- Jellyfin reorder is non-atomic — a mid-sequence `move_playlist_item` failure leaves the playlist partially reordered with no rollback; the RPC returns `Err` while the first N moves are already persisted server-side. Inherent to the per-entry Move design (no Jellyfin batch/transaction API); acceptable for DAP-sized playlists. [`hifimule-daemon/src/providers/jellyfin.rs` reorder loop]
+- Jellyfin set-mismatch surfaces as `ERR_UNSUPPORTED_CAPABILITY` — a "track not in playlist" desync returns `ProviderError::UnsupportedCapability`, misleading an RPC client into thinking the provider lacks the capability rather than that the request was bad. Spec-prescribed code (Task 3); revisit if a dedicated desync error variant is introduced. [`hifimule-daemon/src/providers/jellyfin.rs` reorder loop]

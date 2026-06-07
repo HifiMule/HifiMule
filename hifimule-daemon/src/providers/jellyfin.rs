@@ -2027,4 +2027,55 @@ mod tests {
             .await
             .expect("reorder_playlist already sorted should succeed without moves");
     }
+
+    #[tokio::test]
+    async fn provider_reorder_playlist_multi_move_keeps_local_mirror_in_sync() {
+        // 3 entries requiring 2 moves — exercises the local-mirror index math across
+        // successive moves (a single-move test cannot catch a mirror/server desync). (Code review 11.9)
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _get = server
+            .mock("GET", "/Playlists/playlist99/Items")
+            .match_query(Matcher::UrlEncoded("userId".into(), USER_ID.into()))
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"Items":[
+                    {"Id":"song1","Name":"Track 1","Type":"Audio","PlaylistItemId":"entry-a"},
+                    {"Id":"song2","Name":"Track 2","Type":"Audio","PlaylistItemId":"entry-b"},
+                    {"Id":"song3","Name":"Track 3","Type":"Audio","PlaylistItemId":"entry-c"}
+                ],"TotalRecordCount":3,"StartIndex":0}"#,
+            )
+            .create_async()
+            .await;
+        // Want order song3, song2, song1 → selection sort issues exactly:
+        //   move entry-c to index 0, then (mirror updated) move entry-b to index 1.
+        let move_c = server
+            .mock("POST", "/Playlists/playlist99/Items/entry-c/Move/0")
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(204)
+            .expect(1)
+            .create_async()
+            .await;
+        let move_b = server
+            .mock("POST", "/Playlists/playlist99/Items/entry-b/Move/1")
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(204)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+        provider
+            .reorder_playlist(
+                "playlist99",
+                &["song3".to_string(), "song2".to_string(), "song1".to_string()],
+            )
+            .await
+            .expect("reorder_playlist");
+
+        move_c.assert_async().await;
+        move_b.assert_async().await;
+    }
 }

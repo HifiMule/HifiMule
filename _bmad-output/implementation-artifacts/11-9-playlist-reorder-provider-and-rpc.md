@@ -4,7 +4,7 @@ baseline_commit: 7a63bb5
 
 # Story 11.9: MediaProvider Reorder Contract — Trait, Adapters & RPC
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -431,3 +431,14 @@ claude-sonnet-4-6
 
 - 2026-06-07: Story 11.9 created — `reorder_playlist` trait method + Jellyfin (selection-sort via Items/Move) & Subsonic (`createPlaylist` set-order) adapters + `playlist.reorder` RPC. Backend-only; reuses `supports_playlist_write`. Status → ready-for-dev.
 - 2026-06-07: Story 11.9 implemented — all 5 backend files modified, 4 new tests added (trait-default, Jellyfin x2, Subsonic, RPC gate extended). 419/419 tests passing. Status → review.
+
+## Review Findings
+
+_Code review 2026-06-08 — Blind Hunter + Edge Case Hunter + Acceptance Auditor. All 5 ACs verified satisfied; all 4 Task-6 tests present; scope boundary (backend-only, no new capability flag) respected._
+
+- [x] [Review][Patch] Enforce strict, non-destructive reorder validation on the Subsonic path (resolved from decision, option 2) — **APPLIED 2026-06-08**: `set_playlist_order` now fetches the current playlist via `get_playlist` and rejects any request whose track set isn't a permutation of the current set (`UnsupportedCapability`), and the RPC handler rejects non-string `trackIds` elements (`ERR_INVALID_PARAMS`) instead of silently dropping them. Tests added (`provider_reorder_playlist_rejects_mismatched_track_set_without_replacing`; existing Subsonic test updated with a `getPlaylist` mock). — `set_playlist_order` issues `createPlaylist?playlistId=…&songId=…`, which **replaces the entire track set**, not just the order, so the same `playlist.reorder` RPC is strict/reorder-only on Jellyfin but add/drop/wipe-capable on Subsonic (empty `trackIds` wipes the playlist; a subset drops tracks; a foreign id is added; non-string elements are silently filtered). **Fix:** before calling `set_playlist_order`, fetch the current playlist and assert `ordered_track_ids` is a permutation of the current track set (same elements, same multiplicity) — reject empty / subset / foreign-id / mismatched requests with an appropriate `ProviderError`, matching Jellyfin's strict contract and AC1's "same track set, only sequence changes." Also tighten the RPC handler so non-string `trackIds` elements are rejected rather than silently dropped. Add a test. Sources: blind+edge+auditor. [`hifimule-daemon/src/providers/subsonic.rs` `set_playlist_order` / `hifimule-daemon/src/rpc.rs` `handle_playlist_reorder`]
+- [x] [Review][Patch] Jellyfin reorder lacks a multi-element (≥3, multi-move) test — **APPLIED 2026-06-08**: added `provider_reorder_playlist_multi_move_keeps_local_mirror_in_sync` (3 entries, 2 moves) asserting the exact `Move/{index}` call sequence (`entry-c→0` then `entry-b→1`), exercising the local-mirror index math across successive moves. [`hifimule-daemon/src/providers/jellyfin.rs` `#[cfg(test)]`]
+- [x] [Review][Defer] Jellyfin reorder is non-atomic — a mid-sequence `move_playlist_item` failure leaves the playlist partially reordered with no rollback; the RPC returns `Err` while the first N moves are already persisted server-side. [`hifimule-daemon/src/providers/jellyfin.rs` reorder loop] — deferred, inherent to the per-entry Move design (no Jellyfin batch/transaction API); acceptable for DAP-sized playlists.
+- [x] [Review][Defer] Jellyfin set-mismatch surfaces as `ERR_UNSUPPORTED_CAPABILITY` — a "track not in playlist" desync returns `ProviderError::UnsupportedCapability`, which to an RPC client implies the provider lacks the capability rather than signalling a bad request. [`hifimule-daemon/src/providers/jellyfin.rs` reorder loop] — deferred, spec-prescribed code (Task 3); revisit if a dedicated desync error variant is introduced.
+
+_Dismissed as noise (2): duplicate track-id ordering (two entries with the same track id are content-interchangeable — the final track sequence still matches the request); `get_playlist_items` order assumption (the call preserves playlist order, same guarantee `remove_from_playlist` already relies on)._
