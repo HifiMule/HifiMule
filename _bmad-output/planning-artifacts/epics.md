@@ -2360,3 +2360,52 @@ So that I can build and expand playlists track-by-track without needing to creat
 - The curation view refresh after adding reuses the existing `fetchPlaylist()` → `render()` cycle.
 - Track context menus apply wherever track rows are rendered: album detail views, artist track listings,
   and server playlist browse views.
+
+### Story 11.8: Playlist Rename and Delete — Curation View Header
+
+As a Ritualist (Arthur),
+I want to rename and delete a playlist directly from the curation view,
+So that I can manage my library's playlist catalogue without leaving the edit context.
+
+**Acceptance Criteria:**
+
+**Given** the curation view is open for a playlist
+**When** I click the playlist name in the header
+**Then** the name becomes an inline `<sl-input>` pre-filled with the current name.
+**And** Save and Cancel affordances appear alongside the input.
+
+**Given** the inline name input is open
+**When** I edit the name and click Save
+**Then** `playlist.rename({ playlistId, name: newName })` is called.
+**And** the header title updates to the new name.
+**And** the input is dismissed.
+
+**Given** the inline name input is open
+**When** I press Escape or click Cancel
+**Then** the input is dismissed with no RPC call.
+
+**Given** the active provider supports playlist write
+**When** the curation view renders
+**Then** a delete icon-button (trash) is visible in the header.
+
+**Given** I click the delete icon-button
+**Then** an `<sl-dialog>` opens showing the playlist name and asking for confirmation.
+
+**Given** the confirmation dialog is open and I confirm
+**Then** `playlist.delete({ playlistId })` is called.
+**And** the UI navigates back to the playlist browser.
+
+**Given** the confirmation dialog is open and I cancel
+**Then** the dialog closes with no RPC call.
+
+**Given** the active provider does not support playlist write
+**Then** the delete icon-button is hidden.
+
+**Technical Notes:**
+- `rename_playlist(id, new_name)` is a new method on the `MediaProvider` trait in `providers/mod.rs`.
+- JellyfinProvider: 2-step — `GET /Users/{uid}/Items/{id}` to fetch current item JSON, update `Name`, then `POST /Items/{id}` with the full body.
+- SubsonicProvider: single-step — `GET /rest/updatePlaylist.view?playlistId={id}&name={encoded_name}`.
+- Daemon: new `playlist.rename({ playlistId, name })` RPC handler calling `provider.rename_playlist`.
+- Frontend: editable name state in `PlaylistCurationView.ts`; delete affordance reuses the existing `sl-dialog` pattern from Story 11.5's "Save as playlist" flow.
+- `playlist.delete` RPC from Story 11.4 is reused unchanged.
+- New i18n keys: `playlist.curation.rename_save`, `playlist.curation.rename_cancel`, `playlist.curation.delete_title`, `playlist.curation.delete_body`, `playlist.curation.delete_confirm`, `playlist.curation.delete_cancel_btn`.
