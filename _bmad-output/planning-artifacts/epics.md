@@ -2307,3 +2307,56 @@ So that I can remove specific artists or albums from a playlist without rebuildi
 - Artist and album grouping is derived from `Track.artistName` and `Track.albumName` in the playlist response.
 - Storage size uses `Track.sizeBytes`; tracks without a value are excluded from the total without error.
 - This view edits the server playlist only — it does not trigger a device sync.
+
+### Story 11.7: Add Tracks to Playlist — Browse Context Menu & Curation View
+
+As a Ritualist (Arthur),
+I want to add individual tracks to a server playlist from browse views and from within the curation view,
+So that I can build and expand playlists track-by-track without needing to create a new playlist each time.
+
+**Acceptance Criteria:**
+
+**Given** the active provider supports playlist write
+**When** I right-click an individual track row in any browse view
+**Then** an "Add to playlist…" option appears in the context menu.
+
+**Given** I select "Add to playlist…" from a track's context menu
+**When** the sub-menu or dialog opens
+**Then** a list of existing server playlists is shown alongside a "New playlist…" option.
+
+**Given** I select an existing playlist from the "Add to playlist…" dialog
+**Then** `playlist.addTracks({ playlistId, trackIds: [track.id] })` is called.
+**And** a success notification is shown confirming the track was added.
+
+**Given** I select "New playlist…" from the "Add to playlist…" dialog
+**Then** I am prompted for a playlist name.
+**And** `playlist.create({ name, itemIds: [track.id] })` is called.
+**And** the created playlist becomes available in the server playlist browser.
+
+**Given** the active provider does not support playlist write
+**Then** the "Add to playlist…" context action is hidden on track rows.
+
+**Given** the curation view is open for a playlist
+**When** I click the "Add tracks" button in the statistics header
+**Then** a search dialog opens that accepts a query (title, artist, or album).
+
+**Given** I enter a query in the "Add tracks" search dialog
+**Then** matching tracks from the library are displayed as a selectable list.
+
+**Given** I select one or more tracks in the search dialog and confirm
+**Then** `playlist.addTracks({ playlistId, trackIds: selectedIds })` is called.
+**And** the curation view re-fetches the playlist and re-renders all panels.
+**And** the statistics header updates to reflect the new track count, duration, and storage size.
+
+**Given** I open the "Add tracks" search dialog and cancel without selecting
+**Then** no RPC is called and the curation view is unchanged.
+
+**Technical Notes:**
+- `playlist.addTracks` and `playlist.create` RPCs are already specced in Story 11.4 — no new daemon work.
+- No provider changes needed; Jellyfin and Subsonic adapters already implement `add_to_playlist`.
+- The track context menu reuses the same `supports_playlist_write` capability gate as Story 11.5.
+- The "Add tracks" search dialog should call an existing browse RPC (e.g., `browse.getTracks` or equivalent)
+  filtered by the user's query — no new daemon endpoint needed if a track search RPC exists.
+- The curation view refresh after adding reuses the existing `fetchPlaylist()` → `render()` cycle.
+- Track context menus apply wherever track rows are rendered: album detail views, artist track listings,
+  and server playlist browse views.
