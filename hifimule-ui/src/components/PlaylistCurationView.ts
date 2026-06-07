@@ -31,6 +31,8 @@ export class PlaylistCurationView {
     private isAddingTracks = false;
     private supportsPlaylistWrite: boolean = false;
     private isRenamingPlaylist = false;
+    private isSavingRename = false;
+    private isDeleting = false;
 
     constructor(
         container: HTMLElement,
@@ -178,7 +180,7 @@ export class PlaylistCurationView {
                         : `<span
                                class="playlist-name-title"
                                style="font-weight: var(--sl-font-weight-semibold); font-size: var(--sl-font-size-medium); cursor: pointer; border-bottom: 1px dashed var(--sl-color-neutral-400);"
-                               title="${t('playlist.curation.rename_save')}"
+                               title="${t('playlist.curation.rename_hint')}"
                            >${this.escapeHtml(this.playlistName)}</span>`
                     }
                     ${this.supportsPlaylistWrite
@@ -334,11 +336,21 @@ export class PlaylistCurationView {
 
         // Rename: save
         this.container.querySelector('.playlist-rename-save')?.addEventListener('click', async () => {
+            if (this.isSavingRename) return;
             const input = this.container.querySelector('#playlist-rename-input') as any;
             const newName = input?.value?.trim();
             if (newName && newName !== this.playlistName) {
-                await rpcCall('playlist.rename', { playlistId: this.playlistId, name: newName });
-                this.playlistName = newName;
+                this.isSavingRename = true;
+                try {
+                    await rpcCall('playlist.rename', { playlistId: this.playlistId, name: newName });
+                    this.playlistName = newName;
+                } catch (err) {
+                    const message = err instanceof Error ? err.message : String(err);
+                    showToast(t('playlist.curation.rename_error', { message }), 'danger');
+                    return; // stay in edit mode so the user can retry
+                } finally {
+                    this.isSavingRename = false;
+                }
             }
             this.isRenamingPlaylist = false;
             this.render();
@@ -370,7 +382,17 @@ export class PlaylistCurationView {
 
         // Delete: confirm
         this.container.querySelector('.playlist-delete-confirm')?.addEventListener('click', async () => {
-            await rpcCall('playlist.delete', { playlistId: this.playlistId });
+            if (this.isDeleting) return;
+            this.isDeleting = true;
+            try {
+                await rpcCall('playlist.delete', { playlistId: this.playlistId });
+            } catch (err) {
+                const message = err instanceof Error ? err.message : String(err);
+                showToast(t('playlist.curation.delete_error', { message }), 'danger');
+                return; // leave the dialog open so the user can retry or cancel
+            } finally {
+                this.isDeleting = false;
+            }
             this.onClose();
         });
 

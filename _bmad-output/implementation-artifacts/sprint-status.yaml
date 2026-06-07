@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-06-07  # Story 11.8 review
+last_updated: 2026-06-07  # Story 11.8 done (code review)
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -144,4 +144,4 @@ development_status:
   11-5-save-selection-as-playlist-ui-and-context-menu: done
   11-6-dual-panel-playlist-curation-view-and-stats: done
   11-7-add-tracks-to-playlist-browse-and-curation: done
-  11-8-playlist-rename-and-delete: review
+  11-8-playlist-rename-and-delete: done

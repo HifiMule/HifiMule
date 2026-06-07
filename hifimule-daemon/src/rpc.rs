@@ -1146,7 +1146,15 @@ async fn handle_playlist_rename(
             message: "Missing name".to_string(),
             data: None,
         })?
+        .trim()
         .to_owned();
+    if name.is_empty() {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Playlist name must not be empty".to_string(),
+            data: None,
+        });
+    }
     provider
         .rename_playlist(&playlist_id, &name)
         .await

@@ -4,7 +4,7 @@ baseline_commit: d712ade
 
 # Story 11.8: Playlist Rename and Delete — Curation View Header
 
-Status: review
+Status: done
 
 ## Story
 
@@ -595,3 +595,15 @@ _None — implementation was straightforward with no blockers._
 
 - 2026-06-07: Story 11.8 created — playlist rename (new backend) and delete UI in curation view header ready for dev.
 - 2026-06-07: Story 11.8 implemented — `rename_playlist` trait + Jellyfin/Subsonic impls, `playlist.rename` RPC, inline rename UI and delete confirmation dialog in `PlaylistCurationView`. 415 Rust tests pass. Status → review.
+- 2026-06-07: Code review — 1 decision-needed + 3 patches applied (Jellyfin `skip_serializing_if` hardening, rename/delete error handling + re-entrancy guards, daemon empty-name validation, tooltip i18n key), 2 low-priority items deferred, 6 dismissed. `cargo check` 0 errors, 411 tests pass, `tsc` no new errors, catalog.json valid. Status → done.
+
+## Review Findings
+
+_Code review 2026-06-07 — Blind Hunter + Edge Case Hunter + Acceptance Auditor. All 8 ACs met as written; findings below are robustness/UX/data-integrity gaps. 6 findings dismissed as noise (escapeAttr XSS — escapeAttr escapes `&"<>`; "Escape listener dies after render" — `render()` re-runs `bindEvents()`; Subsonic body discard — envelope `status` is checked in `get()`; hardcoded English RPC error strings — consistent with existing `rpc.rs` handlers; stale list name — `onClose()` invalidates cache + reloads list; rename path not capability-gated — spec AC1 intent + view only opens when write supported + backend guards it)._
+
+- [x] [Review][Patch] (was Decision — resolved: harden) Jellyfin `rename_item` partial GET-then-POST can clobber playlist metadata — **FIXED**: added `#[serde(skip_serializing_if = "Option::is_none")]` to all `Option` fields of `JellyfinItem` so unset fields are no longer POSTed as explicit `null`. [`hifimule-daemon/src/api.rs`:128-170]
+- [x] [Review][Patch] Rename Save + Delete Confirm lack error handling and re-entrancy guards — **FIXED**: both handlers now use a `try/catch/finally` with `isSavingRename` / `isDeleting` guard flags and surface failures via `showToast(..., 'danger')`; rename stays in edit mode and delete keeps the dialog open on failure so the user can retry. [`hifimule-ui/src/components/PlaylistCurationView.ts`:335-359, 376-389]
+- [x] [Review][Patch] Daemon `handle_playlist_rename` does not validate empty/whitespace name — **FIXED**: handler now trims `name` and rejects empty with `ERR_INVALID_PARAMS`. [`hifimule-daemon/src/rpc.rs` `handle_playlist_rename`]
+- [x] [Review][Patch] Click-to-rename title tooltip uses the wrong i18n key — **FIXED**: title span now uses new `playlist.curation.rename_hint` ("Rename playlist") key, added across en/fr/es. [`hifimule-ui/src/components/PlaylistCurationView.ts`:181]
+- [x] [Review][Defer] No Enter-to-save / blur-to-commit on rename input — only Escape + explicit Save/Cancel resolve the edit; Enter does nothing, click-away leaves uncommitted text. UX enhancement, not required by AC1–AC3. [`hifimule-ui/src/components/PlaylistCurationView.ts`:354] — deferred, UX enhancement out of AC scope
+- [x] [Review][Defer] Re-render race during rename — a concurrent `render()` (e.g. a track-removal completing in another panel) rebuilds `innerHTML` and re-reads `this.playlistName`, wiping unsaved rename text and re-creating an open delete dialog. Low likelihood (requires editing the name while another async op completes). [`hifimule-ui/src/components/PlaylistCurationView.ts`:127] — deferred, edge timing low likelihood

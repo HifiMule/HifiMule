@@ -150,3 +150,8 @@ If future review findings need follow-up, add them as new story scope or reopen 
 - **`handle_playlist_add_items` reports partial success as full success** [`hifimule-daemon/src/rpc.rs`] — Unresolvable items are logged to stderr and skipped, returning `{ ok: true }` even if only some resolved (cf. `playlist.create` which returns `skippedItemIds`). Not reachable from the current UI (context menu always sends a single item), so robustness-only for now.
 - **No single-dialog guard — overlapping Add-to-playlist / Add-tracks dialogs possible** [`hifimule-ui/src/components/MediaCard.ts`, `hifimule-ui/src/components/PlaylistCurationView.ts`] — Rapid re-trigger can spawn multiple stacked dialogs (the context menu uses `dismissActiveMenu`, dialogs do not). Low-impact UX polish.
 - **Initial `browse.listPlaylists` failure leaves Add-to-playlist dialog with no retry** [`hifimule-ui/src/components/MediaCard.ts`] — Shows an error but clears the list with no in-dialog retry; user must close/reopen. Low-impact UX.
+
+## Deferred from: code review of 11-8-playlist-rename-and-delete (2026-06-07)
+
+- **No Enter-to-save / blur-to-commit on rename input** [`hifimule-ui/src/components/PlaylistCurationView.ts`:354] — Only Escape and explicit Save/Cancel resolve the inline rename edit; pressing Enter does nothing and clicking away leaves uncommitted text. UX enhancement, outside AC1–AC3 scope.
+- **Re-render race during rename** [`hifimule-ui/src/components/PlaylistCurationView.ts`:127] — A concurrent `render()` (e.g. a track removal completing in another panel) rebuilds `innerHTML` and re-reads `this.playlistName`, wiping unsaved rename text and re-creating an open delete dialog. Low likelihood (requires editing the name while another async op completes).
