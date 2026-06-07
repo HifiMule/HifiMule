@@ -397,6 +397,13 @@ impl MediaProvider for JellyfinProvider {
             .map_err(Self::map_error)
     }
 
+    async fn rename_playlist(&self, playlist_id: &str, new_name: &str) -> Result<(), ProviderError> {
+        self.client
+            .rename_item(self.url(), self.token(), self.user_id(), playlist_id, new_name)
+            .await
+            .map_err(Self::map_error)
+    }
+
     async fn search(&self, query: &str) -> Result<SearchResult, ProviderError> {
         let songs = self
             .client

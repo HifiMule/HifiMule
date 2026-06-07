@@ -1107,6 +1107,7 @@ function openCurationView(playlistId: string, playlistName: string): void {
             invalidatePlaylistsCache();
             loadPlaylists();
         },
+        _supportsPlaylistWrite,
     );
 
     view.load();

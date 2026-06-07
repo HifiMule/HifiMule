@@ -235,6 +235,16 @@ pub trait MediaProvider: Send + Sync {
         ))
     }
 
+    async fn rename_playlist(
+        &self,
+        _playlist_id: &str,
+        _new_name: &str,
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "rename_playlist is not supported by this provider".to_string(),
+        ))
+    }
+
     fn change_metadata(&self, _event: &ChangeEvent) -> Option<ProviderChangeMetadata> {
         None
     }
@@ -1015,5 +1025,15 @@ mod tests {
             panic!("expected UnsupportedCapability, got {result:?}");
         };
         assert!(msg.contains("delete_playlist"), "message should name the method: {msg}");
+    }
+
+    #[tokio::test]
+    async fn trait_default_rename_playlist_returns_unsupported() {
+        let provider = MinimalProvider;
+        let result = provider.rename_playlist("playlist-1", "New Name").await;
+        let Err(ProviderError::UnsupportedCapability(msg)) = result else {
+            panic!("expected UnsupportedCapability, got {result:?}");
+        };
+        assert!(msg.contains("rename_playlist"), "message should name the method: {msg}");
     }
 }

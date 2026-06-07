@@ -29,17 +29,21 @@ export class PlaylistCurationView {
     private onClose: () => void;
     private isRemoving = false;
     private isAddingTracks = false;
+    private supportsPlaylistWrite: boolean = false;
+    private isRenamingPlaylist = false;
 
     constructor(
         container: HTMLElement,
         playlistId: string,
         playlistName: string,
         onClose: () => void,
+        supportsPlaylistWrite = false,
     ) {
         this.container = container;
         this.playlistId = playlistId;
         this.playlistName = playlistName;
         this.onClose = onClose;
+        this.supportsPlaylistWrite = supportsPlaylistWrite;
     }
 
     async load(): Promise<void> {
@@ -154,8 +158,48 @@ export class PlaylistCurationView {
                         label="${t('playlist.curation.close')}"
                         style="font-size: 1.1rem;"
                     ></sl-icon-button>
-                    <span style="font-weight: var(--sl-font-weight-semibold); font-size: var(--sl-font-size-medium);">${this.escapeHtml(this.playlistName)}</span>
+                    ${this.isRenamingPlaylist
+                        ? `<sl-input
+                               id="playlist-rename-input"
+                               value="${this.escapeAttr(this.playlistName)}"
+                               size="small"
+                               style="flex: 1; max-width: 300px;"
+                           ></sl-input>
+                           <sl-icon-button
+                               class="playlist-rename-save"
+                               name="check"
+                               label="${t('playlist.curation.rename_save')}"
+                           ></sl-icon-button>
+                           <sl-icon-button
+                               class="playlist-rename-cancel"
+                               name="x"
+                               label="${t('playlist.curation.rename_cancel')}"
+                           ></sl-icon-button>`
+                        : `<span
+                               class="playlist-name-title"
+                               style="font-weight: var(--sl-font-weight-semibold); font-size: var(--sl-font-size-medium); cursor: pointer; border-bottom: 1px dashed var(--sl-color-neutral-400);"
+                               title="${t('playlist.curation.rename_save')}"
+                           >${this.escapeHtml(this.playlistName)}</span>`
+                    }
+                    ${this.supportsPlaylistWrite
+                        ? `<sl-icon-button
+                               class="playlist-delete-btn"
+                               name="trash"
+                               label="${t('playlist.curation.delete_title')}"
+                               style="color: var(--sl-color-danger-600); margin-left: auto;"
+                           ></sl-icon-button>`
+                        : ''
+                    }
                 </div>
+                <sl-dialog id="playlist-delete-dialog" label="${t('playlist.curation.delete_title')}">
+                    <p>${t('playlist.curation.delete_body', { name: this.escapeHtml(this.playlistName) })}</p>
+                    <sl-button slot="footer" class="playlist-delete-cancel" variant="default">
+                        ${t('playlist.curation.delete_cancel_btn')}
+                    </sl-button>
+                    <sl-button slot="footer" class="playlist-delete-confirm" variant="danger">
+                        ${t('playlist.curation.delete_confirm')}
+                    </sl-button>
+                </sl-dialog>
                 ${this.renderStats()}
                 <div class="curation-panels" style="
                     display: flex;
@@ -277,6 +321,56 @@ export class PlaylistCurationView {
 
     private bindEvents(): void {
         this.container.querySelector('#curation-close-btn')?.addEventListener('click', () => {
+            this.onClose();
+        });
+
+        // Rename: click title → enter edit mode
+        this.container.querySelector('.playlist-name-title')?.addEventListener('click', () => {
+            this.isRenamingPlaylist = true;
+            this.render();
+            const input = this.container.querySelector('#playlist-rename-input') as any;
+            if (input) input.focus();
+        });
+
+        // Rename: save
+        this.container.querySelector('.playlist-rename-save')?.addEventListener('click', async () => {
+            const input = this.container.querySelector('#playlist-rename-input') as any;
+            const newName = input?.value?.trim();
+            if (newName && newName !== this.playlistName) {
+                await rpcCall('playlist.rename', { playlistId: this.playlistId, name: newName });
+                this.playlistName = newName;
+            }
+            this.isRenamingPlaylist = false;
+            this.render();
+        });
+
+        // Rename: cancel
+        this.container.querySelector('.playlist-rename-cancel')?.addEventListener('click', () => {
+            this.isRenamingPlaylist = false;
+            this.render();
+        });
+
+        // Rename: Escape key
+        this.container.querySelector('#playlist-rename-input')?.addEventListener('keydown', (e) => {
+            if ((e as KeyboardEvent).key === 'Escape') {
+                this.isRenamingPlaylist = false;
+                this.render();
+            }
+        });
+
+        // Delete: open dialog
+        this.container.querySelector('.playlist-delete-btn')?.addEventListener('click', () => {
+            (this.container.querySelector('#playlist-delete-dialog') as any)?.show();
+        });
+
+        // Delete: cancel
+        this.container.querySelector('.playlist-delete-cancel')?.addEventListener('click', () => {
+            (this.container.querySelector('#playlist-delete-dialog') as any)?.hide();
+        });
+
+        // Delete: confirm
+        this.container.querySelector('.playlist-delete-confirm')?.addEventListener('click', async () => {
+            await rpcCall('playlist.delete', { playlistId: this.playlistId });
             this.onClose();
         });
 

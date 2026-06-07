@@ -424,6 +424,12 @@ impl MediaProvider for SubsonicProvider {
         self.client.delete_playlist(playlist_id).await
     }
 
+    async fn rename_playlist(&self, playlist_id: &str, new_name: &str) -> Result<(), ProviderError> {
+        self.client
+            .update_playlist_rename(playlist_id, new_name)
+            .await
+    }
+
     async fn search(&self, query: &str) -> Result<SearchResult, ProviderError> {
         let result = self.client.search3(query).await?.search_result3;
 
@@ -897,6 +903,17 @@ impl SubsonicClient {
 
     async fn delete_playlist(&self, playlist_id: &str) -> Result<(), ProviderError> {
         let _: NoBody = self.get("deletePlaylist", &[("id", playlist_id)]).await?;
+        Ok(())
+    }
+
+    async fn update_playlist_rename(
+        &self,
+        playlist_id: &str,
+        new_name: &str,
+    ) -> Result<(), ProviderError> {
+        let _: NoBody = self
+            .get("updatePlaylist", &[("playlistId", playlist_id), ("name", new_name)])
+            .await?;
         Ok(())
     }
 

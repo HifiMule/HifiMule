@@ -1507,6 +1507,49 @@ impl JellyfinClient {
         Ok(())
     }
 
+    pub async fn rename_item(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        item_id: &str,
+        new_name: &str,
+    ) -> Result<()> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        // Step 1: fetch current item JSON
+        let mut item = self
+            .get_item_details(url, token, user_id, item_id)
+            .await?;
+
+        // Step 2: mutate name and POST back
+        item.name = new_name.to_string();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let endpoint = jellyfin_endpoint(url, &["Items", item_id])?;
+
+        let response = self
+            .client
+            .post(endpoint)
+            .headers(headers)
+            .json(&item)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!("Server returned status: {} — {}", status, text));
+        }
+        Ok(())
+    }
+
     async fn get_music_items(
         &self,
         url: &str,

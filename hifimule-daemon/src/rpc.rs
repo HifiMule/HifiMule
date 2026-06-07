@@ -370,6 +370,7 @@ async fn handler(
         "playlist.addTracks" => handle_playlist_add_tracks(&state, payload.params).await,
         "playlist.removeTracks" => handle_playlist_remove_tracks(&state, payload.params).await,
         "playlist.delete" => handle_playlist_delete(&state, payload.params).await,
+        "playlist.rename" => handle_playlist_rename(&state, payload.params).await,
         _ => Err(JsonRpcError {
             code: ERR_METHOD_NOT_FOUND,
             message: hifimule_i18n::t("error.method_not_found"),
@@ -1108,6 +1109,46 @@ async fn handle_playlist_delete(
         .to_owned();
     provider
         .delete_playlist(&playlist_id)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+async fn handle_playlist_rename(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let provider = require_provider(state).await?;
+    if !provider.capabilities().supports_playlist_write {
+        return Err(JsonRpcError {
+            code: ERR_UNSUPPORTED_CAPABILITY,
+            message: "Connected provider does not support playlist write".to_string(),
+            data: None,
+        });
+    }
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let playlist_id = params["playlistId"]
+        .as_str()
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing playlistId".to_string(),
+            data: None,
+        })?
+        .to_owned();
+    let name = params["name"]
+        .as_str()
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing name".to_string(),
+            data: None,
+        })?
+        .to_owned();
+    provider
+        .rename_playlist(&playlist_id, &name)
         .await
         .map_err(provider_error_to_rpc)?;
     Ok(serde_json::json!({ "ok": true }))
