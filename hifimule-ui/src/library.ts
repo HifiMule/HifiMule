@@ -1096,6 +1096,7 @@ function openCurationView(playlistId: string, playlistName: string): void {
     const container = document.getElementById('library-content');
     if (!container) return;
 
+    teardownListScrollHandler();
     saveScroll();
 
     const view = new PlaylistCurationView(

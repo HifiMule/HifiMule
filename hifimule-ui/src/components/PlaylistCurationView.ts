@@ -5,7 +5,7 @@ function formatDuration(totalSecs: number): string {
     const h = Math.floor(totalSecs / 3600);
     const m = Math.floor((totalSecs % 3600) / 60);
     const s = totalSecs % 60;
-    if (h > 0) return `${h}h ${m}m`;
+    if (h > 0) return `${h}h ${m}m ${s}s`;
     if (m > 0) return `${m}m ${s}s`;
     return `${s}s`;
 }
@@ -24,7 +24,9 @@ export class PlaylistCurationView {
     private playlistName: string;
     private tracks: BrowseTrack[] = [];
     private selectedArtist: string | null = null;
+    private selectedAlbum: string | null = null;
     private onClose: () => void;
+    private isRemoving = false;
 
     constructor(
         container: HTMLElement,
@@ -63,23 +65,32 @@ export class PlaylistCurationView {
 
     private getTrackIdsByArtist(artistName: string): string[] {
         return this.tracks
-            .filter(t => (t.artistName || 'Unknown Artist') === artistName)
-            .map(t => t.id);
+            .filter(track => (track.artistName || 'Unknown Artist') === artistName)
+            .map(track => track.id);
     }
 
     private getTrackIdsByAlbum(artistName: string, albumName: string): string[] {
         return this.tracks
-            .filter(t =>
-                (t.artistName || 'Unknown Artist') === artistName &&
-                (t.albumName || 'Unknown Album') === albumName
+            .filter(track =>
+                (track.artistName || 'Unknown Artist') === artistName &&
+                (track.albumName || 'Unknown Album') === albumName
             )
-            .map(t => t.id);
+            .map(track => track.id);
+    }
+
+    private getTracksForPanel(): BrowseTrack[] {
+        if (!this.selectedArtist) return [];
+        return this.tracks.filter(track => {
+            if ((track.artistName || 'Unknown Artist') !== this.selectedArtist) return false;
+            if (this.selectedAlbum !== null && (track.albumName || 'Unknown Album') !== this.selectedAlbum) return false;
+            return true;
+        });
     }
 
     private renderStats(): string {
         const count = this.tracks.length;
-        const totalSecs = this.tracks.reduce((s, t) => s + (t.duration ?? 0), 0);
-        const totalBytes = this.tracks.reduce((s, t) => s + (t.sizeBytes ?? 0), 0);
+        const totalSecs = this.tracks.reduce((s, track) => s + (track.duration ?? 0), 0);
+        const totalBytes = this.tracks.reduce((s, track) => s + (track.sizeBytes ?? 0), 0);
         return `
             <div class="curation-stats" style="
                 padding: 0.5rem 1rem;
@@ -108,6 +119,13 @@ export class PlaylistCurationView {
         const albums = selectedArtist
             ? Array.from(artistIndex.get(selectedArtist)!).sort((a, b) => a.localeCompare(b))
             : [];
+
+        // Reset selectedAlbum if it no longer exists for this artist
+        if (this.selectedAlbum !== null && !albums.includes(this.selectedAlbum)) {
+            this.selectedAlbum = null;
+        }
+
+        const panelTracks = this.getTracksForPanel();
 
         this.container.innerHTML = `
             <div class="curation-view" style="display: flex; flex-direction: column; height: 100%; overflow: hidden;">
@@ -174,13 +192,16 @@ export class PlaylistCurationView {
                         ${!selectedArtist
                             ? `<p style="padding: 1rem; color: var(--sl-color-neutral-500);">${t('playlist.curation.select_artist')}</p>`
                             : albums.map(album => `
-                                <div class="curation-album-row"
+                                <div class="curation-album-row${album === this.selectedAlbum ? ' curation-album-focused' : ''}"
                                      data-artist="${this.escapeAttr(selectedArtist!)}"
                                      data-album="${this.escapeAttr(album)}"
                                      style="
                                         display: flex;
                                         align-items: center;
                                         padding: 0.5rem 0.75rem;
+                                        cursor: pointer;
+                                        background: ${album === this.selectedAlbum ? 'var(--sl-color-primary-50)' : 'transparent'};
+                                        border-left: 3px solid ${album === this.selectedAlbum ? 'var(--sl-color-primary-600)' : 'transparent'};
                                         gap: 0.5rem;
                                      ">
                                     <span style="flex: 1; font-size: var(--sl-font-size-small); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;"
@@ -198,11 +219,48 @@ export class PlaylistCurationView {
                         }
                     </div>
                 </div>
+                <div id="curation-track-panel" style="
+                    border-top: 1px solid var(--sl-color-neutral-200);
+                    overflow-y: auto;
+                    max-height: 40%;
+                    padding: 0.5rem 0;
+                    flex-shrink: 0;
+                ">
+                    ${panelTracks.length === 0
+                        ? `<p style="padding: 0.5rem 1rem; color: var(--sl-color-neutral-500); font-size: var(--sl-font-size-small);">${t('playlist.curation.no_tracks')}</p>`
+                        : panelTracks.map(track => `
+                            <div class="curation-track-row"
+                                 style="display: flex; align-items: center; padding: 0.35rem 0.75rem; gap: 0.5rem;">
+                                <span style="flex: 1; font-size: var(--sl-font-size-small); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;"
+                                      title="${this.escapeAttr(track.title)}">${this.escapeHtml(track.title)}</span>
+                                <span style="font-size: var(--sl-font-size-x-small); color: var(--sl-color-neutral-500); flex-shrink: 0;">
+                                    ${formatDuration(track.duration ?? 0)}
+                                </span>
+                                <sl-icon-button
+                                    class="curation-remove-track"
+                                    name="x-circle"
+                                    data-track-id="${this.escapeAttr(track.id)}"
+                                    label="${t('playlist.curation.remove_track')}"
+                                    style="font-size: 0.9rem; flex-shrink: 0;"
+                                ></sl-icon-button>
+                            </div>
+                        `).join('')
+                    }
+                </div>
                 <sl-alert id="curation-error" variant="danger" closable style="display:none; margin: 0.5rem;"></sl-alert>
             </div>
         `;
 
         this.bindEvents();
+
+        requestAnimationFrame(() => {
+            const artistPanel = this.container.querySelector<HTMLElement>('#curation-artist-panel');
+            const selectedRow = artistPanel?.querySelector<HTMLElement>('.curation-artist-row.curation-selected');
+            if (artistPanel && selectedRow) {
+                artistPanel.scrollTop =
+                    selectedRow.getBoundingClientRect().top - artistPanel.getBoundingClientRect().top;
+            }
+        });
     }
 
     private bindEvents(): void {
@@ -230,10 +288,33 @@ export class PlaylistCurationView {
         });
 
         this.container.querySelectorAll<HTMLElement>('.curation-remove-album').forEach(btn => {
-            btn.addEventListener('click', async () => {
+            btn.addEventListener('click', async (e) => {
+                e.stopPropagation();
                 const artist = (btn as any).dataset?.artist ?? btn.closest('[data-artist]')?.getAttribute('data-artist');
                 const album = (btn as any).dataset?.album ?? btn.closest('[data-album]')?.getAttribute('data-album');
                 if (artist && album) await this.removeAlbum(artist, album);
+            });
+        });
+
+        // Album row click — toggle album focus to filter the track panel
+        this.container.querySelectorAll<HTMLElement>('.curation-album-row').forEach(row => {
+            row.addEventListener('click', (e) => {
+                if ((e.target as HTMLElement).closest('.curation-remove-album')) return;
+                const album = row.dataset.album;
+                if (album) {
+                    this.selectedAlbum = album === this.selectedAlbum ? null : album;
+                    this.render();
+                }
+            });
+        });
+
+        // Track remove buttons
+        this.container.querySelectorAll<HTMLElement>('.curation-remove-track').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const trackId = (btn as any).dataset?.trackId
+                    ?? btn.closest('[data-track-id]')?.getAttribute('data-track-id');
+                if (trackId) await this.doRemove([trackId]);
             });
         });
     }
@@ -242,19 +323,21 @@ export class PlaylistCurationView {
         const trackIds = this.getTrackIdsByArtist(artistName);
         if (trackIds.length === 0) return;
         await this.doRemove(trackIds);
-        if (this.selectedArtist === artistName) this.selectedArtist = null;
     }
 
     private async removeAlbum(artistName: string, albumName: string): Promise<void> {
         const trackIds = this.getTrackIdsByAlbum(artistName, albumName);
         if (trackIds.length === 0) return;
+        if (this.selectedAlbum === albumName) this.selectedAlbum = null;
         await this.doRemove(trackIds);
     }
 
     private async doRemove(trackIds: string[]): Promise<void> {
+        if (this.isRemoving) return;
+        this.isRemoving = true;
         // Optimistic local update — removes from local state before RPC returns
         const removedSet = new Set(trackIds);
-        this.tracks = this.tracks.filter(t => !removedSet.has(t.id));
+        this.tracks = this.tracks.filter(track => !removedSet.has(track.id));
 
         let errorMsg: string | null = null;
         try {
@@ -264,6 +347,8 @@ export class PlaylistCurationView {
             });
         } catch (err) {
             errorMsg = err instanceof Error ? err.message : String(err);
+        } finally {
+            this.isRemoving = false;
         }
 
         this.render();

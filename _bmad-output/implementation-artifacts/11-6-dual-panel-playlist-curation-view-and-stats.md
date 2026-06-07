@@ -26,6 +26,12 @@ so that I can remove specific artists or albums from a playlist without rebuildi
 
 6. **Given** I close the curation view **Then** the server playlist reflects all removals made during the session **And** the playlist list view is restored.
 
+7. **Given** an artist is selected in the left panel **When** the curation view renders or updates **Then** a track panel below the artist/album panels shows all tracks by that artist that are in the playlist **And** each track row shows the track title, duration, and a "Remove track" button.
+
+8. **Given** I click on an album row in the right panel (not the remove button) **Then** the album is highlighted as focused **And** the track panel filters to show only tracks from that album that are in the playlist **And** clicking the focused album again restores the full artist track list.
+
+9. **Given** I click "Remove track" on a track in the track panel **Then** that single track is removed from the playlist via `playlist.removeTracks` **And** the track disappears from the track panel **And** if the artist has no remaining tracks in the playlist the artist also disappears from the left panel **And** the statistics header updates.
+
 ## Tasks / Subtasks
 
 - [x] Task 1: Add i18n keys (AC: 1–6)
@@ -507,11 +513,130 @@ so that I can remove specific artists or albums from a playlist without rebuildi
     - Re-open the curated playlist. Confirm the removed tracks are gone (server reflects changes — requires re-fetching via `browse.getPlaylist`).
     - Click the playlist card body (not the curate button). Confirm it still navigates to the flat track view as before.
 
+- [x] Task 7: Add i18n keys for track removal (AC: 7–9)
+  - [ ] In `hifimule-i18n/catalog.json`, add to the `"en"`, `"fr"`, and `"es"` blocks (after existing `playlist.curation.*` keys):
+
+    ```json
+    "playlist.curation.remove_track": "Remove track",
+    "playlist.curation.no_tracks": "No tracks for this selection"
+    ```
+
+    **Key notes:**
+    - 2 keys × 3 languages = 6 additions total.
+    - Maintain valid JSON — no trailing commas on the last key in each language object.
+
+- [x] Task 8: Add `selectedAlbum` state and album focus interaction (AC: 8)
+  - [ ] In `PlaylistCurationView.ts`, add `private selectedAlbum: string | null = null` field.
+  - [ ] In `render()`, album rows get a click handler on the row body (separate from the remove button):
+
+    ```typescript
+    row.addEventListener('click', (e) => {
+        if ((e.target as HTMLElement).closest('.curation-remove-album')) return;
+        const album = row.dataset.album;
+        if (album) {
+            this.selectedAlbum = album === this.selectedAlbum ? null : album;
+            this.render();
+        }
+    });
+    ```
+
+    Toggle off on second click (so clicking the focused album again shows all artist tracks).
+
+  - [ ] Album rows get a highlighted state when `album === this.selectedAlbum` — use same left-border accent + background-tint pattern already used for artist rows:
+
+    ```typescript
+    background: ${album === this.selectedAlbum ? 'var(--sl-color-primary-50)' : 'transparent'};
+    border-left: 3px solid ${album === this.selectedAlbum ? 'var(--sl-color-primary-600)' : 'transparent'};
+    ```
+
+  - [ ] In `removeAlbum()`, after filtering `this.tracks` and before calling `this.render()`, reset `selectedAlbum` if the removed album was focused:
+
+    ```typescript
+    if (this.selectedAlbum === albumName) this.selectedAlbum = null;
+    ```
+
+- [x] Task 9: Add track panel below artist/album panels (AC: 7, 9)
+  - [ ] Add `private getTracksForPanel(): BrowseTrack[]` helper to `PlaylistCurationView.ts`:
+
+    ```typescript
+    private getTracksForPanel(): BrowseTrack[] {
+        if (!this.selectedArtist) return [];
+        return this.tracks.filter(t => {
+            const artist = t.artistName || 'Unknown Artist';
+            const album = t.albumName || 'Unknown Album';
+            if (artist !== this.selectedArtist) return false;
+            if (this.selectedAlbum !== null && album !== this.selectedAlbum) return false;
+            return true;
+        });
+    }
+    ```
+
+  - [ ] In `render()`, compute `const panelTracks = this.getTracksForPanel();` before building the HTML.
+  - [ ] Add the track panel div after the closing `</div>` of `curation-panels` (inside `curation-view`):
+
+    ```typescript
+    <div id="curation-track-panel" style="
+        border-top: 1px solid var(--sl-color-neutral-200);
+        overflow-y: auto;
+        max-height: 40%;
+        padding: 0.5rem 0;
+    ">
+        ${panelTracks.length === 0
+            ? `<p style="padding: 1rem; color: var(--sl-color-neutral-500);">${t('playlist.curation.no_tracks')}</p>`
+            : panelTracks.map(track => `
+                <div class="curation-track-row"
+                     style="display: flex; align-items: center; padding: 0.35rem 0.75rem; gap: 0.5rem;">
+                    <span style="flex: 1; font-size: var(--sl-font-size-small); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;"
+                          title="${this.escapeAttr(track.title)}">${this.escapeHtml(track.title)}</span>
+                    <span style="font-size: var(--sl-font-size-x-small); color: var(--sl-color-neutral-500); flex-shrink: 0;">
+                        ${formatDuration(track.duration ?? 0)}
+                    </span>
+                    <sl-icon-button
+                        class="curation-remove-track"
+                        name="x-circle"
+                        data-track-id="${this.escapeAttr(track.id)}"
+                        label="${t('playlist.curation.remove_track')}"
+                        style="font-size: 0.9rem; flex-shrink: 0;"
+                    ></sl-icon-button>
+                </div>
+            `).join('')
+        }
+    </div>
+    ```
+
+  - [ ] In `bindEvents()`, add listener for track removal:
+
+    ```typescript
+    this.container.querySelectorAll<HTMLElement>('.curation-remove-track').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const trackId = (btn as any).dataset?.trackId
+                ?? btn.closest('[data-track-id]')?.getAttribute('data-track-id');
+            if (trackId) await this.doRemove([trackId]);
+        });
+    });
+    ```
+
+    **Key notes:**
+    - `doRemove` already handles single-element arrays — no changes to `doRemove` itself.
+    - `doRemove` calls `render()` after removal, so `getTracksForPanel()` will re-run with the updated `this.tracks`.
+    - `max-height: 40%` keeps the artist/album panels visible even with long track lists.
+    - `track.title` is the display name — use `escapeHtml`/`escapeAttr` consistently.
+    - Album click-to-focus uses toggle semantics (click focused album again → show all artist tracks). This avoids needing a separate "show all" affordance.
+
 ### Review Findings
 
 - [x] [Review][Patch] Error alert never shown — `doRemove` calls `render()` unconditionally after the catch block, replacing `#curation-error` with a freshly-rendered hidden state; the error message is never visible to the user [`hifimule-ui/src/components/PlaylistCurationView.ts`]
 - [x] [Review][Patch] Cache key substring collision — `key.includes(playlistId)` in the `openCurationView` close callback may evict unrelated cache entries when playlist IDs are short or share substrings with other browse cache keys (e.g. Subsonic numeric IDs) [`hifimule-ui/src/library.ts`]
 - [x] [Review][Defer] `basketStore` event listener leak compounded by curation close pattern [`hifimule-ui/src/components/MediaCard.ts`] — deferred, pre-existing
+- [x] [Review][Patch] Concurrent `doRemove` race condition — no in-flight guard; rapid clicks on multiple remove buttons cause interleaved optimistic updates and overlapping RPC calls with potentially duplicated/stale trackId sets [`hifimule-ui/src/components/PlaylistCurationView.ts`]
+- [x] [Review][Patch] Dead `selectedArtist = null` in `removeArtist` — the null-assignment after `doRemove` never executes because `render()` (called inside `doRemove`) already reassigned `this.selectedArtist` to `artists[0]`; the comment "clear selection so album panel shows empty" is misleading dead code [`hifimule-ui/src/components/PlaylistCurationView.ts:315`]
+- [x] [Review][Patch] Orphaned list-scroll handler in `openCurationView` — mounting the curation view replaces `#library-content` without calling `teardownListScrollHandler()`; if the user navigated from artists/albums in list mode, the stale scroll handler remains attached and fires on curation-view scroll events [`hifimule-ui/src/library.ts:1095`]
+- [x] [Review][Patch] `formatDuration` silently drops seconds when hours > 0 — `${h}h ${m}m` omits `s`; a 1h 0m 45s track displays as "1h 0m", causing the stats duration to be systematically under-reported [`hifimule-ui/src/components/PlaylistCurationView.ts:8`]
+- [x] [Review][Patch] Filter parameter `t` shadows module-level i18n `t()` — `.filter(t => ...)` and `.reduce((s, t) => ...)` callbacks in `getTrackIdsByArtist`, `getTrackIdsByAlbum`, `getTracksForPanel`, and `renderStats` shadow the imported `t` function; calling `t('key')` inside any of those lambdas would invoke the BrowseTrack object as a function and throw a TypeError [`hifimule-ui/src/components/PlaylistCurationView.ts`]
+- [x] [Review][Patch] Missing `e.stopPropagation()` on remove-track button — all other remove buttons (artist, album) call `e.stopPropagation()`; the track remove handler does not, inconsistent with the defensive event pattern used throughout `bindEvents` [`hifimule-ui/src/components/PlaylistCurationView.ts:302`]
+- [x] [Review][Defer] `t()` i18n return values interpolated directly into `innerHTML` template strings without `escapeHtml` — pre-existing pattern across the codebase; systemic fix required, not scoped to this story [`hifimule-ui/src/components/PlaylistCurationView.ts`] — deferred, pre-existing
+- [x] [Review][Defer] Empty playlist shows simultaneous "Playlist is empty" (artist panel) and "No tracks for this selection" (track panel) empty-state messages — no spec coverage for this edge case [`hifimule-ui/src/components/PlaylistCurationView.ts`] — deferred, pre-existing
+- [x] [Review][Defer] `listViewMode` simplified from per-mode `Map<BrowseMode, 'grid' | 'list'>` to a single global value — switching to list mode in artists now affects albums too; part of approved sprint-change-proposal-2026-06-07 (autoload-on-scroll) [`hifimule-ui/src/library.ts`] — deferred, pre-existing
 
 ## Dev Notes
 
@@ -643,6 +768,10 @@ claude-sonnet-4-6
 ### Completion Notes List
 
 - Added 7 i18n keys × 3 languages (en/fr/es) to catalog.json: `playlist.curation.*`
+- (Tasks 7–9, 2026-06-07) Added 2 new i18n keys (`playlist.curation.remove_track`, `playlist.curation.no_tracks`) × 3 languages to catalog.json.
+- Added `selectedAlbum: string | null` field to `PlaylistCurationView`. Album rows now have click-to-focus handler (toggle: click focused album clears filter); focused album gets left-border accent + background tint identical to selected artist rows. `removeAlbum()` resets `selectedAlbum` when the focused album is removed. `render()` auto-resets `selectedAlbum` when it no longer exists in the current artist's album set.
+- Added `getTracksForPanel()` helper — filters `this.tracks` by `selectedArtist` (always) and `selectedAlbum` (when set). Added `curation-track-panel` div below the artist/album panels: lists title + duration for each panel track, each with a `curation-remove-track` sl-icon-button. `bindEvents()` wires track buttons to `doRemove([trackId])`. Track panel shows "No tracks for this selection" when empty.
+- TypeScript: zero errors (`npx tsc --noEmit`). catalog.json: valid JSON.
 - Extended `MediaCard.create()` with optional 7th param `onCurate?(id, name)`. On Playlist-typed cards the callback wires a `pencil-square` sl-icon-button with `e.stopPropagation()` to prevent bubble-through to the card's `onNavigate` handler.
 - Updated `renderGrid(items, onCurate?)` and both `renderGrid` call sites in `loadPlaylists()` to pass `openCurationView` when `_supportsPlaylistWrite` is true.
 - Created `PlaylistCurationView` class: loads tracks via `fetchBrowsePlaylist`, renders dual-panel (artist list 40% / album panel flex-1), stats header (track count + duration + bytes), optimistic removal via `playlist.removeTracks` RPC, HTML-escaping via separate `escapeHtml`/`escapeAttr` methods per Story 11.5 review learnings.
@@ -655,11 +784,18 @@ claude-sonnet-4-6
 - hifimule-ui/src/components/MediaCard.ts
 - hifimule-ui/src/library.ts
 - hifimule-ui/src/components/PlaylistCurationView.ts
+- _bmad-output/planning-artifacts/prd.md
+- _bmad-output/planning-artifacts/ux-design-specification.md
+- _bmad-output/planning-artifacts/epics.md
+- _bmad-output/planning-artifacts/sprint-change-proposal-2026-06-07-playlist-curation-track-list.md
+- _bmad-output/implementation-artifacts/sprint-status.yaml
 
 ## Change Log
 
 - 2026-06-06: Story 11.6 created — dual-panel playlist curation view ready for dev.
 - 2026-06-06: Implementation complete — all 6 tasks done, TypeScript compiles clean, story ready for review.
+- 2026-06-07: Story reopened — Sprint Change Proposal approved. Tasks 7–9 added for track panel, album focus state, and individual track removal.
+- 2026-06-07: Tasks 7–9 implemented. TypeScript compiles clean. Story moved to review.
 
 ## Status
 

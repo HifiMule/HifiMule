@@ -2287,6 +2287,21 @@ So that I can remove specific artists or albums from a playlist without rebuildi
 **Given** I close the curation view
 **Then** the server playlist reflects all removals made during the session.
 
+**Given** an artist is selected in the left panel
+**When** the curation view renders or updates
+**Then** a track panel below the artist/album panels shows all tracks by that artist that are in the playlist.
+**And** each track row shows the track title, duration, and a "Remove track" button.
+
+**Given** I click on an album row in the right panel (not the remove button)
+**Then** the album is highlighted as focused.
+**And** the track panel filters to show only tracks from that album that are in the playlist.
+
+**Given** I click "Remove track" on a track in the track panel
+**Then** that single track is removed from the playlist via `playlist.removeTracks`.
+**And** the track disappears from the track panel.
+**And** if the artist has no remaining tracks in the playlist, the artist disappears from the left panel.
+**And** the statistics header updates.
+
 **Technical Notes:**
 - The view fetches the current playlist via `browse.getPlaylist` to build initial curation state.
 - Artist and album grouping is derived from `Track.artistName` and `Track.albumName` in the playlist response.
