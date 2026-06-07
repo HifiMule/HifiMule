@@ -113,6 +113,7 @@ FR36: Epic 10 - Device Configuration Editing (Stories 10.1-10.2)
 FR37: Epic 11 - Selection-as-Playlist (Stories 11.1-11.5)
 FR38: Epic 11 - Dual-Panel Curation (Story 11.6)
 FR39: Epic 9 - Virtualized List/Table Browse View (Story 9.7)
+FR40: Epic 11 - Playlist Track Reordering (Stories 11.9-11.10)
 
 ## Epic List
 
@@ -2409,3 +2410,75 @@ So that I can manage my library's playlist catalogue without leaving the edit co
 - Frontend: editable name state in `PlaylistCurationView.ts`; delete affordance reuses the existing `sl-dialog` pattern from Story 11.5's "Save as playlist" flow.
 - `playlist.delete` RPC from Story 11.4 is reused unchanged.
 - New i18n keys: `playlist.curation.rename_save`, `playlist.curation.rename_cancel`, `playlist.curation.delete_title`, `playlist.curation.delete_body`, `playlist.curation.delete_confirm`, `playlist.curation.delete_cancel_btn`.
+
+### Story 11.9: MediaProvider Reorder Contract — Trait, Adapters & RPC
+
+As a Ritualist (Arthur),
+I want the daemon to reorder tracks in a server playlist,
+So that my curated playlist plays in the sequence I intend.
+
+**Acceptance Criteria:**
+
+**Given** the active provider supports playlist write
+**When** `reorder_playlist(playlist_id, ordered_track_ids)` is called
+**Then** the playlist's tracks are set to exactly that order (same track set, only the sequence changes).
+
+**Given** a Jellyfin provider
+**When** `reorder_playlist` is called
+**Then** current playlist entries are fetched, and `POST /Playlists/{id}/Items/{playlistItemId}/Move/{index}` is issued per out-of-place entry until the playlist matches `ordered_track_ids`.
+**And** no entries are removed or re-created (item identity is preserved).
+
+**Given** a Subsonic/OpenSubsonic provider
+**When** `reorder_playlist` is called
+**Then** `createPlaylist?playlistId={id}&songId=…` is issued with the song IDs in the requested order, replacing the playlist contents in that order.
+
+**Given** a provider that does not support playlist write
+**When** `reorder_playlist` is called
+**Then** `ProviderError::NotSupported` is returned.
+
+**Given** the daemon receives `playlist.reorder({ playlistId, trackIds })`
+**Then** it verifies `supports_playlist_write`, calls `reorder_playlist`, and returns success; capability-absent requests are rejected.
+
+**Technical Notes:**
+- New `reorder_playlist` method on `MediaProvider` (`providers/mod.rs`); default impl returns `NotSupported`.
+- Jellyfin (`providers/jellyfin.rs`): reuse `get_playlist_items` to map track_id→PlaylistItemId; selection-sort with Items/Move. Move count is O(n); acceptable for typical playlist sizes.
+- Subsonic (`providers/subsonic.rs`): new client call sending `createPlaylist` with existing `playlistId` + ordered `songId` params.
+- Daemon RPC (`rpc.rs`): `"playlist.reorder" => handle_playlist_reorder`; params `{ playlistId, trackIds }`.
+- Reuses existing `supports_playlist_write` capability — no new capability flag.
+- Tests: order-set correctness for both adapters + `NotSupported` path.
+
+### Story 11.10: Curation View — Complete Track List, Order Numbers & Reorder
+
+As a Ritualist (Arthur),
+I want to see my whole playlist in order and nudge tracks up or down,
+So that I can fine-tune track sequence directly in the editor.
+
+**Acceptance Criteria:**
+
+**Given** the curation view is open
+**When** the artist panel renders
+**Then** an "All artists" entry appears at the top; selecting it shows every playlist track in the track panel, in playlist order.
+**And** an "All albums" entry lets a selected artist's tracks all show together.
+
+**Given** the track panel renders
+**Then** each track row shows its absolute 1-based position (#N) in the full playlist, regardless of any active artist/album filter.
+
+**Given** the active provider supports playlist write
+**When** the track panel renders
+**Then** each row shows up (↑) and down (↓) controls; ↑ is disabled on the first visible row and ↓ on the last visible row.
+
+**Given** I click ↑ or ↓ on a track
+**Then** it swaps playlist position with the previous/next currently-visible track.
+**And** the change is applied optimistically and persisted via `playlist.reorder` with the full reordered track-id list.
+**And** the #N order numbers update to reflect the new sequence.
+
+**Given** the reorder RPC fails
+**Then** an inline error is shown and the prior order is restored.
+
+**Given** the provider does not support playlist write
+**Then** the up/down controls are hidden (order numbers still shown).
+
+**Technical Notes:**
+- `PlaylistCurationView.ts`: allow `selectedArtist = null` ("All"); precompute id→index map for #N; ↑/↓ swap within `getTracksForPanel()` neighbors against full `this.tracks`; `isReordering` guard; reuse `#curation-error` + optimistic-update pattern from `doRemove`.
+- New i18n keys: `playlist.curation.all_artists`, `playlist.curation.all_albums`, `playlist.curation.move_up`, `playlist.curation.move_down` (× en/fr/es).
+- New rpc.ts helper or direct `rpcCall('playlist.reorder', …)`.
