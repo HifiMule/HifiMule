@@ -245,6 +245,16 @@ pub trait MediaProvider: Send + Sync {
         ))
     }
 
+    async fn reorder_playlist(
+        &self,
+        _playlist_id: &str,
+        _ordered_track_ids: &[String],
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "reorder_playlist is not supported by this provider".to_string(),
+        ))
+    }
+
     fn change_metadata(&self, _event: &ChangeEvent) -> Option<ProviderChangeMetadata> {
         None
     }
@@ -1035,5 +1045,17 @@ mod tests {
             panic!("expected UnsupportedCapability, got {result:?}");
         };
         assert!(msg.contains("rename_playlist"), "message should name the method: {msg}");
+    }
+
+    #[tokio::test]
+    async fn trait_default_reorder_playlist_returns_unsupported() {
+        let provider = MinimalProvider;
+        let result = provider
+            .reorder_playlist("playlist-1", &["a".to_string(), "b".to_string()])
+            .await;
+        let Err(ProviderError::UnsupportedCapability(msg)) = result else {
+            panic!("expected UnsupportedCapability, got {result:?}");
+        };
+        assert!(msg.contains("reorder_playlist"), "message should name the method: {msg}");
     }
 }

@@ -1489,6 +1489,38 @@ impl JellyfinClient {
         Ok(())
     }
 
+    pub async fn move_playlist_item(
+        &self,
+        url: &str,
+        token: &str,
+        playlist_id: &str,
+        playlist_item_id: &str,
+        new_index: usize,
+    ) -> Result<()> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let index_str = new_index.to_string();
+        let endpoint = jellyfin_endpoint(
+            url,
+            &["Playlists", playlist_id, "Items", playlist_item_id, "Move", &index_str],
+        )?;
+
+        let response = self.client.post(endpoint).headers(headers).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!("Server returned status: {} — {}", status, text));
+        }
+        Ok(())
+    }
+
     pub async fn delete_item(&self, url: &str, token: &str, item_id: &str) -> Result<()> {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;

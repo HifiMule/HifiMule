@@ -430,6 +430,16 @@ impl MediaProvider for SubsonicProvider {
             .await
     }
 
+    async fn reorder_playlist(
+        &self,
+        playlist_id: &str,
+        ordered_track_ids: &[String],
+    ) -> Result<(), ProviderError> {
+        self.client
+            .set_playlist_order(playlist_id, ordered_track_ids)
+            .await
+    }
+
     async fn search(&self, query: &str) -> Result<SearchResult, ProviderError> {
         let result = self.client.search3(query).await?.search_result3;
 
@@ -914,6 +924,19 @@ impl SubsonicClient {
         let _: NoBody = self
             .get("updatePlaylist", &[("playlistId", playlist_id), ("name", new_name)])
             .await?;
+        Ok(())
+    }
+
+    async fn set_playlist_order(
+        &self,
+        playlist_id: &str,
+        ordered_track_ids: &[String],
+    ) -> Result<(), ProviderError> {
+        let mut params: Vec<(&str, &str)> = vec![("playlistId", playlist_id)];
+        for id in ordered_track_ids {
+            params.push(("songId", id.as_str()));
+        }
+        let _: PlaylistWithSongsBody = self.get("createPlaylist", &params).await?;
         Ok(())
     }
 
@@ -3494,5 +3517,32 @@ mod tests {
             .remove_from_playlist("playlist99", &["song1".to_string(), "song2".to_string()])
             .await
             .expect("remove_from_playlist sends descending indices");
+    }
+
+    #[tokio::test]
+    async fn provider_reorder_playlist_calls_create_playlist_with_ordered_song_ids() {
+        let mut server = Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/rest/createPlaylist.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("playlistId".into(), "playlist99".into()));
+                matchers.push(Matcher::Regex(r"[?&]songId=song2(&|$)".into()));
+                matchers.push(Matcher::Regex(r"[?&]songId=song1(&|$)".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(
+                r#""playlist":{"id":"playlist99","name":"Road Trip","songCount":2,"duration":0}"#,
+            ))
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        provider
+            .reorder_playlist("playlist99", &["song2".to_string(), "song1".to_string()])
+            .await
+            .expect("reorder_playlist");
     }
 }

@@ -404,6 +404,58 @@ impl MediaProvider for JellyfinProvider {
             .map_err(Self::map_error)
     }
 
+    async fn reorder_playlist(
+        &self,
+        playlist_id: &str,
+        ordered_track_ids: &[String],
+    ) -> Result<(), ProviderError> {
+        let items = self
+            .client
+            .get_playlist_items(self.url(), self.token(), self.user_id(), playlist_id)
+            .await
+            .map_err(Self::map_error)?;
+
+        let mut current: Vec<(String, String)> = Vec::with_capacity(items.len());
+        for item in items {
+            match item.playlist_item_id {
+                Some(entry_id) => current.push((item.id, entry_id)),
+                None => {
+                    return Err(ProviderError::Deserialization(format!(
+                        "Playlist item missing PlaylistItemId: {}",
+                        item.id
+                    )))
+                }
+            }
+        }
+
+        for (target_index, wanted_track_id) in ordered_track_ids.iter().enumerate() {
+            if target_index >= current.len() {
+                break;
+            }
+            if &current[target_index].0 == wanted_track_id {
+                continue;
+            }
+            let Some(found) = (target_index..current.len())
+                .find(|&j| &current[j].0 == wanted_track_id)
+            else {
+                return Err(ProviderError::UnsupportedCapability(format!(
+                    "reorder_playlist: track {wanted_track_id} is not in playlist {playlist_id}"
+                )));
+            };
+
+            let (_, entry_id) = current[found].clone();
+            self.client
+                .move_playlist_item(self.url(), self.token(), playlist_id, &entry_id, target_index)
+                .await
+                .map_err(Self::map_error)?;
+
+            let moved = current.remove(found);
+            current.insert(target_index, moved);
+        }
+
+        Ok(())
+    }
+
     async fn search(&self, query: &str) -> Result<SearchResult, ProviderError> {
         let songs = self
             .client
@@ -1914,5 +1966,65 @@ mod tests {
         assert_eq!(favorites.songs[0].album_id.as_deref(), Some("album1"));
         assert_eq!(favorites.songs[0].artist_id.as_deref(), Some("artist1"));
         assert_eq!(favorites.songs[0].is_favorite, Some(true));
+    }
+
+    #[tokio::test]
+    async fn provider_reorder_playlist_issues_move_calls_in_selection_sort_order() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _get = server
+            .mock("GET", "/Playlists/playlist99/Items")
+            .match_query(Matcher::UrlEncoded("userId".into(), USER_ID.into()))
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"Items":[
+                    {"Id":"song1","Name":"Track 1","Type":"Audio","PlaylistItemId":"entry-a"},
+                    {"Id":"song2","Name":"Track 2","Type":"Audio","PlaylistItemId":"entry-b"}
+                ],"TotalRecordCount":2,"StartIndex":0}"#,
+            )
+            .create_async()
+            .await;
+        // Want order: song2, song1 → selection sort moves entry-b to index 0
+        let _move = server
+            .mock("POST", "/Playlists/playlist99/Items/entry-b/Move/0")
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(204)
+            .create_async()
+            .await;
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+        provider
+            .reorder_playlist("playlist99", &["song2".to_string(), "song1".to_string()])
+            .await
+            .expect("reorder_playlist");
+    }
+
+    #[tokio::test]
+    async fn provider_reorder_playlist_issues_no_moves_when_already_sorted() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _get = server
+            .mock("GET", "/Playlists/playlist99/Items")
+            .match_query(Matcher::UrlEncoded("userId".into(), USER_ID.into()))
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"Items":[
+                    {"Id":"song1","Name":"Track 1","Type":"Audio","PlaylistItemId":"entry-a"},
+                    {"Id":"song2","Name":"Track 2","Type":"Audio","PlaylistItemId":"entry-b"}
+                ],"TotalRecordCount":2,"StartIndex":0}"#,
+            )
+            .create_async()
+            .await;
+        // No POST mock — if a Move is issued the test would fail (unexpected request)
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+        provider
+            .reorder_playlist("playlist99", &["song1".to_string(), "song2".to_string()])
+            .await
+            .expect("reorder_playlist already sorted should succeed without moves");
     }
 }

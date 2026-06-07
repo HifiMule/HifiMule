@@ -4,7 +4,7 @@ baseline_commit: 7a63bb5
 
 # Story 11.9: MediaProvider Reorder Contract — Trait, Adapters & RPC
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -405,14 +405,29 @@ Recent commits (`7a63bb5 Review 11.8`, `a8289d8 Dev 11.8`, `53565aa Story 11.8`)
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+claude-sonnet-4-6
 
 ### Debug Log References
 
 ### Completion Notes List
 
+- Task 1: Added `reorder_playlist` trait default to `MediaProvider` (after `rename_playlist` at line 246) + `trait_default_reorder_playlist_returns_unsupported` test using `MinimalProvider` (not `MockProvider` — story note corrected).
+- Task 2: Added `move_playlist_item` to `JellyfinApiClient` in `api.rs` after `delete_playlist_items`. Uses `jellyfin_endpoint` path-segment approach with `let index_str` borrow-lifetime trick for the index.
+- Task 3: Implemented `reorder_playlist` in `JellyfinProvider` (selection-sort via local `(track_id, playlist_item_id)` mirror; mirrors each `remove`/`insert` locally to keep index math correct across moves).
+- Task 4: Implemented `reorder_playlist` in `SubsonicProvider` delegating to `set_playlist_order` client method, which calls `createPlaylist` with `playlistId` + ordered `songId` params deserializing as `PlaylistWithSongsBody`.
+- Task 5: Added `"playlist.reorder"` dispatch in RPC match table and `handle_playlist_reorder` handler (capability-guard first, then param extraction, then provider call).
+- Task 6: Added 4 tests — trait-default (mod.rs), Jellyfin out-of-order + already-sorted (jellyfin.rs), Subsonic createPlaylist call (subsonic.rs), plus RPC capability-gate extended (rpc.rs).
+- Task 7: `rtk cargo check` — 0 errors. `rtk cargo test` — 419 passing (baseline was 411 after 11.8 review commit `7a63bb5`).
+
 ### File List
+
+- hifimule-daemon/src/providers/mod.rs
+- hifimule-daemon/src/api.rs
+- hifimule-daemon/src/providers/jellyfin.rs
+- hifimule-daemon/src/providers/subsonic.rs
+- hifimule-daemon/src/rpc.rs
 
 ## Change Log
 
 - 2026-06-07: Story 11.9 created — `reorder_playlist` trait method + Jellyfin (selection-sort via Items/Move) & Subsonic (`createPlaylist` set-order) adapters + `playlist.reorder` RPC. Backend-only; reuses `supports_playlist_write`. Status → ready-for-dev.
+- 2026-06-07: Story 11.9 implemented — all 5 backend files modified, 4 new tests added (trait-default, Jellyfin x2, Subsonic, RPC gate extended). 419/419 tests passing. Status → review.
