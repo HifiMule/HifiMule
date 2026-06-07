@@ -30,6 +30,10 @@ export class PlaylistCurationView {
     private isRemoving = false;
     private isReordering = false;
     private isAddingTracks = false;
+    /** True while any optimistic track-list mutation (remove/reorder/add) has an RPC in flight. */
+    private get isMutating(): boolean {
+        return this.isRemoving || this.isReordering || this.isAddingTracks;
+    }
     private supportsPlaylistWrite: boolean = false;
     private isRenamingPlaylist = false;
     private isSavingRename = false;
@@ -535,7 +539,7 @@ export class PlaylistCurationView {
     }
 
     private async doRemove(trackIds: string[]): Promise<void> {
-        if (this.isRemoving) return;
+        if (this.isMutating) return;
         this.isRemoving = true;
         // Optimistic local update — removes from local state before RPC returns
         const removedSet = new Set(trackIds);
@@ -566,7 +570,7 @@ export class PlaylistCurationView {
     }
 
     private async moveTrack(panelIdx: number, direction: -1 | 1): Promise<void> {
-        if (this.isReordering) return;
+        if (this.isMutating) return;
         const panel = this.getTracksForPanel();
         const neighbourPanelIdx = panelIdx + direction;
         if (panelIdx < 0 || panelIdx >= panel.length) return;
@@ -744,7 +748,7 @@ export class PlaylistCurationView {
         dialog.querySelector('#add-tracks-cancel')?.addEventListener('click', () => dialog.hide());
 
         dialog.querySelector('#add-tracks-confirm')?.addEventListener('click', async () => {
-            if (selectedIds.size === 0 || this.isAddingTracks) return;
+            if (selectedIds.size === 0 || this.isMutating) return;
             this.isAddingTracks = true;
             const btn = confirmBtn();
             if (btn) { btn.loading = true; btn.disabled = true; }

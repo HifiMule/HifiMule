@@ -4,7 +4,7 @@ baseline_commit: dc52e27
 
 # Story 11.10: Curation View — Complete Track List, Order Numbers & Reorder
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -252,6 +252,19 @@ this.container.querySelector('.curation-all-artists')?.addEventListener('click',
 - `rtk tsc` (or the project's typecheck) — **zero new errors**. Note a pre-existing `TS5101 baseUrl deprecated` warning exists (per Story 11.8) — that is not new.
 - **No `cargo` work** — backend untouched. Do not run/modify Rust.
 - Manual smoke (if a dev environment is available): open a server playlist → curation view shows "All artists" selected by default with every track in order and #N badges; select an artist → "All albums" entry shows; ↑/↓ reorder a track and confirm #N updates and persists (re-open playlist); with a read-only provider, ↑/↓ are hidden but #N still shows.
+
+### Review Findings
+
+_Code review 2026-06-08 — Blind Hunter + Edge Case Hunter + Acceptance Auditor. Acceptance Auditor verdict: all 6 ACs satisfied, diff faithful to spec. 1 decision-needed, 6 deferred (all pre-existing), 14 dismissed as noise._
+
+- [x] [Review][Patch] Cross-mutation guards are independent (reorder vs remove/add) — **FIXED 2026-06-08.** Added an `isMutating` getter (`isRemoving || isReordering || isAddingTracks`) and routed all three mutators (`doRemove`, `moveTrack`, `addTracks`) through it so any optimistic track-list mutation blocks the others while an RPC is in flight. Previously `moveTrack` guarded only on `isReordering` and `doRemove` only on `isRemoving`, so a remove/add during an in-flight `playlist.reorder` could mutate `this.tracks` concurrently; a failing reorder's rollback to its pre-swap snapshot would re-add the just-removed track (transient desync, self-healing on reload). `tsc` clean (only pre-existing TS5101). [PlaylistCurationView.ts](../../hifimule-ui/src/components/PlaylistCurationView.ts)
+
+- [x] [Review][Defer] Remove/rename controls not gated by `supportsPlaylistWrite` [hifimule-ui/src/components/PlaylistCurationView.ts] — deferred, pre-existing (stories 11.6/11.8). Per-track/artist/album remove + title-click rename render on read-only providers and only fail at the RPC. 11.10 correctly gates the new ↑/↓ controls (AC6 satisfied).
+- [x] [Review][Defer] Selecting a specific artist row does not reset `selectedAlbum` [hifimule-ui/src/components/PlaylistCurationView.ts] — deferred, pre-existing. The per-artist row handler (unchanged by 11.10) can leave a stale album filter; a same-named album across artists silently filters the track panel.
+- [x] [Review][Defer] Full re-render orphans an open delete dialog [hifimule-ui/src/components/PlaylistCurationView.ts] — deferred, pre-existing architecture (dialog lives inside the wholesale `innerHTML` replace). `moveTrack`'s optimistic `render()` widens the window.
+- [x] [Review][Defer] Add-tracks confirm post-await runs after dialog/view dismissed [hifimule-ui/src/components/PlaylistCurationView.ts] — deferred, pre-existing (story 11.7). No "still mounted / not cancelled" guard before the post-RPC `render()` + toast.
+- [x] [Review][Defer] fr/es `playlist.curation.error` & `add_tracks_error` hold English text [hifimule-i18n/catalog.json] — deferred, pre-existing i18n gap. The new `reorder_error` key IS translated in all three blocks.
+- [x] [Review][Defer] Duplicate track ids: #N badge collapses + reorder id-list ambiguous [hifimule-ui/src/components/PlaylistCurationView.ts] — deferred. #N collapse explicitly accepted by spec (Task 3 caveat); the id-list ambiguity is the Story 11.9 backend contract; duplicates are reachable only because add-tracks (11.7) does not dedupe.
 
 ## Dev Notes
 
