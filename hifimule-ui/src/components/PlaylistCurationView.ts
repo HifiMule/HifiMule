@@ -1,5 +1,6 @@
 import { fetchBrowsePlaylist, fetchBrowseSearch, BrowseTrack, rpcCall } from '../rpc';
 import { t } from '../i18n';
+import { showToast } from '../toast';
 
 function formatDuration(totalSecs: number): string {
     const h = Math.floor(totalSecs / 3600);
@@ -475,13 +476,22 @@ export class PlaylistCurationView {
                     updateRow(cb.checked);
                 });
 
-                row.appendChild(cb);
-                row.appendChild(info);
-                resultsEl().appendChild(row);
+                el.appendChild(row);
             }
         };
 
+        let latestQueryId = 0;
+        const resetSelection = () => {
+            selectedIds.clear();
+            const btn = confirmBtn();
+            if (btn) btn.disabled = true;
+        };
+
         const doSearch = async (query: string) => {
+            // Each search starts a fresh selection (only currently-visible tracks
+            // can be confirmed) and supersedes any in-flight request.
+            const queryId = ++latestQueryId;
+            resetSelection();
             if (!query.trim()) {
                 resultsEl().innerHTML = '';
                 return;
@@ -489,8 +499,10 @@ export class PlaylistCurationView {
             resultsEl().innerHTML = '<sl-spinner></sl-spinner>';
             try {
                 const result = await fetchBrowseSearch(query);
+                if (queryId !== latestQueryId) return; // a newer search superseded this one
                 renderResults(result.tracks);
             } catch (err) {
+                if (queryId !== latestQueryId) return;
                 const msg = err instanceof Error ? err.message : String(err);
                 resultsEl().innerHTML = '';
                 const err2 = errorEl();
@@ -520,6 +532,7 @@ export class PlaylistCurationView {
                 const result = await fetchBrowsePlaylist(this.playlistId);
                 this.tracks = result.tracks;
                 this.render();
+                showToast(t('playlist.context.added_success'), 'success');
             } catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
                 if (err2) {

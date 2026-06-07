@@ -4,6 +4,7 @@
 import { basketStore } from '../state/basket';
 import { getImageUrl, rpcCall } from '../rpc';
 import { t } from '../i18n';
+import { showToast } from '../toast';
 
 export interface JellyfinItem {
     Id: string;
@@ -401,6 +402,7 @@ export class MediaCard {
                 const { invalidatePlaylistsCache } = await import('../library');
                 invalidatePlaylistsCache();
                 dialog.hide();
+                showToast(t('playlist.context.created_success'), 'success');
             } catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
                 if (errorEl) {
@@ -466,8 +468,10 @@ export class MediaCard {
                 newBtn.style.cssText = 'width: 100%; text-align: left;';
                 newBtn.innerHTML = `<sl-icon slot="prefix" name="plus-circle"></sl-icon> ${t('playlist.context.new_playlist')}`;
                 newBtn.addEventListener('click', () => {
+                    dialog.addEventListener('sl-after-hide', () => {
+                        MediaCard.openCreatePlaylistDialog(trackId, trackName);
+                    }, { once: true });
                     dialog.hide();
-                    MediaCard.openCreatePlaylistDialog(trackId, trackName);
                 });
                 listEl.appendChild(newBtn);
 
@@ -489,6 +493,7 @@ export class MediaCard {
                         try {
                             await rpcCall('playlist.addItems', { playlistId: pl.id, itemIds: [trackId] });
                             dialog.hide();
+                            showToast(t('playlist.context.added_success'), 'success');
                         } catch (err) {
                             const msg = err instanceof Error ? err.message : String(err);
                             if (errorEl) {
@@ -506,7 +511,7 @@ export class MediaCard {
                 if (playlists.length === 0) {
                     const emptyNote = document.createElement('p');
                     emptyNote.style.cssText = 'color: var(--sl-color-neutral-500); font-size: var(--sl-font-size-small); padding: 0.5rem 0;';
-                    emptyNote.textContent = 'No playlists yet. Use "New playlist…" to create one.';
+                    emptyNote.textContent = t('playlist.context.no_playlists_yet');
                     listEl.appendChild(emptyNote);
                 }
             } catch (err) {

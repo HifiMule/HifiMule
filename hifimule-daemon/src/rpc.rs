@@ -840,6 +840,11 @@ async fn handle_browse_search(
             data: None,
         })?
         .to_owned();
+    // An empty/whitespace query would be forwarded to the provider as an
+    // unbounded search; short-circuit to an empty result set instead.
+    if query.trim().is_empty() {
+        return Ok(serde_json::json!({ "tracks": [] }));
+    }
     let result = provider
         .search(&query)
         .await

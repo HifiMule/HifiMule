@@ -4,7 +4,7 @@ baseline_commit: 18d5475
 
 # Story 11.7: Add Tracks to Playlist — Browse Context Menu & Curation View
 
-Status: review
+Status: done
 
 ## Story
 
@@ -682,3 +682,28 @@ _No blocking issues encountered._
 - 2026-06-07: Story 11.7 created — add tracks to playlist via browse context menu and curation view ready for dev.
 - 2026-06-07: Story 11.7 implemented — `browse.search` RPC, `fetchBrowseSearch` TS wrapper, 27 i18n additions, unified `showItemContextMenu` + `openAddToPlaylistDialog` (with new `playlist.addItems` RPC for entity resolution) in MediaCard covering all item types in both grid and list mode, "Add tracks" button and search dialog in `PlaylistCurationView`.
 - 2026-06-07: Post-implementation fixes — Jellyfin `search_audio_items` missing `Recursive=true` (returned root folders instead of tracks); `sl-checkbox` requires `sl-change` event not row `click`; context menus unified across artist/album/track replacing the separate `showContextMenu`/`showTrackContextMenu` split.
+- 2026-06-07: Code review — 6 patches applied (new `toast.ts` helper + `playlist.context.added_success`/`no_playlists_yet` wired for AC 3; removed duplicate DOM appends; localized empty-state; `browse.search` empty-query guard; latest-query token + per-search selection reset in Add Tracks dialog). 3 findings deferred, 8 dismissed. `rtk tsc` + `rtk cargo check` clean. Status → done.
+
+## Review Findings
+
+_Code review 2026-06-07 — 3 layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor). 2 decision-needed, 4 patch, 3 deferred, 8 dismissed as noise._
+
+### Decision Needed
+
+- [x] [Review][Decision→Patch] AC 3 — no success notification after adding a track — RESOLVED 2026-06-07: chose to build a toast/notification mechanism (option 3). Now tracked as a patch below.
+- [x] [Review][Decision→Patch] Add Tracks dialog — selection persists across searches — RESOLVED 2026-06-07: chose to reset selection per search (option 1). Now tracked as a patch below.
+
+### Patch
+
+- [x] [Review][Patch] AC 3 — add toast/notification mechanism and wire success feedback [hifimule-ui/src, MediaCard.ts] — Build a reusable toast helper (`sl-toast`/`sl-alert` stack) and show `playlist.context.added_success` on successful add via the context-menu flow (and the curation "Add tracks" flow). Removes the dead-key issue.
+- [x] [Review][Patch] Duplicate `cb`/`info` appends in `renderResults` (dead code) [hifimule-ui/src/components/PlaylistCurationView.ts] — `row.appendChild(cb)` / `row.appendChild(info)` are executed twice; final DOM is correct only because `appendChild` moves already-parented nodes. Remove the redundant second pair (and use the cached `el` instead of re-querying `resultsEl()` for the final append).
+- [x] [Review][Patch] Hardcoded English "No playlists yet…" empty-state string not localized [hifimule-ui/src/components/MediaCard.ts] — every other string in this change was added to catalog.json (en/fr/es); this one bypasses i18n. Add a key and use `t()`.
+- [x] [Review][Patch] `browse.search` accepts empty/whitespace query [hifimule-daemon/src/rpc.rs handle_browse_search] — `params["query"].as_str()` accepts `""`; an empty/whitespace string passes the guard and is sent to `provider.search("")`, returning an unbounded/arbitrary result set. UI debounce guards empty input, but direct/whitespace queries do not. Add a trim/empty guard returning `{ tracks: [] }` or `ERR_INVALID_PARAMS`.
+- [x] [Review][Patch] Stale debounced search results can clobber newer ones [hifimule-ui/src/components/PlaylistCurationView.ts doSearch] — no request-sequencing token; a slow query A resolving after a faster later query B repopulates the list with stale results. Add a latest-query token and ignore responses that aren't the most recent.
+- [x] [Review][Patch] Add Tracks dialog — reset selection on new search [hifimule-ui/src/components/PlaylistCurationView.ts openAddTracksDialog] — clear `selectedIds` (and reconcile confirm-button disabled state) at the start of each new `doSearch` so only currently-visible tracks can be confirmed.
+
+### Deferred
+
+- [x] [Review][Defer] `handle_playlist_add_items` reports partial success as full success [hifimule-daemon/src/rpc.rs] — deferred: unresolvable items are logged to stderr and skipped, returning `{ ok: true }` even if only some resolved (cf. `playlist.create` which returns `skippedItemIds`). Not reachable from the current UI (context menu always sends a single item), so robustness-only.
+- [x] [Review][Defer] No single-dialog guard — overlapping Add-to-playlist / Add-tracks dialogs possible [hifimule-ui/src/components/MediaCard.ts, PlaylistCurationView.ts] — deferred: rapid re-trigger can spawn multiple stacked dialogs (context menu uses `dismissActiveMenu`, dialogs do not). Low-impact UX polish.
+- [x] [Review][Defer] Initial `browse.listPlaylists` failure leaves Add-to-playlist dialog with no retry [hifimule-ui/src/components/MediaCard.ts] — deferred: shows error but clears the list with no in-dialog retry; user must close/reopen. Low-impact UX.
