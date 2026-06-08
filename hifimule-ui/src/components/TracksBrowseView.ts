@@ -119,7 +119,8 @@ export class TracksBrowseView {
                                     background:var(--surface-fill); flex-shrink:0;"></div>
                     </div>
                 </div>
-                <div id="tracks-track-panel" class="curation-track-panel"></div>
+                <div id="tracks-track-panel" class="curation-track-panel"
+                     style="flex:0 0 35%; min-height:0; max-height:none;"></div>
             </div>
         `;
         this.setupScrollHandlers();
