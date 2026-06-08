@@ -12,7 +12,6 @@ use crate::providers::{
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-const ARTIST_TYPES: &str = "MusicArtist";
 const ALBUM_TYPES: &str = "MusicAlbum";
 const AUDIO_TYPES: &str = "Audio,MusicVideo";
 const PLAYLIST_TYPES: &str = "Playlist";
@@ -139,19 +138,14 @@ impl MediaProvider for JellyfinProvider {
         let limit_param = if limit > 0 { Some(limit) } else { None };
         let response = self
             .client
-            .get_items(
+            .get_album_artists(
                 self.url(),
                 self.token(),
                 self.user_id(),
                 library_id,
-                Some(ARTIST_TYPES),
+                letter,
                 Some(offset),
                 limit_param,
-                letter,
-                None,
-                None,
-                None,
-                None,
             )
             .await
             .map_err(Self::map_error)?;
@@ -1652,10 +1646,10 @@ mod tests {
         let mut server = Server::new_async().await;
         let url = server.url();
         let _mock = server
-            .mock("GET", "/Items")
+            .mock("GET", "/Artists/AlbumArtists")
             .match_query(Matcher::AllOf(vec![
                 Matcher::UrlEncoded("userId".into(), USER_ID.into()),
-                Matcher::UrlEncoded("IncludeItemTypes".into(), "MusicArtist".into()),
+                Matcher::UrlEncoded("SortBy".into(), "SortName".into()),
             ]))
             .match_header("X-Emby-Token", TOKEN)
             .with_status(200)

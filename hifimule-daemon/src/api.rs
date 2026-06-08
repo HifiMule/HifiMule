@@ -286,6 +286,63 @@ impl JellyfinClient {
         Ok(views_response.items)
     }
 
+    /// Fetches album artists via `/Artists/AlbumArtists`.
+    ///
+    /// Prefer this over `/Items?IncludeItemTypes=MusicArtist` for browsing: the dedicated endpoint
+    /// returns artists whose IDs match the `AlbumArtistIds` stored on albums, and preserves the
+    /// original artist name from file tags (e.g. "AC/DC" rather than a normalized variant).
+    pub async fn get_album_artists(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        parent_id: Option<&str>,
+        name_starts_with: Option<&str>,
+        start_index: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<JellyfinItemsResponse> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let mut query_params = vec![format!("userId={}", user_id)];
+        if let Some(parent) = parent_id {
+            query_params.push(format!("ParentId={}", parent));
+        }
+        if let Some(starts_with) = name_starts_with {
+            query_params.push(format!("NameStartsWith={}", url_encode(starts_with)));
+        }
+        if let Some(start) = start_index {
+            query_params.push(format!("StartIndex={}", start));
+        }
+        if let Some(lim) = limit {
+            query_params.push(format!("Limit={}", lim));
+        }
+        query_params.push("SortBy=SortName".to_string());
+
+        let endpoint = format!(
+            "{}/Artists/AlbumArtists?{}",
+            url.trim_end_matches('/'),
+            query_params.join("&")
+        );
+
+        let response = self.client.get(&endpoint).headers(headers).send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+
+        if !status.is_success() {
+            return Err(anyhow!("Server returned status: {}", status));
+        }
+
+        let items_response = serde_json::from_str::<JellyfinItemsResponse>(&text)?;
+        Ok(items_response)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn get_items(
         &self,
@@ -325,12 +382,10 @@ impl JellyfinClient {
             query_params.push(format!("Limit={}", lim));
         }
         if let Some(starts_with) = name_starts_with {
-            let encoded = starts_with.replace('#', "%23");
-            query_params.push(format!("NameStartsWith={}", encoded));
+            query_params.push(format!("NameStartsWith={}", url_encode(starts_with)));
         }
         if let Some(less_than) = name_less_than {
-            let encoded = less_than.replace('#', "%23");
-            query_params.push(format!("NameLessThan={}", encoded));
+            query_params.push(format!("NameLessThan={}", url_encode(less_than)));
         }
         if let Some(aids) = album_artist_ids {
             query_params.push(format!("AlbumArtistIds={}", aids));
