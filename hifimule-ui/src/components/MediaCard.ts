@@ -285,7 +285,6 @@ export class MediaCard {
         return card;
     }
 
-    private static activeContextMenu: HTMLElement | null = null;
     private static dismissActiveMenu: (() => void) | null = null;
 
     static showItemContextMenu(x: number, y: number, itemId: string, itemName: string): void {
@@ -324,7 +323,6 @@ export class MediaCard {
 
         menu.appendChild(menuItem);
         document.body.appendChild(menu);
-        MediaCard.activeContextMenu = menu;
 
         const MARGIN = 8;
         const rect = menu.getBoundingClientRect();
@@ -336,7 +334,6 @@ export class MediaCard {
 
         const cleanup = () => {
             menu.remove();
-            MediaCard.activeContextMenu = null;
             MediaCard.dismissActiveMenu = null;
             document.removeEventListener('click', onDocClick, true);
             window.removeEventListener('scroll', cleanup, true);
