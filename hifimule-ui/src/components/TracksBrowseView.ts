@@ -106,7 +106,7 @@ export class TracksBrowseView {
                          style="display:flex; flex-direction:row; overflow:hidden; padding:0;">
                         <div id="tracks-artist-scroll" style="flex:1; overflow-y:auto; padding:0.5rem 0; min-width:0;"></div>
                         <div id="tracks-artist-az"
-                             style="display:none; flex-direction:column; width:1.25rem; overflow-y:auto;
+                             style="display:none; width:2.5rem; overflow-y:auto;
                                     border-left:1px solid var(--surface-border-soft);
                                     background:var(--surface-fill); flex-shrink:0;"></div>
                     </div>
@@ -114,7 +114,7 @@ export class TracksBrowseView {
                          style="display:flex; flex-direction:row; overflow:hidden; padding:0;">
                         <div id="tracks-album-scroll" style="flex:1; overflow-y:auto; padding:0.5rem 0; min-width:0;"></div>
                         <div id="tracks-album-az"
-                             style="display:none; flex-direction:column; width:1.25rem; overflow-y:auto;
+                             style="display:none; width:2.5rem; overflow-y:auto;
                                     border-left:1px solid var(--surface-border-soft);
                                     background:var(--surface-fill); flex-shrink:0;"></div>
                     </div>
@@ -597,7 +597,8 @@ export class TracksBrowseView {
             return;
         }
 
-        azEl.style.display = 'flex';
+        azEl.style.display = 'grid';
+        azEl.style.gridTemplateColumns = '1fr 1fr';
         azEl.innerHTML = '';
 
         const activeLetter = type === 'artist' ? this.artistLetter : this.albumLetter;
