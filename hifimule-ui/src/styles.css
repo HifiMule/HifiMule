@@ -195,7 +195,16 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.075);
   border-radius: var(--radius);
   transition: background var(--dur-base) var(--ease-out-quart),
-              border-color var(--dur-base) var(--ease-out-quart);
+              border-color var(--dur-base) var(--ease-out-quart),
+              opacity var(--dur-base) var(--ease-out-quart),
+              transform var(--dur-base) var(--ease-out-quart);
+}
+
+@starting-style {
+  .basket-item-card {
+    opacity: 0;
+    transform: translateX(6px);
+  }
 }
 
 .basket-item-card:hover {
@@ -290,10 +299,16 @@ body {
   }
 }
 
+@keyframes iconPulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.45; }
+}
+
 .sync-proposed-banner sl-icon {
   font-size: 1rem;
   flex-shrink: 0;
   color: var(--sl-color-primary-600);
+  animation: iconPulse 2.4s ease-in-out infinite;
 }
 
 /* Capacity Bar */
@@ -302,7 +317,7 @@ body {
 }
 
 .capacity-bar {
-  display: flex;
+  position: relative;
   height: 8px;
   border-radius: 4px;
   overflow: hidden;
@@ -310,14 +325,19 @@ body {
 }
 
 .capacity-segment {
-  transition: width 0.3s var(--ease-out-quart);
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  transform-origin: left;
+  transform: translateX(calc(var(--seg-x, 0) * 100%)) scaleX(var(--seg-w, 0));
+  transition: transform 0.3s var(--ease-out-quart);
 }
 
 .capacity-used {
   background: rgba(255, 255, 255, 0.25);
 }
-
-
 
 .capacity-free {
   background: transparent;
@@ -406,6 +426,13 @@ h2 {
 
 .media-card:hover::part(base) {
   border-color: rgba(34, 184, 240, 0.35);
+}
+
+@starting-style {
+  .media-card {
+    opacity: 0;
+    transform: translateY(4px);
+  }
 }
 
 .card-image {
@@ -671,7 +698,7 @@ h2 {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--ink-dim);
-  transition: color 0.2s ease;
+  transition: color var(--dur-base) var(--ease-out-quart);
 }
 
 .device-folders-summary {
@@ -694,7 +721,7 @@ h2 {
   padding: 0.4rem 0.5rem;
   border-radius: var(--sl-border-radius-small);
   font-size: 0.85rem;
-  transition: background 0.2s ease;
+  transition: background var(--dur-fast) var(--ease-out-quart);
 }
 
 .folder-item:hover {
@@ -745,6 +772,7 @@ h2 {
   align-items: stretch;
   padding: 1rem 0.75rem;
   gap: 0.5rem;
+  animation: resultEnter var(--dur-base) var(--ease-out-quart) both;
 }
 
 .sync-current-file {
@@ -907,7 +935,7 @@ h2 {
   background: var(--surface-fill);
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: var(--sl-border-radius-small);
-  transition: background 0.15s ease;
+  transition: background var(--dur-fast) var(--ease-out-quart);
 }
 
 .repair-item:hover {
@@ -990,7 +1018,16 @@ h2 {
   border: 1px solid color-mix(in srgb, var(--amber-warn) 30%, transparent);
   border-radius: var(--sl-border-radius-medium);
   cursor: pointer;
-  transition: background 0.2s ease;
+  transition: background var(--dur-base) var(--ease-out-quart),
+              opacity var(--dur-base) var(--ease-out-quart),
+              transform var(--dur-base) var(--ease-out-quart);
+}
+
+@starting-style {
+  .dirty-manifest-banner {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
 }
 
 .dirty-manifest-banner:hover {
@@ -1094,7 +1131,8 @@ h2 {
   overflow: hidden;
   transition: background var(--dur-fast) var(--ease-out-quart),
               border-color var(--dur-fast) var(--ease-out-quart),
-              transform var(--dur-fast) var(--ease-out-quart);
+              transform var(--dur-fast) var(--ease-out-quart),
+              box-shadow var(--dur-fast) var(--ease-out-quart);
 }
 .device-hub-card:hover {
   background: var(--surface-fill-hover);
@@ -1116,6 +1154,7 @@ h2 {
 .device-hub-card.active {
   border-color: var(--sl-color-primary-500);
   background: rgba(34, 184, 240, 0.16);
+  box-shadow: 0 0 0 1px rgba(34, 184, 240, 0.22);
 }
 .device-hub-icon {
   font-size: 1.4rem;
@@ -1142,7 +1181,7 @@ h2 {
 .device-settings-label {
   display: block;
   margin-bottom: 0.35rem;
-  color: var(--sl-color-neutral-700);
+  color: var(--ink-dim);
   font-size: var(--sl-input-label-font-size-medium);
 }
 .device-settings-description {
@@ -1161,16 +1200,17 @@ h2 {
   gap: 0.3rem;
   padding: 0.5rem 0.7rem;
   border-radius: var(--radius);
-  border: 2px solid var(--sl-color-neutral-200);
+  border: 2px solid var(--surface-border);
   cursor: pointer;
   min-width: 52px;
   text-align: center;
   background: transparent;
-  transition: border-color 0.15s, background 0.15s;
+  transition: border-color var(--dur-fast) var(--ease-out-quart),
+              background var(--dur-fast) var(--ease-out-quart);
 }
 .device-settings-icon-picker .init-icon-tile.selected {
-  border-color: var(--sl-color-primary-500);
-  background: var(--sl-color-primary-50);
+  border-color: var(--sl-color-primary-600);
+  background: rgba(34, 184, 240, 0.16);
 }
 .device-settings-icon-picker .init-icon-tile sl-icon {
   font-size: 1.5rem;
@@ -1226,6 +1266,269 @@ h2 {
 .init-device-form {
   display: grid;
   gap: 1rem;
+}
+
+/* ========================
+   Playlist Curation View
+   ======================== */
+
+.curation-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.curation-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--surface-border-soft);
+  flex-shrink: 0;
+}
+
+#curation-close-btn {
+  font-size: 1.1rem;
+}
+
+.curation-panels {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.curation-artist-panel {
+  width: 40%;
+  border-right: 1px solid var(--surface-border-soft);
+  overflow-y: auto;
+  padding: 0.5rem 0;
+}
+
+.curation-album-panel {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.5rem 0;
+}
+
+.curation-track-panel {
+  border-top: 1px solid var(--surface-border-soft);
+  overflow-y: auto;
+  max-height: 40%;
+  padding: 0.5rem 0;
+  flex-shrink: 0;
+}
+
+/* Focus rings for keyboard-navigable rows and the rename trigger */
+.curation-artist-row:focus-visible,
+.curation-album-row:focus-visible,
+.playlist-name-title:focus-visible {
+  outline: 2px solid var(--sl-color-primary-600);
+  outline-offset: -2px;
+}
+
+.curation-stats {
+  padding: var(--space-xs) var(--space-md);
+  background: var(--surface-fill);
+  border-bottom: 1px solid var(--surface-border-soft);
+  font-size: var(--sl-font-size-small);
+  color: var(--ink-dim);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-sm) var(--space-lg);
+  flex-shrink: 0;
+}
+
+.curation-artist-row,
+.curation-album-row {
+  display: flex;
+  align-items: center;
+  padding: var(--space-xs) var(--space-sm);
+  cursor: pointer;
+  gap: var(--space-xs);
+  transition: background var(--dur-fast) var(--ease-out-quart),
+              box-shadow var(--dur-fast) var(--ease-out-quart);
+  content-visibility: auto;
+  contain-intrinsic-size: 0 34px;
+}
+
+.curation-artist-row:hover,
+.curation-album-row:hover {
+  background: var(--surface-fill-hover);
+}
+
+.curation-artist-row.curation-selected,
+.curation-album-row.curation-album-focused {
+  background: rgba(34, 184, 240, 0.1);
+  box-shadow: inset 1px 0 0 rgba(34, 184, 240, 0.8);
+}
+
+.curation-track-row {
+  display: flex;
+  align-items: center;
+  padding: var(--space-xs) var(--space-sm);
+  gap: var(--space-xs);
+  transition: background var(--dur-fast) var(--ease-out-quart);
+  content-visibility: auto;
+  contain-intrinsic-size: 0 34px;
+}
+
+.curation-track-row:hover {
+  background: var(--surface-fill);
+}
+
+.curation-track-row:focus-visible {
+  outline: 2px solid var(--sl-color-primary-600);
+  outline-offset: -2px;
+}
+
+/* Playlist name — inline-edit trigger in the curation header */
+.curation-playlist-name {
+  font-weight: var(--sl-font-weight-semibold);
+  font-size: var(--sl-font-size-medium);
+  cursor: pointer;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+  transition: border-color var(--dur-fast) var(--ease-out-quart);
+  /* Prevent long names from overflowing the flex header */
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.curation-playlist-name:hover {
+  border-bottom-color: rgba(34, 184, 240, 0.55);
+}
+
+/* Inline rename input in the header */
+.curation-rename-input {
+  flex: 1;
+  max-width: 300px;
+}
+
+/* Trash button pushed to the right in the header */
+.curation-delete-btn {
+  color: var(--sl-color-danger-600);
+  margin-left: auto;
+}
+
+/* Add-tracks action in the stats bar pushed right */
+.curation-stats-action {
+  margin-left: auto;
+}
+
+/* Row labels (artist name, album name, track title) */
+.curation-row-label {
+  flex: 1;
+  font-size: var(--sl-font-size-small);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.curation-row-label--italic {
+  font-style: italic;
+}
+
+/* Track position badge (#N) */
+.curation-track-pos {
+  font-size: var(--sl-font-size-x-small);
+  color: var(--ink-dim);
+  flex-shrink: 0;
+  min-width: 3.5em;
+  text-align: right;
+}
+
+/* Track duration chip */
+.curation-track-duration {
+  font-size: var(--sl-font-size-x-small);
+  color: var(--ink-dim);
+  flex-shrink: 0;
+}
+
+/* Icon buttons inside rows (remove, move-up, move-down) */
+.curation-row-action {
+  font-size: 0.875rem;
+  flex-shrink: 0;
+}
+
+/* Empty-state messages in the curation panels */
+.curation-empty-state {
+  padding: var(--space-md);
+  margin: 0;
+  color: var(--ink-dim);
+  font-size: var(--sl-font-size-small);
+}
+
+/* Add-tracks dialog: results list */
+.curation-add-tracks-results {
+  margin-top: var(--space-sm);
+  max-height: 300px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+}
+
+/* Add-tracks: each search result row */
+.curation-track-result {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--sl-border-radius-small);
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background var(--dur-fast) var(--ease-out-quart),
+              border-color var(--dur-fast) var(--ease-out-quart);
+}
+
+.curation-track-result:hover {
+  background: var(--surface-fill-hover);
+}
+
+.curation-track-result--selected {
+  background: color-mix(in srgb, var(--sl-color-primary-600) 8%, transparent);
+  border-color: color-mix(in srgb, var(--sl-color-primary-600) 30%, transparent);
+}
+
+.curation-track-result--selected:hover {
+  background: color-mix(in srgb, var(--sl-color-primary-600) 12%, transparent);
+}
+
+/* Checkbox in search result rows should not shrink */
+.curation-track-result sl-checkbox {
+  flex-shrink: 0;
+}
+
+/* Add-tracks: track info block */
+.curation-track-result-info {
+  flex: 1;
+  overflow: hidden;
+}
+
+.curation-track-result-title {
+  font-size: var(--sl-font-size-small);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.curation-track-result-meta {
+  font-size: var(--sl-font-size-x-small);
+  color: var(--ink-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.curation-add-tracks-dialog::part(panel) {
+  background: var(--surface-bg);
+  color: var(--ink);
+  border-radius: var(--radius);
 }
 
 @media (max-width: 1120px) {

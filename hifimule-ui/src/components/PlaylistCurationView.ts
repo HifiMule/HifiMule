@@ -92,7 +92,7 @@ export class PlaylistCurationView {
     }
 
     private getTracksForPanel(): BrowseTrack[] {
-        if (this.selectedArtist === null) return this.tracks; // All artists → full playlist, playlist order
+        if (this.selectedArtist === null) return this.tracks;
         return this.tracks.filter(track => {
             if ((track.artistName || 'Unknown Artist') !== this.selectedArtist) return false;
             if (this.selectedAlbum !== null && (track.albumName || 'Unknown Album') !== this.selectedAlbum) return false;
@@ -100,21 +100,96 @@ export class PlaylistCurationView {
         });
     }
 
+    // ─── Panel HTML builders ───────────────────────────────────────────────────
+
+    private buildArtistPanelHtml(artists: string[], selectedArtist: string | null): string {
+        if (this.tracks.length === 0) {
+            return `<p class="curation-empty-state">${t('playlist.curation.no_artists')}</p>`;
+        }
+        return `<div class="curation-artist-row curation-all-artists${selectedArtist === null ? ' curation-selected' : ''}"
+                     role="button" tabindex="0"
+                     aria-pressed="${selectedArtist === null ? 'true' : 'false'}">
+                    <span class="curation-row-label curation-row-label--italic">${t('playlist.curation.all_artists')}</span>
+                </div>
+                ${artists.map(artist => `
+                 <div class="curation-artist-row${artist === selectedArtist ? ' curation-selected' : ''}"
+                      data-artist="${this.escapeAttr(artist)}"
+                      role="button" tabindex="0"
+                      aria-pressed="${artist === selectedArtist ? 'true' : 'false'}">
+                     <span class="curation-row-label" title="${this.escapeAttr(artist)}">${this.escapeHtml(artist)}</span>
+                     <sl-icon-button
+                         class="curation-remove-artist curation-row-action"
+                         name="x-circle"
+                         data-artist="${this.escapeAttr(artist)}"
+                         label="${t('playlist.curation.remove_artist')}"
+                         ${this.isMutating ? 'disabled' : ''}
+                     ></sl-icon-button>
+                 </div>
+             `).join('')}`;
+    }
+
+    private buildAlbumPanelHtml(albums: string[], selectedArtist: string | null): string {
+        if (selectedArtist === null) {
+            return `<p class="curation-empty-state">${t('playlist.curation.select_artist')}</p>`;
+        }
+        return `<div class="curation-album-row curation-all-albums${this.selectedAlbum === null ? ' curation-album-focused' : ''}"
+                     role="button" tabindex="0"
+                     aria-pressed="${this.selectedAlbum === null ? 'true' : 'false'}">
+                    <span class="curation-row-label curation-row-label--italic">${t('playlist.curation.all_albums')}</span>
+                </div>
+                ${albums.map(album => `
+                 <div class="curation-album-row${album === this.selectedAlbum ? ' curation-album-focused' : ''}"
+                      data-artist="${this.escapeAttr(selectedArtist)}"
+                      data-album="${this.escapeAttr(album)}"
+                      role="button" tabindex="0"
+                      aria-pressed="${album === this.selectedAlbum ? 'true' : 'false'}">
+                     <span class="curation-row-label" title="${this.escapeAttr(album)}">${this.escapeHtml(album)}</span>
+                     <sl-icon-button
+                         class="curation-remove-album curation-row-action"
+                         name="x-circle"
+                         data-artist="${this.escapeAttr(selectedArtist)}"
+                         data-album="${this.escapeAttr(album)}"
+                         label="${t('playlist.curation.remove_album')}"
+                         ${this.isMutating ? 'disabled' : ''}
+                     ></sl-icon-button>
+                 </div>
+             `).join('')}`;
+    }
+
+    private buildTrackPanelHtml(panelTracks: BrowseTrack[], positionById: Map<string, number>): string {
+        if (panelTracks.length === 0) {
+            return `<p class="curation-empty-state">${t('playlist.curation.no_tracks')}</p>`;
+        }
+        return panelTracks.map((track, panelIdx) => `
+            <div class="curation-track-row" data-panel-index="${panelIdx}" tabindex="-1">
+                <span class="curation-track-pos">#${(positionById.get(track.id) ?? 0) + 1}</span>
+                <span class="curation-row-label" title="${this.escapeAttr(track.title)}">${this.escapeHtml(track.title)}</span>
+                <span class="curation-track-duration">${formatDuration(track.duration ?? 0)}</span>
+                ${this.supportsPlaylistWrite ? `
+                    <sl-icon-button class="curation-move-up curation-row-action" name="chevron-up"
+                        data-panel-index="${panelIdx}" label="${t('playlist.curation.move_up')}"
+                        ${panelIdx === 0 || this.isMutating ? 'disabled' : ''}></sl-icon-button>
+                    <sl-icon-button class="curation-move-down curation-row-action" name="chevron-down"
+                        data-panel-index="${panelIdx}" label="${t('playlist.curation.move_down')}"
+                        ${panelIdx === panelTracks.length - 1 || this.isMutating ? 'disabled' : ''}></sl-icon-button>
+                ` : ''}
+                <sl-icon-button
+                    class="curation-remove-track curation-row-action"
+                    name="x-circle"
+                    data-track-id="${this.escapeAttr(track.id)}"
+                    label="${t('playlist.curation.remove_track')}"
+                    ${this.isMutating ? 'disabled' : ''}
+                ></sl-icon-button>
+            </div>
+        `).join('');
+    }
+
     private renderStats(): string {
         const count = this.tracks.length;
         const totalSecs = this.tracks.reduce((s, track) => s + (track.duration ?? 0), 0);
         const totalBytes = this.tracks.reduce((s, track) => s + (track.sizeBytes ?? 0), 0);
         return `
-            <div class="curation-stats" style="
-                padding: 0.5rem 1rem;
-                background: var(--sl-color-neutral-50);
-                border-bottom: 1px solid var(--sl-color-neutral-200);
-                font-size: var(--sl-font-size-small);
-                color: var(--sl-color-neutral-600);
-                display: flex;
-                align-items: center;
-                gap: 1.5rem;
-            ">
+            <div class="curation-stats">
                 <span>${count} track${count === 1 ? '' : 's'}</span>
                 <span>${formatDuration(totalSecs)}</span>
                 <span>${formatBytes(totalBytes)}</span>
@@ -122,7 +197,7 @@ export class PlaylistCurationView {
                     id="curation-add-tracks-btn"
                     size="small"
                     variant="default"
-                    style="margin-left: auto;"
+                    class="curation-stats-action"
                 >
                     <sl-icon slot="prefix" name="plus-circle"></sl-icon>
                     ${t('playlist.curation.add_tracks')}
@@ -131,74 +206,69 @@ export class PlaylistCurationView {
         `;
     }
 
+    // ─── Full render ───────────────────────────────────────────────────────────
+    // Used for: initial load, rename/delete operations, track mutations (add/remove).
+    // Artist/album selection and track reorder use the targeted partial methods below.
+
     private render(): void {
         const artistIndex = this.buildArtistIndex();
         const artists = Array.from(artistIndex.keys()).sort((a, b) => a.localeCompare(b));
-        // null = "All artists". A previously-selected artist that no longer exists → fall back to All.
         if (this.selectedArtist !== null && !artistIndex.has(this.selectedArtist)) {
             this.selectedArtist = null;
         }
-        const selectedArtist = this.selectedArtist; // null = All
-
+        const selectedArtist = this.selectedArtist;
         const albums = selectedArtist !== null
             ? Array.from(artistIndex.get(selectedArtist)!).sort((a, b) => a.localeCompare(b))
             : [];
-
-        // Reset selectedAlbum if it no longer exists for this artist
         if (this.selectedAlbum !== null && !albums.includes(this.selectedAlbum)) {
             this.selectedAlbum = null;
         }
-
-        // Precompute absolute 1-based position map for #N badges (Task 3)
         const positionById = new Map<string, number>();
         this.tracks.forEach((track, i) => positionById.set(track.id, i));
-
         const panelTracks = this.getTracksForPanel();
 
         this.container.innerHTML = `
-            <div class="curation-view" style="display: flex; flex-direction: column; height: 100%; overflow: hidden;">
-                <div class="curation-header" style="
-                    display: flex;
-                    align-items: center;
-                    gap: 0.75rem;
-                    padding: 0.75rem 1rem;
-                    border-bottom: 1px solid var(--sl-color-neutral-200);
-                ">
+            <div class="curation-view">
+                <div class="curation-header">
                     <sl-icon-button
                         id="curation-close-btn"
                         name="arrow-left"
                         label="${t('playlist.curation.close')}"
-                        style="font-size: 1.1rem;"
                     ></sl-icon-button>
                     ${this.isRenamingPlaylist
                         ? `<sl-input
                                id="playlist-rename-input"
                                value="${this.escapeAttr(this.playlistName)}"
                                size="small"
-                               style="flex: 1; max-width: 300px;"
+                               class="curation-rename-input"
                            ></sl-input>
+                           ${this.isSavingRename
+                               ? '<sl-spinner class="curation-row-action"></sl-spinner>'
+                               : `<sl-icon-button
+                                      class="playlist-rename-save curation-row-action"
+                                      name="check"
+                                      label="${t('playlist.curation.rename_save')}"
+                                  ></sl-icon-button>`
+                           }
                            <sl-icon-button
-                               class="playlist-rename-save"
-                               name="check"
-                               label="${t('playlist.curation.rename_save')}"
-                           ></sl-icon-button>
-                           <sl-icon-button
-                               class="playlist-rename-cancel"
+                               class="playlist-rename-cancel curation-row-action"
                                name="x"
                                label="${t('playlist.curation.rename_cancel')}"
+                               ${this.isSavingRename ? 'disabled' : ''}
                            ></sl-icon-button>`
                         : `<span
-                               class="playlist-name-title"
-                               style="font-weight: var(--sl-font-weight-semibold); font-size: var(--sl-font-size-medium); cursor: pointer; border-bottom: 1px dashed var(--sl-color-neutral-400);"
+                               class="playlist-name-title curation-playlist-name"
+                               role="button"
+                               tabindex="0"
+                               aria-label="${t('playlist.curation.rename_hint')}"
                                title="${t('playlist.curation.rename_hint')}"
                            >${this.escapeHtml(this.playlistName)}</span>`
                     }
                     ${this.supportsPlaylistWrite
                         ? `<sl-icon-button
-                               class="playlist-delete-btn"
+                               class="playlist-delete-btn curation-delete-btn curation-row-action"
                                name="trash"
                                label="${t('playlist.curation.delete_title')}"
-                               style="color: var(--sl-color-danger-600); margin-left: auto;"
                            ></sl-icon-button>`
                         : ''
                     }
@@ -213,142 +283,16 @@ export class PlaylistCurationView {
                     </sl-button>
                 </sl-dialog>
                 ${this.renderStats()}
-                <div class="curation-panels" style="
-                    display: flex;
-                    flex: 1;
-                    overflow: hidden;
-                    min-height: 0;
-                ">
-                    <div id="curation-artist-panel" style="
-                        width: 40%;
-                        border-right: 1px solid var(--sl-color-neutral-200);
-                        overflow-y: auto;
-                        padding: 0.5rem 0;
-                    ">
-                        ${this.tracks.length === 0
-                            ? `<p style="padding: 1rem; color: var(--sl-color-neutral-500);">${t('playlist.curation.no_artists')}</p>`
-                            : `<div class="curation-artist-row curation-all-artists${selectedArtist === null ? ' curation-selected' : ''}"
-                                     style="
-                                        display: flex;
-                                        align-items: center;
-                                        padding: 0.5rem 0.75rem;
-                                        cursor: pointer;
-                                        background: ${selectedArtist === null ? 'var(--sl-color-primary-50)' : 'transparent'};
-                                        border-left: 3px solid ${selectedArtist === null ? 'var(--sl-color-primary-600)' : 'transparent'};
-                                        gap: 0.5rem;
-                                     ">
-                                    <span style="flex: 1; font-size: var(--sl-font-size-small); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-style: italic;">${t('playlist.curation.all_artists')}</span>
-                                </div>
-                               ${artists.map(artist => `
-                                <div class="curation-artist-row${artist === selectedArtist ? ' curation-selected' : ''}"
-                                     data-artist="${this.escapeAttr(artist)}"
-                                     style="
-                                        display: flex;
-                                        align-items: center;
-                                        padding: 0.5rem 0.75rem;
-                                        cursor: pointer;
-                                        background: ${artist === selectedArtist ? 'var(--sl-color-primary-50)' : 'transparent'};
-                                        border-left: 3px solid ${artist === selectedArtist ? 'var(--sl-color-primary-600)' : 'transparent'};
-                                        gap: 0.5rem;
-                                     ">
-                                    <span style="flex: 1; font-size: var(--sl-font-size-small); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;"
-                                          title="${this.escapeAttr(artist)}">${this.escapeHtml(artist)}</span>
-                                    <sl-icon-button
-                                        class="curation-remove-artist"
-                                        name="x-circle"
-                                        data-artist="${this.escapeAttr(artist)}"
-                                        label="${t('playlist.curation.remove_artist')}"
-                                        style="font-size: 0.9rem; flex-shrink: 0;"
-                                    ></sl-icon-button>
-                                </div>
-                            `).join('')}`
-                        }
+                <div class="curation-panels">
+                    <div id="curation-artist-panel" class="curation-artist-panel">
+                        ${this.buildArtistPanelHtml(artists, selectedArtist)}
                     </div>
-                    <div id="curation-album-panel" style="
-                        flex: 1;
-                        overflow-y: auto;
-                        padding: 0.5rem 0;
-                    ">
-                        ${selectedArtist === null
-                            ? `<p style="padding: 1rem; color: var(--sl-color-neutral-500);">${t('playlist.curation.select_artist')}</p>`
-                            : `<div class="curation-album-row curation-all-albums${this.selectedAlbum === null ? ' curation-album-focused' : ''}"
-                                     style="
-                                        display: flex;
-                                        align-items: center;
-                                        padding: 0.5rem 0.75rem;
-                                        cursor: pointer;
-                                        background: ${this.selectedAlbum === null ? 'var(--sl-color-primary-50)' : 'transparent'};
-                                        border-left: 3px solid ${this.selectedAlbum === null ? 'var(--sl-color-primary-600)' : 'transparent'};
-                                        gap: 0.5rem;
-                                     ">
-                                    <span style="flex: 1; font-size: var(--sl-font-size-small); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-style: italic;">${t('playlist.curation.all_albums')}</span>
-                                </div>
-                               ${albums.map(album => `
-                                <div class="curation-album-row${album === this.selectedAlbum ? ' curation-album-focused' : ''}"
-                                     data-artist="${this.escapeAttr(selectedArtist)}"
-                                     data-album="${this.escapeAttr(album)}"
-                                     style="
-                                        display: flex;
-                                        align-items: center;
-                                        padding: 0.5rem 0.75rem;
-                                        cursor: pointer;
-                                        background: ${album === this.selectedAlbum ? 'var(--sl-color-primary-50)' : 'transparent'};
-                                        border-left: 3px solid ${album === this.selectedAlbum ? 'var(--sl-color-primary-600)' : 'transparent'};
-                                        gap: 0.5rem;
-                                     ">
-                                    <span style="flex: 1; font-size: var(--sl-font-size-small); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;"
-                                          title="${this.escapeAttr(album)}">${this.escapeHtml(album)}</span>
-                                    <sl-icon-button
-                                        class="curation-remove-album"
-                                        name="x-circle"
-                                        data-artist="${this.escapeAttr(selectedArtist)}"
-                                        data-album="${this.escapeAttr(album)}"
-                                        label="${t('playlist.curation.remove_album')}"
-                                        style="font-size: 0.9rem; flex-shrink: 0;"
-                                    ></sl-icon-button>
-                                </div>
-                            `).join('')}`
-                        }
+                    <div id="curation-album-panel" class="curation-album-panel">
+                        ${this.buildAlbumPanelHtml(albums, selectedArtist)}
                     </div>
                 </div>
-                <div id="curation-track-panel" style="
-                    border-top: 1px solid var(--sl-color-neutral-200);
-                    overflow-y: auto;
-                    max-height: 40%;
-                    padding: 0.5rem 0;
-                    flex-shrink: 0;
-                ">
-                    ${panelTracks.length === 0
-                        ? `<p style="padding: 0.5rem 1rem; color: var(--sl-color-neutral-500); font-size: var(--sl-font-size-small);">${t('playlist.curation.no_tracks')}</p>`
-                        : panelTracks.map((track, panelIdx) => `
-                            <div class="curation-track-row" data-panel-index="${panelIdx}"
-                                 style="display: flex; align-items: center; padding: 0.35rem 0.75rem; gap: 0.5rem;">
-                                <span style="font-size: var(--sl-font-size-x-small); color: var(--sl-color-neutral-400); flex-shrink: 0; min-width: 2.5em; text-align: right;">
-                                    #${(positionById.get(track.id) ?? 0) + 1}
-                                </span>
-                                <span style="flex: 1; font-size: var(--sl-font-size-small); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;"
-                                      title="${this.escapeAttr(track.title)}">${this.escapeHtml(track.title)}</span>
-                                <span style="font-size: var(--sl-font-size-x-small); color: var(--sl-color-neutral-500); flex-shrink: 0;">
-                                    ${formatDuration(track.duration ?? 0)}
-                                </span>
-                                ${this.supportsPlaylistWrite ? `
-                                    <sl-icon-button class="curation-move-up" name="chevron-up"
-                                        data-panel-index="${panelIdx}" label="${t('playlist.curation.move_up')}"
-                                        ${panelIdx === 0 ? 'disabled' : ''} style="font-size: 0.9rem; flex-shrink: 0;"></sl-icon-button>
-                                    <sl-icon-button class="curation-move-down" name="chevron-down"
-                                        data-panel-index="${panelIdx}" label="${t('playlist.curation.move_down')}"
-                                        ${panelIdx === panelTracks.length - 1 ? 'disabled' : ''} style="font-size: 0.9rem; flex-shrink: 0;"></sl-icon-button>
-                                ` : ''}
-                                <sl-icon-button
-                                    class="curation-remove-track"
-                                    name="x-circle"
-                                    data-track-id="${this.escapeAttr(track.id)}"
-                                    label="${t('playlist.curation.remove_track')}"
-                                    style="font-size: 0.9rem; flex-shrink: 0;"
-                                ></sl-icon-button>
-                            </div>
-                        `).join('')
-                    }
+                <div id="curation-track-panel" class="curation-track-panel">
+                    ${this.buildTrackPanelHtml(panelTracks, positionById)}
                 </div>
                 <sl-alert id="curation-error" variant="danger" closable style="display:none; margin: 0.5rem;"></sl-alert>
             </div>
@@ -357,12 +301,178 @@ export class PlaylistCurationView {
         this.bindEvents();
 
         requestAnimationFrame(() => {
-            const artistPanel = this.container.querySelector<HTMLElement>('#curation-artist-panel');
-            const selectedRow = artistPanel?.querySelector<HTMLElement>('.curation-artist-row.curation-selected');
-            if (artistPanel && selectedRow) {
-                artistPanel.scrollTop =
-                    selectedRow.getBoundingClientRect().top - artistPanel.getBoundingClientRect().top;
-            }
+            this.container.querySelector<HTMLElement>('.curation-artist-row.curation-selected')?.scrollIntoView({ block: 'nearest' });
+        });
+    }
+
+    // ─── Partial re-render methods ─────────────────────────────────────────────
+    // Each method updates only the DOM regions that change for a given interaction,
+    // leaving the header, stats bar, dialog, and error alert untouched.
+
+    /** Artist row clicked: update selected state in artist panel, rebuild album + track panels. */
+    private updateAlbumsAndTracks(): void {
+        const artistIndex = this.buildArtistIndex();
+        const selectedArtist = this.selectedArtist;
+        const albums = selectedArtist !== null
+            ? Array.from(artistIndex.get(selectedArtist)!).sort((a, b) => a.localeCompare(b))
+            : [];
+        if (this.selectedAlbum !== null && !albums.includes(this.selectedAlbum)) {
+            this.selectedAlbum = null;
+        }
+        const positionById = new Map<string, number>();
+        this.tracks.forEach((track, i) => positionById.set(track.id, i));
+        const panelTracks = this.getTracksForPanel();
+
+        // Toggle selected class on artist rows without rebuilding the panel
+        this.container.querySelectorAll<HTMLElement>('.curation-artist-row').forEach(row => {
+            const isAll = row.classList.contains('curation-all-artists');
+            const isSelected = isAll ? selectedArtist === null : row.dataset.artist === selectedArtist;
+            row.classList.toggle('curation-selected', isSelected);
+            row.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
+        });
+
+        const albumPanel = this.container.querySelector('#curation-album-panel');
+        if (albumPanel) {
+            albumPanel.innerHTML = this.buildAlbumPanelHtml(albums, selectedArtist);
+            this.bindAlbumPanelEvents();
+        }
+
+        const trackPanel = this.container.querySelector('#curation-track-panel');
+        if (trackPanel) {
+            trackPanel.innerHTML = this.buildTrackPanelHtml(panelTracks, positionById);
+            this.bindTrackPanelEvents();
+        }
+
+        requestAnimationFrame(() => {
+            this.container.querySelector<HTMLElement>('.curation-artist-row.curation-selected')?.scrollIntoView({ block: 'nearest' });
+        });
+    }
+
+    /** Album row clicked: update selected state in album panel, rebuild track panel only. */
+    private updateTracksPanel(): void {
+        const positionById = new Map<string, number>();
+        this.tracks.forEach((track, i) => positionById.set(track.id, i));
+        const panelTracks = this.getTracksForPanel();
+
+        this.container.querySelectorAll<HTMLElement>('.curation-album-row').forEach(row => {
+            const isAll = row.classList.contains('curation-all-albums');
+            const isSelected = isAll ? this.selectedAlbum === null : row.dataset.album === this.selectedAlbum;
+            row.classList.toggle('curation-album-focused', isSelected);
+            row.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
+        });
+
+        const trackPanel = this.container.querySelector('#curation-track-panel');
+        if (trackPanel) {
+            trackPanel.innerHTML = this.buildTrackPanelHtml(panelTracks, positionById);
+            this.bindTrackPanelEvents();
+        }
+    }
+
+    /** Track order changed: rebuild track panel only (stats and panels unchanged). */
+    private updateTrackPanelOnly(): void {
+        const positionById = new Map<string, number>();
+        this.tracks.forEach((track, i) => positionById.set(track.id, i));
+        const panelTracks = this.getTracksForPanel();
+
+        const trackPanel = this.container.querySelector('#curation-track-panel');
+        if (trackPanel) {
+            trackPanel.innerHTML = this.buildTrackPanelHtml(panelTracks, positionById);
+            this.bindTrackPanelEvents();
+        }
+    }
+
+    // ─── Event binding ─────────────────────────────────────────────────────────
+
+    private bindArtistPanelEvents(): void {
+        this.container.querySelector('.curation-all-artists')?.addEventListener('click', () => {
+            this.selectedArtist = null;
+            this.selectedAlbum = null;
+            this.updateAlbumsAndTracks();
+        });
+
+        this.container.querySelectorAll<HTMLElement>('.curation-artist-row').forEach(row => {
+            row.addEventListener('click', (e) => {
+                if ((e.target as HTMLElement).closest('.curation-remove-artist')) return;
+                const artist = row.dataset.artist;
+                if (artist) {
+                    this.selectedArtist = artist;
+                    this.updateAlbumsAndTracks();
+                }
+            });
+            row.addEventListener('keydown', (e) => {
+                if ((e as KeyboardEvent).key === 'Enter' || (e as KeyboardEvent).key === ' ') {
+                    e.preventDefault();
+                    row.click();
+                }
+            });
+        });
+
+        this.container.querySelectorAll<HTMLElement>('.curation-remove-artist').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const artist = (btn as any).dataset?.artist ?? btn.closest('[data-artist]')?.getAttribute('data-artist');
+                if (artist) await this.removeArtist(artist);
+            });
+        });
+    }
+
+    private bindAlbumPanelEvents(): void {
+        this.container.querySelector('.curation-all-albums')?.addEventListener('click', () => {
+            this.selectedAlbum = null;
+            this.updateTracksPanel();
+        });
+
+        this.container.querySelectorAll<HTMLElement>('.curation-album-row').forEach(row => {
+            row.addEventListener('click', (e) => {
+                if ((e.target as HTMLElement).closest('.curation-remove-album')) return;
+                const album = row.dataset.album;
+                if (album) {
+                    this.selectedAlbum = album === this.selectedAlbum ? null : album;
+                    this.updateTracksPanel();
+                }
+            });
+            row.addEventListener('keydown', (e) => {
+                if ((e as KeyboardEvent).key === 'Enter' || (e as KeyboardEvent).key === ' ') {
+                    e.preventDefault();
+                    row.click();
+                }
+            });
+        });
+
+        this.container.querySelectorAll<HTMLElement>('.curation-remove-album').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const artist = (btn as any).dataset?.artist ?? btn.closest('[data-artist]')?.getAttribute('data-artist');
+                const album = (btn as any).dataset?.album ?? btn.closest('[data-album]')?.getAttribute('data-album');
+                if (artist && album) await this.removeAlbum(artist, album);
+            });
+        });
+    }
+
+    private bindTrackPanelEvents(): void {
+        this.container.querySelectorAll<HTMLElement>('.curation-remove-track').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const trackId = (btn as any).dataset?.trackId
+                    ?? btn.closest('[data-track-id]')?.getAttribute('data-track-id');
+                if (trackId) await this.doRemove([trackId]);
+            });
+        });
+
+        this.container.querySelectorAll<HTMLElement>('.curation-move-up').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const idx = Number((btn as HTMLElement).dataset.panelIndex);
+                if (!Number.isNaN(idx)) await this.moveTrack(idx, -1);
+            });
+        });
+
+        this.container.querySelectorAll<HTMLElement>('.curation-move-down').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const idx = Number((btn as HTMLElement).dataset.panelIndex);
+                if (!Number.isNaN(idx)) await this.moveTrack(idx, 1);
+            });
         });
     }
 
@@ -378,26 +488,38 @@ export class PlaylistCurationView {
             const input = this.container.querySelector('#playlist-rename-input') as any;
             if (input) input.focus();
         });
+        this.container.querySelector('.playlist-name-title')?.addEventListener('keydown', (e) => {
+            if ((e as KeyboardEvent).key === 'Enter' || (e as KeyboardEvent).key === ' ') {
+                e.preventDefault();
+                this.isRenamingPlaylist = true;
+                this.render();
+                const input = this.container.querySelector('#playlist-rename-input') as any;
+                if (input) input.focus();
+            }
+        });
 
         // Rename: save
         this.container.querySelector('.playlist-rename-save')?.addEventListener('click', async () => {
             if (this.isSavingRename) return;
             const input = this.container.querySelector('#playlist-rename-input') as any;
             const newName = input?.value?.trim();
-            if (newName && newName !== this.playlistName) {
-                this.isSavingRename = true;
-                try {
-                    await rpcCall('playlist.rename', { playlistId: this.playlistId, name: newName });
-                    this.playlistName = newName;
-                } catch (err) {
-                    const message = err instanceof Error ? err.message : String(err);
-                    showToast(t('playlist.curation.rename_error', { message }), 'danger');
-                    return; // stay in edit mode so the user can retry
-                } finally {
-                    this.isSavingRename = false;
-                }
+            if (!newName || newName === this.playlistName) {
+                this.isRenamingPlaylist = false;
+                this.render();
+                return;
             }
-            this.isRenamingPlaylist = false;
+            this.isSavingRename = true;
+            this.render();
+            try {
+                await rpcCall('playlist.rename', { playlistId: this.playlistId, name: newName });
+                this.playlistName = newName;
+                this.isRenamingPlaylist = false;
+            } catch (err) {
+                const message = err instanceof Error ? err.message : String(err);
+                showToast(t('playlist.curation.rename_error', { message }), 'danger');
+            } finally {
+                this.isSavingRename = false;
+            }
             this.render();
         });
 
@@ -407,11 +529,14 @@ export class PlaylistCurationView {
             this.render();
         });
 
-        // Rename: Escape key
+        // Rename: Escape cancels, Enter confirms
         this.container.querySelector('#playlist-rename-input')?.addEventListener('keydown', (e) => {
-            if ((e as KeyboardEvent).key === 'Escape') {
+            const key = (e as KeyboardEvent).key;
+            if (key === 'Escape') {
                 this.isRenamingPlaylist = false;
                 this.render();
+            } else if (key === 'Enter') {
+                this.container.querySelector<HTMLElement>('.playlist-rename-save')?.click();
             }
         });
 
@@ -429,67 +554,22 @@ export class PlaylistCurationView {
         this.container.querySelector('.playlist-delete-confirm')?.addEventListener('click', async () => {
             if (this.isDeleting) return;
             this.isDeleting = true;
+            const confirmBtn = this.container.querySelector('.playlist-delete-confirm') as any;
+            const cancelBtn = this.container.querySelector('.playlist-delete-cancel') as any;
+            if (confirmBtn) { confirmBtn.loading = true; confirmBtn.disabled = true; }
+            if (cancelBtn) { cancelBtn.disabled = true; }
             try {
                 await rpcCall('playlist.delete', { playlistId: this.playlistId });
             } catch (err) {
                 const message = err instanceof Error ? err.message : String(err);
                 showToast(t('playlist.curation.delete_error', { message }), 'danger');
-                return; // leave the dialog open so the user can retry or cancel
+                return;
             } finally {
                 this.isDeleting = false;
+                if (confirmBtn) { confirmBtn.loading = false; confirmBtn.disabled = false; }
+                if (cancelBtn) { cancelBtn.disabled = false; }
             }
             this.onClose();
-        });
-
-        this.container.querySelector('.curation-all-artists')?.addEventListener('click', () => {
-            this.selectedArtist = null;
-            this.selectedAlbum = null;
-            this.render();
-        });
-
-        this.container.querySelector('.curation-all-albums')?.addEventListener('click', () => {
-            this.selectedAlbum = null;
-            this.render();
-        });
-
-        this.container.querySelectorAll<HTMLElement>('.curation-artist-row').forEach(row => {
-            row.addEventListener('click', (e) => {
-                if ((e.target as HTMLElement).closest('.curation-remove-artist')) return;
-                const artist = row.dataset.artist;
-                if (artist) {
-                    this.selectedArtist = artist;
-                    this.render();
-                }
-            });
-        });
-
-        this.container.querySelectorAll<HTMLElement>('.curation-remove-artist').forEach(btn => {
-            btn.addEventListener('click', async (e) => {
-                e.stopPropagation();
-                const artist = (btn as any).dataset?.artist ?? btn.closest('[data-artist]')?.getAttribute('data-artist');
-                if (artist) await this.removeArtist(artist);
-            });
-        });
-
-        this.container.querySelectorAll<HTMLElement>('.curation-remove-album').forEach(btn => {
-            btn.addEventListener('click', async (e) => {
-                e.stopPropagation();
-                const artist = (btn as any).dataset?.artist ?? btn.closest('[data-artist]')?.getAttribute('data-artist');
-                const album = (btn as any).dataset?.album ?? btn.closest('[data-album]')?.getAttribute('data-album');
-                if (artist && album) await this.removeAlbum(artist, album);
-            });
-        });
-
-        // Album row click — toggle album focus to filter the track panel
-        this.container.querySelectorAll<HTMLElement>('.curation-album-row').forEach(row => {
-            row.addEventListener('click', (e) => {
-                if ((e.target as HTMLElement).closest('.curation-remove-album')) return;
-                const album = row.dataset.album;
-                if (album) {
-                    this.selectedAlbum = album === this.selectedAlbum ? null : album;
-                    this.render();
-                }
-            });
         });
 
         // "Add tracks" button
@@ -498,32 +578,12 @@ export class PlaylistCurationView {
             this.openAddTracksDialog();
         });
 
-        // Track remove buttons
-        this.container.querySelectorAll<HTMLElement>('.curation-remove-track').forEach(btn => {
-            btn.addEventListener('click', async (e) => {
-                e.stopPropagation();
-                const trackId = (btn as any).dataset?.trackId
-                    ?? btn.closest('[data-track-id]')?.getAttribute('data-track-id');
-                if (trackId) await this.doRemove([trackId]);
-            });
-        });
-
-        // Move up/down buttons
-        this.container.querySelectorAll<HTMLElement>('.curation-move-up').forEach(btn => {
-            btn.addEventListener('click', async (e) => {
-                e.stopPropagation();
-                const idx = Number((btn as HTMLElement).dataset.panelIndex);
-                if (!Number.isNaN(idx)) await this.moveTrack(idx, -1);
-            });
-        });
-        this.container.querySelectorAll<HTMLElement>('.curation-move-down').forEach(btn => {
-            btn.addEventListener('click', async (e) => {
-                e.stopPropagation();
-                const idx = Number((btn as HTMLElement).dataset.panelIndex);
-                if (!Number.isNaN(idx)) await this.moveTrack(idx, 1);
-            });
-        });
+        this.bindArtistPanelEvents();
+        this.bindAlbumPanelEvents();
+        this.bindTrackPanelEvents();
     }
+
+    // ─── Actions ───────────────────────────────────────────────────────────────
 
     private async removeArtist(artistName: string): Promise<void> {
         const trackIds = this.getTrackIdsByArtist(artistName);
@@ -541,7 +601,7 @@ export class PlaylistCurationView {
     private async doRemove(trackIds: string[]): Promise<void> {
         if (this.isMutating) return;
         this.isRemoving = true;
-        // Optimistic local update — removes from local state before RPC returns
+        const previousTracks = this.tracks.slice();
         const removedSet = new Set(trackIds);
         this.tracks = this.tracks.filter(track => !removedSet.has(track.id));
 
@@ -553,11 +613,18 @@ export class PlaylistCurationView {
             });
         } catch (err) {
             errorMsg = err instanceof Error ? err.message : String(err);
+            this.tracks = previousTracks;
         } finally {
             this.isRemoving = false;
         }
 
+        // Full render: stats, artist panel, album panel, and track panel all potentially changed.
         this.render();
+
+        requestAnimationFrame(() => {
+            const firstRow = this.container.querySelector<HTMLElement>('.curation-track-row');
+            firstRow?.focus();
+        });
 
         if (errorMsg !== null) {
             const errorEl = this.container.querySelector('#curation-error') as HTMLElement | null;
@@ -576,30 +643,47 @@ export class PlaylistCurationView {
         if (panelIdx < 0 || panelIdx >= panel.length) return;
         if (neighbourPanelIdx < 0 || neighbourPanelIdx >= panel.length) return;
 
-        // Use object-reference indexOf — duplicate-id safe
         const fullIdxA = this.tracks.indexOf(panel[panelIdx]);
         const fullIdxB = this.tracks.indexOf(panel[neighbourPanelIdx]);
         if (fullIdxA < 0 || fullIdxB < 0) return;
 
         this.isReordering = true;
-        const previousOrder = this.tracks.slice(); // snapshot for rollback
+        const previousOrder = this.tracks.slice();
         const next = this.tracks.slice();
         [next[fullIdxA], next[fullIdxB]] = [next[fullIdxB], next[fullIdxA]];
-        this.tracks = next; // optimistic
-        this.render(); // #N updates immediately
+        this.tracks = next;
+
+        // Optimistic: show new order with buttons disabled.
+        // Only the track panel changes — header, stats, and artist/album panels are untouched.
+        this.updateTrackPanelOnly();
+
+        const newPanelIdx = panelIdx + direction;
+        requestAnimationFrame(() => {
+            this.container.querySelector<HTMLElement>(
+                `.curation-track-row[data-panel-index="${newPanelIdx}"]`
+            )?.focus();
+        });
 
         let errorMsg: string | null = null;
         try {
             await rpcCall('playlist.reorder', {
                 playlistId: this.playlistId,
-                trackIds: this.tracks.map(track => track.id), // full reordered id list
+                trackIds: this.tracks.map(track => track.id),
             });
         } catch (err) {
             errorMsg = err instanceof Error ? err.message : String(err);
-            this.tracks = previousOrder; // rollback
-            this.render();
+            this.tracks = previousOrder;
         } finally {
             this.isReordering = false;
+            // Re-render track panel: re-enables buttons in the success path,
+            // shows rolled-back order in the error path.
+            this.updateTrackPanelOnly();
+            const focusIdx = errorMsg !== null ? panelIdx : newPanelIdx;
+            requestAnimationFrame(() => {
+                this.container.querySelector<HTMLElement>(
+                    `.curation-track-row[data-panel-index="${focusIdx}"]`
+                )?.focus();
+            });
         }
 
         if (errorMsg !== null) {
@@ -615,6 +699,7 @@ export class PlaylistCurationView {
     private openAddTracksDialog(): void {
         const dialog = document.createElement('sl-dialog') as any;
         dialog.label = t('playlist.curation.add_tracks');
+        dialog.classList.add('curation-add-tracks-dialog');
         dialog.innerHTML = `
             <sl-input
                 id="add-tracks-query"
@@ -622,14 +707,7 @@ export class PlaylistCurationView {
                 clearable
                 autofocus
             ></sl-input>
-            <div id="add-tracks-results" style="
-                margin-top: 0.75rem;
-                max-height: 300px;
-                overflow-y: auto;
-                display: flex;
-                flex-direction: column;
-                gap: 0.25rem;
-            "></div>
+            <div id="add-tracks-results" class="curation-add-tracks-results"></div>
             <sl-alert id="add-tracks-error" variant="danger" closable style="display:none; margin-top: 0.75rem;"></sl-alert>
             <sl-button slot="footer" variant="default" id="add-tracks-cancel">${t('basket.actions.cancel')}</sl-button>
             <sl-button slot="footer" variant="primary" id="add-tracks-confirm" disabled>${t('playlist.curation.add_tracks_confirm')}</sl-button>
@@ -649,44 +727,35 @@ export class PlaylistCurationView {
             const el = resultsEl();
             el.innerHTML = '';
             if (tracks.length === 0) {
-                el.innerHTML = `<p style="color: var(--sl-color-neutral-500); font-size: var(--sl-font-size-small);">${t('playlist.curation.no_search_results')}</p>`;
+                el.innerHTML = `<p class="curation-empty-state">${t('playlist.curation.no_search_results')}</p>`;
                 return;
             }
             for (const track of tracks) {
                 const row = document.createElement('div');
-                row.style.cssText = `
-                    display: flex; align-items: center; gap: 0.5rem;
-                    padding: 0.35rem 0.5rem;
-                    border-radius: var(--sl-border-radius-small);
-                    cursor: pointer;
-                    background: ${selectedIds.has(track.id) ? 'var(--sl-color-primary-50)' : 'transparent'};
-                    border: 1px solid ${selectedIds.has(track.id) ? 'var(--sl-color-primary-300)' : 'transparent'};
-                `;
+                row.classList.add('curation-track-result');
+                row.classList.toggle('curation-track-result--selected', selectedIds.has(track.id));
                 row.dataset.trackId = track.id;
 
                 const cb = document.createElement('sl-checkbox') as any;
                 cb.checked = selectedIds.has(track.id);
-                cb.style.flexShrink = '0';
 
                 const info = document.createElement('div');
-                info.style.cssText = 'flex: 1; overflow: hidden;';
+                info.className = 'curation-track-result-info';
                 info.innerHTML = `
-                    <div style="font-size: var(--sl-font-size-small); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${this.escapeHtml(track.title)}</div>
-                    <div style="font-size: var(--sl-font-size-x-small); color: var(--sl-color-neutral-500); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${this.escapeHtml(track.artistName || '')} — ${this.escapeHtml(track.albumName || '')}</div>
+                    <div class="curation-track-result-title">${this.escapeHtml(track.title)}</div>
+                    <div class="curation-track-result-meta">${this.escapeHtml(track.artistName || '')} · ${this.escapeHtml(track.albumName || '')}</div>
                 `;
 
                 row.appendChild(cb);
                 row.appendChild(info);
 
                 const updateRow = (selected: boolean) => {
-                    row.style.background = selected ? 'var(--sl-color-primary-50)' : 'transparent';
-                    row.style.borderColor = selected ? 'var(--sl-color-primary-300)' : 'transparent';
+                    row.classList.toggle('curation-track-result--selected', selected);
                     cb.checked = selected;
                     const btn = confirmBtn();
                     if (btn) btn.disabled = selectedIds.size === 0;
                 };
 
-                // Row click (text area): toggle selection and sync checkbox
                 row.addEventListener('click', (e) => {
                     if ((e.target as HTMLElement).closest('sl-checkbox')) return;
                     if (selectedIds.has(track.id)) {
@@ -697,7 +766,6 @@ export class PlaylistCurationView {
                     updateRow(selectedIds.has(track.id));
                 });
 
-                // Checkbox click: Shoelace already toggled cb.checked, sync selectedIds to match
                 cb.addEventListener('sl-change', () => {
                     if (cb.checked) {
                         selectedIds.add(track.id);
@@ -719,8 +787,6 @@ export class PlaylistCurationView {
         };
 
         const doSearch = async (query: string) => {
-            // Each search starts a fresh selection (only currently-visible tracks
-            // can be confirmed) and supersedes any in-flight request.
             const queryId = ++latestQueryId;
             resetSelection();
             if (!query.trim()) {
@@ -730,7 +796,7 @@ export class PlaylistCurationView {
             resultsEl().innerHTML = '<sl-spinner></sl-spinner>';
             try {
                 const result = await fetchBrowseSearch(query);
-                if (queryId !== latestQueryId) return; // a newer search superseded this one
+                if (queryId !== latestQueryId) return;
                 renderResults(result.tracks);
             } catch (err) {
                 if (queryId !== latestQueryId) return;
@@ -793,6 +859,8 @@ export class PlaylistCurationView {
             }
         });
     }
+
+    // ─── Helpers ───────────────────────────────────────────────────────────────
 
     private escapeHtml(s: string): string {
         return s

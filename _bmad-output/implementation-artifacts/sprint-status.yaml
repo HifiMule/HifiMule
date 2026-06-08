@@ -136,7 +136,7 @@ development_status:
   10-3-profile-based-default-folders-and-setup-ordering: done
 
   # Epic 11 — Selection-as-Playlist & Curation (sprint-change-proposal-2026-06-05)
-  epic-11: in-progress
+  epic-11: done
   11-1-mediaprovider-playlist-write-trait-amendment: done
   11-2-jellyfinprovider-playlist-write-adapter: done
   11-3-subsonicprovider-playlist-write-adapter: done

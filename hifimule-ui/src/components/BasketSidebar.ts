@@ -95,7 +95,7 @@ function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: numb
                     <div class="capacity-selection-total">${t('basket.capacity.selection', { size: formatSize(projectedBytes) })}</div>
                     <div class="capacity-bar-container capacity-bar-disabled">
                         <div class="capacity-bar">
-                            <div class="capacity-segment capacity-grey" style="width: 100%;"></div>
+                            <div class="capacity-segment capacity-grey" style="--seg-x: 0; --seg-w: 1;"></div>
                         </div>
                     </div>
                     <div class="capacity-no-device-label">
@@ -109,6 +109,7 @@ function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: numb
     }
 
     const { totalBytes, freeBytes, usedBytes } = storageInfo;
+    if (totalBytes === 0) return '';
     const zone = getCapacityZone(projectedBytes, freeBytes, totalBytes);
 
     const usedPct = Math.min((usedBytes / totalBytes) * 100, 100);
@@ -136,9 +137,9 @@ function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: numb
         <div class="capacity-section capacity-zone-${zone}">
             <div class="capacity-bar-container">
                 <div class="capacity-bar">
-                    <div class="capacity-segment capacity-used" style="width: ${usedPct}%;"></div>
-                    <div class="capacity-segment capacity-projected" style="width: ${projectedPct}%; background: ${projectedColor};"></div>
-                    <div class="capacity-segment capacity-free" style="width: ${freePct}%;"></div>
+                    <div class="capacity-segment capacity-used" style="--seg-x: 0; --seg-w: ${usedPct / 100};"></div>
+                    <div class="capacity-segment capacity-projected" style="--seg-x: ${usedPct / 100}; --seg-w: ${projectedPct / 100}; background: ${projectedColor};"></div>
+                    <div class="capacity-segment capacity-free" style="--seg-x: ${(usedPct + projectedPct) / 100}; --seg-w: ${freePct / 100};"></div>
                 </div>
             </div>
             <div class="capacity-status">
@@ -1742,9 +1743,11 @@ export class BasketSidebar {
     }
 
     private escapeHtml(text: string): string {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML.replace(/"/g, '&quot;');
+        return text
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
     }
 
     private iconLabel(icon: string): string {
