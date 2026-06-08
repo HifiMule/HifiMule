@@ -768,7 +768,7 @@ impl MediaProvider for JellyfinProvider {
             None
         };
         // Album implies its artist; when album_id is set, do not pass artist_id (AC 4).
-        let (artist_ids, album_ids) =
+        let (album_artist_ids, album_ids) =
             match (filter.album_id.as_deref(), filter.artist_id.as_deref()) {
                 (Some(album), _) => (None, Some(album)),
                 (None, Some(artist)) => (Some(artist), None),
@@ -786,7 +786,7 @@ impl MediaProvider for JellyfinProvider {
                 limit_param,
                 filter.letter.as_deref(),
                 None,
-                artist_ids,
+                album_artist_ids,
                 album_ids,
                 Some("Name,Album"),
             )
@@ -2150,5 +2150,43 @@ mod tests {
 
         move_c.assert_async().await;
         move_b.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn provider_list_tracks_by_artist_uses_album_artist_ids() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _mock = server
+            .mock("GET", "/Items")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("userId".into(), USER_ID.into()),
+                Matcher::UrlEncoded("AlbumArtistIds".into(), "artist1".into()),
+                Matcher::UrlEncoded("IncludeItemTypes".into(), "Audio".into()),
+                Matcher::UrlEncoded("Recursive".into(), "true".into()),
+            ]))
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Items":[{"Id":"track1","Name":"Highway to Hell","Type":"Audio","Artists":["AC/DC"],"AlbumArtist":"AC/DC","Album":"Highway to Hell","Duration":208}],"TotalRecordCount":1,"StartIndex":0}"#)
+            .create_async()
+            .await;
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+
+        let page = provider
+            .list_tracks(TrackListFilter {
+                artist_id: Some("artist1".to_string()),
+                album_id: None,
+                library_id: None,
+                letter: None,
+                start_index: 0,
+                limit: 50,
+            })
+            .await
+            .expect("list_tracks");
+
+        assert_eq!(page.tracks.len(), 1);
+        assert_eq!(page.tracks[0].id, "track1");
+        assert_eq!(page.total, 1);
     }
 }

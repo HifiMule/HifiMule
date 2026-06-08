@@ -199,7 +199,7 @@ pub async fn run_server(
 
     let app = Router::new()
         .route("/", post(handler))
-        .route("/jellyfin/image/{id}", get(handle_proxy_image))
+        .route("/jellyfin/image/{*id}", get(handle_proxy_image))
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
         .layer(
             tower_http::cors::CorsLayer::new()

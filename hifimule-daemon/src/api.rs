@@ -248,7 +248,6 @@ impl JellyfinClient {
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
         let text = response.text().await?;
-        println!("DEBUG: Jellyfin Response [{}] - Body: {}", status, text);
 
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
@@ -278,7 +277,6 @@ impl JellyfinClient {
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
         let text = response.text().await?;
-        println!("DEBUG: Jellyfin Response [{}] - Body: {}", status, text);
 
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
@@ -300,7 +298,7 @@ impl JellyfinClient {
         limit: Option<u32>,
         name_starts_with: Option<&str>,
         name_less_than: Option<&str>,
-        artist_ids: Option<&str>,
+        album_artist_ids: Option<&str>,
         album_ids: Option<&str>,
         sort_by: Option<&str>,
     ) -> Result<JellyfinItemsResponse> {
@@ -327,13 +325,15 @@ impl JellyfinClient {
             query_params.push(format!("Limit={}", lim));
         }
         if let Some(starts_with) = name_starts_with {
-            query_params.push(format!("NameStartsWith={}", starts_with));
+            let encoded = starts_with.replace('#', "%23");
+            query_params.push(format!("NameStartsWith={}", encoded));
         }
         if let Some(less_than) = name_less_than {
-            query_params.push(format!("NameLessThan={}", less_than));
+            let encoded = less_than.replace('#', "%23");
+            query_params.push(format!("NameLessThan={}", encoded));
         }
-        if let Some(aids) = artist_ids {
-            query_params.push(format!("ArtistIds={}", aids));
+        if let Some(aids) = album_artist_ids {
+            query_params.push(format!("AlbumArtistIds={}", aids));
         }
         if let Some(album_ids_val) = album_ids {
             query_params.push(format!("AlbumIds={}", album_ids_val));
@@ -353,7 +353,6 @@ impl JellyfinClient {
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
         let text = response.text().await?;
-        println!("DEBUG: Jellyfin Response [{}] - Body: {}", status, text);
 
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
@@ -389,7 +388,6 @@ impl JellyfinClient {
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
         let text = response.text().await?;
-        println!("DEBUG: Jellyfin Response [{}] - Body: {}", status, text);
 
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
@@ -465,7 +463,6 @@ impl JellyfinClient {
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
         let text = response.text().await?;
-        println!("DEBUG: Jellyfin Response [{}] - Body: {}", status, text);
 
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
@@ -501,7 +498,6 @@ impl JellyfinClient {
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
         let text = response.text().await?;
-        println!("DEBUG: Jellyfin Response [{}] - Body: {}", status, text);
 
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
@@ -745,7 +741,6 @@ impl JellyfinClient {
 
         let status = response.status();
         let text = response.text().await?;
-        println!("DEBUG: Jellyfin Response [{}] - Body: {}", status, text);
 
         if !status.is_success() {
             return Err(anyhow!("Authentication failed: {}", status));
