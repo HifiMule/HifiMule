@@ -188,9 +188,12 @@ export class PlaylistCurationView {
         const count = this.tracks.length;
         const totalSecs = this.tracks.reduce((s, track) => s + (track.duration ?? 0), 0);
         const totalBytes = this.tracks.reduce((s, track) => s + (track.sizeBytes ?? 0), 0);
+        const trackLabel = count === 1
+            ? t('playlist.stats.tracks_one')
+            : t('playlist.stats.tracks_other', { count });
         return `
             <div class="curation-stats">
-                <span>${count} track${count === 1 ? '' : 's'}</span>
+                <span>${trackLabel}</span>
                 <span>${formatDuration(totalSecs)}</span>
                 <span>${formatBytes(totalBytes)}</span>
                 <sl-button

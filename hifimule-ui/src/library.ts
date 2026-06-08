@@ -663,7 +663,7 @@ function renderListRow(item: BrowseDisplayItem, index: number, onCurate?: (id: s
     }
     const toggleBtn = document.createElement('sl-icon-button') as any;
     toggleBtn.name = isSelected ? 'dash-circle-fill' : 'plus-circle-fill';
-    toggleBtn.label = isSelected ? 'Remove from basket' : 'Add to basket';
+    toggleBtn.label = isSelected ? t('tracks.view.remove_from_basket') : t('tracks.view.add_to_basket');
     toggleBtn.style.fontSize = '1.25rem';
     toggleBtn.addEventListener('click', async (e: Event) => {
         e.stopPropagation();

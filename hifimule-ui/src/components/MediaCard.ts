@@ -75,7 +75,7 @@ export class MediaCard {
             const ji = item as JellyfinItem;
             if (ji.AlbumArtist) subtitleHtml = `<div class="card-subtitle">${this.escapeHtml(ji.AlbumArtist)}</div>`;
             if (ji.ProductionYear) yearHtml = `<div class="card-year">${ji.ProductionYear}</div>`;
-            if ((item as JellyfinView).Type === 'CollectionFolder') subtitleHtml = '<div class="card-subtitle">Library</div>';
+            if ((item as JellyfinView).Type === 'CollectionFolder') subtitleHtml = `<div class="card-subtitle">${t('ui.library.title')}</div>`;
         }
 
         card.innerHTML = `
@@ -88,7 +88,7 @@ export class MediaCard {
                             name="${isSelected ? 'dash-circle-fill' : 'plus-circle-fill'}"
                             class="basket-toggle-btn"
                             variant="${isSelected ? 'danger' : 'primary'}"
-                            label="${isSelected ? 'Remove from basket' : 'Add to basket'}"
+                            label="${isSelected ? t('tracks.view.remove_from_basket') : t('tracks.view.add_to_basket')}"
                             ${btnDisabled ? 'disabled' : ''}
                         ></sl-icon-button>
                     </div>
@@ -306,43 +306,31 @@ export class MediaCard {
 
         const menu = document.createElement('div');
         menu.className = 'hm-context-menu';
-        menu.style.cssText = `
-            position: fixed;
-            z-index: 9999;
-            background: var(--sl-panel-background-color, #fff);
-            border: 1px solid var(--sl-color-neutral-200, #e2e8f0);
-            border-radius: var(--sl-border-radius-medium, 4px);
-            box-shadow: var(--sl-shadow-large);
-            padding: 4px 0;
-            min-width: 180px;
-            visibility: hidden;
-        `;
+        menu.setAttribute('role', 'menu');
+        menu.setAttribute('aria-label', itemName);
 
         const menuItem = document.createElement('div');
         menuItem.className = 'hm-context-menu-item';
-        menuItem.style.cssText = `
-            padding: 8px 16px;
-            cursor: pointer;
-            font-size: var(--sl-font-size-small, 0.875rem);
-            color: var(--sl-color-neutral-900);
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        `;
+        menuItem.setAttribute('role', 'menuitem');
+        menuItem.setAttribute('tabindex', '0');
         menuItem.innerHTML = `<sl-icon name="collection-play"></sl-icon> ${t('playlist.context.add_to_playlist')}`;
-        menuItem.addEventListener('mouseover', () => { menuItem.style.background = 'var(--sl-color-primary-50, #eff6ff)'; });
-        menuItem.addEventListener('mouseout', () => { menuItem.style.background = ''; });
 
         menu.appendChild(menuItem);
         document.body.appendChild(menu);
 
+        // Use offsetWidth/offsetHeight (layout size, unaffected by transforms) so
+        // the viewport-clamp math stays correct when the entrance animation runs.
         const MARGIN = 8;
-        const rect = menu.getBoundingClientRect();
-        const left = Math.max(MARGIN, Math.min(x, window.innerWidth - rect.width - MARGIN));
-        const top = Math.max(MARGIN, Math.min(y, window.innerHeight - rect.height - MARGIN));
+        const left = Math.max(MARGIN, Math.min(x, window.innerWidth - menu.offsetWidth - MARGIN));
+        const top = Math.max(MARGIN, Math.min(y, window.innerHeight - menu.offsetHeight - MARGIN));
         menu.style.left = `${left}px`;
         menu.style.top = `${top}px`;
-        menu.style.visibility = 'visible';
+
+        // Reveal + focus in the same frame so the animation starts visible.
+        requestAnimationFrame(() => {
+            menu.classList.add('is-open');
+            menuItem.focus();
+        });
 
         const cleanup = () => {
             menu.remove();
@@ -358,7 +346,17 @@ export class MediaCard {
             if (!menu.contains(ev.target as Node)) cleanup();
         };
         const onKeyDown = (ev: KeyboardEvent) => {
-            if (ev.key === 'Escape') cleanup();
+            if (ev.key === 'Escape') {
+                cleanup();
+            } else if (ev.key === 'Tab') {
+                ev.preventDefault();
+                cleanup();
+            } else if (ev.key === 'Enter' || ev.key === ' ') {
+                if (document.activeElement === menuItem) {
+                    ev.preventDefault();
+                    menuItem.click();
+                }
+            }
         };
 
         menuItem.addEventListener('click', () => {
