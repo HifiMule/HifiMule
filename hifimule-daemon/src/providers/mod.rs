@@ -183,6 +183,12 @@ pub trait MediaProvider: Send + Sync {
         ))
     }
 
+    async fn list_tracks(&self, _filter: TrackListFilter) -> Result<TrackListPage, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "list_tracks is not supported by this provider".to_string(),
+        ))
+    }
+
     /// Paginated listing of all songs in the library, in any server-defined order.
     /// Used as the bulk-fill pass in provider auto-fill, after priority lists are exhausted.
     async fn list_all_songs_page(
@@ -226,10 +232,7 @@ pub trait MediaProvider: Send + Sync {
         ))
     }
 
-    async fn delete_playlist(
-        &self,
-        _playlist_id: &str,
-    ) -> Result<(), ProviderError> {
+    async fn delete_playlist(&self, _playlist_id: &str) -> Result<(), ProviderError> {
         Err(ProviderError::UnsupportedCapability(
             "delete_playlist is not supported by this provider".to_string(),
         ))
@@ -298,6 +301,7 @@ pub enum BrowseMode {
     Artists,
     Albums,
     Playlists,
+    Tracks,
     Genres,
     RecentlyAdded,
     FrequentlyPlayed,
@@ -318,6 +322,26 @@ pub struct Capabilities {
     pub supports_server_transcoding: bool,
     pub supports_playlist_write: bool,
     pub browse: BrowseCapabilities,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackListFilter {
+    pub library_id: Option<String>,
+    pub artist_id: Option<String>,
+    pub album_id: Option<String>,
+    pub letter: Option<String>,
+    pub start_index: u32,
+    pub limit: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackListPage {
+    pub tracks: Vec<Song>,
+    pub total: u32,
+    pub start_index: u32,
+    pub limit: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -873,6 +897,10 @@ mod tests {
             "\"playlists\""
         );
         assert_eq!(
+            serde_json::to_string(&BrowseMode::Tracks).unwrap(),
+            "\"tracks\""
+        );
+        assert_eq!(
             serde_json::to_string(&BrowseMode::Genres).unwrap(),
             "\"genres\""
         );
@@ -928,8 +956,12 @@ mod tests {
             }
         }
 
-        async fn list_libraries(&self) -> Result<Vec<crate::domain::models::Library>, ProviderError> {
-            Err(ProviderError::UnsupportedCapability("list_libraries".to_string()))
+        async fn list_libraries(
+            &self,
+        ) -> Result<Vec<crate::domain::models::Library>, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "list_libraries".to_string(),
+            ))
         }
 
         async fn list_artists(
@@ -939,11 +971,18 @@ mod tests {
             _offset: u32,
             _limit: u32,
         ) -> Result<(Vec<crate::domain::models::Artist>, u32), ProviderError> {
-            Err(ProviderError::UnsupportedCapability("list_artists".to_string()))
+            Err(ProviderError::UnsupportedCapability(
+                "list_artists".to_string(),
+            ))
         }
 
-        async fn get_artist(&self, _artist_id: &str) -> Result<crate::domain::models::ArtistWithAlbums, ProviderError> {
-            Err(ProviderError::UnsupportedCapability("get_artist".to_string()))
+        async fn get_artist(
+            &self,
+            _artist_id: &str,
+        ) -> Result<crate::domain::models::ArtistWithAlbums, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "get_artist".to_string(),
+            ))
         }
 
         async fn list_albums(
@@ -953,22 +992,41 @@ mod tests {
             _offset: u32,
             _limit: u32,
         ) -> Result<(Vec<crate::domain::models::Album>, u32), ProviderError> {
-            Err(ProviderError::UnsupportedCapability("list_albums".to_string()))
+            Err(ProviderError::UnsupportedCapability(
+                "list_albums".to_string(),
+            ))
         }
 
-        async fn get_album(&self, _album_id: &str) -> Result<crate::domain::models::AlbumWithTracks, ProviderError> {
-            Err(ProviderError::UnsupportedCapability("get_album".to_string()))
+        async fn get_album(
+            &self,
+            _album_id: &str,
+        ) -> Result<crate::domain::models::AlbumWithTracks, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "get_album".to_string(),
+            ))
         }
 
-        async fn list_playlists(&self) -> Result<Vec<crate::domain::models::Playlist>, ProviderError> {
-            Err(ProviderError::UnsupportedCapability("list_playlists".to_string()))
+        async fn list_playlists(
+            &self,
+        ) -> Result<Vec<crate::domain::models::Playlist>, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "list_playlists".to_string(),
+            ))
         }
 
-        async fn get_playlist(&self, _playlist_id: &str) -> Result<crate::domain::models::PlaylistWithTracks, ProviderError> {
-            Err(ProviderError::UnsupportedCapability("get_playlist".to_string()))
+        async fn get_playlist(
+            &self,
+            _playlist_id: &str,
+        ) -> Result<crate::domain::models::PlaylistWithTracks, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "get_playlist".to_string(),
+            ))
         }
 
-        async fn search(&self, _query: &str) -> Result<crate::domain::models::SearchResult, ProviderError> {
+        async fn search(
+            &self,
+            _query: &str,
+        ) -> Result<crate::domain::models::SearchResult, ProviderError> {
             Err(ProviderError::UnsupportedCapability("search".to_string()))
         }
 
@@ -977,11 +1035,15 @@ mod tests {
             _song_id: &str,
             _profile: Option<&TranscodeProfile>,
         ) -> Result<String, ProviderError> {
-            Err(ProviderError::UnsupportedCapability("download_url".to_string()))
+            Err(ProviderError::UnsupportedCapability(
+                "download_url".to_string(),
+            ))
         }
 
         async fn cover_art_url(&self, _cover_art_id: &str) -> Result<String, ProviderError> {
-            Err(ProviderError::UnsupportedCapability("cover_art_url".to_string()))
+            Err(ProviderError::UnsupportedCapability(
+                "cover_art_url".to_string(),
+            ))
         }
 
         async fn changes_since_with_context(
@@ -989,7 +1051,9 @@ mod tests {
             _token: Option<&str>,
             _context: &ProviderChangeContext,
         ) -> Result<Vec<crate::domain::models::ChangeEvent>, ProviderError> {
-            Err(ProviderError::UnsupportedCapability("changes_since_with_context".to_string()))
+            Err(ProviderError::UnsupportedCapability(
+                "changes_since_with_context".to_string(),
+            ))
         }
 
         async fn scrobble(&self, _request: ScrobbleRequest) -> Result<(), ProviderError> {
@@ -1004,7 +1068,10 @@ mod tests {
         let Err(ProviderError::UnsupportedCapability(msg)) = result else {
             panic!("expected UnsupportedCapability, got {result:?}");
         };
-        assert!(msg.contains("create_playlist"), "message should name the method: {msg}");
+        assert!(
+            msg.contains("create_playlist"),
+            "message should name the method: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -1014,7 +1081,10 @@ mod tests {
         let Err(ProviderError::UnsupportedCapability(msg)) = result else {
             panic!("expected UnsupportedCapability, got {result:?}");
         };
-        assert!(msg.contains("add_to_playlist"), "message should name the method: {msg}");
+        assert!(
+            msg.contains("add_to_playlist"),
+            "message should name the method: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -1024,7 +1094,10 @@ mod tests {
         let Err(ProviderError::UnsupportedCapability(msg)) = result else {
             panic!("expected UnsupportedCapability, got {result:?}");
         };
-        assert!(msg.contains("remove_from_playlist"), "message should name the method: {msg}");
+        assert!(
+            msg.contains("remove_from_playlist"),
+            "message should name the method: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -1034,7 +1107,10 @@ mod tests {
         let Err(ProviderError::UnsupportedCapability(msg)) = result else {
             panic!("expected UnsupportedCapability, got {result:?}");
         };
-        assert!(msg.contains("delete_playlist"), "message should name the method: {msg}");
+        assert!(
+            msg.contains("delete_playlist"),
+            "message should name the method: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -1044,7 +1120,10 @@ mod tests {
         let Err(ProviderError::UnsupportedCapability(msg)) = result else {
             panic!("expected UnsupportedCapability, got {result:?}");
         };
-        assert!(msg.contains("rename_playlist"), "message should name the method: {msg}");
+        assert!(
+            msg.contains("rename_playlist"),
+            "message should name the method: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -1056,6 +1135,9 @@ mod tests {
         let Err(ProviderError::UnsupportedCapability(msg)) = result else {
             panic!("expected UnsupportedCapability, got {result:?}");
         };
-        assert!(msg.contains("reorder_playlist"), "message should name the method: {msg}");
+        assert!(
+            msg.contains("reorder_playlist"),
+            "message should name the method: {msg}"
+        );
     }
 }

@@ -1,8 +1,8 @@
 use crate::api::{CredentialManager, JellyfinClient};
 use crate::domain::models::{Album, Artist, ChangeType, ItemType, Library, Playlist, Song};
 use crate::providers::{
-    CredentialKind, MediaProvider, ProviderCredentials, ProviderError,
-    SUBSONIC_PLAYLISTS_LIBRARY_ID, ServerType, ServerTypeHint, server_type_slug,
+    BrowseMode, CredentialKind, MediaProvider, ProviderCredentials, ProviderError,
+    SUBSONIC_PLAYLISTS_LIBRARY_ID, ServerType, ServerTypeHint, TrackListFilter, server_type_slug,
 };
 use axum::{
     Json, Router,
@@ -364,6 +364,7 @@ async fn handler(
         "browse.listFavoriteItems" => {
             handle_browse_list_favorite_items(&state, payload.params).await
         }
+        "browse.listTracks" => handle_browse_list_tracks(&state, payload.params).await,
         "browse.search" => handle_browse_search(&state, payload.params).await,
         "playlist.create" => handle_playlist_create(&state, payload.params).await,
         "playlist.addItems" => handle_playlist_add_items(&state, payload.params).await,
@@ -825,6 +826,60 @@ async fn handle_browse_list_favorite_items(
         "artists": favorites.artists,
         "albums": favorites.albums,
         "tracks": favorites.songs,
+    }))
+}
+
+async fn handle_browse_list_tracks(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let library_id = params
+        .as_ref()
+        .and_then(|p| p["libraryId"].as_str())
+        .map(str::to_owned);
+    let artist_id = params
+        .as_ref()
+        .and_then(|p| p["artistId"].as_str())
+        .map(str::to_owned);
+    let album_id = params
+        .as_ref()
+        .and_then(|p| p["albumId"].as_str())
+        .map(str::to_owned);
+    let letter = params
+        .as_ref()
+        .and_then(|p| p["letter"].as_str())
+        .map(str::to_owned);
+    let (start_index, limit) = browse_pagination(&params);
+    let provider = require_provider(state).await?;
+    if !provider
+        .capabilities()
+        .browse
+        .list_modes
+        .contains(&BrowseMode::Tracks)
+    {
+        return Err(JsonRpcError {
+            code: ERR_UNSUPPORTED_CAPABILITY,
+            message: hifimule_i18n::t("error.tracks_mode_unsupported"),
+            data: None,
+        });
+    }
+    let filter = TrackListFilter {
+        library_id,
+        artist_id,
+        album_id,
+        letter,
+        start_index,
+        limit,
+    };
+    let page = provider
+        .list_tracks(filter)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    Ok(serde_json::json!({
+        "tracks": page.tracks,
+        "total": page.total,
+        "startIndex": page.start_index,
+        "limit": page.limit,
     }))
 }
 
@@ -2722,6 +2777,9 @@ async fn handle_jellyfin_get_items(
             limit,
             name_starts_with,
             name_less_than,
+            None,
+            None,
+            None,
         )
         .await
     {
@@ -8259,6 +8317,7 @@ mod tests {
         albums: HashMap<String, crate::domain::models::AlbumWithTracks>,
         genre_tracks: HashMap<String, Vec<crate::domain::models::Song>>,
         songs: HashMap<String, crate::domain::models::Song>,
+        tracks: Vec<crate::domain::models::Song>,
         song_auth_error: Option<String>,
     }
 
@@ -8273,6 +8332,7 @@ mod tests {
                 albums: HashMap::new(),
                 genre_tracks: HashMap::new(),
                 songs: HashMap::new(),
+                tracks: vec![],
                 song_auth_error: None,
             })
         }
@@ -8289,6 +8349,7 @@ mod tests {
                 albums: HashMap::new(),
                 genre_tracks,
                 songs: HashMap::new(),
+                tracks: vec![],
                 song_auth_error: None,
             })
         }
@@ -8302,6 +8363,7 @@ mod tests {
                 albums: HashMap::new(),
                 genre_tracks: HashMap::new(),
                 songs,
+                tracks: vec![],
                 song_auth_error: None,
             })
         }
@@ -8320,6 +8382,7 @@ mod tests {
                 albums,
                 genre_tracks: HashMap::new(),
                 songs,
+                tracks: vec![],
                 song_auth_error: None,
             })
         }
@@ -8331,7 +8394,20 @@ mod tests {
                 albums: HashMap::new(),
                 genre_tracks: HashMap::new(),
                 songs: HashMap::new(),
+                tracks: vec![],
                 song_auth_error: Some(message.to_string()),
+            })
+        }
+
+        fn with_tracks(tracks: Vec<crate::domain::models::Song>) -> Arc<Self> {
+            Arc::new(Self {
+                modes: vec![crate::providers::BrowseMode::Tracks],
+                genres: vec![],
+                albums: HashMap::new(),
+                genre_tracks: HashMap::new(),
+                songs: HashMap::new(),
+                tracks,
+                song_auth_error: None,
             })
         }
     }
@@ -8472,6 +8548,30 @@ mod tests {
                 .cloned()
                 .collect();
             Ok((page, tracks.len() as u32))
+        }
+        async fn list_tracks(
+            &self,
+            filter: crate::providers::TrackListFilter,
+        ) -> Result<crate::providers::TrackListPage, ProviderError> {
+            let start = filter.start_index as usize;
+            let limit = filter.limit as usize;
+            let total = self.tracks.len() as u32;
+            let page: Vec<crate::domain::models::Song> = if limit > 0 {
+                self.tracks
+                    .iter()
+                    .skip(start)
+                    .take(limit)
+                    .cloned()
+                    .collect()
+            } else {
+                self.tracks.iter().skip(start).cloned().collect()
+            };
+            Ok(crate::providers::TrackListPage {
+                tracks: page,
+                total,
+                start_index: filter.start_index,
+                limit: filter.limit,
+            })
         }
         fn server_type(&self) -> crate::providers::ServerType {
             crate::providers::ServerType::Jellyfin
@@ -8702,6 +8802,76 @@ mod tests {
         );
     }
 
+    fn make_fake_song(id: &str, title: &str) -> crate::domain::models::Song {
+        crate::domain::models::Song {
+            id: id.to_string(),
+            title: title.to_string(),
+            artist_id: Some("artist1".to_string()),
+            artist_name: Some("Artist".to_string()),
+            album_id: Some("album1".to_string()),
+            album_title: Some("Album".to_string()),
+            duration_seconds: 0,
+            bitrate_kbps: None,
+            track_number: Some(1),
+            disc_number: None,
+            cover_art_id: None,
+            date_added: None,
+            last_played_at: None,
+            play_count: None,
+            is_favorite: None,
+            content_type: None,
+            suffix: None,
+            size_bytes: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn browse_list_tracks_returns_tracks_from_provider() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let tracks = vec![
+            make_fake_song("s1", "Alpha"),
+            make_fake_song("s2", "Beta"),
+            make_fake_song("s3", "Gamma"),
+        ];
+        let provider = FakeBrowseProvider::with_tracks(tracks);
+        *state.provider.write().await = Some(provider as Arc<dyn MediaProvider>);
+
+        let params = Some(serde_json::json!({
+            "startIndex": 0,
+            "limit": 2,
+        }));
+        let result = handle_browse_list_tracks(&state, params)
+            .await
+            .expect("listTracks should succeed");
+
+        let returned = result["tracks"].as_array().expect("tracks array");
+        assert_eq!(returned.len(), 2);
+        assert_eq!(returned[0]["id"], "s1");
+        assert_eq!(returned[1]["id"], "s2");
+        assert_eq!(result["total"], 3);
+        assert_eq!(result["startIndex"], 0);
+        assert_eq!(result["limit"], 2);
+    }
+
+    #[tokio::test]
+    async fn browse_list_tracks_rejects_when_capability_missing() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let provider = FakeBrowseProvider::new(vec![crate::providers::BrowseMode::Artists], vec![]);
+        *state.provider.write().await = Some(provider as Arc<dyn MediaProvider>);
+
+        let err = handle_browse_list_tracks(&state, None)
+            .await
+            .expect_err("should be unsupported");
+
+        assert_eq!(
+            err.code, ERR_UNSUPPORTED_CAPABILITY,
+            "listTracks without capability must map to ERR_UNSUPPORTED_CAPABILITY, got code {}",
+            err.code
+        );
+    }
+
     // --- FakePlaylistProvider for playlist RPC tests ---
 
     struct FakePlaylistProvider {
@@ -8768,13 +8938,41 @@ mod tests {
 
     #[async_trait::async_trait]
     impl MediaProvider for FakePlaylistProvider {
-        async fn list_libraries(&self) -> Result<Vec<crate::domain::models::Library>, ProviderError> { unimplemented!() }
-        async fn list_artists(&self, _: Option<&str>, _: Option<&str>, _: u32, _: u32) -> Result<(Vec<crate::domain::models::Artist>, u32), ProviderError> { unimplemented!() }
-        async fn get_artist(&self, _: &str) -> Result<crate::domain::models::ArtistWithAlbums, ProviderError> {
-            Err(ProviderError::UnsupportedCapability("no artists".to_string()))
+        async fn list_libraries(
+            &self,
+        ) -> Result<Vec<crate::domain::models::Library>, ProviderError> {
+            unimplemented!()
         }
-        async fn list_albums(&self, _: Option<&str>, _: Option<&str>, _: u32, _: u32) -> Result<(Vec<crate::domain::models::Album>, u32), ProviderError> { unimplemented!() }
-        async fn get_album(&self, album_id: &str) -> Result<crate::domain::models::AlbumWithTracks, ProviderError> {
+        async fn list_artists(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: u32,
+            _: u32,
+        ) -> Result<(Vec<crate::domain::models::Artist>, u32), ProviderError> {
+            unimplemented!()
+        }
+        async fn get_artist(
+            &self,
+            _: &str,
+        ) -> Result<crate::domain::models::ArtistWithAlbums, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "no artists".to_string(),
+            ))
+        }
+        async fn list_albums(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: u32,
+            _: u32,
+        ) -> Result<(Vec<crate::domain::models::Album>, u32), ProviderError> {
+            unimplemented!()
+        }
+        async fn get_album(
+            &self,
+            album_id: &str,
+        ) -> Result<crate::domain::models::AlbumWithTracks, ProviderError> {
             match self.albums.get(album_id) {
                 Some(tracks) => Ok(crate::domain::models::AlbumWithTracks {
                     album: crate::domain::models::Album {
@@ -8789,28 +8987,79 @@ mod tests {
                     },
                     tracks: tracks.clone(),
                 }),
-                None => Err(ProviderError::UnsupportedCapability("no albums".to_string())),
+                None => Err(ProviderError::UnsupportedCapability(
+                    "no albums".to_string(),
+                )),
             }
         }
-        async fn get_song(&self, song_id: &str) -> Result<crate::domain::models::Song, ProviderError> {
-            self.songs.get(song_id).cloned().ok_or(ProviderError::NotFound {
-                item_type: "Song".to_string(),
-                id: song_id.to_string(),
-            })
+        async fn get_song(
+            &self,
+            song_id: &str,
+        ) -> Result<crate::domain::models::Song, ProviderError> {
+            self.songs
+                .get(song_id)
+                .cloned()
+                .ok_or(ProviderError::NotFound {
+                    item_type: "Song".to_string(),
+                    id: song_id.to_string(),
+                })
         }
-        async fn list_playlists(&self) -> Result<Vec<crate::domain::models::Playlist>, ProviderError> { unimplemented!() }
-        async fn get_playlist(&self, _: &str) -> Result<crate::domain::models::PlaylistWithTracks, ProviderError> {
-            Err(ProviderError::UnsupportedCapability("no playlists".to_string()))
+        async fn list_playlists(
+            &self,
+        ) -> Result<Vec<crate::domain::models::Playlist>, ProviderError> {
+            unimplemented!()
         }
-        async fn search(&self, _: &str) -> Result<crate::domain::models::SearchResult, ProviderError> { unimplemented!() }
-        async fn download_url(&self, _: &str, _: Option<&crate::providers::TranscodeProfile>) -> Result<String, ProviderError> { unimplemented!() }
-        async fn cover_art_url(&self, _: &str) -> Result<String, ProviderError> { unimplemented!() }
-        async fn changes_since_with_context(&self, _: Option<&str>, _: &crate::providers::ProviderChangeContext) -> Result<Vec<crate::domain::models::ChangeEvent>, ProviderError> { unimplemented!() }
-        async fn scrobble(&self, _: crate::providers::ScrobbleRequest) -> Result<(), ProviderError> { unimplemented!() }
-        async fn list_genres(&self, _: Option<&str>, _: u32, _: u32) -> Result<(Vec<crate::domain::models::Genre>, u64), ProviderError> {
+        async fn get_playlist(
+            &self,
+            _: &str,
+        ) -> Result<crate::domain::models::PlaylistWithTracks, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "no playlists".to_string(),
+            ))
+        }
+        async fn search(
+            &self,
+            _: &str,
+        ) -> Result<crate::domain::models::SearchResult, ProviderError> {
+            unimplemented!()
+        }
+        async fn download_url(
+            &self,
+            _: &str,
+            _: Option<&crate::providers::TranscodeProfile>,
+        ) -> Result<String, ProviderError> {
+            unimplemented!()
+        }
+        async fn cover_art_url(&self, _: &str) -> Result<String, ProviderError> {
+            unimplemented!()
+        }
+        async fn changes_since_with_context(
+            &self,
+            _: Option<&str>,
+            _: &crate::providers::ProviderChangeContext,
+        ) -> Result<Vec<crate::domain::models::ChangeEvent>, ProviderError> {
+            unimplemented!()
+        }
+        async fn scrobble(
+            &self,
+            _: crate::providers::ScrobbleRequest,
+        ) -> Result<(), ProviderError> {
+            unimplemented!()
+        }
+        async fn list_genres(
+            &self,
+            _: Option<&str>,
+            _: u32,
+            _: u32,
+        ) -> Result<(Vec<crate::domain::models::Genre>, u64), ProviderError> {
             Ok((vec![], 0))
         }
-        async fn get_genre_tracks(&self, genre_id: &str, _: u32, _: u32) -> Result<(Vec<crate::domain::models::Song>, u32), ProviderError> {
+        async fn get_genre_tracks(
+            &self,
+            genre_id: &str,
+            _: u32,
+            _: u32,
+        ) -> Result<(Vec<crate::domain::models::Song>, u32), ProviderError> {
             // No genres in this fake: an unknown id is genuinely unresolvable
             // (NotFound), so `provider_sync_items_for_id` falls through to its
             // final not-found error rather than returning an empty track list.
@@ -8819,7 +9068,9 @@ mod tests {
                 id: genre_id.to_string(),
             })
         }
-        fn server_type(&self) -> crate::providers::ServerType { crate::providers::ServerType::Subsonic }
+        fn server_type(&self) -> crate::providers::ServerType {
+            crate::providers::ServerType::Subsonic
+        }
         fn capabilities(&self) -> crate::providers::Capabilities {
             crate::providers::Capabilities {
                 open_subsonic: false,
@@ -8829,20 +9080,44 @@ mod tests {
                 browse: crate::providers::BrowseCapabilities { list_modes: vec![] },
             }
         }
-        async fn create_playlist(&self, name: &str, track_ids: &[String]) -> Result<String, ProviderError> {
-            self.create_calls.lock().unwrap().push((name.to_string(), track_ids.to_vec()));
+        async fn create_playlist(
+            &self,
+            name: &str,
+            track_ids: &[String],
+        ) -> Result<String, ProviderError> {
+            self.create_calls
+                .lock()
+                .unwrap()
+                .push((name.to_string(), track_ids.to_vec()));
             Ok(self.playlist_return_id.clone())
         }
-        async fn add_to_playlist(&self, playlist_id: &str, track_ids: &[String]) -> Result<(), ProviderError> {
-            self.add_calls.lock().unwrap().push((playlist_id.to_string(), track_ids.to_vec()));
+        async fn add_to_playlist(
+            &self,
+            playlist_id: &str,
+            track_ids: &[String],
+        ) -> Result<(), ProviderError> {
+            self.add_calls
+                .lock()
+                .unwrap()
+                .push((playlist_id.to_string(), track_ids.to_vec()));
             Ok(())
         }
-        async fn remove_from_playlist(&self, playlist_id: &str, track_ids: &[String]) -> Result<(), ProviderError> {
-            self.remove_calls.lock().unwrap().push((playlist_id.to_string(), track_ids.to_vec()));
+        async fn remove_from_playlist(
+            &self,
+            playlist_id: &str,
+            track_ids: &[String],
+        ) -> Result<(), ProviderError> {
+            self.remove_calls
+                .lock()
+                .unwrap()
+                .push((playlist_id.to_string(), track_ids.to_vec()));
             Ok(())
         }
         async fn delete_playlist(&self, playlist_id: &str) -> Result<(), ProviderError> {
-            self.delete_calls.lock().unwrap().push(playlist_id.to_string());
+            self.delete_calls
+                .lock()
+                .unwrap()
+                .push(playlist_id.to_string());
             Ok(())
         }
     }
@@ -9036,12 +9311,10 @@ mod tests {
         let provider = FakePlaylistProvider::new("ignored");
         *state.provider.write().await = Some(provider.clone() as Arc<dyn MediaProvider>);
 
-        let result = handle_playlist_delete(
-            &state,
-            Some(serde_json::json!({ "playlistId": "p3" })),
-        )
-        .await
-        .expect("playlist.delete");
+        let result =
+            handle_playlist_delete(&state, Some(serde_json::json!({ "playlistId": "p3" })))
+                .await
+                .expect("playlist.delete");
 
         assert_eq!(result["ok"], true);
         let calls = provider.delete_calls.lock().unwrap();
@@ -9057,10 +9330,8 @@ mod tests {
         let provider = FakeBrowseProvider::new(vec![], vec![]);
         *state.provider.write().await = Some(provider as Arc<dyn MediaProvider>);
 
-        let dummy_create_params =
-            Some(serde_json::json!({ "name": "x", "itemIds": [] }));
-        let dummy_modify_params =
-            Some(serde_json::json!({ "playlistId": "p", "trackIds": [] }));
+        let dummy_create_params = Some(serde_json::json!({ "name": "x", "itemIds": [] }));
+        let dummy_modify_params = Some(serde_json::json!({ "playlistId": "p", "trackIds": [] }));
         let dummy_delete_params = Some(serde_json::json!({ "playlistId": "p" }));
 
         let create_err = handle_playlist_create(&state, dummy_create_params)

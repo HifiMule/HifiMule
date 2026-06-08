@@ -6,7 +6,8 @@ use crate::domain::models::{
 };
 use crate::providers::{
     BrowseCapabilities, BrowseMode, Capabilities, MediaProvider, ProviderChangeContext,
-    ProviderError, ScrobbleRequest, ScrobbleSubmission, ServerType, TranscodeProfile,
+    ProviderError, ScrobbleRequest, ScrobbleSubmission, ServerType, TrackListFilter, TrackListPage,
+    TranscodeProfile,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -148,6 +149,9 @@ impl MediaProvider for JellyfinProvider {
                 limit_param,
                 letter,
                 None,
+                None,
+                None,
+                None,
             )
             .await
             .map_err(Self::map_error)?;
@@ -206,6 +210,9 @@ impl MediaProvider for JellyfinProvider {
                 limit_param,
                 letter,
                 None,
+                None,
+                None,
+                None,
             )
             .await
             .map_err(Self::map_error)?;
@@ -252,6 +259,9 @@ impl MediaProvider for JellyfinProvider {
                 self.user_id(),
                 None,
                 Some(PLAYLIST_TYPES),
+                None,
+                None,
+                None,
                 None,
                 None,
                 None,
@@ -397,9 +407,19 @@ impl MediaProvider for JellyfinProvider {
             .map_err(Self::map_error)
     }
 
-    async fn rename_playlist(&self, playlist_id: &str, new_name: &str) -> Result<(), ProviderError> {
+    async fn rename_playlist(
+        &self,
+        playlist_id: &str,
+        new_name: &str,
+    ) -> Result<(), ProviderError> {
         self.client
-            .rename_item(self.url(), self.token(), self.user_id(), playlist_id, new_name)
+            .rename_item(
+                self.url(),
+                self.token(),
+                self.user_id(),
+                playlist_id,
+                new_name,
+            )
             .await
             .map_err(Self::map_error)
     }
@@ -423,7 +443,7 @@ impl MediaProvider for JellyfinProvider {
                     return Err(ProviderError::Deserialization(format!(
                         "Playlist item missing PlaylistItemId: {}",
                         item.id
-                    )))
+                    )));
                 }
             }
         }
@@ -435,8 +455,8 @@ impl MediaProvider for JellyfinProvider {
             if &current[target_index].0 == wanted_track_id {
                 continue;
             }
-            let Some(found) = (target_index..current.len())
-                .find(|&j| &current[j].0 == wanted_track_id)
+            let Some(found) =
+                (target_index..current.len()).find(|&j| &current[j].0 == wanted_track_id)
             else {
                 return Err(ProviderError::UnsupportedCapability(format!(
                     "reorder_playlist: track {wanted_track_id} is not in playlist {playlist_id}"
@@ -445,7 +465,13 @@ impl MediaProvider for JellyfinProvider {
 
             let (_, entry_id) = current[found].clone();
             self.client
-                .move_playlist_item(self.url(), self.token(), playlist_id, &entry_id, target_index)
+                .move_playlist_item(
+                    self.url(),
+                    self.token(),
+                    playlist_id,
+                    &entry_id,
+                    target_index,
+                )
                 .await
                 .map_err(Self::map_error)?;
 
@@ -560,6 +586,7 @@ impl MediaProvider for JellyfinProvider {
                     BrowseMode::Artists,
                     BrowseMode::Albums,
                     BrowseMode::Playlists,
+                    BrowseMode::Tracks,
                     BrowseMode::Genres,
                     BrowseMode::RecentlyAdded,
                     BrowseMode::FrequentlyPlayed,
@@ -732,6 +759,47 @@ impl MediaProvider for JellyfinProvider {
             }
         }
         Ok(result)
+    }
+
+    async fn list_tracks(&self, filter: TrackListFilter) -> Result<TrackListPage, ProviderError> {
+        let limit_param = if filter.limit > 0 {
+            Some(filter.limit)
+        } else {
+            None
+        };
+        // Album implies its artist; when album_id is set, do not pass artist_id (AC 4).
+        let (artist_ids, album_ids) =
+            match (filter.album_id.as_deref(), filter.artist_id.as_deref()) {
+                (Some(album), _) => (None, Some(album)),
+                (None, Some(artist)) => (Some(artist), None),
+                (None, None) => (None, None),
+            };
+        let response = self
+            .client
+            .get_items(
+                self.url(),
+                self.token(),
+                self.user_id(),
+                filter.library_id.as_deref(),
+                Some("Audio"),
+                Some(filter.start_index),
+                limit_param,
+                filter.letter.as_deref(),
+                None,
+                artist_ids,
+                album_ids,
+                Some("Name,Album"),
+            )
+            .await
+            .map_err(Self::map_error)?;
+        let total = response.total_record_count;
+        let tracks: Vec<Song> = response.items.into_iter().map(song_from_item).collect();
+        Ok(TrackListPage {
+            tracks,
+            total,
+            start_index: filter.start_index,
+            limit: filter.limit,
+        })
     }
 }
 
@@ -1058,6 +1126,7 @@ mod tests {
                         BrowseMode::Artists,
                         BrowseMode::Albums,
                         BrowseMode::Playlists,
+                        BrowseMode::Tracks,
                         BrowseMode::Genres,
                         BrowseMode::RecentlyAdded,
                         BrowseMode::FrequentlyPlayed,
@@ -2070,7 +2139,11 @@ mod tests {
         provider
             .reorder_playlist(
                 "playlist99",
-                &["song3".to_string(), "song2".to_string(), "song1".to_string()],
+                &[
+                    "song3".to_string(),
+                    "song2".to_string(),
+                    "song1".to_string(),
+                ],
             )
             .await
             .expect("reorder_playlist");

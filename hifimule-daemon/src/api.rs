@@ -288,6 +288,7 @@ impl JellyfinClient {
         Ok(views_response.items)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn get_items(
         &self,
         url: &str,
@@ -299,6 +300,9 @@ impl JellyfinClient {
         limit: Option<u32>,
         name_starts_with: Option<&str>,
         name_less_than: Option<&str>,
+        artist_ids: Option<&str>,
+        album_ids: Option<&str>,
+        sort_by: Option<&str>,
     ) -> Result<JellyfinItemsResponse> {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
@@ -327,6 +331,15 @@ impl JellyfinClient {
         }
         if let Some(less_than) = name_less_than {
             query_params.push(format!("NameLessThan={}", less_than));
+        }
+        if let Some(aids) = artist_ids {
+            query_params.push(format!("ArtistIds={}", aids));
+        }
+        if let Some(album_ids_val) = album_ids {
+            query_params.push(format!("AlbumIds={}", album_ids_val));
+        }
+        if let Some(sort) = sort_by {
+            query_params.push(format!("SortBy={}", sort));
         }
 
         let query_string = if query_params.is_empty() {
@@ -1509,7 +1522,14 @@ impl JellyfinClient {
         let index_str = new_index.to_string();
         let endpoint = jellyfin_endpoint(
             url,
-            &["Playlists", playlist_id, "Items", playlist_item_id, "Move", &index_str],
+            &[
+                "Playlists",
+                playlist_id,
+                "Items",
+                playlist_item_id,
+                "Move",
+                &index_str,
+            ],
         )?;
 
         let response = self.client.post(endpoint).headers(headers).send().await?;
@@ -1554,9 +1574,7 @@ impl JellyfinClient {
         CredentialManager::validate_token(token)?;
 
         // Step 1: fetch current item JSON
-        let mut item = self
-            .get_item_details(url, token, user_id, item_id)
-            .await?;
+        let mut item = self.get_item_details(url, token, user_id, item_id).await?;
 
         // Step 2: mutate name and POST back
         item.name = new_name.to_string();
@@ -2040,6 +2058,9 @@ mod tests {
                 Some(MUSIC_ITEM_TYPES),
                 None,
                 Some(50),
+                None,
+                None,
+                None,
                 None,
                 None,
             )
