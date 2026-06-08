@@ -120,7 +120,7 @@ export class TracksBrowseView {
                     </div>
                 </div>
                 <div id="tracks-track-panel" class="curation-track-panel"
-                     style="flex:0 0 35%; min-height:0; max-height:none;"></div>
+                     style="flex:0 0 55%; min-height:0; max-height:none;"></div>
             </div>
         `;
         this.setupScrollHandlers();
