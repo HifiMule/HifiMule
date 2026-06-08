@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-06-08  # Story 11.10 code review complete → done
+last_updated: 2026-06-08  # Story 9.8 ready-for-dev (extend view toggle all modes)
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -121,7 +121,7 @@ development_status:
   8-5-subsonic-url-credential-sanitization: done
   8-6-incremental-sync-subsonic-album-level-fallback: done
 
-  epic-9: done
+  epic-9: in-progress
   9-1-provider-browse-modes-and-capability-contract: done
   9-2-browse-mode-navigation-ui: done
   9-3-genre-browsing-and-genre-entity-basket-item: done
@@ -129,6 +129,7 @@ development_status:
   9-5-hierarchical-favorites-navigation: done
   9-6-navidrome-subsonic-browse-parity-hardening: done
   9-7-virtualized-list-table-browse-views: done  # revised via sprint-change-proposal-2026-06-07 (autoload-on-scroll)
+  9-8-extend-view-toggle-all-modes: ready-for-dev  # added via sprint-change-proposal-2026-06-08-extend-view-toggle
 
   epic-10: done
   10-1-device-manifest-editing-identity-and-folder-settings: done
