@@ -619,7 +619,7 @@ function setViewMode(mode: 'grid' | 'list') {
     renderCurrentView();
 }
 
-function renderListRow(item: BrowseDisplayItem, index: number): HTMLElement {
+function renderListRow(item: BrowseDisplayItem, index: number, onCurate?: (id: string, name: string) => void): HTMLElement {
     const itemId = item.basketId ?? item.id;
     const isSelected = basketStore.has(itemId);
     const row = document.createElement('div');
@@ -714,13 +714,25 @@ function renderListRow(item: BrowseDisplayItem, index: number): HTMLElement {
     }
     row.appendChild(thumb);
     row.appendChild(info);
+    // Curate button: appears on Playlist rows when playlist write is supported (mirrors MediaCard grid behavior)
+    if (onCurate && item.type === 'Playlist') {
+        const curateBtn = document.createElement('sl-icon-button') as any;
+        curateBtn.name = 'pencil-square';
+        curateBtn.label = t('playlist.curation.curate_btn');
+        curateBtn.style.fontSize = '1.25rem';
+        curateBtn.addEventListener('click', (e: MouseEvent) => {
+            e.stopPropagation();
+            onCurate(item.id, item.name);
+        });
+        row.appendChild(curateBtn);
+    }
     row.appendChild(toggleBtn);
     return row;
 }
 
 const LOAD_AHEAD = 5;
 
-function renderList(items: BrowseDisplayItem[]) {
+function renderList(items: BrowseDisplayItem[], onCurate?: (id: string, name: string) => void) {
     const container = document.getElementById('library-content');
     if (!container) return;
     const content = container;
@@ -748,7 +760,7 @@ function renderList(items: BrowseDisplayItem[]) {
             [...scroller.querySelectorAll<HTMLElement>('.media-list-row')].map(r => Number(r.dataset.idx))
         );
         for (let i = first; i <= last; i++) {
-            if (!existing.has(i)) scroller.appendChild(renderListRow(currentItems[i], i));
+            if (!existing.has(i)) scroller.appendChild(renderListRow(currentItems[i], i, onCurate));
         }
     }
     (content as any).__listPaint = paint;
@@ -760,6 +772,7 @@ function renderList(items: BrowseDisplayItem[]) {
         paint();
         if (
             !state.listLoading &&
+            listAutoloadSupported() &&
             state.items.length < state.pagination.total
         ) {
             const loadedBoundary = (state.items.length - LOAD_AHEAD) * VIRTUAL_ROW_HEIGHT;
@@ -780,8 +793,27 @@ function renderList(items: BrowseDisplayItem[]) {
     paint();
 }
 
+// Which (mode, depth) combinations loadMoreForListView() can actually paginate.
+// Single source of truth shared with the scroll handler so it never fires for
+// modes that fall through to the no-op branch (avoids churn / stuck triggers).
+function listAutoloadSupported(): boolean {
+    const depth = state.breadcrumbStack.length;
+    switch (state.browseMode) {
+        case 'artists':
+        case 'albums':
+        case 'recentlyAdded':
+        case 'frequentlyPlayed':
+        case 'recentlyPlayed':
+            return depth === 0;
+        case 'genres':
+            return depth === 0 || (depth === 1 && !!state.parentId);
+        default:
+            return false;
+    }
+}
+
 async function loadMoreForListView() {
-    if (state.listLoading || state.items.length >= state.pagination.total) return;
+    if (state.listLoading || !listAutoloadSupported() || state.items.length >= state.pagination.total) return;
     state.listLoading = true;
     const content = document.getElementById('library-content');
     if (content) showListSpinner(content, state.items.length);
@@ -791,11 +823,11 @@ async function loadMoreForListView() {
         const depth = state.breadcrumbStack.length;
         const mode = state.browseMode;
 
-        if (mode === 'artists') {
+        if (mode === 'artists' && depth === 0) {
             const r = await fetchBrowseArtists(letter, undefined, startIndex, 200);
             state.items = [...state.items, ...mapArtists(r.artists)];
             state.pagination.total = r.total;
-        } else if (mode === 'albums') {
+        } else if (mode === 'albums' && depth === 0) {
             const r = await fetchBrowseAlbums(letter, undefined, startIndex, 200);
             state.items = [...state.items, ...mapAlbums(r.albums)];
             state.pagination.total = r.total;
@@ -807,15 +839,15 @@ async function loadMoreForListView() {
             const r = await fetchBrowseGenre(state.parentId, startIndex, state.pagination.limit);
             state.items = [...state.items, ...mapFlatTracks(r.tracks)];
             state.pagination.total = r.total;
-        } else if (mode === 'recentlyAdded') {
+        } else if (mode === 'recentlyAdded' && depth === 0) {
             const r = await fetchBrowseRecentlyAdded(undefined, startIndex, state.pagination.limit);
             state.items = [...state.items, ...mapAlbums(r.albums)];
             state.pagination.total = r.total;
-        } else if (mode === 'frequentlyPlayed') {
+        } else if (mode === 'frequentlyPlayed' && depth === 0) {
             const r = await fetchBrowseFrequentlyPlayed(undefined, startIndex, state.pagination.limit);
             state.items = [...state.items, ...mapFlatTracks(r.tracks, 'frequentlyPlayed')];
             state.pagination.total = r.total;
-        } else if (mode === 'recentlyPlayed') {
+        } else if (mode === 'recentlyPlayed' && depth === 0) {
             const r = await fetchBrowseRecentlyPlayed(undefined, startIndex, state.pagination.limit);
             state.items = [...state.items, ...mapFlatTracks(r.tracks, 'recentlyPlayed')];
             state.pagination.total = r.total;
@@ -843,7 +875,7 @@ function renderCurrentView() {
         ? openCurationView
         : undefined;
     if (mode === 'list') {
-        renderList(state.items);
+        renderList(state.items, onCurate);
     } else {
         renderGrid(state.items, onCurate);
     }

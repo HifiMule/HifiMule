@@ -4,7 +4,7 @@ baseline_commit: 1b66ae46c24410cb842f214657bffa7e6df64825
 
 # Story 9.8: Extend Grid/Table Toggle to All Browse Modes and Drill-Down Levels
 
-Status: review
+Status: done
 
 ## Story
 
@@ -22,7 +22,7 @@ So that I can use my preferred view mode consistently across all library content
 
 4. **Given** list view is active **When** I click a sub-level item (album row drills to tracks; track row adds to basket) **Then** drill-down and basket-add behaviors are identical to grid view.
 
-5. **Given** list view is active on a mode without autoload (playlists, genres, history/favorites, or any sub-level with breadcrumbs) **Then** the list renders what is currently loaded; autoload-on-scroll is not triggered (that behavior remains exclusive to artists/albums root).
+5. **Given** list view is active **When** I scroll a paginated mode (artists, albums, genres root, genre tracks, recentlyAdded, frequentlyPlayed, recentlyPlayed) **Then** autoload-on-scroll fetches the next page. **Given** a mode that loads its full result set in one request (playlists, playlist tracks, favorites and their sub-levels, artist albums, album tracks) **Then** the list renders everything that was loaded and no autoload is triggered. _(Amended 2026-06-08 during code review — original AC restricted autoload to artists/albums root; implementation extended pagination to genres and history modes, accepted as an enhancement.)_
 
 ## Tasks / Subtasks
 
@@ -53,6 +53,16 @@ So that I can use my preferred view mode consistently across all library content
   - [x] Navigate into an album's track list, toggle to list — tracks render as rows with basket-add working.
   - [x] Toggle back to grid from any of the above — instant switch, no re-fetch.
   - [x] Switch browse mode while in list view — toggle state preserved (still list).
+
+### Review Findings
+
+_Code review 2026-06-08 (baseline 1b66ae4 → HEAD). Layers: Blind Hunter, Edge Case Hunter, Acceptance Auditor._
+
+- [x] [Review][Decision→Accepted] Autoload-on-scroll enabled for genres / recentlyAdded / frequentlyPlayed / recentlyPlayed (+ supporting `subsonic.rs` daemon change). **Resolved 2026-06-08: accepted as an enhancement.** AC 5 amended to reflect expanded pagination; daemon scope deviation accepted. The two defer items below (10k cap, refetch perf) are now real follow-ups. [blind+auditor]
+- [x] [Review][Patch] Wire playlist curation (`onCurate`) into list rows [hifimule-ui/src/library.ts] — **Applied 2026-06-08.** `renderCurrentView` now passes `onCurate` to `renderList`; `renderList`/`renderListRow` accept it and render a curate (`pencil-square`) button on Playlist rows when playlist write is supported, mirroring the grid `MediaCard` behavior. [blind+auditor]
+- [x] [Review][Patch] Constrain list-view autoload to the modes/depths `loadMoreForListView` actually handles [hifimule-ui/src/library.ts] — **Applied 2026-06-08.** Added `listAutoloadSupported()` predicate (single source of truth for supported mode/depth), gated the scroll-handler trigger and the `loadMoreForListView` early-return on it, and added explicit `depth === 0` guards to the artists/albums/recentlyAdded/frequentlyPlayed/recentlyPlayed branches. `rtk tsc` clean (only pre-existing baseUrl warning). [edge+blind]
+- [x] [Review][Defer] Stale-mode race in `loadMoreForListView` [hifimule-ui/src/library.ts:783] — reads `browseMode`/`depth` after the `await` with no load-sequence token; navigating mid-fetch appends stale-mode items to the new view's `state.items`. Deferred, pre-existing (existed for artists/albums before this change; widened to more modes; no sequence-token pattern in codebase).
+- [x] [Review][Defer] `subsonic.rs::get_songs_by_genre` fetches up to 10,000 songs on every page request and paginates locally [hifimule-daemon/src/providers/subsonic.rs:654] — silent truncation for genres >10k songs, and O(n²) refetch-all per scroll page. Deferred, contingent on keeping the daemon change (resolve Decision #1 first).
 
 ## Dev Notes
 
