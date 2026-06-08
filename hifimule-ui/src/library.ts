@@ -24,6 +24,7 @@ import {
 } from './rpc';
 import { MediaCard, BrowseDisplayItem } from './components/MediaCard';
 import { PlaylistCurationView } from './components/PlaylistCurationView';
+import { TracksBrowseView } from './components/TracksBrowseView';
 import { basketStore } from './state/basket';
 import { t } from './i18n';
 
@@ -82,6 +83,8 @@ let state: AppState = {
     listViewMode: 'grid',
 };
 
+let _tracksBrowseView: TracksBrowseView | null = null;
+
 function cacheKey(parentId?: string): string {
     return `${state.browseMode}:${parentId ?? 'root'}`;
 }
@@ -108,6 +111,8 @@ export function clearNavigationCache() {
     state.favoriteTree = null;
     state.listLoading = false;
     // browseMode, availableModes, and listViewMode are intentionally preserved
+    _tracksBrowseView?.destroy();
+    _tracksBrowseView = null;
 }
 
 // --- Scroll helpers ---
@@ -590,7 +595,7 @@ function renderViewToggle() {
     if (!container) return;
     const existing = container.querySelector('.view-toggle-group');
     if (existing) existing.remove();
-    const showToggle = !state.loading;
+    const showToggle = !state.loading && state.browseMode !== 'tracks';
     if (!showToggle) return;
     const currentMode = state.listViewMode;
     const group = document.createElement('div');
@@ -933,6 +938,7 @@ async function loadModeRoot() {
         case 'artists': await loadArtists(true); break;
         case 'albums': await loadAlbums(true); break;
         case 'playlists': await loadPlaylists(); break;
+        case 'tracks': loadTracksView(); break;
         case 'genres': await loadGenres(true); break;
         case 'recentlyAdded':
             await loadRecentlyAddedAlbums(true);
@@ -944,6 +950,18 @@ async function loadModeRoot() {
         case 'favorites':
             await loadFavoriteArtists();
             break;
+    }
+}
+
+function loadTracksView(): void {
+    const container = document.getElementById('library-content');
+    if (!container) return;
+    teardownListScrollHandler();
+    if (_tracksBrowseView) {
+        _tracksBrowseView.remount();
+    } else {
+        _tracksBrowseView = new TracksBrowseView(container, _supportsPlaylistWrite);
+        _tracksBrowseView.load();
     }
 }
 

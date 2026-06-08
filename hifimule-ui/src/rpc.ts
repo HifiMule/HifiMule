@@ -92,7 +92,7 @@ export async function getImageUrl(id: string, maxHeight?: number, quality?: numb
 
 // --- Provider-neutral browse types ---
 
-export type BrowseMode = "artists" | "albums" | "playlists" | "genres" | "recentlyAdded" | "frequentlyPlayed" | "recentlyPlayed" | "favorites";
+export type BrowseMode = "artists" | "albums" | "playlists" | "tracks" | "genres" | "recentlyAdded" | "frequentlyPlayed" | "recentlyPlayed" | "favorites";
 
 export interface BrowseArtist {
     id: string;
@@ -270,6 +270,17 @@ export async function fetchBrowseFavorites(
         ...(startIndex !== undefined && { startIndex }),
         ...(limit !== undefined && { limit }),
     });
+}
+
+export async function fetchBrowseTracks(filter: {
+    libraryId?: string;
+    artistId?: string;
+    albumId?: string;
+    letter?: string;
+    startIndex?: number;
+    limit?: number;
+}): Promise<{ tracks: BrowseTrack[]; total: number; startIndex: number; limit: number }> {
+    return await rpcCall('browse.listTracks', filter);
 }
 
 export async function fetchBrowseFavoriteItems(
