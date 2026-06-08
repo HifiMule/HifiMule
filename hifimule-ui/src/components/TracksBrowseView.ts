@@ -33,10 +33,11 @@ interface PanelState<T> {
     startIndex: number;
     loading: boolean;
     exhausted: boolean;
+    errored: boolean;
 }
 
 function makePanelState<T>(): PanelState<T> {
-    return { items: [], total: 0, startIndex: 0, loading: false, exhausted: false };
+    return { items: [], total: 0, startIndex: 0, loading: false, exhausted: false, errored: false };
 }
 
 export class TracksBrowseView {
@@ -51,6 +52,13 @@ export class TracksBrowseView {
     private artistState: PanelState<BrowseArtist> = makePanelState();
     private albumState: PanelState<BrowseAlbum> = makePanelState();
     private trackState: PanelState<BrowseTrack> = makePanelState();
+
+    // Per-panel request generation. Bumped on every fetch; a resolved request
+    // whose captured generation no longer matches is stale and is discarded,
+    // so a reset (selection/letter change) always supersedes an in-flight load.
+    private artistGen = 0;
+    private albumGen = 0;
+    private trackGen = 0;
 
     private artistScrollTop = 0;
     private albumScrollTop = 0;
@@ -134,7 +142,7 @@ export class TracksBrowseView {
         if (as) {
             this._artistScrollHandler = () => {
                 this.artistScrollTop = as.scrollTop;
-                if (!this.artistState.loading && !this.artistState.exhausted &&
+                if (!this.artistState.loading && !this.artistState.exhausted && !this.artistState.errored &&
                     as.scrollTop + as.clientHeight >= as.scrollHeight - SCROLL_NEAR_BOTTOM_PX) {
                     this.fetchArtists(false);
                 }
@@ -144,7 +152,7 @@ export class TracksBrowseView {
         if (als) {
             this._albumScrollHandler = () => {
                 this.albumScrollTop = als.scrollTop;
-                if (!this.albumState.loading && !this.albumState.exhausted &&
+                if (!this.albumState.loading && !this.albumState.exhausted && !this.albumState.errored &&
                     als.scrollTop + als.clientHeight >= als.scrollHeight - SCROLL_NEAR_BOTTOM_PX) {
                     this.fetchAlbums(false);
                 }
@@ -154,7 +162,7 @@ export class TracksBrowseView {
         if (tp) {
             this._trackScrollHandler = () => {
                 this.trackScrollTop = tp.scrollTop;
-                if (!this.trackState.loading && !this.trackState.exhausted &&
+                if (!this.trackState.loading && !this.trackState.exhausted && !this.trackState.errored &&
                     tp.scrollTop + tp.clientHeight >= tp.scrollHeight - SCROLL_NEAR_BOTTOM_PX) {
                     this.fetchTracks(false);
                 }
@@ -178,10 +186,12 @@ export class TracksBrowseView {
     // ─── Data fetching ────────────────────────────────────────────────────────
 
     private async fetchArtists(reset: boolean): Promise<void> {
-        if (this.artistState.loading) return;
-        if (!reset && this.artistState.exhausted) return;
+        // Autoload is skipped while loading, exhausted, or in an error state; a
+        // reset always proceeds and supersedes any in-flight load via the gen token.
+        if (!reset && (this.artistState.loading || this.artistState.exhausted || this.artistState.errored)) return;
 
         if (reset) this.artistState = makePanelState();
+        const gen = ++this.artistGen;
         this.artistState.loading = true;
         const startIndex = this.artistState.startIndex;
 
@@ -195,7 +205,7 @@ export class TracksBrowseView {
                 startIndex,
                 ARTIST_LIMIT,
             );
-            if (!this.container.isConnected) return;
+            if (!this.container.isConnected || gen !== this.artistGen) return;
 
             const newItems = result.artists;
             this.artistState.items.push(...newItems);
@@ -211,17 +221,18 @@ export class TracksBrowseView {
                 this.appendArtistRows(newItems);
             }
         } catch (e) {
-            if (!this.container.isConnected) return;
+            if (!this.container.isConnected || gen !== this.artistGen) return;
             this.artistState.loading = false;
+            this.artistState.errored = true;
             this.showPanelError(ARTIST_SCROLL, e as Error);
         }
     }
 
     private async fetchAlbums(reset: boolean): Promise<void> {
-        if (this.albumState.loading) return;
-        if (!reset && this.albumState.exhausted) return;
+        if (!reset && (this.albumState.loading || this.albumState.exhausted || this.albumState.errored)) return;
 
         if (reset) this.albumState = makePanelState();
+        const gen = ++this.albumGen;
         this.albumState.loading = true;
         const startIndex = this.albumState.startIndex;
 
@@ -231,7 +242,7 @@ export class TracksBrowseView {
         try {
             if (this.selectedArtistId !== null) {
                 const result = await fetchBrowseArtist(this.selectedArtistId);
-                if (!this.container.isConnected) return;
+                if (!this.container.isConnected || gen !== this.albumGen) return;
                 this.albumState.items = result.albums;
                 this.albumState.total = result.albums.length;
                 this.albumState.startIndex = result.albums.length;
@@ -243,7 +254,7 @@ export class TracksBrowseView {
                     startIndex,
                     ALBUM_LIMIT,
                 );
-                if (!this.container.isConnected) return;
+                if (!this.container.isConnected || gen !== this.albumGen) return;
                 const newItems = result.albums;
                 this.albumState.items.push(...newItems);
                 this.albumState.total = result.total;
@@ -259,17 +270,18 @@ export class TracksBrowseView {
                 this.appendAlbumRows(this.albumState.items.slice(startIndex));
             }
         } catch (e) {
-            if (!this.container.isConnected) return;
+            if (!this.container.isConnected || gen !== this.albumGen) return;
             this.albumState.loading = false;
+            this.albumState.errored = true;
             this.showPanelError(ALBUM_SCROLL, e as Error);
         }
     }
 
     private async fetchTracks(reset: boolean): Promise<void> {
-        if (this.trackState.loading) return;
-        if (!reset && this.trackState.exhausted) return;
+        if (!reset && (this.trackState.loading || this.trackState.exhausted || this.trackState.errored)) return;
 
         if (reset) this.trackState = makePanelState();
+        const gen = ++this.trackGen;
         this.trackState.loading = true;
         const startIndex = this.trackState.startIndex;
 
@@ -283,7 +295,7 @@ export class TracksBrowseView {
                 startIndex,
                 limit: TRACK_LIMIT,
             });
-            if (!this.container.isConnected) return;
+            if (!this.container.isConnected || gen !== this.trackGen) return;
 
             const newItems = result.tracks;
             this.trackState.items.push(...newItems);
@@ -300,8 +312,9 @@ export class TracksBrowseView {
                 this.appendTrackRows(newItems);
             }
         } catch (e) {
-            if (!this.container.isConnected) return;
+            if (!this.container.isConnected || gen !== this.trackGen) return;
             this.trackState.loading = false;
+            this.trackState.errored = true;
             this.showPanelError(TRACK_PANEL, e as Error);
         }
     }
@@ -470,9 +483,11 @@ export class TracksBrowseView {
         const isInBasket = basketStore.has(track.id);
         const toggleBtn = document.createElement('sl-icon-button') as any;
         toggleBtn.name = isInBasket ? 'dash-circle-fill' : 'plus-circle-fill';
-        toggleBtn.label = isInBasket ? 'Remove from basket' : 'Add to basket';
+        toggleBtn.label = isInBasket ? t('tracks.view.remove_from_basket') : t('tracks.view.add_to_basket');
         toggleBtn.style.fontSize = '1.1rem';
         toggleBtn.dataset.basketToggle = track.id;
+        // AC 9: (+) controls render disabled when no device (server) is selected.
+        toggleBtn.disabled = !basketStore.getActiveServerId();
         toggleBtn.addEventListener('click', (e: Event) => {
             e.stopPropagation();
             if (basketStore.has(track.id)) {
@@ -516,11 +531,13 @@ export class TracksBrowseView {
     private updateTrackButtons(): void {
         const panel = this.container.querySelector<HTMLElement>(TRACK_PANEL);
         if (!panel) return;
+        const noDevice = !basketStore.getActiveServerId();
         panel.querySelectorAll<HTMLElement>('[data-basket-toggle]').forEach(btn => {
             const trackId = (btn as any).dataset.basketToggle;
             const isInBasket = basketStore.has(trackId);
             (btn as any).name = isInBasket ? 'dash-circle-fill' : 'plus-circle-fill';
-            (btn as any).label = isInBasket ? 'Remove from basket' : 'Add to basket';
+            (btn as any).label = isInBasket ? t('tracks.view.remove_from_basket') : t('tracks.view.add_to_basket');
+            (btn as any).disabled = noDevice;
         });
     }
 
@@ -567,6 +584,7 @@ export class TracksBrowseView {
         this.artistLetter = newLetter;
         this.selectedArtistId = null;
         this.selectedAlbumId = null;
+        this.albumLetter = null;
         await Promise.all([this.fetchArtists(true), this.fetchAlbums(true), this.fetchTracks(true)]);
     }
 
@@ -587,8 +605,11 @@ export class TracksBrowseView {
         );
         if (!azEl) return;
 
+        const activeLetter = type === 'artist' ? this.artistLetter : this.albumLetter;
         const total = type === 'artist' ? this.artistState.total : this.albumState.total;
-        const showStrip = total >= AZ_THRESHOLD &&
+        // Keep the strip when a letter filter is active even if the filtered total
+        // is below threshold, so the user can always clear or change the letter.
+        const showStrip = (total >= AZ_THRESHOLD || activeLetter !== null) &&
             (type === 'artist' || this.selectedArtistId === null);
 
         if (!showStrip) {
@@ -599,8 +620,6 @@ export class TracksBrowseView {
         azEl.style.display = 'grid';
         azEl.style.gridTemplateColumns = '1fr 1fr';
         azEl.innerHTML = '';
-
-        const activeLetter = type === 'artist' ? this.artistLetter : this.albumLetter;
         for (const letter of ALL_LETTERS) {
             const btn = document.createElement('button');
             btn.textContent = letter;
@@ -646,7 +665,10 @@ export class TracksBrowseView {
     private showPanelError(selector: string, err: Error): void {
         const panel = this.container.querySelector<HTMLElement>(selector);
         if (!panel) return;
+        panel.querySelector('.tracks-spinner')?.remove();
+        panel.querySelector('.tracks-error')?.remove();
         const alert = document.createElement('sl-alert') as any;
+        alert.className = 'tracks-error';
         alert.variant = 'danger';
         alert.open = true;
         alert.style.margin = '0.5rem';

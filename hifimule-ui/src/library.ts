@@ -910,6 +910,12 @@ async function switchMode(mode: BrowseMode) {
     if (mode === state.browseMode || state.loading) return;
 
     saveScroll();
+    // Leaving Tracks mode: tear down the view's basket subscription and scroll
+    // handlers. The instance is kept (not nulled) so re-entry can remount and
+    // restore prior selection/scroll; only clearNavigationCache fully discards it.
+    if (state.browseMode === 'tracks' && mode !== 'tracks') {
+        _tracksBrowseView?.destroy();
+    }
     state.browseMode = mode;
     state.breadcrumbStack = [];
     state.pagination.startIndex = 0;

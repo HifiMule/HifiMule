@@ -3,6 +3,13 @@
 Status: open
 Last updated: 2026-06-08
 
+## Deferred from: code review of 9-10-tracks-browse-mode-dual-panel-ui (2026-06-08)
+
+- **No row virtualization in the three panels** [`hifimule-ui/src/components/TracksBrowseView.ts:351`] — builds a real DOM node per item (artists/albums/tracks accumulate without recycling), unlike the main library's virtual rows. Deliberate deviation; perf concern only on very large libraries.
+- **Provider total-undercount → premature pagination stop** [`hifimule-ui/src/components/TracksBrowseView.ts:293`] — exhaustion heuristic `items.length >= result.total || newItems.length < LIMIT` can stop early when Subsonic reports `total` as the page length rather than the global count. Provider-dependent; acknowledged in Dev Notes "Track Panel — Exhaustion Detection". Related to the deferred 9.9 Subsonic letter-filter pagination item above.
+- **Scroll/selection restoration is conditional on nav-cache state** [`hifimule-ui/src/library.ts:956`] — returning to Tracks restores scroll only when `clearNavigationCache` was not called in between; otherwise a fresh instance loses position. Minor restoration-contract inconsistency.
+- **`loadTracksView()` calls `load()` fire-and-forget** [`hifimule-ui/src/library.ts:964`] — the returned promise is neither awaited nor `.catch`-ed; low risk because each per-panel fetch catches internally.
+
 ## Deferred from: code review of 9-9-tracks-browse-mode-provider-contract-and-daemon-rpc (2026-06-08)
 
 - **Letter filter post-application in Subsonic Branch 3 causes early pagination exhaustion** [`hifimule-daemon/src/providers/subsonic.rs:803`] — `search3_paged` pages server-side with `offset=start`, then `apply_letter_filter` discards songs; `filtered.len() < limit` makes the UI's exhaustion heuristic fire prematurely when matching songs exist beyond the current page window. Explicit v1 limitation documented in spec ("UI may need to fetch additional pages if prefix is rare"). Story 9.10 must account for this.

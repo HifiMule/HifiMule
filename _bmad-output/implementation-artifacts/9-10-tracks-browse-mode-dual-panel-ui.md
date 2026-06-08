@@ -4,7 +4,7 @@ baseline_commit: 5ca0d07
 
 # Story 9.10: Tracks Browse Mode — Dual-Panel UI with Auto-Pagination & Track Actions
 
-Status: review
+Status: done
 
 ## Story
 
@@ -440,10 +440,23 @@ _none_
 
 ### Review Findings
 
-_to be filled by reviewer_
+_Code review 2026-06-08 (Blind Hunter + Edge Case Hunter + Acceptance Auditor, range `5ca0d07..a0d2a55`)._
+
+- [x] [Review][Patch] AC 9 "(+) controls render disabled when no device selected" is not implemented — `buildTrackRow` never sets `disabled` on the toggle [hifimule-ui/src/components/TracksBrowseView.ts:471]. Resolution (user decision 2026-06-08): honor AC 9 literally. Set `toggleBtn.disabled = !basketStore.getActiveServerId()` at render time in `buildTrackRow`, and recompute it in `updateTrackButtons`. Supersedes the Task 5 always-enabled decision (spec lines 177/218/431). Note `setActiveServerId` only fires `update` when basket items change, so the render-time set is the reliable hook (real device switches rebuild the view via `clearNavigationCache`).
+- [x] [Review][Patch] Stale-selection race: a reset fetch is silently dropped while a prior fetch is in flight, so the panel shows the previous selection's contents under the new highlight [hifimule-ui/src/components/TracksBrowseView.ts:269] — the `if (loading) return` guard precedes the reset in `fetchTracks`/`fetchAlbums`/`fetchArtists`; `selectArtist`/`selectAlbum`/`setArtistLetter` therefore cannot supersede an in-flight load. Fix with a request-generation token that discards superseded responses.
+- [x] [Review][Patch] Failed paginated fetch never latches `exhausted` and `showPanelError` never clears prior alerts [hifimule-ui/src/components/TracksBrowseView.ts:213] — after an error the scroll handler re-fires `fetch*(false)` on every scroll, stacking `sl-alert`s and re-hammering the failing RPC; a successful later load leaves the stale alert in place.
+- [x] [Review][Patch] Switching away from Tracks mode never calls `_tracksBrowseView.destroy()` [hifimule-ui/src/library.ts:909] — `switchMode`→`loadModeRoot`→other loaders replace `container.innerHTML` but only `clearNavigationCache` destroys the view, so the `basketStore` `update` listener leaks and fires `updateTrackButtons()` against a detached panel until a cache clear.
+- [x] [Review][Patch] A–Z strip vanishes after selecting a low-count letter, trapping the user [hifimule-ui/src/components/TracksBrowseView.ts:591] — `syncAzStrip` gates visibility on the *filtered* `total >= 20`; picking a letter with < 20 results hides the strip, leaving no way to change/clear the letter. Keep the strip visible while a letter filter is active (or gate on the unfiltered total).
+- [x] [Review][Patch] `setArtistLetter` clears `selectedArtistId`/`selectedAlbumId` but not `albumLetter` [hifimule-ui/src/components/TracksBrowseView.ts:565] — a previously chosen album-letter filter silently persists and filters the album panel after an artist-letter selection.
+- [x] [Review][Patch] Basket toggle accessible labels are hardcoded English [hifimule-ui/src/components/TracksBrowseView.ts:473] — `'Add to basket'`/`'Remove from basket'` (also line 523) bypass i18n while `send_to_playlist` uses `t()`; add catalog keys.
+- [x] [Review][Defer] No row virtualization in the three panels [hifimule-ui/src/components/TracksBrowseView.ts:351] — deferred, deliberate deviation from the main library's virtual rows; perf concern only on very large libraries.
+- [x] [Review][Defer] Provider total-undercount → premature pagination stop [hifimule-ui/src/components/TracksBrowseView.ts:293] — deferred, provider-dependent (Subsonic), acknowledged in Dev Notes "Track Panel — Exhaustion Detection".
+- [x] [Review][Defer] Scroll/selection restoration depends on whether the nav cache was cleared between visits [hifimule-ui/src/library.ts:956] — deferred, minor restoration-contract inconsistency.
+- [x] [Review][Defer] `loadTracksView()` calls `_tracksBrowseView.load()` fire-and-forget [hifimule-ui/src/library.ts:964] — deferred, low risk; per-panel fetches catch internally.
 
 ## Change Log
 
 - 2026-06-08: Story created. Daemon dependency (Story 9.9) is complete at baseline commit `5ca0d07`. Ultimate context engine analysis completed — comprehensive developer guide created.
 - 2026-06-08: Implementation complete. TracksBrowseView component created; rpc.ts, library.ts, and catalog.json updated. All ACs satisfied. TypeScript: zero new errors.
 - 2026-06-08: Post-review refinements — autoload spinner added before each fetch; A–Z strips moved to vertical 2-column grid sidebar on panel right edge; track panel fixed at 55% height; "All artists"/"All albums" rows changed from sticky to regular scrollable items.
+- 2026-06-08: Code review (range `5ca0d07..a0d2a55`) — 7 patches applied: per-panel request-generation token to discard stale fetches on rapid selection (P1); error latch + alert dedup so failed autoloads stop re-firing (P2); `destroy()` on Tracks→other mode switch to stop the leaked basket listener (P3); A–Z strip kept visible while a letter filter is active (P4); `setArtistLetter` clears `albumLetter` (P5); i18n keys for basket toggle labels (P6); AC 9 — (+) toggle disabled when no device/server selected via `basketStore.getActiveServerId()` (P7). 4 items deferred to deferred-work.md. TypeScript: zero new errors. Status → done.
