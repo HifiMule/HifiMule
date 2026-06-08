@@ -225,10 +225,10 @@ pub async fn cleanup_tmp_files(
             Err(_) => continue,
         };
         for entry in entries {
-            if entry.name.ends_with(".tmp") {
-                if device_io.delete_file(&entry.path).await.is_ok() {
-                    count += 1;
-                }
+            if entry.name.ends_with(".tmp")
+                && device_io.delete_file(&entry.path).await.is_ok()
+            {
+                count += 1;
             }
         }
     }
@@ -302,60 +302,60 @@ impl DeviceManager {
         // T5.9: Scan for MTP-style dirty markers on reconnect.
         // For MSC devices, leftover `.dirty` markers indicate an interrupted MtpBackend write
         // from a previous session (e.g., the device was used with MTP before).
-        if let Ok(files) = device_io.list_files("").await {
-            if files.iter().any(|f| f.name.ends_with(".dirty")) {
+        if let Ok(files) = device_io.list_files("").await
+            && files.iter().any(|f| f.name.ends_with(".dirty"))
+        {
+            daemon_log!(
+                "[Device] Dirty marker detected on reconnect at {:?} — firing on_device_dirty",
+                path
+            );
+            // The dirty flag in the manifest is the on_device_dirty signal path (same as MSC).
+            // We surface it via the manifest.dirty field; the RPC dirty-resume handler handles cleanup.
+            let mut dirty_manifest = manifest.clone();
+            dirty_manifest.dirty = true;
+            let connected = ConnectedDevice {
+                manifest: dirty_manifest.clone(),
+                device_io: std::sync::Arc::clone(&device_io),
+                device_class: device_class.clone(),
+            };
+            {
+                let mut state = self.state.write().await;
+                state.connected_devices.insert(path.clone(), connected);
+                if state.selected_device_path.is_none() {
+                    state.selected_device_path = Some(path.clone());
+                }
+            }
+            {
+                *self.unrecognized_device.write().await = None;
+            }
+            let name = dirty_manifest
+                .name
+                .clone()
+                .unwrap_or_else(|| dirty_manifest.device_id.clone());
+            let mapping = self
+                .db
+                .get_device_mapping(&dirty_manifest.device_id)
+                .unwrap_or(None);
+            if mapping.is_some()
+                && let Err(e) = self.db.set_auto_sync_on_connect(
+                    &dirty_manifest.device_id,
+                    dirty_manifest.auto_sync_on_connect,
+                )
+            {
                 daemon_log!(
-                    "[Device] Dirty marker detected on reconnect at {:?} — firing on_device_dirty",
-                    path
+                    "[Device] Failed to sync auto_sync_on_connect from manifest: {}",
+                    e
                 );
-                // The dirty flag in the manifest is the on_device_dirty signal path (same as MSC).
-                // We surface it via the manifest.dirty field; the RPC dirty-resume handler handles cleanup.
-                let mut dirty_manifest = manifest.clone();
-                dirty_manifest.dirty = true;
-                let connected = ConnectedDevice {
-                    manifest: dirty_manifest.clone(),
-                    device_io: std::sync::Arc::clone(&device_io),
-                    device_class: device_class.clone(),
-                };
-                {
-                    let mut state = self.state.write().await;
-                    state.connected_devices.insert(path.clone(), connected);
-                    if state.selected_device_path.is_none() {
-                        state.selected_device_path = Some(path.clone());
-                    }
-                }
-                {
-                    *self.unrecognized_device.write().await = None;
-                }
-                let name = dirty_manifest
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| dirty_manifest.device_id.clone());
-                let mapping = self
-                    .db
-                    .get_device_mapping(&dirty_manifest.device_id)
-                    .unwrap_or(None);
-                if mapping.is_some() {
-                    if let Err(e) = self.db.set_auto_sync_on_connect(
-                        &dirty_manifest.device_id,
-                        dirty_manifest.auto_sync_on_connect,
-                    ) {
-                        daemon_log!(
-                            "[Device] Failed to sync auto_sync_on_connect from manifest: {}",
-                            e
-                        );
-                    }
-                }
-                return if let Some(m) = mapping {
-                    if let Some(profile_id) = m.jellyfin_user_id {
-                        Ok(crate::DaemonState::DeviceRecognized { name, profile_id })
-                    } else {
-                        Ok(crate::DaemonState::DeviceFound(name))
-                    }
+            }
+            return if let Some(m) = mapping {
+                if let Some(profile_id) = m.jellyfin_user_id {
+                    Ok(crate::DaemonState::DeviceRecognized { name, profile_id })
                 } else {
                     Ok(crate::DaemonState::DeviceFound(name))
-                };
-            }
+                }
+            } else {
+                Ok(crate::DaemonState::DeviceFound(name))
+            };
         }
 
         let connected = ConnectedDevice {
@@ -384,16 +384,15 @@ impl DeviceManager {
             .db
             .get_device_mapping(&manifest.device_id)
             .unwrap_or(None);
-        if mapping.is_some() {
-            if let Err(e) = self
+        if mapping.is_some()
+            && let Err(e) = self
                 .db
                 .set_auto_sync_on_connect(&manifest.device_id, manifest.auto_sync_on_connect)
-            {
-                daemon_log!(
-                    "[Device] Failed to sync auto_sync_on_connect from manifest: {}",
-                    e
-                );
-            }
+        {
+            daemon_log!(
+                "[Device] Failed to sync auto_sync_on_connect from manifest: {}",
+                e
+            );
         }
 
         if let Some(m) = mapping {
@@ -642,7 +641,7 @@ impl DeviceManager {
         // (auto-creates parent objects) handle them transparently.
         if !folder_path.is_empty() {
             let components: Vec<&str> = folder_path.split(&['/', '\\']).collect();
-            if components.iter().any(|c| *c == "..") {
+            if components.contains(&"..") {
                 return Err(anyhow::anyhow!(
                     "Invalid folder path: path traversal ('..') not allowed"
                 ));
@@ -732,15 +731,16 @@ impl DeviceManager {
             .filter(|path| !path.is_empty())
             .map(str::to_string)
             .or_else(|| managed_paths.first().cloned());
-        if let Some(path) = playlist_path.as_deref() {
-            if !path.is_empty() && managed_paths.first().map(String::as_str) != Some(path) {
-                device_io.ensure_dir(path).await.with_context(|| {
-                    format!(
-                        "Failed to create playlist folder '{}' on device {}",
-                        path, device_path
-                    )
-                })?;
-            }
+        if let Some(path) = playlist_path.as_deref()
+            && !path.is_empty()
+            && managed_paths.first().map(String::as_str) != Some(path)
+        {
+            device_io.ensure_dir(path).await.with_context(|| {
+                format!(
+                    "Failed to create playlist folder '{}' on device {}",
+                    path, device_path
+                )
+            })?;
         }
 
         let manifest = DeviceManifest {
@@ -924,7 +924,7 @@ impl DeviceManager {
         }
 
         // Sort alphabetically
-        folders.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        folders.sort_by_key(|a| a.name.to_lowercase());
 
         let device_name = manifest.and_then(|m| m.name).unwrap_or_else(|| {
             device_path
@@ -1604,7 +1604,7 @@ pub async fn run_mtp_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
         // disables MTP without triggering a USB re-enumerate, so the device stays in the
         // enumeration list but storage is no longer accessible.
         liveness_tick = liveness_tick.wrapping_add(1);
-        if liveness_tick % 8 == 0 {
+        if liveness_tick.is_multiple_of(8) {
             for dev in &devices {
                 let dev_id = dev.device_id.clone();
                 if !known_ids.contains(&dev_id) {
@@ -1782,10 +1782,10 @@ async fn emit_mtp_probe_event(
 #[cfg(unix)]
 fn is_mount_point(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
-    if let (Some(parent), Ok(path_meta)) = (path.parent(), std::fs::metadata(path)) {
-        if let Ok(parent_meta) = std::fs::metadata(parent) {
-            return parent_meta.dev() != path_meta.dev();
-        }
+    if let (Some(parent), Ok(path_meta)) = (path.parent(), std::fs::metadata(path))
+        && let Ok(parent_meta) = std::fs::metadata(parent)
+    {
+        return parent_meta.dev() != path_meta.dev();
     }
     false
 }

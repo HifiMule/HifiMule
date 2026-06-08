@@ -45,6 +45,8 @@ pub struct Song {
     pub content_type: Option<String>,
     #[serde(default)]
     pub suffix: Option<String>,
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,6 +229,7 @@ mod tests {
             is_favorite: None,
             content_type: Some("audio/mpeg".to_string()),
             suffix: Some("mp3".to_string()),
+            size_bytes: None,
         };
 
         assert_eq!(song.id, "9f86d081884c7d659a2feaa0c55ad015");

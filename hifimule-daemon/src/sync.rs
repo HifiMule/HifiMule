@@ -909,12 +909,11 @@ fn audio_compatibility_profile(
 
         let transcode_profile = transcode_profile_from_device_profile(profile);
         let mut output_formats = direct_formats.clone();
-        if let Some(profile) = &transcode_profile {
-            if let Some(requirement) =
+        if let Some(profile) = &transcode_profile
+            && let Some(requirement) =
                 audio_requirement(profile.container.as_deref(), profile.audio_codec.as_deref())
-            {
-                output_formats.push(requirement);
-            }
+        {
+            output_formats.push(requirement);
         }
 
         return AudioCompatibilityProfile {
@@ -1248,7 +1247,7 @@ fn truncate_component(component: &str, max_len: usize) -> String {
     } else {
         component.chars().take(max_len).collect()
     };
-    let cleaned = source.trim_end_matches(|c| c == ' ' || c == '.');
+    let cleaned = source.trim_end_matches([' ', '.']);
     if cleaned.is_empty() {
         "_".to_string()
     } else {
@@ -1269,12 +1268,12 @@ fn truncate_filename(base: &str, extension: &str, max_len: usize) -> String {
         // Pathological: extension itself fills the limit.
         // Return a truncated extension rather than dropping it entirely.
         let truncated_ext: String = extension.chars().take(max_len.saturating_sub(1)).collect();
-        let clean_ext = truncated_ext.trim_end_matches(|c| c == ' ' || c == '.');
+        let clean_ext = truncated_ext.trim_end_matches([' ', '.']);
         return format!(".{}", clean_ext);
     }
     let max_base_len = max_len - ext_len;
     let truncated_base: String = base.chars().take(max_base_len).collect();
-    let clean_base = truncated_base.trim_end_matches(|c| c == ' ' || c == '.');
+    let clean_base = truncated_base.trim_end_matches([' ', '.']);
     format!("{}.{}", clean_base, extension)
 }
 
@@ -1840,7 +1839,7 @@ pub async fn execute_sync(
             add_item.name
         );
         let construction =
-            match construct_file_path_with_extension(&managed_path, &item, extension_override) {
+            match construct_file_path_with_extension(&managed_path, item, extension_override) {
                 Ok(result) => result,
                 Err(e) => {
                     errors.push(SyncFileError {
@@ -1982,8 +1981,8 @@ pub async fn execute_sync(
 
                 // Per-file manifest update for dirty-resume support (Story 4.4)
                 // Per-file writes ensure manifest always reflects completed work for true delta resume.
-                if let Some(delete_item) = readd_delete_by_id.get(add_item.jellyfin_id.as_str()) {
-                    if let Some(error) = cleanup_replaced_file_after_write(
+                if let Some(delete_item) = readd_delete_by_id.get(add_item.jellyfin_id.as_str())
+                    && let Some(error) = cleanup_replaced_file_after_write(
                         delete_item,
                         &rel_path,
                         device_path,
@@ -1996,9 +1995,8 @@ pub async fn execute_sync(
                         &operation_id,
                     )
                     .await
-                    {
-                        errors.push(error);
-                    }
+                {
+                    errors.push(error);
                 }
                 let synced_item = synced_items.last().unwrap().clone();
                 let id_to_replace = add_item.jellyfin_id.clone();
@@ -2189,32 +2187,32 @@ pub async fn execute_sync(
     // Runs when there are playlist basket items OR manifest entries that need cleanup.
     // The auto-sync path calls execute_sync with delta.playlists = []; the inner guard
     // skips work when both sides are empty, avoiding unnecessary manifest reads.
-    if let Some(mut manifest_snapshot) = device_manager.get_current_device().await {
-        if !delta.playlists.is_empty() || !manifest_snapshot.playlists.is_empty() {
-            let warnings = generate_m3u_files(
-                &delta.playlists,
-                device_path,
-                &managed_path,
-                &manifest_snapshot.synced_items.clone(),
-                &mut manifest_snapshot,
-                Arc::clone(&device_io),
-            )
-            .await;
+    if let Some(mut manifest_snapshot) = device_manager.get_current_device().await
+        && (!delta.playlists.is_empty() || !manifest_snapshot.playlists.is_empty())
+    {
+        let warnings = generate_m3u_files(
+            &delta.playlists,
+            device_path,
+            &managed_path,
+            &manifest_snapshot.synced_items.clone(),
+            &mut manifest_snapshot,
+            Arc::clone(&device_io),
+        )
+        .await;
 
-            for w in &warnings {
-                eprintln!("{}", w);
-            }
+        for w in &warnings {
+            eprintln!("{}", w);
+        }
 
-            // Persist the updated playlists array back through the device manager.
-            let updated_playlists = manifest_snapshot.playlists;
-            if let Err(e) = device_manager
-                .update_manifest(|m| {
-                    m.playlists = updated_playlists;
-                })
-                .await
-            {
-                eprintln!("[M3U] Failed to persist manifest after M3U update: {}", e);
-            }
+        // Persist the updated playlists array back through the device manager.
+        let updated_playlists = manifest_snapshot.playlists;
+        if let Err(e) = device_manager
+            .update_manifest(|m| {
+                m.playlists = updated_playlists;
+            })
+            .await
+        {
+            eprintln!("[M3U] Failed to persist manifest after M3U update: {}", e);
         }
     }
 
@@ -2225,13 +2223,13 @@ pub async fn execute_sync(
             e
         ));
     }
-    if !device_warnings.is_empty() {
-        if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
-            operation.warnings.append(&mut device_warnings);
-            operation_manager
-                .update_operation(&operation_id, operation)
-                .await;
-        }
+    if !device_warnings.is_empty()
+        && let Some(mut operation) = operation_manager.get_operation(&operation_id).await
+    {
+        operation.warnings.append(&mut device_warnings);
+        operation_manager
+            .update_operation(&operation_id, operation)
+            .await;
     }
 
     Ok((synced_items, errors))
@@ -2622,8 +2620,8 @@ pub async fn execute_provider_sync(
                         .await;
                 }
                 let synced_item = synced_items.last().unwrap().clone();
-                if let Some(delete_item) = readd_delete_by_id.get(add_item.jellyfin_id.as_str()) {
-                    if let Some(error) = cleanup_replaced_file_after_write(
+                if let Some(delete_item) = readd_delete_by_id.get(add_item.jellyfin_id.as_str())
+                    && let Some(error) = cleanup_replaced_file_after_write(
                         delete_item,
                         &rel_path,
                         device_path,
@@ -2636,9 +2634,8 @@ pub async fn execute_provider_sync(
                         &operation_id,
                     )
                     .await
-                    {
-                        errors.push(error);
-                    }
+                {
+                    errors.push(error);
                 }
                 let id_to_replace = add_item.jellyfin_id.clone();
                 if let Err(e) = device_manager
@@ -2775,29 +2772,29 @@ pub async fn execute_provider_sync(
         }
     }
 
-    if let Some(mut manifest_snapshot) = device_manager.get_current_device().await {
-        if !delta.playlists.is_empty() || !manifest_snapshot.playlists.is_empty() {
-            let warnings = generate_m3u_files(
-                &delta.playlists,
-                device_path,
-                &managed_path,
-                &manifest_snapshot.synced_items.clone(),
-                &mut manifest_snapshot,
-                Arc::clone(&device_io),
-            )
-            .await;
-            for warning in &warnings {
-                eprintln!("{}", warning);
-            }
-            let updated_playlists = manifest_snapshot.playlists;
-            if let Err(e) = device_manager
-                .update_manifest(|m| {
-                    m.playlists = updated_playlists;
-                })
-                .await
-            {
-                eprintln!("[M3U] Failed to persist manifest after M3U update: {}", e);
-            }
+    if let Some(mut manifest_snapshot) = device_manager.get_current_device().await
+        && (!delta.playlists.is_empty() || !manifest_snapshot.playlists.is_empty())
+    {
+        let warnings = generate_m3u_files(
+            &delta.playlists,
+            device_path,
+            &managed_path,
+            &manifest_snapshot.synced_items.clone(),
+            &mut manifest_snapshot,
+            Arc::clone(&device_io),
+        )
+        .await;
+        for warning in &warnings {
+            eprintln!("{}", warning);
+        }
+        let updated_playlists = manifest_snapshot.playlists;
+        if let Err(e) = device_manager
+            .update_manifest(|m| {
+                m.playlists = updated_playlists;
+            })
+            .await
+        {
+            eprintln!("[M3U] Failed to persist manifest after M3U update: {}", e);
         }
     }
 
@@ -2809,13 +2806,13 @@ pub async fn execute_provider_sync(
             e
         ));
     }
-    if !device_warnings.is_empty() {
-        if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
-            operation.warnings.append(&mut device_warnings);
-            operation_manager
-                .update_operation(&operation_id, operation)
-                .await;
-        }
+    if !device_warnings.is_empty()
+        && let Some(mut operation) = operation_manager.get_operation(&operation_id).await
+    {
+        operation.warnings.append(&mut device_warnings);
+        operation_manager
+            .update_operation(&operation_id, operation)
+            .await;
     }
 
     Ok((synced_items, errors))
@@ -3124,19 +3121,18 @@ async fn generate_m3u_files(
                 );
 
                 // Delete old file if the playlist was renamed
-                if let Some(old_fn) = &old_filename_opt {
-                    if *old_fn != m3u_filename {
-                        let rel_old = playlist_manifest_rel_path(old_fn, &playlist_subfolder);
-                        if rel_old != rel_m3u {
-                            if let Err(e) = device_io.delete_file(&rel_old).await {
-                                if !is_missing_delete_error(&e) {
-                                    warnings.push(format!(
-                                        "[M3U] Failed to delete old file {}: {}",
-                                        rel_old, e
-                                    ));
-                                }
-                            }
-                        }
+                if let Some(old_fn) = &old_filename_opt
+                    && *old_fn != m3u_filename
+                {
+                    let rel_old = playlist_manifest_rel_path(old_fn, &playlist_subfolder);
+                    if rel_old != rel_m3u
+                        && let Err(e) = device_io.delete_file(&rel_old).await
+                        && !is_missing_delete_error(&e)
+                    {
+                        warnings.push(format!(
+                            "[M3U] Failed to delete old file {}: {}",
+                            rel_old, e
+                        ));
                     }
                 }
 
@@ -3194,10 +3190,10 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
             }
             // Quality-upgrade check: re-sync when server reports higher bitrate than recorded,
             // or when the manifest entry has no bitrate recorded (old manifest, populate on next sync).
-            if let Some(desired) = desired {
-                if bitrate_stale_reason(desired.original_bitrate, i.original_bitrate).is_some() {
-                    return false;
-                }
+            if let Some(desired) = desired
+                && bitrate_stale_reason(desired.original_bitrate, i.original_bitrate).is_some()
+            {
+                return false;
             }
             true
         })
@@ -3281,16 +3277,14 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
             "transcoding-profile-change"
         } else if stale_for_relocation {
             "music-folder-change"
-        } else if let Some(reason) = desired_by_id
-            .get(item.jellyfin_id.as_str())
-            .copied()
-            .and_then(|desired| {
-                bitrate_stale_reason(desired.original_bitrate, item.original_bitrate)
-            })
-        {
-            reason
         } else {
-            "removed-selection"
+            desired_by_id
+                .get(item.jellyfin_id.as_str())
+                .copied()
+                .and_then(|desired| {
+                    bitrate_stale_reason(desired.original_bitrate, item.original_bitrate)
+                })
+                .unwrap_or("removed-selection")
         };
         if stale_for_profile
             || stale_for_relocation
@@ -3319,7 +3313,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
             );
             delete_by_metadata
                 .entry(key)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(idx);
         }
     }
@@ -3827,6 +3821,7 @@ mod tests {
             etag: None,
             user_data: None,
             date_created: None,
+            playlist_item_id: None,
         }
     }
 
@@ -4580,6 +4575,7 @@ mod tests {
             etag: None,
             user_data: None,
             date_created: None,
+            playlist_item_id: None,
         };
 
         let path = construct_file_path(&managed, &item).unwrap().path;
@@ -4617,6 +4613,7 @@ mod tests {
             etag: None,
             user_data: None,
             date_created: None,
+            playlist_item_id: None,
         };
 
         let path = construct_file_path(&managed, &item).unwrap().path;

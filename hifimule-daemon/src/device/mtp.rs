@@ -35,6 +35,7 @@ pub(super) fn split_path_components(path: &str) -> Vec<&str> {
         .collect()
 }
 
+#[allow(dead_code)]
 fn resolve_path_with_lookup<F>(
     root_id: String,
     components: &[&str],
@@ -1528,7 +1529,9 @@ pub mod libmtp {
         // libmtp is not thread-safe. The Mutex must be held for the full duration of every
         // FFI call — do NOT copy the raw pointer out and drop the guard before calling FFI.
         device: Arc<Mutex<*mut LIBMTP_MtpDevice_t>>,
+        #[allow(dead_code)]
         bus_location: u32,
+        #[allow(dead_code)]
         dev_num: u8,
         // Folder IDs populated lazily on the first path-not-found miss in ensure_path_raw, and
         // extended when new folders are created. Replaced fresh each open — not persisted to the
@@ -1723,11 +1726,11 @@ pub mod libmtp {
                         // Garmin hides sub-folder objects from enumeration; ensure_path_raw lazily
                         // BFS-primes the hints cache on first miss so it can resolve the hidden ID.
                         let is_last_component = idx + 1 == components.len();
-                        if !is_last_component {
-                            if let Some(&hint_id) = hints.get(&acc_path) {
-                                parent_id = hint_id;
-                                continue;
-                            }
+                        if !is_last_component
+                            && let Some(&hint_id) = hints.get(&acc_path)
+                        {
+                            parent_id = hint_id;
+                            continue;
                         }
                         return Err(anyhow::anyhow!(
                             "libmtp: path component '{}' not found",
@@ -2232,10 +2235,10 @@ pub mod libmtp {
                 if let Ok(mut h) = self.folder_hints.lock() {
                     *h = hints;
                 }
-            } else if !discovered.is_empty() {
-                if let Ok(mut h) = self.folder_hints.lock() {
-                    h.extend(discovered);
-                }
+            } else if !discovered.is_empty()
+                && let Ok(mut h) = self.folder_hints.lock()
+            {
+                h.extend(discovered);
             }
             // LIBMTP_Send_File_From_File only creates new objects; overwrite requires
             // delete-then-create. Also capture storage_id from the existing object so

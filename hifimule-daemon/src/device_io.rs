@@ -122,14 +122,14 @@ async fn msc_cleanup_empty_dirs(path: &std::path::Path) -> Result<()> {
         if entry.file_type().await?.is_dir() {
             Box::pin(msc_cleanup_empty_dirs(&entry_path)).await?;
             let mut sub_entries = tokio::fs::read_dir(&entry_path).await?;
-            if sub_entries.next_entry().await?.is_none() {
-                if let Err(e) = tokio::fs::remove_dir(&entry_path).await {
-                    eprintln!(
-                        "[Sync] Warning: failed to remove empty directory {}: {}",
-                        entry_path.display(),
-                        e
-                    );
-                }
+            if sub_entries.next_entry().await?.is_none()
+                && let Err(e) = tokio::fs::remove_dir(&entry_path).await
+            {
+                eprintln!(
+                    "[Sync] Warning: failed to remove empty directory {}: {}",
+                    entry_path.display(),
+                    e
+                );
             }
         }
     }

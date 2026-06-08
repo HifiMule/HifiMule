@@ -1,9 +1,11 @@
 /// Auto-fill module: fetches pre-sorted Audio tracks from Jellyfin and truncates to capacity.
 ///
 /// Requests tracks sorted server-side by:
+///
 ///   1. IsFavoriteOrLiked DESC (favorites first)
 ///   2. PlayCount DESC (most-played next)
 ///   3. DateCreated DESC (newest last)
+///
 /// Stops paginating as soon as the device capacity budget is filled.
 use crate::api::{CredentialManager, JellyfinClient, JellyfinItem, JellyfinItemsResponse};
 use crate::providers::{MediaProvider, ProviderError};
@@ -142,21 +144,21 @@ pub async fn run_auto_fill(
                 let status = response.status();
                 if !status.is_success() {
                     let body = response.text().await?;
-                    if status.is_server_error() {
-                        if let Some(&delay_ms) = PAGE_RETRY_DELAYS_MS.get(attempt) {
-                            crate::daemon_log!(
-                                "[AutoFill] Page {}: server error {} (URL: {} bytes), retrying in {}ms (attempt {}/{})",
-                                page_num,
-                                status,
-                                endpoint.len(),
-                                delay_ms,
-                                attempt + 2,
-                                PAGE_RETRY_DELAYS_MS.len() + 1
-                            );
-                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                            attempt += 1;
-                            continue;
-                        }
+                    if status.is_server_error()
+                        && let Some(&delay_ms) = PAGE_RETRY_DELAYS_MS.get(attempt)
+                    {
+                        crate::daemon_log!(
+                            "[AutoFill] Page {}: server error {} (URL: {} bytes), retrying in {}ms (attempt {}/{})",
+                            page_num,
+                            status,
+                            endpoint.len(),
+                            delay_ms,
+                            attempt + 2,
+                            PAGE_RETRY_DELAYS_MS.len() + 1
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        attempt += 1;
+                        continue;
                     }
                     return Err(anyhow::anyhow!(
                         "Page {}: server returned status: {} (URL: {} bytes, {} IDs excluded client-side) - {}",
@@ -519,6 +521,7 @@ mod tests {
                 last_played_date: None,
             }),
             date_created: Some(date_created.to_string()),
+            playlist_item_id: None,
         }
     }
 

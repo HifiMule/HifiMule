@@ -1,7 +1,25 @@
 # Deferred Work
 
 Status: open
-Last updated: 2026-05-29
+Last updated: 2026-06-08
+
+## Deferred from: code review of 9-10-tracks-browse-mode-dual-panel-ui (2026-06-08)
+
+- **No row virtualization in the three panels** [`hifimule-ui/src/components/TracksBrowseView.ts:351`] — builds a real DOM node per item (artists/albums/tracks accumulate without recycling), unlike the main library's virtual rows. Deliberate deviation; perf concern only on very large libraries.
+- **Provider total-undercount → premature pagination stop** [`hifimule-ui/src/components/TracksBrowseView.ts:293`] — exhaustion heuristic `items.length >= result.total || newItems.length < LIMIT` can stop early when Subsonic reports `total` as the page length rather than the global count. Provider-dependent; acknowledged in Dev Notes "Track Panel — Exhaustion Detection". Related to the deferred 9.9 Subsonic letter-filter pagination item above.
+- **Scroll/selection restoration is conditional on nav-cache state** [`hifimule-ui/src/library.ts:956`] — returning to Tracks restores scroll only when `clearNavigationCache` was not called in between; otherwise a fresh instance loses position. Minor restoration-contract inconsistency.
+- **`loadTracksView()` calls `load()` fire-and-forget** [`hifimule-ui/src/library.ts:964`] — the returned promise is neither awaited nor `.catch`-ed; low risk because each per-panel fetch catches internally.
+
+## Deferred from: code review of 9-9-tracks-browse-mode-provider-contract-and-daemon-rpc (2026-06-08)
+
+- **Letter filter post-application in Subsonic Branch 3 causes early pagination exhaustion** [`hifimule-daemon/src/providers/subsonic.rs:803`] — `search3_paged` pages server-side with `offset=start`, then `apply_letter_filter` discards songs; `filtered.len() < limit` makes the UI's exhaustion heuristic fire prematurely when matching songs exist beyond the current page window. Explicit v1 limitation documented in spec ("UI may need to fetch additional pages if prefix is rare"). Story 9.10 must account for this.
+- **Subsonic Branch 3 with `limit=0` sends `songCount=0` to `search3` → empty response** [`hifimule-daemon/src/providers/subsonic.rs:792`] — Branches 1 and 2 treat `limit=0` as "return all" but Branch 3 passes `Some(0)` directly to `search3_paged` which yields zero results. Low probability since `browse_pagination` defaults to 50; only affects callers explicitly passing `limit=0`.
+- **Jellyfin `list_tracks` with `limit=0` omits `Limit` param → unbounded server response** [`hifimule-daemon/src/providers/jellyfin.rs:765`] — Same pattern as `list_artists`/`list_albums`. Normal UI calls are safe (default 50). Large libraries could cause high memory usage if `limit=0` slips through.
+- **`get_items` inserts `ArtistIds`/`AlbumIds`/`SortBy` via raw `format!` without URL encoding** [`hifimule-daemon/src/api.rs:332`] — All existing params use the same pattern. GUIDs don't contain injection characters, but the pattern is technically unsafe if future callers pass non-GUID values.
+- **Subsonic `album_id`/`artist_id` branches in `list_tracks` callable without `open_subsonic` check** [`hifimule-daemon/src/providers/subsonic.rs:761`] — Defence-in-depth only; the RPC capability gate prevents classic Subsonic from reaching these branches. The underlying `get_album`/`get_artist` methods are also available on classic Subsonic.
+
+Status: open
+Last updated: 2026-06-06
 
 ## Deferred from: autosync-subsonic-navidrome (2026-05-29)
 
@@ -115,3 +133,62 @@ If future review findings need follow-up, add them as new story scope or reopen 
 - **`cleanup_empty_subdirs` runs unconditionally on cancel** [`hifimule-daemon/src/sync.rs`] — After the deletes loop breaks early, `cleanup_empty_subdirs` still executes, pruning partially-emptied directories. Harmless in practice (the next sync recreates them), but logically inconsistent with cancellation semantics. Fix: skip or guard behind a non-cancelled check.
 - **Tiny race: cancel arrives just as sync completes** [`hifimule-daemon/src/rpc.rs`] — If `sync_cancel` is received between `execute_sync` returning `Ok` and the spawned task's `is_cancelled` check, the manifest is left dirty even though all files were transferred successfully. Consequence: a false "interrupted sync" resume dialog on next device connect that resolves immediately (delta is empty). Fix: check the cancel token only if `synced_items.len() < delta.adds.len()`, or clear dirty before the cancellation guard.
 - **Auto-sync operations report `Complete` when cancelled** [`hifimule-daemon/src/main.rs:run_auto_sync`, `run_auto_sync_via_provider`] — The auto-sync spawned tasks do not check `is_cancelled` after `execute_sync` returns, so a cancelled auto-sync clears the dirty flag, sets status to `Complete`, and fires the completion notification. Fix: add the same `is_cancelled` guard used in the manual-sync paths in `rpc.rs`.
+
+## Deferred from: code review of 11-1-mediaprovider-playlist-write-trait-amendment (2026-06-05)
+
+- Empty `track_ids` boundary unhandled/untested for real providers (hifimule-daemon/src/providers/mod.rs). No provider overrides the playlist-write methods yet; empty-slice validation/behavior belongs to Stories 11.2 (Jellyfin) and 11.3 (Subsonic).
+
+## Deferred from: code review of 11-3-subsonicprovider-playlist-write-adapter (2026-06-05)
+
+- Unbounded GET query-string length / HTTP 414 on large create/add/remove lists (hifimule-daemon/src/providers/subsonic.rs:841,854,867). All Subsonic playlist writes pack one query param per track/index into a single GET; very large playlists can exceed server/proxy URL limits (~8KB). Chunking is out of scope for 11.3 but should be considered before bulk playlist operations ship in later Epic 11 stories.
+- `create_playlist` returns an empty string silently if the server responds `ok` with a missing `playlist.id` (hifimule-daemon/src/providers/subsonic.rs:841). `PlaylistWithSongsDto.id` is a non-`Option` `String` with `Default`, so a malformed-but-ok response yields `""` rather than an error. Low likelihood; matches the existing pattern in other read methods.
+- `create_playlist` does not validate an empty/whitespace `name` (hifimule-daemon/src/providers/subsonic.rs:841). Not required by AC; the server rejects it and the error propagates.
+
+## Deferred from: code review of 11-4-playlist-rpcs-and-selection-to-tracks-resolution (2026-06-05)
+
+- **Input-validation leniency at playlist RPC handlers** (`hifimule-daemon/src/rpc.rs`): The four new playlist handlers accept empty `name`, empty `playlistId`, and silently drop non-string elements from `itemIds`/`trackIds` arrays via `filter_map`. This matches the established rpc.rs param-parsing convention (e.g. `rpc.rs:581` checks only `.as_str()` presence, not emptiness) and the only client is the trusted HifiMule UI, so it is consistent rather than a regression. A future codebase-wide param-validation hardening pass could reject empty/malformed values with `ERR_INVALID_PARAMS`.
+- **Large `itemIds`/`trackIds` may exceed Subsonic GET URL length** (`hifimule-daemon/src/providers/subsonic.rs`): `playlist.create`/`addTracks` with very large resolved lists feed one query param per track into a single GET, which can hit ~8KB URL limits. Pre-existing provider-layer concern already noted in the 11.3 review deferral; the new RPC entry points make it reachable from larger basket selections. Chunking should be considered before bulk playlist operations ship.
+
+## Deferred from: code review of story-11.5 (2026-06-06)
+
+- No server-side empty/whitespace `name` validation in the `playlist.create` RPC handler (`hifimule-daemon/src/rpc.rs:844`). Pre-existing from Story 11.4; the daemon forwards any non-null string to the provider. Both 11.5 UI paths trim client-side, so the current UI is safe — defense-in-depth gap only, not introduced by this change.
+
+## Deferred from: code review of 11-6-dual-panel-playlist-curation-view-and-stats (2026-06-06)
+
+- **`basketStore` event listener leak compounded by curation close pattern** [`hifimule-ui/src/components/MediaCard.ts`] — `MediaCard.create()` attaches a `basketStore 'update'` listener for every card rendered and never removes it when the card is discarded from the DOM. Each `loadPlaylists()` call (including the one triggered on close from `openCurationView`) rebuilds all playlist cards and attaches fresh listeners, while prior listeners remain held by `basketStore`. Pre-existing issue across all browse modes; the curation close path adds one more cycle that reproduces it.
+
+## Deferred from: code review of 11-6-dual-panel-playlist-curation-view-and-stats (2026-06-07)
+
+- **`t()` i18n return values interpolated unescaped into `innerHTML`** [`hifimule-ui/src/components/PlaylistCurationView.ts`] — Strings from `t('playlist.curation.*')` are inserted directly into the HTML template without `escapeHtml`. While the catalog.json is a trusted static file (not user-supplied), escaping all i18n calls is a systemic change needed across the whole codebase, not scoped to this story.
+- **Empty playlist shows two simultaneous empty-state messages** [`hifimule-ui/src/components/PlaylistCurationView.ts`] — When a playlist has zero tracks, both the artist panel ("Playlist is empty") and the track panel ("No tracks for this selection") display at once. No spec coverage for this edge case; low practical impact since empty playlists are rare.
+- **`listViewMode` simplified from per-mode `Map<BrowseMode, 'grid' | 'list'>` to a single global value** [`hifimule-ui/src/library.ts`] — Switching to list mode in artists now affects albums too; the previous per-mode memory is lost. Part of the approved sprint-change-proposal-2026-06-07 (autoload-on-scroll) redesign; a deliberate simplification but may surprise users who expected independent per-mode preferences.
+
+## Deferred from: code review of 11-7-add-tracks-to-playlist-browse-and-curation (2026-06-07)
+
+- **`handle_playlist_add_items` reports partial success as full success** [`hifimule-daemon/src/rpc.rs`] — Unresolvable items are logged to stderr and skipped, returning `{ ok: true }` even if only some resolved (cf. `playlist.create` which returns `skippedItemIds`). Not reachable from the current UI (context menu always sends a single item), so robustness-only for now.
+- **No single-dialog guard — overlapping Add-to-playlist / Add-tracks dialogs possible** [`hifimule-ui/src/components/MediaCard.ts`, `hifimule-ui/src/components/PlaylistCurationView.ts`] — Rapid re-trigger can spawn multiple stacked dialogs (the context menu uses `dismissActiveMenu`, dialogs do not). Low-impact UX polish.
+- **Initial `browse.listPlaylists` failure leaves Add-to-playlist dialog with no retry** [`hifimule-ui/src/components/MediaCard.ts`] — Shows an error but clears the list with no in-dialog retry; user must close/reopen. Low-impact UX.
+
+## Deferred from: code review of 11-8-playlist-rename-and-delete (2026-06-07)
+
+- **No Enter-to-save / blur-to-commit on rename input** [`hifimule-ui/src/components/PlaylistCurationView.ts`:354] — Only Escape and explicit Save/Cancel resolve the inline rename edit; pressing Enter does nothing and clicking away leaves uncommitted text. UX enhancement, outside AC1–AC3 scope.
+- **Re-render race during rename** [`hifimule-ui/src/components/PlaylistCurationView.ts`:127] — A concurrent `render()` (e.g. a track removal completing in another panel) rebuilds `innerHTML` and re-reads `this.playlistName`, wiping unsaved rename text and re-creating an open delete dialog. Low likelihood (requires editing the name while another async op completes).
+
+## Deferred from: code review of 11-9-playlist-reorder-provider-and-rpc (2026-06-08)
+
+- Jellyfin reorder is non-atomic — a mid-sequence `move_playlist_item` failure leaves the playlist partially reordered with no rollback; the RPC returns `Err` while the first N moves are already persisted server-side. Inherent to the per-entry Move design (no Jellyfin batch/transaction API); acceptable for DAP-sized playlists. [`hifimule-daemon/src/providers/jellyfin.rs` reorder loop]
+- Jellyfin set-mismatch surfaces as `ERR_UNSUPPORTED_CAPABILITY` — a "track not in playlist" desync returns `ProviderError::UnsupportedCapability`, misleading an RPC client into thinking the provider lacks the capability rather than that the request was bad. Spec-prescribed code (Task 3); revisit if a dedicated desync error variant is introduced. [`hifimule-daemon/src/providers/jellyfin.rs` reorder loop]
+
+## Deferred from: code review of story-11.10 (2026-06-08)
+
+- **Remove/rename controls not gated by `supportsPlaylistWrite`** [`hifimule-ui/src/components/PlaylistCurationView.ts`] — Per-track/artist/album remove buttons and the title-click inline rename render unconditionally; only the new ↑/↓ move controls and the header delete button are capability-gated. On a read-only provider the user can still trigger `playlist.removeTracks`/`playlist.rename`, which only fail at the RPC. Pre-existing from stories 11.6/11.8; out of 11.10's frontend-reorder scope (AC6 is satisfied for the move controls).
+- **Selecting a specific artist row does not reset `selectedAlbum`** [`hifimule-ui/src/components/PlaylistCurationView.ts`] — The All-artists handler resets both selections, but the per-artist row handler (unchanged by 11.10) sets `selectedArtist` without clearing `selectedAlbum`. The render-time guard only clears the album when its name is absent from the new artist's albums; a same-named album across artists leaves a stale filter on the track panel. Pre-existing.
+- **Full re-render orphans an open delete dialog** [`hifimule-ui/src/components/PlaylistCurationView.ts`] — `#playlist-delete-dialog` lives inside the wholesale `innerHTML` replace; any concurrent `render()` (now including `moveTrack`'s optimistic/rollback renders) destroys an open dialog mid-interaction. Pre-existing architecture, widened by reorder.
+- **Add-tracks confirm post-await runs after dialog/view dismissed** [`hifimule-ui/src/components/PlaylistCurationView.ts`] — If the add-tracks dialog is cancelled or the curation view is closed while the `addTracks` RPC is in flight, the post-await block still calls `render()` (on a possibly-detached container) and shows a success toast. No mounted/cancelled guard. Pre-existing from story 11.7.
+- **fr/es `playlist.curation.error` & `add_tracks_error` hold English text** [`hifimule-i18n/catalog.json`] — The remove/add failure messages fall back to literal English in the fr and es blocks (placeholders are consistent). Pre-existing i18n gap; the new `reorder_error` key is correctly translated in all three blocks.
+- **Duplicate track ids: #N badge collapses + reorder id-list ambiguous** [`hifimule-ui/src/components/PlaylistCurationView.ts`] — `positionById` (id→index Map) collapses to the last index for a repeated id, so duplicate rows show the same #N; and `playlist.reorder` receives `[…, X, X, …]` which the backend cannot disambiguate. The #N collapse is explicitly accepted by the spec (Task 3 caveat) and the swap logic itself is duplicate-safe (object-reference `indexOf`); the id-list ambiguity is the Story 11.9 RPC contract. Duplicates are reachable only because add-tracks (11.7) does not dedupe.
+
+## Deferred from: code review of story-9.8 (2026-06-08)
+
+- **Stale-mode race in `loadMoreForListView`** [hifimule-ui/src/library.ts:783] — the function reads `state.browseMode` and `breadcrumbStack.length` after the awaited fetch, with no load-sequence/mode token. If the user switches browse mode or navigates during the in-flight fetch, the returned items and `pagination.total` get written into the new view's `state.items`, corrupting the list and virtual-scroll height. Pre-existing pattern (already present for artists/albums prior to 9.8); widened to genres/history modes by this change. No sequence-token guard exists anywhere in the codebase yet.
+- **`subsonic.rs::get_songs_by_genre` full-fetch + local pagination** [hifimule-daemon/src/providers/subsonic.rs:654] — now calls `get_songs_by_genre(genre, 0, 10_000)` and paginates locally. (a) Genres with >10,000 songs are silently truncated and report a capped total; (b) every paginated page request re-downloads the full song set (O(n²) network/CPU per scroll). Contingent on keeping the daemon change — resolve review Decision #1 (AC 5 autoload scope) first. A cache of the full per-genre fetch, or true server-side paging, would fix the perf issue.

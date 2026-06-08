@@ -6,6 +6,7 @@ import { rpcCall, getImageUrl } from '../rpc';
 import { RepairModal } from './RepairModal';
 import { InitDeviceModal } from './InitDeviceModal';
 import { t } from '../i18n';
+import { setPlaylistWriteCapability, invalidatePlaylistsCache } from '../library';
 
 interface StorageInfo {
     totalBytes: number;
@@ -94,7 +95,7 @@ function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: numb
                     <div class="capacity-selection-total">${t('basket.capacity.selection', { size: formatSize(projectedBytes) })}</div>
                     <div class="capacity-bar-container capacity-bar-disabled">
                         <div class="capacity-bar">
-                            <div class="capacity-segment capacity-grey" style="width: 100%;"></div>
+                            <div class="capacity-segment capacity-grey" style="--seg-x: 0; --seg-w: 1;"></div>
                         </div>
                     </div>
                     <div class="capacity-no-device-label">
@@ -108,6 +109,7 @@ function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: numb
     }
 
     const { totalBytes, freeBytes, usedBytes } = storageInfo;
+    if (totalBytes === 0) return '';
     const zone = getCapacityZone(projectedBytes, freeBytes, totalBytes);
 
     const usedPct = Math.min((usedBytes / totalBytes) * 100, 100);
@@ -120,24 +122,28 @@ function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: numb
     let statusIcon = '';
     if (zone === 'green') {
         statusMessage = t('basket.capacity.remaining', { size: formatSize(remaining) });
-        statusIcon = '<sl-icon name="check-circle" style="color: var(--sl-color-success-600);"></sl-icon>';
+        // Healthy state is neutral, not green: capacity carries no warning here, so
+        // it stays off the amber/red signal scale. Reserve color for thresholds.
+        statusIcon = '<sl-icon name="check-circle" style="color: var(--ink-dim);"></sl-icon>';
     } else if (zone === 'amber') {
         statusMessage = t('basket.capacity.tight_fit', { size: formatSize(remaining) });
     } else {
         statusMessage = t('basket.capacity.exceeds', { size: formatSize(Math.abs(remaining)) });
     }
 
-    const projectedColor = zone === 'green' ? 'var(--sl-color-success-500)'
-        : zone === 'amber' ? '#EBB334'
+    // Pending-selection segment: Signal Cyan when healthy (the live "what you're
+    // adding" indicator, per DESIGN.md §5), amber/red only as threshold overrides.
+    const projectedColor = zone === 'green' ? 'var(--accent)'
+        : zone === 'amber' ? 'var(--amber-warn)'
             : 'var(--sl-color-danger-500)';
 
     return `
         <div class="capacity-section capacity-zone-${zone}">
             <div class="capacity-bar-container">
                 <div class="capacity-bar">
-                    <div class="capacity-segment capacity-used" style="width: ${usedPct}%;"></div>
-                    <div class="capacity-segment capacity-projected" style="width: ${projectedPct}%; background: ${projectedColor};"></div>
-                    <div class="capacity-segment capacity-free" style="width: ${freePct}%;"></div>
+                    <div class="capacity-segment capacity-used" style="--seg-x: 0; --seg-w: ${usedPct / 100};"></div>
+                    <div class="capacity-segment capacity-projected" style="--seg-x: ${usedPct / 100}; --seg-w: ${projectedPct / 100}; background: ${projectedColor};"></div>
+                    <div class="capacity-segment capacity-free" style="--seg-x: ${(usedPct + projectedPct) / 100}; --seg-w: ${freePct / 100};"></div>
                 </div>
             </div>
             <div class="capacity-status">
@@ -185,6 +191,7 @@ export class BasketSidebar {
     // Transfer stats captured at completion for the sync-complete screen
     private completedFilesCount: number = 0;
     private completedBytesCount: number = 0;
+    private supportsPlaylistWrite: boolean = false;
 
     constructor(container: HTMLElement) {
         this.container = container;
@@ -295,6 +302,9 @@ export class BasketSidebar {
                 this.autoFillMaxBytes = null;
                 this.autoSyncOnConnect = false;
             }
+            const newSupportsPlaylist = (state.supportsPlaylistWrite === true);
+            this.supportsPlaylistWrite = newSupportsPlaylist;
+            setPlaylistWriteCapability(newSupportsPlaylist);
         }
 
         // Attach to daemon-initiated sync if one is running and we're not already tracking it
@@ -630,6 +640,11 @@ export class BasketSidebar {
                 const currentDevice = daemonStateResult?.currentDevice;
                 this.currentDevice = currentDevice ?? null;
                 this.serverType = daemonStateResult?.serverType ?? null;
+                const newSupportsPlaylist = daemonStateResult?.supportsPlaylistWrite === true;
+                if (newSupportsPlaylist !== this.supportsPlaylistWrite) {
+                    this.supportsPlaylistWrite = newSupportsPlaylist;
+                    setPlaylistWriteCapability(newSupportsPlaylist);
+                }
                 this.currentServerId = daemonStateResult?.currentServer?.serverId ?? null;
                 basketStore.setActiveServerId(this.currentServerId);
                 const currentDeviceId = this.getCurrentDeviceId(currentDevice);
@@ -943,6 +958,14 @@ export class BasketSidebar {
             <div class="basket-header">
                 <h2>${t('basket.title')}</h2>
                 <sl-badge variant="primary" pill>${items.length}</sl-badge>
+                ${this.supportsPlaylistWrite ? `
+                    <sl-icon-button
+                        id="save-as-playlist-btn"
+                        name="collection-play"
+                        label="${t('basket.actions.save_as_playlist')}"
+                        style="font-size: 1.1rem; margin-left: auto;">
+                    </sl-icon-button>
+                ` : ''}
             </div>
 
             <div class="basket-items-list">
@@ -1013,6 +1036,10 @@ export class BasketSidebar {
 
         this.container.querySelector('.clear-basket-btn')?.addEventListener('click', () => {
             this.confirmClearAll();
+        });
+
+        this.container.querySelector('#save-as-playlist-btn')?.addEventListener('click', () => {
+            this.handleSaveAsPlaylist();
         });
 
         this.container.querySelector('#start-sync-btn')?.addEventListener('click', () => {
@@ -1630,10 +1657,101 @@ export class BasketSidebar {
         customElements.whenDefined('sl-dialog').then(() => dialog.show());
     }
 
+    private handleSaveAsPlaylist(): void {
+        const allItems = basketStore.getItems();
+        const hasAutoFill = allItems.some(i => i.id === AUTO_FILL_SLOT_ID);
+        const manualIds = allItems
+            .filter(i => i.id !== AUTO_FILL_SLOT_ID)
+            .map(i => i.id);
+
+        const autoFillNoticeHtml = hasAutoFill ? `
+            <sl-alert variant="warning" open style="margin-bottom: 0.75rem;">
+                <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+                ${t('basket.playlist.auto_fill_notice')}
+            </sl-alert>
+        ` : '';
+
+        const dialog = document.createElement('sl-dialog') as any;
+        dialog.label = t('basket.playlist.create_title');
+        dialog.innerHTML = `
+            ${autoFillNoticeHtml}
+            <sl-input
+                id="playlist-name-input"
+                placeholder="${t('basket.playlist.name_placeholder')}"
+                autofocus
+                clearable>
+            </sl-input>
+            <sl-alert id="playlist-create-error" variant="danger" closable style="display:none; margin-top: 0.75rem;"></sl-alert>
+            <sl-button slot="footer" variant="default" id="playlist-cancel-btn">${t('basket.actions.cancel')}</sl-button>
+            <sl-button slot="footer" variant="primary" id="playlist-create-btn">
+                ${t('basket.playlist.create_btn')}
+            </sl-button>
+        `;
+
+        document.body.appendChild(dialog);
+
+        dialog.querySelector('#playlist-cancel-btn')?.addEventListener('click', () => dialog.hide());
+
+        const submit = async () => {
+            const createBtn = dialog.querySelector('#playlist-create-btn') as any;
+            const errorEl = dialog.querySelector('#playlist-create-error') as HTMLElement | null;
+            const nameInput = dialog.querySelector('#playlist-name-input') as any;
+            const name = (nameInput?.value ?? '').trim();
+            if (!name) return;
+            if (createBtn?.loading) return; // guard against double-submit
+
+            const showError = (text: string) => {
+                if (errorEl) {
+                    errorEl.textContent = text;
+                    errorEl.style.display = '';
+                    (errorEl as any).open = true;
+                }
+            };
+
+            // Nothing to save if the basket holds only an Auto-Fill slot
+            if (manualIds.length === 0) {
+                showError(t('basket.playlist.empty_error'));
+                return;
+            }
+
+            createBtn.loading = true;
+            createBtn.disabled = true;
+            if (errorEl) errorEl.style.display = 'none';
+
+            try {
+                await rpcCall('playlist.create', { name, itemIds: manualIds });
+                invalidatePlaylistsCache();
+                dialog.hide();
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                showError(t('basket.playlist.error', { message: msg }));
+            } finally {
+                createBtn.loading = false;
+                createBtn.disabled = false;
+            }
+        };
+
+        dialog.querySelector('#playlist-create-btn')?.addEventListener('click', submit);
+        dialog.querySelector('#playlist-name-input')?.addEventListener('keydown', (e: KeyboardEvent) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                submit();
+            }
+        });
+
+        dialog.addEventListener('sl-after-hide', (event: Event) => {
+            if (event.target === dialog) dialog.remove();
+        });
+
+        customElements.whenDefined('sl-dialog').then(() => dialog.show());
+    }
+
     private escapeHtml(text: string): string {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML.replace(/"/g, '&quot;');
+        return text
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
     }
 
     private iconLabel(icon: string): string {

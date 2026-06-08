@@ -183,6 +183,12 @@ pub trait MediaProvider: Send + Sync {
         ))
     }
 
+    async fn list_tracks(&self, _filter: TrackListFilter) -> Result<TrackListPage, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "list_tracks is not supported by this provider".to_string(),
+        ))
+    }
+
     /// Paginated listing of all songs in the library, in any server-defined order.
     /// Used as the bulk-fill pass in provider auto-fill, after priority lists are exhausted.
     async fn list_all_songs_page(
@@ -193,6 +199,62 @@ pub trait MediaProvider: Send + Sync {
     ) -> Result<(Vec<Song>, u32), ProviderError> {
         Err(ProviderError::UnsupportedCapability(
             "list_all_songs_page is not supported by this provider".to_string(),
+        ))
+    }
+
+    async fn create_playlist(
+        &self,
+        _name: &str,
+        _track_ids: &[String],
+    ) -> Result<String, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "create_playlist is not supported by this provider".to_string(),
+        ))
+    }
+
+    async fn add_to_playlist(
+        &self,
+        _playlist_id: &str,
+        _track_ids: &[String],
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "add_to_playlist is not supported by this provider".to_string(),
+        ))
+    }
+
+    async fn remove_from_playlist(
+        &self,
+        _playlist_id: &str,
+        _track_ids: &[String],
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "remove_from_playlist is not supported by this provider".to_string(),
+        ))
+    }
+
+    async fn delete_playlist(&self, _playlist_id: &str) -> Result<(), ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "delete_playlist is not supported by this provider".to_string(),
+        ))
+    }
+
+    async fn rename_playlist(
+        &self,
+        _playlist_id: &str,
+        _new_name: &str,
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "rename_playlist is not supported by this provider".to_string(),
+        ))
+    }
+
+    async fn reorder_playlist(
+        &self,
+        _playlist_id: &str,
+        _ordered_track_ids: &[String],
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "reorder_playlist is not supported by this provider".to_string(),
         ))
     }
 
@@ -239,6 +301,7 @@ pub enum BrowseMode {
     Artists,
     Albums,
     Playlists,
+    Tracks,
     Genres,
     RecentlyAdded,
     FrequentlyPlayed,
@@ -257,7 +320,28 @@ pub struct Capabilities {
     pub open_subsonic: bool,
     pub supports_changes_since: bool,
     pub supports_server_transcoding: bool,
+    pub supports_playlist_write: bool,
     pub browse: BrowseCapabilities,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackListFilter {
+    pub library_id: Option<String>,
+    pub artist_id: Option<String>,
+    pub album_id: Option<String>,
+    pub letter: Option<String>,
+    pub start_index: u32,
+    pub limit: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackListPage {
+    pub tracks: Vec<Song>,
+    pub total: u32,
+    pub start_index: u32,
+    pub limit: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -355,35 +439,32 @@ pub async fn probe_url(url: &str) -> ServerType {
 
     // Subsonic returns its JSON envelope even for unauthenticated requests
     let subsonic_url = format!("{}/rest/ping.view?v=1.16.1&c=hifimule-probe&f=json", base);
-    if let Ok(resp) = client.get(&subsonic_url).send().await {
-        if let Ok(text) = resp.text().await {
-            if text.contains("subsonic-response") {
-                let open_subsonic = serde_json::from_str::<serde_json::Value>(&text)
-                    .ok()
-                    .and_then(|json| {
-                        json.pointer("/subsonic-response/openSubsonic")
-                            .and_then(|v| v.as_bool())
-                    })
-                    .unwrap_or(false);
-                return if open_subsonic {
-                    ServerType::OpenSubsonic
-                } else {
-                    ServerType::Subsonic
-                };
-            }
-        }
+    if let Ok(resp) = client.get(&subsonic_url).send().await
+        && let Ok(text) = resp.text().await
+        && text.contains("subsonic-response")
+    {
+        let open_subsonic = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|json| {
+                json.pointer("/subsonic-response/openSubsonic")
+                    .and_then(|v| v.as_bool())
+            })
+            .unwrap_or(false);
+        return if open_subsonic {
+            ServerType::OpenSubsonic
+        } else {
+            ServerType::Subsonic
+        };
     }
 
     // Jellyfin's public info endpoint requires no authentication
     let jellyfin_url = format!("{}/System/Info/Public", base);
-    if let Ok(resp) = client.get(&jellyfin_url).send().await {
-        if resp.status().is_success() {
-            if let Ok(text) = resp.text().await {
-                if text.contains("\"ServerName\"") || text.contains("\"Version\"") {
-                    return ServerType::Jellyfin;
-                }
-            }
-        }
+    if let Ok(resp) = client.get(&jellyfin_url).send().await
+        && resp.status().is_success()
+        && let Ok(text) = resp.text().await
+        && (text.contains("\"ServerName\"") || text.contains("\"Version\""))
+    {
+        return ServerType::Jellyfin;
     }
 
     ServerType::Unknown
@@ -813,6 +894,10 @@ mod tests {
             "\"playlists\""
         );
         assert_eq!(
+            serde_json::to_string(&BrowseMode::Tracks).unwrap(),
+            "\"tracks\""
+        );
+        assert_eq!(
             serde_json::to_string(&BrowseMode::Genres).unwrap(),
             "\"genres\""
         );
@@ -848,5 +933,208 @@ mod tests {
         assert_eq!(modes[0], "artists");
         assert_eq!(modes[1], "albums");
         assert_eq!(modes[2], "playlists");
+    }
+
+    struct MinimalProvider;
+
+    #[async_trait]
+    impl MediaProvider for MinimalProvider {
+        fn server_type(&self) -> ServerType {
+            ServerType::Unknown
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                open_subsonic: false,
+                supports_changes_since: false,
+                supports_server_transcoding: false,
+                supports_playlist_write: false,
+                browse: BrowseCapabilities { list_modes: vec![] },
+            }
+        }
+
+        async fn list_libraries(
+            &self,
+        ) -> Result<Vec<crate::domain::models::Library>, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "list_libraries".to_string(),
+            ))
+        }
+
+        async fn list_artists(
+            &self,
+            _library_id: Option<&str>,
+            _letter: Option<&str>,
+            _offset: u32,
+            _limit: u32,
+        ) -> Result<(Vec<crate::domain::models::Artist>, u32), ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "list_artists".to_string(),
+            ))
+        }
+
+        async fn get_artist(
+            &self,
+            _artist_id: &str,
+        ) -> Result<crate::domain::models::ArtistWithAlbums, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "get_artist".to_string(),
+            ))
+        }
+
+        async fn list_albums(
+            &self,
+            _library_id: Option<&str>,
+            _letter: Option<&str>,
+            _offset: u32,
+            _limit: u32,
+        ) -> Result<(Vec<crate::domain::models::Album>, u32), ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "list_albums".to_string(),
+            ))
+        }
+
+        async fn get_album(
+            &self,
+            _album_id: &str,
+        ) -> Result<crate::domain::models::AlbumWithTracks, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "get_album".to_string(),
+            ))
+        }
+
+        async fn list_playlists(
+            &self,
+        ) -> Result<Vec<crate::domain::models::Playlist>, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "list_playlists".to_string(),
+            ))
+        }
+
+        async fn get_playlist(
+            &self,
+            _playlist_id: &str,
+        ) -> Result<crate::domain::models::PlaylistWithTracks, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "get_playlist".to_string(),
+            ))
+        }
+
+        async fn search(
+            &self,
+            _query: &str,
+        ) -> Result<crate::domain::models::SearchResult, ProviderError> {
+            Err(ProviderError::UnsupportedCapability("search".to_string()))
+        }
+
+        async fn download_url(
+            &self,
+            _song_id: &str,
+            _profile: Option<&TranscodeProfile>,
+        ) -> Result<String, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "download_url".to_string(),
+            ))
+        }
+
+        async fn cover_art_url(&self, _cover_art_id: &str) -> Result<String, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "cover_art_url".to_string(),
+            ))
+        }
+
+        async fn changes_since_with_context(
+            &self,
+            _token: Option<&str>,
+            _context: &ProviderChangeContext,
+        ) -> Result<Vec<crate::domain::models::ChangeEvent>, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "changes_since_with_context".to_string(),
+            ))
+        }
+
+        async fn scrobble(&self, _request: ScrobbleRequest) -> Result<(), ProviderError> {
+            Err(ProviderError::UnsupportedCapability("scrobble".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn trait_default_create_playlist_returns_unsupported() {
+        let provider = MinimalProvider;
+        let result = provider.create_playlist("My Playlist", &[]).await;
+        let Err(ProviderError::UnsupportedCapability(msg)) = result else {
+            panic!("expected UnsupportedCapability, got {result:?}");
+        };
+        assert!(
+            msg.contains("create_playlist"),
+            "message should name the method: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn trait_default_add_to_playlist_returns_unsupported() {
+        let provider = MinimalProvider;
+        let result = provider.add_to_playlist("playlist-1", &[]).await;
+        let Err(ProviderError::UnsupportedCapability(msg)) = result else {
+            panic!("expected UnsupportedCapability, got {result:?}");
+        };
+        assert!(
+            msg.contains("add_to_playlist"),
+            "message should name the method: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn trait_default_remove_from_playlist_returns_unsupported() {
+        let provider = MinimalProvider;
+        let result = provider.remove_from_playlist("playlist-1", &[]).await;
+        let Err(ProviderError::UnsupportedCapability(msg)) = result else {
+            panic!("expected UnsupportedCapability, got {result:?}");
+        };
+        assert!(
+            msg.contains("remove_from_playlist"),
+            "message should name the method: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn trait_default_delete_playlist_returns_unsupported() {
+        let provider = MinimalProvider;
+        let result = provider.delete_playlist("playlist-1").await;
+        let Err(ProviderError::UnsupportedCapability(msg)) = result else {
+            panic!("expected UnsupportedCapability, got {result:?}");
+        };
+        assert!(
+            msg.contains("delete_playlist"),
+            "message should name the method: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn trait_default_rename_playlist_returns_unsupported() {
+        let provider = MinimalProvider;
+        let result = provider.rename_playlist("playlist-1", "New Name").await;
+        let Err(ProviderError::UnsupportedCapability(msg)) = result else {
+            panic!("expected UnsupportedCapability, got {result:?}");
+        };
+        assert!(
+            msg.contains("rename_playlist"),
+            "message should name the method: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn trait_default_reorder_playlist_returns_unsupported() {
+        let provider = MinimalProvider;
+        let result = provider
+            .reorder_playlist("playlist-1", &["a".to_string(), "b".to_string()])
+            .await;
+        let Err(ProviderError::UnsupportedCapability(msg)) = result else {
+            panic!("expected UnsupportedCapability, got {result:?}");
+        };
+        assert!(
+            msg.contains("reorder_playlist"),
+            "message should name the method: {msg}"
+        );
     }
 }

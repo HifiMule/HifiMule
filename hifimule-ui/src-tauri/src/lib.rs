@@ -318,11 +318,10 @@ fn ui_log(msg: &str) {
         let log_dir = std::path::Path::new(&home).join("Library/Application Support/HifiMule");
         let _ = std::fs::create_dir_all(&log_dir);
         let log_path = log_dir.join("ui.log");
-        if let Ok(meta) = std::fs::metadata(&log_path) {
-            if meta.len() > LOG_MAX_BYTES {
+        if let Ok(meta) = std::fs::metadata(&log_path)
+            && meta.len() > LOG_MAX_BYTES {
                 let _ = std::fs::write(&log_path, "--- log truncated ---\n");
             }
-        }
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -367,11 +366,10 @@ pub fn run() {
                 // Step 1: Check if daemon is already running (e.g., as startup app or Windows Service)
                 if check_daemon_health() {
                     ui_log("Daemon already running (startup app or existing instance), skipping sidecar spawn");
-                    if let Some(state) = app_handle.try_state::<SidecarStatus>() {
-                        if let Ok(mut s) = state.0.lock() {
+                    if let Some(state) = app_handle.try_state::<SidecarStatus>()
+                        && let Ok(mut s) = state.0.lock() {
                             *s = "startup".to_string();
                         }
-                    }
                     return;
                 }
 
@@ -426,16 +424,14 @@ pub fn run() {
                                     "Sidecar spawned successfully (pid={})",
                                     child.pid()
                                 ));
-                                if let Some(state) = app_handle.try_state::<SidecarStatus>() {
-                                    if let Ok(mut s) = state.0.lock() {
+                                if let Some(state) = app_handle.try_state::<SidecarStatus>()
+                                    && let Ok(mut s) = state.0.lock() {
                                         *s = format!("running (pid={})", child.pid());
                                     }
-                                }
-                                if let Some(state) = app_handle.try_state::<DaemonProcess>() {
-                                    if let Ok(mut daemon_proc) = state.0.lock() {
+                                if let Some(state) = app_handle.try_state::<DaemonProcess>()
+                                    && let Ok(mut daemon_proc) = state.0.lock() {
                                         *daemon_proc = Some(child);
                                     }
-                                }
                                 let handle_clone = app_handle.clone();
                                 tauri::async_runtime::spawn(async move {
                                     use tauri_plugin_shell::process::CommandEvent;
@@ -461,14 +457,12 @@ pub fn run() {
                                                 ui_log(&msg);
                                                 if let Some(state) =
                                                     handle_clone.try_state::<SidecarStatus>()
-                                                {
-                                                    if let Ok(mut s) = state.0.lock() {
+                                                    && let Ok(mut s) = state.0.lock() {
                                                         *s = format!(
                                                             "terminated (code={:?})",
                                                             payload.code
                                                         );
                                                     }
-                                                }
                                                 break;
                                             }
                                             CommandEvent::Error(err) => {
@@ -482,22 +476,20 @@ pub fn run() {
                             Err(e) => {
                                 let msg = format!("Failed to spawn sidecar: {}", e);
                                 ui_log(&msg);
-                                if let Some(state) = app_handle.try_state::<SidecarStatus>() {
-                                    if let Ok(mut s) = state.0.lock() {
+                                if let Some(state) = app_handle.try_state::<SidecarStatus>()
+                                    && let Ok(mut s) = state.0.lock() {
                                         *s = format!("spawn_failed: {}", e);
                                     }
-                                }
                             }
                         }
                     }
                     Err(e) => {
                         let msg = format!("Failed to create sidecar command: {}", e);
                         ui_log(&msg);
-                        if let Some(state) = app_handle.try_state::<SidecarStatus>() {
-                            if let Ok(mut s) = state.0.lock() {
+                        if let Some(state) = app_handle.try_state::<SidecarStatus>()
+                            && let Ok(mut s) = state.0.lock() {
                                 *s = format!("command_failed: {}", e);
                             }
-                        }
                     }
                 }
             });
@@ -510,14 +502,12 @@ pub fn run() {
     builder.run(|app_handle, event| {
         if let RunEvent::Exit = event {
             // Explicitly kill the daemon sidecar process to prevent zombie processes
-            if let Some(state) = app_handle.try_state::<DaemonProcess>() {
-                if let Ok(mut daemon_proc) = state.0.lock() {
-                    if let Some(child) = daemon_proc.take() {
+            if let Some(state) = app_handle.try_state::<DaemonProcess>()
+                && let Ok(mut daemon_proc) = state.0.lock()
+                    && let Some(child) = daemon_proc.take() {
                         ui_log("Killing hifimule-daemon sidecar before exit");
                         let _ = child.kill();
                     }
-                }
-            }
         }
     });
 }

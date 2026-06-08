@@ -92,7 +92,7 @@ export async function getImageUrl(id: string, maxHeight?: number, quality?: numb
 
 // --- Provider-neutral browse types ---
 
-export type BrowseMode = "artists" | "albums" | "playlists" | "genres" | "recentlyAdded" | "frequentlyPlayed" | "recentlyPlayed" | "favorites";
+export type BrowseMode = "artists" | "albums" | "playlists" | "tracks" | "genres" | "recentlyAdded" | "frequentlyPlayed" | "recentlyPlayed" | "favorites";
 
 export interface BrowseArtist {
     id: string;
@@ -272,10 +272,27 @@ export async function fetchBrowseFavorites(
     });
 }
 
+export async function fetchBrowseTracks(filter: {
+    libraryId?: string;
+    artistId?: string;
+    albumId?: string;
+    letter?: string;
+    startIndex?: number;
+    limit?: number;
+}): Promise<{ tracks: BrowseTrack[]; total: number; startIndex: number; limit: number }> {
+    return await rpcCall('browse.listTracks', filter);
+}
+
 export async function fetchBrowseFavoriteItems(
     libraryId?: string,
 ): Promise<{ artists: BrowseArtist[]; albums: BrowseAlbum[]; tracks: BrowseTrack[] }> {
     return await rpcCall('browse.listFavoriteItems', {
         ...(libraryId !== undefined && { libraryId }),
     });
+}
+
+export async function fetchBrowseSearch(
+    query: string,
+): Promise<{ tracks: BrowseTrack[] }> {
+    return await rpcCall('browse.search', { query });
 }

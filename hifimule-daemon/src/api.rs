@@ -1,5 +1,8 @@
 use anyhow::{Result, anyhow};
-use reqwest::header::{HeaderMap, HeaderValue};
+use reqwest::{
+    Url,
+    header::{HeaderMap, HeaderValue},
+};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -23,6 +26,22 @@ pub(crate) fn url_encode(s: &str) -> String {
         }
     }
     encoded
+}
+
+fn jellyfin_endpoint(url: &str, path_segments: &[&str]) -> Result<Url> {
+    let mut endpoint = Url::parse(url.trim_end_matches('/'))?;
+    endpoint
+        .path_segments_mut()
+        .map_err(|_| anyhow!("URL cannot be used as a Jellyfin API base"))?
+        .extend(path_segments);
+    Ok(endpoint)
+}
+
+fn comma_joined_query_value(kind: &str, ids: &[String]) -> Result<String> {
+    if let Some(id) = ids.iter().find(|id| id.contains(',')) {
+        return Err(anyhow!("{} cannot contain comma: {}", kind, id));
+    }
+    Ok(ids.join(","))
 }
 #[cfg(test)]
 const MUSIC_ITEM_TYPES: &str = "MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo";
@@ -106,47 +125,52 @@ pub struct JellyfinItem {
     pub name: String,
     #[serde(rename = "Type")]
     pub item_type: String,
-    #[serde(default)]
+    // `skip_serializing_if` keeps `None` fields out of the serialized body. This matters for
+    // `rename_item`, which round-trips this struct back to `POST /Items/{id}`: without it, every
+    // unset field would be sent as an explicit `null` and clobber the server-side value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub album: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub album_artist: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artists: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_number: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_index_number: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub album_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artist_items: Option<Vec<NameIdPair>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub production_year: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recursive_item_count: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub song_count: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cumulative_run_time_ticks: Option<u64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_time_ticks: Option<u64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bitrate: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_sources: Option<Vec<MediaSource>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_tags: Option<std::collections::HashMap<String, String>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub etag: Option<String>,
     // Auto-fill priority fields
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_data: Option<JellyfinUserData>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub date_created: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playlist_item_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -224,7 +248,6 @@ impl JellyfinClient {
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
         let text = response.text().await?;
-        println!("DEBUG: Jellyfin Response [{}] - Body: {}", status, text);
 
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
@@ -254,7 +277,6 @@ impl JellyfinClient {
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
         let text = response.text().await?;
-        println!("DEBUG: Jellyfin Response [{}] - Body: {}", status, text);
 
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
@@ -264,6 +286,64 @@ impl JellyfinClient {
         Ok(views_response.items)
     }
 
+    /// Fetches album artists via `/Artists/AlbumArtists`.
+    ///
+    /// Prefer this over `/Items?IncludeItemTypes=MusicArtist` for browsing: the dedicated endpoint
+    /// returns artists whose IDs match the `AlbumArtistIds` stored on albums, and preserves the
+    /// original artist name from file tags (e.g. "AC/DC" rather than a normalized variant).
+    pub async fn get_album_artists(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        parent_id: Option<&str>,
+        name_starts_with: Option<&str>,
+        start_index: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<JellyfinItemsResponse> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let mut query_params = vec![format!("userId={}", user_id)];
+        if let Some(parent) = parent_id {
+            query_params.push(format!("ParentId={}", parent));
+        }
+        if let Some(starts_with) = name_starts_with {
+            query_params.push(format!("NameStartsWith={}", url_encode(starts_with)));
+        }
+        if let Some(start) = start_index {
+            query_params.push(format!("StartIndex={}", start));
+        }
+        if let Some(lim) = limit {
+            query_params.push(format!("Limit={}", lim));
+        }
+        query_params.push("SortBy=SortName".to_string());
+
+        let endpoint = format!(
+            "{}/Artists/AlbumArtists?{}",
+            url.trim_end_matches('/'),
+            query_params.join("&")
+        );
+
+        let response = self.client.get(&endpoint).headers(headers).send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+
+        if !status.is_success() {
+            return Err(anyhow!("Server returned status: {}", status));
+        }
+
+        let items_response = serde_json::from_str::<JellyfinItemsResponse>(&text)?;
+        Ok(items_response)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn get_items(
         &self,
         url: &str,
@@ -275,6 +355,9 @@ impl JellyfinClient {
         limit: Option<u32>,
         name_starts_with: Option<&str>,
         name_less_than: Option<&str>,
+        album_artist_ids: Option<&str>,
+        album_ids: Option<&str>,
+        sort_by: Option<&str>,
     ) -> Result<JellyfinItemsResponse> {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
@@ -299,10 +382,19 @@ impl JellyfinClient {
             query_params.push(format!("Limit={}", lim));
         }
         if let Some(starts_with) = name_starts_with {
-            query_params.push(format!("NameStartsWith={}", starts_with));
+            query_params.push(format!("NameStartsWith={}", url_encode(starts_with)));
         }
         if let Some(less_than) = name_less_than {
-            query_params.push(format!("NameLessThan={}", less_than));
+            query_params.push(format!("NameLessThan={}", url_encode(less_than)));
+        }
+        if let Some(aids) = album_artist_ids {
+            query_params.push(format!("AlbumArtistIds={}", aids));
+        }
+        if let Some(album_ids_val) = album_ids {
+            query_params.push(format!("AlbumIds={}", album_ids_val));
+        }
+        if let Some(sort) = sort_by {
+            query_params.push(format!("SortBy={}", sort));
         }
 
         let query_string = if query_params.is_empty() {
@@ -316,7 +408,6 @@ impl JellyfinClient {
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
         let text = response.text().await?;
-        println!("DEBUG: Jellyfin Response [{}] - Body: {}", status, text);
 
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
@@ -352,7 +443,6 @@ impl JellyfinClient {
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
         let text = response.text().await?;
-        println!("DEBUG: Jellyfin Response [{}] - Body: {}", status, text);
 
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
@@ -428,7 +518,6 @@ impl JellyfinClient {
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
         let text = response.text().await?;
-        println!("DEBUG: Jellyfin Response [{}] - Body: {}", status, text);
 
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
@@ -464,7 +553,6 @@ impl JellyfinClient {
         let response = self.client.get(&endpoint).headers(headers).send().await?;
         let status = response.status();
         let text = response.text().await?;
-        println!("DEBUG: Jellyfin Response [{}] - Body: {}", status, text);
 
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
@@ -708,7 +796,6 @@ impl JellyfinClient {
 
         let status = response.status();
         let text = response.text().await?;
-        println!("DEBUG: Jellyfin Response [{}] - Body: {}", status, text);
 
         if !status.is_success() {
             return Err(anyhow!("Authentication failed: {}", status));
@@ -736,7 +823,7 @@ impl JellyfinClient {
 
         let encoded_title = url_encode(title);
         let endpoint = format!(
-            "{}/Items?userId={}&SearchTerm={}&IncludeItemTypes=Audio&Limit=10&Fields=Id,Name,Album,AlbumArtist,Artists,AlbumId",
+            "{}/Items?userId={}&SearchTerm={}&IncludeItemTypes=Audio&Recursive=true&Limit=25&Fields=Id,Name,Album,AlbumArtist,Artists,AlbumId",
             url.trim_end_matches('/'),
             user_id,
             encoded_title
@@ -1325,6 +1412,247 @@ impl JellyfinClient {
         .await
     }
 
+    pub async fn create_playlist(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        name: &str,
+        track_ids: &[String],
+    ) -> Result<String> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let endpoint = jellyfin_endpoint(url, &["Playlists"])?;
+        let body = serde_json::json!({
+            "Name": name,
+            "MediaType": "Audio",
+            "Ids": track_ids,
+            "UserId": user_id,
+        });
+
+        let response = self
+            .client
+            .post(endpoint)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        let text = response.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("Server returned status: {}", status));
+        }
+
+        let value: serde_json::Value = serde_json::from_str(&text)?;
+        value["Id"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow!("Playlist create response missing Id field"))
+    }
+
+    pub async fn add_tracks_to_playlist(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        playlist_id: &str,
+        track_ids: &[String],
+    ) -> Result<()> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let ids_param = comma_joined_query_value("track ID", track_ids)?;
+        let mut endpoint = jellyfin_endpoint(url, &["Playlists", playlist_id, "Items"])?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("Ids", &ids_param)
+            .append_pair("userId", user_id);
+
+        let response = self.client.post(endpoint).headers(headers).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!("Server returned status: {} — {}", status, text));
+        }
+        Ok(())
+    }
+
+    pub async fn get_playlist_items(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        playlist_id: &str,
+    ) -> Result<Vec<JellyfinItem>> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let mut endpoint = jellyfin_endpoint(url, &["Playlists", playlist_id, "Items"])?;
+        endpoint.query_pairs_mut().append_pair("userId", user_id);
+
+        let response = self.client.get(endpoint).headers(headers).send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+        if !status.is_success() {
+            return Err(anyhow!("Server returned status: {}", status));
+        }
+
+        let items_response = serde_json::from_str::<JellyfinItemsResponse>(&text)?;
+        Ok(items_response.items)
+    }
+
+    pub async fn delete_playlist_items(
+        &self,
+        url: &str,
+        token: &str,
+        playlist_id: &str,
+        entry_ids: &[String],
+    ) -> Result<()> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let entry_ids_param = comma_joined_query_value("playlist entry ID", entry_ids)?;
+        let mut endpoint = jellyfin_endpoint(url, &["Playlists", playlist_id, "Items"])?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("EntryIds", &entry_ids_param);
+
+        let response = self.client.delete(endpoint).headers(headers).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!("Server returned status: {} — {}", status, text));
+        }
+        Ok(())
+    }
+
+    pub async fn move_playlist_item(
+        &self,
+        url: &str,
+        token: &str,
+        playlist_id: &str,
+        playlist_item_id: &str,
+        new_index: usize,
+    ) -> Result<()> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let index_str = new_index.to_string();
+        let endpoint = jellyfin_endpoint(
+            url,
+            &[
+                "Playlists",
+                playlist_id,
+                "Items",
+                playlist_item_id,
+                "Move",
+                &index_str,
+            ],
+        )?;
+
+        let response = self.client.post(endpoint).headers(headers).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!("Server returned status: {} — {}", status, text));
+        }
+        Ok(())
+    }
+
+    pub async fn delete_item(&self, url: &str, token: &str, item_id: &str) -> Result<()> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let endpoint = jellyfin_endpoint(url, &["Items", item_id])?;
+
+        let response = self.client.delete(endpoint).headers(headers).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!("Server returned status: {} — {}", status, text));
+        }
+        Ok(())
+    }
+
+    pub async fn rename_item(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        item_id: &str,
+        new_name: &str,
+    ) -> Result<()> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        // Step 1: fetch current item JSON
+        let mut item = self.get_item_details(url, token, user_id, item_id).await?;
+
+        // Step 2: mutate name and POST back
+        item.name = new_name.to_string();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let endpoint = jellyfin_endpoint(url, &["Items", item_id])?;
+
+        let response = self
+            .client
+            .post(endpoint)
+            .headers(headers)
+            .json(&item)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!("Server returned status: {} — {}", status, text));
+        }
+        Ok(())
+    }
+
     async fn get_music_items(
         &self,
         url: &str,
@@ -1433,8 +1761,8 @@ impl CredentialManager {
             }
             let json = crate::vault::decrypt_file(&path, VAULT_APP_SALT)
                 .map_err(|e| anyhow!("Failed to decrypt secrets vault: {}", e))?;
-            return serde_json::from_str(&json)
-                .map_err(|e| anyhow!("Failed to parse secrets blob: {}", e));
+            serde_json::from_str(&json)
+                .map_err(|e| anyhow!("Failed to parse secrets blob: {}", e))
         }
         #[cfg(test)]
         {
@@ -1448,8 +1776,8 @@ impl CredentialManager {
         {
             let path = Self::get_vault_path()?;
             let json = serde_json::to_string(secrets)?;
-            return crate::vault::encrypt_file(&path, &json, VAULT_APP_SALT)
-                .map_err(|e| anyhow!("Failed to save secrets vault: {}", e));
+            crate::vault::encrypt_file(&path, &json, VAULT_APP_SALT)
+                .map_err(|e| anyhow!("Failed to save secrets vault: {}", e))
         }
         #[cfg(test)]
         {
@@ -1542,12 +1870,12 @@ impl CredentialManager {
 
         #[cfg(not(test))]
         {
-            if let Ok(vault_path) = Self::get_vault_path() {
-                if vault_path.exists() {
-                    fs::remove_file(&vault_path)
-                        .map_err(|e| anyhow!("Failed to remove vault file: {}", e))?;
-                }
-            }
+            if let Ok(vault_path) = Self::get_vault_path()
+            && vault_path.exists()
+        {
+            fs::remove_file(&vault_path)
+                .map_err(|e| anyhow!("Failed to remove vault file: {}", e))?;
+        }
         }
 
         #[cfg(test)]
@@ -1780,6 +2108,9 @@ mod tests {
                 Some(MUSIC_ITEM_TYPES),
                 None,
                 Some(50),
+                None,
+                None,
+                None,
                 None,
                 None,
             )

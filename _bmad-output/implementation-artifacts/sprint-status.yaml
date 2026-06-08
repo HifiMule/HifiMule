@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-05-30  # Story 7.5 code review complete — all patches applied
+last_updated: 2026-06-08  # Fix Jellyfin AlbumArtistIds bug (done)
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -128,8 +128,25 @@ development_status:
   9-4-history-and-favorites-browse-modes: done
   9-5-hierarchical-favorites-navigation: done
   9-6-navidrome-subsonic-browse-parity-hardening: done
+  9-7-virtualized-list-table-browse-views: done  # revised via sprint-change-proposal-2026-06-07 (autoload-on-scroll)
+  9-8-extend-view-toggle-all-modes: done  # added via sprint-change-proposal-2026-06-08-extend-view-toggle
+  9-9-tracks-browse-mode-provider-contract-and-daemon-rpc: done  # added via sprint-change-proposal-2026-06-08-tracks-browse-mode
+  9-10-tracks-browse-mode-dual-panel-ui: done  # added via sprint-change-proposal-2026-06-08-tracks-browse-mode
 
-  epic-10: in-progress
+  epic-10: done
   10-1-device-manifest-editing-identity-and-folder-settings: done
   10-2-separate-playlist-folder-and-relocation-cleanup: done
   10-3-profile-based-default-folders-and-setup-ordering: done
+
+  # Epic 11 — Selection-as-Playlist & Curation (sprint-change-proposal-2026-06-05)
+  epic-11: done
+  11-1-mediaprovider-playlist-write-trait-amendment: done
+  11-2-jellyfinprovider-playlist-write-adapter: done
+  11-3-subsonicprovider-playlist-write-adapter: done
+  11-4-playlist-rpcs-and-selection-to-tracks-resolution: done
+  11-5-save-selection-as-playlist-ui-and-context-menu: done
+  11-6-dual-panel-playlist-curation-view-and-stats: done
+  11-7-add-tracks-to-playlist-browse-and-curation: done
+  11-8-playlist-rename-and-delete: done
+  11-9-playlist-reorder-provider-and-rpc: done
+  11-10-curation-view-complete-list-order-numbers-and-reorder: done

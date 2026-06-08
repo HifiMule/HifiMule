@@ -30,6 +30,7 @@ pub fn normalize_language(language: &str) -> String {
     match lower.split('-').next().unwrap_or(DEFAULT_LANGUAGE) {
         "fr" => "fr".to_string(),
         "es" => "es".to_string(),
+        "de" => "de".to_string(),
         _ => DEFAULT_LANGUAGE.to_string(),
     }
 }
@@ -92,7 +93,12 @@ mod tests {
 
     #[test]
     fn falls_back_to_english_for_unknown_language() {
-        assert_eq!(translate("de", "tray.quit"), "Quit");
+        assert_eq!(translate("zz", "tray.quit"), "Quit");
+    }
+
+    #[test]
+    fn translates_german_keys() {
+        assert_eq!(translate("de-DE", "tray.quit"), "Beenden");
     }
 
     #[test]
@@ -110,6 +116,14 @@ mod tests {
         assert_eq!(
             translate_with("en", "tray.tooltip.found", &[("name", "iPod")]),
             "HifiMule: Found iPod"
+        );
+    }
+
+    #[test]
+    fn interpolates_german_values() {
+        assert_eq!(
+            translate_with("de", "basket.sync.file_counter", &[("completed", "3"), ("total", "10")]),
+            "3 von 10 Dateien"
         );
     }
 }

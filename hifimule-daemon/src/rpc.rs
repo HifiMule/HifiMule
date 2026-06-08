@@ -1,8 +1,8 @@
 use crate::api::{CredentialManager, JellyfinClient};
 use crate::domain::models::{Album, Artist, ChangeType, ItemType, Library, Playlist, Song};
 use crate::providers::{
-    CredentialKind, MediaProvider, ProviderCredentials, ProviderError,
-    SUBSONIC_PLAYLISTS_LIBRARY_ID, ServerType, ServerTypeHint, server_type_slug,
+    BrowseMode, CredentialKind, MediaProvider, ProviderCredentials, ProviderError,
+    SUBSONIC_PLAYLISTS_LIBRARY_ID, ServerType, ServerTypeHint, TrackListFilter, server_type_slug,
 };
 use axum::{
     Json, Router,
@@ -114,10 +114,10 @@ fn get_subsonic_server_secret_candidates(preferred_server_type: &str) -> Vec<Str
 
     let mut secrets = Vec::new();
     for alias in aliases {
-        if let Ok(secret) = CredentialManager::get_server_secret(alias) {
-            if !secrets.contains(&secret) {
-                secrets.push(secret);
-            }
+        if let Ok(secret) = CredentialManager::get_server_secret(alias)
+            && !secrets.contains(&secret)
+        {
+            secrets.push(secret);
         }
     }
     secrets
@@ -199,7 +199,7 @@ pub async fn run_server(
 
     let app = Router::new()
         .route("/", post(handler))
-        .route("/jellyfin/image/{id}", get(handle_proxy_image))
+        .route("/jellyfin/image/{*id}", get(handle_proxy_image))
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
         .layer(
             tower_http::cors::CorsLayer::new()
@@ -364,6 +364,15 @@ async fn handler(
         "browse.listFavoriteItems" => {
             handle_browse_list_favorite_items(&state, payload.params).await
         }
+        "browse.listTracks" => handle_browse_list_tracks(&state, payload.params).await,
+        "browse.search" => handle_browse_search(&state, payload.params).await,
+        "playlist.create" => handle_playlist_create(&state, payload.params).await,
+        "playlist.addItems" => handle_playlist_add_items(&state, payload.params).await,
+        "playlist.addTracks" => handle_playlist_add_tracks(&state, payload.params).await,
+        "playlist.removeTracks" => handle_playlist_remove_tracks(&state, payload.params).await,
+        "playlist.delete" => handle_playlist_delete(&state, payload.params).await,
+        "playlist.rename" => handle_playlist_rename(&state, payload.params).await,
+        "playlist.reorder" => handle_playlist_reorder(&state, payload.params).await,
         _ => Err(JsonRpcError {
             code: ERR_METHOD_NOT_FOUND,
             message: hifimule_i18n::t("error.method_not_found"),
@@ -820,6 +829,443 @@ async fn handle_browse_list_favorite_items(
     }))
 }
 
+async fn handle_browse_list_tracks(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let library_id = params
+        .as_ref()
+        .and_then(|p| p["libraryId"].as_str())
+        .map(str::to_owned);
+    let artist_id = params
+        .as_ref()
+        .and_then(|p| p["artistId"].as_str())
+        .map(str::to_owned);
+    let album_id = params
+        .as_ref()
+        .and_then(|p| p["albumId"].as_str())
+        .map(str::to_owned);
+    let letter = params
+        .as_ref()
+        .and_then(|p| p["letter"].as_str())
+        .map(str::to_owned);
+    let (start_index, limit) = browse_pagination(&params);
+    let provider = require_provider(state).await?;
+    if !provider
+        .capabilities()
+        .browse
+        .list_modes
+        .contains(&BrowseMode::Tracks)
+    {
+        return Err(JsonRpcError {
+            code: ERR_UNSUPPORTED_CAPABILITY,
+            message: hifimule_i18n::t("error.tracks_mode_unsupported"),
+            data: None,
+        });
+    }
+    let filter = TrackListFilter {
+        library_id,
+        artist_id,
+        album_id,
+        letter,
+        start_index,
+        limit,
+    };
+    let page = provider
+        .list_tracks(filter)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    Ok(serde_json::json!({
+        "tracks": page.tracks,
+        "total": page.total,
+        "startIndex": page.start_index,
+        "limit": page.limit,
+    }))
+}
+
+async fn handle_browse_search(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let provider = require_provider(state).await?;
+    let query = params
+        .as_ref()
+        .and_then(|p| p["query"].as_str())
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing query".to_string(),
+            data: None,
+        })?
+        .to_owned();
+    // An empty/whitespace query would be forwarded to the provider as an
+    // unbounded search; short-circuit to an empty result set instead.
+    if query.trim().is_empty() {
+        return Ok(serde_json::json!({ "tracks": [] }));
+    }
+    let result = provider
+        .search(&query)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    Ok(serde_json::json!({ "tracks": result.songs }))
+}
+
+async fn handle_playlist_create(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let provider = require_provider(state).await?;
+    if !provider.capabilities().supports_playlist_write {
+        return Err(JsonRpcError {
+            code: ERR_UNSUPPORTED_CAPABILITY,
+            message: "Connected provider does not support playlist write".to_string(),
+            data: None,
+        });
+    }
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let name = params["name"]
+        .as_str()
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing name".to_string(),
+            data: None,
+        })?
+        .to_owned();
+    let raw_ids = params["itemIds"].as_array().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing or invalid itemIds array".to_string(),
+        data: None,
+    })?;
+    let item_ids: Vec<String> = raw_ids
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .filter(|id| id != "__auto_fill_slot__")
+        .collect();
+
+    let mut track_ids: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut skipped_item_ids: Vec<String> = Vec::new();
+    for item_id in &item_ids {
+        // Skip-and-continue: one unresolvable item (deleted entity, transient
+        // error, stale basket entry) must not abort the whole create. Record it
+        // and report the skipped IDs in the response instead.
+        let (tracks, _playlist) = match provider_sync_items_for_id(provider.clone(), item_id).await
+        {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                eprintln!(
+                    "[Playlist] Skipping unresolvable item '{}' during playlist.create: {}",
+                    item_id, e.message
+                );
+                skipped_item_ids.push(item_id.clone());
+                continue;
+            }
+        };
+        for track in tracks {
+            if seen.insert(track.jellyfin_id.clone()) {
+                track_ids.push(track.jellyfin_id);
+            }
+        }
+    }
+
+    if !item_ids.is_empty() && track_ids.is_empty() {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "No valid tracks found in selection to create a playlist".to_string(),
+            data: None,
+        });
+    }
+
+    let playlist_id = provider
+        .create_playlist(&name, &track_ids)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    Ok(serde_json::json!({ "playlistId": playlist_id, "skippedItemIds": skipped_item_ids }))
+}
+
+async fn handle_playlist_add_items(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let provider = require_provider(state).await?;
+    if !provider.capabilities().supports_playlist_write {
+        return Err(JsonRpcError {
+            code: ERR_UNSUPPORTED_CAPABILITY,
+            message: "Connected provider does not support playlist write".to_string(),
+            data: None,
+        });
+    }
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let playlist_id = params["playlistId"]
+        .as_str()
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing playlistId".to_string(),
+            data: None,
+        })?
+        .to_owned();
+    let raw_ids = params["itemIds"].as_array().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing or invalid itemIds array".to_string(),
+        data: None,
+    })?;
+    let item_ids: Vec<String> = raw_ids
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect();
+
+    let mut track_ids: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for item_id in &item_ids {
+        let (tracks, _) = match provider_sync_items_for_id(provider.clone(), item_id).await {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                eprintln!(
+                    "[Playlist] Skipping unresolvable item '{}' during playlist.addItems: {}",
+                    item_id, e.message
+                );
+                continue;
+            }
+        };
+        for track in tracks {
+            if seen.insert(track.jellyfin_id.clone()) {
+                track_ids.push(track.jellyfin_id);
+            }
+        }
+    }
+
+    if track_ids.is_empty() {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "No valid tracks found in selection".to_string(),
+            data: None,
+        });
+    }
+
+    provider
+        .add_to_playlist(&playlist_id, &track_ids)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+async fn handle_playlist_add_tracks(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let provider = require_provider(state).await?;
+    if !provider.capabilities().supports_playlist_write {
+        return Err(JsonRpcError {
+            code: ERR_UNSUPPORTED_CAPABILITY,
+            message: "Connected provider does not support playlist write".to_string(),
+            data: None,
+        });
+    }
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let playlist_id = params["playlistId"]
+        .as_str()
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing playlistId".to_string(),
+            data: None,
+        })?
+        .to_owned();
+    let raw_ids = params["trackIds"].as_array().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing or invalid trackIds array".to_string(),
+        data: None,
+    })?;
+    let track_ids: Vec<String> = raw_ids
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect();
+    provider
+        .add_to_playlist(&playlist_id, &track_ids)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+async fn handle_playlist_remove_tracks(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let provider = require_provider(state).await?;
+    if !provider.capabilities().supports_playlist_write {
+        return Err(JsonRpcError {
+            code: ERR_UNSUPPORTED_CAPABILITY,
+            message: "Connected provider does not support playlist write".to_string(),
+            data: None,
+        });
+    }
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let playlist_id = params["playlistId"]
+        .as_str()
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing playlistId".to_string(),
+            data: None,
+        })?
+        .to_owned();
+    let raw_ids = params["trackIds"].as_array().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing or invalid trackIds array".to_string(),
+        data: None,
+    })?;
+    let track_ids: Vec<String> = raw_ids
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect();
+    provider
+        .remove_from_playlist(&playlist_id, &track_ids)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+async fn handle_playlist_delete(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let provider = require_provider(state).await?;
+    if !provider.capabilities().supports_playlist_write {
+        return Err(JsonRpcError {
+            code: ERR_UNSUPPORTED_CAPABILITY,
+            message: "Connected provider does not support playlist write".to_string(),
+            data: None,
+        });
+    }
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let playlist_id = params["playlistId"]
+        .as_str()
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing playlistId".to_string(),
+            data: None,
+        })?
+        .to_owned();
+    provider
+        .delete_playlist(&playlist_id)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+async fn handle_playlist_rename(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let provider = require_provider(state).await?;
+    if !provider.capabilities().supports_playlist_write {
+        return Err(JsonRpcError {
+            code: ERR_UNSUPPORTED_CAPABILITY,
+            message: "Connected provider does not support playlist write".to_string(),
+            data: None,
+        });
+    }
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let playlist_id = params["playlistId"]
+        .as_str()
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing playlistId".to_string(),
+            data: None,
+        })?
+        .to_owned();
+    let name = params["name"]
+        .as_str()
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing name".to_string(),
+            data: None,
+        })?
+        .trim()
+        .to_owned();
+    if name.is_empty() {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Playlist name must not be empty".to_string(),
+            data: None,
+        });
+    }
+    provider
+        .rename_playlist(&playlist_id, &name)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+async fn handle_playlist_reorder(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let provider = require_provider(state).await?;
+    if !provider.capabilities().supports_playlist_write {
+        return Err(JsonRpcError {
+            code: ERR_UNSUPPORTED_CAPABILITY,
+            message: "Connected provider does not support playlist write".to_string(),
+            data: None,
+        });
+    }
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let playlist_id = params["playlistId"]
+        .as_str()
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing playlistId".to_string(),
+            data: None,
+        })?
+        .to_owned();
+    let raw_ids = params["trackIds"].as_array().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing or invalid trackIds array".to_string(),
+        data: None,
+    })?;
+    // Reject non-string entries rather than silently dropping them: a dropped id would
+    // shrink the requested order and, on the Subsonic replace path, could remove a track.
+    let mut track_ids: Vec<String> = Vec::with_capacity(raw_ids.len());
+    for v in raw_ids {
+        let s = v.as_str().ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "trackIds must contain only strings".to_string(),
+            data: None,
+        })?;
+        track_ids.push(s.to_string());
+    }
+    provider
+        .reorder_playlist(&playlist_id, &track_ids)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    Ok(serde_json::json!({ "ok": true }))
+}
+
 async fn handle_server_connect(
     state: &AppState,
     params: Option<Value>,
@@ -1167,6 +1613,14 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         })
         .collect();
 
+    let supports_playlist_write = {
+        let guard = state.provider.read().await;
+        guard
+            .as_ref()
+            .map(|p| p.capabilities().supports_playlist_write)
+            .unwrap_or(false)
+    };
+
     Ok(serde_json::json!({
         "currentDevice": device,
         "deviceMapping": mapping,
@@ -1182,6 +1636,7 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         "activeOperationId": active_operation_id,
         "connectedDevices": connected_devices_json,
         "selectedDevicePath": selected_device_path,
+        "supportsPlaylistWrite": supports_playlist_write,
     }))
 }
 
@@ -1255,10 +1710,10 @@ async fn check_server_connection_cached(state: &AppState) -> bool {
     let mut cache = state.last_connection_check.lock().await;
 
     // Check if we have a recent cached result
-    if let Some((timestamp, result)) = *cache {
-        if timestamp.elapsed().as_secs() < CACHE_DURATION_SECS {
-            return result;
-        }
+    if let Some((timestamp, result)) = *cache
+        && timestamp.elapsed().as_secs() < CACHE_DURATION_SECS
+    {
+        return result;
     }
 
     // Perform actual connection check
@@ -1402,7 +1857,7 @@ async fn provider_legacy_item_size(
         let total = album
             .tracks
             .iter()
-            .map(|track| provider_track_size(track))
+            .map(provider_track_size)
             .sum::<u64>();
         return Ok(serde_json::json!({
             "id": item_id,
@@ -1413,7 +1868,7 @@ async fn provider_legacy_item_size(
         let total = playlist
             .tracks
             .iter()
-            .map(|track| provider_track_size(track))
+            .map(provider_track_size)
             .sum::<u64>();
         return Ok(serde_json::json!({
             "id": item_id,
@@ -1427,7 +1882,7 @@ async fn provider_legacy_item_size(
                 total += album
                     .tracks
                     .iter()
-                    .map(|track| provider_track_size(track))
+                    .map(provider_track_size)
                     .sum::<u64>();
             }
         }
@@ -1439,7 +1894,7 @@ async fn provider_legacy_item_size(
     if let Ok((tracks, _)) = provider.get_genre_tracks(item_id, 0, 10_000).await {
         let total = tracks
             .iter()
-            .map(|track| provider_track_size(track))
+            .map(provider_track_size)
             .sum::<u64>();
         return Ok(serde_json::json!({
             "id": item_id,
@@ -1805,7 +2260,7 @@ async fn provider_calculate_delta(
         } else {
             let synced_bytes: u64 = manifest.synced_items.iter().map(|s| s.size_bytes).sum();
             let basket_size: u64 = desired_items.iter().map(|i| i.size_bytes).sum();
-            let budget = match _state.device_manager.get_device_storage().await {
+            match _state.device_manager.get_device_storage().await {
                 Some(info) => {
                     crate::daemon_log!(
                         "[AutoFill] no maxBytes from UI — server fallback: free={} synced={} basket_est={} -> budget={}",
@@ -1827,8 +2282,7 @@ async fn provider_calculate_delta(
                         data: None,
                     });
                 }
-            };
-            budget
+            }
         };
         crate::daemon_log!(
             "[AutoFill] basket_items={} desired_items={} auto_fill_budget={} bytes",
@@ -2154,8 +2608,7 @@ async fn provider_items_response(
             .iter()
             .map(legacy_playlist_item)
             .collect::<Vec<_>>()
-    } else {
-        let id = parent_id.unwrap();
+    } else if let Some(id) = parent_id {
         if let Ok(artist) = provider.get_artist(id).await {
             artist
                 .albums
@@ -2181,6 +2634,8 @@ async fn provider_items_response(
                 data: None,
             });
         }
+    } else {
+        vec![]
     };
     items = apply_name_filter(items, name_starts_with, name_less_than);
     Ok(paginate_values(items, start_index, limit))
@@ -2322,6 +2777,9 @@ async fn handle_jellyfin_get_items(
             limit,
             name_starts_with,
             name_less_than,
+            None,
+            None,
+            None,
         )
         .await
     {
@@ -2914,68 +3372,68 @@ async fn handle_sync_calculate_delta(
 
     // Auto-fill expansion (Story 3.8): if the basket contained an auto-fill slot,
     // run the priority algorithm now and merge results with manual items.
-    if let Some(af) = params.get("autoFill") {
-        if af["enabled"].as_bool().unwrap_or(false) {
-            let max_fill_bytes = if let Some(mb) = af["maxBytes"].as_u64() {
-                mb
-            } else {
-                match state.device_manager.get_device_storage().await {
-                    Some(info) => info.free_bytes,
-                    None => {
-                        return Err(JsonRpcError {
-                            code: ERR_CONNECTION_FAILED,
-                            message: "Auto-fill: could not determine device free space".to_string(),
-                            data: None,
-                        });
-                    }
-                }
-            };
-            let exclude_ids: Vec<String> = af["excludeItemIds"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let expanded_excludes = expand_exclude_ids(&state.jellyfin_client, exclude_ids).await;
-            let fill_params = crate::auto_fill::AutoFillParams {
-                exclude_item_ids: expanded_excludes,
-                max_fill_bytes,
-            };
-            match crate::auto_fill::run_auto_fill(&state.jellyfin_client, fill_params).await {
-                Ok(af_items) => {
-                    let af_total_bytes: u64 = af_items.iter().map(|i| i.size_bytes).sum();
-                    crate::daemon_log!(
-                        "[AutoFill] Pagination complete: {} tracks, {} MB",
-                        af_items.len(),
-                        af_total_bytes / 1_048_576,
-                    );
-                    for item in af_items {
-                        if seen_ids.insert(item.id.clone()) {
-                            desired_items.push(crate::sync::DesiredItem {
-                                jellyfin_id: item.id,
-                                name: item.name,
-                                album: item.album,
-                                artist: item.artist,
-                                size_bytes: item.size_bytes,
-                                etag: None,
-                                provider_album_id: None,
-                                provider_content_type: item.provider_content_type,
-                                provider_suffix: item.provider_suffix,
-                                original_bitrate: None,
-                                track_number: None,
-                            });
-                        }
-                    }
-                }
-                Err(e) => {
+    if let Some(af) = params.get("autoFill")
+        && af["enabled"].as_bool().unwrap_or(false)
+    {
+        let max_fill_bytes = if let Some(mb) = af["maxBytes"].as_u64() {
+            mb
+        } else {
+            match state.device_manager.get_device_storage().await {
+                Some(info) => info.free_bytes,
+                None => {
                     return Err(JsonRpcError {
                         code: ERR_CONNECTION_FAILED,
-                        message: format!("Auto-fill expansion failed at sync time: {}", e),
+                        message: "Auto-fill: could not determine device free space".to_string(),
                         data: None,
                     });
                 }
+            }
+        };
+        let exclude_ids: Vec<String> = af["excludeItemIds"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let expanded_excludes = expand_exclude_ids(&state.jellyfin_client, exclude_ids).await;
+        let fill_params = crate::auto_fill::AutoFillParams {
+            exclude_item_ids: expanded_excludes,
+            max_fill_bytes,
+        };
+        match crate::auto_fill::run_auto_fill(&state.jellyfin_client, fill_params).await {
+            Ok(af_items) => {
+                let af_total_bytes: u64 = af_items.iter().map(|i| i.size_bytes).sum();
+                crate::daemon_log!(
+                    "[AutoFill] Pagination complete: {} tracks, {} MB",
+                    af_items.len(),
+                    af_total_bytes / 1_048_576,
+                );
+                for item in af_items {
+                    if seen_ids.insert(item.id.clone()) {
+                        desired_items.push(crate::sync::DesiredItem {
+                            jellyfin_id: item.id,
+                            name: item.name,
+                            album: item.album,
+                            artist: item.artist,
+                            size_bytes: item.size_bytes,
+                            etag: None,
+                            provider_album_id: None,
+                            provider_content_type: item.provider_content_type,
+                            provider_suffix: item.provider_suffix,
+                            original_bitrate: None,
+                            track_number: None,
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(JsonRpcError {
+                    code: ERR_CONNECTION_FAILED,
+                    message: format!("Auto-fill expansion failed at sync time: {}", e),
+                    data: None,
+                });
             }
         }
     }
@@ -3033,7 +3491,7 @@ async fn handle_sync_detect_changes(
         message: "Missing params".to_string(),
         data: None,
     })?;
-    if !params.is_object() || !params.get("syncToken").is_some() {
+    if !params.is_object() || params.get("syncToken").is_none() {
         return Err(JsonRpcError {
             code: ERR_INVALID_PARAMS,
             message: "Missing syncToken".to_string(),
@@ -3378,7 +3836,7 @@ async fn handle_sync_execute(
                         op_manager.update_operation(&op_id, operation).await;
                     }
                     if errors.is_empty() {
-                        let _ = tokio::task::spawn_blocking(send_sync_complete_notification);
+                        drop(tokio::task::spawn_blocking(send_sync_complete_notification));
                     }
                     let _ = state_tx.send(crate::DaemonState::Idle);
                 }
@@ -3510,7 +3968,7 @@ async fn handle_sync_execute(
                     // JoinHandle intentionally dropped: fire-and-forget per AC #4.
                     // Err(e) path inside the function logs the failure; panics are silently
                     // absorbed, which is acceptable for a best-effort OS notification.
-                    let _ = tokio::task::spawn_blocking(send_sync_complete_notification);
+                    drop(tokio::task::spawn_blocking(send_sync_complete_notification));
                 }
                 let _ = state_tx.send(crate::DaemonState::Idle);
             }
@@ -3914,14 +4372,14 @@ fn validate_device_name_and_icon(
             });
         }
     }
-    if let Some(icon) = icon.filter(|icon| !icon.is_empty()) {
-        if !VALID_DEVICE_ICONS.contains(&icon) {
-            return Err(JsonRpcError {
-                code: ERR_INVALID_PARAMS,
-                message: format!("Invalid icon '{}'", icon),
-                data: None,
-            });
-        }
+    if let Some(icon) = icon.filter(|icon| !icon.is_empty())
+        && !VALID_DEVICE_ICONS.contains(&icon)
+    {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: format!("Invalid icon '{}'", icon),
+            data: None,
+        });
     }
     Ok(())
 }
@@ -4048,11 +4506,11 @@ fn apply_manifest_settings_update(
             old_playlist.as_deref(),
             new_playlist.as_deref(),
         );
-        if playlist_changed {
-            if let Some(old_playlist) = old_playlist.as_deref() {
-                for entry in &mut manifest.playlists {
-                    entry.filename = playlist_filename_with_folder(old_playlist, &entry.filename);
-                }
+        if playlist_changed
+            && let Some(old_playlist) = old_playlist.as_deref()
+        {
+            for entry in &mut manifest.playlists {
+                entry.filename = playlist_filename_with_folder(old_playlist, &entry.filename);
             }
         }
     }
@@ -4409,20 +4867,20 @@ async fn handle_device_set_auto_sync_on_connect(
 
     // Update device manifest on disk (if this device is currently connected)
     let current_device = state.device_manager.get_current_device().await;
-    if let Some(ref d) = current_device {
-        if d.device_id == device_id {
-            state
-                .device_manager
-                .update_manifest(|m| {
-                    m.auto_sync_on_connect = enabled;
-                })
-                .await
-                .map_err(|e| JsonRpcError {
-                    code: ERR_STORAGE_ERROR,
-                    message: format!("Failed to update manifest: {}", e),
-                    data: None,
-                })?;
-        }
+    if let Some(ref d) = current_device
+        && d.device_id == device_id
+    {
+        state
+            .device_manager
+            .update_manifest(|m| {
+                m.auto_sync_on_connect = enabled;
+            })
+            .await
+            .map_err(|e| JsonRpcError {
+                code: ERR_STORAGE_ERROR,
+                message: format!("Failed to update manifest: {}", e),
+                data: None,
+            })?;
     }
 
     Ok(serde_json::json!({
@@ -4777,6 +5235,7 @@ mod tests {
     use super::*;
     use crate::api::credential_test_lock;
     use serde_json::json;
+    use std::sync::Mutex;
 
     fn make_test_state(db: Arc<crate::db::Database>) -> Arc<AppState> {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
@@ -7858,6 +8317,7 @@ mod tests {
         albums: HashMap<String, crate::domain::models::AlbumWithTracks>,
         genre_tracks: HashMap<String, Vec<crate::domain::models::Song>>,
         songs: HashMap<String, crate::domain::models::Song>,
+        tracks: Vec<crate::domain::models::Song>,
         song_auth_error: Option<String>,
     }
 
@@ -7872,6 +8332,7 @@ mod tests {
                 albums: HashMap::new(),
                 genre_tracks: HashMap::new(),
                 songs: HashMap::new(),
+                tracks: vec![],
                 song_auth_error: None,
             })
         }
@@ -7888,6 +8349,7 @@ mod tests {
                 albums: HashMap::new(),
                 genre_tracks,
                 songs: HashMap::new(),
+                tracks: vec![],
                 song_auth_error: None,
             })
         }
@@ -7901,6 +8363,7 @@ mod tests {
                 albums: HashMap::new(),
                 genre_tracks: HashMap::new(),
                 songs,
+                tracks: vec![],
                 song_auth_error: None,
             })
         }
@@ -7919,6 +8382,7 @@ mod tests {
                 albums,
                 genre_tracks: HashMap::new(),
                 songs,
+                tracks: vec![],
                 song_auth_error: None,
             })
         }
@@ -7930,7 +8394,20 @@ mod tests {
                 albums: HashMap::new(),
                 genre_tracks: HashMap::new(),
                 songs: HashMap::new(),
+                tracks: vec![],
                 song_auth_error: Some(message.to_string()),
+            })
+        }
+
+        fn with_tracks(tracks: Vec<crate::domain::models::Song>) -> Arc<Self> {
+            Arc::new(Self {
+                modes: vec![crate::providers::BrowseMode::Tracks],
+                genres: vec![],
+                albums: HashMap::new(),
+                genre_tracks: HashMap::new(),
+                songs: HashMap::new(),
+                tracks,
+                song_auth_error: None,
             })
         }
     }
@@ -8072,6 +8549,30 @@ mod tests {
                 .collect();
             Ok((page, tracks.len() as u32))
         }
+        async fn list_tracks(
+            &self,
+            filter: crate::providers::TrackListFilter,
+        ) -> Result<crate::providers::TrackListPage, ProviderError> {
+            let start = filter.start_index as usize;
+            let limit = filter.limit as usize;
+            let total = self.tracks.len() as u32;
+            let page: Vec<crate::domain::models::Song> = if limit > 0 {
+                self.tracks
+                    .iter()
+                    .skip(start)
+                    .take(limit)
+                    .cloned()
+                    .collect()
+            } else {
+                self.tracks.iter().skip(start).cloned().collect()
+            };
+            Ok(crate::providers::TrackListPage {
+                tracks: page,
+                total,
+                start_index: filter.start_index,
+                limit: filter.limit,
+            })
+        }
         fn server_type(&self) -> crate::providers::ServerType {
             crate::providers::ServerType::Jellyfin
         }
@@ -8080,6 +8581,7 @@ mod tests {
                 open_subsonic: false,
                 supports_changes_since: false,
                 supports_server_transcoding: false,
+                supports_playlist_write: false,
                 browse: crate::providers::BrowseCapabilities {
                     list_modes: self.modes.clone(),
                 },
@@ -8153,6 +8655,7 @@ mod tests {
                 is_favorite: None,
                 content_type: Some("audio/mpeg".to_string()),
                 suffix: Some("mp3".to_string()),
+                size_bytes: None,
             })
             .collect::<Vec<_>>();
         let provider = FakeBrowseProvider::with_genre_tracks("rock", tracks);
@@ -8191,6 +8694,7 @@ mod tests {
             is_favorite: None,
             content_type: Some("audio/flac".to_string()),
             suffix: Some("flac".to_string()),
+            size_bytes: None,
         });
 
         let (items, playlist) =
@@ -8244,6 +8748,7 @@ mod tests {
             is_favorite: None,
             content_type: Some("audio/mpeg".to_string()),
             suffix: Some("mp3".to_string()),
+            size_bytes: None,
         };
         let provider = FakeBrowseProvider::with_album_and_song(
             crate::domain::models::AlbumWithTracks {
@@ -8295,5 +8800,566 @@ mod tests {
             "UnsupportedCapability must map to ERR_UNSUPPORTED_CAPABILITY, got code {}",
             err.code
         );
+    }
+
+    fn make_fake_song(id: &str, title: &str) -> crate::domain::models::Song {
+        crate::domain::models::Song {
+            id: id.to_string(),
+            title: title.to_string(),
+            artist_id: Some("artist1".to_string()),
+            artist_name: Some("Artist".to_string()),
+            album_id: Some("album1".to_string()),
+            album_title: Some("Album".to_string()),
+            duration_seconds: 0,
+            bitrate_kbps: None,
+            track_number: Some(1),
+            disc_number: None,
+            cover_art_id: None,
+            date_added: None,
+            last_played_at: None,
+            play_count: None,
+            is_favorite: None,
+            content_type: None,
+            suffix: None,
+            size_bytes: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn browse_list_tracks_returns_tracks_from_provider() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let tracks = vec![
+            make_fake_song("s1", "Alpha"),
+            make_fake_song("s2", "Beta"),
+            make_fake_song("s3", "Gamma"),
+        ];
+        let provider = FakeBrowseProvider::with_tracks(tracks);
+        *state.provider.write().await = Some(provider as Arc<dyn MediaProvider>);
+
+        let params = Some(serde_json::json!({
+            "startIndex": 0,
+            "limit": 2,
+        }));
+        let result = handle_browse_list_tracks(&state, params)
+            .await
+            .expect("listTracks should succeed");
+
+        let returned = result["tracks"].as_array().expect("tracks array");
+        assert_eq!(returned.len(), 2);
+        assert_eq!(returned[0]["id"], "s1");
+        assert_eq!(returned[1]["id"], "s2");
+        assert_eq!(result["total"], 3);
+        assert_eq!(result["startIndex"], 0);
+        assert_eq!(result["limit"], 2);
+    }
+
+    #[tokio::test]
+    async fn browse_list_tracks_rejects_when_capability_missing() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let provider = FakeBrowseProvider::new(vec![crate::providers::BrowseMode::Artists], vec![]);
+        *state.provider.write().await = Some(provider as Arc<dyn MediaProvider>);
+
+        let err = handle_browse_list_tracks(&state, None)
+            .await
+            .expect_err("should be unsupported");
+
+        assert_eq!(
+            err.code, ERR_UNSUPPORTED_CAPABILITY,
+            "listTracks without capability must map to ERR_UNSUPPORTED_CAPABILITY, got code {}",
+            err.code
+        );
+    }
+
+    // --- FakePlaylistProvider for playlist RPC tests ---
+
+    struct FakePlaylistProvider {
+        songs: HashMap<String, crate::domain::models::Song>,
+        albums: HashMap<String, Vec<crate::domain::models::Song>>,
+        playlist_return_id: String,
+        create_calls: Mutex<Vec<(String, Vec<String>)>>,
+        add_calls: Mutex<Vec<(String, Vec<String>)>>,
+        remove_calls: Mutex<Vec<(String, Vec<String>)>>,
+        delete_calls: Mutex<Vec<String>>,
+    }
+
+    impl FakePlaylistProvider {
+        fn new(playlist_return_id: &str) -> Arc<Self> {
+            Arc::new(Self {
+                songs: HashMap::new(),
+                albums: HashMap::new(),
+                playlist_return_id: playlist_return_id.to_string(),
+                create_calls: Mutex::new(vec![]),
+                add_calls: Mutex::new(vec![]),
+                remove_calls: Mutex::new(vec![]),
+                delete_calls: Mutex::new(vec![]),
+            })
+        }
+
+        fn with_song(playlist_return_id: &str, song: crate::domain::models::Song) -> Arc<Self> {
+            let mut songs = HashMap::new();
+            songs.insert(song.id.clone(), song);
+            Arc::new(Self {
+                songs,
+                albums: HashMap::new(),
+                playlist_return_id: playlist_return_id.to_string(),
+                create_calls: Mutex::new(vec![]),
+                add_calls: Mutex::new(vec![]),
+                remove_calls: Mutex::new(vec![]),
+                delete_calls: Mutex::new(vec![]),
+            })
+        }
+
+        /// Seeds a provider where `album_id` resolves (via `get_album`) to an
+        /// album containing `song`, and the same `song` is also resolvable
+        /// standalone (via `get_song`). Used to exercise cross-container dedup
+        /// in `playlist.create`.
+        fn with_album_and_song(
+            playlist_return_id: &str,
+            album_id: &str,
+            song: crate::domain::models::Song,
+        ) -> Arc<Self> {
+            let mut songs = HashMap::new();
+            songs.insert(song.id.clone(), song.clone());
+            let mut albums = HashMap::new();
+            albums.insert(album_id.to_string(), vec![song]);
+            Arc::new(Self {
+                songs,
+                albums,
+                playlist_return_id: playlist_return_id.to_string(),
+                create_calls: Mutex::new(vec![]),
+                add_calls: Mutex::new(vec![]),
+                remove_calls: Mutex::new(vec![]),
+                delete_calls: Mutex::new(vec![]),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MediaProvider for FakePlaylistProvider {
+        async fn list_libraries(
+            &self,
+        ) -> Result<Vec<crate::domain::models::Library>, ProviderError> {
+            unimplemented!()
+        }
+        async fn list_artists(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: u32,
+            _: u32,
+        ) -> Result<(Vec<crate::domain::models::Artist>, u32), ProviderError> {
+            unimplemented!()
+        }
+        async fn get_artist(
+            &self,
+            _: &str,
+        ) -> Result<crate::domain::models::ArtistWithAlbums, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "no artists".to_string(),
+            ))
+        }
+        async fn list_albums(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: u32,
+            _: u32,
+        ) -> Result<(Vec<crate::domain::models::Album>, u32), ProviderError> {
+            unimplemented!()
+        }
+        async fn get_album(
+            &self,
+            album_id: &str,
+        ) -> Result<crate::domain::models::AlbumWithTracks, ProviderError> {
+            match self.albums.get(album_id) {
+                Some(tracks) => Ok(crate::domain::models::AlbumWithTracks {
+                    album: crate::domain::models::Album {
+                        id: album_id.to_string(),
+                        title: "Album".to_string(),
+                        artist_id: None,
+                        artist_name: None,
+                        year: None,
+                        song_count: Some(tracks.len() as u32),
+                        duration_seconds: None,
+                        cover_art_id: None,
+                    },
+                    tracks: tracks.clone(),
+                }),
+                None => Err(ProviderError::UnsupportedCapability(
+                    "no albums".to_string(),
+                )),
+            }
+        }
+        async fn get_song(
+            &self,
+            song_id: &str,
+        ) -> Result<crate::domain::models::Song, ProviderError> {
+            self.songs
+                .get(song_id)
+                .cloned()
+                .ok_or(ProviderError::NotFound {
+                    item_type: "Song".to_string(),
+                    id: song_id.to_string(),
+                })
+        }
+        async fn list_playlists(
+            &self,
+        ) -> Result<Vec<crate::domain::models::Playlist>, ProviderError> {
+            unimplemented!()
+        }
+        async fn get_playlist(
+            &self,
+            _: &str,
+        ) -> Result<crate::domain::models::PlaylistWithTracks, ProviderError> {
+            Err(ProviderError::UnsupportedCapability(
+                "no playlists".to_string(),
+            ))
+        }
+        async fn search(
+            &self,
+            _: &str,
+        ) -> Result<crate::domain::models::SearchResult, ProviderError> {
+            unimplemented!()
+        }
+        async fn download_url(
+            &self,
+            _: &str,
+            _: Option<&crate::providers::TranscodeProfile>,
+        ) -> Result<String, ProviderError> {
+            unimplemented!()
+        }
+        async fn cover_art_url(&self, _: &str) -> Result<String, ProviderError> {
+            unimplemented!()
+        }
+        async fn changes_since_with_context(
+            &self,
+            _: Option<&str>,
+            _: &crate::providers::ProviderChangeContext,
+        ) -> Result<Vec<crate::domain::models::ChangeEvent>, ProviderError> {
+            unimplemented!()
+        }
+        async fn scrobble(
+            &self,
+            _: crate::providers::ScrobbleRequest,
+        ) -> Result<(), ProviderError> {
+            unimplemented!()
+        }
+        async fn list_genres(
+            &self,
+            _: Option<&str>,
+            _: u32,
+            _: u32,
+        ) -> Result<(Vec<crate::domain::models::Genre>, u64), ProviderError> {
+            Ok((vec![], 0))
+        }
+        async fn get_genre_tracks(
+            &self,
+            genre_id: &str,
+            _: u32,
+            _: u32,
+        ) -> Result<(Vec<crate::domain::models::Song>, u32), ProviderError> {
+            // No genres in this fake: an unknown id is genuinely unresolvable
+            // (NotFound), so `provider_sync_items_for_id` falls through to its
+            // final not-found error rather than returning an empty track list.
+            Err(ProviderError::NotFound {
+                item_type: "Genre".to_string(),
+                id: genre_id.to_string(),
+            })
+        }
+        fn server_type(&self) -> crate::providers::ServerType {
+            crate::providers::ServerType::Subsonic
+        }
+        fn capabilities(&self) -> crate::providers::Capabilities {
+            crate::providers::Capabilities {
+                open_subsonic: false,
+                supports_changes_since: false,
+                supports_server_transcoding: false,
+                supports_playlist_write: true,
+                browse: crate::providers::BrowseCapabilities { list_modes: vec![] },
+            }
+        }
+        async fn create_playlist(
+            &self,
+            name: &str,
+            track_ids: &[String],
+        ) -> Result<String, ProviderError> {
+            self.create_calls
+                .lock()
+                .unwrap()
+                .push((name.to_string(), track_ids.to_vec()));
+            Ok(self.playlist_return_id.clone())
+        }
+        async fn add_to_playlist(
+            &self,
+            playlist_id: &str,
+            track_ids: &[String],
+        ) -> Result<(), ProviderError> {
+            self.add_calls
+                .lock()
+                .unwrap()
+                .push((playlist_id.to_string(), track_ids.to_vec()));
+            Ok(())
+        }
+        async fn remove_from_playlist(
+            &self,
+            playlist_id: &str,
+            track_ids: &[String],
+        ) -> Result<(), ProviderError> {
+            self.remove_calls
+                .lock()
+                .unwrap()
+                .push((playlist_id.to_string(), track_ids.to_vec()));
+            Ok(())
+        }
+        async fn delete_playlist(&self, playlist_id: &str) -> Result<(), ProviderError> {
+            self.delete_calls
+                .lock()
+                .unwrap()
+                .push(playlist_id.to_string());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn playlist_create_resolves_song_and_returns_server_id() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let song = crate::domain::models::Song {
+            id: "song1".to_string(),
+            title: "Track 1".to_string(),
+            artist_id: None,
+            artist_name: Some("Artist".to_string()),
+            album_id: Some("album-1".to_string()),
+            album_title: Some("Album".to_string()),
+            duration_seconds: 180,
+            bitrate_kbps: Some(320),
+            track_number: Some(1),
+            disc_number: Some(1),
+            cover_art_id: None,
+            date_added: None,
+            last_played_at: None,
+            play_count: None,
+            is_favorite: None,
+            content_type: Some("audio/mpeg".to_string()),
+            suffix: Some("mp3".to_string()),
+            size_bytes: None,
+        };
+        let provider = FakePlaylistProvider::with_song("playlist-42", song);
+        *state.provider.write().await = Some(provider.clone() as Arc<dyn MediaProvider>);
+
+        let result = handle_playlist_create(
+            &state,
+            Some(serde_json::json!({ "name": "My Playlist", "itemIds": ["song1"] })),
+        )
+        .await
+        .expect("playlist.create");
+
+        assert_eq!(result["playlistId"], "playlist-42");
+        let calls = provider.create_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "My Playlist");
+        assert_eq!(calls[0].1, vec!["song1"]);
+    }
+
+    fn fake_song(id: &str) -> crate::domain::models::Song {
+        crate::domain::models::Song {
+            id: id.to_string(),
+            title: format!("Track {id}"),
+            artist_id: None,
+            artist_name: Some("Artist".to_string()),
+            album_id: Some("album-1".to_string()),
+            album_title: Some("Album".to_string()),
+            duration_seconds: 180,
+            bitrate_kbps: Some(320),
+            track_number: Some(1),
+            disc_number: Some(1),
+            cover_art_id: None,
+            date_added: None,
+            last_played_at: None,
+            play_count: None,
+            is_favorite: None,
+            content_type: Some("audio/mpeg".to_string()),
+            suffix: Some("mp3".to_string()),
+            size_bytes: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn playlist_create_dedups_overlapping_container_and_track() {
+        // "album-1" resolves to [song1]; "song1" also resolves standalone to the
+        // same track. AC1 dedup must collapse them to a single track id.
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let provider =
+            FakePlaylistProvider::with_album_and_song("playlist-7", "album-1", fake_song("song1"));
+        *state.provider.write().await = Some(provider.clone() as Arc<dyn MediaProvider>);
+
+        let result = handle_playlist_create(
+            &state,
+            Some(serde_json::json!({ "name": "Dedup", "itemIds": ["album-1", "song1"] })),
+        )
+        .await
+        .expect("playlist.create");
+
+        assert_eq!(result["playlistId"], "playlist-7");
+        let calls = provider.create_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].1,
+            vec!["song1"],
+            "overlapping container and track must dedup to one track id"
+        );
+    }
+
+    #[tokio::test]
+    async fn playlist_create_skips_unresolvable_items_and_reports_them() {
+        // One valid item ("song1") and one unresolvable item ("ghost"): the
+        // create must still succeed with the resolved track and report the
+        // skipped id rather than aborting the whole operation.
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let provider = FakePlaylistProvider::with_song("playlist-77", fake_song("song1"));
+        *state.provider.write().await = Some(provider.clone() as Arc<dyn MediaProvider>);
+
+        let result = handle_playlist_create(
+            &state,
+            Some(serde_json::json!({ "name": "Partial", "itemIds": ["song1", "ghost"] })),
+        )
+        .await
+        .expect("playlist.create should not abort on one unresolvable item");
+
+        assert_eq!(result["playlistId"], "playlist-77");
+        assert_eq!(
+            result["skippedItemIds"],
+            serde_json::json!(["ghost"]),
+            "unresolvable item must be reported in skippedItemIds"
+        );
+        let calls = provider.create_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, vec!["song1"]);
+    }
+
+    #[tokio::test]
+    async fn playlist_create_excludes_auto_fill_slot() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let provider = FakePlaylistProvider::new("playlist-99");
+        *state.provider.write().await = Some(provider.clone() as Arc<dyn MediaProvider>);
+
+        // Only item is the auto-fill slot — should be filtered; create_playlist called with empty list.
+        let result = handle_playlist_create(
+            &state,
+            Some(serde_json::json!({ "name": "Auto", "itemIds": ["__auto_fill_slot__"] })),
+        )
+        .await
+        .expect("playlist.create with only auto-fill slot");
+
+        assert_eq!(result["playlistId"], "playlist-99");
+        let calls = provider.create_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].1.is_empty(), "auto-fill slot must be excluded");
+    }
+
+    #[tokio::test]
+    async fn playlist_add_tracks_passes_ids_directly_without_resolution() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let provider = FakePlaylistProvider::new("ignored");
+        *state.provider.write().await = Some(provider.clone() as Arc<dyn MediaProvider>);
+
+        let result = handle_playlist_add_tracks(
+            &state,
+            Some(serde_json::json!({ "playlistId": "p1", "trackIds": ["t1", "t2"] })),
+        )
+        .await
+        .expect("playlist.addTracks");
+
+        assert_eq!(result["ok"], true);
+        let calls = provider.add_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "p1");
+        assert_eq!(calls[0].1, vec!["t1", "t2"]);
+    }
+
+    #[tokio::test]
+    async fn playlist_remove_tracks_passes_ids_directly_without_resolution() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let provider = FakePlaylistProvider::new("ignored");
+        *state.provider.write().await = Some(provider.clone() as Arc<dyn MediaProvider>);
+
+        let result = handle_playlist_remove_tracks(
+            &state,
+            Some(serde_json::json!({ "playlistId": "p2", "trackIds": ["t3"] })),
+        )
+        .await
+        .expect("playlist.removeTracks");
+
+        assert_eq!(result["ok"], true);
+        let calls = provider.remove_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "p2");
+        assert_eq!(calls[0].1, vec!["t3"]);
+    }
+
+    #[tokio::test]
+    async fn playlist_delete_passes_playlist_id() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let provider = FakePlaylistProvider::new("ignored");
+        *state.provider.write().await = Some(provider.clone() as Arc<dyn MediaProvider>);
+
+        let result =
+            handle_playlist_delete(&state, Some(serde_json::json!({ "playlistId": "p3" })))
+                .await
+                .expect("playlist.delete");
+
+        assert_eq!(result["ok"], true);
+        let calls = provider.delete_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], "p3");
+    }
+
+    #[tokio::test]
+    async fn playlist_write_rpcs_return_unsupported_when_capability_false() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        // FakeBrowseProvider has supports_playlist_write: false
+        let provider = FakeBrowseProvider::new(vec![], vec![]);
+        *state.provider.write().await = Some(provider as Arc<dyn MediaProvider>);
+
+        let dummy_create_params = Some(serde_json::json!({ "name": "x", "itemIds": [] }));
+        let dummy_modify_params = Some(serde_json::json!({ "playlistId": "p", "trackIds": [] }));
+        let dummy_delete_params = Some(serde_json::json!({ "playlistId": "p" }));
+
+        let create_err = handle_playlist_create(&state, dummy_create_params)
+            .await
+            .expect_err("create should fail");
+        assert_eq!(create_err.code, ERR_UNSUPPORTED_CAPABILITY);
+
+        let add_err = handle_playlist_add_tracks(&state, dummy_modify_params.clone())
+            .await
+            .expect_err("addTracks should fail");
+        assert_eq!(add_err.code, ERR_UNSUPPORTED_CAPABILITY);
+
+        let remove_err = handle_playlist_remove_tracks(&state, dummy_modify_params)
+            .await
+            .expect_err("removeTracks should fail");
+        assert_eq!(remove_err.code, ERR_UNSUPPORTED_CAPABILITY);
+
+        let delete_err = handle_playlist_delete(&state, dummy_delete_params)
+            .await
+            .expect_err("delete should fail");
+        assert_eq!(delete_err.code, ERR_UNSUPPORTED_CAPABILITY);
+
+        let reorder_err = handle_playlist_reorder(
+            &state,
+            Some(serde_json::json!({ "playlistId": "p", "trackIds": ["t1", "t2"] })),
+        )
+        .await
+        .expect_err("reorder should fail");
+        assert_eq!(reorder_err.code, ERR_UNSUPPORTED_CAPABILITY);
     }
 }

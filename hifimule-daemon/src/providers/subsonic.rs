@@ -6,7 +6,7 @@ use crate::providers::{
     BrowseCapabilities, BrowseMode, Capabilities, CredentialKind, MediaProvider,
     ProviderChangeContext, ProviderChangeMetadata, ProviderCredentials, ProviderError,
     ProviderSyncedSong, SUBSONIC_PLAYLISTS_LIBRARY_ID, ScrobbleRequest, ScrobbleSubmission,
-    ServerType, TranscodeProfile,
+    ServerType, TrackListFilter, TrackListPage, TranscodeProfile,
 };
 use async_trait::async_trait;
 use md5::{Digest, Md5};
@@ -245,10 +245,10 @@ impl MediaProvider for SubsonicProvider {
             .index
             .into_iter()
             .filter(|idx| {
-                letter.map_or(true, |l| {
+                letter.is_none_or(|l| {
                     idx.name
                         .as_deref()
-                        .map_or(false, |n| n.eq_ignore_ascii_case(l))
+                        .is_some_and(|n| n.eq_ignore_ascii_case(l))
                 })
             })
             .flat_map(|idx| idx.artist)
@@ -358,6 +358,94 @@ impl MediaProvider for SubsonicProvider {
         })
     }
 
+    async fn create_playlist(
+        &self,
+        name: &str,
+        track_ids: &[String],
+    ) -> Result<String, ProviderError> {
+        self.client.create_playlist(name, track_ids).await
+    }
+
+    async fn add_to_playlist(
+        &self,
+        playlist_id: &str,
+        track_ids: &[String],
+    ) -> Result<(), ProviderError> {
+        if track_ids.is_empty() {
+            return Ok(());
+        }
+        self.client
+            .update_playlist_add(playlist_id, track_ids)
+            .await
+    }
+
+    async fn remove_from_playlist(
+        &self,
+        playlist_id: &str,
+        track_ids: &[String],
+    ) -> Result<(), ProviderError> {
+        if track_ids.is_empty() {
+            return Ok(());
+        }
+
+        let playlist = self.client.get_playlist(playlist_id).await?;
+
+        // Count requested occurrences per track id so a track passed N times removes
+        // exactly N entries — matching the Jellyfin adapter's count semantics rather
+        // than removing every matching entry. (Code review 11.3)
+        let mut remaining_by_track_id: HashMap<&str, usize> = HashMap::new();
+        for track_id in track_ids {
+            *remaining_by_track_id.entry(track_id.as_str()).or_insert(0) += 1;
+        }
+
+        let indices: Vec<usize> = playlist
+            .playlist
+            .entry
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, song)| {
+                let remaining = remaining_by_track_id.get_mut(song.id.as_str())?;
+                if *remaining == 0 {
+                    return None;
+                }
+                *remaining -= 1;
+                Some(idx)
+            })
+            .collect();
+
+        if indices.is_empty() {
+            return Ok(());
+        }
+
+        self.client
+            .update_playlist_remove_by_indices(playlist_id, &indices)
+            .await
+    }
+
+    async fn delete_playlist(&self, playlist_id: &str) -> Result<(), ProviderError> {
+        self.client.delete_playlist(playlist_id).await
+    }
+
+    async fn rename_playlist(
+        &self,
+        playlist_id: &str,
+        new_name: &str,
+    ) -> Result<(), ProviderError> {
+        self.client
+            .update_playlist_rename(playlist_id, new_name)
+            .await
+    }
+
+    async fn reorder_playlist(
+        &self,
+        playlist_id: &str,
+        ordered_track_ids: &[String],
+    ) -> Result<(), ProviderError> {
+        self.client
+            .set_playlist_order(playlist_id, ordered_track_ids)
+            .await
+    }
+
     async fn search(&self, query: &str) -> Result<SearchResult, ProviderError> {
         let result = self.client.search3(query).await?.search_result3;
 
@@ -462,6 +550,7 @@ impl MediaProvider for SubsonicProvider {
         ];
         if self.open_subsonic {
             list_modes.extend([
+                BrowseMode::Tracks,
                 BrowseMode::RecentlyAdded,
                 BrowseMode::FrequentlyPlayed,
                 BrowseMode::RecentlyPlayed,
@@ -473,6 +562,7 @@ impl MediaProvider for SubsonicProvider {
             open_subsonic: self.open_subsonic,
             supports_changes_since: true,
             supports_server_transcoding: self.open_subsonic,
+            supports_playlist_write: true,
             browse: BrowseCapabilities { list_modes },
         }
     }
@@ -571,18 +661,24 @@ impl MediaProvider for SubsonicProvider {
         offset: u32,
         limit: u32,
     ) -> Result<(Vec<Song>, u32), ProviderError> {
+        // getSongsByGenre doesn't return a total count, so fetch all and paginate locally
         let body = self
             .client
-            .get_songs_by_genre(genre_id_or_name, offset, limit)
+            .get_songs_by_genre(genre_id_or_name, 0, 10_000)
             .await?;
-        let songs: Vec<Song> = body
+        let all_songs: Vec<Song> = body
             .songs_by_genre
             .song
             .into_iter()
             .map(song_from_dto)
             .collect();
-        let total = songs.len() as u32;
-        Ok((songs, total))
+        let total = all_songs.len() as u32;
+        let page: Vec<Song> = all_songs
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect();
+        Ok((page, total))
     }
 
     async fn list_favorites(
@@ -665,6 +761,101 @@ impl MediaProvider for SubsonicProvider {
             playlists: vec![],
         })
     }
+
+    async fn list_tracks(&self, filter: TrackListFilter) -> Result<TrackListPage, ProviderError> {
+        // Subsonic has no native track-title prefix filter — apply `letter` in-process
+        // across all three branches. See story 9.9 Dev Notes (Letter Caveat).
+        let start = filter.start_index as usize;
+        let limit = filter.limit as usize;
+
+        let all_songs: Vec<Song> = if let Some(album_id) = filter.album_id.as_deref() {
+            // Branch 1: album-scoped (album implies its artist — AC 4).
+            let album = self.client.get_album(album_id).await?;
+            album.album.song.into_iter().map(song_from_dto).collect()
+        } else if let Some(artist_id) = filter.artist_id.as_deref() {
+            // Branch 2: artist-scoped — fetch all albums for the artist and flatten.
+            let artist = self.client.get_artist(artist_id).await?;
+            let mut songs = Vec::new();
+            for album_summary in artist.artist.album {
+                let album = self.client.get_album(&album_summary.id).await?;
+                songs.extend(album.album.song.into_iter().map(song_from_dto));
+            }
+            songs
+        } else {
+            // Branch 3: unfiltered enumeration — requires OpenSubsonic search3.
+            if !self.open_subsonic {
+                return Err(ProviderError::UnsupportedCapability(
+                    "list_tracks requires OpenSubsonic search3 support".to_string(),
+                ));
+            }
+            let response = self
+                .client
+                .search3_paged("", Some(limit), Some(start))
+                .await?;
+            let songs: Vec<Song> = response
+                .search_result3
+                .song
+                .into_iter()
+                .map(song_from_dto)
+                .collect();
+            // search3 does not return a total; mirror list_all_songs_page and return
+            // page-length as total. The UI uses "page length < limit" as exhaustion.
+            let filtered = apply_letter_filter(songs, filter.letter.as_deref());
+            let total = filtered.len() as u32;
+            return Ok(TrackListPage {
+                tracks: filtered,
+                total,
+                start_index: filter.start_index,
+                limit: filter.limit,
+            });
+        };
+
+        // Branches 1 and 2: filter in-process, then slice the page locally.
+        let filtered = apply_letter_filter(all_songs, filter.letter.as_deref());
+        let total = filtered.len() as u32;
+        let page: Vec<Song> = if limit > 0 {
+            filtered.into_iter().skip(start).take(limit).collect()
+        } else {
+            filtered.into_iter().skip(start).collect()
+        };
+        Ok(TrackListPage {
+            tracks: page,
+            total,
+            start_index: filter.start_index,
+            limit: filter.limit,
+        })
+    }
+}
+
+fn apply_letter_filter(songs: Vec<Song>, letter: Option<&str>) -> Vec<Song> {
+    let Some(letter) = letter.map(str::trim).filter(|l| !l.is_empty()) else {
+        return songs;
+    };
+    // "#" matches titles whose first non-whitespace char is non-alphabetic (mirrors album_matches_letter).
+    if letter == "#" {
+        return songs
+            .into_iter()
+            .filter(|s| {
+                s.title
+                    .chars()
+                    .find(|c| !c.is_whitespace())
+                    .is_none_or(|c| !c.is_ascii_alphabetic())
+            })
+            .collect();
+    }
+    // Compare only the first character of `letter` (consistent with album_matches_letter).
+    let Some(expected) = letter.chars().next() else {
+        return songs;
+    };
+    songs
+        .into_iter()
+        .filter(|s| {
+            s.title
+                .chars()
+                .find(|c| !c.is_whitespace())
+                .is_some_and(|c| c.eq_ignore_ascii_case(&expected))
+        })
+        .collect()
 }
 
 #[derive(Clone)]
@@ -781,6 +972,104 @@ impl SubsonicClient {
 
     async fn get_playlist(&self, id: &str) -> Result<PlaylistWithSongsBody, ProviderError> {
         self.get("getPlaylist", &[("id", id)]).await
+    }
+
+    async fn create_playlist(
+        &self,
+        name: &str,
+        track_ids: &[String],
+    ) -> Result<String, ProviderError> {
+        let mut params: Vec<(&str, &str)> = vec![("name", name)];
+        for id in track_ids {
+            params.push(("songId", id.as_str()));
+        }
+        let body: PlaylistWithSongsBody = self.get("createPlaylist", &params).await?;
+        Ok(body.playlist.id)
+    }
+
+    async fn update_playlist_add(
+        &self,
+        playlist_id: &str,
+        track_ids: &[String],
+    ) -> Result<(), ProviderError> {
+        let mut params: Vec<(&str, &str)> = vec![("playlistId", playlist_id)];
+        for id in track_ids {
+            params.push(("songIdToAdd", id.as_str()));
+        }
+        let _: NoBody = self.get("updatePlaylist", &params).await?;
+        Ok(())
+    }
+
+    async fn update_playlist_remove_by_indices(
+        &self,
+        playlist_id: &str,
+        indices: &[usize],
+    ) -> Result<(), ProviderError> {
+        // Emit indices high-to-low. Servers that apply songIndexToRemove sequentially
+        // against a mutating list would otherwise shift later positions and delete the
+        // wrong tracks; descending order is also correct for snapshot-based servers. (Code review 11.3)
+        let mut sorted_indices = indices.to_vec();
+        sorted_indices.sort_unstable_by(|a, b| b.cmp(a));
+        let index_strings: Vec<String> = sorted_indices.iter().map(|i| i.to_string()).collect();
+        let mut params: Vec<(&str, &str)> = vec![("playlistId", playlist_id)];
+        for s in &index_strings {
+            params.push(("songIndexToRemove", s.as_str()));
+        }
+        let _: NoBody = self.get("updatePlaylist", &params).await?;
+        Ok(())
+    }
+
+    async fn delete_playlist(&self, playlist_id: &str) -> Result<(), ProviderError> {
+        let _: NoBody = self.get("deletePlaylist", &[("id", playlist_id)]).await?;
+        Ok(())
+    }
+
+    async fn update_playlist_rename(
+        &self,
+        playlist_id: &str,
+        new_name: &str,
+    ) -> Result<(), ProviderError> {
+        let _: NoBody = self
+            .get(
+                "updatePlaylist",
+                &[("playlistId", playlist_id), ("name", new_name)],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn set_playlist_order(
+        &self,
+        playlist_id: &str,
+        ordered_track_ids: &[String],
+    ) -> Result<(), ProviderError> {
+        // `createPlaylist` with an existing playlistId REPLACES the playlist contents, so a
+        // request whose id set differs from the current playlist would silently add/drop
+        // tracks (and an empty list would empty the playlist). Validate the request is a pure
+        // reorder — same tracks, same multiplicity — to match the Jellyfin contract and honor
+        // AC1 ("same track set, only the sequence changes"). (Code review 11.9)
+        let current = self.get_playlist(playlist_id).await?;
+        let mut current_ids: Vec<&str> = current
+            .playlist
+            .entry
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        let mut requested_ids: Vec<&str> = ordered_track_ids.iter().map(|s| s.as_str()).collect();
+        current_ids.sort_unstable();
+        requested_ids.sort_unstable();
+        if current_ids != requested_ids {
+            return Err(ProviderError::UnsupportedCapability(format!(
+                "reorder_playlist: requested track set does not match playlist {playlist_id} (reorder must preserve the same tracks)"
+            )));
+        }
+
+        let mut params: Vec<(&str, &str)> = vec![("playlistId", playlist_id)];
+        for id in ordered_track_ids {
+            params.push(("songId", id.as_str()));
+        }
+        let _: PlaylistWithSongsBody = self.get("createPlaylist", &params).await?;
+        Ok(())
     }
 
     async fn search3(&self, query: &str) -> Result<Search3Body, ProviderError> {
@@ -1153,6 +1442,7 @@ fn song_from_dto(song: SongDto) -> Song {
         is_favorite: None,
         content_type: song.content_type,
         suffix: song.suffix,
+        size_bytes: song.size,
     }
 }
 
@@ -1710,12 +2000,14 @@ mod tests {
                 open_subsonic: true,
                 supports_changes_since: true,
                 supports_server_transcoding: true,
+                supports_playlist_write: true,
                 browse: BrowseCapabilities {
                     list_modes: vec![
                         BrowseMode::Artists,
                         BrowseMode::Albums,
                         BrowseMode::Playlists,
                         BrowseMode::Genres,
+                        BrowseMode::Tracks,
                         BrowseMode::RecentlyAdded,
                         BrowseMode::FrequentlyPlayed,
                         BrowseMode::RecentlyPlayed,
@@ -1744,6 +2036,32 @@ mod tests {
                 BrowseMode::Favorites,
             ]
         );
+        assert!(
+            !provider
+                .capabilities()
+                .browse
+                .list_modes
+                .contains(&BrowseMode::Tracks)
+        );
+    }
+
+    #[tokio::test]
+    async fn classic_subsonic_list_tracks_unfiltered_unsupported() {
+        let provider = SubsonicProvider::from_client_for_tests(
+            SubsonicClient::new("http://localhost", USERNAME, PASSWORD).expect("client"),
+            false,
+        );
+        let result = provider
+            .list_tracks(crate::providers::TrackListFilter {
+                start_index: 0,
+                limit: 50,
+                ..Default::default()
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(ProviderError::UnsupportedCapability(_))
+        ));
     }
 
     #[tokio::test]
@@ -2744,7 +3062,10 @@ mod tests {
             .match_query(Matcher::AllOf({
                 let mut matchers = auth_matchers();
                 matchers.push(Matcher::UrlEncoded("genre".into(), "Rock".into()));
-                matchers.push(Matcher::UrlEncoded("count".into(), "20".into()));
+                // Production fetches up to the 10k cap, then paginates in-process
+                // (see get_genre_tracks impl). Tracked as a deferred follow-up
+                // from the 9.8 review.
+                matchers.push(Matcher::UrlEncoded("count".into(), "10000".into()));
                 matchers.push(Matcher::UrlEncoded("offset".into(), "0".into()));
                 matchers
             }))
@@ -3126,5 +3447,324 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["number", "symbol"]
         );
+    }
+
+    #[tokio::test]
+    async fn provider_creates_playlist_returns_server_id() {
+        let mut server = Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/rest/createPlaylist.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("name".into(), "Road Trip".into()));
+                // Matcher::UrlEncoded uses HashMap and drops duplicate keys; use Regex for
+                // repeated params so both values are verified in the raw query string.
+                matchers.push(Matcher::Regex(r"[?&]songId=song1(&|$)".into()));
+                matchers.push(Matcher::Regex(r"[?&]songId=song2(&|$)".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(
+                r#""playlist":{"id":"playlist99","name":"Road Trip","songCount":2,"duration":0}"#,
+            ))
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        let id = provider
+            .create_playlist("Road Trip", &["song1".to_string(), "song2".to_string()])
+            .await
+            .expect("create_playlist");
+
+        assert_eq!(id, "playlist99");
+    }
+
+    #[tokio::test]
+    async fn provider_add_to_playlist_posts_song_id_to_add() {
+        let mut server = Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/rest/updatePlaylist.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded(
+                    "playlistId".into(),
+                    "playlist99".into(),
+                ));
+                matchers.push(Matcher::Regex(r"[?&]songIdToAdd=song1(&|$)".into()));
+                matchers.push(Matcher::Regex(r"[?&]songIdToAdd=song2(&|$)".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        provider
+            .add_to_playlist("playlist99", &["song1".to_string(), "song2".to_string()])
+            .await
+            .expect("add_to_playlist");
+    }
+
+    #[tokio::test]
+    async fn provider_remove_from_playlist_resolves_indices_then_updates() {
+        let mut server = Server::new_async().await;
+        let _get = server
+            .mock("GET", "/rest/getPlaylist.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "playlist99".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(r#""playlist":{"id":"playlist99","name":"Road Trip","songCount":3,"duration":0,"entry":[
+                {"id":"song1","title":"Track 1"},
+                {"id":"song2","title":"Track 2"},
+                {"id":"song3","title":"Track 3"}
+            ]}"#))
+            .create_async()
+            .await;
+        let _update = server
+            .mock("GET", "/rest/updatePlaylist.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded(
+                    "playlistId".into(),
+                    "playlist99".into(),
+                ));
+                matchers.push(Matcher::Regex(r"[?&]songIndexToRemove=0(&|$)".into()));
+                matchers.push(Matcher::Regex(r"[?&]songIndexToRemove=2(&|$)".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        provider
+            .remove_from_playlist("playlist99", &["song1".to_string(), "song3".to_string()])
+            .await
+            .expect("remove_from_playlist");
+    }
+
+    #[tokio::test]
+    async fn provider_remove_from_playlist_skips_update_when_no_entries_match() {
+        let mut server = Server::new_async().await;
+        let _get = server
+            .mock("GET", "/rest/getPlaylist.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "playlist99".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(r#""playlist":{"id":"playlist99","name":"Road Trip","songCount":1,"duration":0,"entry":[
+                {"id":"song3","title":"Track 3"}
+            ]}"#))
+            .create_async()
+            .await;
+        // No updatePlaylist mock — if it is called, mockito will fail the test (unexpected request).
+        let provider = provider(&server).await;
+
+        provider
+            .remove_from_playlist("playlist99", &["song1".to_string()])
+            .await
+            .expect("remove_from_playlist when no match should succeed");
+    }
+
+    #[tokio::test]
+    async fn provider_delete_playlist_calls_delete_playlist_endpoint() {
+        let mut server = Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/rest/deletePlaylist.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "playlist99".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        provider
+            .delete_playlist("playlist99")
+            .await
+            .expect("delete_playlist");
+    }
+
+    #[tokio::test]
+    async fn provider_remove_from_playlist_removes_one_instance_per_requested_id() {
+        // Playlist contains song1 twice; requesting a single removal of song1 must
+        // remove exactly one entry (the first occurrence, index 0) — count semantics,
+        // matching the Jellyfin adapter — not every matching entry. (Code review 11.3)
+        let mut server = Server::new_async().await;
+        let _get = server
+            .mock("GET", "/rest/getPlaylist.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "playlist99".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(r#""playlist":{"id":"playlist99","name":"Road Trip","songCount":3,"duration":0,"entry":[
+                {"id":"song1","title":"Track 1"},
+                {"id":"song2","title":"Track 2"},
+                {"id":"song1","title":"Track 1 again"}
+            ]}"#))
+            .create_async()
+            .await;
+        let _update = server
+            .mock("GET", "/rest/updatePlaylist.view")
+            // Exactly one songIndexToRemove (index 0) and never index 2 — proves only one
+            // of the two song1 entries is removed.
+            .match_query(Matcher::AllOf(vec![Matcher::Regex(
+                r"[?&]songIndexToRemove=0(&|$)".into(),
+            )]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        provider
+            .remove_from_playlist("playlist99", &["song1".to_string()])
+            .await
+            .expect("remove_from_playlist removes one instance");
+    }
+
+    #[tokio::test]
+    async fn provider_remove_from_playlist_sends_indices_descending() {
+        // Removing adjacent entries song1 (index 0) and song2 (index 1) must emit
+        // songIndexToRemove in descending order (1 before 0) so a server applying
+        // removals sequentially does not shift positions onto the wrong track. (Code review 11.3)
+        let mut server = Server::new_async().await;
+        let _get = server
+            .mock("GET", "/rest/getPlaylist.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "playlist99".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(r#""playlist":{"id":"playlist99","name":"Road Trip","songCount":3,"duration":0,"entry":[
+                {"id":"song1","title":"Track 1"},
+                {"id":"song2","title":"Track 2"},
+                {"id":"song3","title":"Track 3"}
+            ]}"#))
+            .create_async()
+            .await;
+        let _update = server
+            .mock("GET", "/rest/updatePlaylist.view")
+            // Indices must appear contiguously as 1 then 0 (descending).
+            .match_query(Matcher::Regex(
+                r"songIndexToRemove=1&songIndexToRemove=0".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        provider
+            .remove_from_playlist("playlist99", &["song1".to_string(), "song2".to_string()])
+            .await
+            .expect("remove_from_playlist sends descending indices");
+    }
+
+    #[tokio::test]
+    async fn provider_reorder_playlist_calls_create_playlist_with_ordered_song_ids() {
+        let mut server = Server::new_async().await;
+        // Reorder validates the requested set against the current playlist first.
+        let _get = server
+            .mock("GET", "/rest/getPlaylist.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "playlist99".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(r#""playlist":{"id":"playlist99","name":"Road Trip","songCount":2,"duration":0,"entry":[
+                {"id":"song1","title":"Track 1"},
+                {"id":"song2","title":"Track 2"}
+            ]}"#))
+            .create_async()
+            .await;
+        let _mock = server
+            .mock("GET", "/rest/createPlaylist.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded(
+                    "playlistId".into(),
+                    "playlist99".into(),
+                ));
+                matchers.push(Matcher::Regex(r"[?&]songId=song2(&|$)".into()));
+                matchers.push(Matcher::Regex(r"[?&]songId=song1(&|$)".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(
+                r#""playlist":{"id":"playlist99","name":"Road Trip","songCount":2,"duration":0}"#,
+            ))
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        provider
+            .reorder_playlist("playlist99", &["song2".to_string(), "song1".to_string()])
+            .await
+            .expect("reorder_playlist");
+    }
+
+    #[tokio::test]
+    async fn provider_reorder_playlist_rejects_mismatched_track_set_without_replacing() {
+        let mut server = Server::new_async().await;
+        let _get = server
+            .mock("GET", "/rest/getPlaylist.view")
+            .match_query(Matcher::AllOf({
+                let mut matchers = auth_matchers();
+                matchers.push(Matcher::UrlEncoded("id".into(), "playlist99".into()));
+                matchers
+            }))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&ok(r#""playlist":{"id":"playlist99","name":"Road Trip","songCount":2,"duration":0,"entry":[
+                {"id":"song1","title":"Track 1"},
+                {"id":"song2","title":"Track 2"}
+            ]}"#))
+            .create_async()
+            .await;
+        // No createPlaylist mock: a destructive replace must NOT be issued for a mismatched set.
+        let _no_create = server
+            .mock("GET", "/rest/createPlaylist.view")
+            .expect(0)
+            .create_async()
+            .await;
+        let provider = provider(&server).await;
+
+        // Requested set drops song2 — a subset request must be rejected, not silently applied.
+        let err = provider
+            .reorder_playlist("playlist99", &["song1".to_string()])
+            .await
+            .expect_err("mismatched track set must be rejected");
+        assert!(
+            matches!(err, ProviderError::UnsupportedCapability(_)),
+            "got {err:?}"
+        );
+        _no_create.assert_async().await;
     }
 }

@@ -2,6 +2,8 @@ stepsCompleted: ['step-01-validate-prerequisites', 'step-02-design-epics', 'step
 inputDocuments: ['prd.md', 'architecture.md', 'ux-design-specification.md', 'product-brief-bmad-2026-01-26.md', 'project-context.md']
 status: 'complete'
 completedAt: '2026-01-27'
+lastAmended: '2026-06-05'
+amendments: ['epic-11-selection-as-playlist', 'story-9-7-virtualized-list-view']
 
 # HifiMule - Epic Breakdown
 
@@ -37,6 +39,9 @@ FR21: Toggle "Launch on Startup" behavior.
 FR22: Provide tray-icon status updates for sync progress and hardware state.
 FR23: Send OS-native notifications for sync completion or errors.
 FR24: Provide visual feedback (splash screen) during application startup and connection validation.
+FR37: The system can persist the current device selection as a media-server playlist — creating a new playlist or updating an existing one. The system reads the current server playlist state before editing (read-fresh) and writes the resulting track set back (write-back). Basket entities are resolved to a concrete ordered track list at save time. The Auto-Fill virtual slot is excluded; when present, the user is notified. Supported on Jellyfin and Subsonic/OpenSubsonic, gated by `supports_playlist_write`.
+FR38: The system provides a dual-panel playlist curation view: artists in the playlist on the left, that artist's albums on the right, filtered to playlist contents. Users can remove an artist or specific albums. A right-click context menu lets users send artists/albums to a playlist from browse views. The view displays playlist statistics (track count, total duration, total storage size). Edits update the server playlist.
+FR39: The system can present Artist and Album browse pages as virtualized list/table views (in addition to paginated album-art grids), enabling rapid scanning across thousands of items without pagination.
 
 ### NonFunctional Requirements
 
@@ -93,6 +98,7 @@ FR21: Epic 1 - Toggle Launch on Startup
 FR22: Epic 1 - System Tray Lifecycle Hub
 FR23: Epic 5 - OS-Native Sync Notifications
 FR24: Epic 2 - Startup Splash Screen with Connection Status
+FR25: Epic 3 - Music-Only Library Filtering (Story 3.5)
 FR27: Epic 6 - Platform-Native Installer Bundling
 FR28: Epic 6 - CI/CD Cross-Platform Build Pipeline
 FR29: Epic 3 - Auto-Fill Virtual Slot (Story 3.8)
@@ -104,6 +110,11 @@ FR33: Epic 2 - Enhanced Multi-Device Hub (Story 2.8)
 FR34: Epic 3 - Artist Entity Basket Item (Story 3.9)
 FR35: Epic 8 - Multi-Provider Server Support (Stories 8.1–8.6)
 FR36: Epic 10 - Device Configuration Editing (Stories 10.1-10.2)
+FR37: Epic 11 - Selection-as-Playlist (Stories 11.1-11.5)
+FR38: Epic 11 - Dual-Panel Curation (Story 11.6)
+FR39: Epic 9 - Virtualized List/Table Browse View (Story 9.7)
+FR40: Epic 11 - Playlist Track Reordering (Stories 11.9-11.10)
+FR41: Epic 9 - Tracks Browse Mode (Stories 9.9-9.10)
 
 ## Epic List
 
@@ -1881,6 +1892,193 @@ So that switching from Jellyfin does not remove core curation workflows.
 - Prefer OpenSubsonic/Navidrome endpoints that expose ordered recent/frequent data reliably; hide modes rather than synthesizing misleading lists.
 - Tests should cover capability lists for OpenSubsonic/Navidrome versus classic Subsonic, recently added sorting, frequently played sorting, recently played sorting, and album letter filtering.
 
+### Story 9.7: Virtualized List/Table Browse View
+
+As a Ritualist (Arthur),
+I want to browse Artists and Albums as a list/table view in addition to the current grid,
+So that I can scan libraries of thousands of items quickly without waiting for pagination.
+
+**Acceptance Criteria:**
+
+**Given** the Artist or Album browse page is open
+**When** I toggle to list/table view
+**Then** the list renders immediately with the currently loaded items using virtualized windowed rendering.
+**And** scroll performance remains smooth for libraries of thousands of items.
+
+**Given** I scroll the list
+**Then** only visible rows are mounted in the DOM at any time.
+
+**Given** I scroll toward the end of the loaded rows in list view
+**Then** the next page is fetched automatically from the daemon and appended to the list.
+**And** this continues until all items (up to `total`) are loaded.
+
+**Given** the browse page has an A–Z filter control
+**When** I select a letter in either grid or list view
+**Then** the view fetches and displays only items starting with that letter (server-side filter), identical in both views.
+
+**Given** I am in list/table view
+**When** I click an item
+**Then** drill-down, breadcrumb, and basket-add behaviors are identical to grid view.
+
+**Given** I toggle between grid and list view
+**When** data has already been fetched
+**Then** the view switches without re-fetching from the daemon.
+
+**Technical Notes:**
+- Implement windowed/virtualized rendering with autoload-on-scroll: render immediately with the loaded page; fetch the next page (200 items) when the user scrolls within 5 rows of the loaded boundary.
+- The scroller element height is set to `state.pagination.total × VIRTUAL_ROW_HEIGHT` from the start so the scrollbar reflects the full expected size; height is updated as the total is refined by responses.
+- View mode (grid vs list) is stored in local UI state per browse mode. **Note: superseded by Story 9.8** — the toggle is now a single global value.
+- A–Z is a server-side filter in both grid and list view. There is no client-side scroll-to-letter behavior.
+- When an A–Z letter filter is active in list view, autoload-on-scroll is suppressed (the filtered set is already complete).
+- No new daemon RPCs or basket entity types; this is a pure UI rendering concern.
+- Both views share the same data model from the existing `browse.*` RPC layer.
+
+### Story 9.8: Extend Grid/Table Toggle to All Browse Modes and Drill-Down Levels
+
+As a Ritualist (Arthur),
+I want the grid/table toggle to work on every browse page and drill-down level,
+So that I can use my preferred view mode consistently across all library content — not just at the Artists/Albums root.
+
+**Acceptance Criteria:**
+
+**Given** any browse mode is active (artists, albums, playlists, genres, recentlyAdded, frequentlyPlayed, recentlyPlayed, favorites)
+**When** the browse area renders
+**Then** the view toggle (grid/list) is always visible in the browse-mode bar.
+
+**Given** I am drilled into a sub-level (e.g., albums within an artist, tracks within an album)
+**When** the sub-level content renders
+**Then** the view toggle remains visible and the active mode (grid or list) applies.
+
+**Given** I toggle to list view
+**When** I switch browse mode or navigate into/out of a sub-level
+**Then** the global toggle state is preserved — all levels and modes use the same grid/list preference.
+
+**Given** list view is active
+**When** I click a sub-level item (album row drills to tracks; track row adds to basket)
+**Then** drill-down and basket-add behaviors are identical to grid view.
+
+**Given** list view is active on a mode without autoload (playlists, genres, history/favorites, or any sub-level with breadcrumbs)
+**Then** the list renders what is currently loaded; autoload-on-scroll is not triggered (that behavior remains exclusive to artists/albums root).
+
+**Technical Notes:**
+- Remove the `(state.browseMode === 'artists' || state.browseMode === 'albums') && state.breadcrumbStack.length === 0` guard from `renderViewToggle()` in `library.ts:593–596`.
+- Remove the matching mode+breadcrumb guard from `renderCurrentView()` at `library.ts:823–826`.
+- No state structure change needed: `state.listViewMode` is already a single global value.
+- `loadMoreForListView` continues to operate only for artists/albums root; the `rootMode` variable in `renderList()` already returns `null` for other modes/levels, which suppresses autoload — no change needed there.
+- No new daemon RPCs; pure UI rendering concern.
+
+### Story 9.9: Tracks Browse Mode — Provider Contract & Daemon RPC
+
+As a System Admin (Alexis),
+I want the daemon to expose a flat, paginated, filterable track listing,
+So that the UI can present a library-wide Tracks browse mode for both Jellyfin and OpenSubsonic-class servers.
+
+**Acceptance Criteria:**
+
+**Given** a provider that implements `list_tracks`
+**When** `browse.listTracks({ startIndex: 0, limit: 200 })` is called
+**Then** the daemon returns the first page of library tracks along with `total`.
+
+**Given** `browse.listTracks` is called with `artistId`
+**Then** the response is filtered to tracks whose artist matches.
+
+**Given** `browse.listTracks` is called with `albumId`
+**Then** the response is filtered to tracks within that album.
+
+**Given** both `artistId` and `albumId` are provided
+**Then** the album filter takes precedence (album implies its artist).
+
+**Given** a Subsonic provider without `search3` support
+**When** `browse.listModes` is called
+**Then** `Tracks` is not present in the returned list.
+
+**Given** a provider that does not advertise `Tracks`
+**When** `browse.listTracks` is called anyway
+**Then** an RPC error indicating unsupported capability is returned.
+
+**Given** A–Z letter filtering is implemented (optional v1)
+**When** `letter` is provided
+**Then** only tracks whose title starts with that letter are returned.
+
+**Technical Notes:**
+- `BrowseMode::Tracks` added to `providers/mod.rs`.
+- New `TrackListFilter` and `TrackListPage` types; default `list_tracks` trait impl returns `ProviderError::NotSupported`.
+- Jellyfin: `GET /Users/{uid}/Items?IncludeItemTypes=Audio&Recursive=true&SortBy=Name,Album&StartIndex&Limit[&ArtistIds][&AlbumIds][&NameStartsWith]`.
+- Subsonic/OpenSubsonic: `search3?query=&songCount&songOffset` for unfiltered enumeration; `getArtist`+`getAlbum` aggregation when `artistId`/`albumId` is set; classic Subsonic without `search3` returns `NotSupported` and omits `Tracks` from `list_modes`.
+- All Subsonic URL auth sanitization rules apply.
+- Daemon RPC: `browse.listTracks` handler dispatches to `provider.list_tracks`; capability-absent requests are rejected.
+- Tests: unfiltered page, artist filter, album filter, combined filters, letter filter, `NotSupported` path.
+
+### Story 9.10: Tracks Browse Mode — Dual-Panel UI with Auto-Pagination & Track Actions
+
+As a Ritualist (Arthur),
+I want to browse my entire library at the track grain with artist and album filters,
+So that I can quickly find and queue individual songs without drilling through albums.
+
+**Acceptance Criteria:**
+
+**Given** the active provider advertises the Tracks mode
+**When** the Library Browser renders the browse-mode bar
+**Then** a "Tracks" mode is shown alongside the existing modes.
+
+**Given** I select the Tracks mode
+**Then** the view renders three panels: an artists panel on the left, an albums panel on the right, and a track list panel below.
+
+**Given** the Tracks view is rendering
+**Then** the artist panel auto-paginates the full library artist list via `browse.listArtists` with autoload-on-scroll.
+**And** the album panel auto-paginates albums (filtered by the selected artist if any) via `browse.listAlbums` with autoload-on-scroll.
+**And** the track list auto-paginates via `browse.listTracks` with the active artist/album filters.
+
+**Given** the artist panel shows an "All artists" entry at the top
+**When** I select it
+**Then** the album panel shows all library albums (paginated) and the track panel shows all library tracks (paginated).
+
+**Given** I select an artist in the left panel
+**Then** the album panel filters to that artist's albums (paginated).
+**And** the track panel filters to that artist's tracks (paginated).
+
+**Given** I select an album in the right panel
+**Then** the track panel filters to that album's tracks (paginated).
+
+**Given** the album panel shows an "All albums" entry at the top
+**When** I select it
+**Then** the track panel filter clears its album constraint (artist constraint, if any, remains).
+
+**Given** a device is selected
+**When** a track row renders
+**Then** a (+) "Add to basket" control is shown; if the track is already in the basket, a (-) "Remove from basket" control is shown instead.
+
+**Given** no device is selected
+**Then** all (+) controls render disabled.
+
+**Given** the active provider supports playlist write
+**When** I right-click a track row
+**Then** an "Add to playlist…" context menu appears (per Story 11.7).
+**And** the track row also renders a visible "Send to playlist…" affordance opening the same flow.
+
+**Given** the active provider does not support playlist write
+**Then** both the context menu and the "Send to playlist…" affordance are hidden.
+
+**Given** I am in Tracks mode
+**Then** the grid/list view toggle is not displayed (the dual-panel layout is the sole rendering).
+
+**Given** an A–Z letter strip is available on the artist or album panel
+**When** I select a letter
+**Then** the corresponding panel filters its list and pagination resets.
+
+**Given** I switch away from Tracks mode and back
+**Then** the panel selections and scroll positions are restored from the page cache (consistent with other browse modes).
+
+**Technical Notes:**
+- New `TracksBrowseView.ts` modeled on `PlaylistCurationView.ts`, but each panel manages its own paginated list state (re-using the autoload-on-scroll logic from `library.ts` artist/album root path).
+- `BrowseMode` TS union in `rpc.ts` extended with `"tracks"`.
+- New `fetchBrowseTracks(filter)` helper in `rpc.ts`.
+- Per-panel state lives in the component, not in the global `library.ts` state, since this view's pagination is multi-axis. Page-cache key: `tracks:${artistId ?? '*'}:${albumId ?? '*'}:${letter ?? '*'}`.
+- The grid/list global toggle is read but ignored in this view's renderer; the toggle button is hidden when `state.browseMode === 'tracks'`.
+- Track-row right-click context menu re-uses the dispatcher wired in Story 11.7; per-row "Send to playlist…" is a visible button/icon calling the same dispatcher.
+- New i18n keys (en/fr/es): `library.mode.tracks`, `tracks.view.all_artists`, `tracks.view.all_albums`, `tracks.view.no_tracks`, `tracks.view.loading`, `tracks.view.send_to_playlist`.
+- Depends on Story 9.9.
+
 ## Epic 10: Device Configuration Editing
 
 Allow existing managed devices to be edited after initialization, including identity and folder configuration. Support separate playlist output folders for devices such as Rockbox players, while preserving managed-file safety and backward compatibility with existing manifests.
@@ -2006,3 +2204,428 @@ So that Rockbox and Garmin-style devices start with sensible folder layouts with
 - Extend `DeviceProfileEntry` with optional `default_music_folder` / `default_playlist_folder` mapped to camelCase JSON.
 - Built-in defaults: Rockbox profiles use `Music` + `Playlists`; Garmin Music Watch uses `Music` + `Music`.
 - Keep `device-profiles.json` user-editable and backward compatible when fields are absent.
+
+## Epic 11: Selection-as-Playlist & Curation
+
+Extend HifiMule with server playlist write-back: users can save their device selection as a server playlist, curate it through a dual-panel artist/album view, and send individual items to playlists via right-click. Backed by a new `MediaProvider` write contract and capability-gated throughout.
+
+### Story 11.1: MediaProvider Playlist-Write Trait Amendment
+
+As a System Admin (Alexis),
+I want the MediaProvider trait to expose playlist write operations,
+So that the daemon can create, modify, and delete server playlists in a provider-neutral way.
+
+**Acceptance Criteria:**
+
+**Given** a provider is connected
+**When** capabilities are queried
+**Then** `capabilities().supports_playlist_write` is returned — `true` for Jellyfin and Subsonic/OpenSubsonic.
+
+**Given** the active provider supports playlist write
+**When** `create_playlist(name, track_ids)` is called
+**Then** the server creates a new playlist with those tracks and returns the server-assigned playlist ID as a `String`.
+
+**Given** the active provider supports playlist write
+**When** `add_to_playlist(playlist_id, track_ids)` is called
+**Then** the specified tracks are appended to the playlist.
+
+**Given** the active provider supports playlist write
+**When** `remove_from_playlist(playlist_id, track_ids)` is called
+**Then** the specified tracks are removed from the playlist.
+
+**Given** the active provider supports playlist write
+**When** `delete_playlist(playlist_id)` is called
+**Then** the playlist is deleted from the server.
+
+**Given** a provider does not support playlist write
+**When** any write method is called
+**Then** `ProviderError::NotSupported` is returned.
+
+**Technical Notes:**
+- Four new methods added to `MediaProvider` in `providers/mod.rs`: `create_playlist`, `add_to_playlist`, `remove_from_playlist`, `delete_playlist`.
+- `Capabilities` gains `supports_playlist_write: bool`.
+- Callers MUST check `capabilities().supports_playlist_write` before invoking any write method.
+- Selection→tracks resolution lives in the daemon RPC layer (Story 11.4), not in the trait.
+- No UI changes in this story.
+- Tests must cover capability `true` and the `NotSupported` path for both providers.
+
+### Story 11.2: JellyfinProvider Playlist Write Adapter
+
+As a System Admin (Alexis),
+I want Jellyfin playlist create/add/remove/delete to work correctly,
+So that my Jellyfin server playlists reflect my HifiMule selections.
+
+**Acceptance Criteria:**
+
+**Given** a Jellyfin provider is connected
+**When** `create_playlist(name, track_ids)` is called
+**Then** `POST /Playlists` is issued with MediaType "Audio" and the name in the request body.
+**And** the `Id` field from the response is returned as the playlist ID.
+
+**Given** a Jellyfin provider is connected
+**When** `add_to_playlist(playlist_id, track_ids)` is called
+**Then** `POST /Playlists/{id}/Items?Ids={comma-separated IDs}` is issued.
+
+**Given** a Jellyfin provider is connected
+**When** `remove_from_playlist(playlist_id, track_ids)` is called
+**Then** `GET /Playlists/{id}/Items` is called first to resolve the Jellyfin `PlaylistItemId` entries matching the given track IDs.
+**And** `DELETE /Playlists/{id}/Items?EntryIds={comma-separated PlaylistItemIds}` removes them.
+
+**Given** a Jellyfin provider is connected
+**When** `delete_playlist(playlist_id)` is called
+**Then** `DELETE /Items/{id}` is issued (Jellyfin deletes playlists as generic items).
+
+**Given** `supports_playlist_write` is queried for a Jellyfin provider
+**Then** it is `true`.
+
+**Technical Notes:**
+- All four methods implemented in `providers/jellyfin.rs`.
+- `remove_from_playlist` is a 2-step operation: GET to resolve `PlaylistItemId` entries, then DELETE.
+- All requests go through the provider's existing authenticated HTTP client.
+- Tests mock HTTP responses for each operation and verify correct URL and body construction.
+
+### Story 11.3: SubsonicProvider Playlist Write Adapter
+
+As a System Admin (Alexis),
+I want Subsonic playlist create/add/remove/delete to work correctly,
+So that my Navidrome/Subsonic server playlists reflect my HifiMule selections regardless of provider.
+
+**Acceptance Criteria:**
+
+**Given** a Subsonic provider is connected
+**When** `create_playlist(name, track_ids)` is called
+**Then** `GET /rest/createPlaylist.view?name={name}&songId[]={ids}` is issued.
+**And** the `id` field from the response is returned as the playlist ID.
+
+**Given** a Subsonic provider is connected
+**When** `add_to_playlist(playlist_id, track_ids)` is called
+**Then** `GET /rest/updatePlaylist.view?playlistId={id}&songIdToAdd[]={ids}` is issued.
+
+**Given** a Subsonic provider is connected
+**When** `remove_from_playlist(playlist_id, track_ids)` is called
+**Then** `GET /rest/getPlaylist.view?id={id}` fetches the current track list to resolve song index positions.
+**And** `GET /rest/updatePlaylist.view?playlistId={id}&songIndexToRemove[]={indices}` removes them.
+
+**Given** a Subsonic provider is connected
+**When** `delete_playlist(playlist_id)` is called
+**Then** `GET /rest/deletePlaylist.view?id={id}` is issued.
+
+**Given** any playlist write URL contains Subsonic auth params
+**When** the URL appears in logs
+**Then** auth params are stripped via `sanitize_subsonic_url()` before logging.
+
+**Given** `supports_playlist_write` is queried for a Subsonic or OpenSubsonic provider
+**Then** it is `true`.
+
+**Technical Notes:**
+- All four methods implemented in `providers/subsonic.rs`.
+- `remove_from_playlist` is a 2-step operation: `getPlaylist` to resolve index positions, then `updatePlaylist`.
+- All existing Subsonic auth sanitization rules apply to playlist write URLs.
+- Tests cover both classic Subsonic and OpenSubsonic response shapes.
+
+### Story 11.4: Daemon RPCs — playlist.create / addTracks / removeTracks / delete
+
+As a System Admin (Alexis),
+I want the daemon to expose playlist management RPCs,
+So that the UI can create and edit server playlists from the device selection basket.
+
+**Acceptance Criteria:**
+
+**Given** the active provider supports playlist write
+**When** `playlist.create({ name, itemIds })` is called
+**Then** the daemon resolves all basket entities (albums, artists, genres, individual tracks) in `itemIds` to a concrete flat track list using the existing container-expansion logic.
+**And** Auto-Fill virtual slots (`id: '__auto_fill_slot__'`) are silently excluded from the resolved list.
+**And** `provider.create_playlist(name, resolved_track_ids)` is called.
+**And** the response returns `{ playlistId: string }` with the server-assigned ID.
+
+**Given** a playlist exists
+**When** `playlist.addTracks({ playlistId, trackIds })` is called
+**Then** `provider.add_to_playlist(playlistId, trackIds)` is called with the provided track IDs directly (no entity resolution).
+**And** `{ ok: true }` is returned.
+
+**Given** a playlist exists
+**When** `playlist.removeTracks({ playlistId, trackIds })` is called
+**Then** `provider.remove_from_playlist(playlistId, trackIds)` is called.
+**And** `{ ok: true }` is returned.
+
+**Given** a playlist exists
+**When** `playlist.delete({ playlistId })` is called
+**Then** `provider.delete_playlist(playlistId)` is called.
+**And** `{ ok: true }` is returned.
+
+**Given** the active provider does not support playlist write
+**When** any playlist write RPC is called
+**Then** an RPC error indicating the capability is unsupported is returned.
+
+**Technical Notes:**
+- Container-expansion reuses the existing `rpc.rs:807–866` path.
+- Auto-Fill slots are silently skipped; callers do not need to pre-filter them.
+- Track ordering within a resolved entity is left to implementation.
+- All four RPCs call `require_provider()` before dispatch.
+- `playlist.addTracks` and `playlist.removeTracks` pass `trackIds` directly — no entity resolution.
+
+### Story 11.5: Basket "Save as Playlist" and "Send to Playlist" UI
+
+As a Ritualist (Arthur),
+I want to save the basket selection as a server playlist and send items to playlists from browse views,
+So that I can persist and reuse my curated selections across sessions.
+
+**Acceptance Criteria:**
+
+**Given** the active provider supports playlist write and the basket is non-empty
+**When** the basket header is visible
+**Then** a "Save selection as playlist" action is shown.
+
+**Given** the active provider does not support playlist write
+**Then** the "Save selection as playlist" action is hidden.
+
+**Given** I click "Save selection as playlist" and the basket contains only manual selections
+**When** the dialog opens
+**Then** I can enter a name to create a new server playlist.
+
+**Given** I click "Save selection as playlist" and the basket contains an Auto-Fill slot
+**When** the dialog opens
+**Then** an inline notice informs me that Auto-Fill tracks are resolved at sync time and will not be saved to the playlist.
+**And** I can still proceed to save the manual selections.
+
+**Given** I right-click an artist or album in a browse view
+**Then** a context menu appears with a "Send to playlist…" option.
+
+**Given** I select "Send to playlist…" from a context menu
+**Then** I can create a new playlist with that item as the initial content.
+
+**Given** I confirm playlist creation
+**Then** `playlist.create` is called with the resolved item IDs.
+**And** the created playlist becomes available in the server playlist browser.
+
+**Technical Notes:**
+- Capability-gating: check `capabilities().supports_playlist_write` before rendering any playlist-write affordances.
+- Auto-Fill exclusion notice is informational only; the save proceeds for manual items.
+- Context menus appear on artists and albums in browse views.
+
+### Story 11.6: Dual-Panel Playlist Curation View
+
+As a Ritualist (Arthur),
+I want a dual-panel view for curating server playlists,
+So that I can remove specific artists or albums from a playlist without rebuilding it from scratch.
+
+**Acceptance Criteria:**
+
+**Given** a server playlist is selected for curation
+**When** I open the curation view
+**Then** the left panel shows all artists who have tracks in the playlist.
+**And** selecting an artist shows that artist's albums filtered to only those with tracks in the playlist in the right panel.
+
+**Given** I click "Remove artist" in the left panel
+**Then** all tracks by that artist are removed from the playlist via `playlist.removeTracks`.
+**And** the artist disappears from the left panel.
+
+**Given** I click "Remove album" in the right panel
+**Then** all tracks in that album are removed from the playlist via `playlist.removeTracks`.
+**And** the album disappears from the right panel.
+**And** if that artist has no remaining tracks in the playlist, the artist also disappears from the left panel.
+
+**Given** the curation view is open
+**Then** a statistics header shows total track count, total duration, and total storage size.
+
+**Given** some tracks in the playlist have no `sizeBytes` value
+**When** the storage size statistic is displayed
+**Then** those tracks are excluded from the size total.
+
+**Given** I close the curation view
+**Then** the server playlist reflects all removals made during the session.
+
+**Given** an artist is selected in the left panel
+**When** the curation view renders or updates
+**Then** a track panel below the artist/album panels shows all tracks by that artist that are in the playlist.
+**And** each track row shows the track title, duration, and a "Remove track" button.
+
+**Given** I click on an album row in the right panel (not the remove button)
+**Then** the album is highlighted as focused.
+**And** the track panel filters to show only tracks from that album that are in the playlist.
+
+**Given** I click "Remove track" on a track in the track panel
+**Then** that single track is removed from the playlist via `playlist.removeTracks`.
+**And** the track disappears from the track panel.
+**And** if the artist has no remaining tracks in the playlist, the artist disappears from the left panel.
+**And** the statistics header updates.
+
+**Technical Notes:**
+- The view fetches the current playlist via `browse.getPlaylist` to build initial curation state.
+- Artist and album grouping is derived from `Track.artistName` and `Track.albumName` in the playlist response.
+- Storage size uses `Track.sizeBytes`; tracks without a value are excluded from the total without error.
+- This view edits the server playlist only — it does not trigger a device sync.
+
+### Story 11.7: Add Tracks to Playlist — Browse Context Menu & Curation View
+
+As a Ritualist (Arthur),
+I want to add individual tracks to a server playlist from browse views and from within the curation view,
+So that I can build and expand playlists track-by-track without needing to create a new playlist each time.
+
+**Acceptance Criteria:**
+
+**Given** the active provider supports playlist write
+**When** I right-click an individual track row in any browse view
+**Then** an "Add to playlist…" option appears in the context menu.
+
+**Given** I select "Add to playlist…" from a track's context menu
+**When** the sub-menu or dialog opens
+**Then** a list of existing server playlists is shown alongside a "New playlist…" option.
+
+**Given** I select an existing playlist from the "Add to playlist…" dialog
+**Then** `playlist.addTracks({ playlistId, trackIds: [track.id] })` is called.
+**And** a success notification is shown confirming the track was added.
+
+**Given** I select "New playlist…" from the "Add to playlist…" dialog
+**Then** I am prompted for a playlist name.
+**And** `playlist.create({ name, itemIds: [track.id] })` is called.
+**And** the created playlist becomes available in the server playlist browser.
+
+**Given** the active provider does not support playlist write
+**Then** the "Add to playlist…" context action is hidden on track rows.
+
+**Given** the curation view is open for a playlist
+**When** I click the "Add tracks" button in the statistics header
+**Then** a search dialog opens that accepts a query (title, artist, or album).
+
+**Given** I enter a query in the "Add tracks" search dialog
+**Then** matching tracks from the library are displayed as a selectable list.
+
+**Given** I select one or more tracks in the search dialog and confirm
+**Then** `playlist.addTracks({ playlistId, trackIds: selectedIds })` is called.
+**And** the curation view re-fetches the playlist and re-renders all panels.
+**And** the statistics header updates to reflect the new track count, duration, and storage size.
+
+**Given** I open the "Add tracks" search dialog and cancel without selecting
+**Then** no RPC is called and the curation view is unchanged.
+
+**Technical Notes:**
+- `playlist.addTracks` and `playlist.create` RPCs are already specced in Story 11.4 — no new daemon work.
+- No provider changes needed; Jellyfin and Subsonic adapters already implement `add_to_playlist`.
+- The track context menu reuses the same `supports_playlist_write` capability gate as Story 11.5.
+- The "Add tracks" search dialog should call an existing browse RPC (e.g., `browse.getTracks` or equivalent)
+  filtered by the user's query — no new daemon endpoint needed if a track search RPC exists.
+- The curation view refresh after adding reuses the existing `fetchPlaylist()` → `render()` cycle.
+- Track context menus apply wherever track rows are rendered: album detail views, artist track listings,
+  and server playlist browse views.
+
+### Story 11.8: Playlist Rename and Delete — Curation View Header
+
+As a Ritualist (Arthur),
+I want to rename and delete a playlist directly from the curation view,
+So that I can manage my library's playlist catalogue without leaving the edit context.
+
+**Acceptance Criteria:**
+
+**Given** the curation view is open for a playlist
+**When** I click the playlist name in the header
+**Then** the name becomes an inline `<sl-input>` pre-filled with the current name.
+**And** Save and Cancel affordances appear alongside the input.
+
+**Given** the inline name input is open
+**When** I edit the name and click Save
+**Then** `playlist.rename({ playlistId, name: newName })` is called.
+**And** the header title updates to the new name.
+**And** the input is dismissed.
+
+**Given** the inline name input is open
+**When** I press Escape or click Cancel
+**Then** the input is dismissed with no RPC call.
+
+**Given** the active provider supports playlist write
+**When** the curation view renders
+**Then** a delete icon-button (trash) is visible in the header.
+
+**Given** I click the delete icon-button
+**Then** an `<sl-dialog>` opens showing the playlist name and asking for confirmation.
+
+**Given** the confirmation dialog is open and I confirm
+**Then** `playlist.delete({ playlistId })` is called.
+**And** the UI navigates back to the playlist browser.
+
+**Given** the confirmation dialog is open and I cancel
+**Then** the dialog closes with no RPC call.
+
+**Given** the active provider does not support playlist write
+**Then** the delete icon-button is hidden.
+
+**Technical Notes:**
+- `rename_playlist(id, new_name)` is a new method on the `MediaProvider` trait in `providers/mod.rs`.
+- JellyfinProvider: 2-step — `GET /Users/{uid}/Items/{id}` to fetch current item JSON, update `Name`, then `POST /Items/{id}` with the full body.
+- SubsonicProvider: single-step — `GET /rest/updatePlaylist.view?playlistId={id}&name={encoded_name}`.
+- Daemon: new `playlist.rename({ playlistId, name })` RPC handler calling `provider.rename_playlist`.
+- Frontend: editable name state in `PlaylistCurationView.ts`; delete affordance reuses the existing `sl-dialog` pattern from Story 11.5's "Save as playlist" flow.
+- `playlist.delete` RPC from Story 11.4 is reused unchanged.
+- New i18n keys: `playlist.curation.rename_save`, `playlist.curation.rename_cancel`, `playlist.curation.delete_title`, `playlist.curation.delete_body`, `playlist.curation.delete_confirm`, `playlist.curation.delete_cancel_btn`.
+
+### Story 11.9: MediaProvider Reorder Contract — Trait, Adapters & RPC
+
+As a Ritualist (Arthur),
+I want the daemon to reorder tracks in a server playlist,
+So that my curated playlist plays in the sequence I intend.
+
+**Acceptance Criteria:**
+
+**Given** the active provider supports playlist write
+**When** `reorder_playlist(playlist_id, ordered_track_ids)` is called
+**Then** the playlist's tracks are set to exactly that order (same track set, only the sequence changes).
+
+**Given** a Jellyfin provider
+**When** `reorder_playlist` is called
+**Then** current playlist entries are fetched, and `POST /Playlists/{id}/Items/{playlistItemId}/Move/{index}` is issued per out-of-place entry until the playlist matches `ordered_track_ids`.
+**And** no entries are removed or re-created (item identity is preserved).
+
+**Given** a Subsonic/OpenSubsonic provider
+**When** `reorder_playlist` is called
+**Then** `createPlaylist?playlistId={id}&songId=…` is issued with the song IDs in the requested order, replacing the playlist contents in that order.
+
+**Given** a provider that does not support playlist write
+**When** `reorder_playlist` is called
+**Then** `ProviderError::NotSupported` is returned.
+
+**Given** the daemon receives `playlist.reorder({ playlistId, trackIds })`
+**Then** it verifies `supports_playlist_write`, calls `reorder_playlist`, and returns success; capability-absent requests are rejected.
+
+**Technical Notes:**
+- New `reorder_playlist` method on `MediaProvider` (`providers/mod.rs`); default impl returns `NotSupported`.
+- Jellyfin (`providers/jellyfin.rs`): reuse `get_playlist_items` to map track_id→PlaylistItemId; selection-sort with Items/Move. Move count is O(n); acceptable for typical playlist sizes.
+- Subsonic (`providers/subsonic.rs`): new client call sending `createPlaylist` with existing `playlistId` + ordered `songId` params.
+- Daemon RPC (`rpc.rs`): `"playlist.reorder" => handle_playlist_reorder`; params `{ playlistId, trackIds }`.
+- Reuses existing `supports_playlist_write` capability — no new capability flag.
+- Tests: order-set correctness for both adapters + `NotSupported` path.
+
+### Story 11.10: Curation View — Complete Track List, Order Numbers & Reorder
+
+As a Ritualist (Arthur),
+I want to see my whole playlist in order and nudge tracks up or down,
+So that I can fine-tune track sequence directly in the editor.
+
+**Acceptance Criteria:**
+
+**Given** the curation view is open
+**When** the artist panel renders
+**Then** an "All artists" entry appears at the top; selecting it shows every playlist track in the track panel, in playlist order.
+**And** an "All albums" entry lets a selected artist's tracks all show together.
+
+**Given** the track panel renders
+**Then** each track row shows its absolute 1-based position (#N) in the full playlist, regardless of any active artist/album filter.
+
+**Given** the active provider supports playlist write
+**When** the track panel renders
+**Then** each row shows up (↑) and down (↓) controls; ↑ is disabled on the first visible row and ↓ on the last visible row.
+
+**Given** I click ↑ or ↓ on a track
+**Then** it swaps playlist position with the previous/next currently-visible track.
+**And** the change is applied optimistically and persisted via `playlist.reorder` with the full reordered track-id list.
+**And** the #N order numbers update to reflect the new sequence.
+
+**Given** the reorder RPC fails
+**Then** an inline error is shown and the prior order is restored.
+
+**Given** the provider does not support playlist write
+**Then** the up/down controls are hidden (order numbers still shown).
+
+**Technical Notes:**
+- `PlaylistCurationView.ts`: allow `selectedArtist = null` ("All"); precompute id→index map for #N; ↑/↓ swap within `getTracksForPanel()` neighbors against full `this.tracks`; `isReordering` guard; reuse `#curation-error` + optimistic-update pattern from `doRemove`.
+- New i18n keys: `playlist.curation.all_artists`, `playlist.curation.all_albums`, `playlist.curation.move_up`, `playlist.curation.move_down` (× en/fr/es).
+- New rpc.ts helper or direct `rpcCall('playlist.reorder', …)`.
