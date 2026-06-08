@@ -160,6 +160,7 @@ export class TracksBrowseView {
         const startIndex = this.artistState.startIndex;
 
         if (reset) this.renderArtistPanel();
+        else this.appendPanelSpinner('#tracks-artist-panel');
 
         try {
             const result = await fetchBrowseArtists(
@@ -199,6 +200,7 @@ export class TracksBrowseView {
         const startIndex = this.albumState.startIndex;
 
         if (reset) this.renderAlbumPanel();
+        else this.appendPanelSpinner('#tracks-album-panel');
 
         try {
             if (this.selectedArtistId !== null) {
@@ -246,6 +248,7 @@ export class TracksBrowseView {
         const startIndex = this.trackState.startIndex;
 
         if (reset) this.renderTrackPanel();
+        else this.appendPanelSpinner('#tracks-track-panel');
 
         try {
             const result = await fetchBrowseTracks({
@@ -596,6 +599,12 @@ export class TracksBrowseView {
         el.style.cssText = 'text-align:center; padding:0.75rem;';
         el.innerHTML = '<sl-spinner></sl-spinner>';
         return el;
+    }
+
+    private appendPanelSpinner(selector: string): void {
+        const panel = this.container.querySelector<HTMLElement>(selector);
+        if (!panel || panel.querySelector('.tracks-spinner')) return;
+        panel.appendChild(this.buildSpinner());
     }
 
     private showPanelError(selector: string, err: Error): void {
