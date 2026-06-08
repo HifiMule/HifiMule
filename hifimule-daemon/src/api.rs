@@ -1761,8 +1761,8 @@ impl CredentialManager {
             }
             let json = crate::vault::decrypt_file(&path, VAULT_APP_SALT)
                 .map_err(|e| anyhow!("Failed to decrypt secrets vault: {}", e))?;
-            return serde_json::from_str(&json)
-                .map_err(|e| anyhow!("Failed to parse secrets blob: {}", e));
+            serde_json::from_str(&json)
+                .map_err(|e| anyhow!("Failed to parse secrets blob: {}", e))
         }
         #[cfg(test)]
         {
@@ -1776,8 +1776,8 @@ impl CredentialManager {
         {
             let path = Self::get_vault_path()?;
             let json = serde_json::to_string(secrets)?;
-            return crate::vault::encrypt_file(&path, &json, VAULT_APP_SALT)
-                .map_err(|e| anyhow!("Failed to save secrets vault: {}", e));
+            crate::vault::encrypt_file(&path, &json, VAULT_APP_SALT)
+                .map_err(|e| anyhow!("Failed to save secrets vault: {}", e))
         }
         #[cfg(test)]
         {
@@ -1870,12 +1870,12 @@ impl CredentialManager {
 
         #[cfg(not(test))]
         {
-            if let Ok(vault_path) = Self::get_vault_path() {
-                if vault_path.exists() {
-                    fs::remove_file(&vault_path)
-                        .map_err(|e| anyhow!("Failed to remove vault file: {}", e))?;
-                }
-            }
+            if let Ok(vault_path) = Self::get_vault_path()
+            && vault_path.exists()
+        {
+            fs::remove_file(&vault_path)
+                .map_err(|e| anyhow!("Failed to remove vault file: {}", e))?;
+        }
         }
 
         #[cfg(test)]

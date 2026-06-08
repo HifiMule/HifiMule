@@ -439,35 +439,32 @@ pub async fn probe_url(url: &str) -> ServerType {
 
     // Subsonic returns its JSON envelope even for unauthenticated requests
     let subsonic_url = format!("{}/rest/ping.view?v=1.16.1&c=hifimule-probe&f=json", base);
-    if let Ok(resp) = client.get(&subsonic_url).send().await {
-        if let Ok(text) = resp.text().await {
-            if text.contains("subsonic-response") {
-                let open_subsonic = serde_json::from_str::<serde_json::Value>(&text)
-                    .ok()
-                    .and_then(|json| {
-                        json.pointer("/subsonic-response/openSubsonic")
-                            .and_then(|v| v.as_bool())
-                    })
-                    .unwrap_or(false);
-                return if open_subsonic {
-                    ServerType::OpenSubsonic
-                } else {
-                    ServerType::Subsonic
-                };
-            }
-        }
+    if let Ok(resp) = client.get(&subsonic_url).send().await
+        && let Ok(text) = resp.text().await
+        && text.contains("subsonic-response")
+    {
+        let open_subsonic = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|json| {
+                json.pointer("/subsonic-response/openSubsonic")
+                    .and_then(|v| v.as_bool())
+            })
+            .unwrap_or(false);
+        return if open_subsonic {
+            ServerType::OpenSubsonic
+        } else {
+            ServerType::Subsonic
+        };
     }
 
     // Jellyfin's public info endpoint requires no authentication
     let jellyfin_url = format!("{}/System/Info/Public", base);
-    if let Ok(resp) = client.get(&jellyfin_url).send().await {
-        if resp.status().is_success() {
-            if let Ok(text) = resp.text().await {
-                if text.contains("\"ServerName\"") || text.contains("\"Version\"") {
-                    return ServerType::Jellyfin;
-                }
-            }
-        }
+    if let Ok(resp) = client.get(&jellyfin_url).send().await
+        && resp.status().is_success()
+        && let Ok(text) = resp.text().await
+        && (text.contains("\"ServerName\"") || text.contains("\"Version\""))
+    {
+        return ServerType::Jellyfin;
     }
 
     ServerType::Unknown

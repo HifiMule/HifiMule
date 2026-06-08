@@ -26,10 +26,10 @@ pub fn log_to_file(msg: &str) {
     if let Ok(dir) = paths::get_app_data_dir() {
         let log_path = dir.join("daemon.log");
         // Truncate if over 1 MB
-        if let Ok(meta) = std::fs::metadata(&log_path) {
-            if meta.len() > LOG_MAX_BYTES {
-                let _ = std::fs::write(&log_path, "--- log truncated ---\n");
-            }
+        if let Ok(meta) = std::fs::metadata(&log_path)
+            && meta.len() > LOG_MAX_BYTES
+        {
+            let _ = std::fs::write(&log_path, "--- log truncated ---\n");
         }
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -162,11 +162,11 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
 
             // Seed default device-profiles.json if not present
             let profiles_default = include_bytes!("../assets/device-profiles.json");
-            if let Ok(profiles_path) = crate::paths::get_device_profiles_path() {
-                if let Err(e) = crate::transcoding::ensure_profiles_file_exists(&profiles_path, profiles_default) {
-                    daemon_log!("Warning: Failed to seed device-profiles.json: {}", e);
-                    // Non-fatal — transcoding will be unavailable until the file exists
-                }
+            if let Ok(profiles_path) = crate::paths::get_device_profiles_path()
+                && let Err(e) = crate::transcoding::ensure_profiles_file_exists(&profiles_path, profiles_default)
+            {
+                daemon_log!("Warning: Failed to seed device-profiles.json: {}", e);
+                // Non-fatal — transcoding will be unavailable until the file exists
             }
 
             // Initial state
@@ -344,7 +344,7 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                                         som_events.update_operation(&op.id.clone(), op).await;
                                     }
                                 }
-                                let _ = tokio::task::spawn_blocking(|| {
+                                drop(tokio::task::spawn_blocking(|| {
                                     if let Err(e) = notify_rust::Notification::new()
                                         .summary(&hifimule_i18n::t("app.name"))
                                         .body(&hifimule_i18n::t(
@@ -354,7 +354,7 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                                     {
                                         daemon_log!("[AutoSync] Notification failed: {}", e);
                                     }
-                                });
+                                }));
                                 let _ = state_tx_clone.send(DaemonState::Error);
                             } else {
                                 let _ = state_tx_clone.send(DaemonState::Idle);
@@ -441,39 +441,39 @@ fn run_interactive() -> Result<()> {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250));
 
         // Handle state updates from tokio thread
-        if let Ok(state) = state_rx.try_recv() {
-            if let Some(ref mut tray) = tray_icon {
-                match state {
-                    DaemonState::Idle => {
-                        let _ = tray.set_tooltip(Some(&hifimule_i18n::t("tray.tooltip.idle")));
-                        let _ = tray.set_icon(Some((*icon_idle).clone()));
-                    }
-                    DaemonState::Syncing => {
-                        let _ = tray.set_tooltip(Some(&hifimule_i18n::t("tray.tooltip.syncing")));
-                        let _ = tray.set_icon(Some((*icon_syncing).clone()));
-                    }
-                    DaemonState::Scanning => {
-                        let _ = tray.set_tooltip(Some(&hifimule_i18n::t("tray.tooltip.scanning")));
-                        let _ = tray.set_icon(Some((*icon_syncing).clone()));
-                    }
-                    DaemonState::DeviceFound(name) => {
-                        let _ = tray.set_tooltip(Some(&hifimule_i18n::tf(
-                            "tray.tooltip.found",
-                            &[("name", &name)],
-                        )));
-                        let _ = tray.set_icon(Some((*icon_syncing).clone()));
-                    }
-                    DaemonState::DeviceRecognized { name, profile_id } => {
-                        let _ = tray.set_tooltip(Some(&hifimule_i18n::tf(
-                            "tray.tooltip.recognized",
-                            &[("name", &name), ("profile", &profile_id)],
-                        )));
-                        let _ = tray.set_icon(Some((*icon_syncing).clone()));
-                    }
-                    DaemonState::Error => {
-                        let _ = tray.set_tooltip(Some(&hifimule_i18n::t("tray.tooltip.error")));
-                        let _ = tray.set_icon(Some((*icon_error).clone()));
-                    }
+        if let Ok(state) = state_rx.try_recv()
+            && let Some(ref mut tray) = tray_icon
+        {
+            match state {
+                DaemonState::Idle => {
+                    let _ = tray.set_tooltip(Some(&hifimule_i18n::t("tray.tooltip.idle")));
+                    let _ = tray.set_icon(Some((*icon_idle).clone()));
+                }
+                DaemonState::Syncing => {
+                    let _ = tray.set_tooltip(Some(&hifimule_i18n::t("tray.tooltip.syncing")));
+                    let _ = tray.set_icon(Some((*icon_syncing).clone()));
+                }
+                DaemonState::Scanning => {
+                    let _ = tray.set_tooltip(Some(&hifimule_i18n::t("tray.tooltip.scanning")));
+                    let _ = tray.set_icon(Some((*icon_syncing).clone()));
+                }
+                DaemonState::DeviceFound(name) => {
+                    let _ = tray.set_tooltip(Some(&hifimule_i18n::tf(
+                        "tray.tooltip.found",
+                        &[("name", &name)],
+                    )));
+                    let _ = tray.set_icon(Some((*icon_syncing).clone()));
+                }
+                DaemonState::DeviceRecognized { name, profile_id } => {
+                    let _ = tray.set_tooltip(Some(&hifimule_i18n::tf(
+                        "tray.tooltip.recognized",
+                        &[("name", &name), ("profile", &profile_id)],
+                    )));
+                    let _ = tray.set_icon(Some((*icon_syncing).clone()));
+                }
+                DaemonState::Error => {
+                    let _ = tray.set_tooltip(Some(&hifimule_i18n::t("tray.tooltip.error")));
+                    let _ = tray.set_icon(Some((*icon_error).clone()));
                 }
             }
         }
@@ -746,7 +746,7 @@ async fn run_auto_sync(
                 }
                 Err(e) => {
                     daemon_log!("[AutoSync] Failed to fetch items from Jellyfin: {}", e);
-                    return Err(e.into());
+                    return Err(e);
                 }
             }
         }
@@ -877,7 +877,7 @@ async fn run_auto_sync(
 
             if errors.is_empty() {
                 daemon_log!("[AutoSync] Sync completed successfully");
-                let _ = tokio::task::spawn_blocking(|| {
+                drop(tokio::task::spawn_blocking(|| {
                     if let Err(e) = notify_rust::Notification::new()
                         .summary(&hifimule_i18n::t("app.name"))
                         .body(&hifimule_i18n::t("notification.sync_complete_safe"))
@@ -885,12 +885,12 @@ async fn run_auto_sync(
                     {
                         daemon_log!("[AutoSync] Notification failed: {}", e);
                     }
-                });
+                }));
                 let _ = state_tx.send(DaemonState::Idle);
             } else {
                 daemon_log!("[AutoSync] Sync completed with {} errors", errors.len());
                 let error_msg = format!("Sync completed with {} error(s)", errors.len());
-                let _ = tokio::task::spawn_blocking(move || {
+                drop(tokio::task::spawn_blocking(move || {
                     if let Err(e) = notify_rust::Notification::new()
                         .summary("HifiMule")
                         .body(&error_msg)
@@ -898,7 +898,7 @@ async fn run_auto_sync(
                     {
                         daemon_log!("[AutoSync] Notification failed: {}", e);
                     }
-                });
+                }));
                 let _ = state_tx.send(DaemonState::Error);
             }
         }
@@ -918,7 +918,7 @@ async fn run_auto_sync(
             }
 
             let error_msg = format!("Sync failed: {}", e);
-            let _ = tokio::task::spawn_blocking(move || {
+            drop(tokio::task::spawn_blocking(move || {
                 if let Err(e) = notify_rust::Notification::new()
                     .summary("HifiMule")
                     .body(&error_msg)
@@ -926,7 +926,7 @@ async fn run_auto_sync(
                 {
                     daemon_log!("[AutoSync] Notification failed: {}", e);
                 }
-            });
+            }));
             let _ = state_tx.send(DaemonState::Error);
         }
     }
@@ -1068,10 +1068,10 @@ async fn get_non_jellyfin_provider(
     let candidates: Vec<String> = {
         let mut out = Vec::new();
         for alias in [config.server_type.as_str(), "openSubsonic", "subsonic"] {
-            if let Ok(secret) = api::CredentialManager::get_server_secret(alias) {
-                if !out.contains(&secret) {
-                    out.push(secret);
-                }
+            if let Ok(secret) = api::CredentialManager::get_server_secret(alias)
+                && !out.contains(&secret)
+            {
+                out.push(secret);
             }
         }
         out
@@ -1328,7 +1328,7 @@ async fn run_auto_sync_via_provider(
 
             if errors.is_empty() {
                 daemon_log!("[AutoSync] Sync completed successfully");
-                let _ = tokio::task::spawn_blocking(|| {
+                drop(tokio::task::spawn_blocking(|| {
                     if let Err(e) = notify_rust::Notification::new()
                         .summary(&hifimule_i18n::t("app.name"))
                         .body(&hifimule_i18n::t("notification.sync_complete_safe"))
@@ -1336,12 +1336,12 @@ async fn run_auto_sync_via_provider(
                     {
                         daemon_log!("[AutoSync] Notification failed: {}", e);
                     }
-                });
+                }));
                 let _ = state_tx.send(DaemonState::Idle);
             } else {
                 daemon_log!("[AutoSync] Sync completed with {} errors", errors.len());
                 let error_msg = format!("Sync completed with {} error(s)", errors.len());
-                let _ = tokio::task::spawn_blocking(move || {
+                drop(tokio::task::spawn_blocking(move || {
                     if let Err(e) = notify_rust::Notification::new()
                         .summary("HifiMule")
                         .body(&error_msg)
@@ -1349,7 +1349,7 @@ async fn run_auto_sync_via_provider(
                     {
                         daemon_log!("[AutoSync] Notification failed: {}", e);
                     }
-                });
+                }));
                 let _ = state_tx.send(DaemonState::Error);
             }
         }
@@ -1367,7 +1367,7 @@ async fn run_auto_sync_via_provider(
                     .await;
             }
             let error_msg = format!("Sync failed: {}", e);
-            let _ = tokio::task::spawn_blocking(move || {
+            drop(tokio::task::spawn_blocking(move || {
                 if let Err(e) = notify_rust::Notification::new()
                     .summary("HifiMule")
                     .body(&error_msg)
@@ -1375,7 +1375,7 @@ async fn run_auto_sync_via_provider(
                 {
                     daemon_log!("[AutoSync] Notification failed: {}", e);
                 }
-            });
+            }));
             let _ = state_tx.send(DaemonState::Error);
         }
     }

@@ -245,10 +245,10 @@ impl MediaProvider for SubsonicProvider {
             .index
             .into_iter()
             .filter(|idx| {
-                letter.map_or(true, |l| {
+                letter.is_none_or(|l| {
                     idx.name
                         .as_deref()
-                        .map_or(false, |n| n.eq_ignore_ascii_case(l))
+                        .is_some_and(|n| n.eq_ignore_ascii_case(l))
                 })
             })
             .flat_map(|idx| idx.artist)
@@ -839,7 +839,7 @@ fn apply_letter_filter(songs: Vec<Song>, letter: Option<&str>) -> Vec<Song> {
                 s.title
                     .chars()
                     .find(|c| !c.is_whitespace())
-                    .map_or(true, |c| !c.is_ascii_alphabetic())
+                    .is_none_or(|c| !c.is_ascii_alphabetic())
             })
             .collect();
     }
@@ -853,7 +853,7 @@ fn apply_letter_filter(songs: Vec<Song>, letter: Option<&str>) -> Vec<Song> {
             s.title
                 .chars()
                 .find(|c| !c.is_whitespace())
-                .map_or(false, |c| c.eq_ignore_ascii_case(&expected))
+                .is_some_and(|c| c.eq_ignore_ascii_case(&expected))
         })
         .collect()
 }

@@ -114,10 +114,10 @@ fn get_subsonic_server_secret_candidates(preferred_server_type: &str) -> Vec<Str
 
     let mut secrets = Vec::new();
     for alias in aliases {
-        if let Ok(secret) = CredentialManager::get_server_secret(alias) {
-            if !secrets.contains(&secret) {
-                secrets.push(secret);
-            }
+        if let Ok(secret) = CredentialManager::get_server_secret(alias)
+            && !secrets.contains(&secret)
+        {
+            secrets.push(secret);
         }
     }
     secrets
@@ -1710,10 +1710,10 @@ async fn check_server_connection_cached(state: &AppState) -> bool {
     let mut cache = state.last_connection_check.lock().await;
 
     // Check if we have a recent cached result
-    if let Some((timestamp, result)) = *cache {
-        if timestamp.elapsed().as_secs() < CACHE_DURATION_SECS {
-            return result;
-        }
+    if let Some((timestamp, result)) = *cache
+        && timestamp.elapsed().as_secs() < CACHE_DURATION_SECS
+    {
+        return result;
     }
 
     // Perform actual connection check
@@ -1857,7 +1857,7 @@ async fn provider_legacy_item_size(
         let total = album
             .tracks
             .iter()
-            .map(|track| provider_track_size(track))
+            .map(provider_track_size)
             .sum::<u64>();
         return Ok(serde_json::json!({
             "id": item_id,
@@ -1868,7 +1868,7 @@ async fn provider_legacy_item_size(
         let total = playlist
             .tracks
             .iter()
-            .map(|track| provider_track_size(track))
+            .map(provider_track_size)
             .sum::<u64>();
         return Ok(serde_json::json!({
             "id": item_id,
@@ -1882,7 +1882,7 @@ async fn provider_legacy_item_size(
                 total += album
                     .tracks
                     .iter()
-                    .map(|track| provider_track_size(track))
+                    .map(provider_track_size)
                     .sum::<u64>();
             }
         }
@@ -1894,7 +1894,7 @@ async fn provider_legacy_item_size(
     if let Ok((tracks, _)) = provider.get_genre_tracks(item_id, 0, 10_000).await {
         let total = tracks
             .iter()
-            .map(|track| provider_track_size(track))
+            .map(provider_track_size)
             .sum::<u64>();
         return Ok(serde_json::json!({
             "id": item_id,
@@ -2260,7 +2260,7 @@ async fn provider_calculate_delta(
         } else {
             let synced_bytes: u64 = manifest.synced_items.iter().map(|s| s.size_bytes).sum();
             let basket_size: u64 = desired_items.iter().map(|i| i.size_bytes).sum();
-            let budget = match _state.device_manager.get_device_storage().await {
+            match _state.device_manager.get_device_storage().await {
                 Some(info) => {
                     crate::daemon_log!(
                         "[AutoFill] no maxBytes from UI — server fallback: free={} synced={} basket_est={} -> budget={}",
@@ -2282,8 +2282,7 @@ async fn provider_calculate_delta(
                         data: None,
                     });
                 }
-            };
-            budget
+            }
         };
         crate::daemon_log!(
             "[AutoFill] basket_items={} desired_items={} auto_fill_budget={} bytes",
@@ -2609,8 +2608,7 @@ async fn provider_items_response(
             .iter()
             .map(legacy_playlist_item)
             .collect::<Vec<_>>()
-    } else {
-        let id = parent_id.unwrap();
+    } else if let Some(id) = parent_id {
         if let Ok(artist) = provider.get_artist(id).await {
             artist
                 .albums
@@ -2636,6 +2634,8 @@ async fn provider_items_response(
                 data: None,
             });
         }
+    } else {
+        vec![]
     };
     items = apply_name_filter(items, name_starts_with, name_less_than);
     Ok(paginate_values(items, start_index, limit))
@@ -3372,68 +3372,68 @@ async fn handle_sync_calculate_delta(
 
     // Auto-fill expansion (Story 3.8): if the basket contained an auto-fill slot,
     // run the priority algorithm now and merge results with manual items.
-    if let Some(af) = params.get("autoFill") {
-        if af["enabled"].as_bool().unwrap_or(false) {
-            let max_fill_bytes = if let Some(mb) = af["maxBytes"].as_u64() {
-                mb
-            } else {
-                match state.device_manager.get_device_storage().await {
-                    Some(info) => info.free_bytes,
-                    None => {
-                        return Err(JsonRpcError {
-                            code: ERR_CONNECTION_FAILED,
-                            message: "Auto-fill: could not determine device free space".to_string(),
-                            data: None,
-                        });
-                    }
-                }
-            };
-            let exclude_ids: Vec<String> = af["excludeItemIds"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let expanded_excludes = expand_exclude_ids(&state.jellyfin_client, exclude_ids).await;
-            let fill_params = crate::auto_fill::AutoFillParams {
-                exclude_item_ids: expanded_excludes,
-                max_fill_bytes,
-            };
-            match crate::auto_fill::run_auto_fill(&state.jellyfin_client, fill_params).await {
-                Ok(af_items) => {
-                    let af_total_bytes: u64 = af_items.iter().map(|i| i.size_bytes).sum();
-                    crate::daemon_log!(
-                        "[AutoFill] Pagination complete: {} tracks, {} MB",
-                        af_items.len(),
-                        af_total_bytes / 1_048_576,
-                    );
-                    for item in af_items {
-                        if seen_ids.insert(item.id.clone()) {
-                            desired_items.push(crate::sync::DesiredItem {
-                                jellyfin_id: item.id,
-                                name: item.name,
-                                album: item.album,
-                                artist: item.artist,
-                                size_bytes: item.size_bytes,
-                                etag: None,
-                                provider_album_id: None,
-                                provider_content_type: item.provider_content_type,
-                                provider_suffix: item.provider_suffix,
-                                original_bitrate: None,
-                                track_number: None,
-                            });
-                        }
-                    }
-                }
-                Err(e) => {
+    if let Some(af) = params.get("autoFill")
+        && af["enabled"].as_bool().unwrap_or(false)
+    {
+        let max_fill_bytes = if let Some(mb) = af["maxBytes"].as_u64() {
+            mb
+        } else {
+            match state.device_manager.get_device_storage().await {
+                Some(info) => info.free_bytes,
+                None => {
                     return Err(JsonRpcError {
                         code: ERR_CONNECTION_FAILED,
-                        message: format!("Auto-fill expansion failed at sync time: {}", e),
+                        message: "Auto-fill: could not determine device free space".to_string(),
                         data: None,
                     });
                 }
+            }
+        };
+        let exclude_ids: Vec<String> = af["excludeItemIds"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let expanded_excludes = expand_exclude_ids(&state.jellyfin_client, exclude_ids).await;
+        let fill_params = crate::auto_fill::AutoFillParams {
+            exclude_item_ids: expanded_excludes,
+            max_fill_bytes,
+        };
+        match crate::auto_fill::run_auto_fill(&state.jellyfin_client, fill_params).await {
+            Ok(af_items) => {
+                let af_total_bytes: u64 = af_items.iter().map(|i| i.size_bytes).sum();
+                crate::daemon_log!(
+                    "[AutoFill] Pagination complete: {} tracks, {} MB",
+                    af_items.len(),
+                    af_total_bytes / 1_048_576,
+                );
+                for item in af_items {
+                    if seen_ids.insert(item.id.clone()) {
+                        desired_items.push(crate::sync::DesiredItem {
+                            jellyfin_id: item.id,
+                            name: item.name,
+                            album: item.album,
+                            artist: item.artist,
+                            size_bytes: item.size_bytes,
+                            etag: None,
+                            provider_album_id: None,
+                            provider_content_type: item.provider_content_type,
+                            provider_suffix: item.provider_suffix,
+                            original_bitrate: None,
+                            track_number: None,
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(JsonRpcError {
+                    code: ERR_CONNECTION_FAILED,
+                    message: format!("Auto-fill expansion failed at sync time: {}", e),
+                    data: None,
+                });
             }
         }
     }
@@ -3491,7 +3491,7 @@ async fn handle_sync_detect_changes(
         message: "Missing params".to_string(),
         data: None,
     })?;
-    if !params.is_object() || !params.get("syncToken").is_some() {
+    if !params.is_object() || params.get("syncToken").is_none() {
         return Err(JsonRpcError {
             code: ERR_INVALID_PARAMS,
             message: "Missing syncToken".to_string(),
@@ -3836,7 +3836,7 @@ async fn handle_sync_execute(
                         op_manager.update_operation(&op_id, operation).await;
                     }
                     if errors.is_empty() {
-                        let _ = tokio::task::spawn_blocking(send_sync_complete_notification);
+                        drop(tokio::task::spawn_blocking(send_sync_complete_notification));
                     }
                     let _ = state_tx.send(crate::DaemonState::Idle);
                 }
@@ -3968,7 +3968,7 @@ async fn handle_sync_execute(
                     // JoinHandle intentionally dropped: fire-and-forget per AC #4.
                     // Err(e) path inside the function logs the failure; panics are silently
                     // absorbed, which is acceptable for a best-effort OS notification.
-                    let _ = tokio::task::spawn_blocking(send_sync_complete_notification);
+                    drop(tokio::task::spawn_blocking(send_sync_complete_notification));
                 }
                 let _ = state_tx.send(crate::DaemonState::Idle);
             }
@@ -4372,14 +4372,14 @@ fn validate_device_name_and_icon(
             });
         }
     }
-    if let Some(icon) = icon.filter(|icon| !icon.is_empty()) {
-        if !VALID_DEVICE_ICONS.contains(&icon) {
-            return Err(JsonRpcError {
-                code: ERR_INVALID_PARAMS,
-                message: format!("Invalid icon '{}'", icon),
-                data: None,
-            });
-        }
+    if let Some(icon) = icon.filter(|icon| !icon.is_empty())
+        && !VALID_DEVICE_ICONS.contains(&icon)
+    {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: format!("Invalid icon '{}'", icon),
+            data: None,
+        });
     }
     Ok(())
 }
@@ -4506,11 +4506,11 @@ fn apply_manifest_settings_update(
             old_playlist.as_deref(),
             new_playlist.as_deref(),
         );
-        if playlist_changed {
-            if let Some(old_playlist) = old_playlist.as_deref() {
-                for entry in &mut manifest.playlists {
-                    entry.filename = playlist_filename_with_folder(old_playlist, &entry.filename);
-                }
+        if playlist_changed
+            && let Some(old_playlist) = old_playlist.as_deref()
+        {
+            for entry in &mut manifest.playlists {
+                entry.filename = playlist_filename_with_folder(old_playlist, &entry.filename);
             }
         }
     }
@@ -4867,20 +4867,20 @@ async fn handle_device_set_auto_sync_on_connect(
 
     // Update device manifest on disk (if this device is currently connected)
     let current_device = state.device_manager.get_current_device().await;
-    if let Some(ref d) = current_device {
-        if d.device_id == device_id {
-            state
-                .device_manager
-                .update_manifest(|m| {
-                    m.auto_sync_on_connect = enabled;
-                })
-                .await
-                .map_err(|e| JsonRpcError {
-                    code: ERR_STORAGE_ERROR,
-                    message: format!("Failed to update manifest: {}", e),
-                    data: None,
-                })?;
-        }
+    if let Some(ref d) = current_device
+        && d.device_id == device_id
+    {
+        state
+            .device_manager
+            .update_manifest(|m| {
+                m.auto_sync_on_connect = enabled;
+            })
+            .await
+            .map_err(|e| JsonRpcError {
+                code: ERR_STORAGE_ERROR,
+                message: format!("Failed to update manifest: {}", e),
+                data: None,
+            })?;
     }
 
     Ok(serde_json::json!({
