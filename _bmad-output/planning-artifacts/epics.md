@@ -1926,11 +1926,45 @@ So that I can scan libraries of thousands of items quickly without waiting for p
 **Technical Notes:**
 - Implement windowed/virtualized rendering with autoload-on-scroll: render immediately with the loaded page; fetch the next page (200 items) when the user scrolls within 5 rows of the loaded boundary.
 - The scroller element height is set to `state.pagination.total × VIRTUAL_ROW_HEIGHT` from the start so the scrollbar reflects the full expected size; height is updated as the total is refined by responses.
-- View mode (grid vs list) is stored in local UI state per browse mode.
+- View mode (grid vs list) is stored in local UI state per browse mode. **Note: superseded by Story 9.8** — the toggle is now a single global value.
 - A–Z is a server-side filter in both grid and list view. There is no client-side scroll-to-letter behavior.
 - When an A–Z letter filter is active in list view, autoload-on-scroll is suppressed (the filtered set is already complete).
 - No new daemon RPCs or basket entity types; this is a pure UI rendering concern.
 - Both views share the same data model from the existing `browse.*` RPC layer.
+
+### Story 9.8: Extend Grid/Table Toggle to All Browse Modes and Drill-Down Levels
+
+As a Ritualist (Arthur),
+I want the grid/table toggle to work on every browse page and drill-down level,
+So that I can use my preferred view mode consistently across all library content — not just at the Artists/Albums root.
+
+**Acceptance Criteria:**
+
+**Given** any browse mode is active (artists, albums, playlists, genres, recentlyAdded, frequentlyPlayed, recentlyPlayed, favorites)
+**When** the browse area renders
+**Then** the view toggle (grid/list) is always visible in the browse-mode bar.
+
+**Given** I am drilled into a sub-level (e.g., albums within an artist, tracks within an album)
+**When** the sub-level content renders
+**Then** the view toggle remains visible and the active mode (grid or list) applies.
+
+**Given** I toggle to list view
+**When** I switch browse mode or navigate into/out of a sub-level
+**Then** the global toggle state is preserved — all levels and modes use the same grid/list preference.
+
+**Given** list view is active
+**When** I click a sub-level item (album row drills to tracks; track row adds to basket)
+**Then** drill-down and basket-add behaviors are identical to grid view.
+
+**Given** list view is active on a mode without autoload (playlists, genres, history/favorites, or any sub-level with breadcrumbs)
+**Then** the list renders what is currently loaded; autoload-on-scroll is not triggered (that behavior remains exclusive to artists/albums root).
+
+**Technical Notes:**
+- Remove the `(state.browseMode === 'artists' || state.browseMode === 'albums') && state.breadcrumbStack.length === 0` guard from `renderViewToggle()` in `library.ts:593–596`.
+- Remove the matching mode+breadcrumb guard from `renderCurrentView()` at `library.ts:823–826`.
+- No state structure change needed: `state.listViewMode` is already a single global value.
+- `loadMoreForListView` continues to operate only for artists/albums root; the `rootMode` variable in `renderList()` already returns `null` for other modes/levels, which suppresses autoload — no change needed there.
+- No new daemon RPCs; pure UI rendering concern.
 
 ## Epic 10: Device Configuration Editing
 

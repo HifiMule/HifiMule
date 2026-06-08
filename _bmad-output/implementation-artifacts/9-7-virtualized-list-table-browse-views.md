@@ -79,7 +79,7 @@ So that I can scan libraries of thousands of items quickly without waiting for p
   - [ ] Manually verify: clicking artist in list view drills down to albums grid (or list if albums view mode is list).
   - [ ] Manually verify: basket-add button in list row adds/removes item (visual update when store changes).
   - [ ] Manually verify: toggle between grid and list — no re-fetch, instant switch.
-  - [ ] Manually verify: toggle is hidden when drilled into artist albums.
+  - [ ] ~~Manually verify: toggle is hidden when drilled into artist albums.~~ **Superseded by Story 9.8** — toggle is now global and visible at all levels.
   - [ ] Manually verify: Albums list view works identically to Artists list view.
 
 ### Review Findings
