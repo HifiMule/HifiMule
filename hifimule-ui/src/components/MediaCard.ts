@@ -54,6 +54,9 @@ export class MediaCard {
 
         const card = document.createElement('sl-card');
         card.className = 'media-card';
+        // Identifies the card for the grid's single delegated basket listener
+        // (see MediaCard.refreshSelection). Avoids a per-card store subscription.
+        card.dataset.basketId = itemId;
         if (isSynced) card.classList.add('synced');
 
         const isSelected = basketStore.has(itemId);
@@ -240,17 +243,10 @@ export class MediaCard {
             });
         }
 
-        // Listen for store updates to update visual state locally
-        basketStore.addEventListener('update', () => {
-            const selected = basketStore.has(itemId);
-            card.classList.toggle('is-selected', selected);
-            if (showSelection) {
-                const btn = card.querySelector('.basket-toggle-btn') as any;
-                if (btn) {
-                    btn.name = selected ? 'dash-circle-fill' : 'plus-circle-fill';
-                }
-            }
-        });
+        // Selection state is synced by MediaCard.refreshSelection, driven by a
+        // single delegated basketStore listener the grid renderer owns. Cards do
+        // not self-subscribe: innerHTML teardown can't unsubscribe them, so a
+        // per-card listener leaks one orphaned subscription per card per render.
 
         // Context menu: "Add to playlist…" on artist/album/track cards
         if (supportsPlaylistWrite) {
@@ -283,6 +279,22 @@ export class MediaCard {
         }
 
         return card;
+    }
+
+    /**
+     * Sync every media card under `root` to the current basket state.
+     * Drive this from one delegated basketStore 'update' listener owned by the
+     * grid renderer (one listener per grid), not one subscription per card.
+     */
+    static refreshSelection(root: HTMLElement): void {
+        root.querySelectorAll<HTMLElement>('.media-card[data-basket-id]').forEach(card => {
+            const id = card.dataset.basketId;
+            if (!id) return;
+            const selected = basketStore.has(id);
+            card.classList.toggle('is-selected', selected);
+            const btn = card.querySelector('.basket-toggle-btn') as any;
+            if (btn) btn.name = selected ? 'dash-circle-fill' : 'plus-circle-fill';
+        });
     }
 
     private static dismissActiveMenu: (() => void) | null = null;

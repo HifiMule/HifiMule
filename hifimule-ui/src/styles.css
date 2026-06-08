@@ -1,5 +1,10 @@
 :root {
-  --sl-color-primary-600: #22b8f0;
+  /* Signal Cyan: the one accent. --accent-rgb holds the raw channels so alpha
+     tints compose as rgba(var(--accent-rgb), <a>) instead of repeating the
+     literal 34,184,240 across the sheet. Shoelace's primary points here too. */
+  --accent: #22b8f0;
+  --accent-rgb: 34, 184, 240;
+  --sl-color-primary-600: var(--accent);
   --sl-input-height-medium: 2.5rem;
   --app-bg: #0b1020;
   --panel-bg: #151d31;
@@ -39,7 +44,7 @@ body {
   padding: 0;
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   background:
-    radial-gradient(circle at 12% 0%, rgba(34, 184, 240, 0.12), transparent 32rem),
+    radial-gradient(circle at 12% 0%, rgba(var(--accent-rgb), 0.12), transparent 32rem),
     linear-gradient(135deg, #101827 0%, var(--app-bg) 58%, #0a0d16 100%);
   color: var(--ink);
   height: 100vh;
@@ -209,7 +214,7 @@ body {
 
 .basket-item-card:hover {
   background: var(--surface-fill-hover);
-  border-color: rgba(34, 184, 240, 0.26);
+  border-color: rgba(var(--accent-rgb), 0.26);
 }
 
 .basket-item-image {
@@ -425,7 +430,7 @@ h2 {
 }
 
 .media-card:hover::part(base) {
-  border-color: rgba(34, 184, 240, 0.35);
+  border-color: rgba(var(--accent-rgb), 0.35);
 }
 
 @starting-style {
@@ -462,6 +467,7 @@ h2 {
 }
 
 .media-card:hover .selection-overlay,
+.media-card:focus-within .selection-overlay,
 .media-card.is-selected .selection-overlay {
   opacity: 1;
 }
@@ -625,6 +631,20 @@ h2 {
   font-size: 0.75rem;
   font-weight: 600;
   letter-spacing: 0.02em;
+}
+
+/* A-Z index letters are navigation affordances, not live signals. Keep them
+   neutral at rest so Signal Cyan stays meaningful (One Wire Rule): cyan is
+   earned on hover (actionable now) and on the active letter, which Shoelace
+   renders as a filled primary pill. A full alphabet glowing cyan reads as
+   decoration and drowns out the one letter that actually carries state. */
+.quick-nav-bar sl-button[variant="text"]::part(base) {
+  color: var(--ink-dim);
+  transition: color var(--dur-fast) var(--ease-out-quart);
+}
+
+.quick-nav-bar sl-button[variant="text"]:hover::part(base) {
+  color: var(--sl-color-primary-600);
 }
 
 /* Breadcrumbs */
@@ -1153,8 +1173,8 @@ h2 {
 }
 .device-hub-card.active {
   border-color: var(--sl-color-primary-500);
-  background: rgba(34, 184, 240, 0.16);
-  box-shadow: 0 0 0 1px rgba(34, 184, 240, 0.22);
+  background: rgba(var(--accent-rgb), 0.16);
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.22);
 }
 .device-hub-icon {
   font-size: 1.4rem;
@@ -1210,7 +1230,7 @@ h2 {
 }
 .device-settings-icon-picker .init-icon-tile.selected {
   border-color: var(--sl-color-primary-600);
-  background: rgba(34, 184, 240, 0.16);
+  background: rgba(var(--accent-rgb), 0.16);
 }
 .device-settings-icon-picker .init-icon-tile sl-icon {
   font-size: 1.5rem;
@@ -1361,8 +1381,8 @@ h2 {
 
 .curation-artist-row.curation-selected,
 .curation-album-row.curation-album-focused {
-  background: rgba(34, 184, 240, 0.1);
-  box-shadow: inset 1px 0 0 rgba(34, 184, 240, 0.8);
+  background: rgba(var(--accent-rgb), 0.1);
+  box-shadow: inset 1px 0 0 rgba(var(--accent-rgb), 0.8);
 }
 
 .curation-track-row {
@@ -1400,7 +1420,7 @@ h2 {
 }
 
 .curation-playlist-name:hover {
-  border-bottom-color: rgba(34, 184, 240, 0.55);
+  border-bottom-color: rgba(var(--accent-rgb), 0.55);
 }
 
 /* Inline rename input in the header */
@@ -1627,7 +1647,7 @@ h2 {
 }
 
 .media-list-row.is-selected {
-  background: rgba(34, 184, 240, 0.08);
+  background: rgba(var(--accent-rgb), 0.08);
 }
 
 .media-list-row__thumb {

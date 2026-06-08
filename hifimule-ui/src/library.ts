@@ -538,6 +538,14 @@ function renderGrid(items: BrowseDisplayItem[], onCurate?: (id: string, name: st
 
     container.appendChild(grid);
 
+    // One delegated basket listener for the whole grid, torn down in
+    // teardownListScrollHandler before each re-render. Replaces the former
+    // per-card subscription, which leaked one orphaned listener per card on
+    // every navigation (innerHTML teardown can't unsubscribe individual cards).
+    const gridBasketHandler = () => MediaCard.refreshSelection(grid);
+    basketStore.addEventListener('update', gridBasketHandler);
+    (container as any).__gridBasketHandler = gridBasketHandler;
+
     if (state.items.length < state.pagination.total) {
         const loadMoreContainer = document.createElement('div');
         loadMoreContainer.className = 'load-more-container';
@@ -562,6 +570,10 @@ function teardownListScrollHandler() {
         if ((c as any).__listBasketHandler) {
             basketStore.removeEventListener('update', (c as any).__listBasketHandler);
             delete (c as any).__listBasketHandler;
+        }
+        if ((c as any).__gridBasketHandler) {
+            basketStore.removeEventListener('update', (c as any).__gridBasketHandler);
+            delete (c as any).__gridBasketHandler;
         }
         delete (c as any).__listScroller;
         delete (c as any).__listPaint;

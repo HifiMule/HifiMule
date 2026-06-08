@@ -122,15 +122,19 @@ function renderCapacityBar(storageInfo: StorageInfo | null, projectedBytes: numb
     let statusIcon = '';
     if (zone === 'green') {
         statusMessage = t('basket.capacity.remaining', { size: formatSize(remaining) });
-        statusIcon = '<sl-icon name="check-circle" style="color: var(--sl-color-success-600);"></sl-icon>';
+        // Healthy state is neutral, not green: capacity carries no warning here, so
+        // it stays off the amber/red signal scale. Reserve color for thresholds.
+        statusIcon = '<sl-icon name="check-circle" style="color: var(--ink-dim);"></sl-icon>';
     } else if (zone === 'amber') {
         statusMessage = t('basket.capacity.tight_fit', { size: formatSize(remaining) });
     } else {
         statusMessage = t('basket.capacity.exceeds', { size: formatSize(Math.abs(remaining)) });
     }
 
-    const projectedColor = zone === 'green' ? 'var(--sl-color-success-500)'
-        : zone === 'amber' ? '#EBB334'
+    // Pending-selection segment: Signal Cyan when healthy (the live "what you're
+    // adding" indicator, per DESIGN.md §5), amber/red only as threshold overrides.
+    const projectedColor = zone === 'green' ? 'var(--accent)'
+        : zone === 'amber' ? 'var(--amber-warn)'
             : 'var(--sl-color-danger-500)';
 
     return `

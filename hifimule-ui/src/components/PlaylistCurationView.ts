@@ -723,6 +723,19 @@ export class PlaylistCurationView {
         const errorEl = () => dialog.querySelector('#add-tracks-error') as HTMLElement | null;
         const confirmBtn = () => dialog.querySelector('#add-tracks-confirm') as any;
 
+        // Single source of truth for the confirm button's enabled state and label.
+        // The label carries the live selection count so the user sees exactly how
+        // many tracks the action commits. The count is a locale-neutral number, so
+        // no per-language pluralization is needed.
+        const baseConfirmLabel = t('playlist.curation.add_tracks_confirm');
+        const updateConfirmBtn = () => {
+            const btn = confirmBtn();
+            if (!btn) return;
+            const n = selectedIds.size;
+            btn.disabled = n === 0;
+            btn.textContent = n > 0 ? `${baseConfirmLabel} (${n})` : baseConfirmLabel;
+        };
+
         const renderResults = (tracks: BrowseTrack[]) => {
             const el = resultsEl();
             el.innerHTML = '';
@@ -752,8 +765,7 @@ export class PlaylistCurationView {
                 const updateRow = (selected: boolean) => {
                     row.classList.toggle('curation-track-result--selected', selected);
                     cb.checked = selected;
-                    const btn = confirmBtn();
-                    if (btn) btn.disabled = selectedIds.size === 0;
+                    updateConfirmBtn();
                 };
 
                 row.addEventListener('click', (e) => {
@@ -782,8 +794,7 @@ export class PlaylistCurationView {
         let latestQueryId = 0;
         const resetSelection = () => {
             selectedIds.clear();
-            const btn = confirmBtn();
-            if (btn) btn.disabled = true;
+            updateConfirmBtn();
         };
 
         const doSearch = async (query: string) => {
