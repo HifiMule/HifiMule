@@ -144,24 +144,24 @@ So that I can quickly find and queue individual songs without drilling through a
         loading: boolean;
     }
     ```
-  - [x] **Layout** — three-panel layout with CSS classes mirroring `curation-view`:
-    - Use classes `tracks-view`, `tracks-artist-panel`, `tracks-album-panel`, `tracks-track-panel`
-    - Artist panel and album panel are side-by-side (flex row)
-    - Track panel is below
-    - The `curation-panels` / `curation-artist-panel` / `curation-album-panel` / `curation-track-panel` CSS from `PlaylistCurationView` already exists and can be reused by using the same class names. Check that the CSS is shared (not scoped to `.curation-view`). If reuse is possible, use `curation-*` class names; if not, define `tracks-*` equivalents in the same pattern.
+  - [x] **Layout** — three-panel layout reusing global `curation-*` CSS classes:
+    - Root: flex column, `height:100%`, `overflow:hidden`
+    - `.curation-panels` row holds two sub-panels side by side
+    - Each sub-panel (`curation-artist-panel` / `curation-album-panel`) is a flex-row shell: an inner scroll div (`#tracks-artist-scroll` / `#tracks-album-scroll`) + a narrow vertical A–Z sidebar (`#tracks-artist-az` / `#tracks-album-az`) on the right
+    - Track panel (`#tracks-track-panel`) below, fixed at `flex:0 0 55%` so it is always visible and never jumps on load
   - [x] **Artist panel content** (AC: 4, 5, 13):
-    - Sticky "All artists" row at top (`data-all-artists`, `.curation-all-artists` style, selected when `selectedArtistId === null`)
+    - "All artists" row at top as the **first scrollable item** (`data-all-artists`, `.curation-all-artists` style, selected when `selectedArtistId === null`) — NOT sticky
     - Then loaded artist rows (`data-artist-id`, `.curation-artist-row` style)
-    - A–Z strip (same as `renderQuickNav()` in `library.ts` — 26 letters + `#`) — render when `artistState.total >= 20`
-    - On scroll near bottom: autoload next page (`browse.listArtists({letter, startIndex, limit: 200})`)
-    - On letter click: reset pagination, call `browse.listArtists({letter})`, reset `selectedArtistId`
+    - A–Z strip: a narrow vertical sidebar (`width:2.5rem`) displayed as a 2-column grid of letter buttons, shown on the right of the panel when `artistState.total >= 20`; clicking an active letter deselects it
+    - On scroll near bottom: autoload next page with a spinner shown immediately before the fetch
+    - On letter click: reset pagination, reload artists, reset `selectedArtistId`
   - [x] **Album panel content** (AC: 7, 6, 13):
-    - Sticky "All albums" row at top (`data-all-albums`, selected when `selectedAlbumId === null`)
+    - "All albums" row at top as the **first scrollable item** (`data-all-albums`, selected when `selectedAlbumId === null`) — NOT sticky
     - Then loaded album rows (`data-album-id`)
     - **TWO data sources** — this is critical:
       - `selectedArtistId === null`: paginated `browse.listAlbums({letter, startIndex, limit: 50})` with autoload-on-scroll
       - `selectedArtistId !== null`: single `browse.getArtist(selectedArtistId)` returns all albums at once (bounded by artist discography — same pattern as `loadArtistAlbums` in `library.ts:1498`)
-    - A–Z strip: shown only when `selectedArtistId === null` (unfiltered library albums can be A–Z filtered; per-artist list is already bounded)
+    - A–Z strip: vertical sidebar, shown only when `selectedArtistId === null`; hidden when artist is selected (per-artist list is already bounded)
     - When artist changes: re-fetch albums, reset `selectedAlbumId`
   - [x] **Track panel content** (AC: 3, 8, 9, 10, 11):
     - Show each track row: title, artist name, album name
@@ -170,8 +170,9 @@ So that I can quickly find and queue individual songs without drilling through a
       - Device NOT selected (`basketStore` has no device? — use the same check as `renderListRow` in `library.ts:696`): render button as `disabled`
     - **Context menu** (AC: 10, 11): when `supportsPlaylistWrite`, add `contextmenu` listener calling `MediaCard.showItemContextMenu(x, y, track.id, track.title)`
     - **"Send to playlist…" button** (AC: 10, 11): when `supportsPlaylistWrite`, render a visible `<sl-icon-button name="collection-play" label="${t('tracks.view.send_to_playlist')}">` per track row, calling `MediaCard.openAddToPlaylistDialog(track.id, track.title)` on click
-    - Pagination: autoload-on-scroll against `browse.listTracks({artistId?, albumId?, startIndex, limit: 200})`
+    - Pagination: autoload-on-scroll against `browse.listTracks({artistId?, albumId?, startIndex, limit: 200})`; a spinner is appended to the panel immediately before each autoload fetch so the loading state is always visible
     - Exhaustion check: `state.items.length < state.pagination.total` — for Subsonic unfiltered, `total` equals page length on the last page; use `page.tracks.length < limit` as secondary signal (consistent with 9.9 dev notes)
+    - Panel height is fixed at `flex:0 0 55%` (overriding the CSS `max-height:40%`) so the track panel area is always visible and does not jump when content loads
     - Subscribe to `basketStore` events to re-render visible rows when basket changes (same pattern as `library.ts:786`)
   - [x] **"No device selected" detection** — check `basketStore.devicePath` (or the same mechanism `library.ts` uses). Looking at the existing `renderListRow` at [library.ts:646](hifimule-ui/src/library.ts:646), the disabled state for (+) buttons comes from... it does NOT check a device path — it just always renders. The no-device state in `library.ts` is controlled externally by `main.ts` disabling the entire mode bar. For `TracksBrowseView`, check if a `selectedDevicePath` or equivalent is available via the basket store. Looking at the basket store import: `import { basketStore } from '../state/basket';` — check `basket.ts` for a device path field. If none, mirror the disabled-button pattern from `MediaCard` which uses the same mechanism.
   - [x] **Scroll position tracking per panel**: Save the scroll top of each scrollable panel element in the instance (`artistScrollTop`, `albumScrollTop`, `trackScrollTop`). Restore on `remount()`.
@@ -420,11 +421,14 @@ _none_
 
 ### Completion Notes List
 
-- Created `TracksBrowseView.ts` (~340 lines): three-panel layout reusing `curation-*` CSS classes with independent pagination per panel, autoload-on-scroll, A-Z strips (threshold: 20), basket subscribe/unsub, per-panel error handling, scroll position save/restore.
+- Created `TracksBrowseView.ts`: three-panel layout reusing `curation-*` CSS classes with independent pagination per panel, autoload-on-scroll with immediate spinner before each fetch, A-Z strips (threshold: 20), basket subscribe/unsub, per-panel error handling, scroll position save/restore.
+- A–Z strips are vertical 2-column grid sidebars (`width:2.5rem`, `grid-template-columns:1fr 1fr`) on the right edge of the artist/album panels — not horizontal strips inside the scroll flow. Each panel is a flex-row shell with an inner scroll div and the sidebar alongside it.
+- Track panel fixed at `flex:0 0 55%` (overrides `curation-track-panel` CSS `max-height:40%`) so it is always the same height and never jumps on load.
+- "All artists" and "All albums" rows are regular first items in their scroll lists — not sticky.
 - Extended `BrowseMode` union to include `"tracks"` in `rpc.ts`; added `fetchBrowseTracks` helper with four-field return type `{ tracks, total, startIndex, limit }`.
 - Wired `TracksBrowseView` into `library.ts`: import, `_tracksBrowseView` module-level instance, `clearNavigationCache` destroy hook, `case 'tracks'` in `loadModeRoot`, `loadTracksView()` function, `renderViewToggle` mode guard.
 - Added 6 i18n keys in EN/FR/ES: `library.mode.tracks` and `tracks.view.{all_artists,all_albums,no_tracks,loading,send_to_playlist}`.
-- No-device basket: mirrored existing `renderListRow` behavior — basket toggle always enabled per-row; global mode bar disable via `main.ts` handles the no-device state.
+- No-device basket: mirrored existing `renderListRow` behavior — basket toggle always enabled per-row.
 - Pre-existing `MediaCard.ts` TS6133 error confirmed unchanged; zero new TypeScript errors introduced.
 
 ### File List
@@ -442,3 +446,4 @@ _to be filled by reviewer_
 
 - 2026-06-08: Story created. Daemon dependency (Story 9.9) is complete at baseline commit `5ca0d07`. Ultimate context engine analysis completed — comprehensive developer guide created.
 - 2026-06-08: Implementation complete. TracksBrowseView component created; rpc.ts, library.ts, and catalog.json updated. All ACs satisfied. TypeScript: zero new errors.
+- 2026-06-08: Post-review refinements — autoload spinner added before each fetch; A–Z strips moved to vertical 2-column grid sidebar on panel right edge; track panel fixed at 55% height; "All artists"/"All albums" rows changed from sticky to regular scrollable items.
