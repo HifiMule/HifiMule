@@ -99,6 +99,7 @@ pub trait MediaProvider: Send + Sync {
     async fn list_frequently_played(&self, library_id: Option<&str>, limit: u32, offset: u32) -> Result<Vec<Song>, ProviderError>;
     async fn list_recently_played(&self, library_id: Option<&str>, limit: u32, offset: u32) -> Result<Vec<Song>, ProviderError>;
     async fn list_favorites(&self, library_id: Option<&str>, limit: u32, offset: u32) -> Result<Vec<Song>, ProviderError>;
+    async fn list_tracks(&self, filter: TrackListFilter) -> Result<TrackListPage, ProviderError>;
     async fn search(&self, query: &str) -> Result<SearchResult, ProviderError>;
     async fn download_url(&self, song_id: &str, profile: Option<&TranscodeProfile>) -> Result<String, ProviderError>;
     async fn cover_art_url(&self, cover_art_id: &str) -> Result<String, ProviderError>;
@@ -316,6 +317,7 @@ Level-specific `browse.*` methods expose the provider hierarchy to the UI. Each 
 | `browse.listFrequentlyPlayed` | `{ libraryId?: string, startIndex?: number, limit?: number }` | `{ tracks: Track[], total: number }` |
 | `browse.listRecentlyPlayed` | `{ libraryId?: string, startIndex?: number, limit?: number }` | `{ tracks: Track[], total: number }` |
 | `browse.listFavorites` | `{ libraryId?: string, startIndex?: number, limit?: number }` | `{ tracks: Track[], total: number }` |
+| `browse.listTracks` | `{ libraryId?: string, artistId?: string, albumId?: string, letter?: string, startIndex?: number, limit?: number }` | `{ tracks: Track[], total: number, startIndex: number, limit: number }` |
 
 **Response shapes (camelCase per IPC naming convention):**
 ```typescript
@@ -330,7 +332,7 @@ type Track    = { id: string; title: string; artistName: string; albumName: stri
                   playCount?: number | null; isFavorite?: boolean | null }
 type Playlist = { id: string; name: string; trackCount: number; durationSeconds: number }
 type Genre    = { id: string; name: string; trackCount: number | null; coverArtId: string | null }
-type BrowseMode = "artists" | "albums" | "playlists" | "genres" |
+type BrowseMode = "artists" | "albums" | "playlists" | "tracks" | "genres" |
                   "recentlyAdded" | "frequentlyPlayed" | "recentlyPlayed" | "favorites"
 ```
 
@@ -363,6 +365,36 @@ async fn list_artists(
 - **SubsonicProvider:** calls `GET /rest/getArtists.view` once (no filter param in the API); filters the returned index array by matching the letter key (`index.iter().find(|i| i.name == letter_str)`). Full artist list is fetched in-process; no caching at the daemon layer.
 
 `browse.listArtists` forwards `letter` (single uppercase char or absent) directly to `provider.list_artists()`.
+
+### Tracks Browse Mode — Provider Contract
+
+**Trait method:**
+```rust
+pub struct TrackListFilter {
+    pub library_id: Option<String>,
+    pub artist_id: Option<String>,
+    pub album_id: Option<String>,
+    pub letter: Option<char>,
+    pub start_index: u32,
+    pub limit: u32,
+}
+
+pub struct TrackListPage {
+    pub tracks: Vec<Track>,
+    pub total: u32,
+    pub start_index: u32,
+    pub limit: u32,
+}
+
+async fn list_tracks(&self, filter: TrackListFilter) -> Result<TrackListPage, ProviderError>;
+// Default impl returns ProviderError::NotSupported.
+```
+
+**Provider implementations:**
+- **JellyfinProvider:** `GET /Users/{uid}/Items?IncludeItemTypes=Audio&Recursive=true&SortBy=Name,Album&StartIndex&Limit[&ArtistIds][&AlbumIds][&NameStartsWith]`. When both `artist_id` and `album_id` are supplied, the album filter takes precedence (album implies its artist).
+- **SubsonicProvider:** unfiltered enumeration uses `search3?query=&songCount&songOffset`. When `artist_id` is set, the adapter composes from `getArtist` (album list) + `getAlbum` (tracks). When `album_id` is set, `getAlbum` is used directly. Classic Subsonic without `search3` returns `ProviderError::NotSupported` and omits `BrowseMode::Tracks` from `BrowseCapabilities::list_modes`. All Subsonic URL auth sanitization rules apply.
+
+**Capability gating:** `browse.listModes` includes `Tracks` only when `provider.capabilities().browse.list_modes` contains `BrowseMode::Tracks`. A `browse.listTracks` call on a provider lacking the capability returns an RPC error.
 
 ### Cover Art Routing
 

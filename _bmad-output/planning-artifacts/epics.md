@@ -114,6 +114,7 @@ FR37: Epic 11 - Selection-as-Playlist (Stories 11.1-11.5)
 FR38: Epic 11 - Dual-Panel Curation (Story 11.6)
 FR39: Epic 9 - Virtualized List/Table Browse View (Story 9.7)
 FR40: Epic 11 - Playlist Track Reordering (Stories 11.9-11.10)
+FR41: Epic 9 - Tracks Browse Mode (Stories 9.9-9.10)
 
 ## Epic List
 
@@ -1965,6 +1966,118 @@ So that I can use my preferred view mode consistently across all library content
 - No state structure change needed: `state.listViewMode` is already a single global value.
 - `loadMoreForListView` continues to operate only for artists/albums root; the `rootMode` variable in `renderList()` already returns `null` for other modes/levels, which suppresses autoload — no change needed there.
 - No new daemon RPCs; pure UI rendering concern.
+
+### Story 9.9: Tracks Browse Mode — Provider Contract & Daemon RPC
+
+As a System Admin (Alexis),
+I want the daemon to expose a flat, paginated, filterable track listing,
+So that the UI can present a library-wide Tracks browse mode for both Jellyfin and OpenSubsonic-class servers.
+
+**Acceptance Criteria:**
+
+**Given** a provider that implements `list_tracks`
+**When** `browse.listTracks({ startIndex: 0, limit: 200 })` is called
+**Then** the daemon returns the first page of library tracks along with `total`.
+
+**Given** `browse.listTracks` is called with `artistId`
+**Then** the response is filtered to tracks whose artist matches.
+
+**Given** `browse.listTracks` is called with `albumId`
+**Then** the response is filtered to tracks within that album.
+
+**Given** both `artistId` and `albumId` are provided
+**Then** the album filter takes precedence (album implies its artist).
+
+**Given** a Subsonic provider without `search3` support
+**When** `browse.listModes` is called
+**Then** `Tracks` is not present in the returned list.
+
+**Given** a provider that does not advertise `Tracks`
+**When** `browse.listTracks` is called anyway
+**Then** an RPC error indicating unsupported capability is returned.
+
+**Given** A–Z letter filtering is implemented (optional v1)
+**When** `letter` is provided
+**Then** only tracks whose title starts with that letter are returned.
+
+**Technical Notes:**
+- `BrowseMode::Tracks` added to `providers/mod.rs`.
+- New `TrackListFilter` and `TrackListPage` types; default `list_tracks` trait impl returns `ProviderError::NotSupported`.
+- Jellyfin: `GET /Users/{uid}/Items?IncludeItemTypes=Audio&Recursive=true&SortBy=Name,Album&StartIndex&Limit[&ArtistIds][&AlbumIds][&NameStartsWith]`.
+- Subsonic/OpenSubsonic: `search3?query=&songCount&songOffset` for unfiltered enumeration; `getArtist`+`getAlbum` aggregation when `artistId`/`albumId` is set; classic Subsonic without `search3` returns `NotSupported` and omits `Tracks` from `list_modes`.
+- All Subsonic URL auth sanitization rules apply.
+- Daemon RPC: `browse.listTracks` handler dispatches to `provider.list_tracks`; capability-absent requests are rejected.
+- Tests: unfiltered page, artist filter, album filter, combined filters, letter filter, `NotSupported` path.
+
+### Story 9.10: Tracks Browse Mode — Dual-Panel UI with Auto-Pagination & Track Actions
+
+As a Ritualist (Arthur),
+I want to browse my entire library at the track grain with artist and album filters,
+So that I can quickly find and queue individual songs without drilling through albums.
+
+**Acceptance Criteria:**
+
+**Given** the active provider advertises the Tracks mode
+**When** the Library Browser renders the browse-mode bar
+**Then** a "Tracks" mode is shown alongside the existing modes.
+
+**Given** I select the Tracks mode
+**Then** the view renders three panels: an artists panel on the left, an albums panel on the right, and a track list panel below.
+
+**Given** the Tracks view is rendering
+**Then** the artist panel auto-paginates the full library artist list via `browse.listArtists` with autoload-on-scroll.
+**And** the album panel auto-paginates albums (filtered by the selected artist if any) via `browse.listAlbums` with autoload-on-scroll.
+**And** the track list auto-paginates via `browse.listTracks` with the active artist/album filters.
+
+**Given** the artist panel shows an "All artists" entry at the top
+**When** I select it
+**Then** the album panel shows all library albums (paginated) and the track panel shows all library tracks (paginated).
+
+**Given** I select an artist in the left panel
+**Then** the album panel filters to that artist's albums (paginated).
+**And** the track panel filters to that artist's tracks (paginated).
+
+**Given** I select an album in the right panel
+**Then** the track panel filters to that album's tracks (paginated).
+
+**Given** the album panel shows an "All albums" entry at the top
+**When** I select it
+**Then** the track panel filter clears its album constraint (artist constraint, if any, remains).
+
+**Given** a device is selected
+**When** a track row renders
+**Then** a (+) "Add to basket" control is shown; if the track is already in the basket, a (-) "Remove from basket" control is shown instead.
+
+**Given** no device is selected
+**Then** all (+) controls render disabled.
+
+**Given** the active provider supports playlist write
+**When** I right-click a track row
+**Then** an "Add to playlist…" context menu appears (per Story 11.7).
+**And** the track row also renders a visible "Send to playlist…" affordance opening the same flow.
+
+**Given** the active provider does not support playlist write
+**Then** both the context menu and the "Send to playlist…" affordance are hidden.
+
+**Given** I am in Tracks mode
+**Then** the grid/list view toggle is not displayed (the dual-panel layout is the sole rendering).
+
+**Given** an A–Z letter strip is available on the artist or album panel
+**When** I select a letter
+**Then** the corresponding panel filters its list and pagination resets.
+
+**Given** I switch away from Tracks mode and back
+**Then** the panel selections and scroll positions are restored from the page cache (consistent with other browse modes).
+
+**Technical Notes:**
+- New `TracksBrowseView.ts` modeled on `PlaylistCurationView.ts`, but each panel manages its own paginated list state (re-using the autoload-on-scroll logic from `library.ts` artist/album root path).
+- `BrowseMode` TS union in `rpc.ts` extended with `"tracks"`.
+- New `fetchBrowseTracks(filter)` helper in `rpc.ts`.
+- Per-panel state lives in the component, not in the global `library.ts` state, since this view's pagination is multi-axis. Page-cache key: `tracks:${artistId ?? '*'}:${albumId ?? '*'}:${letter ?? '*'}`.
+- The grid/list global toggle is read but ignored in this view's renderer; the toggle button is hidden when `state.browseMode === 'tracks'`.
+- Track-row right-click context menu re-uses the dispatcher wired in Story 11.7; per-row "Send to playlist…" is a visible button/icon calling the same dispatcher.
+- New i18n keys (en/fr/es): `library.mode.tracks`, `tracks.view.all_artists`, `tracks.view.all_albums`, `tracks.view.no_tracks`, `tracks.view.loading`, `tracks.view.send_to_playlist`.
+- Depends on Story 9.9.
 
 ## Epic 10: Device Configuration Editing
 
