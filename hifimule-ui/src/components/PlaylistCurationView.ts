@@ -27,6 +27,7 @@ export class PlaylistCurationView {
     private selectedArtist: string | null = null;
     private selectedAlbum: string | null = null;
     private onClose: () => void;
+    private onPlaylistRenamed: (playlistId: string, name: string) => void;
     private isRemoving = false;
     private isReordering = false;
     private isAddingTracks = false;
@@ -45,12 +46,14 @@ export class PlaylistCurationView {
         playlistName: string,
         onClose: () => void,
         supportsPlaylistWrite = false,
+        onPlaylistRenamed: (playlistId: string, name: string) => void = () => {},
     ) {
         this.container = container;
         this.playlistId = playlistId;
         this.playlistName = playlistName;
         this.onClose = onClose;
         this.supportsPlaylistWrite = supportsPlaylistWrite;
+        this.onPlaylistRenamed = onPlaylistRenamed;
     }
 
     async load(): Promise<void> {
@@ -516,6 +519,7 @@ export class PlaylistCurationView {
             try {
                 await rpcCall('playlist.rename', { playlistId: this.playlistId, name: newName });
                 this.playlistName = newName;
+                this.onPlaylistRenamed(this.playlistId, newName);
                 this.isRenamingPlaylist = false;
             } catch (err) {
                 const message = err instanceof Error ? err.message : String(err);

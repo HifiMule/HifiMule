@@ -281,7 +281,12 @@ impl MediaProvider for JellyfinProvider {
         }
         let tracks = self
             .client
-            .get_child_items_with_sizes(self.url(), self.token(), self.user_id(), playlist_id)
+            .get_playlist_items_via_user_library(
+                self.url(),
+                self.token(),
+                self.user_id(),
+                playlist_id,
+            )
             .await
             .map_err(Self::map_error)?
             .into_iter()
@@ -407,13 +412,7 @@ impl MediaProvider for JellyfinProvider {
         new_name: &str,
     ) -> Result<(), ProviderError> {
         self.client
-            .rename_item(
-                self.url(),
-                self.token(),
-                self.user_id(),
-                playlist_id,
-                new_name,
-            )
+            .update_playlist_name(self.url(), self.token(), playlist_id, new_name)
             .await
             .map_err(Self::map_error)
     }
@@ -1252,9 +1251,8 @@ mod tests {
             .create_async()
             .await;
         let _tracks = server
-            .mock("GET", "/Items")
+            .mock("GET", "/Users/user1/Items")
             .match_query(Matcher::AllOf(vec![
-                Matcher::UrlEncoded("userId".into(), USER_ID.into()),
                 Matcher::UrlEncoded("ParentId".into(), "playlist1".into()),
                 Matcher::UrlEncoded("IncludeItemTypes".into(), "Audio,MusicVideo".into()),
                 Matcher::UrlEncoded("Fields".into(), "MediaSources".into()),
@@ -1303,6 +1301,28 @@ mod tests {
             .expect("create_playlist");
 
         assert_eq!(id, "playlist99");
+    }
+
+    #[tokio::test]
+    async fn provider_renames_playlist_with_playlist_update_dto() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _mock = server
+            .mock("POST", "/Playlists/playlist99")
+            .match_header("X-Emby-Token", TOKEN)
+            .match_body(Matcher::Json(serde_json::json!({
+                "Name": "Renamed Road Trip",
+            })))
+            .with_status(204)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+        provider
+            .rename_playlist("playlist99", "Renamed Road Trip")
+            .await
+            .expect("rename_playlist");
     }
 
     #[tokio::test]

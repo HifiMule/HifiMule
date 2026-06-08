@@ -98,6 +98,22 @@ export function invalidatePlaylistsCache(): void {
     }
 }
 
+function updatePlaylistNameInCache(playlistId: string, name: string): void {
+    for (const cached of state.pageCache.values()) {
+        for (const item of cached.items) {
+            if (item.type === 'Playlist' && item.id === playlistId) {
+                item.name = name;
+            }
+        }
+    }
+
+    for (const item of state.items) {
+        if (item.type === 'Playlist' && item.id === playlistId) {
+            item.name = name;
+        }
+    }
+}
+
 export function clearNavigationCache() {
     state.scrollCache = new Map();
     state.pageCache = new Map();
@@ -1194,6 +1210,7 @@ function openCurationView(playlistId: string, playlistName: string): void {
             loadPlaylists();
         },
         _supportsPlaylistWrite,
+        updatePlaylistNameInCache,
     );
 
     view.load();

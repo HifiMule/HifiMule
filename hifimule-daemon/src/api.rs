@@ -1491,6 +1491,41 @@ impl JellyfinClient {
         Ok(())
     }
 
+    pub async fn update_playlist_name(
+        &self,
+        url: &str,
+        token: &str,
+        playlist_id: &str,
+        new_name: &str,
+    ) -> Result<()> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let endpoint = jellyfin_endpoint(url, &["Playlists", playlist_id])?;
+        let body = serde_json::json!({ "Name": new_name });
+
+        let response = self
+            .client
+            .post(endpoint)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!("Server returned status: {} — {}", status, text));
+        }
+        Ok(())
+    }
+
     pub async fn get_playlist_items(
         &self,
         url: &str,
@@ -1515,6 +1550,42 @@ impl JellyfinClient {
         let text = response.text().await?;
         if !status.is_success() {
             return Err(anyhow!("Server returned status: {}", status));
+        }
+
+        let items_response = serde_json::from_str::<JellyfinItemsResponse>(&text)?;
+        Ok(items_response.items)
+    }
+
+    pub async fn get_playlist_items_via_user_library(
+        &self,
+        url: &str,
+        token: &str,
+        user_id: &str,
+        playlist_id: &str,
+    ) -> Result<Vec<JellyfinItem>> {
+        CredentialManager::validate_url(url)?;
+        CredentialManager::validate_token(token)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Token",
+            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
+        );
+
+        let mut endpoint = jellyfin_endpoint(url, &["Users", user_id, "Items"])?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("ParentId", playlist_id)
+            .append_pair("IncludeItemTypes", "Audio,MusicVideo")
+            .append_pair("Fields", "MediaSources")
+            .append_pair("Recursive", "true");
+
+        let response = self.client.get(endpoint).headers(headers).send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+
+        if !status.is_success() {
+            return Err(anyhow!("Server returned status: {} — {}", status, text));
         }
 
         let items_response = serde_json::from_str::<JellyfinItemsResponse>(&text)?;
