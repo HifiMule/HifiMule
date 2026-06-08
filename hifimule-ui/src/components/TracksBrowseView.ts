@@ -18,6 +18,15 @@ const AZ_THRESHOLD = 20;
 const ALL_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').concat('#');
 const SCROLL_NEAR_BOTTOM_PX = 200;
 
+// Artist/album panels split into an inner scroll area (#tracks-*-scroll) and a
+// vertical A-Z strip sidebar (#tracks-*-az).  All content queries target the
+// inner scroll div; the outer panel div is only a flex-row shell.
+const ARTIST_SCROLL = '#tracks-artist-scroll';
+const ALBUM_SCROLL  = '#tracks-album-scroll';
+const ARTIST_AZ     = '#tracks-artist-az';
+const ALBUM_AZ      = '#tracks-album-az';
+const TRACK_PANEL   = '#tracks-track-panel';
+
 interface PanelState<T> {
     items: T[];
     total: number;
@@ -88,11 +97,27 @@ export class TracksBrowseView {
 
     private renderLayout(): void {
         this.teardownScrollHandlers();
+        // Each left/right panel is a flex-row shell: scrollable content area + vertical A-Z strip.
+        // The outer div keeps the curation-* class for sizing; overflow is handled by the inner scroll div.
         this.container.innerHTML = `
             <div style="display:flex; flex-direction:column; height:100%; overflow:hidden;">
                 <div class="curation-panels">
-                    <div id="tracks-artist-panel" class="curation-artist-panel"></div>
-                    <div id="tracks-album-panel" class="curation-album-panel"></div>
+                    <div id="tracks-artist-panel" class="curation-artist-panel"
+                         style="display:flex; flex-direction:row; overflow:hidden; padding:0;">
+                        <div id="tracks-artist-scroll" style="flex:1; overflow-y:auto; padding:0.5rem 0; min-width:0;"></div>
+                        <div id="tracks-artist-az"
+                             style="display:none; flex-direction:column; width:1.25rem; overflow-y:auto;
+                                    border-left:1px solid var(--surface-border-soft);
+                                    background:var(--surface-fill); flex-shrink:0;"></div>
+                    </div>
+                    <div id="tracks-album-panel" class="curation-album-panel"
+                         style="display:flex; flex-direction:row; overflow:hidden; padding:0;">
+                        <div id="tracks-album-scroll" style="flex:1; overflow-y:auto; padding:0.5rem 0; min-width:0;"></div>
+                        <div id="tracks-album-az"
+                             style="display:none; flex-direction:column; width:1.25rem; overflow-y:auto;
+                                    border-left:1px solid var(--surface-border-soft);
+                                    background:var(--surface-fill); flex-shrink:0;"></div>
+                    </div>
                 </div>
                 <div id="tracks-track-panel" class="curation-track-panel"></div>
             </div>
@@ -101,29 +126,29 @@ export class TracksBrowseView {
     }
 
     private setupScrollHandlers(): void {
-        const ap = this.container.querySelector<HTMLElement>('#tracks-artist-panel');
-        const alp = this.container.querySelector<HTMLElement>('#tracks-album-panel');
-        const tp = this.container.querySelector<HTMLElement>('#tracks-track-panel');
+        const as = this.container.querySelector<HTMLElement>(ARTIST_SCROLL);
+        const als = this.container.querySelector<HTMLElement>(ALBUM_SCROLL);
+        const tp = this.container.querySelector<HTMLElement>(TRACK_PANEL);
 
-        if (ap) {
+        if (as) {
             this._artistScrollHandler = () => {
-                this.artistScrollTop = ap.scrollTop;
+                this.artistScrollTop = as.scrollTop;
                 if (!this.artistState.loading && !this.artistState.exhausted &&
-                    ap.scrollTop + ap.clientHeight >= ap.scrollHeight - SCROLL_NEAR_BOTTOM_PX) {
+                    as.scrollTop + as.clientHeight >= as.scrollHeight - SCROLL_NEAR_BOTTOM_PX) {
                     this.fetchArtists(false);
                 }
             };
-            ap.addEventListener('scroll', this._artistScrollHandler);
+            as.addEventListener('scroll', this._artistScrollHandler);
         }
-        if (alp) {
+        if (als) {
             this._albumScrollHandler = () => {
-                this.albumScrollTop = alp.scrollTop;
+                this.albumScrollTop = als.scrollTop;
                 if (!this.albumState.loading && !this.albumState.exhausted &&
-                    alp.scrollTop + alp.clientHeight >= alp.scrollHeight - SCROLL_NEAR_BOTTOM_PX) {
+                    als.scrollTop + als.clientHeight >= als.scrollHeight - SCROLL_NEAR_BOTTOM_PX) {
                     this.fetchAlbums(false);
                 }
             };
-            alp.addEventListener('scroll', this._albumScrollHandler);
+            als.addEventListener('scroll', this._albumScrollHandler);
         }
         if (tp) {
             this._trackScrollHandler = () => {
@@ -138,11 +163,11 @@ export class TracksBrowseView {
     }
 
     private teardownScrollHandlers(): void {
-        const ap = this.container.querySelector<HTMLElement>('#tracks-artist-panel');
-        if (ap && this._artistScrollHandler) ap.removeEventListener('scroll', this._artistScrollHandler);
-        const alp = this.container.querySelector<HTMLElement>('#tracks-album-panel');
-        if (alp && this._albumScrollHandler) alp.removeEventListener('scroll', this._albumScrollHandler);
-        const tp = this.container.querySelector<HTMLElement>('#tracks-track-panel');
+        const as = this.container.querySelector<HTMLElement>(ARTIST_SCROLL);
+        if (as && this._artistScrollHandler) as.removeEventListener('scroll', this._artistScrollHandler);
+        const als = this.container.querySelector<HTMLElement>(ALBUM_SCROLL);
+        if (als && this._albumScrollHandler) als.removeEventListener('scroll', this._albumScrollHandler);
+        const tp = this.container.querySelector<HTMLElement>(TRACK_PANEL);
         if (tp && this._trackScrollHandler) tp.removeEventListener('scroll', this._trackScrollHandler);
         this._artistScrollHandler = null;
         this._albumScrollHandler = null;
@@ -160,7 +185,7 @@ export class TracksBrowseView {
         const startIndex = this.artistState.startIndex;
 
         if (reset) this.renderArtistPanel();
-        else this.appendPanelSpinner('#tracks-artist-panel');
+        else this.appendPanelSpinner(ARTIST_SCROLL);
 
         try {
             const result = await fetchBrowseArtists(
@@ -187,7 +212,7 @@ export class TracksBrowseView {
         } catch (e) {
             if (!this.container.isConnected) return;
             this.artistState.loading = false;
-            this.showPanelError('#tracks-artist-panel', e as Error);
+            this.showPanelError(ARTIST_SCROLL, e as Error);
         }
     }
 
@@ -200,7 +225,7 @@ export class TracksBrowseView {
         const startIndex = this.albumState.startIndex;
 
         if (reset) this.renderAlbumPanel();
-        else this.appendPanelSpinner('#tracks-album-panel');
+        else this.appendPanelSpinner(ALBUM_SCROLL);
 
         try {
             if (this.selectedArtistId !== null) {
@@ -235,7 +260,7 @@ export class TracksBrowseView {
         } catch (e) {
             if (!this.container.isConnected) return;
             this.albumState.loading = false;
-            this.showPanelError('#tracks-album-panel', e as Error);
+            this.showPanelError(ALBUM_SCROLL, e as Error);
         }
     }
 
@@ -248,7 +273,7 @@ export class TracksBrowseView {
         const startIndex = this.trackState.startIndex;
 
         if (reset) this.renderTrackPanel();
-        else this.appendPanelSpinner('#tracks-track-panel');
+        else this.appendPanelSpinner(TRACK_PANEL);
 
         try {
             const result = await fetchBrowseTracks({
@@ -276,44 +301,38 @@ export class TracksBrowseView {
         } catch (e) {
             if (!this.container.isConnected) return;
             this.trackState.loading = false;
-            this.showPanelError('#tracks-track-panel', e as Error);
+            this.showPanelError(TRACK_PANEL, e as Error);
         }
     }
 
     // ─── Panel rendering (full rebuild) ───────────────────────────────────────
 
     private renderArtistPanel(): void {
-        const panel = this.container.querySelector<HTMLElement>('#tracks-artist-panel');
-        if (!panel) return;
-        panel.innerHTML = '';
-        panel.appendChild(this.buildAllArtistsRow());
-
-        if (this.artistState.total >= AZ_THRESHOLD) {
-            panel.appendChild(this.buildAzStrip('artist'));
-        }
+        const scroll = this.container.querySelector<HTMLElement>(ARTIST_SCROLL);
+        if (!scroll) return;
+        scroll.innerHTML = '';
+        scroll.appendChild(this.buildAllArtistsRow());
         for (const artist of this.artistState.items) {
-            panel.appendChild(this.buildArtistRow(artist));
+            scroll.appendChild(this.buildArtistRow(artist));
         }
-        if (this.artistState.loading) panel.appendChild(this.buildSpinner());
+        if (this.artistState.loading) scroll.appendChild(this.buildSpinner());
+        this.syncAzStrip('artist');
     }
 
     private renderAlbumPanel(): void {
-        const panel = this.container.querySelector<HTMLElement>('#tracks-album-panel');
-        if (!panel) return;
-        panel.innerHTML = '';
-        panel.appendChild(this.buildAllAlbumsRow());
-
-        if (this.selectedArtistId === null && this.albumState.total >= AZ_THRESHOLD) {
-            panel.appendChild(this.buildAzStrip('album'));
-        }
+        const scroll = this.container.querySelector<HTMLElement>(ALBUM_SCROLL);
+        if (!scroll) return;
+        scroll.innerHTML = '';
+        scroll.appendChild(this.buildAllAlbumsRow());
         for (const album of this.albumState.items) {
-            panel.appendChild(this.buildAlbumRow(album));
+            scroll.appendChild(this.buildAlbumRow(album));
         }
-        if (this.albumState.loading) panel.appendChild(this.buildSpinner());
+        if (this.albumState.loading) scroll.appendChild(this.buildSpinner());
+        this.syncAzStrip('album');
     }
 
     private renderTrackPanel(): void {
-        const panel = this.container.querySelector<HTMLElement>('#tracks-track-panel');
+        const panel = this.container.querySelector<HTMLElement>(TRACK_PANEL);
         if (!panel) return;
         panel.innerHTML = '';
 
@@ -337,38 +356,29 @@ export class TracksBrowseView {
     // ─── Append helpers (for autoload-on-scroll) ──────────────────────────────
 
     private appendArtistRows(artists: BrowseArtist[]): void {
-        const panel = this.container.querySelector<HTMLElement>('#tracks-artist-panel');
-        if (!panel) return;
-        panel.querySelector('.tracks-spinner')?.remove();
-
-        if (this.artistState.total >= AZ_THRESHOLD && !panel.querySelector('.tracks-az-strip')) {
-            const allRow = panel.querySelector<HTMLElement>('[data-all-artists]');
-            if (allRow) allRow.after(this.buildAzStrip('artist'));
-        }
+        const scroll = this.container.querySelector<HTMLElement>(ARTIST_SCROLL);
+        if (!scroll) return;
+        scroll.querySelector('.tracks-spinner')?.remove();
         for (const artist of artists) {
-            panel.appendChild(this.buildArtistRow(artist));
+            scroll.appendChild(this.buildArtistRow(artist));
         }
-        if (this.artistState.loading) panel.appendChild(this.buildSpinner());
+        if (this.artistState.loading) scroll.appendChild(this.buildSpinner());
+        this.syncAzStrip('artist');
     }
 
     private appendAlbumRows(albums: BrowseAlbum[]): void {
-        const panel = this.container.querySelector<HTMLElement>('#tracks-album-panel');
-        if (!panel) return;
-        panel.querySelector('.tracks-spinner')?.remove();
-
-        if (this.selectedArtistId === null && this.albumState.total >= AZ_THRESHOLD &&
-            !panel.querySelector('.tracks-az-strip')) {
-            const allRow = panel.querySelector<HTMLElement>('[data-all-albums]');
-            if (allRow) allRow.after(this.buildAzStrip('album'));
-        }
+        const scroll = this.container.querySelector<HTMLElement>(ALBUM_SCROLL);
+        if (!scroll) return;
+        scroll.querySelector('.tracks-spinner')?.remove();
         for (const album of albums) {
-            panel.appendChild(this.buildAlbumRow(album));
+            scroll.appendChild(this.buildAlbumRow(album));
         }
-        if (this.albumState.loading) panel.appendChild(this.buildSpinner());
+        if (this.albumState.loading) scroll.appendChild(this.buildSpinner());
+        this.syncAzStrip('album');
     }
 
     private appendTrackRows(tracks: BrowseTrack[]): void {
-        const panel = this.container.querySelector<HTMLElement>('#tracks-track-panel');
+        const panel = this.container.querySelector<HTMLElement>(TRACK_PANEL);
         if (!panel) return;
         panel.querySelector('.tracks-spinner')?.remove();
         for (const track of tracks) {
@@ -505,7 +515,7 @@ export class TracksBrowseView {
     // ─── Basket button refresh on store update ─────────────────────────────────
 
     private updateTrackButtons(): void {
-        const panel = this.container.querySelector<HTMLElement>('#tracks-track-panel');
+        const panel = this.container.querySelector<HTMLElement>(TRACK_PANEL);
         if (!panel) return;
         panel.querySelectorAll<HTMLElement>('[data-basket-toggle]').forEach(btn => {
             const trackId = (btn as any).dataset.basketToggle;
@@ -523,9 +533,9 @@ export class TracksBrowseView {
         this.selectedAlbumId = null;
         this.albumLetter = null;
 
-        const panel = this.container.querySelector('#tracks-artist-panel');
-        if (panel) {
-            panel.querySelectorAll<HTMLElement>('.curation-artist-row').forEach(row => {
+        const scroll = this.container.querySelector(ARTIST_SCROLL);
+        if (scroll) {
+            scroll.querySelectorAll<HTMLElement>('.curation-artist-row').forEach(row => {
                 const isAll = 'allArtists' in row.dataset;
                 const isSelected = isAll ? artistId === null : row.dataset.artistId === artistId;
                 row.classList.toggle('curation-selected', isSelected);
@@ -540,9 +550,9 @@ export class TracksBrowseView {
         if (this.selectedAlbumId === albumId) return;
         this.selectedAlbumId = albumId;
 
-        const panel = this.container.querySelector('#tracks-album-panel');
-        if (panel) {
-            panel.querySelectorAll<HTMLElement>('.curation-album-row').forEach(row => {
+        const scroll = this.container.querySelector(ALBUM_SCROLL);
+        if (scroll) {
+            scroll.querySelectorAll<HTMLElement>('.curation-album-row').forEach(row => {
                 const isAll = 'allAlbums' in row.dataset;
                 const isSelected = isAll ? albumId === null : row.dataset.albumId === albumId;
                 row.classList.toggle('curation-album-focused', isSelected);
@@ -569,26 +579,52 @@ export class TracksBrowseView {
         await Promise.all([this.fetchAlbums(true), this.fetchTracks(true)]);
     }
 
-    // ─── A-Z strip ────────────────────────────────────────────────────────────
+    // ─── Vertical A-Z strip ───────────────────────────────────────────────────
 
-    private buildAzStrip(type: 'artist' | 'album'): HTMLElement {
-        const strip = document.createElement('div');
-        strip.className = 'tracks-az-strip';
-        strip.style.cssText = 'display:flex; flex-wrap:wrap; gap:0.1rem; padding:0.2rem; border-bottom:1px solid var(--surface-border-soft); background:var(--surface-fill); position:sticky; top:2.25rem; z-index:4;';
+    // Show/hide and repopulate the sidebar strip based on current state.
+    private syncAzStrip(type: 'artist' | 'album'): void {
+        const azEl = this.container.querySelector<HTMLElement>(
+            type === 'artist' ? ARTIST_AZ : ALBUM_AZ,
+        );
+        if (!azEl) return;
+
+        const total = type === 'artist' ? this.artistState.total : this.albumState.total;
+        const showStrip = total >= AZ_THRESHOLD &&
+            (type === 'artist' || this.selectedArtistId === null);
+
+        if (!showStrip) {
+            azEl.style.display = 'none';
+            return;
+        }
+
+        azEl.style.display = 'flex';
+        azEl.innerHTML = '';
 
         const activeLetter = type === 'artist' ? this.artistLetter : this.albumLetter;
         for (const letter of ALL_LETTERS) {
-            const btn = document.createElement('sl-button') as any;
-            btn.size = 'small';
-            btn.variant = letter === activeLetter ? 'primary' : 'text';
+            const btn = document.createElement('button');
             btn.textContent = letter;
+            const isActive = letter === activeLetter;
+            btn.style.cssText = [
+                'width:100%',
+                'padding:0.15rem 0',
+                'background:none',
+                'border:none',
+                'cursor:pointer',
+                'font-size:0.55rem',
+                'font-weight:600',
+                'text-align:center',
+                'line-height:1',
+                isActive
+                    ? 'color:var(--sl-color-primary-500)'
+                    : 'color:var(--ink-dim,rgba(255,255,255,0.45))',
+            ].join(';');
             btn.addEventListener('click', () => {
                 if (type === 'artist') this.setArtistLetter(letter);
                 else this.setAlbumLetter(letter);
             });
-            strip.appendChild(btn);
+            azEl.appendChild(btn);
         }
-        return strip;
     }
 
     // ─── Utilities ────────────────────────────────────────────────────────────
@@ -626,11 +662,11 @@ export class TracksBrowseView {
     }
 
     private restoreScrolls(): void {
-        const ap = this.container.querySelector<HTMLElement>('#tracks-artist-panel');
-        if (ap) ap.scrollTop = this.artistScrollTop;
-        const alp = this.container.querySelector<HTMLElement>('#tracks-album-panel');
-        if (alp) alp.scrollTop = this.albumScrollTop;
-        const tp = this.container.querySelector<HTMLElement>('#tracks-track-panel');
+        const as = this.container.querySelector<HTMLElement>(ARTIST_SCROLL);
+        if (as) as.scrollTop = this.artistScrollTop;
+        const als = this.container.querySelector<HTMLElement>(ALBUM_SCROLL);
+        if (als) als.scrollTop = this.albumScrollTop;
+        const tp = this.container.querySelector<HTMLElement>(TRACK_PANEL);
         if (tp) tp.scrollTop = this.trackScrollTop;
     }
 
