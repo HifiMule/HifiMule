@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.10.0 - 2026-06-08
+
+You can now edit playlists right from HifiMule. A new playlist curation view lets you create a playlist, add or remove tracks, rename or delete it, and drag tracks into the order you want — with a live count of how many tracks it holds, how long it plays, and how much space it takes. You can also turn whatever is in your basket into a new playlist (or add it to an existing one) in a couple of clicks. Playlist editing works whether you're connected to Jellyfin or to a Subsonic/Navidrome server.
+
+Browsing your library got better too. A new **Tracks** view shows your songs in a scrollable list that loads more as you go, with an A–Z strip for jumping around big collections. The grid/table view switch now works everywhere — every browse mode and every level you drill into.
+
+This release also adds a **German** translation (joining English, French, and Spanish), fixes Jellyfin so artists and their tracks show up correctly under the album artist, and includes a round of visual polish.
+
 ## v0.9.1 - 2026-06-05
 
 You can now cancel a running sync — a **Cancel Sync** button appears while a sync is in progress. Cancellation stops cleanly after the current file transfer and keeps the device marked for resume, so the next time you connect it picks up where it left off.
