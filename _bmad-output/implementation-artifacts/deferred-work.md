@@ -1,6 +1,17 @@
 # Deferred Work
 
 Status: open
+Last updated: 2026-06-08
+
+## Deferred from: code review of 9-9-tracks-browse-mode-provider-contract-and-daemon-rpc (2026-06-08)
+
+- **Letter filter post-application in Subsonic Branch 3 causes early pagination exhaustion** [`hifimule-daemon/src/providers/subsonic.rs:803`] — `search3_paged` pages server-side with `offset=start`, then `apply_letter_filter` discards songs; `filtered.len() < limit` makes the UI's exhaustion heuristic fire prematurely when matching songs exist beyond the current page window. Explicit v1 limitation documented in spec ("UI may need to fetch additional pages if prefix is rare"). Story 9.10 must account for this.
+- **Subsonic Branch 3 with `limit=0` sends `songCount=0` to `search3` → empty response** [`hifimule-daemon/src/providers/subsonic.rs:792`] — Branches 1 and 2 treat `limit=0` as "return all" but Branch 3 passes `Some(0)` directly to `search3_paged` which yields zero results. Low probability since `browse_pagination` defaults to 50; only affects callers explicitly passing `limit=0`.
+- **Jellyfin `list_tracks` with `limit=0` omits `Limit` param → unbounded server response** [`hifimule-daemon/src/providers/jellyfin.rs:765`] — Same pattern as `list_artists`/`list_albums`. Normal UI calls are safe (default 50). Large libraries could cause high memory usage if `limit=0` slips through.
+- **`get_items` inserts `ArtistIds`/`AlbumIds`/`SortBy` via raw `format!` without URL encoding** [`hifimule-daemon/src/api.rs:332`] — All existing params use the same pattern. GUIDs don't contain injection characters, but the pattern is technically unsafe if future callers pass non-GUID values.
+- **Subsonic `album_id`/`artist_id` branches in `list_tracks` callable without `open_subsonic` check** [`hifimule-daemon/src/providers/subsonic.rs:761`] — Defence-in-depth only; the RPC capability gate prevents classic Subsonic from reaching these branches. The underlying `get_album`/`get_artist` methods are also available on classic Subsonic.
+
+Status: open
 Last updated: 2026-06-06
 
 ## Deferred from: autosync-subsonic-navidrome (2026-05-29)

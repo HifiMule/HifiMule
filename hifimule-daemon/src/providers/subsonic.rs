@@ -831,10 +831,30 @@ fn apply_letter_filter(songs: Vec<Song>, letter: Option<&str>) -> Vec<Song> {
     let Some(letter) = letter.map(str::trim).filter(|l| !l.is_empty()) else {
         return songs;
     };
-    let needle = letter.to_lowercase();
+    // "#" matches titles whose first non-whitespace char is non-alphabetic (mirrors album_matches_letter).
+    if letter == "#" {
+        return songs
+            .into_iter()
+            .filter(|s| {
+                s.title
+                    .chars()
+                    .find(|c| !c.is_whitespace())
+                    .map_or(true, |c| !c.is_ascii_alphabetic())
+            })
+            .collect();
+    }
+    // Compare only the first character of `letter` (consistent with album_matches_letter).
+    let Some(expected) = letter.chars().next() else {
+        return songs;
+    };
     songs
         .into_iter()
-        .filter(|s| s.title.to_lowercase().starts_with(&needle))
+        .filter(|s| {
+            s.title
+                .chars()
+                .find(|c| !c.is_whitespace())
+                .map_or(false, |c| c.eq_ignore_ascii_case(&expected))
+        })
         .collect()
 }
 

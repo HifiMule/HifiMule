@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-06-08  # Story 9.9 marked ready for review
+last_updated: 2026-06-08  # Story 9.9 review complete
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -130,7 +130,7 @@ development_status:
   9-6-navidrome-subsonic-browse-parity-hardening: done
   9-7-virtualized-list-table-browse-views: done  # revised via sprint-change-proposal-2026-06-07 (autoload-on-scroll)
   9-8-extend-view-toggle-all-modes: done  # added via sprint-change-proposal-2026-06-08-extend-view-toggle
-  9-9-tracks-browse-mode-provider-contract-and-daemon-rpc: review  # added via sprint-change-proposal-2026-06-08-tracks-browse-mode
+  9-9-tracks-browse-mode-provider-contract-and-daemon-rpc: done  # added via sprint-change-proposal-2026-06-08-tracks-browse-mode
   9-10-tracks-browse-mode-dual-panel-ui: backlog  # added via sprint-change-proposal-2026-06-08-tracks-browse-mode
 
   epic-10: done

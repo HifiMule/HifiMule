@@ -4,7 +4,7 @@ baseline_commit: 39cdb09
 
 # Story 9.9: Tracks Browse Mode — Provider Contract & Daemon RPC
 
-Status: review
+Status: done
 
 ## Story
 
@@ -357,6 +357,15 @@ _none_
 - hifimule-daemon/src/api.rs — extended `get_items` signature with `artist_ids`, `album_ids`, `sort_by` optional params (`#[allow(clippy::too_many_arguments)]`); updated the existing in-file test call site.
 - hifimule-daemon/src/rpc.rs — added imports for `BrowseMode`/`TrackListFilter`, registered `browse.listTracks` dispatch arm, added `handle_browse_list_tracks` handler with capability gate, extended `FakeBrowseProvider` with a `tracks` field/constructor/impl, added two RPC-level tests, added a `make_fake_song` test helper, updated the existing `handle_jellyfin_get_items` call site with three trailing `None` args.
 - hifimule-i18n/catalog.json — added `error.tracks_mode_unsupported` in en/fr/es.
+
+### Review Findings
+
+- [x] [Review][Patch] `apply_letter_filter` missing `"#"` sentinel and uses full-string `starts_with` instead of first-char comparison — inconsistent with `album_matches_letter` [hifimule-daemon/src/providers/subsonic.rs:830] — **fixed**
+- [x] [Review][Defer] Letter filter post-application in Subsonic Branch 3 causes early pagination exhaustion [hifimule-daemon/src/providers/subsonic.rs:803] — deferred, explicit v1 limitation documented in spec
+- [x] [Review][Defer] Subsonic Branch 3 with `limit=0` sends `songCount=0` to `search3` → returns empty [hifimule-daemon/src/providers/subsonic.rs:792] — deferred, pre-existing; `browse_pagination` defaults to 50
+- [x] [Review][Defer] Jellyfin `limit=0` omits `Limit` param — Jellyfin returns all tracks unbounded [hifimule-daemon/src/providers/jellyfin.rs:765] — deferred, pre-existing pattern consistent with `list_artists`/`list_albums`
+- [x] [Review][Defer] `get_items` inserts `ArtistIds`/`AlbumIds`/`SortBy` via raw `format!` without URL encoding [hifimule-daemon/src/api.rs:332] — deferred, pre-existing pattern; ID values are GUIDs with no injection chars
+- [x] [Review][Defer] Subsonic `album_id`/`artist_id` branches callable without `open_subsonic` gate via direct trait call — RPC capability gate is the enforced boundary [hifimule-daemon/src/providers/subsonic.rs:761] — deferred, pre-existing; defence-in-depth only
 
 ## Change Log
 
