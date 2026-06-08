@@ -590,10 +590,7 @@ function renderViewToggle() {
     if (!container) return;
     const existing = container.querySelector('.view-toggle-group');
     if (existing) existing.remove();
-    const showToggle =
-        (state.browseMode === 'artists' || state.browseMode === 'albums') &&
-        state.breadcrumbStack.length === 0 &&
-        !state.loading;
+    const showToggle = !state.loading;
     if (!showToggle) return;
     const currentMode = state.listViewMode;
     const group = document.createElement('div');
@@ -755,9 +752,6 @@ function renderList(items: BrowseDisplayItem[]) {
         }
     }
     (content as any).__listPaint = paint;
-    const rootMode = state.browseMode === 'artists' || state.browseMode === 'albums'
-        ? state.browseMode as 'artists' | 'albums'
-        : null;
     const scrollHandler = () => {
         if (state.listLoading) {
             const maxScroll = state.items.length * VIRTUAL_ROW_HEIGHT;
@@ -765,13 +759,12 @@ function renderList(items: BrowseDisplayItem[]) {
         }
         paint();
         if (
-            rootMode &&
             !state.listLoading &&
             state.items.length < state.pagination.total
         ) {
             const loadedBoundary = (state.items.length - LOAD_AHEAD) * VIRTUAL_ROW_HEIGHT;
             if (content.scrollTop + content.clientHeight >= loadedBoundary) {
-                loadMoreForListView(rootMode);
+                loadMoreForListView();
             }
         }
     };
@@ -787,7 +780,7 @@ function renderList(items: BrowseDisplayItem[]) {
     paint();
 }
 
-async function loadMoreForListView(mode: 'artists' | 'albums') {
+async function loadMoreForListView() {
     if (state.listLoading || state.items.length >= state.pagination.total) return;
     state.listLoading = true;
     const content = document.getElementById('library-content');
@@ -795,15 +788,41 @@ async function loadMoreForListView(mode: 'artists' | 'albums') {
     try {
         const startIndex = state.items.length;
         const letter = state.activeLetter ?? undefined;
+        const depth = state.breadcrumbStack.length;
+        const mode = state.browseMode;
+
         if (mode === 'artists') {
             const r = await fetchBrowseArtists(letter, undefined, startIndex, 200);
             state.items = [...state.items, ...mapArtists(r.artists)];
             state.pagination.total = r.total;
-        } else {
+        } else if (mode === 'albums') {
             const r = await fetchBrowseAlbums(letter, undefined, startIndex, 200);
             state.items = [...state.items, ...mapAlbums(r.albums)];
             state.pagination.total = r.total;
+        } else if (mode === 'genres' && depth === 0) {
+            const r = await fetchBrowseGenres(undefined, startIndex, state.pagination.limit);
+            state.items = [...state.items, ...mapGenres(r.genres)];
+            state.pagination.total = r.total;
+        } else if (mode === 'genres' && depth === 1 && state.parentId) {
+            const r = await fetchBrowseGenre(state.parentId, startIndex, state.pagination.limit);
+            state.items = [...state.items, ...mapFlatTracks(r.tracks)];
+            state.pagination.total = r.total;
+        } else if (mode === 'recentlyAdded') {
+            const r = await fetchBrowseRecentlyAdded(undefined, startIndex, state.pagination.limit);
+            state.items = [...state.items, ...mapAlbums(r.albums)];
+            state.pagination.total = r.total;
+        } else if (mode === 'frequentlyPlayed') {
+            const r = await fetchBrowseFrequentlyPlayed(undefined, startIndex, state.pagination.limit);
+            state.items = [...state.items, ...mapFlatTracks(r.tracks, 'frequentlyPlayed')];
+            state.pagination.total = r.total;
+        } else if (mode === 'recentlyPlayed') {
+            const r = await fetchBrowseRecentlyPlayed(undefined, startIndex, state.pagination.limit);
+            state.items = [...state.items, ...mapFlatTracks(r.tracks, 'recentlyPlayed')];
+            state.pagination.total = r.total;
+        } else {
+            return;
         }
+
         state.pagination.startIndex = state.items.length;
         if (content) {
             const scroller = (content as any).__listScroller as HTMLElement | undefined;
@@ -820,14 +839,13 @@ async function loadMoreForListView(mode: 'artists' | 'albums') {
 
 function renderCurrentView() {
     const mode = state.listViewMode;
-    if (
-        mode === 'list' &&
-        (state.browseMode === 'artists' || state.browseMode === 'albums') &&
-        state.breadcrumbStack.length === 0
-    ) {
+    const onCurate = state.browseMode === 'playlists' && _supportsPlaylistWrite
+        ? openCurationView
+        : undefined;
+    if (mode === 'list') {
         renderList(state.items);
     } else {
-        renderGrid(state.items);
+        renderGrid(state.items, onCurate);
     }
 }
 
@@ -1124,7 +1142,7 @@ async function loadPlaylists() {
         state.items = cached.items;
         state.pagination.total = cached.total;
         state.artistViewTotal = 0;
-        renderGrid(state.items, _supportsPlaylistWrite ? openCurationView : undefined);
+        renderCurrentView();
         restoreScroll(key);
         return;
     }
@@ -1143,7 +1161,7 @@ async function loadPlaylists() {
         state.pagination.startIndex = mapped.length;
         state.artistViewTotal = 0;
         state.pageCache.set(key, { items: state.items, total: mapped.length });
-        renderGrid(state.items, _supportsPlaylistWrite ? openCurationView : undefined);
+        renderCurrentView();
         restoreScroll(key);
     } catch (e) {
         renderError(e as Error);
@@ -1166,7 +1184,7 @@ async function loadGenres(reset: boolean) {
             state.pagination.total = cached.total;
             state.pagination.startIndex = 0;
             state.artistViewTotal = 0;
-            renderGrid(state.items);
+            renderCurrentView();
             restoreScroll(key);
             return;
         }
@@ -1193,7 +1211,7 @@ async function loadGenres(reset: boolean) {
             state.items = [...state.items, ...mapped];
         }
 
-        renderGrid(state.items);
+        renderCurrentView();
         if (reset) restoreScroll(key);
     } catch (e) {
         renderError(e as Error);
@@ -1215,7 +1233,7 @@ async function loadRecentlyAddedAlbums(reset: boolean) {
             state.items = cached.items;
             state.pagination.total = cached.total;
             state.pagination.startIndex = 0;
-            renderGrid(state.items);
+            renderCurrentView();
             restoreScroll(key);
             return;
         }
@@ -1241,7 +1259,7 @@ async function loadRecentlyAddedAlbums(reset: boolean) {
             state.items = [...state.items, ...mapped];
         }
 
-        renderGrid(state.items);
+        renderCurrentView();
         if (reset) restoreScroll(key);
     } catch (e) {
         renderError(e as Error);
@@ -1267,7 +1285,7 @@ async function loadFlatTracks(
             state.pagination.total = cached.total;
             state.pagination.startIndex = 0;
             state.artistViewTotal = 0;
-            renderGrid(state.items);
+            renderCurrentView();
             restoreScroll(key);
             return;
         }
@@ -1306,7 +1324,7 @@ async function loadFlatTracks(
             state.items = [...state.items, ...mapped];
         }
 
-        renderGrid(state.items);
+        renderCurrentView();
         if (reset) restoreScroll(key);
     } catch (e) {
         renderError(e as Error);
@@ -1326,7 +1344,7 @@ async function loadFavoriteArtists() {
         state.items = cached.items;
         state.pagination.total = cached.total;
         state.pagination.startIndex = cached.total;
-        renderGrid(state.items);
+        renderCurrentView();
         restoreScroll(key);
         return;
     }
@@ -1346,7 +1364,7 @@ async function loadFavoriteArtists() {
         state.artistViewTotal = 0;
         state.albumViewTotal = 0;
         state.pageCache.set(key, { items: artists, total: artists.length });
-        renderGrid(state.items);
+        renderCurrentView();
         restoreScroll(key);
     } catch (e) {
         renderError(e as Error);
@@ -1366,7 +1384,7 @@ async function loadFavoriteArtistAlbums(artistId: string) {
         state.items = cached.items;
         state.pagination.total = cached.total;
         state.pagination.startIndex = cached.total;
-        renderGrid(state.items);
+        renderCurrentView();
         restoreScroll(key);
         return;
     }
@@ -1388,7 +1406,7 @@ async function loadFavoriteArtistAlbums(artistId: string) {
         state.pagination.total = mapped.length;
         state.pagination.startIndex = mapped.length;
         state.pageCache.set(key, { items: mapped, total: mapped.length });
-        renderGrid(state.items);
+        renderCurrentView();
         restoreScroll(key);
     } catch (e) {
         renderError(e as Error);
@@ -1408,7 +1426,7 @@ async function loadFavoriteAlbumTracks(albumId: string) {
         state.items = cached.items;
         state.pagination.total = cached.total;
         state.pagination.startIndex = cached.total;
-        renderGrid(state.items);
+        renderCurrentView();
         restoreScroll(key);
         return;
     }
@@ -1433,7 +1451,7 @@ async function loadFavoriteAlbumTracks(albumId: string) {
         state.pagination.total = mapped.length;
         state.pagination.startIndex = mapped.length;
         state.pageCache.set(key, { items: mapped, total: mapped.length });
-        renderGrid(state.items);
+        renderCurrentView();
         restoreScroll(key);
     } catch (e) {
         renderError(e as Error);
@@ -1457,7 +1475,7 @@ async function loadArtistAlbums(artistId: string) {
         state.pagination.total = cached.total;
         state.pagination.startIndex = cached.total;
         state.artistViewTotal = 0;
-        renderGrid(state.items);
+        renderCurrentView();
         restoreScroll(key);
         return;
     }
@@ -1476,7 +1494,7 @@ async function loadArtistAlbums(artistId: string) {
         state.pagination.startIndex = albums.length;
         state.artistViewTotal = 0;
         state.pageCache.set(key, { items: albums, total: albums.length });
-        renderGrid(state.items);
+        renderCurrentView();
         restoreScroll(key);
     } catch (e) {
         renderError(e as Error);
@@ -1498,7 +1516,7 @@ async function loadAlbumTracks(albumId: string) {
         state.pagination.total = cached.total;
         state.pagination.startIndex = cached.total;
         state.artistViewTotal = 0;
-        renderGrid(state.items);
+        renderCurrentView();
         restoreScroll(key);
         return;
     }
@@ -1517,7 +1535,7 @@ async function loadAlbumTracks(albumId: string) {
         state.pagination.startIndex = tracks.length;
         state.artistViewTotal = 0;
         state.pageCache.set(key, { items: tracks, total: tracks.length });
-        renderGrid(state.items);
+        renderCurrentView();
         restoreScroll(key);
     } catch (e) {
         renderError(e as Error);
@@ -1544,7 +1562,7 @@ async function loadPlaylistTracks(playlistId: string) {
         state.pagination.total = tracks.length;
         state.pagination.startIndex = tracks.length;
         state.artistViewTotal = 0;
-        renderGrid(state.items);
+        renderCurrentView();
     } catch (e) {
         renderError(e as Error);
     } finally {
@@ -1566,7 +1584,7 @@ async function loadGenreTracks(genreIdOrName: string, reset: boolean) {
             state.pagination.total = cached.total;
             state.pagination.startIndex = 0;
             state.artistViewTotal = 0;
-            renderGrid(state.items);
+            renderCurrentView();
             restoreScroll(key);
             return;
         }
@@ -1593,7 +1611,7 @@ async function loadGenreTracks(genreIdOrName: string, reset: boolean) {
             state.items = [...state.items, ...mapped];
         }
 
-        renderGrid(state.items);
+        renderCurrentView();
         if (reset) restoreScroll(key);
     } catch (e) {
         renderError(e as Error);
@@ -1726,7 +1744,7 @@ async function appendByLetter(mode: 'artists' | 'albums', letter: string) {
             state.pagination.total = result.total;
         }
         state.pagination.startIndex = state.items.length;
-        renderGrid(state.items);
+        renderCurrentView();
     } catch (e) {
         renderError(e as Error);
     } finally {

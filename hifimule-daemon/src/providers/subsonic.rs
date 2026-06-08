@@ -654,18 +654,24 @@ impl MediaProvider for SubsonicProvider {
         offset: u32,
         limit: u32,
     ) -> Result<(Vec<Song>, u32), ProviderError> {
+        // getSongsByGenre doesn't return a total count, so fetch all and paginate locally
         let body = self
             .client
-            .get_songs_by_genre(genre_id_or_name, offset, limit)
+            .get_songs_by_genre(genre_id_or_name, 0, 10_000)
             .await?;
-        let songs: Vec<Song> = body
+        let all_songs: Vec<Song> = body
             .songs_by_genre
             .song
             .into_iter()
             .map(song_from_dto)
             .collect();
-        let total = songs.len() as u32;
-        Ok((songs, total))
+        let total = all_songs.len() as u32;
+        let page: Vec<Song> = all_songs
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect();
+        Ok((page, total))
     }
 
     async fn list_favorites(
