@@ -130,7 +130,7 @@ development_status:
   9-6-navidrome-subsonic-browse-parity-hardening: done
   9-7-virtualized-list-table-browse-views: done  # revised via sprint-change-proposal-2026-06-07 (autoload-on-scroll)
   9-8-extend-view-toggle-all-modes: done  # added via sprint-change-proposal-2026-06-08-extend-view-toggle
-  9-9-tracks-browse-mode-provider-contract-and-daemon-rpc: backlog  # added via sprint-change-proposal-2026-06-08-tracks-browse-mode
+  9-9-tracks-browse-mode-provider-contract-and-daemon-rpc: ready-for-dev  # added via sprint-change-proposal-2026-06-08-tracks-browse-mode
   9-10-tracks-browse-mode-dual-panel-ui: backlog  # added via sprint-change-proposal-2026-06-08-tracks-browse-mode
 
   epic-10: done
