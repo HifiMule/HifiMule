@@ -1626,8 +1626,10 @@ impl JellyfinClient {
         // Step 1: fetch current item JSON
         let mut item = self.get_item_details(url, token, user_id, item_id).await?;
 
-        // Step 2: mutate name and POST back
+        // Step 2: mutate name and POST back. UserData is user-scoped read metadata; newer
+        // Jellyfin versions reject it on item update bodies unless it includes server-only fields.
         item.name = new_name.to_string();
+        item.user_data = None;
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -2196,6 +2198,53 @@ mod tests {
         let item: JellyfinItem = serde_json::from_str(json).unwrap();
         assert_eq!(item.recursive_item_count, Some(12));
         assert_eq!(item.cumulative_run_time_ticks, Some(123456789));
+    }
+
+    #[tokio::test]
+    async fn test_rename_item_omits_user_data_from_update_body() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let token = "test-token-1234567890";
+
+        let _get = server
+            .mock("GET", "/Items/playlist1")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("userId".to_string(), "user1".to_string()),
+                mockito::Matcher::UrlEncoded(
+                    "Fields".to_string(),
+                    "RecursiveItemCount,CumulativeRunTimeTicks".to_string(),
+                ),
+            ]))
+            .match_header("X-Emby-Token", token)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"Id":"playlist1","Name":"Old Name","Type":"Playlist","RecursiveItemCount":3,"UserData":{"PlayCount":0,"IsFavorite":false}}"#,
+            )
+            .create_async()
+            .await;
+
+        let update = server
+            .mock("POST", "/Items/playlist1")
+            .match_header("X-Emby-Token", token)
+            .match_body(mockito::Matcher::Json(serde_json::json!({
+                "Id": "playlist1",
+                "Name": "New Name",
+                "Type": "Playlist",
+                "RecursiveItemCount": 3,
+            })))
+            .with_status(204)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = JellyfinClient::new();
+        client
+            .rename_item(&url, token, "user1", "playlist1", "New Name")
+            .await
+            .expect("rename_item should update without user data");
+
+        update.assert_async().await;
     }
 
     #[tokio::test]

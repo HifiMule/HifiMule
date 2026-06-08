@@ -1726,9 +1726,7 @@ pub mod libmtp {
                         // Garmin hides sub-folder objects from enumeration; ensure_path_raw lazily
                         // BFS-primes the hints cache on first miss so it can resolve the hidden ID.
                         let is_last_component = idx + 1 == components.len();
-                        if !is_last_component
-                            && let Some(&hint_id) = hints.get(&acc_path)
-                        {
+                        if !is_last_component && let Some(&hint_id) = hints.get(&acc_path) {
                             parent_id = hint_id;
                             continue;
                         }

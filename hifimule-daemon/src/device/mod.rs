@@ -225,9 +225,7 @@ pub async fn cleanup_tmp_files(
             Err(_) => continue,
         };
         for entry in entries {
-            if entry.name.ends_with(".tmp")
-                && device_io.delete_file(&entry.path).await.is_ok()
-            {
+            if entry.name.ends_with(".tmp") && device_io.delete_file(&entry.path).await.is_ok() {
                 count += 1;
             }
         }

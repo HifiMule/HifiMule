@@ -1854,22 +1854,14 @@ async fn provider_legacy_item_size(
     item_id: &str,
 ) -> Result<Value, JsonRpcError> {
     if let Ok(album) = provider.get_album(item_id).await {
-        let total = album
-            .tracks
-            .iter()
-            .map(provider_track_size)
-            .sum::<u64>();
+        let total = album.tracks.iter().map(provider_track_size).sum::<u64>();
         return Ok(serde_json::json!({
             "id": item_id,
             "totalSizeBytes": total,
         }));
     }
     if let Ok(playlist) = provider.get_playlist(item_id).await {
-        let total = playlist
-            .tracks
-            .iter()
-            .map(provider_track_size)
-            .sum::<u64>();
+        let total = playlist.tracks.iter().map(provider_track_size).sum::<u64>();
         return Ok(serde_json::json!({
             "id": item_id,
             "totalSizeBytes": total,
@@ -1879,11 +1871,7 @@ async fn provider_legacy_item_size(
         let mut total = 0_u64;
         for album in artist.albums {
             if let Ok(album) = provider.get_album(&album.id).await {
-                total += album
-                    .tracks
-                    .iter()
-                    .map(provider_track_size)
-                    .sum::<u64>();
+                total += album.tracks.iter().map(provider_track_size).sum::<u64>();
             }
         }
         return Ok(serde_json::json!({
@@ -1892,10 +1880,7 @@ async fn provider_legacy_item_size(
         }));
     }
     if let Ok((tracks, _)) = provider.get_genre_tracks(item_id, 0, 10_000).await {
-        let total = tracks
-            .iter()
-            .map(provider_track_size)
-            .sum::<u64>();
+        let total = tracks.iter().map(provider_track_size).sum::<u64>();
         return Ok(serde_json::json!({
             "id": item_id,
             "totalSizeBytes": total,
@@ -4506,9 +4491,7 @@ fn apply_manifest_settings_update(
             old_playlist.as_deref(),
             new_playlist.as_deref(),
         );
-        if playlist_changed
-            && let Some(old_playlist) = old_playlist.as_deref()
-        {
+        if playlist_changed && let Some(old_playlist) = old_playlist.as_deref() {
             for entry in &mut manifest.playlists {
                 entry.filename = playlist_filename_with_folder(old_playlist, &entry.filename);
             }

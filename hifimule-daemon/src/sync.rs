@@ -3311,10 +3311,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
                 item.album.as_ref().map(|a| a.to_lowercase()),
                 item.artist.as_ref().map(|a| a.to_lowercase()),
             );
-            delete_by_metadata
-                .entry(key)
-                .or_default()
-                .push(idx);
+            delete_by_metadata.entry(key).or_default().push(idx);
         }
     }
 
