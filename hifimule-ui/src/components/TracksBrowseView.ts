@@ -397,7 +397,6 @@ export class TracksBrowseView {
         row.setAttribute('role', 'button');
         row.setAttribute('tabindex', '0');
         row.setAttribute('aria-pressed', this.selectedArtistId === null ? 'true' : 'false');
-        row.style.cssText = 'position:sticky; top:0; z-index:5; background:var(--sl-panel-background-color,#1e293b);';
         row.innerHTML = `<span class="curation-row-label curation-row-label--italic">${t('tracks.view.all_artists')}</span>`;
         row.addEventListener('click', () => this.selectArtist(null));
         row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.selectArtist(null); } });
@@ -411,7 +410,6 @@ export class TracksBrowseView {
         row.setAttribute('role', 'button');
         row.setAttribute('tabindex', '0');
         row.setAttribute('aria-pressed', this.selectedAlbumId === null ? 'true' : 'false');
-        row.style.cssText = 'position:sticky; top:0; z-index:5; background:var(--sl-panel-background-color,#1e293b);';
         row.innerHTML = `<span class="curation-row-label curation-row-label--italic">${t('tracks.view.all_albums')}</span>`;
         row.addEventListener('click', () => this.selectAlbum(null));
         row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.selectAlbum(null); } });
