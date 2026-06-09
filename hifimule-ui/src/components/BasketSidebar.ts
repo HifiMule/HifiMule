@@ -819,15 +819,10 @@ export class BasketSidebar {
     }
 
     private renderStatusZone(): string {
-        // Mixed-server informational note (AC36): shown whenever the basket holds
-        // items from more than one server, independent of the dirty state.
-        const mixedNote = basketStore.hasMultipleServers()
-            ? `
-            <div class="basket-mixed-server-note">
-                <sl-icon name="info-circle"></sl-icon>
-                <span>${t('basket.mixedServerNote')}</span>
-            </div>`
-            : '';
+        // The mixed-server note was removed (2026-06-09): the per-server section
+        // labels, lock placeholder, and locked-item tooltip now convey that other
+        // servers' items are read-only, so the banner is redundant and the freed
+        // space goes to the basket list (AC36).
 
         // Collapse the dirty banner entirely when clean; the footer's flex gap
         // closes the space. The banner fades in on appear.
@@ -839,8 +834,8 @@ export class BasketSidebar {
                 </div>`
             : '';
 
-        if (!mixedNote && !dirtyBanner) return '';
-        return `<div class="basket-status-zone">${mixedNote}${dirtyBanner}</div>`;
+        if (!dirtyBanner) return '';
+        return `<div class="basket-status-zone">${dirtyBanner}</div>`;
     }
 
     private updateDeviceLockState(): void {
@@ -989,7 +984,7 @@ export class BasketSidebar {
             </div>
 
             <div class="basket-items-list">
-                ${items.map(item => this.renderItem(item)).join('')}
+                ${this.renderItemsList(items)}
             </div>
 
             <div class="basket-footer">
@@ -1603,12 +1598,6 @@ export class BasketSidebar {
         }
     }
 
-    /** Read-only badge for items belonging to a non-selected server (AC35). */
-    private lockedServerBadge(item: BasketItem): string {
-        if (!basketStore.isItemLocked(item)) return '';
-        return `<span class="basket-item-server-badge" title="${this.escapeHtml(t('basket.locked_hint'))}">${this.escapeHtml(this.serverDisplayLabel(item.serverId))}</span>`;
-    }
-
     /** Remove control, hidden for locked (non-selected-server) items (AC35). */
     private removeButtonFor(item: BasketItem, id: string): string {
         if (basketStore.isItemLocked(item)) return '';
@@ -1626,7 +1615,7 @@ export class BasketSidebar {
                     <sl-icon name="stars"></sl-icon>
                 </div>
                 <div class="basket-item-info">
-                    <div class="basket-item-name">${this.lockedServerBadge(item)}${t('basket.autofill.slot')}</div>
+                    <div class="basket-item-name">${t('basket.autofill.slot')}</div>
                     <div class="basket-item-meta">
                         ${t('basket.autofill.slot_meta', { size: formatSize(item.sizeBytes) })}
                     </div>
@@ -1643,7 +1632,7 @@ export class BasketSidebar {
                     <sl-icon name="person-fill"></sl-icon>
                 </div>
                 <div class="basket-item-info">
-                    <div class="basket-item-name">${this.lockedServerBadge(item)}${this.escapeHtml(item.name)}</div>
+                    <div class="basket-item-name">${this.escapeHtml(item.name)}</div>
                     <div class="basket-item-meta">
                         ${t('basket.item.artist_meta', { count: item.childCount ?? 0, size: formatSize(item.sizeBytes ?? 0) })}
                     </div>
@@ -1660,7 +1649,7 @@ export class BasketSidebar {
                     <sl-icon name="music-note-beamed"></sl-icon>
                 </div>
                 <div class="basket-item-info">
-                    <div class="basket-item-name">${this.lockedServerBadge(item)}${this.escapeHtml(item.name)}</div>
+                    <div class="basket-item-name">${this.escapeHtml(item.name)}</div>
                     <div class="basket-item-meta">
                         ${t('basket.item.genre_meta', { count: item.childCount ?? 0, size: formatSize(item.sizeBytes ?? 0) })}
                     </div>
@@ -1668,6 +1657,37 @@ export class BasketSidebar {
                 ${this.removeButtonFor(item, item.id)}
             </div>
         `;
+    }
+
+    /** Renders the basket items, grouping them by server with a labelled section
+     * divider when the basket spans multiple servers (AC36). Single-server baskets
+     * render as a flat list (unchanged). Insertion order is preserved for both the
+     * server groups and the items within each group. */
+    private renderItemsList(items: BasketItem[]): string {
+        // Group (and label) by server whenever the basket spans multiple servers OR
+        // holds any item from a non-selected server. The per-group label is the sole
+        // server indicator, so any foreign-server item must sit under a label. A
+        // homogeneous, all-selected-server basket renders as a flat, unlabelled list.
+        const shouldGroup =
+            basketStore.hasMultipleServers() || items.some(item => basketStore.isItemLocked(item));
+        if (!shouldGroup) {
+            return items.map(item => this.renderItem(item)).join('');
+        }
+        const groups: Array<{ serverId: string | undefined; items: BasketItem[] }> = [];
+        for (const item of items) {
+            let group = groups.find(g => g.serverId === item.serverId);
+            if (!group) {
+                group = { serverId: item.serverId, items: [] };
+                groups.push(group);
+            }
+            group.items.push(item);
+        }
+        return groups
+            .map(group => `
+                <div class="basket-server-group-label">${this.escapeHtml(this.serverDisplayLabel(group.serverId))}</div>
+                ${group.items.map(item => this.renderItem(item)).join('')}
+            `)
+            .join('');
     }
 
     private renderItem(item: BasketItem): string {
@@ -1691,10 +1711,9 @@ export class BasketSidebar {
 
         return `
             <div class="basket-item-card ${item.autoFilled ? 'basket-item-auto' : ''}${this.lockedCardClass(item)}" data-id="${item.id}">
-                <div class="basket-item-image" data-image-id="${item.id}"></div>
+                ${this.basketItemImage(item)}
                 <div class="basket-item-info">
                     <div class="basket-item-name">
-                        ${this.lockedServerBadge(item)}
                         ${autoBadge}
                         ${this.escapeHtml(item.name)}
                     </div>
@@ -1706,6 +1725,17 @@ export class BasketSidebar {
                 ${this.removeButtonFor(item, item.id)}
             </div>
         `;
+    }
+
+    /** Image cell for a track/album basket item. Foreign-server (locked) items
+     * can't load their thumbnail from the active provider, so instead of a blank
+     * square they get a lock placeholder (and no `data-image-id`, so the async
+     * loader skips them). */
+    private basketItemImage(item: BasketItem): string {
+        if (basketStore.isItemLocked(item)) {
+            return `<div class="basket-item-image basket-item-image--locked" title="${this.escapeHtml(t('basket.locked_hint'))}"><sl-icon name="lock-fill"></sl-icon></div>`;
+        }
+        return `<div class="basket-item-image" data-image-id="${this.escapeHtml(item.id)}"></div>`;
     }
 
     /** Load basket item images asynchronously after HTML is in the DOM. */
@@ -1801,6 +1831,9 @@ export class BasketSidebar {
         dialog.innerHTML = `
             ${crossServerNoticeHtml}
             ${autoFillNoticeHtml}
+            <div class="playlist-dialog-count" style="margin-bottom: 0.5rem; font-size: 0.85rem; opacity: 0.7;">
+                ${t('basket.playlist.item_count', { count: manualIds.length })}
+            </div>
             <sl-input
                 id="playlist-name-input"
                 placeholder="${t('basket.playlist.name_placeholder')}"

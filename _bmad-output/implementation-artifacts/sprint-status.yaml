@@ -59,7 +59,7 @@ development_status:
   2-8-enhanced-multi-device-hub: done
   2-9-device-identity-name-and-icon: done
   2-10-mtp-device-detection: done
-  2-11-multi-server-hub: review  # T17.3 manual two-server hardware test passed 2026-06-09
+  2-11-multi-server-hub: done  # code review 2026-06-09: 5 patches applied (incl. HIGH single-non-selected-server sync routing), 2 false positives dismissed, 1 LOW deferred
   epic-2-retrospective: done
 
   epic-3: done

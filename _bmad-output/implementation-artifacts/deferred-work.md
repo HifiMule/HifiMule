@@ -1,7 +1,13 @@
 # Deferred Work
 
 Status: open
-Last updated: 2026-06-08
+Last updated: 2026-06-09
+
+## Deferred from: code review of 2-11-multi-server-hub (2026-06-09)
+
+- **Cross-server playlist guard (AC33) checks only the `items` param, not the `itemIds` used to build the track list** [`hifimule-daemon/src/rpc.rs:875-915` `handle_playlist_create`] — defense-in-depth only. The guard inspects `params["items"]` (`{id, serverId}`), but `track_ids` is built from `params["itemIds"]`. A non-UI caller sending legacy `itemIds: string[]` (no `items`) skips the guard; however those ids resolve only against the *selected* provider, so cross-server ids fail to resolve and are skipped (not mis-assigned). The UI always sends `items` (AC34 pre-filter), so the supported flow is fully covered. A complete fix needs per-item serverIds in the bare-`itemIds` path; forcing `items` would break the documented legacy contract.
+- **load_vault masks decryptable-but-unparseable vault as empty** [`hifimule-daemon/src/api.rs` `load_vault`] — `serde_json::from_str(&json).unwrap_or_default()` turns a corrupted-but-decryptable vault into an empty map (previously errored on parse failure). Worst case the user re-authenticates; the legacy-migration path reads the raw blob separately so migration is unaffected. Low impact.
+- **`handle_server_connect` with `ServerType::Unknown` caches a provider but saves no credential** [`hifimule-daemon/src/rpc.rs` `handle_server_connect`] — the Unknown arm stores no vault entry yet inserts the provider into the cache; a later lazy reconnect fails with "No credential found" → `ERR_UNAUTHORIZED`, leaving a broken row the user must remove. Only reachable for an unrecognized server type.
 
 ## Deferred from: code review of 9-10-tracks-browse-mode-dual-panel-ui (2026-06-08)
 

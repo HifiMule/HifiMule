@@ -191,6 +191,25 @@ body {
   gap: var(--space-sm);
 }
 
+/* Per-server section divider/label for mixed-server baskets (AC36). */
+.basket-server-group-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.5);
+  margin-top: var(--space-xs);
+}
+.basket-server-group-label::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
 .basket-item-card {
   display: flex;
   align-items: center;
@@ -224,6 +243,17 @@ body {
   background-position: center;
   border-radius: var(--sl-border-radius-small);
   flex-shrink: 0;
+}
+
+/* Foreign-server (locked) item: lock placeholder instead of a blank thumbnail. */
+.basket-item-image--locked {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px dashed rgba(255, 255, 255, 0.15);
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 1.1rem;
 }
 
 .basket-item-info {

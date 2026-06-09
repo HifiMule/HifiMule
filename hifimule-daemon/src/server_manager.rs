@@ -164,11 +164,15 @@ pub async fn get_provider(
             .ok_or_else(|| ProviderError::Auth(format!("Unknown server: {id}")))?,
     };
     let provider = connect_provider_for(&record).await?;
-    manager
-        .write()
-        .await
-        .providers
-        .insert(id.to_string(), provider.clone());
+    // Double-checked insert: a concurrent caller may have connected and cached the
+    // same id while we were awaiting `connect_provider_for`. Converge on whichever
+    // instance landed first so every caller shares one provider Arc (avoids
+    // duplicate per-provider session state from a check-then-insert race).
+    let mut guard = manager.write().await;
+    if let Some(existing) = guard.providers.get(id).cloned() {
+        return Ok(existing);
+    }
+    guard.providers.insert(id.to_string(), provider.clone());
     Ok(provider)
 }
 

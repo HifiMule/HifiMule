@@ -1763,16 +1763,25 @@ fn reconcile_basket_server_ids(
         .collect();
     items
         .into_iter()
-        .filter_map(|mut item| {
-            let resolved = match item.server_id.clone() {
-                None => selected_id.map(|s| s.to_string()),
-                Some(s) if known.contains(s.as_str()) => Some(s),
-                Some(s) => composite_to_uuid.get(&s).cloned(),
-            };
-            resolved.map(|rid| {
-                item.server_id = Some(rid);
-                item
-            })
+        .filter_map(|mut item| match item.server_id.clone() {
+            // Untagged (legacy) item: adopt the selected server if there is one;
+            // otherwise keep it untagged rather than dropping it — it isn't bound to
+            // any removed server, and it will be reconciled once a server is selected.
+            None => {
+                item.server_id = selected_id.map(|s| s.to_string());
+                Some(item)
+            }
+            // Already a known UUID — keep as-is.
+            Some(s) if known.contains(s.as_str()) => Some(item),
+            // Composite legacy id that maps to a migrated server — remap to its UUID.
+            Some(s) => match composite_to_uuid.get(&s) {
+                Some(uuid) => {
+                    item.server_id = Some(uuid.clone());
+                    Some(item)
+                }
+                // Belongs to an unknown/removed server (AC7) — drop it.
+                None => None,
+            },
         })
         .collect()
 }
@@ -3153,7 +3162,13 @@ fn parse_item_specs(raw: &[Value]) -> Vec<(String, Option<String>)> {
 
 /// True when the basket items resolve to more than one distinct server (each
 /// item's serverId, or the selected server when unspecified).
-fn sync_spans_multiple_servers(
+/// True when the sync must route items to per-server providers rather than the
+/// single-server dispatch. The single-server path always uses the *selected*
+/// provider, so it is only correct when every resolved item (and the auto-fill
+/// slot) belongs to the selected server. Routing is therefore needed when items
+/// span multiple servers OR the sole server is not the selected one — the latter
+/// happens with a basket holding only locked, other-server items (AC26/AC28).
+fn sync_needs_provider_routing(
     item_specs: &[(String, Option<String>)],
     selected_id: Option<&str>,
     auto_fill_server: Option<&str>,
@@ -3168,7 +3183,11 @@ fn sync_spans_multiple_servers(
     if let Some(af) = auto_fill_server {
         servers.insert(af.to_string());
     }
-    servers.len() > 1
+    match selected_id {
+        Some(sel) => servers.iter().any(|s| s != sel),
+        // Nothing selected: any concrete server means we must route explicitly.
+        None => !servers.is_empty(),
+    }
 }
 
 /// Resolves a mixed-server basket by routing each item to its originating
@@ -3366,7 +3385,7 @@ async fn handle_sync_calculate_delta(
     } else {
         None
     };
-    if sync_spans_multiple_servers(&item_specs, selected_id.as_deref(), auto_fill_server.as_deref())
+    if sync_needs_provider_routing(&item_specs, selected_id.as_deref(), auto_fill_server.as_deref())
     {
         return multi_provider_calculate_delta(state, &item_specs, &manifest, &params).await;
     }
@@ -4062,9 +4081,11 @@ async fn handle_sync_execute(
         });
     }
 
-    // Multi-server execute (AC28/AC29): when the delta's adds span more than one
-    // server, route each server's items to its own provider. Single-server syncs
-    // keep the existing dispatch unchanged (AC21).
+    // Multi-server execute (AC28/AC29): when the delta's adds belong to a server
+    // other than the selected one — whether they span multiple servers or sit on a
+    // single non-selected server — route each server's items to its own provider.
+    // Single-server syncs (no tagged adds, or all adds on the selected server) keep
+    // the existing dispatch unchanged (AC21).
     let add_servers: Vec<String> = {
         let mut seen = HashSet::new();
         let mut ordered = Vec::new();
@@ -4077,7 +4098,13 @@ async fn handle_sync_execute(
         }
         ordered
     };
-    if add_servers.len() > 1 {
+    let selected_for_exec = current_server_id(state)?;
+    let needs_provider_routing = match selected_for_exec.as_deref() {
+        _ if add_servers.is_empty() => false,
+        Some(sel) => add_servers.iter().any(|s| s != sel),
+        None => true,
+    };
+    if needs_provider_routing {
         // Resolve every group's provider up front so connection errors surface here.
         let mut group_providers: Vec<(String, Arc<dyn MediaProvider>)> = Vec::new();
         for sid in &add_servers {
@@ -6856,22 +6883,32 @@ mod tests {
         );
     }
 
-    // AC28: detect when a basket spans multiple servers (incl. auto-fill server).
+    // AC28: detect when a sync must route items to per-server providers
+    // (multiple servers, or a single server that isn't the selected one).
     #[test]
-    fn test_sync_spans_multiple_servers() {
+    fn test_sync_needs_provider_routing() {
         let single = vec![("a".into(), Some("s1".into())), ("b".into(), Some("s1".into()))];
-        assert!(!sync_spans_multiple_servers(&single, Some("s1"), None));
+        assert!(!sync_needs_provider_routing(&single, Some("s1"), None));
 
         let mixed = vec![("a".into(), Some("s1".into())), ("b".into(), Some("s2".into()))];
-        assert!(sync_spans_multiple_servers(&mixed, Some("s1"), None));
+        assert!(sync_needs_provider_routing(&mixed, Some("s1"), None));
 
         // Legacy items (no serverId) resolve to the selected server → single.
         let legacy = vec![("a".into(), None), ("b".into(), None)];
-        assert!(!sync_spans_multiple_servers(&legacy, Some("s1"), None));
+        assert!(!sync_needs_provider_routing(&legacy, Some("s1"), None));
 
-        // An auto-fill slot bound to another server makes it multi.
+        // An auto-fill slot bound to another server forces routing.
         let af = vec![("a".into(), Some("s1".into()))];
-        assert!(sync_spans_multiple_servers(&af, Some("s1"), Some("s2")));
+        assert!(sync_needs_provider_routing(&af, Some("s1"), Some("s2")));
+
+        // A basket holding only another server's (locked) items while s1 is
+        // selected: a single distinct server, but NOT the selected one — must
+        // still route to that server's provider, not the selected one.
+        let single_other = vec![("a".into(), Some("s2".into())), ("b".into(), Some("s2".into()))];
+        assert!(sync_needs_provider_routing(&single_other, Some("s1"), None));
+
+        // Nothing selected but a concrete server present → route.
+        assert!(sync_needs_provider_routing(&single_other, None, None));
     }
 
     // AC11: provider auth errors map to ERR_UNAUTHORIZED with an `unauthorized`
