@@ -643,6 +643,8 @@ pub struct ServerRecord {
     pub url: String,
     pub server_type: String,  // 'jellyfin' | 'subsonic'
     pub username: String,
+    pub name: Option<String>, // user-facing display name
+    pub icon: Option<String>, // built-in icon identifier
 }
 
 // In AppState — replaces `provider: Arc<RwLock<Option<Arc<dyn MediaProvider>>>>`
@@ -676,6 +678,8 @@ CREATE TABLE IF NOT EXISTS server_config (
     url         TEXT    NOT NULL,
     server_type TEXT    NOT NULL,              -- 'jellyfin' | 'subsonic'
     username    TEXT    NOT NULL,
+    name        TEXT    NULL,                  -- user-facing display name
+    icon        TEXT    NULL,                  -- built-in icon identifier
     selected    INTEGER NOT NULL DEFAULT 0,    -- NEW: 1 for the active server
     updated_at  INTEGER NOT NULL
 );
@@ -716,7 +720,7 @@ pub struct ServerCredentials {
 
 **Modified — server.connect now returns serverId:**
 ```
-server.connect(params: { url, serverType, username, password })
+server.connect(params: { url, serverType, username, password, name?, icon? })
   → { ok: true, serverId: string, serverType: string, serverVersion: string }
 ```
 
@@ -737,6 +741,8 @@ server.connect(params: { url, serverType, username, password })
   selectedServerId: string | null,
 }
 ```
+
+**Server identity amendment:** `server.list` and `get_daemon_state.servers` include `name: string | null` and `icon: string | null` for every server record. `server.connect` accepts optional `name` and `icon` fields. A new `server.update({ id, name?: string, icon?: string | null }) -> { ok: true }` RPC persists identity-only changes without reconnecting credentials or replacing the provider cache. UI labels use configured name/icon first, then fall back to URL host, username plus provider type, and finally provider type.
 
 `server.select` updates both `ServerManager.selected_server_id` (in-memory) and the `selected` column in `server_config` (persist). Lazy-loads the provider if not already cached.
 

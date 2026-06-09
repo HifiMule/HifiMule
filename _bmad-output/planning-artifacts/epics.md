@@ -3,7 +3,7 @@ inputDocuments: ['prd.md', 'architecture.md', 'ux-design-specification.md', 'pro
 status: 'complete'
 completedAt: '2026-01-27'
 lastAmended: '2026-06-09'
-amendments: ['epic-11-selection-as-playlist', 'story-9-7-virtualized-list-view', 'multi-server-management']
+amendments: ['epic-11-selection-as-playlist', 'story-9-7-virtualized-list-view', 'multi-server-management', 'server-identity-name-and-icon']
 
 # HifiMule - Epic Breakdown
 
@@ -118,6 +118,7 @@ FR41: Epic 9 - Tracks Browse Mode (Stories 9.9-9.10)
 FR42: Epic 2 - Multi-Server Hub (Story 2.11)
 FR43: Epic 3 - Mixed-Server Basket (Story 3.2, amended)
 FR44: Epic 11 - Playlist Server Scope (Stories 11.4, 11.5, amended)
+FR45: Epic 2 - Server Identity Name and Icon (Story 2.12)
 
 ## Epic List
 
@@ -500,6 +501,46 @@ So that I have full control over which media library I'm curating from at any ti
 - `server_config` DB migration: recreate table to drop `CHECK (id = 1)` constraint; add `selected INTEGER NOT NULL DEFAULT 0` column; existing single row gets a generated UUID and `selected = 1`
 - UI: Server Hub lives in a "Servers" tab in Settings AND as a compact selector in the main layout header (analogous to the device hub in the sidebar)
 - Basket item locked rendering: CSS class `basket-item--locked` on items where `item.serverId !== state.selectedServerId`; (×) button hidden for locked items
+
+### Story 2.12: Server Identity Name and Icon
+
+As a System Admin (Alexis) and multi-server user,
+I want each configured media server to have a custom display name and icon,
+So that I can quickly distinguish servers in the hub, switcher, basket, and playlist flows without relying on provider type.
+
+**Acceptance Criteria:**
+
+**Given** I add a new server
+**When** the connection succeeds
+**Then** the server is created with a default display name derived from the server URL or detected provider name.
+**And** the server receives a default icon based on detected provider type when available.
+
+**Given** I open Settings -> Servers for an existing server
+**When** I edit its display name or icon
+**Then** `server.update({ id, name, icon })` persists the changes.
+**And** the Server Hub, compact switcher, basket badges, and playlist notices update without reconnecting the server.
+
+**Given** I choose a server icon
+**Then** the picker offers provider icons plus generic music/audio icons such as music note, headphones, library, album, radio, audiobook/book, and generic server.
+**And** unsupported or missing provider logos fall back to a generic server or music icon.
+
+**Given** the basket contains items from multiple servers
+**When** basket items render
+**Then** each server badge uses the configured server icon and display name.
+**And** provider type is shown only as secondary metadata or tooltip text when helpful.
+
+**Given** a legacy server record has no name or icon
+**When** it is loaded
+**Then** the UI uses a stable fallback label: configured name -> URL host -> username + provider type -> provider type.
+**And** no migration blocks startup.
+
+**Technical Notes:**
+- `server_config` adds nullable `name` and `icon` columns.
+- `ServerRecord` gains `name: Option<String>` and `icon: Option<String>`.
+- `server.connect` accepts optional `name` and `icon`, and still works when omitted.
+- `server.list` and `get_daemon_state.servers` return `{ id, url, serverType, username, name, icon, selected }`.
+- New `server.update({ id, name?: string, icon?: string | null }) -> { ok: true }`.
+- UI should share one `formatServerIdentity(server)` helper so hub cards, switcher labels, basket badges, notices, and playlist dialogs do not drift.
 
 ## Epic 3: The Curation Hub (Basket & Library)
 

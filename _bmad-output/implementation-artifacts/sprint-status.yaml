@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-06-09  # Multi-server management (sprint-change-proposal-2026-06-09-multi-server-management)
+last_updated: 2026-06-09  # Server identity name/icon approved (sprint-change-proposal-2026-06-09-server-identity)
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -47,7 +47,7 @@ development_status:
   1-3-detachable-tauri-ui-skeleton: done
   epic-1-retrospective: done
 
-  epic-2: in-progress  # reopened: Story 2.11 added via sprint-change-proposal-2026-06-09-multi-server-management
+  epic-2: in-progress  # reopened: Story 2.12 added via sprint-change-proposal-2026-06-09-server-identity
   2-1-secure-jellyfin-server-link: done  # amended: multi-server vault + server.connect returns serverId
   2-2-mass-storage-heartbeat-autodetection: done
   2-3-multi-device-profile-mapping: done
@@ -60,6 +60,7 @@ development_status:
   2-9-device-identity-name-and-icon: done
   2-10-mtp-device-detection: done
   2-11-multi-server-hub: done  # code review 2026-06-09: 5 patches applied (incl. HIGH single-non-selected-server sync routing), 2 false positives dismissed, 1 LOW deferred
+  2-12-server-identity-name-and-icon: ready-for-dev
   epic-2-retrospective: done
 
   epic-3: done
