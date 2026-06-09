@@ -2785,6 +2785,8 @@ mod tests {
             server_type: server_type.to_string(),
             username: "alexis".to_string(),
             server_version: None,
+            name: None,
+            icon: None,
             updated_at: 0,
             selected: true,
         }
@@ -2818,9 +2820,11 @@ mod tests {
 
         // Alias fallback: stored under "subsonic" but server_type is openSubsonic.
         let legacy_alias = r#"{"server_secrets":{"subsonic":"alias-pass"}}"#;
-        let vault =
-            CredentialManager::rekey_legacy_vault(legacy_alias, &server, None).unwrap();
-        assert_eq!(vault.get("uuid-sub").unwrap().token_or_password, "alias-pass");
+        let vault = CredentialManager::rekey_legacy_vault(legacy_alias, &server, None).unwrap();
+        assert_eq!(
+            vault.get("uuid-sub").unwrap().token_or_password,
+            "alias-pass"
+        );
     }
 
     // AC19: an already-new-format vault is a no-op (no re-migration).
@@ -2851,7 +2855,14 @@ mod tests {
 
         let db = crate::db::Database::memory().unwrap();
         let id = db
-            .upsert_server("http://legacy.example", "jellyfin", "alexis", None)
+            .upsert_server(
+                "http://legacy.example",
+                "jellyfin",
+                "alexis",
+                None,
+                None,
+                None,
+            )
             .unwrap();
 
         CredentialManager::set_test_legacy_raw(r#"{"token":"legacy-tok","server_secrets":{}}"#);

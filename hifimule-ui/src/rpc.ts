@@ -116,6 +116,8 @@ export interface ServerSummary {
     url: string;
     serverType: string;
     username: string;
+    name: string | null;
+    icon: string | null;
     selected: boolean;
 }
 
@@ -127,6 +129,14 @@ export async function serverList(): Promise<ServerSummary[]> {
 /** Selects the active server (AC2). */
 export async function serverSelect(id: string): Promise<void> {
     await rpcCall('server.select', { id });
+}
+
+export async function serverUpdate(params: {
+    id: string;
+    name?: string;
+    icon?: string | null;
+}): Promise<void> {
+    await rpcCall('server.update', params);
 }
 
 /** Removes a server; returns the removed id and the reselected id (if any) (AC6/AC8). */

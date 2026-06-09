@@ -23,6 +23,8 @@ pub struct ServerRecord {
     pub server_type: String,
     pub username: String,
     pub server_version: Option<String>,
+    pub name: Option<String>,
+    pub icon: Option<String>,
     pub selected: bool,
 }
 
@@ -34,6 +36,8 @@ impl From<ServerConfig> for ServerRecord {
             server_type: c.server_type,
             username: c.username,
             server_version: c.server_version,
+            name: c.name,
+            icon: c.icon,
             selected: c.selected,
         }
     }
@@ -85,6 +89,8 @@ impl ServerManager {
             server_type,
             username: String::new(),
             server_version,
+            name: None,
+            icon: None,
             selected: true,
         }];
         self.selected_server_id = Some(id.clone());
@@ -191,7 +197,7 @@ mod tests {
     use super::*;
 
     fn seed(db: &Database, url: &str, kind: &str, user: &str) -> String {
-        db.upsert_server(url, kind, user, None).unwrap()
+        db.upsert_server(url, kind, user, None, None, None).unwrap()
     }
 
     // load_from_db reflects the DB's rows and the `selected = 1` row (AC12/AC14:
@@ -260,7 +266,10 @@ mod tests {
 
         let mgr = Arc::new(RwLock::new(ServerManager::new()));
         mgr.write().await.load_from_db(&db);
-        assert_eq!(mgr.read().await.selected_server_id.as_deref(), Some(id1.as_str()));
+        assert_eq!(
+            mgr.read().await.selected_server_id.as_deref(),
+            Some(id1.as_str())
+        );
 
         // Remove the selected server and reselect the remaining one (AC8 flow).
         db.remove_server(&id1).unwrap();
@@ -269,6 +278,9 @@ mod tests {
         mgr.write().await.load_from_db(&db);
 
         assert_eq!(mgr.read().await.servers.len(), 1);
-        assert_eq!(mgr.read().await.selected_server_id.as_deref(), Some(id2.as_str()));
+        assert_eq!(
+            mgr.read().await.selected_server_id.as_deref(),
+            Some(id2.as_str())
+        );
     }
 }

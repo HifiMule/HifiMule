@@ -146,6 +146,34 @@ body {
   white-space: nowrap;
 }
 
+.server-hub-row::part(base) {
+  min-width: 280px;
+}
+
+.server-hub-row-text {
+  display: inline-flex;
+  flex-direction: column;
+  min-width: 0;
+  max-width: 260px;
+  line-height: 1.2;
+}
+
+.server-hub-row-name,
+.server-hub-row-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.server-hub-row-name {
+  color: var(--ink);
+}
+
+.server-hub-row-meta {
+  color: var(--ink-dim);
+  font-size: 0.72rem;
+}
+
 .basket-view {
   min-width: 330px;
   padding: var(--space-lg) var(--space-lg) var(--space-md);
@@ -202,6 +230,15 @@ body {
   letter-spacing: 0.04em;
   color: rgba(255, 255, 255, 0.5);
   margin-top: var(--space-xs);
+}
+.basket-server-group-label sl-icon {
+  flex-shrink: 0;
+}
+.basket-server-group-label span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .basket-server-group-label::after {
   content: "";
@@ -707,18 +744,38 @@ h2 {
   display: flex;
   justify-content: center;
   align-items: center;
+  flex: 1;
+  width: 100%;
+  min-width: 0;
   height: 100vh;
-  background: var(--app-bg);
+  padding: var(--space-lg);
+  box-sizing: border-box;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(var(--accent-rgb), 0.1), transparent 34rem),
+    linear-gradient(135deg, #101827 0%, var(--app-bg) 58%, #0a0d16 100%);
 }
 
 .login-card {
   width: 100%;
   max-width: 400px;
+  max-height: calc(100vh - (2 * var(--space-lg)));
+  overflow-y: auto;
 }
 
 .login-card h3 {
   margin: 0;
   text-align: center;
+}
+
+.login-identity-fields {
+  display: grid;
+  gap: var(--space-xs);
+}
+
+.login-server-icon-picker .init-icon-tile {
+  min-width: 44px;
+  min-height: 44px;
+  justify-content: center;
 }
 
 /* Device Folders Panel (Story 3.4) */
@@ -1293,7 +1350,8 @@ h2 {
 
 #init-device-dialog::part(panel),
 #repair-dialog::part(panel),
-.device-settings-dialog::part(panel) {
+.device-settings-dialog::part(panel),
+.server-identity-dialog::part(panel) {
   max-width: min(92vw, 720px);
   border-radius: var(--radius);
   background: var(--surface-bg);
@@ -1317,6 +1375,21 @@ h2 {
 .init-device-form {
   display: grid;
   gap: 1rem;
+}
+
+.server-identity-dialog {
+  --width: min(92vw, 460px);
+}
+
+.server-identity-form {
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.server-identity-icon-picker .init-icon-tile {
+  min-width: 44px;
+  min-height: 44px;
+  justify-content: center;
 }
 
 /* ========================

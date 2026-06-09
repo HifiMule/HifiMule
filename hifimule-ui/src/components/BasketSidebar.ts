@@ -7,6 +7,8 @@ import { RepairModal } from './RepairModal';
 import { InitDeviceModal } from './InitDeviceModal';
 import { t } from '../i18n';
 import { setPlaylistWriteCapability, invalidatePlaylistsCache } from '../library';
+import { formatServerIdentity } from '../serverIdentity';
+import type { ServerSummary } from '../rpc';
 
 interface StorageInfo {
     totalBytes: number;
@@ -172,8 +174,8 @@ export class BasketSidebar {
     private lastHydratedDeviceId: string | null = null;
     private serverType: string | null = null;
     private currentServerId: string | null = null;
-    // Server metadata for read-only basket badges (Story 2.11 AC35).
-    private serversById: Map<string, { serverType: string; username: string; url: string }> = new Map();
+    // Server metadata for read-only basket group labels (Story 2.11 AC35).
+    private serversById: Map<string, ServerSummary> = new Map();
     private syncSnapshotIds: string[] = [];
     // Auto-fill state
     private autoFillEnabled: boolean = false;
@@ -1583,19 +1585,27 @@ export class BasketSidebar {
     private updateServersById(servers: any): void {
         if (!Array.isArray(servers)) return;
         this.serversById = new Map(
-            servers.map((s: any) => [s.id, { serverType: s.serverType, username: s.username, url: s.url }])
+            servers.map((s: any) => [s.id, {
+                id: s.id,
+                serverType: s.serverType,
+                username: s.username,
+                url: s.url,
+                name: s.name ?? null,
+                icon: s.icon ?? null,
+                selected: Boolean(s.selected),
+            }])
         );
     }
 
-    private serverDisplayLabel(serverId: string | undefined): string {
+    private serverDisplayIdentity(serverId: string | undefined): { label: string; icon: string; tooltip: string } {
         const s = serverId ? this.serversById.get(serverId) : undefined;
-        if (!s) return t('basket.other_server');
-        switch (s.serverType) {
-            case 'jellyfin': return 'Jellyfin';
-            case 'openSubsonic': return 'OpenSubsonic';
-            case 'subsonic': return 'Subsonic';
-            default: return s.username || t('basket.other_server');
-        }
+        if (!s) return { label: t('basket.other_server'), icon: 'server', tooltip: t('basket.other_server') };
+        const identity = formatServerIdentity(s);
+        return { label: identity.label, icon: identity.icon, tooltip: identity.tooltip };
+    }
+
+    private serverDisplayLabel(serverId: string | undefined): string {
+        return this.serverDisplayIdentity(serverId).label;
     }
 
     /** Remove control, hidden for locked (non-selected-server) items (AC35). */
@@ -1683,10 +1693,16 @@ export class BasketSidebar {
             group.items.push(item);
         }
         return groups
-            .map(group => `
-                <div class="basket-server-group-label">${this.escapeHtml(this.serverDisplayLabel(group.serverId))}</div>
+            .map(group => {
+                const identity = this.serverDisplayIdentity(group.serverId);
+                return `
+                <div class="basket-server-group-label" title="${this.escapeHtml(identity.tooltip)}">
+                    <sl-icon name="${this.escapeHtml(identity.icon)}"></sl-icon>
+                    <span>${this.escapeHtml(identity.label)}</span>
+                </div>
                 ${group.items.map(item => this.renderItem(item)).join('')}
-            `)
+            `;
+            })
             .join('');
     }
 

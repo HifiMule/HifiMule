@@ -1,6 +1,6 @@
 # Story 2.12: Server Identity Name and Icon
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -22,51 +22,51 @@ so that I can quickly distinguish servers in the hub, switcher, basket, and play
 
 ## Tasks / Subtasks
 
-- [ ] **Daemon persistence and migration** (AC: #1, #6, #7)
-  - [ ] Add `name: Option<String>` and `icon: Option<String>` to `ServerConfig` in `hifimule-daemon/src/db.rs` and `ServerRecord` in `hifimule-daemon/src/server_manager.rs`.
-  - [ ] Extend fresh `server_config` DDL with `name TEXT NULL` and `icon TEXT NULL`.
-  - [ ] Add idempotent nullable-column migration for existing TEXT UUID tables, and preserve `name`/`icon` when migrating legacy INTEGER single-server tables if present.
-  - [ ] Backfill existing/pre-migration server rows that have no identity: `name` equals provider type label and `icon` equals provider-type default.
-  - [ ] Update `row_to_server_config`, `list_servers`, `get_server`, and `get_server_config` SELECT lists in lockstep.
-  - [ ] Update `upsert_server` so new rows receive default name/icon values, while URL upserts do not erase existing user-edited identity unless explicit values are supplied.
+- [x] **Daemon persistence and migration** (AC: #1, #6, #7)
+  - [x] Add `name: Option<String>` and `icon: Option<String>` to `ServerConfig` in `hifimule-daemon/src/db.rs` and `ServerRecord` in `hifimule-daemon/src/server_manager.rs`.
+  - [x] Extend fresh `server_config` DDL with `name TEXT NULL` and `icon TEXT NULL`.
+  - [x] Add idempotent nullable-column migration for existing TEXT UUID tables, and preserve `name`/`icon` when migrating legacy INTEGER single-server tables if present.
+  - [x] Backfill existing/pre-migration server rows that have no identity: `name` equals provider type label and `icon` equals provider-type default.
+  - [x] Update `row_to_server_config`, `list_servers`, `get_server`, and `get_server_config` SELECT lists in lockstep.
+  - [x] Update `upsert_server` so new rows receive default name/icon values, while URL upserts do not erase existing user-edited identity unless explicit values are supplied.
 
-- [ ] **Daemon RPC contract** (AC: #2, #5, #6, #7)
-  - [ ] Dispatch a new `"server.update"` method in `hifimule-daemon/src/rpc.rs`.
-  - [ ] Implement `handle_server_update`: require `id`, validate server existence, trim and validate `name` if provided, allow `icon: null` to clear icon, reject or ignore `url` if present, whitelist accepted icon identifiers, persist via a DB helper, reload `ServerManager` server records, and return `{ "ok": true }`.
-  - [ ] Extend `handle_server_connect` to accept optional `name` and `icon`; preserve existing authentication, vault, provider cache, and URL-upsert behavior.
-  - [ ] Extend `server_row_to_json` and `handle_get_daemon_state` `servers[]` serialization with `name` and `icon`.
-  - [ ] Do not reconnect providers, rewrite credentials, change selected server, or evict provider cache for identity-only updates.
+- [x] **Daemon RPC contract** (AC: #2, #5, #6, #7)
+  - [x] Dispatch a new `"server.update"` method in `hifimule-daemon/src/rpc.rs`.
+  - [x] Implement `handle_server_update`: require `id`, validate server existence, trim and validate `name` if provided, allow `icon: null` to clear icon, reject or ignore `url` if present, whitelist accepted icon identifiers, persist via a DB helper, reload `ServerManager` server records, and return `{ "ok": true }`.
+  - [x] Extend `handle_server_connect` to accept optional `name` and `icon`; preserve existing authentication, vault, provider cache, and URL-upsert behavior.
+  - [x] Extend `server_row_to_json` and `handle_get_daemon_state` `servers[]` serialization with `name` and `icon`.
+  - [x] Do not reconnect providers, rewrite credentials, change selected server, or evict provider cache for identity-only updates.
 
-- [ ] **Shared UI identity helper** (AC: #2, #4, #5, #6)
-  - [ ] Extend `ServerSummary` in `hifimule-ui/src/rpc.ts` with `name: string | null` and `icon: string | null`; add a `serverUpdate` wrapper.
-  - [ ] Create or colocate one shared `formatServerIdentity(server)` helper used by Server Hub and basket/playlist labels. It must return display label, icon, provider label, host, and tooltip/secondary text.
-  - [ ] Replace hardcoded `username @ url`, `serverTypeLabel`, and `BasketSidebar.serverDisplayLabel` identity decisions with the shared helper. Keep provider type visible as metadata, not the primary label.
-  - [ ] Preserve Story 2.11 basket behavior: server identity appears on group labels, not as redundant per-item badges.
+- [x] **Shared UI identity helper** (AC: #2, #4, #5, #6)
+  - [x] Extend `ServerSummary` in `hifimule-ui/src/rpc.ts` with `name: string | null` and `icon: string | null`; add a `serverUpdate` wrapper.
+  - [x] Create or colocate one shared `formatServerIdentity(server)` helper used by Server Hub and basket/playlist labels. It must return display label, icon, provider label, host, and tooltip/secondary text.
+  - [x] Replace hardcoded `username @ url`, `serverTypeLabel`, and `BasketSidebar.serverDisplayLabel` identity decisions with the shared helper. Keep provider type visible as metadata, not the primary label.
+  - [x] Preserve Story 2.11 basket behavior: server identity appears on group labels, not as redundant per-item badges.
 
-- [ ] **Server Hub identity editing UI** (AC: #2, #3, #4, #5)
-  - [ ] Update `hifimule-ui/src/components/ServerHub.ts` rows and trigger chip to render icon + display name as the primary identity, with provider badge/username/host as secondary information.
-  - [ ] Add an edit affordance for each server row (use an icon button, e.g. `pencil`, with tooltip/label).
-  - [ ] Add a compact identity editor dialog with required display-name input, icon picker, Save/Cancel controls, loading/error states, and validation before calling `server.update`.
-  - [ ] Do not include an editable URL field in the identity editor. URL may be displayed as read-only secondary context or tooltip text only.
-  - [ ] Use Shoelace `<sl-icon name="...">` icon identifiers, following the existing device identity pattern rather than custom SVGs.
-  - [ ] After save, refresh the Server Hub and trigger the host refresh so basket labels and playlist notices pick up the updated identity.
+- [x] **Server Hub identity editing UI** (AC: #2, #3, #4, #5)
+  - [x] Update `hifimule-ui/src/components/ServerHub.ts` rows and trigger chip to render icon + display name as the primary identity, with provider badge/username/host as secondary information.
+  - [x] Add an edit affordance for each server row (use an icon button, e.g. `pencil`, with tooltip/label).
+  - [x] Add a compact identity editor dialog with required display-name input, icon picker, Save/Cancel controls, loading/error states, and validation before calling `server.update`.
+  - [x] Do not include an editable URL field in the identity editor. URL may be displayed as read-only secondary context or tooltip text only.
+  - [x] Use Shoelace `<sl-icon name="...">` icon identifiers, following the existing device identity pattern rather than custom SVGs.
+  - [x] After save, refresh the Server Hub and trigger the host refresh so basket labels and playlist notices pick up the updated identity.
 
-- [ ] **Connect/add-server defaults** (AC: #1, #3, #5, #6)
-  - [ ] Decide whether the add-server login dialog exposes identity fields immediately or relies on defaults plus later edit. Either path must satisfy AC1 and not disrupt first-run/add/reauth modes.
-  - [ ] Ensure re-auth mode does not overwrite `name` or `icon`; it should only replace credentials for the existing server URL.
-  - [ ] Derive default names deterministically from provider type label, not URL, for pre-migration rows and omitted-name connect payloads. Derive provider icons for Jellyfin/OpenSubsonic/Subsonic where available, else generic server/music.
+- [x] **Connect/add-server defaults** (AC: #1, #3, #5, #6)
+  - [x] Decide whether the add-server login dialog exposes identity fields immediately or relies on defaults plus later edit. Either path must satisfy AC1 and not disrupt first-run/add/reauth modes.
+  - [x] Ensure re-auth mode does not overwrite `name` or `icon`; it should only replace credentials for the existing server URL.
+  - [x] Derive default names deterministically from provider type label, not URL, for pre-migration rows and omitted-name connect payloads. Derive provider icons for Jellyfin/OpenSubsonic/Subsonic where available, else generic server/music.
 
-- [ ] **i18n and visual polish** (AC: #2, #3, #4)
-  - [ ] Add all new user-facing strings to `hifimule-i18n/catalog.json` for en/fr/es/de.
-  - [ ] Add any needed CSS in the existing style locations; keep the Server Hub compact and avoid nested cards.
-  - [ ] Ensure the compact trigger, menu rows, identity editor, and basket group labels fit at narrow window widths and do not overlap controls.
+- [x] **i18n and visual polish** (AC: #2, #3, #4)
+  - [x] Add all new user-facing strings to `hifimule-i18n/catalog.json` for en/fr/es/de.
+  - [x] Add any needed CSS in the existing style locations; keep the Server Hub compact and avoid nested cards.
+  - [x] Ensure the compact trigger, menu rows, identity editor, and basket group labels fit at narrow window widths and do not overlap controls.
 
-- [ ] **Tests and verification** (AC: all)
-  - [ ] Add Rust tests for nullable-column migration, pre-migration default name/icon backfill, default identity on insert, preserving edited identity on credential upsert, `server.update`, URL immutability, icon clearing, invalid icon rejection, and `server.list` / `get_daemon_state` payload fields.
-  - [ ] Add UI-level unit coverage if available for `formatServerIdentity` fallback order.
-  - [ ] Run `rtk cargo test -p hifimule-daemon`.
-  - [ ] Run `rtk tsc` for `hifimule-ui`.
-  - [ ] Run `rtk lint` if the UI lint script exists.
+- [x] **Tests and verification** (AC: all)
+  - [x] Add Rust tests for nullable-column migration, pre-migration default name/icon backfill, default identity on insert, preserving edited identity on credential upsert, `server.update`, URL immutability, icon clearing, invalid icon rejection, and `server.list` / `get_daemon_state` payload fields.
+  - [x] Add UI-level unit coverage if available for `formatServerIdentity` fallback order.
+  - [x] Run `rtk cargo test -p hifimule-daemon`.
+  - [x] Run `rtk tsc` for `hifimule-ui`.
+  - [x] Run `rtk lint` if the UI lint script exists.
 
 ## Dev Notes
 
@@ -128,16 +128,40 @@ so that I can quickly distinguish servers in the hub, switcher, basket, and play
 
 ### Agent Model Used
 
-(to be filled by dev agent)
+GPT-5 Codex
 
 ### Debug Log References
+
+- 2026-06-09: Started dev-story workflow for Story 2.12; loaded sprint status, project context, and story guidance.
+- 2026-06-09: Implemented daemon persistence, migration/backfill, RPC contract, and targeted Rust tests; `rtk cargo test -p hifimule-daemon` passed with 441 tests.
+- 2026-06-09: Implemented shared UI identity formatting, Server Hub identity editor, basket group identity labels, i18n strings, and responsive CSS.
+- 2026-06-09: Final validation passed: `rtk cargo test` passed with 447 tests; direct TypeScript compiler invocation passed for `hifimule-ui`; no UI lint script exists.
+- 2026-06-09: Added server identity fields to first-run login and add-server flows; defaults are prefilled from probed server type while re-auth omits identity metadata.
 
 ### Completion Notes List
 
 Ultimate context engine analysis completed - comprehensive developer guide created.
+- Daemon server identity metadata is persisted, backfilled, serialized, and editable through `server.update` without reconnecting providers or mutating URLs.
+- Server Hub and basket labels now use one shared server identity formatter with configured display names/icons and provider/host secondary metadata.
+- First-run and add-server flows now expose server name/icon fields prefilled from detected provider type; re-auth remains credential-only and preserves existing edited identities.
+- UI unit test coverage is not available in this package; the helper is covered by TypeScript validation and daemon contract tests cover the persisted/RPC fields.
 
 ### File List
+
+- hifimule-daemon/src/api.rs
+- hifimule-daemon/src/db.rs
+- hifimule-daemon/src/rpc.rs
+- hifimule-daemon/src/server_manager.rs
+- hifimule-i18n/catalog.json
+- hifimule-ui/src/components/BasketSidebar.ts
+- hifimule-ui/src/components/ServerHub.ts
+- hifimule-ui/src/login.ts
+- hifimule-ui/src/rpc.ts
+- hifimule-ui/src/serverIdentity.ts
+- hifimule-ui/src/styles.css
 
 ## Change Log
 
 - 2026-06-09: Story created from approved server identity sprint-change proposal. Status set to ready-for-dev.
+- 2026-06-09: Implemented server identity name/icon persistence, RPC update contract, shared UI labels, Server Hub editor, i18n/CSS, and tests. Status set to review.
+- 2026-06-09: Refined login/add-server to collect server identity during connect with provider-type defaults.

@@ -44,6 +44,18 @@ const ERR_UNAUTHORIZED: i32 = -8;
 const JELLYFIN_TICKS_PER_SECOND: u64 = 10_000_000;
 const GENRE_TRACK_PAGE_SIZE: u32 = 500;
 const GENRE_TRACK_MAX_PAGES: u32 = 200;
+const SERVER_NAME_MAX_LEN: usize = 40;
+const SERVER_ICON_IDS: &[&str] = &[
+    "hdd-network",
+    "server",
+    "music-note-list",
+    "music-note-beamed",
+    "headphones",
+    "collection-play",
+    "disc",
+    "broadcast-pin",
+    "book",
+];
 
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
@@ -91,7 +103,6 @@ fn send_sync_complete_notification() {
         eprintln!("[Notification] Failed to show OS notification: {}", e);
     }
 }
-
 
 /// On a Subsonic auth failure, evicts the selected server's cached provider and
 /// rebuilds it from stored credentials, returning the fresh provider.
@@ -182,6 +193,7 @@ async fn handler(
         "server.logout" => handle_server_logout(&state).await,
         "server.list" => handle_server_list(&state).await,
         "server.select" => handle_server_select(&state, payload.params).await,
+        "server.update" => handle_server_update(&state, payload.params).await,
         "server.remove" => handle_server_remove(&state, payload.params).await,
         "login" => handle_login(&state, payload.params).await,
         "save_credentials" => handle_save_credentials(payload.params).await,
@@ -299,6 +311,64 @@ async fn handle_server_probe(params: Option<Value>) -> Result<Value, JsonRpcErro
 
 fn normalized_server_url(url: &str) -> String {
     url.trim().trim_end_matches('/').to_ascii_lowercase()
+}
+
+fn validate_server_icon(icon: &str) -> Result<(), JsonRpcError> {
+    if SERVER_ICON_IDS.contains(&icon) {
+        Ok(())
+    } else {
+        Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Unsupported server icon".to_string(),
+            data: Some(serde_json::json!({ "allowedIcons": SERVER_ICON_IDS })),
+        })
+    }
+}
+
+fn optional_server_name(params: &Value) -> Result<Option<String>, JsonRpcError> {
+    match params.get("name") {
+        Some(Value::String(value)) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err(JsonRpcError {
+                    code: ERR_INVALID_PARAMS,
+                    message: "Server name must not be empty".to_string(),
+                    data: None,
+                });
+            }
+            if trimmed.chars().count() > SERVER_NAME_MAX_LEN {
+                return Err(JsonRpcError {
+                    code: ERR_INVALID_PARAMS,
+                    message: format!(
+                        "Server name must be {SERVER_NAME_MAX_LEN} characters or fewer"
+                    ),
+                    data: None,
+                });
+            }
+            Ok(Some(trimmed.to_string()))
+        }
+        Some(Value::Null) | None => Ok(None),
+        Some(_) => Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Server name must be a string".to_string(),
+            data: None,
+        }),
+    }
+}
+
+fn optional_server_icon_for_connect(params: &Value) -> Result<Option<String>, JsonRpcError> {
+    match params.get("icon") {
+        Some(Value::String(value)) => {
+            validate_server_icon(value)?;
+            Ok(Some(value.to_string()))
+        }
+        Some(Value::Null) | None => Ok(None),
+        Some(_) => Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Server icon must be a string or null".to_string(),
+            data: None,
+        }),
+    }
 }
 
 /// The pre-2.11 derived composite server id (`type|url|username`). Retained only
@@ -1235,6 +1305,8 @@ async fn handle_server_connect(
         message: "Missing password".to_string(),
         data: None,
     })?;
+    let name = optional_server_name(&params)?;
+    let icon = optional_server_icon_for_connect(&params)?;
 
     let hint = parse_server_type_hint(server_type)?;
     let credentials = ProviderCredentials {
@@ -1259,7 +1331,14 @@ async fn handle_server_connect(
     // Persist the server row (upsert by normalized URL, AC5) and obtain its UUID.
     let server_id = state
         .db
-        .upsert_server(url, &normalized_type, username, version.as_deref())
+        .upsert_server(
+            url,
+            &normalized_type,
+            username,
+            version.as_deref(),
+            name.as_deref(),
+            icon.as_deref(),
+        )
         .map_err(|error| JsonRpcError {
             code: ERR_STORAGE_ERROR,
             message: error.to_string(),
@@ -1348,7 +1427,10 @@ async fn handle_server_logout(state: &AppState) -> Result<Value, JsonRpcError> {
     }
     *state.last_connection_check.lock().await = None;
 
-    state.db.clear_server_config().map_err(storage_error_to_rpc)?;
+    state
+        .db
+        .clear_server_config()
+        .map_err(storage_error_to_rpc)?;
     CredentialManager::clear_credentials().map_err(storage_error_to_rpc)?;
 
     Ok(serde_json::json!({ "ok": true }))
@@ -1360,6 +1442,8 @@ fn server_row_to_json(config: &crate::db::ServerConfig) -> Value {
         "url": config.url,
         "serverType": config.server_type,
         "username": config.username,
+        "name": config.name,
+        "icon": config.icon,
         "selected": config.selected,
     })
 }
@@ -1369,6 +1453,71 @@ async fn handle_server_list(state: &AppState) -> Result<Value, JsonRpcError> {
     let servers = state.db.list_servers().map_err(storage_error_to_rpc)?;
     let json: Vec<Value> = servers.iter().map(server_row_to_json).collect();
     Ok(serde_json::json!(json))
+}
+
+async fn handle_server_update(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Invalid params".to_string(),
+        data: None,
+    })?;
+    if params.get("url").is_some() {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Server URL cannot be changed by server.update".to_string(),
+            data: None,
+        });
+    }
+    let id = params["id"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing id".to_string(),
+        data: None,
+    })?;
+    if state
+        .db
+        .get_server(id)
+        .map_err(storage_error_to_rpc)?
+        .is_none()
+    {
+        return Err(JsonRpcError {
+            code: ERR_NOT_FOUND,
+            message: format!("Server not found: {id}"),
+            data: None,
+        });
+    }
+    let name = optional_server_name(&params)?;
+    let icon = match params.get("icon") {
+        Some(Value::String(value)) => {
+            validate_server_icon(value)?;
+            Some(Some(value.as_str()))
+        }
+        Some(Value::Null) => Some(None),
+        None => None,
+        Some(_) => {
+            return Err(JsonRpcError {
+                code: ERR_INVALID_PARAMS,
+                message: "Server icon must be a string or null".to_string(),
+                data: None,
+            });
+        }
+    };
+    if name.is_none() && icon.is_none() {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "No server identity fields provided".to_string(),
+            data: None,
+        });
+    }
+
+    state
+        .db
+        .update_server_identity(id, name.as_deref(), icon)
+        .map_err(storage_error_to_rpc)?;
+    state.server_manager.write().await.load_from_db(&state.db);
+    Ok(serde_json::json!({ "ok": true }))
 }
 
 /// Updates config.json to reflect `id` as the active server so the static
@@ -1470,7 +1619,10 @@ async fn handle_server_remove(
     if was_selected {
         let remaining = state.db.list_servers().map_err(storage_error_to_rpc)?;
         if let Some(next) = remaining.first() {
-            state.db.set_selected(&next.id).map_err(storage_error_to_rpc)?;
+            state
+                .db
+                .set_selected(&next.id)
+                .map_err(storage_error_to_rpc)?;
             sync_selected_config(state, &next.id)?;
             reselected = Some(next.id.clone());
         }
@@ -1676,6 +1828,8 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
                 "url": s.url,
                 "serverType": s.server_type,
                 "username": s.username,
+                "name": s.name,
+                "icon": s.icon,
                 "selected": s.selected,
             })
         })
@@ -1795,8 +1949,7 @@ async fn handle_manifest_get_basket(state: &AppState) -> Result<Value, JsonRpcEr
         .map(|d| d.basket_items.clone())
         .unwrap_or_default();
     // Return items from ALL servers (mixed basket, AC3); only reconcile ids.
-    let basket_items =
-        reconcile_basket_server_ids(basket_items, &servers, selected_id.as_deref());
+    let basket_items = reconcile_basket_server_ids(basket_items, &servers, selected_id.as_deref());
     Ok(serde_json::json!({
         "basketItems": basket_items,
         "serverId": selected_id,
@@ -3143,16 +3296,14 @@ fn parse_item_specs(raw: &[Value]) -> Vec<(String, Option<String>)> {
             if let Some(s) = v.as_str() {
                 Some((s.to_string(), None))
             } else if let Some(obj) = v.as_object() {
-                obj.get("id")
-                    .and_then(Value::as_str)
-                    .map(|id| {
-                        (
-                            id.to_string(),
-                            obj.get("serverId")
-                                .and_then(Value::as_str)
-                                .map(str::to_string),
-                        )
-                    })
+                obj.get("id").and_then(Value::as_str).map(|id| {
+                    (
+                        id.to_string(),
+                        obj.get("serverId")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                    )
+                })
             } else {
                 None
             }
@@ -3274,8 +3425,10 @@ async fn multi_provider_calculate_delta(
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
             if auto_fill_budget > 0 {
-                let exclude_ids: Vec<String> =
-                    desired_items.iter().map(|i| i.jellyfin_id.clone()).collect();
+                let exclude_ids: Vec<String> = desired_items
+                    .iter()
+                    .map(|i| i.jellyfin_id.clone())
+                    .collect();
                 let fill_params = crate::auto_fill::AutoFillParams {
                     exclude_item_ids: exclude_ids,
                     max_fill_bytes: auto_fill_budget,
@@ -3385,8 +3538,11 @@ async fn handle_sync_calculate_delta(
     } else {
         None
     };
-    if sync_needs_provider_routing(&item_specs, selected_id.as_deref(), auto_fill_server.as_deref())
-    {
+    if sync_needs_provider_routing(
+        &item_specs,
+        selected_id.as_deref(),
+        auto_fill_server.as_deref(),
+    ) {
         return multi_provider_calculate_delta(state, &item_specs, &manifest, &params).await;
     }
 
@@ -3864,7 +4020,7 @@ async fn handle_sync_detect_changes(
                 code: ERR_INTERNAL_ERROR,
                 message: format!("Change detection failed: {}", e),
                 data: None,
-            })
+            });
         }
     };
 
@@ -4123,8 +4279,13 @@ async fn handle_sync_execute(
                 Some(pair) => pair,
                 None => {
                     eprintln!("[Sync] No device available — cannot execute multi-server sync");
-                    fail_sync_operation(&op_manager, &op_id, "sync_execute", "No device".to_string())
-                        .await;
+                    fail_sync_operation(
+                        &op_manager,
+                        &op_id,
+                        "sync_execute",
+                        "No device".to_string(),
+                    )
+                    .await;
                     let _ = state_tx.send(crate::DaemonState::Error);
                     return;
                 }
@@ -4162,10 +4323,22 @@ async fn handle_sync_execute(
                     .collect();
                 let sub_delta = crate::sync::SyncDelta {
                     adds: group_adds,
-                    deletes: if first { delta.deletes.clone() } else { Vec::new() },
-                    id_changes: if first { delta.id_changes.clone() } else { Vec::new() },
+                    deletes: if first {
+                        delta.deletes.clone()
+                    } else {
+                        Vec::new()
+                    },
+                    id_changes: if first {
+                        delta.id_changes.clone()
+                    } else {
+                        Vec::new()
+                    },
                     unchanged: 0,
-                    playlists: if first { delta.playlists.clone() } else { Vec::new() },
+                    playlists: if first {
+                        delta.playlists.clone()
+                    } else {
+                        Vec::new()
+                    },
                 };
                 first = false;
                 let result = crate::sync::execute_provider_sync(
@@ -6229,15 +6402,19 @@ mod tests {
 
         let db = Arc::new(crate::db::Database::memory().unwrap());
         let state = make_test_state(db);
-        state.server_manager.write().await.set_test_provider(Arc::new(
-            crate::providers::jellyfin::JellyfinProvider::new_with_version(
-                JellyfinClient::new(),
-                server.url(),
-                token,
-                "user1",
-                Some("10.9.0".to_string()),
-            ),
-        ));
+        state
+            .server_manager
+            .write()
+            .await
+            .set_test_provider(Arc::new(
+                crate::providers::jellyfin::JellyfinProvider::new_with_version(
+                    JellyfinClient::new(),
+                    server.url(),
+                    token,
+                    "user1",
+                    Some("10.9.0".to_string()),
+                ),
+            ));
 
         let items = handle_jellyfin_get_items(
             &state,
@@ -6390,6 +6567,8 @@ mod tests {
             "subsonic",
             "subsonic-user",
             Some("1.16.1"),
+            None,
+            None,
         )
         .unwrap();
         let state = make_test_state(db);
@@ -6837,30 +7016,137 @@ mod tests {
         assert_eq!(arr.len(), 2);
         let selected_count = arr.iter().filter(|s| s["selected"] == true).count();
         assert_eq!(selected_count, 1);
-        assert!(arr.iter().any(|s| s["id"] == id_a.as_str() && s["selected"] == true));
+        assert!(
+            arr.iter()
+                .any(|s| s["id"] == id_a.as_str() && s["selected"] == true)
+        );
 
         // server.select(B) switches selection (AC2).
-        handle_server_select(&state, Some(json!({ "id": id_b }))).await.unwrap();
+        handle_server_select(&state, Some(json!({ "id": id_b })))
+            .await
+            .unwrap();
         assert_eq!(
-            state.server_manager.read().await.selected_server_id.as_deref(),
+            state
+                .server_manager
+                .read()
+                .await
+                .selected_server_id
+                .as_deref(),
             Some(id_b.as_str())
         );
 
         // server.remove(A) — non-selected; row + vault + cache gone (AC6).
-        handle_server_remove(&state, Some(json!({ "id": id_a }))).await.unwrap();
+        handle_server_remove(&state, Some(json!({ "id": id_a })))
+            .await
+            .unwrap();
         assert_eq!(db.list_servers().unwrap().len(), 1);
         assert!(CredentialManager::get_server_credential(&id_a).is_err());
-        assert!(!state.server_manager.read().await.providers.contains_key(&id_a));
+        assert!(
+            !state
+                .server_manager
+                .read()
+                .await
+                .providers
+                .contains_key(&id_a)
+        );
 
         // server.remove(B) — the selected one; nothing remains, selection cleared (AC8).
-        let removed = handle_server_remove(&state, Some(json!({ "id": id_b }))).await.unwrap();
+        let removed = handle_server_remove(&state, Some(json!({ "id": id_b })))
+            .await
+            .unwrap();
         assert_eq!(removed["reselectedServerId"], Value::Null);
         assert_eq!(db.list_servers().unwrap().len(), 0);
         assert_eq!(state.server_manager.read().await.selected_server_id, None);
 
         // Removing a non-existent server errors.
-        let err = handle_server_remove(&state, Some(json!({ "id": "nope" }))).await.unwrap_err();
+        let err = handle_server_remove(&state, Some(json!({ "id": "nope" })))
+            .await
+            .unwrap_err();
         assert_eq!(err.code, ERR_NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_server_update_identity_metadata_only() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let id = db
+            .upsert_server(
+                "http://music.example",
+                "subsonic",
+                "alexis",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let state = make_test_state(db.clone());
+        state.server_manager.write().await.load_from_db(&db);
+        state
+            .server_manager
+            .write()
+            .await
+            .providers
+            .insert(id.clone(), FakeBrowseProvider::new(vec![], vec![]));
+
+        let result = handle_server_update(
+            &state,
+            Some(json!({ "id": id, "name": "Kitchen Hi-Fi", "icon": "headphones" })),
+        )
+        .await
+        .expect("server.update");
+        assert_eq!(result["ok"], true);
+
+        let row = db.get_server(&id).unwrap().unwrap();
+        assert_eq!(row.name.as_deref(), Some("Kitchen Hi-Fi"));
+        assert_eq!(row.icon.as_deref(), Some("headphones"));
+        assert_eq!(row.url, "http://music.example");
+        assert!(
+            state
+                .server_manager
+                .read()
+                .await
+                .providers
+                .contains_key(&id),
+            "identity update must not evict provider cache"
+        );
+
+        let state_json = handle_get_daemon_state(&state).await.unwrap();
+        assert_eq!(state_json["servers"][0]["name"], "Kitchen Hi-Fi");
+        assert_eq!(state_json["servers"][0]["icon"], "headphones");
+
+        handle_server_update(&state, Some(json!({ "id": id, "icon": null })))
+            .await
+            .expect("clear icon");
+        assert_eq!(db.get_server(&id).unwrap().unwrap().icon, None);
+    }
+
+    #[tokio::test]
+    async fn test_server_update_rejects_url_and_invalid_icon() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let id = db
+            .upsert_server(
+                "http://music.example",
+                "subsonic",
+                "alexis",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let state = make_test_state(db);
+
+        let url_err = handle_server_update(
+            &state,
+            Some(json!({ "id": id, "url": "http://evil.example", "name": "Name" })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(url_err.code, ERR_INVALID_PARAMS);
+
+        let icon_err =
+            handle_server_update(&state, Some(json!({ "id": id, "icon": "not-a-real-icon" })))
+                .await
+                .unwrap_err();
+        assert_eq!(icon_err.code, ERR_INVALID_PARAMS);
     }
 
     // AC27: itemIds accepts legacy strings and {id, serverId} objects.
@@ -6887,10 +7173,16 @@ mod tests {
     // (multiple servers, or a single server that isn't the selected one).
     #[test]
     fn test_sync_needs_provider_routing() {
-        let single = vec![("a".into(), Some("s1".into())), ("b".into(), Some("s1".into()))];
+        let single = vec![
+            ("a".into(), Some("s1".into())),
+            ("b".into(), Some("s1".into())),
+        ];
         assert!(!sync_needs_provider_routing(&single, Some("s1"), None));
 
-        let mixed = vec![("a".into(), Some("s1".into())), ("b".into(), Some("s2".into()))];
+        let mixed = vec![
+            ("a".into(), Some("s1".into())),
+            ("b".into(), Some("s2".into())),
+        ];
         assert!(sync_needs_provider_routing(&mixed, Some("s1"), None));
 
         // Legacy items (no serverId) resolve to the selected server → single.
@@ -6904,7 +7196,10 @@ mod tests {
         // A basket holding only another server's (locked) items while s1 is
         // selected: a single distinct server, but NOT the selected one — must
         // still route to that server's provider, not the selected one.
-        let single_other = vec![("a".into(), Some("s2".into())), ("b".into(), Some("s2".into()))];
+        let single_other = vec![
+            ("a".into(), Some("s2".into())),
+            ("b".into(), Some("s2".into())),
+        ];
         assert!(sync_needs_provider_routing(&single_other, Some("s1"), None));
 
         // Nothing selected but a concrete server present → route.
@@ -8443,15 +8738,19 @@ mod tests {
         assert_eq!(result["serverType"], serde_json::Value::Null);
         assert_eq!(result["serverVersion"], serde_json::Value::Null);
 
-        state.server_manager.write().await.set_test_provider(Arc::new(
-            crate::providers::jellyfin::JellyfinProvider::new_with_version(
-                JellyfinClient::new(),
-                "http://localhost",
-                "jellyfin-token-12345",
-                "user1",
-                Some("10.9.0".to_string()),
-            ),
-        ));
+        state
+            .server_manager
+            .write()
+            .await
+            .set_test_provider(Arc::new(
+                crate::providers::jellyfin::JellyfinProvider::new_with_version(
+                    JellyfinClient::new(),
+                    "http://localhost",
+                    "jellyfin-token-12345",
+                    "user1",
+                    Some("10.9.0".to_string()),
+                ),
+            ));
 
         let result = handle_get_daemon_state(&state).await.unwrap();
         assert_eq!(result["serverConnected"], true);
@@ -8917,15 +9216,19 @@ mod tests {
         let state = make_test_state(db);
         // Jellyfin provider is set so active_non_jellyfin_provider returns None,
         // causing handle_jellyfin_get_views to fall through to the JellyfinClient path.
-        state.server_manager.write().await.set_test_provider(Arc::new(
-            crate::providers::jellyfin::JellyfinProvider::new_with_version(
-                JellyfinClient::new(),
-                server.url(),
-                token,
-                "user1",
-                Some("10.9.0".to_string()),
-            ),
-        ));
+        state
+            .server_manager
+            .write()
+            .await
+            .set_test_provider(Arc::new(
+                crate::providers::jellyfin::JellyfinProvider::new_with_version(
+                    JellyfinClient::new(),
+                    server.url(),
+                    token,
+                    "user1",
+                    Some("10.9.0".to_string()),
+                ),
+            ));
 
         let views = handle_jellyfin_get_views(&state, None)
             .await

@@ -2,28 +2,11 @@
 // Compact header component listing all configured servers, allowing the user to
 // switch the active one, add a new server (inline login), or remove one.
 
-import { rpcCall, serverList, serverSelect, serverRemove, ServerSummary } from '../rpc';
+import { rpcCall, serverList, serverSelect, serverRemove, serverUpdate, ServerSummary } from '../rpc';
 import { basketStore } from '../state/basket';
 import { initLoginView } from '../login';
 import { t } from '../i18n';
-
-function serverTypeLabel(type: string): string {
-    switch (type) {
-        case 'jellyfin': return 'Jellyfin';
-        case 'openSubsonic': return 'OpenSubsonic';
-        case 'subsonic': return 'Subsonic';
-        default: return t('server.default');
-    }
-}
-
-function serverBadgeVariant(type: string): string {
-    switch (type) {
-        case 'jellyfin': return 'primary';
-        case 'openSubsonic': return 'success';
-        case 'subsonic': return 'neutral';
-        default: return 'neutral';
-    }
-}
+import { SERVER_ICON_OPTIONS, formatServerIdentity } from '../serverIdentity';
 
 export class ServerHub {
     private container: HTMLElement;
@@ -60,27 +43,34 @@ export class ServerHub {
 
     private render(): void {
         const selected = this.selectedServer();
+        const selectedIdentity = selected ? formatServerIdentity(selected) : null;
         const triggerLabel = selected
-            ? `${selected.username} @ ${selected.url}`
+            ? selectedIdentity!.label
             : t('serverHub.none_selected');
-        const triggerType = selected ? serverTypeLabel(selected.serverType) : '';
-        const triggerVariant = selected ? serverBadgeVariant(selected.serverType) : 'neutral';
 
-        const rows = this.servers.map(s => `
+        const rows = this.servers.map(s => {
+            const identity = formatServerIdentity(s);
+            return `
             <sl-menu-item class="server-hub-row ${s.id === this.selectedId ? 'active' : ''}"
                           data-id="${this.escape(s.id)}" type="checkbox" ${s.id === this.selectedId ? 'checked' : ''}>
-                <sl-badge slot="prefix" variant="${serverBadgeVariant(s.serverType)}" pill>${serverTypeLabel(s.serverType)}</sl-badge>
-                <span title="${this.escape(s.url)}">${this.escape(s.username)} @ ${this.escape(s.url)}</span>
+                <sl-icon slot="prefix" name="${this.escape(identity.icon)}"></sl-icon>
+                <span class="server-hub-row-text" title="${this.escape(identity.tooltip)}">
+                    <span class="server-hub-row-name">${this.escape(identity.label)}</span>
+                    <span class="server-hub-row-meta">${this.escape(identity.secondaryText)}</span>
+                </span>
+                <sl-icon-button slot="suffix" name="pencil" class="server-hub-edit"
+                                data-id="${this.escape(s.id)}" label="${t('serverHub.edit')}"></sl-icon-button>
                 <sl-icon-button slot="suffix" name="trash" class="server-hub-remove"
                                 data-id="${this.escape(s.id)}" label="${t('serverHub.remove')}"></sl-icon-button>
             </sl-menu-item>
-        `).join('');
+        `;
+        }).join('');
 
         this.container.innerHTML = `
             <div class="server-hub">
                 <sl-dropdown placement="bottom-end" hoist>
-                    <div slot="trigger" class="server-connection-chip" role="button" tabindex="0" title="${this.escape(triggerLabel)}">
-                        ${selected ? `<sl-badge variant="${triggerVariant}" pill>${triggerType}</sl-badge>` : ''}
+                    <div slot="trigger" class="server-connection-chip" role="button" tabindex="0" title="${this.escape(selectedIdentity?.tooltip ?? triggerLabel)}">
+                        ${selectedIdentity ? `<sl-icon name="${this.escape(selectedIdentity.icon)}"></sl-icon>` : ''}
                         <span>${this.escape(triggerLabel)}</span>
                         <sl-icon name="chevron-down"></sl-icon>
                     </div>
@@ -107,9 +97,16 @@ export class ServerHub {
         // Switch server on row click (ignore clicks on the remove button).
         this.container.querySelectorAll('.server-hub-row').forEach(row => {
             row.addEventListener('click', (e) => {
-                if ((e.target as HTMLElement)?.closest('.server-hub-remove')) return;
+                if ((e.target as HTMLElement)?.closest('.server-hub-remove, .server-hub-edit')) return;
                 const id = (row as HTMLElement).dataset.id;
                 if (id && id !== this.selectedId) this.handleSelect(id);
+            });
+        });
+        this.container.querySelectorAll('.server-hub-edit').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const id = (btn as HTMLElement).dataset.id;
+                if (id) this.handleEdit(id);
             });
         });
         this.container.querySelectorAll('.server-hub-remove').forEach(btn => {
@@ -121,6 +118,89 @@ export class ServerHub {
         });
         this.container.querySelector('.server-hub-add')?.addEventListener('click', () => this.handleAdd());
         this.container.querySelector('.server-hub-logout')?.addEventListener('click', () => this.handleLogout());
+    }
+
+    private handleEdit(id: string): void {
+        const server = this.servers.find(s => s.id === id);
+        if (!server) return;
+        const identity = formatServerIdentity(server);
+        let selectedIcon = identity.icon;
+
+        const dialog = document.createElement('sl-dialog') as any;
+        dialog.className = 'server-identity-dialog';
+        dialog.label = t('serverHub.identity_title');
+        dialog.innerHTML = `
+            <div class="server-identity-form">
+                <sl-input
+                    id="server-identity-name"
+                    label="${t('serverHub.identity_name')}"
+                    maxlength="40"
+                    required
+                    value="${this.escape(identity.label)}">
+                </sl-input>
+                <div class="device-settings-description">${this.escape(identity.secondaryText)}</div>
+                <label class="device-settings-label">${t('serverHub.identity_icon')}</label>
+                <div class="device-settings-icon-picker server-identity-icon-picker">
+                    ${SERVER_ICON_OPTIONS.map(icon => `
+                        <button type="button" class="init-icon-tile ${icon === selectedIcon ? 'selected' : ''}" data-icon="${this.escape(icon)}" title="${this.escape(icon)}">
+                            <sl-icon name="${this.escape(icon)}"></sl-icon>
+                        </button>
+                    `).join('')}
+                </div>
+                <sl-alert id="server-identity-error" variant="danger" closable style="display:none;"></sl-alert>
+            </div>
+            <sl-button slot="footer" variant="default" id="server-identity-cancel">${t('basket.actions.cancel')}</sl-button>
+            <sl-button slot="footer" variant="primary" id="server-identity-save">${t('basket.actions.save')}</sl-button>
+        `;
+        document.body.appendChild(dialog);
+
+        const setSelectedIcon = (icon: string) => {
+            selectedIcon = icon;
+            dialog.querySelectorAll('.init-icon-tile').forEach((tile: Element) => {
+                tile.classList.toggle('selected', (tile as HTMLElement).dataset.icon === icon);
+            });
+        };
+        dialog.querySelectorAll('.init-icon-tile').forEach((tile: Element) => {
+            tile.addEventListener('click', () => {
+                const icon = (tile as HTMLElement).dataset.icon;
+                if (icon) setSelectedIcon(icon);
+            });
+        });
+        dialog.querySelector('#server-identity-cancel')?.addEventListener('click', () => dialog.hide());
+        dialog.querySelector('#server-identity-save')?.addEventListener('click', async () => {
+            const saveBtn = dialog.querySelector('#server-identity-save') as any;
+            const errorEl = dialog.querySelector('#server-identity-error') as HTMLElement | null;
+            const nameInput = dialog.querySelector('#server-identity-name') as any;
+            const name = (nameInput?.value ?? '').trim();
+            if (!name) {
+                if (errorEl) {
+                    errorEl.textContent = t('serverHub.identity_name_required');
+                    errorEl.style.display = 'block';
+                    (errorEl as any).open = true;
+                }
+                return;
+            }
+            try {
+                saveBtn.loading = true;
+                await serverUpdate({ id, name, icon: selectedIcon });
+                dialog.hide();
+                await this.refresh();
+                this.onServerChanged();
+            } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e);
+                if (errorEl) {
+                    errorEl.textContent = t('serverHub.identity_error', { message: msg });
+                    errorEl.style.display = 'block';
+                    (errorEl as any).open = true;
+                }
+            } finally {
+                saveBtn.loading = false;
+            }
+        });
+        dialog.addEventListener('sl-after-hide', (ev: Event) => {
+            if (ev.target === dialog) dialog.remove();
+        });
+        customElements.whenDefined('sl-dialog').then(() => dialog.show());
     }
 
     private async handleSelect(id: string): Promise<void> {
@@ -155,6 +235,7 @@ export class ServerHub {
 
         const dialog = document.createElement('sl-dialog') as any;
         dialog.label = t('serverHub.remove_title');
+        const identity = formatServerIdentity(server);
         const warning = isSelected
             ? `<sl-alert variant="warning" open style="margin-bottom: 0.75rem;">
                  <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
@@ -163,7 +244,7 @@ export class ServerHub {
             : '';
         dialog.innerHTML = `
             ${warning}
-            <p>${t('serverHub.remove_confirm', { server: `${server.username} @ ${server.url}` })}</p>
+            <p>${t('serverHub.remove_confirm', { server: identity.label })}</p>
             <sl-button slot="footer" variant="default" id="server-remove-cancel">${t('basket.actions.cancel')}</sl-button>
             <sl-button slot="footer" variant="danger" id="server-remove-confirm">${t('serverHub.remove')}</sl-button>
         `;
@@ -180,7 +261,7 @@ export class ServerHub {
                             type: 'info',
                             message: t('serverHub.items_removed', {
                                 count: removed,
-                                server: serverTypeLabel(server.serverType),
+                                server: identity.label,
                             }),
                         },
                     }));

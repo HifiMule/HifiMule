@@ -23,9 +23,28 @@ pub struct ServerConfig {
     pub server_type: String,
     pub username: String,
     pub server_version: Option<String>,
+    pub name: Option<String>,
+    pub icon: Option<String>,
     pub updated_at: i64,
     /// True for the single currently-selected server (`selected = 1`).
     pub selected: bool,
+}
+
+pub fn server_type_label(server_type: &str) -> &'static str {
+    match server_type {
+        "jellyfin" => "Jellyfin",
+        "openSubsonic" => "OpenSubsonic",
+        "subsonic" => "Subsonic",
+        _ => "Server",
+    }
+}
+
+pub fn default_server_icon(server_type: &str) -> &'static str {
+    match server_type {
+        "jellyfin" => "collection-play",
+        "openSubsonic" | "subsonic" => "music-note-list",
+        _ => "hdd-network",
+    }
 }
 
 pub struct Database {
@@ -127,6 +146,8 @@ impl Database {
                 server_type TEXT NOT NULL,
                 username TEXT NOT NULL,
                 server_version TEXT,
+                name TEXT,
+                icon TEXT,
                 updated_at INTEGER NOT NULL,
                 selected INTEGER NOT NULL DEFAULT 0
             )",
@@ -166,29 +187,72 @@ impl Database {
                 )
                 .map_err(|e| anyhow!("Failed to add selected column: {}", e))?;
             }
+            let has_name = conn
+                .prepare("SELECT name FROM server_config LIMIT 0")
+                .is_ok();
+            if !has_name {
+                conn.execute("ALTER TABLE server_config ADD COLUMN name TEXT", [])
+                    .map_err(|e| anyhow!("Failed to add server name column: {}", e))?;
+            }
+            let has_icon = conn
+                .prepare("SELECT icon FROM server_config LIMIT 0")
+                .is_ok();
+            if !has_icon {
+                conn.execute("ALTER TABLE server_config ADD COLUMN icon TEXT", [])
+                    .map_err(|e| anyhow!("Failed to add server icon column: {}", e))?;
+            }
+            Self::backfill_server_identity(conn)?;
             return Ok(());
         }
 
         // Legacy table: read the single existing row (if any) before recreating.
-        let existing: Option<(String, String, String, Option<String>, i64)> = conn
-            .query_row(
-                "SELECT url, server_type, username, server_version, updated_at
-                 FROM server_config WHERE id = 1",
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
+        let has_name = conn
+            .prepare("SELECT name FROM server_config LIMIT 0")
+            .is_ok();
+        let has_icon = conn
+            .prepare("SELECT icon FROM server_config LIMIT 0")
+            .is_ok();
+        let select_sql = match (has_name, has_icon) {
+            (true, true) => {
+                "SELECT url, server_type, username, server_version, updated_at, name, icon FROM server_config WHERE id = 1"
+            }
+            (true, false) => {
+                "SELECT url, server_type, username, server_version, updated_at, name, NULL FROM server_config WHERE id = 1"
+            }
+            (false, true) => {
+                "SELECT url, server_type, username, server_version, updated_at, NULL, icon FROM server_config WHERE id = 1"
+            }
+            (false, false) => {
+                "SELECT url, server_type, username, server_version, updated_at, NULL, NULL FROM server_config WHERE id = 1"
+            }
+        };
+        let existing: Option<(
+            String,
+            String,
+            String,
+            Option<String>,
+            i64,
+            Option<String>,
+            Option<String>,
+        )> = conn
+            .query_row(select_sql, [], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            })
             .ok();
 
-        conn.execute("ALTER TABLE server_config RENAME TO server_config_legacy", [])
-            .map_err(|e| anyhow!("Failed to rename legacy server_config: {}", e))?;
+        conn.execute(
+            "ALTER TABLE server_config RENAME TO server_config_legacy",
+            [],
+        )
+        .map_err(|e| anyhow!("Failed to rename legacy server_config: {}", e))?;
         conn.execute(
             "CREATE TABLE server_config (
                 id TEXT PRIMARY KEY,
@@ -196,6 +260,8 @@ impl Database {
                 server_type TEXT NOT NULL,
                 username TEXT NOT NULL,
                 server_version TEXT,
+                name TEXT,
+                icon TEXT,
                 updated_at INTEGER NOT NULL,
                 selected INTEGER NOT NULL DEFAULT 0
             )",
@@ -203,19 +269,51 @@ impl Database {
         )
         .map_err(|e| anyhow!("Failed to recreate server_config table: {}", e))?;
 
-        if let Some((url, server_type, username, server_version, updated_at)) = existing {
+        if let Some((url, server_type, username, server_version, updated_at, name, icon)) = existing
+        {
             let id = uuid::Uuid::new_v4().to_string();
+            let name = name.unwrap_or_else(|| server_type_label(&server_type).to_string());
+            let icon = icon.unwrap_or_else(|| default_server_icon(&server_type).to_string());
             conn.execute(
                 "INSERT INTO server_config
-                    (id, url, server_type, username, server_version, updated_at, selected)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
-                params![id, url, server_type, username, server_version, updated_at],
+                    (id, url, server_type, username, server_version, name, icon, updated_at, selected)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)",
+                params![id, url, server_type, username, server_version, name, icon, updated_at],
             )
             .map_err(|e| anyhow!("Failed to migrate server row: {}", e))?;
         }
 
         conn.execute("DROP TABLE server_config_legacy", [])
             .map_err(|e| anyhow!("Failed to drop legacy server_config: {}", e))?;
+        Self::backfill_server_identity(conn)?;
+        Ok(())
+    }
+
+    fn backfill_server_identity(conn: &Connection) -> Result<()> {
+        conn.execute(
+            "UPDATE server_config
+             SET name = CASE server_type
+                WHEN 'jellyfin' THEN 'Jellyfin'
+                WHEN 'openSubsonic' THEN 'OpenSubsonic'
+                WHEN 'subsonic' THEN 'Subsonic'
+                ELSE 'Server'
+             END
+             WHERE name IS NULL OR trim(name) = ''",
+            [],
+        )
+        .map_err(|e| anyhow!("Failed to backfill server names: {}", e))?;
+        conn.execute(
+            "UPDATE server_config
+             SET icon = CASE server_type
+                WHEN 'jellyfin' THEN 'collection-play'
+                WHEN 'openSubsonic' THEN 'music-note-list'
+                WHEN 'subsonic' THEN 'music-note-list'
+                ELSE 'hdd-network'
+             END
+             WHERE icon IS NULL OR trim(icon) = ''",
+            [],
+        )
+        .map_err(|e| anyhow!("Failed to backfill server icons: {}", e))?;
         Ok(())
     }
 
@@ -226,8 +324,10 @@ impl Database {
             server_type: row.get(2)?,
             username: row.get(3)?,
             server_version: row.get(4)?,
-            updated_at: row.get(5)?,
-            selected: row.get::<_, i64>(6)? != 0,
+            name: row.get(5)?,
+            icon: row.get(6)?,
+            updated_at: row.get(7)?,
+            selected: row.get::<_, i64>(8)? != 0,
         })
     }
 
@@ -241,6 +341,8 @@ impl Database {
         server_type: &str,
         username: &str,
         server_version: Option<&str>,
+        name: Option<&str>,
+        icon: Option<&str>,
     ) -> Result<String> {
         let conn = self.conn.lock().unwrap();
         let updated_at = std::time::SystemTime::now()
@@ -263,15 +365,31 @@ impl Database {
             conn.execute(
                 "UPDATE server_config SET
                     url = ?2, server_type = ?3, username = ?4,
-                    server_version = ?5, updated_at = ?6
+                    server_version = ?5,
+                    name = COALESCE(?6, name),
+                    icon = COALESCE(?7, icon),
+                    updated_at = ?8
                  WHERE id = ?1",
-                params![id, url, server_type, username, server_version, updated_at],
+                params![
+                    id,
+                    url,
+                    server_type,
+                    username,
+                    server_version,
+                    name,
+                    icon,
+                    updated_at
+                ],
             )
             .map_err(|e| anyhow!("Failed to update server config: {}", e))?;
             return Ok(id);
         }
 
         let id = uuid::Uuid::new_v4().to_string();
+        let default_name = server_type_label(server_type).to_string();
+        let default_icon = default_server_icon(server_type).to_string();
+        let insert_name = name.unwrap_or(default_name.as_str());
+        let insert_icon = icon.unwrap_or(default_icon.as_str());
         // First-ever server is auto-selected; otherwise selection is preserved.
         let any_selected: bool = conn
             .query_row(
@@ -284,19 +402,57 @@ impl Database {
         let selected = if any_selected { 0 } else { 1 };
         conn.execute(
             "INSERT INTO server_config
-                (id, url, server_type, username, server_version, updated_at, selected)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![id, url, server_type, username, server_version, updated_at, selected],
+                (id, url, server_type, username, server_version, name, icon, updated_at, selected)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                id,
+                url,
+                server_type,
+                username,
+                server_version,
+                insert_name,
+                insert_icon,
+                updated_at,
+                selected
+            ],
         )
         .map_err(|e| anyhow!("Failed to insert server config: {}", e))?;
         Ok(id)
+    }
+
+    pub fn update_server_identity(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        icon: Option<Option<&str>>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let rows = match icon {
+            Some(icon) => conn.execute(
+                "UPDATE server_config
+                 SET name = COALESCE(?2, name), icon = ?3
+                 WHERE id = ?1",
+                params![id, name, icon],
+            ),
+            None => conn.execute(
+                "UPDATE server_config
+                 SET name = COALESCE(?2, name)
+                 WHERE id = ?1",
+                params![id, name],
+            ),
+        }
+        .map_err(|e| anyhow!("Failed to update server identity: {}", e))?;
+        if rows == 0 {
+            return Err(anyhow!("Server not found: {}", id));
+        }
+        Ok(())
     }
 
     /// Returns all configured servers ordered by insertion (updated_at, then id).
     pub fn list_servers(&self) -> Result<Vec<ServerConfig>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, url, server_type, username, server_version, updated_at, selected
+            "SELECT id, url, server_type, username, server_version, name, icon, updated_at, selected
              FROM server_config ORDER BY updated_at ASC, id ASC",
         )?;
         let rows = stmt.query_map([], Self::row_to_server_config)?;
@@ -310,7 +466,7 @@ impl Database {
     pub fn get_server(&self, id: &str) -> Result<Option<ServerConfig>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, url, server_type, username, server_version, updated_at, selected
+            "SELECT id, url, server_type, username, server_version, name, icon, updated_at, selected
              FROM server_config WHERE id = ?1",
         )?;
         let mut rows = stmt.query(params![id])?;
@@ -325,7 +481,7 @@ impl Database {
     pub fn get_server_config(&self) -> Result<Option<ServerConfig>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, url, server_type, username, server_version, updated_at, selected
+            "SELECT id, url, server_type, username, server_version, name, icon, updated_at, selected
              FROM server_config WHERE selected = 1 LIMIT 1",
         )?;
         let mut rows = stmt.query([])?;
@@ -684,7 +840,8 @@ mod tests {
         // Second call to init must not fail — all DDL uses CREATE TABLE IF NOT EXISTS.
         db.init_for_test().unwrap();
         // Operations still work after re-init.
-        db.upsert_server("http://x", "jellyfin", "u", None).unwrap();
+        db.upsert_server("http://x", "jellyfin", "u", None, None, None)
+            .unwrap();
         assert!(db.get_server_config().unwrap().is_some());
     }
 
@@ -696,7 +853,14 @@ mod tests {
 
         // First-ever server is auto-selected.
         let id1 = db
-            .upsert_server("http://music.example", "openSubsonic", "alexis", Some("1.16.1"))
+            .upsert_server(
+                "http://music.example",
+                "openSubsonic",
+                "alexis",
+                Some("1.16.1"),
+                None,
+                None,
+            )
             .unwrap();
         let config = db.get_server_config().unwrap().unwrap();
         assert_eq!(config.id, id1);
@@ -704,22 +868,48 @@ mod tests {
         assert_eq!(config.server_type, "openSubsonic");
         assert_eq!(config.username, "alexis");
         assert_eq!(config.server_version.as_deref(), Some("1.16.1"));
+        assert_eq!(config.name.as_deref(), Some("OpenSubsonic"));
+        assert_eq!(config.icon.as_deref(), Some("music-note-list"));
         assert!(config.selected);
+
+        db.update_server_identity(&id1, Some("Kitchen"), Some(Some("headphones")))
+            .unwrap();
 
         // Re-upsert by normalized URL (trailing slash) updates in place, same id.
         let id1b = db
-            .upsert_server("http://music.example/", "openSubsonic", "alexis", Some("1.17.0"))
+            .upsert_server(
+                "http://music.example/",
+                "openSubsonic",
+                "alexis",
+                Some("1.17.0"),
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(id1, id1b);
         assert_eq!(db.list_servers().unwrap().len(), 1);
         assert_eq!(
-            db.get_server(&id1).unwrap().unwrap().server_version.as_deref(),
+            db.get_server(&id1)
+                .unwrap()
+                .unwrap()
+                .server_version
+                .as_deref(),
             Some("1.17.0")
         );
+        let edited = db.get_server(&id1).unwrap().unwrap();
+        assert_eq!(edited.name.as_deref(), Some("Kitchen"));
+        assert_eq!(edited.icon.as_deref(), Some("headphones"));
 
         // A second, distinct server does NOT steal the selection.
         let id2 = db
-            .upsert_server("http://jellyfin.example", "jellyfin", "user-id", None)
+            .upsert_server(
+                "http://jellyfin.example",
+                "jellyfin",
+                "user-id",
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_ne!(id1, id2);
         assert_eq!(db.list_servers().unwrap().len(), 2);
@@ -734,6 +924,23 @@ mod tests {
         assert!(db.remove_server(&id1).unwrap());
         assert_eq!(db.list_servers().unwrap().len(), 1);
         assert!(!db.remove_server("does-not-exist").unwrap());
+    }
+
+    #[test]
+    fn test_update_server_identity_clears_icon_without_reordering() {
+        let db = Database::memory().unwrap();
+        let id = db
+            .upsert_server("http://music.example", "jellyfin", "u", None, None, None)
+            .unwrap();
+        let before = db.get_server(&id).unwrap().unwrap().updated_at;
+
+        db.update_server_identity(&id, Some("Living Room"), Some(None))
+            .unwrap();
+
+        let config = db.get_server(&id).unwrap().unwrap();
+        assert_eq!(config.name.as_deref(), Some("Living Room"));
+        assert_eq!(config.icon, None);
+        assert_eq!(config.updated_at, before);
     }
 
     #[test]
@@ -781,6 +988,8 @@ mod tests {
         assert_eq!(migrated.server_type, "jellyfin");
         assert_eq!(migrated.username, "alexis");
         assert_eq!(migrated.server_version.as_deref(), Some("10.9.0"));
+        assert_eq!(migrated.name.as_deref(), Some("Jellyfin"));
+        assert_eq!(migrated.icon.as_deref(), Some("collection-play"));
         assert_eq!(migrated.updated_at, 42);
         assert!(migrated.selected);
 
@@ -814,8 +1023,42 @@ mod tests {
         db.init_for_test().unwrap();
         assert_eq!(db.list_servers().unwrap().len(), 0);
         // New-schema operations work post-migration.
-        db.upsert_server("http://new.example", "jellyfin", "u", None)
+        db.upsert_server("http://new.example", "jellyfin", "u", None, None, None)
             .unwrap();
         assert_eq!(db.list_servers().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_existing_uuid_server_config_identity_columns_are_backfilled() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE server_config (
+                id TEXT PRIMARY KEY,
+                url TEXT NOT NULL,
+                server_type TEXT NOT NULL,
+                username TEXT NOT NULL,
+                server_version TEXT,
+                updated_at INTEGER NOT NULL,
+                selected INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO server_config
+                (id, url, server_type, username, server_version, updated_at, selected)
+             VALUES ('srv-1', 'http://sub.example', 'subsonic', 'alexis', NULL, 7, 1)",
+            [],
+        )
+        .unwrap();
+
+        let db = Database {
+            conn: Arc::new(Mutex::new(conn)),
+        };
+        db.init_for_test().unwrap();
+
+        let server = db.get_server("srv-1").unwrap().unwrap();
+        assert_eq!(server.name.as_deref(), Some("Subsonic"));
+        assert_eq!(server.icon.as_deref(), Some("music-note-list"));
     }
 }
