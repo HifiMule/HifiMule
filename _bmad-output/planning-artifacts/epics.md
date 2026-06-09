@@ -2,8 +2,8 @@ stepsCompleted: ['step-01-validate-prerequisites', 'step-02-design-epics', 'step
 inputDocuments: ['prd.md', 'architecture.md', 'ux-design-specification.md', 'product-brief-bmad-2026-01-26.md', 'project-context.md']
 status: 'complete'
 completedAt: '2026-01-27'
-lastAmended: '2026-06-05'
-amendments: ['epic-11-selection-as-playlist', 'story-9-7-virtualized-list-view']
+lastAmended: '2026-06-09'
+amendments: ['epic-11-selection-as-playlist', 'story-9-7-virtualized-list-view', 'multi-server-management']
 
 # HifiMule - Epic Breakdown
 
@@ -115,6 +115,9 @@ FR38: Epic 11 - Dual-Panel Curation (Story 11.6)
 FR39: Epic 9 - Virtualized List/Table Browse View (Story 9.7)
 FR40: Epic 11 - Playlist Track Reordering (Stories 11.9-11.10)
 FR41: Epic 9 - Tracks Browse Mode (Stories 9.9-9.10)
+FR42: Epic 2 - Multi-Server Hub (Story 2.11)
+FR43: Epic 3 - Mixed-Server Basket (Story 3.2, amended)
+FR44: Epic 11 - Playlist Server Scope (Stories 11.4, 11.5, amended)
 
 ## Epic List
 
@@ -171,17 +174,25 @@ Implement secure Jellyfin authentication and automated hardware identification.
 ### Story 2.1: Secure Media Server Link
 
 As a System Admin (Alexis),
-I want to securely store my media server URL and credentials in the encrypted local vault,
-So that I don't have to re-enter them and my credentials are safe from other users.
+I want to securely add media server credentials to the encrypted local vault and manage them per server,
+So that I don't have to re-enter them and my credentials are safe from other users even when multiple servers are configured.
 
 **Acceptance Criteria:**
 
-**Given** the UI is open in "Settings"
-**When** I enter a server URL
+**Given** the UI is open in "Settings → Servers"
+**When** I enter a server URL, username, and password and click "Add Server"
 **Then** the daemon auto-detects the server type (Story 8.4 factory: Subsonic ping → Jellyfin `/System/Info` fallback).
-**And** for Jellyfin: I enter a Username and Password → daemon authenticates and stores the access token in the encrypted local vault (`secrets.enc`).
-**And** for Subsonic/Navidrome: I enter a Username and Password → daemon stores the password in the encrypted local vault (`secrets.enc`) for per-request MD5 signing.
+**And** for Jellyfin: authenticates and stores the access token in the vault keyed by the new server's UUID.
+**And** for Subsonic/Navidrome: stores the password in the vault keyed by the new server's UUID for per-request MD5 signing.
 **And** the connection is validated by a successful ping/library query.
+**And** the new server appears in the Server Hub with its detected type and username.
+**And** if a server with the same URL already exists, its credentials are updated (upsert by URL — no duplicate entries).
+**And** the newly added server becomes the selected server if no server was previously selected.
+
+**Technical Notes:**
+- `server.connect` RPC now returns `{ ok, serverId: string, serverType, serverVersion }`.
+- Vault key format: server UUID (not URL) so credentials survive URL edits (e.g., adding trailing slash or switching http→https).
+- Vault stores `HashMap<String, ServerCredentials>` keyed by server UUID; old single-blob format auto-migrated on first startup after upgrade (see Story 2.11).
 
 ### Story 2.2: Mass Storage Heartbeat (Autodetection)
 
@@ -255,15 +266,28 @@ So that I can easily connect to my library without manually copying API tokens.
 **Then** the daemon calls the factory (Story 8.4) to auto-detect server type and authenticate.
 **And** for Jellyfin: retrieves and stores an access token via `POST /Users/AuthenticateByName`.
 **And** for Subsonic: verifies credentials via `GET /rest/ping.view` (no token — stateless auth).
-**And** the token or password is securely stored in the encrypted local vault (replacing any existing credential).
-**And** the UI transitions to the main Library Browser on success.
+**And** the token or password is securely stored in the encrypted local vault keyed by the new server's UUID.
+**And** the UI transitions to the main Library Browser on success with that server selected.
 **When** authentication fails
 **Then** a clear error message is shown (e.g., "Invalid Credentials", "Server Unreachable", or "Unknown server type at this URL").
+
+**Given** the application already has configured servers
+**When** I open Settings → Servers → "Add Server"
+**Then** the same connection form is presented inline (not a full-screen takeover).
+**And** on success, the new server is appended to the hub without disrupting the currently selected server or basket.
+
+**Given** a previously configured server has an expired or invalid token
+**When** the user selects that server in the Server Hub and the library browse RPC returns a 401
+**Then** the UI surfaces a re-authentication prompt for that server specifically (not a full-screen login).
+**And** re-authentication replaces only that server's credential in the vault.
+**And** the other servers and their basket items are unaffected.
 
 **Technical Notes:**
 - The Login screen shows a subtle server type badge that updates live (debounced) as the URL is typed
 - Auto-detection is primary; a manual server type override is available as an advanced option
 - No separate "server type" dropdown in the primary flow
+- Full-screen login is shown only on first run (no servers configured); post-first-run server addition is an inline form in the Server Hub settings panel
+- Re-auth prompt: inline modal bound to the specific server's URL, not a global state reset
 
 ### Story 2.6: Initialize New Device Manifest
 
@@ -424,6 +448,59 @@ So that it appears in the device hub without requiring manual steps.
 - MTP device `path` in `device.list` RPC: use synthetic identifier `mtp://<device_id>` — no real filesystem path exists
 - Device enumeration runs in `tokio::task::spawn_blocking` (libmtp is synchronous)
 
+### Story 2.11: Multi-Server Hub
+
+As a System Admin (Alexis) and Ritualist (Arthur),
+I want a persistent Server Hub where I can see all configured servers, switch the active one, and add or remove servers,
+So that I have full control over which media library I'm curating from at any time.
+
+**Acceptance Criteria:**
+
+**Given** one or more servers are configured
+**When** I open the main UI or Settings → Servers
+**Then** the Server Hub is displayed listing all configured servers.
+**And** each server shows its URL (or a user-friendly display name), detected type badge (Jellyfin / Subsonic), and username.
+**And** the currently selected server is highlighted.
+
+**Given** I click a server in the hub that is not currently selected
+**When** the UI calls `server.select({ id })`
+**Then** the daemon updates `selectedServerId` in `ServerManager` and persists the `selected` flag in `server_config`.
+**And** the library browser reloads with the newly selected server's content.
+**And** basket items from the previous server become read-only (locked visual state).
+**And** basket items from the newly selected server become editable.
+
+**Given** I click "Add Server" in the hub
+**Then** the server connection form (Story 2.5) is presented inline.
+**And** on success, the new server is appended to the hub without disrupting the currently selected server.
+
+**Given** I click "Remove" on a server that is not currently selected
+**When** I confirm removal in a confirmation dialog
+**Then** `server.remove({ id })` is called.
+**And** the server's credentials are deleted from the vault.
+**And** the server is removed from the `server_config` table.
+**And** basket items that originated from that server are removed from the basket with a notification: "X items from [server] were removed from your basket."
+
+**Given** I click "Remove" on the currently selected server
+**Then** the confirmation dialog warns that the active server will be deselected.
+**And** on confirmation, removal proceeds and `selectedServerId` is set to the first remaining server (or null if none remain).
+**And** if no servers remain, the UI enters the first-run state (full-screen login).
+
+**Given** no server is selected (`selectedServerId === null`)
+**Then** the library browser shows an empty state: "Select a server to browse your library."
+**And** all (+) add buttons in the library browser are disabled.
+**And** the "Start Sync" button is disabled.
+
+**Technical Notes:**
+- `server.list` → `Array<{ id, url, serverType, username, selected: boolean }>`
+- `server.select({ id })` → `{ ok: true }` — updates `ServerManager.selected_server_id` + sets `selected = 1` in DB (clears `selected` on all other rows)
+- `server.remove({ id })` → `{ ok: true }` — removes row from `server_config`, deletes vault entry for that server UUID, evicts provider from `ServerManager.providers` cache
+- `get_daemon_state` gains `servers: Array<{ id, url, serverType, username, selected }>` and `selectedServerId: string | null`
+- Provider initialization is lazy: `ServerManager` calls `providers::connect()` only when a server is first selected, not at daemon startup for all servers (preserves < 10MB idle RAM NFR)
+- Vault migration: on first daemon startup after upgrade, if `secrets.enc` decrypts to the old single-`Secrets` struct format, it is auto-migrated to `HashMap<serverId, ServerCredentials>` using the existing server's UUID; the migrated vault is re-encrypted and saved
+- `server_config` DB migration: recreate table to drop `CHECK (id = 1)` constraint; add `selected INTEGER NOT NULL DEFAULT 0` column; existing single row gets a generated UUID and `selected = 1`
+- UI: Server Hub lives in a "Servers" tab in Settings AND as a compact selector in the main layout header (analogous to the device hub in the sidebar)
+- Basket item locked rendering: CSS class `basket-item--locked` on items where `item.serverId !== state.selectedServerId`; (×) button hidden for locked items
+
 ## Epic 3: The Curation Hub (Basket & Library)
 
 Develop the high-confidence Library Browser and Selection Basket with storage projection.
@@ -463,10 +540,40 @@ So that I can see exactly what I'm about to sync without committing yet.
 
 **Acceptance Criteria:**
 
-**Given** the Library Browser
-**When** I click the `(+)` on an album or playlist
-**Then** the item is added to the "Sync Basket" sidebar.
+**Given** the Library Browser and a server is selected
+**When** I click the `(+)` on an album, artist, playlist, or track
+**Then** the item is added to the "Sync Basket" sidebar with its `serverId` set to the currently `selectedServerId`.
 **And** the sidebar displays the "Intent Overlay" (e.g., `+12 Tracks`).
+
+**Given** no device is selected
+**When** I view the library browser
+**Then** all `(+)` add buttons are disabled (greyed out, no click interaction).
+
+**Given** the basket contains items from multiple servers
+**When** the basket renders
+**Then** items from the selected server render with normal `(+)` / `(×)` controls.
+**And** items from non-selected servers render with a server name badge and no remove `(×)` control (read-only / locked state).
+**And** a clear informational note is shown when mixed-server items are present: "Items from other servers are read-only until you switch back to that server."
+
+**Given** I switch the selected server via the Server Hub
+**When** the basket re-renders
+**Then** previously-selected-server items become locked (read-only, no `(×)`).
+**And** newly-selected-server items (if any) become editable.
+
+**Given** the basket contains only items from non-selected servers
+**Then** the "Start Sync" button remains enabled (sync can execute items from any server).
+**And** the storage projection bar includes all items regardless of server.
+
+**Given** sync starts with a mixed-server basket
+**When** `sync.start` is called
+**Then** the daemon groups `itemIds` by their `serverId`, retrieves the appropriate provider per group via `ServerManager.get_provider(serverId)`, and downloads each file from its correct server.
+
+**Technical Notes:**
+- `BasketItem` gains `serverId: string` — populated from `selectedServerId` at add time.
+- `basketStore` persists `serverId` per item in the basket manifest section of `.hifimule.json`.
+- `sync.start` params: `itemIds` becomes `Array<{ id: string, serverId: string }>`; daemon routes each group to `ServerManager.get_provider(serverId)`.
+- `basket.add` / `basket.remove` RPCs gain `serverId` in params; daemon validates `serverId` exists in `server_config` before accepting.
+- Read-only rendering: CSS class `basket-item--locked` on items where `item.serverId !== state.selectedServerId`; `(×)` button hidden.
 
 ### Story 3.3: High-Confidence Storage Projection
 
@@ -613,13 +720,30 @@ So that I don't wait for a slow basket population and always get the freshest tr
 **When** I toggle it off
 **Then** the Auto-Fill Slot is removed from the basket immediately (no API call).
 
+**Given** the basket sidebar is visible and a server is selected
+**When** I enable the "Auto-Fill" toggle
+**Then** the Auto-Fill Slot card is bound to the currently `selectedServerId`.
+**And** if an Auto-Fill Slot already exists (from any server), it is replaced by the new slot.
+
+**Given** an Auto-Fill Slot is in the basket from server A and I switch to server B
+**When** the basket renders
+**Then** the Auto-Fill Slot from server A is shown as read-only (locked, no toggle affordance) with a server name badge indicating it belongs to server A.
+**And** the auto-fill toggle for server B is shown as OFF.
+
+**Given** an Auto-Fill Slot is in the basket from server A and I switch to server B and enable Auto-Fill
+**When** the toggle is turned ON
+**Then** the server A slot is replaced by a new Auto-Fill Slot bound to server B (silent overwrite, no confirmation prompt).
+
 **Technical Notes:**
 - Remove from `BasketSidebar.ts`: `triggerAutoFill()`, `scheduleAutoFill()`, `autoFillInFlight`, `autoFillPendingRetrigger`, `autoFillDebounceTimer`, `isAutoFillLoading`, `basketStore.replaceAutoFilled()`
-- Toggle inserts a single `{ id: '__auto_fill_slot__', type: 'AutoFillSlot', maxBytes: N }` virtual item into `basketStore`
+- Toggle inserts a single `{ id: '__auto_fill_slot__', type: 'AutoFillSlot', maxBytes: N, serverId: selectedServerId }` virtual item into `basketStore`
+- Auto-fill toggle state: UI checks `item.serverId === selectedServerId` to determine whether to show the toggle as ON or OFF
+- On toggle ON: dispatch removes any existing `__auto_fill_slot__` item first, then inserts new one with `serverId = selectedServerId`
 - `basket.autoFill` RPC: retained as preview/debug endpoint, no longer called by UI for basket population
-- `sync.start` RPC handler: if request contains `autoFill: { enabled: true, maxBytes?, excludeItemIds[] }`, call `run_auto_fill()` and merge results with `itemIds` before executing — mirrors existing daemon-initiated path (`main.rs:503`)
-- `sync.start` params gain: `autoFill?: { enabled: boolean, maxBytes?: number, excludeItemIds: string[] }`
+- `sync.start` RPC handler: if request contains `autoFill: { enabled: true, maxBytes?, excludeItemIds[], serverId }`, call `run_auto_fill()` routing to `ServerManager.get_provider(serverId)` — mirrors existing daemon-initiated path (`main.rs:503`)
+- `sync.start` params gain: `autoFill?: { enabled: boolean, maxBytes?: number, excludeItemIds: string[], serverId: string }`
 - Auto-fill preferences (enabled, maxBytes) continue to be persisted via `sync.setAutoFill`
+- Multi-slot auto-fill (one per server simultaneously) is deferred to a future change
 
 ### Story 3.9: Artist Entity Basket Item
 
@@ -784,6 +908,7 @@ So that I can either manually execute my selection or enjoy zero-touch automatic
 
 **Technical Notes:**
 - IPC pattern: JSON-RPC 2.0 · Request: `sync.start` · Response: `{ jobId }` · Events: `on_sync_progress`
+- `sync.start` `itemIds` parameter format: `Array<{ id: string, serverId: string }>` — each item carries its originating server UUID so the daemon can route per-item downloads to the correct `MediaProvider`. The daemon groups items by `serverId` and calls `ServerManager.get_provider(serverId)` for each group.
 - Follows the architecture's Request-Response-Event communication pattern
 - Button must be disabled when: basket is empty, storage projection is Over Limit, or a sync is already in progress
 - ARIA-live region required for progress updates (WCAG 2.1 AA)
@@ -1496,27 +1621,38 @@ So that the daemon works reliably in headless and minimal Linux environments wit
 
 **Acceptance Criteria:**
 
-**Given** `CredentialManager::save_secrets()` is called with a Jellyfin token or Subsonic password
+**Given** `CredentialManager::save_credentials(server_id, token_or_password)` is called for a Jellyfin token or Subsonic password
 **When** the write completes
 **Then** a `secrets.enc` file is written to `get_app_data_dir()` (alongside `config.json`).
 **And** no OS credential vault (Keychain, Credential Manager, Secret Service) is accessed.
+**And** the vault stores `HashMap<String, ServerCredentials>` where the key is the server UUID and the value contains `token_or_password`.
 
-**Given** `CredentialManager::load_secrets()` is called on a machine that saved the vault
+**Given** `CredentialManager::load_credentials(server_id)` is called on a machine that saved the vault
 **When** the read completes
-**Then** the correct `Secrets` blob is returned (covering both Jellyfin token and Subsonic password).
+**Then** the `ServerCredentials` for that server UUID is returned.
+**And** if the server UUID does not exist in the vault, `None` is returned (not an error).
+
+**Given** `secrets.enc` contains a legacy single-`Secrets` blob (pre-multi-server upgrade)
+**When** `load_all_credentials()` is called on first daemon startup
+**Then** the old blob is detected (by attempting deserialization as `Secrets`), converted to `HashMap<existing_server_uuid, credentials>`, and re-encrypted as the new format.
+**And** the migrated vault replaces the old file atomically.
 
 **Given** `secrets.enc` is copied to a different machine
-**When** `load_secrets()` is called on the second machine
-**Then** decryption fails (hardware fingerprint mismatch) and `Secrets::default()` is returned.
+**When** `load_all_credentials()` is called on the second machine
+**Then** decryption fails (hardware fingerprint mismatch) and an empty `HashMap` is returned.
 
-**Given** `CredentialManager::clear_credentials()` is called
+**Given** `CredentialManager::remove_credentials(server_id)` is called
+**When** the call completes
+**Then** the entry for that server UUID is removed from the vault map and the file re-encrypted.
+
+**Given** `CredentialManager::clear_all_credentials()` is called
 **When** the call completes
 **Then** `secrets.enc` is deleted from disk.
 **And** `config.json` is also removed (existing behaviour unchanged).
 
 **Given** the test suite runs (`cargo test`)
-**When** the `#[cfg(test)]` mock seam (`TEST_SECRETS: Mutex<Option<Secrets>>`) is active
-**Then** all existing `CredentialManager` tests pass without modification.
+**When** the `#[cfg(test)]` mock seam is active
+**Then** all `CredentialManager` tests pass without modification.
 
 **Technical Notes:**
 - New module `hifimule-daemon/src/vault.rs`: `derive_key(app_salt)` (machine-uid + blake3) + `encrypt_file(path, plaintext, salt)` + `decrypt_file(path, salt)` (ChaCha20-Poly1305)
@@ -2357,12 +2493,19 @@ So that the UI can create and edit server playlists from the device selection ba
 **When** any playlist write RPC is called
 **Then** an RPC error indicating the capability is unsupported is returned.
 
+**Given** `playlist.create({ name, itemIds })` is called
+**When** the daemon resolves the `itemIds` to track IDs
+**Then** it verifies all resolved tracks' `serverId` fields match the current `selectedServerId`.
+**And** if any track's `serverId` does not match `selectedServerId`, the RPC returns an error (code 409): "Playlist creation requires all items to be from the selected server. Switch server or remove cross-server items."
+**And** no playlist is created on the server.
+
 **Technical Notes:**
 - Container-expansion reuses the existing `rpc.rs:807–866` path.
 - Auto-Fill slots are silently skipped; callers do not need to pre-filter them.
 - Track ordering within a resolved entity is left to implementation.
-- All four RPCs call `require_provider()` before dispatch.
+- All four RPCs call `require_provider()` before dispatch — `require_provider()` routes through `ServerManager.selected_server_id`.
 - `playlist.addTracks` and `playlist.removeTracks` pass `trackIds` directly — no entity resolution.
+- Server scope validation in `playlist.create`: daemon checks each resolved track's originating `serverId` against `selectedServerId` before calling `provider.create_playlist`; 409 error prevents partial cross-server playlists.
 
 ### Story 11.5: Basket "Save as Playlist" and "Send to Playlist" UI
 
@@ -2398,10 +2541,17 @@ So that I can persist and reuse my curated selections across sessions.
 **Then** `playlist.create` is called with the resolved item IDs.
 **And** the created playlist becomes available in the server playlist browser.
 
+**Given** I click "Save selection as playlist" and the basket contains items from non-selected servers
+**When** the dialog opens
+**Then** an inline notice informs me: "Only items from [selected server name] will be saved. Items from other servers are not included."
+**And** the item count shown in the dialog reflects only the selected-server items.
+**And** I can proceed; cross-server items are silently pre-filtered from the `itemIds` sent to `playlist.create`.
+
 **Technical Notes:**
 - Capability-gating: check `capabilities().supports_playlist_write` before rendering any playlist-write affordances.
 - Auto-Fill exclusion notice is informational only; the save proceeds for manual items.
 - Context menus appear on artists and albums in browse views.
+- Cross-server pre-filter: UI filters `basketStore` items to `serverId === selectedServerId` before building the `itemIds` array for `playlist.create` — this prevents the 409 error from surfacing in normal flow.
 
 ### Story 11.6: Dual-Panel Playlist Curation View
 

@@ -2,8 +2,8 @@ stepsCompleted: ['step-01-init', 'step-02-context', 'step-03-starter', 'step-04-
 workflowType: 'architecture'
 status: 'complete'
 completedAt: '2026-01-26'
-lastAmended: '2026-06-05'
-amendments: ['epic-8-library-browsing-rpc-contract', 'epic-8-provider-layer-type-definitions', 'epic-8-factory-lifecycle-config', 'epic-8-subsonic-auth-scrobble-incremental-sync', 'epic-11-selection-as-playlist-write-trait']
+lastAmended: '2026-06-09'
+amendments: ['epic-8-library-browsing-rpc-contract', 'epic-8-provider-layer-type-definitions', 'epic-8-factory-lifecycle-config', 'epic-8-subsonic-auth-scrobble-incremental-sync', 'epic-11-selection-as-playlist-write-trait', 'multi-server-management']
 ---
 
 # Architecture Decision Document
@@ -622,3 +622,168 @@ pub struct Capabilities {
 - Never construct Jellyfin or Subsonic playlist write URLs outside `providers/jellyfin.rs` and `providers/subsonic.rs`.
 - Exclude Auto-Fill slots from all `playlist.create` / `playlist.addTracks` calls.
 - Use `String` for playlist IDs — consistent with the project-wide ID type rule.
+
+## Multi-Server Management — Architectural Decisions
+
+### Motivation
+
+The existing single-server architecture (`server_config CHECK (id = 1)`, single `Arc<RwLock<Option<Arc<dyn MediaProvider>>>>` in `AppState`) is replaced by a `ServerManager` that holds multiple server records with lazy per-server provider caching. The `MediaProvider` abstraction and `server_id` manifest field already anticipated this; this amendment activates them at the user-facing level.
+
+### ServerManager — Replaces AppState.provider
+
+```rust
+pub struct ServerManager {
+    servers: Vec<ServerRecord>,
+    selected_server_id: Option<String>,
+    providers: HashMap<String, Arc<dyn MediaProvider>>,  // lazy, keyed by server UUID
+}
+
+pub struct ServerRecord {
+    pub id: String,           // stable UUID
+    pub url: String,
+    pub server_type: String,  // 'jellyfin' | 'subsonic'
+    pub username: String,
+}
+
+// In AppState — replaces `provider: Arc<RwLock<Option<Arc<dyn MediaProvider>>>>`
+pub server_manager: Arc<RwLock<ServerManager>>,
+```
+
+**Provider lifecycle (lazy initialization):**
+- Providers are instantiated via `providers::connect()` only when a server is first selected (`server.select` or first startup auto-select), not eagerly on daemon startup for all configured servers.
+- This preserves the < 10MB idle memory NFR. Only the active provider's HTTP client and in-memory state are live at any time.
+- When `server.remove` is called, the evicted provider's `Arc` is dropped from the cache; refcount reaches zero when all in-flight RPC handlers release their clones.
+
+**require_provider() — semantic change:**
+```rust
+// Returns the selected server's provider, or RpcError::NotConnected if none selected.
+async fn require_provider(state: &AppState) -> Result<Arc<dyn MediaProvider>, RpcError> {
+    let mgr = state.server_manager.read().await;
+    let id = mgr.selected_server_id.as_deref().ok_or(RpcError::NotConnected)?;
+    mgr.providers.get(id).cloned().ok_or(RpcError::NotConnected)
+}
+```
+All existing `browse.*`, `sync.*`, scrobble, and playlist RPC handlers continue to call `require_provider()` — no other changes needed at the call sites.
+
+### Database Migration — server_config
+
+The `CHECK (id = 1)` single-row constraint is removed. The table is recreated (SQLite does not support dropping CHECK constraints via ALTER TABLE).
+
+```sql
+-- New schema
+CREATE TABLE IF NOT EXISTS server_config (
+    id          TEXT    PRIMARY KEY,           -- stable UUID (was INTEGER with CHECK id=1)
+    url         TEXT    NOT NULL,
+    server_type TEXT    NOT NULL,              -- 'jellyfin' | 'subsonic'
+    username    TEXT    NOT NULL,
+    selected    INTEGER NOT NULL DEFAULT 0,    -- NEW: 1 for the active server
+    updated_at  INTEGER NOT NULL
+);
+
+-- Migration (runs on first startup after upgrade):
+-- 1. Read existing INTEGER row (if any).
+-- 2. Generate UUID for it.
+-- 3. Drop old table, create new schema.
+-- 4. Re-insert with UUID primary key and selected = 1.
+```
+
+On daemon startup: load all rows into `ServerManager.servers`; the row with `selected = 1` becomes `selected_server_id`. If no row has `selected = 1`, `selected_server_id` is `None`.
+
+### Credential Vault — Restructuring
+
+**Old format** (single blob): `Secrets { jellyfin_token: Option<String>, subsonic_password: Option<String> }`
+
+**New format** (multi-server map):
+```rust
+// Decrypted contents of secrets.enc
+type VaultContents = HashMap<String, ServerCredentials>;  // key = server UUID
+
+pub struct ServerCredentials {
+    pub token_or_password: String,  // Jellyfin token OR Subsonic password
+}
+```
+
+**Migration path** (run on first load after upgrade):
+1. Decrypt `secrets.enc`.
+2. Attempt to deserialize as `VaultContents` (new format). If successful → done.
+3. If deserialization fails, attempt as legacy `Secrets` struct.
+4. If legacy format detected: obtain the existing server's UUID from `server_config`, wrap as `HashMap { uuid → ServerCredentials { token_or_password } }`, re-encrypt and overwrite `secrets.enc`.
+5. If neither format parses, treat vault as empty (credentials lost — existing known limitation for hardware fingerprint changes).
+
+**Known limitation (unchanged):** credentials are irrecoverably lost if the hardware fingerprint changes (VM migration, hardware replacement, OS reinstall). Re-authentication per server is required.
+
+### IPC Contract Changes
+
+**Modified — server.connect now returns serverId:**
+```
+server.connect(params: { url, serverType, username, password })
+  → { ok: true, serverId: string, serverType: string, serverVersion: string }
+```
+
+**New methods:**
+
+| Method | Params | Returns |
+|---|---|---|
+| `server.list` | — | `Array<{ id, url, serverType, username, selected: boolean }>` |
+| `server.select` | `{ id: string }` | `{ ok: true }` |
+| `server.remove` | `{ id: string }` | `{ ok: true }` |
+
+**get_daemon_state extended:**
+```typescript
+{
+  // ...all existing fields...
+  servers: Array<{ id: string, url: string, serverType: string,
+                   username: string, selected: boolean }>,
+  selectedServerId: string | null,
+}
+```
+
+`server.select` updates both `ServerManager.selected_server_id` (in-memory) and the `selected` column in `server_config` (persist). Lazy-loads the provider if not already cached.
+
+`server.remove` removes from DB, deletes the server's entry from the vault, evicts the provider from `ServerManager.providers`. If the removed server was selected, `selected_server_id` is set to the first remaining server's ID, or `None` if no servers remain.
+
+### Basket Item Model — serverId Field
+
+```typescript
+type BasketItem = {
+  id: string;
+  type: BasketItemType;
+  name: string;
+  sizeBytes: number | null;
+  serverId: string;          // NEW — UUID of originating server; set at add time
+  // ...rest unchanged
+}
+```
+
+- `serverId` is set to `state.selectedServerId` at the moment the item is added to the basket.
+- `AutoFillSlot` virtual item also gains `serverId` (set to `selectedServerId` at toggle time). On toggle ON: any existing `__auto_fill_slot__` item is removed first, then a new one is inserted with `serverId = selectedServerId`.
+- `basketStore` persists `serverId` per item in the basket manifest section of `.hifimule.json`.
+- Items where `item.serverId !== state.selectedServerId` render as locked (CSS class `basket-item--locked`; `(×)` button hidden).
+
+**basket.add / basket.remove RPC changes:**
+- Both RPCs gain `serverId` in params.
+- Daemon validates that `serverId` exists in `server_config` before accepting.
+
+### sync.start — Multi-Provider Routing
+
+`itemIds` param changes type:
+```typescript
+// Old
+itemIds: string[]
+
+// New
+itemIds: Array<{ id: string, serverId: string }>
+```
+
+The daemon groups `itemIds` by `serverId`, calls `ServerManager.get_provider(serverId)` per group, and runs the existing container-expansion logic (`rpc.rs:807–866`) and download pipeline per group. Groups execute concurrently (one provider per server, bounded by the existing async task model).
+
+`autoFill` param gains `serverId: string`; `run_auto_fill()` routes to `ServerManager.get_provider(serverId)` instead of the single global provider.
+
+### Enforcement — All AI Agents MUST
+
+- Never access `AppState.provider` — that field no longer exists. Use `require_provider(state)` or `state.server_manager` directly.
+- Never hardcode `server_config` queries that assume a single row or INTEGER primary key.
+- Always pass `serverId` when adding items to the basket RPC.
+- Group `sync.start` `itemIds` by `serverId` and route each group to its correct provider — never assume all items belong to the active provider.
+- Never re-encrypt the vault with the legacy `Secrets` struct format — always use `HashMap<String, ServerCredentials>`.
+- Evict provider cache entry on `server.remove` before returning `{ ok: true }`.
