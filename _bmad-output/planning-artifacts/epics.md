@@ -119,6 +119,7 @@ FR42: Epic 2 - Multi-Server Hub (Story 2.11)
 FR43: Epic 3 - Mixed-Server Basket (Story 3.2, amended)
 FR44: Epic 11 - Playlist Server Scope (Stories 11.4, 11.5, amended)
 FR45: Epic 2 - Server Identity Name and Icon (Story 2.12)
+FR46: Epic 2 - Portable Server Identity (Story 2.13)
 
 ## Epic List
 
@@ -541,6 +542,69 @@ So that I can quickly distinguish servers in the hub, switcher, basket, and play
 - `server.list` and `get_daemon_state.servers` return `{ id, url, serverType, username, name, icon, selected }`.
 - New `server.update({ id, name?: string, icon?: string | null }) -> { ok: true }`.
 - UI should share one `formatServerIdentity(server)` helper so hub cards, switcher labels, basket badges, notices, and playlist dialogs do not drift.
+
+### Story 2.13: Portable Server Identity
+
+As a System Admin (Alexis) and multi-server user,
+I want each media server to have a stable, machine-independent identity used in device
+manifests and sync routing,
+So that a device synced on one machine is recognized on another, and removing then
+re-adding the same server does not trigger a needless full resync.
+
+**Acceptance Criteria:**
+
+**Given** a server is added or reconnected
+**When** `server.connect` / upsert runs
+**Then** the daemon derives a deterministic portable `server_id` and persists it in
+  `server_config.server_id`, while the existing random `id` is retained as the machine-local id.
+**And** the basis is `sha256("v1|" + serverType + "|" + canonicalBaseUrl + "|" + username)`,
+  preferring `sha256("v1|" + serverType + "|rid:" + serverReportedId + "|" + username)` when a
+  server-reported id is available (Jellyfin `System/Info.Id`); Subsonic/OpenSubsonic uses the
+  canonical-URL basis.
+
+**Given** the same logical server/user is configured on two different machines
+**Then** both machines derive an identical `server_id`.
+
+**Given** a server is removed and later re-added with the same type/URL/username
+**Then** the re-derived `server_id` is identical to the previous one.
+**And** existing manifest items tagged with that `server_id` are still recognized — no full resync.
+
+**Given** the credentials vault and provider cache
+**Then** they remain keyed by the machine-local `id` (credentials are machine-local).
+
+**Given** sync runs with basket/manifest items tagged by portable `server_id`
+**When** the daemon needs a provider for an item
+**Then** it resolves `server_id -> local id` and uses the existing per-local-id provider cache.
+
+**Given** a device manifest or UI basket holds items tagged with an old random `server_id`
+  (a machine-local UUID written by Story 2.11) or the pre-2.11 composite `type|url|user`
+**When** the server is loaded/connected
+**Then** those tags are reconciled in place to the new deterministic `server_id`.
+**And** reconciliation is idempotent and never blocks startup.
+
+**Given** the canonical base URL changes but a server-reported id is available
+**Then** `server_id` remains stable.
+**And** if no server-reported id is available, a URL change may yield a new logical identity
+  (documented fallback behavior).
+
+**Technical Notes:**
+- `server_config` adds `server_id TEXT` (deterministic) and `server_reported_id TEXT NULL`
+  (captured at connect for stable re-derivation). Existing `id` becomes the documented
+  machine-local id (vault key, provider-cache key, select/remove/update key).
+- New daemon helper `derive_server_id(server_type, canonical_base_url, username, reported_id)`.
+  Reuse `normalized_server_url()` for the canonical base URL.
+- `ServerManager` gains `get_provider_by_server_id(server_id)` mapping portable -> local
+  before delegating to the existing `get_provider(local_id)`.
+- Device manifest `SyncedItem.server_id` / `BasketItem.server_id` and UI basket `serverId`
+  store the portable `server_id`. Extend `reconcileServerIds()` to map random-UUID -> portable.
+- A migration backfills `server_id` for existing rows by deriving from stored type/url/username.
+- Contracts: `server.list` / `get_daemon_state.servers[]` return both `id` (local) and
+  `serverId` (portable); `get_daemon_state` adds `selectedServerPortableId`; `server.connect`
+  returns `serverId` (portable) and `localId`. `server.select/remove/update` keep using local `id`.
+- Tests: derivation determinism, cross-machine equality, remove/re-add no-resync, manifest +
+  basket reconciliation idempotency, schema migration/backfill.
+
+**Prerequisites:** Story 2.11, Story 2.12.
 
 ## Epic 3: The Curation Hub (Basket & Library)
 

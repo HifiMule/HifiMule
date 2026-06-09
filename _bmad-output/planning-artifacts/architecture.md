@@ -785,6 +785,91 @@ The daemon groups `itemIds` by `serverId`, calls `ServerManager.get_provider(ser
 
 `autoFill` param gains `serverId: string`; `run_auto_fill()` routes to `ServerManager.get_provider(serverId)` instead of the single global provider.
 
+### Server Identity Model — Portable vs Machine-Local (Story 2.13)
+
+**Problem:** Stories 2.11/2.12 used a single random `Uuid::new_v4()` (`server_config.id`) for
+*everything* — DB row PK, vault key, provider-cache key, AND the manifest/basket/sync `serverId`.
+Because that id is machine-local and random, `.hifimule.json` is not portable across machines,
+and remove/re-add of the same logical server mints a new id → spurious full resync and orphaned
+manifest items. (Pre-2.11 used a deterministic composite `type|url|user`; 2.11 regressed it.)
+
+**Resolution — two distinct identities:**
+
+| Identity | Column | Used for | Stability |
+|---|---|---|---|
+| `local_id` | `server_config.id` (unchanged) | DB row PK, **vault key**, **provider-cache key**, `server.select/remove/update` | Random UUID, machine-local |
+| `server_id` (portable) | `server_config.server_id` (NEW) | device manifest `SyncedItem.server_id` / `BasketItem.server_id`, UI basket `serverId`, **sync routing** | Deterministic, identical across machines & re-adds |
+
+**Derivation (daemon, at connect/upsert):**
+```rust
+fn derive_server_id(
+    server_type: &str,
+    canonical_base_url: &str,   // normalized_server_url(): scheme+host+port+path, lowercased host, no trailing slash
+    username: &str,
+    server_reported_id: Option<&str>,  // Jellyfin System/Info.Id; None for Subsonic/OpenSubsonic
+) -> String {
+    let basis = match server_reported_id {
+        Some(rid) if !rid.is_empty() => format!("v1|{server_type}|rid:{rid}|{username}"),
+        _                            => format!("v1|{server_type}|url:{canonical_base_url}|{username}"),
+    };
+    sha256_hex(basis.as_bytes())   // lowercase hex
+}
+```
+- The `v1|` prefix and `rid:` / `url:` basis tags allow future versioning without collisions.
+- `server_reported_id` is captured at connect into a new `server_config.server_reported_id TEXT NULL`
+  so the basis is recomputable and stable. Jellyfin populates it from `System/Info.Id`; Subsonic/
+  OpenSubsonic has no server-id concept → URL basis. **Consequence:** for URL-basis servers, a base-URL
+  change yields a new logical identity (documented fallback); for `rid`-basis servers, identity survives URL changes.
+
+**Schema amendment:**
+```sql
+ALTER TABLE server_config ADD COLUMN server_id           TEXT;  -- deterministic portable id
+ALTER TABLE server_config ADD COLUMN server_reported_id  TEXT;  -- nullable; basis input
+-- Backfill on migration: server_id = derive_server_id(server_type, url, username, NULL) for existing rows.
+```
+
+**ServerRecord amendment:**
+```rust
+pub struct ServerRecord {
+    pub id: String,                      // machine-local id (was "stable UUID")
+    pub server_id: String,               // NEW — deterministic portable id
+    pub server_reported_id: Option<String>, // NEW
+    pub url: String,
+    pub server_type: String,
+    pub username: String,
+    pub name: Option<String>,
+    pub icon: Option<String>,
+}
+```
+
+**Routing translation:** vault and provider cache stay keyed by `local_id`. Manifest/basket/sync carry
+`server_id`. `ServerManager` gains:
+```rust
+// Resolve a portable server_id to the local record, then reuse the existing per-local-id cache.
+pub async fn get_provider_by_server_id(state: &AppState, server_id: &str)
+    -> Result<Arc<dyn MediaProvider>, RpcError>;
+```
+`sync.start` grouping and `run_auto_fill()` route via `get_provider_by_server_id` instead of
+`get_provider(local_id)`. On a single machine `server_id ↔ local_id` is 1:1 (upsert-by-URL prevents dupes).
+
+**Reconciliation (idempotent, on startup/connect — no spurious resync):**
+- Device manifests: rewrite any `synced_items[].server_id` / `basket_items[].server_id` that equals a known
+  `local_id` (2.11 random UUID) **or** the pre-2.11 composite `type|url|user` → that server's portable `server_id`.
+- UI: extend `reconcileServerIds()` to map `local_id → server_id` in addition to the existing composite mapping.
+- Because re-deriving yields the same `server_id`, remove/re-add leaves manifest tags valid → delta sees items as unchanged.
+
+**Contract amendments (additive — existing fields preserved):**
+- `server.connect` → adds `serverId` (portable) and `localId` to the existing response.
+- `server.list` / `get_daemon_state.servers[]` → each record adds `serverId` (portable) alongside `id` (local).
+- `get_daemon_state` → adds `selectedServerPortableId`. `selectedServerId` keeps its current meaning (local id).
+- `server.select` / `server.remove` / `server.update` → unchanged; continue to key on local `id`.
+- UI basket `setActiveServerId()` switches to compare against `selectedServerPortableId`; basket items tag with portable `serverId`.
+
+**Enforcement additions:**
+- Never write a `local_id` into the device manifest or basket `serverId` — always the portable `server_id`.
+- Keep the vault and provider cache keyed by `local_id`; translate portable→local at the routing boundary.
+- `derive_server_id` is the single source of truth for portable identity — do not reconstruct the basis ad hoc.
+
 ### Enforcement — All AI Agents MUST
 
 - Never access `AppState.provider` — that field no longer exists. Use `require_provider(state)` or `state.server_manager` directly.
