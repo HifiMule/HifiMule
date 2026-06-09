@@ -107,23 +107,32 @@ class BasketStore extends EventTarget {
         return removed;
     }
 
-    /** Reconciles persisted items still keyed by the pre-2.11 composite serverId
-     * (`type|url|username`) to the matching server's UUID (AC22), so a server
-     * switch/migration does not strand or lock the existing basket. */
+    /** Reconciles persisted items keyed by a legacy serverId — the pre-2.11 composite
+     * (`type|url|username`) OR the 2.11 machine-local UUID — onto the deterministic
+     * PORTABLE server id (Story 2.13), so an upgrade does not strand or lock the
+     * existing localStorage basket. Idempotent: items already tagged with a portable
+     * id are not remapped (never maps portable → anything). */
     public reconcileServerIds(
-        servers: Array<{ id: string; serverType: string; url: string; username: string }>
+        servers: Array<{ id: string; serverId?: string | null; serverType: string; url: string; username: string }>
     ): void {
         if (servers.length === 0) return;
-        const compositeToUuid = new Map<string, string>();
+        const remap = new Map<string, string>();
         for (const s of servers) {
+            if (!s.serverId) continue; // no portable id known yet — nothing to map to
             const normalizedUrl = s.url.trim().replace(/\/+$/, '').toLowerCase();
-            compositeToUuid.set(`${s.serverType}|${normalizedUrl}|${s.username}`, s.id);
+            // pre-2.11 composite → portable
+            remap.set(`${s.serverType}|${normalizedUrl}|${s.username}`, s.serverId);
+            // 2.11 machine-local UUID → portable
+            remap.set(s.id, s.serverId);
         }
         let changed = false;
         for (const item of this.items.values()) {
-            if (item.serverId && compositeToUuid.has(item.serverId)) {
-                item.serverId = compositeToUuid.get(item.serverId)!;
-                changed = true;
+            if (item.serverId && remap.has(item.serverId)) {
+                const portable = remap.get(item.serverId)!;
+                if (item.serverId !== portable) {
+                    item.serverId = portable;
+                    changed = true;
+                }
             }
         }
         if (changed) {

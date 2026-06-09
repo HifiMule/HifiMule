@@ -2789,6 +2789,8 @@ mod tests {
             icon: None,
             updated_at: 0,
             selected: true,
+            server_id: None,
+            server_reported_id: None,
         }
     }
 
@@ -2859,6 +2861,7 @@ mod tests {
                 "http://legacy.example",
                 "jellyfin",
                 "alexis",
+                None,
                 None,
                 None,
                 None,

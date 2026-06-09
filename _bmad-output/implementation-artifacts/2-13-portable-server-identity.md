@@ -1,6 +1,10 @@
+---
+baseline_commit: d10ba8c1a465ba11628932b00c764c1ea5f77dcc
+---
+
 # Story 2.13: Portable Server Identity
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -44,52 +48,52 @@ The change is **invisible to users** — manifest portability + resync avoidance
 
 ## Tasks / Subtasks
 
-- [ ] **1. Schema + derivation helper (daemon, db.rs)** (AC: #1, #9)
-  - [ ] Add `server_id: Option<String>` and `server_reported_id: Option<String>` to `ServerConfig` (`hifimule-daemon/src/db.rs:18`). Keep `id` first/unchanged.
-  - [ ] Add `server_id TEXT` and `server_reported_id TEXT` to the `CREATE TABLE IF NOT EXISTS server_config` DDL (`db.rs:142`).
-  - [ ] Add an idempotent inline migration in `Database::init` (follow existing `PRAGMA table_info` existence-check + `ALTER TABLE ADD COLUMN` style, `db.rs:158-289`) that adds both columns to existing UUID tables.
-  - [ ] Backfill: for existing rows where `server_id IS NULL`, compute `server_id = derive_server_id(server_type, normalized_server_url(url), username, None)` and UPDATE. Idempotent; must not block startup.
-  - [ ] Update `row_to_server_config` (`db.rs:320`), and the SELECT column lists in `list_servers` (`db.rs:452`), `get_server` (`db.rs:466`), `get_server_config` (`db.rs:481`) **in lockstep** so the new columns are read.
-  - [ ] In `upsert_server` (`db.rs:338-421`): after URL upsert, compute and persist `server_id`. New rows: derive from type/url/username (+ reported id if supplied). Existing rows: re-derive on upsert (keeps stable). Do NOT change the `Uuid::new_v4()` minting of the local `id` (`db.rs:388`).
-  - [ ] Implement `derive_server_id(server_type, canonical_base_url, username, server_reported_id: Option<&str>) -> String` exactly per the architecture basis (`v1|`, `rid:`/`url:` tags, lowercase hex sha256). Place it where `normalized_server_url` lives or a shared util; reuse `normalized_server_url` for the canonical URL.
-  - [ ] **Hashing crate:** add `sha2 = "0.10"` to `hifimule-daemon/Cargo.toml`. The AC + architecture specify `sha256` for the documented basis — use SHA-256, NOT the existing `blake3` (blake3 is used only for the hardware-uid vault derivation; do not reuse it here, as the documented basis string must hash with sha256 to remain authoritative and cross-machine stable).
+- [x] **1. Schema + derivation helper (daemon, db.rs)** (AC: #1, #9)
+  - [x] Add `server_id: Option<String>` and `server_reported_id: Option<String>` to `ServerConfig` (`hifimule-daemon/src/db.rs:18`). Keep `id` first/unchanged.
+  - [x] Add `server_id TEXT` and `server_reported_id TEXT` to the `CREATE TABLE IF NOT EXISTS server_config` DDL (`db.rs:142`).
+  - [x] Add an idempotent inline migration in `Database::init` (follow existing `PRAGMA table_info` existence-check + `ALTER TABLE ADD COLUMN` style, `db.rs:158-289`) that adds both columns to existing UUID tables.
+  - [x] Backfill: for existing rows where `server_id IS NULL`, compute `server_id = derive_server_id(server_type, normalized_server_url(url), username, None)` and UPDATE. Idempotent; must not block startup.
+  - [x] Update `row_to_server_config` (`db.rs:320`), and the SELECT column lists in `list_servers` (`db.rs:452`), `get_server` (`db.rs:466`), `get_server_config` (`db.rs:481`) **in lockstep** so the new columns are read.
+  - [x] In `upsert_server` (`db.rs:338-421`): after URL upsert, compute and persist `server_id`. New rows: derive from type/url/username (+ reported id if supplied). Existing rows: re-derive on upsert (keeps stable). Do NOT change the `Uuid::new_v4()` minting of the local `id` (`db.rs:388`).
+  - [x] Implement `derive_server_id(server_type, canonical_base_url, username, server_reported_id: Option<&str>) -> String` exactly per the architecture basis (`v1|`, `rid:`/`url:` tags, lowercase hex sha256). Place it where `normalized_server_url` lives or a shared util; reuse `normalized_server_url` for the canonical URL.
+  - [x] **Hashing crate:** add `sha2 = "0.10"` to `hifimule-daemon/Cargo.toml`. The AC + architecture specify `sha256` for the documented basis — use SHA-256, NOT the existing `blake3` (blake3 is used only for the hardware-uid vault derivation; do not reuse it here, as the documented basis string must hash with sha256 to remain authoritative and cross-machine stable).
 
-- [ ] **2. Capture server-reported id at connect (daemon)** (AC: #1, #2, #7)
-  - [ ] Jellyfin: fetch `System/Info` (the `Id` field) during/after connect and surface it from the provider. The Jellyfin provider (`hifimule-daemon/src/providers/jellyfin.rs`) currently exposes `access_token()` and `provider_user_id()` but does NOT fetch System/Info — add a `System/Info.Id` accessor (e.g. `server_reported_id() -> Option<String>`).
-  - [ ] Subsonic/OpenSubsonic: no server-id concept → `server_reported_id = None` (URL basis). Do not invent one.
-  - [ ] In `handle_server_connect` (`hifimule-daemon/src/rpc.rs:1282-1419`), capture the reported id and pass it into `upsert_server` so `server_reported_id` is persisted and the `rid:` basis is used when present. Preserve all existing connect behavior (probe, vault store by local id, provider cache, URL upsert).
+- [x] **2. Capture server-reported id at connect (daemon)** (AC: #1, #2, #7)
+  - [x] Jellyfin: fetch `System/Info` (the `Id` field) during/after connect and surface it from the provider. The Jellyfin provider (`hifimule-daemon/src/providers/jellyfin.rs`) currently exposes `access_token()` and `provider_user_id()` but does NOT fetch System/Info — add a `System/Info.Id` accessor (e.g. `server_reported_id() -> Option<String>`).
+  - [x] Subsonic/OpenSubsonic: no server-id concept → `server_reported_id = None` (URL basis). Do not invent one.
+  - [x] In `handle_server_connect` (`hifimule-daemon/src/rpc.rs:1282-1419`), capture the reported id and pass it into `upsert_server` so `server_reported_id` is persisted and the `rid:` basis is used when present. Preserve all existing connect behavior (probe, vault store by local id, provider cache, URL upsert).
 
-- [ ] **3. Portable→local routing (daemon, server_manager.rs + rpc.rs)** (AC: #4, #5)
-  - [ ] Add `server_id: String` and `server_reported_id: Option<String>` to `ServerRecord` (`hifimule-daemon/src/server_manager.rs:20`) and its `From<ServerConfig>` impl (`server_manager.rs:31`).
-  - [ ] Add `ServerManager::get_provider_by_server_id(...)` that maps portable `server_id` → the matching record's local `id`, then delegates to the existing `get_provider(manager, db, local_id)` (`server_manager.rs:150`). Keep the cache keyed by local id — do NOT add a second cache.
-  - [ ] Add an rpc-level wrapper mirroring `get_provider_for_server` (`rpc.rs:452`) → `get_provider_by_server_id_for(...)` returning `JsonRpcError` on unknown id.
-  - [ ] Route sync provider resolution by portable id: in `handle_sync_calculate_delta` (groups items by serverId, `rpc.rs:~3360-3463`) and `handle_sync_execute` multi-server dispatch (`rpc.rs:~4240-4269`) and `run_auto_fill`, resolve providers via `get_provider_by_server_id` instead of `get_provider_for_server(local_id)`. On a single machine `server_id ↔ local_id` is 1:1 (upsert-by-URL prevents dupes).
+- [x] **3. Portable→local routing (daemon, server_manager.rs + rpc.rs)** (AC: #4, #5)
+  - [x] Add `server_id: String` and `server_reported_id: Option<String>` to `ServerRecord` (`hifimule-daemon/src/server_manager.rs:20`) and its `From<ServerConfig>` impl (`server_manager.rs:31`).
+  - [x] Add `ServerManager::get_provider_by_server_id(...)` that maps portable `server_id` → the matching record's local `id`, then delegates to the existing `get_provider(manager, db, local_id)` (`server_manager.rs:150`). Keep the cache keyed by local id — do NOT add a second cache.
+  - [x] Add an rpc-level wrapper mirroring `get_provider_for_server` (`rpc.rs:452`) → `get_provider_by_server_id_for(...)` returning `JsonRpcError` on unknown id.
+  - [x] Route sync provider resolution by portable id: in `handle_sync_calculate_delta` (groups items by serverId, `rpc.rs:~3360-3463`) and `handle_sync_execute` multi-server dispatch (`rpc.rs:~4240-4269`) and `run_auto_fill`, resolve providers via `get_provider_by_server_id` instead of `get_provider_for_server(local_id)`. On a single machine `server_id ↔ local_id` is 1:1 (upsert-by-URL prevents dupes).
 
-- [ ] **4. Write portable id into manifest + basket (daemon)** (AC: #5, #6)
-  - [ ] Wherever `SyncedItem.server_id` / `BasketItem.server_id` (`hifimule-daemon/src/device/mod.rs:12-61`) are written during sync, write the **portable** `server_id`, never the local id.
-  - [ ] Manifest reconciliation: on device load/connect, rewrite any `synced_items[].server_id` / `basket_items[].server_id` that equals a known **local_id** (2.11 random UUID) **or** the pre-2.11 composite (`legacy_composite_server_id`) → that server's portable `server_id`. Idempotent; never blocks startup. Persist the rewritten manifest.
-  - [ ] Update the daemon-side `reconcile_basket_server_ids()` (`rpc.rs:~1908-1942`, called by `handle_manifest_get_basket`): its current map is composite→local UUID; extend so the resolved target is the **portable** id, and add the local_id→portable mapping. Preserve existing behavior (drop items for removed servers, adopt selected server for untagged items) but adopt the **portable** id for untagged items.
+- [x] **4. Write portable id into manifest + basket (daemon)** (AC: #5, #6)
+  - [x] Wherever `SyncedItem.server_id` / `BasketItem.server_id` (`hifimule-daemon/src/device/mod.rs:12-61`) are written during sync, write the **portable** `server_id`, never the local id.
+  - [x] Manifest reconciliation: on device load/connect, rewrite any `synced_items[].server_id` / `basket_items[].server_id` that equals a known **local_id** (2.11 random UUID) **or** the pre-2.11 composite (`legacy_composite_server_id`) → that server's portable `server_id`. Idempotent; never blocks startup. Persist the rewritten manifest.
+  - [x] Update the daemon-side `reconcile_basket_server_ids()` (`rpc.rs:~1908-1942`, called by `handle_manifest_get_basket`): its current map is composite→local UUID; extend so the resolved target is the **portable** id, and add the local_id→portable mapping. Preserve existing behavior (drop items for removed servers, adopt selected server for untagged items) but adopt the **portable** id for untagged items.
 
-- [ ] **5. Additive RPC contract (daemon, rpc.rs)** (AC: #8)
-  - [ ] `server_row_to_json` (`rpc.rs:1439-1449`): add `"serverId": config.server_id` alongside existing `"id"`.
-  - [ ] `handle_server_connect` response: add `serverId` (portable) and `localId` (the local UUID). **Preserve the existing `serverId` field's wire name but change its value to the portable id, and add `localId`** — see Regression Risks; audit consumers.
-  - [ ] `handle_get_daemon_state` (`rpc.rs:1776-1900`): add `selectedServerPortableId` (portable id of the selected server) next to the existing `selectedServerId` (keeps local-id meaning); ensure each entry in `servers[]` includes `serverId`.
-  - [ ] `server.select` / `server.remove` / `server.update` unchanged — continue to key on local `id`.
+- [x] **5. Additive RPC contract (daemon, rpc.rs)** (AC: #8)
+  - [x] `server_row_to_json` (`rpc.rs:1439-1449`): add `"serverId": config.server_id` alongside existing `"id"`.
+  - [x] `handle_server_connect` response: add `serverId` (portable) and `localId` (the local UUID). **Preserve the existing `serverId` field's wire name but change its value to the portable id, and add `localId`** — see Regression Risks; audit consumers.
+  - [x] `handle_get_daemon_state` (`rpc.rs:1776-1900`): add `selectedServerPortableId` (portable id of the selected server) next to the existing `selectedServerId` (keeps local-id meaning); ensure each entry in `servers[]` includes `serverId`.
+  - [x] `server.select` / `server.remove` / `server.update` unchanged — continue to key on local `id`.
 
-- [ ] **6. UI coherence — switch active-server + tagging to portable** (AC: #10)
-  - [ ] `hifimule-ui/src/main.ts:66-79`: read `state.selectedServerPortableId` (NEW) and pass it to `basketStore.setActiveServerId(...)` instead of the local `selectedServerId`. This is the linchpin for AC10.
-  - [ ] `hifimule-ui/src/state/basket.ts:266` tags new items with `this.activeServerId` — since activeServerId becomes portable, items get tagged portable automatically. Verify no other tagging path uses a local id.
-  - [ ] `hifimule-ui/src/components/BasketSidebar.ts`: `currentServerId` (used as the fallback serverId at `:1151`, `:1169`, and to build sync items at `:1901`) must be the **portable** id. Trace how `currentServerId` is set and switch its source to the portable id. The sync payload `items: [{ id, serverId }]` (`:1901`) must carry portable ids so the daemon's `get_provider_by_server_id` resolves them.
-  - [ ] `basketStore.reconcileServerIds()` (`hifimule-ui/src/state/basket.ts:113-133`): currently maps composite→local UUID. Extend so it maps **both** the pre-2.11 composite **and** the local UUID → the portable `server_id`. It needs the portable id per server, so the `servers` arg (passed from `ServerHub.ts:31` and elsewhere) must include `serverId`. Persist + notify only when changed (keep idempotency).
-  - [ ] `ServerHub.ts`: where it calls `setActiveServerId(id)` on select (`:212`) and `reconcileServerIds(this.servers)` (`:31`), ensure `id`/`servers` carry the portable id. `setActiveServerId(null)` on logout (`:286`) is unchanged.
-  - [ ] `BasketItem` interface (`basket.ts:8-19`) and `ServerSummary`/RPC types (`hifimule-ui/src/rpc.ts`): add `serverId` (portable) to server summaries so the UI can map local↔portable. `server.connect` consumers: `login.ts:218` awaits `server.connect` without reading `serverId` (low risk), but audit anyway.
+- [x] **6. UI coherence — switch active-server + tagging to portable** (AC: #10)
+  - [x] `hifimule-ui/src/main.ts:66-79`: read `state.selectedServerPortableId` (NEW) and pass it to `basketStore.setActiveServerId(...)` instead of the local `selectedServerId`. This is the linchpin for AC10.
+  - [x] `hifimule-ui/src/state/basket.ts:266` tags new items with `this.activeServerId` — since activeServerId becomes portable, items get tagged portable automatically. Verify no other tagging path uses a local id.
+  - [x] `hifimule-ui/src/components/BasketSidebar.ts`: `currentServerId` (used as the fallback serverId at `:1151`, `:1169`, and to build sync items at `:1901`) must be the **portable** id. Trace how `currentServerId` is set and switch its source to the portable id. The sync payload `items: [{ id, serverId }]` (`:1901`) must carry portable ids so the daemon's `get_provider_by_server_id` resolves them.
+  - [x] `basketStore.reconcileServerIds()` (`hifimule-ui/src/state/basket.ts:113-133`): currently maps composite→local UUID. Extend so it maps **both** the pre-2.11 composite **and** the local UUID → the portable `server_id`. It needs the portable id per server, so the `servers` arg (passed from `ServerHub.ts:31` and elsewhere) must include `serverId`. Persist + notify only when changed (keep idempotency).
+  - [x] `ServerHub.ts`: where it calls `setActiveServerId(id)` on select (`:212`) and `reconcileServerIds(this.servers)` (`:31`), ensure `id`/`servers` carry the portable id. `setActiveServerId(null)` on logout (`:286`) is unchanged.
+  - [x] `BasketItem` interface (`basket.ts:8-19`) and `ServerSummary`/RPC types (`hifimule-ui/src/rpc.ts`): add `serverId` (portable) to server summaries so the UI can map local↔portable. `server.connect` consumers: `login.ts:218` awaits `server.connect` without reading `serverId` (low risk), but audit anyway.
 
-- [ ] **7. Tests** (AC: #11)
-  - [ ] Rust unit: `derive_server_id` determinism; identical output for same inputs (cross-machine equality); `rid:` basis preferred when reported id present and non-empty; URL basis when reported id None/empty; URL-change-with-rid stability vs URL-change-without-rid new identity.
-  - [ ] Rust: remove/re-add yields identical `server_id`; manifest items tagged with that id remain matched (delta sees them unchanged — no resync).
-  - [ ] Rust: schema migration adds columns idempotently; backfill derives correct `server_id`; reconciliation (manifest + `reconcile_basket_server_ids`) is idempotent (second run no-op) and maps local_id & composite → portable.
-  - [ ] Rust: contract fields present — `server.list` / `get_daemon_state.servers[]` include `serverId`; `server.connect` returns `serverId` + `localId`; `get_daemon_state` includes `selectedServerPortableId`.
-  - [ ] Run `rtk cargo test -p hifimule-daemon`, then `rtk cargo test` (workspace). Run `rtk tsc` for `hifimule-ui`. Run `rtk lint` if a UI lint script exists.
+- [x] **7. Tests** (AC: #11)
+  - [x] Rust unit: `derive_server_id` determinism; identical output for same inputs (cross-machine equality); `rid:` basis preferred when reported id present and non-empty; URL basis when reported id None/empty; URL-change-with-rid stability vs URL-change-without-rid new identity.
+  - [x] Rust: remove/re-add yields identical `server_id`; manifest items tagged with that id remain matched (delta sees them unchanged — no resync).
+  - [x] Rust: schema migration adds columns idempotently; backfill derives correct `server_id`; reconciliation (manifest + `reconcile_basket_server_ids`) is idempotent (second run no-op) and maps local_id & composite → portable.
+  - [x] Rust: contract fields present — `server.list` / `get_daemon_state.servers[]` include `serverId`; `server.connect` returns `serverId` + `localId`; `get_daemon_state` includes `selectedServerPortableId`.
+  - [x] Run `rtk cargo test -p hifimule-daemon`, then `rtk cargo test` (workspace). Run `rtk tsc` for `hifimule-ui`. Run `rtk lint` if a UI lint script exists.
 
 ## Dev Notes
 
@@ -155,12 +159,45 @@ If any one of these still uses the local id while the others use portable → ev
 
 ### Agent Model Used
 
+claude-opus-4-8 (Claude Code, dev-story workflow)
+
 ### Debug Log References
+
+- `rtk cargo test -p hifimule-daemon` → 451 passed.
+- `rtk cargo test` (workspace) → 457 passed.
+- `rtk cargo clippy -p hifimule-daemon` → 0 errors (warnings are pre-existing "too many arguments" patterns + the new 8-arg `upsert_server`, consistent with the codebase's existing style).
+- `npx tsc --noEmit` → no errors in source (the lone reported error is a pre-existing `tsconfig.json` `baseUrl` deprecation, not introduced by this story).
 
 ### Completion Notes List
 
+**Two-identity model implemented.** The random `server_config.id` is retained as the machine-local id (DB PK, credentials-vault key, provider-cache key, `server.select/remove/update` keying). A new deterministic portable `server_config.server_id` (lowercase-hex SHA-256 of `v1|type|url:<canonical>|<user>`, preferring `…|rid:<reportedId>|…` when a Jellyfin `System/Info.Id` is known) is persisted and used for manifest/basket tagging and sync routing.
+
+- **Derivation (AC1/2/7):** `db::derive_server_id()` + `db::normalized_server_url()`. `rid:` basis preferred when a non-empty reported id is present (survives URL changes); URL basis otherwise. Pure function → identical output across machines.
+- **Server-reported id (AC1):** Jellyfin provider gained `server_reported_id()` (from the `System/Info` already fetched at connect via `test_connection`); plumbed through `connect_jellyfin` and `handle_server_connect` into `upsert_server`. Subsonic/OpenSubsonic → `None` (URL basis).
+- **Routing (AC4/5):** `ServerManager::get_provider_by_server_id` maps portable → local then reuses the existing local-id-keyed provider cache (no second cache). Sync delta/execute/auto-fill + playlist scope-check resolve providers by portable id; single-server delta paths tag desired items with the selected portable id so manifest entries are always portable.
+- **Reconciliation (AC6):** `db::server_id_remap()` builds `{ local-UUID → portable, composite → portable }`. `device::reconcile_manifest_server_ids()` rewrites manifest synced+basket tags on device load (idempotent, best-effort persist, never blocks load). `reconcile_basket_server_ids` (daemon) and `basketStore.reconcileServerIds` (UI) extended to target portable, mapping both legacy local-UUID and composite.
+- **Schema (AC9):** `server_id`/`server_reported_id` columns added to DDL + idempotent inline `ALTER TABLE` migration; `backfill_server_identity` derives `server_id` for rows where NULL (URL basis). All SELECTs + `row_to_server_config` updated in lockstep.
+- **Contract (AC8):** `server.connect` now returns portable `serverId` + machine-local `localId` (semantic flip — audited consumers: `login.ts` only awaits; Rust test updated). `server.list` / `get_daemon_state.servers[]` add `serverId`; `get_daemon_state` adds `selectedServerPortableId`. `server.select/remove/update` unchanged (key local).
+- **UI coherence (AC10):** active-server key switched to `selectedServerPortableId` end-to-end (`main.ts`, `BasketSidebar.currentServerId`); `serversById` re-keyed by portable id; `ServerHub` select/remove route basket calls by portable id (RPCs still local); item tagging via `activeServerId` (now portable). No new user-facing strings → i18n untouched.
+
 ### File List
+
+- hifimule-daemon/Cargo.toml
+- hifimule-daemon/src/db.rs
+- hifimule-daemon/src/rpc.rs
+- hifimule-daemon/src/server_manager.rs
+- hifimule-daemon/src/device/mod.rs
+- hifimule-daemon/src/device/tests.rs
+- hifimule-daemon/src/providers/jellyfin.rs
+- hifimule-daemon/src/providers/mod.rs
+- hifimule-daemon/src/api.rs (test helper field only)
+- hifimule-ui/src/main.ts
+- hifimule-ui/src/state/basket.ts
+- hifimule-ui/src/components/BasketSidebar.ts
+- hifimule-ui/src/components/ServerHub.ts
+- hifimule-ui/src/rpc.ts
 
 ## Change Log
 
 - 2026-06-09: Story created from approved sprint-change-proposal-2026-06-09-portable-server-identity. Comprehensive context engine analysis completed — comprehensive developer guide created. Status set to ready-for-dev.
+- 2026-06-09: Implemented portable server identity (Tasks 1–7). Daemon: schema + `derive_server_id`/`server_id_remap`, Jellyfin reported-id capture, portable→local routing, manifest + basket reconciliation, additive RPC contract. UI: portable active-server + tagging coherence. Tests added (derivation determinism/equality, rid-vs-url basis, remove/re-add stability, migration/backfill idempotency, manifest + basket reconciliation, portable→provider resolution, connect/list/daemon-state contract). 457 workspace tests pass; tsc clean. Status → review.

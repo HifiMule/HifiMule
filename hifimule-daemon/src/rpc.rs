@@ -309,10 +309,6 @@ async fn handle_server_probe(params: Option<Value>) -> Result<Value, JsonRpcErro
     Ok(serde_json::json!({ "serverType": slug }))
 }
 
-fn normalized_server_url(url: &str) -> String {
-    url.trim().trim_end_matches('/').to_ascii_lowercase()
-}
-
 fn validate_server_icon(icon: &str) -> Result<(), JsonRpcError> {
     if SERVER_ICON_IDS.contains(&icon) {
         Ok(())
@@ -371,18 +367,6 @@ fn optional_server_icon_for_connect(params: &Value) -> Result<Option<String>, Js
     }
 }
 
-/// The pre-2.11 derived composite server id (`type|url|username`). Retained only
-/// to reconcile basket items persisted under the old scheme to the new UUID so
-/// they are not silently wiped after migration (AC22).
-fn legacy_composite_server_id(config: &crate::db::ServerConfig) -> String {
-    format!(
-        "{}|{}|{}",
-        config.server_type,
-        normalized_server_url(&config.url),
-        config.username
-    )
-}
-
 /// The currently selected server config row (`selected = 1`), if any.
 fn current_server_config(
     state: &AppState,
@@ -394,10 +378,17 @@ fn current_server_config(
     })
 }
 
-/// The currently selected server's UUID, if any.
+/// The currently selected server's machine-local UUID, if any.
 #[allow(dead_code)]
 fn current_server_id(state: &AppState) -> Result<Option<String>, JsonRpcError> {
     Ok(current_server_config(state)?.map(|c| c.id))
+}
+
+/// The currently selected server's PORTABLE id (Story 2.13), if any. Used to tag
+/// newly synced items and to route untagged basket items so manifest tags are
+/// always portable.
+fn current_server_portable_id(state: &AppState) -> Result<Option<String>, JsonRpcError> {
+    Ok(current_server_config(state)?.and_then(|c| c.server_id))
 }
 
 async fn handle_test_connection(
@@ -454,6 +445,19 @@ pub async fn get_provider_for_server(
     server_id: &str,
 ) -> Result<Arc<dyn MediaProvider>, JsonRpcError> {
     crate::server_manager::get_provider(&state.server_manager, &state.db, server_id)
+        .await
+        .map_err(provider_error_to_rpc)
+}
+
+/// Resolves a PORTABLE `server_id` (Story 2.13) to its provider, mapping portable →
+/// machine-local id and reusing the existing per-local-id provider cache. Sync
+/// routing uses this so basket/manifest items tagged with the portable id reach the
+/// correct provider.
+pub async fn get_provider_by_server_id_for(
+    state: &AppState,
+    server_id: &str,
+) -> Result<Arc<dyn MediaProvider>, JsonRpcError> {
+    crate::server_manager::get_provider_by_server_id(&state.server_manager, &state.db, server_id)
         .await
         .map_err(provider_error_to_rpc)
 }
@@ -943,7 +947,9 @@ async fn handle_playlist_create(
     // The UI pre-filters (AC34) so this normally never trips; it is the daemon-side
     // guard against a basket holding items from another server.
     if let Some(items) = params.get("items").and_then(Value::as_array) {
-        let selected_id = current_server_id(state)?;
+        // Items carry the portable serverId (Story 2.13) — compare against the
+        // selected server's portable id.
+        let selected_id = current_server_portable_id(state)?;
         for item in items {
             let item_server = item.get("serverId").and_then(Value::as_str);
             if let (Some(item_server), Some(selected)) = (item_server, selected_id.as_deref())
@@ -1327,9 +1333,13 @@ async fn handle_server_connect(
         })?
         .to_string();
     let version = provider.server_version().map(str::to_string);
+    // Server-reported stable id (Jellyfin System/Info.Id) drives the portable
+    // server_id `rid:` basis (Story 2.13). Subsonic/OpenSubsonic → None (URL basis).
+    let reported_id = provider.server_reported_id().map(str::to_string);
 
-    // Persist the server row (upsert by normalized URL, AC5) and obtain its UUID.
-    let server_id = state
+    // Persist the server row (upsert by normalized URL, AC5) and obtain its
+    // machine-local UUID. upsert_server also (re-)derives the portable server_id.
+    let local_id = state
         .db
         .upsert_server(
             url,
@@ -1338,6 +1348,7 @@ async fn handle_server_connect(
             version.as_deref(),
             name.as_deref(),
             icon.as_deref(),
+            reported_id.as_deref(),
         )
         .map_err(|error| JsonRpcError {
             code: ERR_STORAGE_ERROR,
@@ -1347,8 +1358,16 @@ async fn handle_server_connect(
 
     // Did this server end up selected? (upsert auto-selects the first-ever server.)
     let is_selected = current_server_config(state)?
-        .map(|c| c.id == server_id)
+        .map(|c| c.id == local_id)
         .unwrap_or(false);
+
+    // The deterministic portable id persisted by upsert (Story 2.13).
+    let portable_id = state
+        .db
+        .get_server(&local_id)
+        .ok()
+        .flatten()
+        .and_then(|c| c.server_id);
 
     // Store the credential in the UUID-keyed vault (AC18); update config.json only
     // when this server is the selected one, so the static get_credentials() resolves
@@ -1372,11 +1391,11 @@ async fn handle_server_connect(
                 })?
                 .to_string();
             if is_selected {
-                CredentialManager::save_jellyfin_session(&server_id, url, &token, Some(&user_id))
+                CredentialManager::save_jellyfin_session(&local_id, url, &token, Some(&user_id))
                     .map_err(storage_error_to_rpc)?;
             } else {
                 CredentialManager::save_server_credential(
-                    &server_id,
+                    &local_id,
                     &crate::api::ServerCredentials {
                         token_or_password: token,
                         user_id: Some(user_id),
@@ -1387,7 +1406,7 @@ async fn handle_server_connect(
         }
         crate::providers::ServerType::Subsonic | crate::providers::ServerType::OpenSubsonic => {
             CredentialManager::save_server_credential(
-                &server_id,
+                &local_id,
                 &crate::api::ServerCredentials {
                     token_or_password: password.to_string(),
                     user_id: None,
@@ -1395,7 +1414,7 @@ async fn handle_server_connect(
             )
             .map_err(storage_error_to_rpc)?;
             if is_selected {
-                CredentialManager::set_config_selected_server(&server_id)
+                CredentialManager::set_config_selected_server(&local_id)
                     .map_err(storage_error_to_rpc)?;
             }
         }
@@ -1406,13 +1425,16 @@ async fn handle_server_connect(
     {
         let mut mgr = state.server_manager.write().await;
         mgr.load_from_db(&state.db);
-        mgr.providers.insert(server_id.clone(), provider.clone());
+        mgr.providers.insert(local_id.clone(), provider.clone());
     }
     *state.last_connection_check.lock().await = None;
 
+    // Story 2.13: `serverId` now carries the PORTABLE id (semantic flip), and
+    // `localId` exposes the machine-local UUID for callers that key on it.
     Ok(serde_json::json!({
         "ok": true,
-        "serverId": server_id,
+        "serverId": portable_id,
+        "localId": local_id,
         "serverType": normalized_type,
         "serverVersion": version,
     }))
@@ -1439,6 +1461,7 @@ async fn handle_server_logout(state: &AppState) -> Result<Value, JsonRpcError> {
 fn server_row_to_json(config: &crate::db::ServerConfig) -> Value {
     serde_json::json!({
         "id": config.id,
+        "serverId": config.server_id,
         "url": config.url,
         "serverType": config.server_type,
         "username": config.username,
@@ -1825,6 +1848,7 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         .map(|s| {
             serde_json::json!({
                 "id": s.id,
+                "serverId": s.server_id,
                 "url": s.url,
                 "serverType": s.server_type,
                 "username": s.username,
@@ -1837,6 +1861,8 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
     let selected_server = selected_server_id
         .as_deref()
         .and_then(|id| servers_snapshot.iter().find(|s| s.id == id));
+    // Portable id of the selected server (Story 2.13) — the UI's active-server key.
+    let selected_server_portable_id = selected_server.and_then(|s| s.server_id.clone());
     let server_type = selected_server.map(|c| c.server_type.clone());
     let server_version = selected_server.and_then(|c| c.server_version.clone());
     let current_server = selected_server.map(|config| {
@@ -1887,6 +1913,7 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         "currentServer": current_server,
         "servers": servers_json,
         "selectedServerId": selected_server_id,
+        "selectedServerPortableId": selected_server_portable_id,
         "dirtyManifest": dirty,
         "pendingDevicePath": pending_device_path,
         "pendingDeviceFriendlyName": pending_device_friendly_name,
@@ -1899,41 +1926,52 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
     }))
 }
 
-/// Reconciles basket items to current server UUIDs (AC22): items still carrying a
-/// pre-2.11 composite serverId (`type|url|username`) are remapped to the matching
-/// server's UUID; items with no serverId are assigned to the selected server;
-/// items referencing an unknown/removed server are dropped (so a removed server's
-/// items do not linger). Multi-server items from other known servers are retained
-/// (read-only rendering is the UI's job, AC3).
+/// Reconciles basket items to the PORTABLE server id (Story 2.13, supersedes AC22):
+/// items carrying a pre-2.11 composite serverId (`type|url|username`) **or** a 2.11
+/// machine-local UUID are remapped to the matching server's portable id; items with
+/// no serverId are assigned to the selected server's portable id; items referencing
+/// an unknown/removed server are dropped (so a removed server's items do not linger).
+/// Items already tagged with a known portable id are retained as-is. Idempotent:
+/// re-running over already-portable items is a no-op (never maps portable → other).
 fn reconcile_basket_server_ids(
     items: Vec<crate::device::BasketItem>,
     servers: &[crate::db::ServerConfig],
-    selected_id: Option<&str>,
 ) -> Vec<crate::device::BasketItem> {
-    let known: HashSet<&str> = servers.iter().map(|s| s.id.as_str()).collect();
-    let composite_to_uuid: HashMap<String, String> = servers
-        .iter()
-        .map(|s| (legacy_composite_server_id(s), s.id.clone()))
-        .collect();
+    // Set of valid portable ids (the only tags we keep untouched).
+    let portable_known: HashSet<&str> =
+        servers.iter().filter_map(|s| s.server_id.as_deref()).collect();
+    // { legacy-composite → portable, machine-local UUID → portable }.
+    let mut remap: HashMap<String, String> = HashMap::new();
+    for s in servers {
+        if let Some(portable) = s.server_id.clone() {
+            remap.insert(s.id.clone(), portable.clone());
+            remap.insert(
+                crate::db::legacy_composite_server_id(&s.server_type, &s.url, &s.username),
+                portable,
+            );
+        }
+    }
+    let selected_portable: Option<String> =
+        servers.iter().find(|s| s.selected).and_then(|s| s.server_id.clone());
+
     items
         .into_iter()
         .filter_map(|mut item| match item.server_id.clone() {
-            // Untagged (legacy) item: adopt the selected server if there is one;
-            // otherwise keep it untagged rather than dropping it — it isn't bound to
-            // any removed server, and it will be reconciled once a server is selected.
+            // Untagged item: adopt the selected server's portable id if any; otherwise
+            // keep it untagged (it will be reconciled once a server is selected).
             None => {
-                item.server_id = selected_id.map(|s| s.to_string());
+                item.server_id = selected_portable.clone();
                 Some(item)
             }
-            // Already a known UUID — keep as-is.
-            Some(s) if known.contains(s.as_str()) => Some(item),
-            // Composite legacy id that maps to a migrated server — remap to its UUID.
-            Some(s) => match composite_to_uuid.get(&s) {
-                Some(uuid) => {
-                    item.server_id = Some(uuid.clone());
+            // Already a known portable id — keep as-is (idempotent).
+            Some(s) if portable_known.contains(s.as_str()) => Some(item),
+            // Legacy local-UUID or composite that maps to a known server → portable.
+            Some(s) => match remap.get(&s) {
+                Some(portable) => {
+                    item.server_id = Some(portable.clone());
                     Some(item)
                 }
-                // Belongs to an unknown/removed server (AC7) — drop it.
+                // Belongs to an unknown/removed server — drop it.
                 None => None,
             },
         })
@@ -1943,16 +1981,19 @@ fn reconcile_basket_server_ids(
 async fn handle_manifest_get_basket(state: &AppState) -> Result<Value, JsonRpcError> {
     let device = state.device_manager.get_current_device().await;
     let servers = state.db.list_servers().map_err(storage_error_to_rpc)?;
-    let selected_id = servers.iter().find(|s| s.selected).map(|s| s.id.clone());
+    let selected_portable = servers
+        .iter()
+        .find(|s| s.selected)
+        .and_then(|s| s.server_id.clone());
     let basket_items = device
         .as_ref()
         .map(|d| d.basket_items.clone())
         .unwrap_or_default();
     // Return items from ALL servers (mixed basket, AC3); only reconcile ids.
-    let basket_items = reconcile_basket_server_ids(basket_items, &servers, selected_id.as_deref());
+    let basket_items = reconcile_basket_server_ids(basket_items, &servers);
     Ok(serde_json::json!({
         "basketItems": basket_items,
-        "serverId": selected_id,
+        "serverId": selected_portable,
     }))
 }
 
@@ -1982,10 +2023,10 @@ async fn handle_manifest_save_basket(
             data: None,
         })?;
     // Persist items from ALL known servers (mixed basket, AC3/AC25); reconcile
-    // legacy/composite serverIds and drop items from unknown/removed servers.
+    // legacy/composite/local serverIds to portable and drop items from unknown/
+    // removed servers (Story 2.13).
     let servers = state.db.list_servers().map_err(storage_error_to_rpc)?;
-    let selected_id = servers.iter().find(|s| s.selected).map(|s| s.id.clone());
-    let items = reconcile_basket_server_ids(items, &servers, selected_id.as_deref());
+    let items = reconcile_basket_server_ids(items, &servers);
 
     match state.device_manager.save_basket(items).await {
         Ok(_) => Ok(Value::Bool(true)),
@@ -2586,6 +2627,16 @@ async fn provider_calculate_delta(
                         server_id: None,
                     });
                 }
+            }
+        }
+    }
+
+    // Story 2.13: single-server path — tag every item with the selected server's
+    // portable id so manifest entries always carry the portable identity.
+    if let Some(portable) = current_server_portable_id(_state)? {
+        for item in &mut desired_items {
+            if item.server_id.is_none() {
+                item.server_id = Some(portable.clone());
             }
         }
     }
@@ -3351,7 +3402,10 @@ async fn multi_provider_calculate_delta(
     manifest: &crate::device::DeviceManifest,
     params: &Value,
 ) -> Result<Value, JsonRpcError> {
-    let selected_id = current_server_id(state)?;
+    // Items carry the portable serverId (Story 2.13); group + route by portable id
+    // and fall back to the selected server's portable id for untagged items so
+    // manifest tags are always portable.
+    let selected_id = current_server_portable_id(state)?;
     let basket_items = basket_items_from_params_or_manifest(params, manifest);
     let favorite_basket_by_id: HashMap<String, crate::device::BasketItem> = basket_items
         .into_iter()
@@ -3376,7 +3430,7 @@ async fn multi_provider_calculate_delta(
     let mut seen_ids = HashSet::new();
 
     for (server_id, ids) in &groups {
-        let provider = get_provider_for_server(state, server_id).await?;
+        let provider = get_provider_by_server_id_for(state, server_id).await?;
         for id in ids {
             if let Some(basket_item) = favorite_basket_by_id.get(id) {
                 let tracks =
@@ -3418,7 +3472,7 @@ async fn multi_provider_calculate_delta(
             .map(str::to_string)
             .or_else(|| selected_id.clone());
         if let Some(af_server) = af_server {
-            let provider = get_provider_for_server(state, &af_server).await?;
+            let provider = get_provider_by_server_id_for(state, &af_server).await?;
             let auto_fill_budget = params
                 .get("autoFill")
                 .and_then(|af| af.get("maxBytes"))
@@ -3522,8 +3576,9 @@ async fn handle_sync_calculate_delta(
     // Multi-server routing (AC27/AC28): when the basket (or an auto-fill slot bound
     // to a different server) spans more than one server, resolve each item against
     // its originating provider. Single-server baskets keep the existing dispatch
-    // unchanged (AC21).
-    let selected_id = current_server_id(state)?;
+    // unchanged (AC21). Item/auto-fill serverIds are portable (Story 2.13), so the
+    // routing decision compares against the selected server's portable id.
+    let selected_id = current_server_portable_id(state)?;
     let auto_fill_server = if params
         .get("autoFill")
         .and_then(|af| af.get("enabled"))
@@ -3915,6 +3970,16 @@ async fn handle_sync_calculate_delta(
         }
     }
 
+    // Story 2.13: single-server (Jellyfin) path — tag every item with the selected
+    // server's portable id so manifest entries always carry the portable identity.
+    if let Some(portable) = current_server_portable_id(state)? {
+        for item in &mut desired_items {
+            if item.server_id.is_none() {
+                item.server_id = Some(portable.clone());
+            }
+        }
+    }
+
     crate::daemon_log!(
         "[Sync] Computing delta: {} desired items vs {} synced in manifest",
         desired_items.len(),
@@ -4254,7 +4319,9 @@ async fn handle_sync_execute(
         }
         ordered
     };
-    let selected_for_exec = current_server_id(state)?;
+    // Adds carry the portable serverId (Story 2.13); compare/route against the
+    // selected server's portable id.
+    let selected_for_exec = current_server_portable_id(state)?;
     let needs_provider_routing = match selected_for_exec.as_deref() {
         _ if add_servers.is_empty() => false,
         Some(sel) => add_servers.iter().any(|s| s != sel),
@@ -4264,7 +4331,7 @@ async fn handle_sync_execute(
         // Resolve every group's provider up front so connection errors surface here.
         let mut group_providers: Vec<(String, Arc<dyn MediaProvider>)> = Vec::new();
         for sid in &add_servers {
-            let provider = get_provider_for_server(state, sid).await?;
+            let provider = get_provider_by_server_id_for(state, sid).await?;
             group_providers.push((sid.clone(), provider));
         }
 
@@ -6258,6 +6325,86 @@ mod tests {
         assert_eq!(config.server_type, "openSubsonic");
         assert_eq!(config.username, "user");
         assert_eq!(config.url, server.url());
+
+        // Story 2.13: portable id derived (URL basis for Subsonic), persisted, and
+        // returned alongside the machine-local id (semantic flip + new localId).
+        let expected_portable = crate::db::derive_server_id(
+            "openSubsonic",
+            &crate::db::normalized_server_url(&server.url()),
+            "user",
+            None,
+        );
+        assert_eq!(config.server_id.as_deref(), Some(expected_portable.as_str()));
+        assert_eq!(result["serverId"], json!(expected_portable));
+        assert_eq!(result["localId"], json!(config.id));
+
+        // get_daemon_state surfaces the portable id on each server row and as
+        // selectedServerPortableId; server.list rows carry serverId too.
+        let state_json = handle_get_daemon_state(&state).await.unwrap();
+        assert_eq!(state_json["selectedServerPortableId"], json!(expected_portable));
+        assert_eq!(state_json["servers"][0]["serverId"], json!(expected_portable));
+        assert_eq!(state_json["selectedServerId"], json!(config.id));
+        let list = handle_server_list(&state).await.unwrap();
+        assert_eq!(list[0]["serverId"], json!(expected_portable));
+        assert_eq!(list[0]["id"], json!(config.id));
+    }
+
+    /// Story 2.13: basket reconciliation maps a machine-local UUID and a pre-2.11
+    /// composite onto the portable id, keeps already-portable items, adopts the
+    /// selected server's portable id for untagged items, drops unknown-server items,
+    /// and is idempotent.
+    #[test]
+    fn reconcile_basket_server_ids_targets_portable_id() {
+        fn cfg(id: &str, server_id: &str, url: &str, selected: bool) -> crate::db::ServerConfig {
+            crate::db::ServerConfig {
+                id: id.to_string(),
+                url: url.to_string(),
+                server_type: "jellyfin".to_string(),
+                username: "alexis".to_string(),
+                server_version: None,
+                name: None,
+                icon: None,
+                updated_at: 0,
+                selected,
+                server_id: Some(server_id.to_string()),
+                server_reported_id: None,
+            }
+        }
+        fn item(id: &str, server_id: Option<&str>) -> crate::device::BasketItem {
+            crate::device::BasketItem {
+                id: id.to_string(),
+                name: id.to_string(),
+                item_type: "Audio".to_string(),
+                server_id: server_id.map(str::to_string),
+                artist: None,
+                child_count: 0,
+                size_ticks: 0,
+                size_bytes: 1,
+            }
+        }
+
+        let servers = vec![cfg("local-1", "portable-1", "http://media.example", true)];
+        let composite =
+            crate::db::legacy_composite_server_id("jellyfin", "http://media.example", "alexis");
+
+        let items = vec![
+            item("by-local", Some("local-1")),
+            item("by-composite", Some(&composite)),
+            item("by-portable", Some("portable-1")),
+            item("untagged", None),
+            item("unknown", Some("ghost-server")),
+        ];
+        let out = reconcile_basket_server_ids(items, &servers);
+
+        // unknown-server item dropped; the rest kept and mapped to the portable id.
+        assert_eq!(out.len(), 4);
+        for it in &out {
+            assert_eq!(it.server_id.as_deref(), Some("portable-1"), "item {}", it.id);
+        }
+
+        // Idempotent: a second pass over already-portable items is a no-op.
+        let again = reconcile_basket_server_ids(out.clone(), &servers);
+        assert_eq!(again, out);
     }
 
     #[tokio::test]
@@ -6567,6 +6714,7 @@ mod tests {
             "subsonic",
             "subsonic-user",
             Some("1.16.1"),
+            None,
             None,
             None,
         )
@@ -7004,11 +7152,16 @@ mod tests {
             }
         };
 
+        // Story 2.13: server.connect returns the PORTABLE serverId + the machine-
+        // local localId. select/remove/list key on the LOCAL id.
         let res_a = connect(server_a.url(), "user-a").await;
         let id_a = res_a["serverId"].as_str().unwrap().to_string();
+        let local_a = res_a["localId"].as_str().unwrap().to_string();
         let res_b = connect(server_b.url(), "user-b").await;
         let id_b = res_b["serverId"].as_str().unwrap().to_string();
+        let local_b = res_b["localId"].as_str().unwrap().to_string();
         assert_ne!(id_a, id_b);
+        assert_ne!(local_a, id_a, "portable id differs from local id");
 
         // server.list → two entries; the first connected is selected (AC1/AC20).
         let list = handle_server_list(&state).await.unwrap();
@@ -7018,11 +7171,13 @@ mod tests {
         assert_eq!(selected_count, 1);
         assert!(
             arr.iter()
-                .any(|s| s["id"] == id_a.as_str() && s["selected"] == true)
+                .any(|s| s["id"] == local_a.as_str()
+                    && s["serverId"] == id_a.as_str()
+                    && s["selected"] == true)
         );
 
-        // server.select(B) switches selection (AC2).
-        handle_server_select(&state, Some(json!({ "id": id_b })))
+        // server.select(B) switches selection (AC2) — keyed on the local id.
+        handle_server_select(&state, Some(json!({ "id": local_b })))
             .await
             .unwrap();
         assert_eq!(
@@ -7032,26 +7187,26 @@ mod tests {
                 .await
                 .selected_server_id
                 .as_deref(),
-            Some(id_b.as_str())
+            Some(local_b.as_str())
         );
 
         // server.remove(A) — non-selected; row + vault + cache gone (AC6).
-        handle_server_remove(&state, Some(json!({ "id": id_a })))
+        handle_server_remove(&state, Some(json!({ "id": local_a })))
             .await
             .unwrap();
         assert_eq!(db.list_servers().unwrap().len(), 1);
-        assert!(CredentialManager::get_server_credential(&id_a).is_err());
+        assert!(CredentialManager::get_server_credential(&local_a).is_err());
         assert!(
             !state
                 .server_manager
                 .read()
                 .await
                 .providers
-                .contains_key(&id_a)
+                .contains_key(&local_a)
         );
 
         // server.remove(B) — the selected one; nothing remains, selection cleared (AC8).
-        let removed = handle_server_remove(&state, Some(json!({ "id": id_b })))
+        let removed = handle_server_remove(&state, Some(json!({ "id": local_b })))
             .await
             .unwrap();
         assert_eq!(removed["reselectedServerId"], Value::Null);
@@ -7073,6 +7228,7 @@ mod tests {
                 "http://music.example",
                 "subsonic",
                 "alexis",
+                None,
                 None,
                 None,
                 None,
@@ -7127,6 +7283,7 @@ mod tests {
                 "http://music.example",
                 "subsonic",
                 "alexis",
+                None,
                 None,
                 None,
                 None,

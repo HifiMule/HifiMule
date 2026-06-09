@@ -17,7 +17,8 @@ pub struct DeviceMapping {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerConfig {
-    /// Stable UUID primary key (Story 2.11). Generated on first insert / migration.
+    /// Stable UUID primary key (Story 2.11). Machine-local: DB row PK, credentials
+    /// vault key, provider-cache key. Random per machine; NOT portable.
     pub id: String,
     pub url: String,
     pub server_type: String,
@@ -28,6 +29,58 @@ pub struct ServerConfig {
     pub updated_at: i64,
     /// True for the single currently-selected server (`selected = 1`).
     pub selected: bool,
+    /// Deterministic, machine-independent portable identity (Story 2.13). Derived
+    /// from `type|url|user` (or `type|rid|user` when a server-reported id is known).
+    /// Used for device-manifest / basket tagging and sync routing — identical across
+    /// machines and stable across remove/re-add.
+    #[serde(default)]
+    pub server_id: Option<String>,
+    /// Server-reported stable id (Jellyfin `System/Info.Id`), when available. Drives
+    /// the `rid:` derivation basis so `server_id` survives URL changes.
+    #[serde(default)]
+    pub server_reported_id: Option<String>,
+}
+
+/// Canonical base URL used for identity derivation and upsert matching:
+/// trimmed, trailing slash removed, lowercased.
+pub fn normalized_server_url(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_ascii_lowercase()
+}
+
+/// Derives the deterministic, machine-independent portable `server_id` (Story 2.13).
+///
+/// Basis (lowercase hex SHA-256):
+///   - `sha256("v1|" + server_type + "|rid:" + server_reported_id + "|" + username)`
+///     when a non-empty server-reported id is supplied (preferred — survives URL
+///     changes), else
+///   - `sha256("v1|" + server_type + "|url:" + canonical_base_url + "|" + username)`.
+///
+/// `canonical_base_url` must already be normalized (see `normalized_server_url`).
+pub fn derive_server_id(
+    server_type: &str,
+    canonical_base_url: &str,
+    username: &str,
+    server_reported_id: Option<&str>,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let basis = match server_reported_id.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(rid) => format!("v1|{server_type}|rid:{rid}|{username}"),
+        None => format!("v1|{server_type}|url:{canonical_base_url}|{username}"),
+    };
+    let digest = Sha256::digest(basis.as_bytes());
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest.iter() {
+        use std::fmt::Write;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+/// The pre-2.11 derived composite server id (`type|normalized_url|username`).
+/// Retained only so legacy manifest/basket tags can be reconciled to the portable
+/// id rather than silently dropped (Story 2.13 AC6).
+pub fn legacy_composite_server_id(server_type: &str, url: &str, username: &str) -> String {
+    format!("{}|{}|{}", server_type, normalized_server_url(url), username)
 }
 
 pub fn server_type_label(server_type: &str) -> &'static str {
@@ -149,7 +202,9 @@ impl Database {
                 name TEXT,
                 icon TEXT,
                 updated_at INTEGER NOT NULL,
-                selected INTEGER NOT NULL DEFAULT 0
+                selected INTEGER NOT NULL DEFAULT 0,
+                server_id TEXT,
+                server_reported_id TEXT
             )",
             [],
         )
@@ -200,6 +255,24 @@ impl Database {
             if !has_icon {
                 conn.execute("ALTER TABLE server_config ADD COLUMN icon TEXT", [])
                     .map_err(|e| anyhow!("Failed to add server icon column: {}", e))?;
+            }
+            // Story 2.13: portable identity columns.
+            let has_server_id = conn
+                .prepare("SELECT server_id FROM server_config LIMIT 0")
+                .is_ok();
+            if !has_server_id {
+                conn.execute("ALTER TABLE server_config ADD COLUMN server_id TEXT", [])
+                    .map_err(|e| anyhow!("Failed to add server_id column: {}", e))?;
+            }
+            let has_reported_id = conn
+                .prepare("SELECT server_reported_id FROM server_config LIMIT 0")
+                .is_ok();
+            if !has_reported_id {
+                conn.execute(
+                    "ALTER TABLE server_config ADD COLUMN server_reported_id TEXT",
+                    [],
+                )
+                .map_err(|e| anyhow!("Failed to add server_reported_id column: {}", e))?;
             }
             Self::backfill_server_identity(conn)?;
             return Ok(());
@@ -263,7 +336,9 @@ impl Database {
                 name TEXT,
                 icon TEXT,
                 updated_at INTEGER NOT NULL,
-                selected INTEGER NOT NULL DEFAULT 0
+                selected INTEGER NOT NULL DEFAULT 0,
+                server_id TEXT,
+                server_reported_id TEXT
             )",
             [],
         )
@@ -314,6 +389,42 @@ impl Database {
             [],
         )
         .map_err(|e| anyhow!("Failed to backfill server icons: {}", e))?;
+
+        // Story 2.13: backfill the deterministic portable `server_id` for existing
+        // rows. Reported id is unknown on backfill → URL basis. Idempotent: only
+        // touches rows where `server_id` is still NULL/empty.
+        let to_backfill: Vec<(String, String, String, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, server_type, url, username FROM server_config
+                     WHERE server_id IS NULL OR trim(server_id) = ''",
+                )
+                .map_err(|e| anyhow!("Failed to query rows for server_id backfill: {}", e))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })
+                .map_err(|e| anyhow!("Failed to read rows for server_id backfill: {}", e))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row.map_err(|e| anyhow!("Failed to map backfill row: {}", e))?);
+            }
+            out
+        };
+        for (id, server_type, url, username) in to_backfill {
+            let portable =
+                derive_server_id(&server_type, &normalized_server_url(&url), &username, None);
+            conn.execute(
+                "UPDATE server_config SET server_id = ?2 WHERE id = ?1",
+                params![id, portable],
+            )
+            .map_err(|e| anyhow!("Failed to backfill server_id: {}", e))?;
+        }
         Ok(())
     }
 
@@ -328,6 +439,8 @@ impl Database {
             icon: row.get(6)?,
             updated_at: row.get(7)?,
             selected: row.get::<_, i64>(8)? != 0,
+            server_id: row.get(9)?,
+            server_reported_id: row.get(10)?,
         })
     }
 
@@ -343,6 +456,7 @@ impl Database {
         server_version: Option<&str>,
         name: Option<&str>,
         icon: Option<&str>,
+        server_reported_id: Option<&str>,
     ) -> Result<String> {
         let conn = self.conn.lock().unwrap();
         let updated_at = std::time::SystemTime::now()
@@ -351,7 +465,11 @@ impl Database {
             .as_secs() as i64;
 
         // Match an existing server by normalized URL (trim trailing slash, lowercase).
-        let normalized = url.trim().trim_end_matches('/').to_ascii_lowercase();
+        let normalized = normalized_server_url(url);
+        let reported_id = server_reported_id.map(str::trim).filter(|s| !s.is_empty());
+        // Derive the deterministic portable id (Story 2.13). Re-derived on every
+        // upsert so it stays stable across remove/re-add and reconnects.
+        let portable_id = derive_server_id(server_type, &normalized, username, reported_id);
         let existing_id: Option<String> = conn
             .query_row(
                 "SELECT id FROM server_config
@@ -368,7 +486,9 @@ impl Database {
                     server_version = ?5,
                     name = COALESCE(?6, name),
                     icon = COALESCE(?7, icon),
-                    updated_at = ?8
+                    updated_at = ?8,
+                    server_id = ?9,
+                    server_reported_id = COALESCE(?10, server_reported_id)
                  WHERE id = ?1",
                 params![
                     id,
@@ -378,7 +498,9 @@ impl Database {
                     server_version,
                     name,
                     icon,
-                    updated_at
+                    updated_at,
+                    portable_id,
+                    reported_id
                 ],
             )
             .map_err(|e| anyhow!("Failed to update server config: {}", e))?;
@@ -402,8 +524,8 @@ impl Database {
         let selected = if any_selected { 0 } else { 1 };
         conn.execute(
             "INSERT INTO server_config
-                (id, url, server_type, username, server_version, name, icon, updated_at, selected)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                (id, url, server_type, username, server_version, name, icon, updated_at, selected, server_id, server_reported_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 id,
                 url,
@@ -413,11 +535,35 @@ impl Database {
                 insert_name,
                 insert_icon,
                 updated_at,
-                selected
+                selected,
+                portable_id,
+                reported_id
             ],
         )
         .map_err(|e| anyhow!("Failed to insert server config: {}", e))?;
         Ok(id)
+    }
+
+    /// Builds the reconciliation remap `{ legacy-composite → portable, local-id →
+    /// portable }` across all configured servers (Story 2.13). Used to rewrite
+    /// device-manifest and basket `server_id` tags carrying a pre-2.11 composite or
+    /// a 2.11 machine-local UUID onto the deterministic portable id. Idempotent:
+    /// already-portable ids are not in the map's key set, so re-running is a no-op.
+    pub fn server_id_remap(&self) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        for server in self.list_servers().unwrap_or_default() {
+            let Some(portable) = server.server_id.clone() else {
+                continue;
+            };
+            // 2.11 machine-local UUID → portable.
+            map.insert(server.id.clone(), portable.clone());
+            // pre-2.11 composite → portable.
+            map.insert(
+                legacy_composite_server_id(&server.server_type, &server.url, &server.username),
+                portable,
+            );
+        }
+        map
     }
 
     pub fn update_server_identity(
@@ -452,7 +598,7 @@ impl Database {
     pub fn list_servers(&self) -> Result<Vec<ServerConfig>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, url, server_type, username, server_version, name, icon, updated_at, selected
+            "SELECT id, url, server_type, username, server_version, name, icon, updated_at, selected, server_id, server_reported_id
              FROM server_config ORDER BY updated_at ASC, id ASC",
         )?;
         let rows = stmt.query_map([], Self::row_to_server_config)?;
@@ -466,7 +612,7 @@ impl Database {
     pub fn get_server(&self, id: &str) -> Result<Option<ServerConfig>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, url, server_type, username, server_version, name, icon, updated_at, selected
+            "SELECT id, url, server_type, username, server_version, name, icon, updated_at, selected, server_id, server_reported_id
              FROM server_config WHERE id = ?1",
         )?;
         let mut rows = stmt.query(params![id])?;
@@ -481,7 +627,7 @@ impl Database {
     pub fn get_server_config(&self) -> Result<Option<ServerConfig>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, url, server_type, username, server_version, name, icon, updated_at, selected
+            "SELECT id, url, server_type, username, server_version, name, icon, updated_at, selected, server_id, server_reported_id
              FROM server_config WHERE selected = 1 LIMIT 1",
         )?;
         let mut rows = stmt.query([])?;
@@ -840,7 +986,7 @@ mod tests {
         // Second call to init must not fail — all DDL uses CREATE TABLE IF NOT EXISTS.
         db.init_for_test().unwrap();
         // Operations still work after re-init.
-        db.upsert_server("http://x", "jellyfin", "u", None, None, None)
+        db.upsert_server("http://x", "jellyfin", "u", None, None, None, None)
             .unwrap();
         assert!(db.get_server_config().unwrap().is_some());
     }
@@ -858,6 +1004,7 @@ mod tests {
                 "openSubsonic",
                 "alexis",
                 Some("1.16.1"),
+                None,
                 None,
                 None,
             )
@@ -882,6 +1029,7 @@ mod tests {
                 "openSubsonic",
                 "alexis",
                 Some("1.17.0"),
+                None,
                 None,
                 None,
             )
@@ -909,6 +1057,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap();
         assert_ne!(id1, id2);
@@ -930,7 +1079,7 @@ mod tests {
     fn test_update_server_identity_clears_icon_without_reordering() {
         let db = Database::memory().unwrap();
         let id = db
-            .upsert_server("http://music.example", "jellyfin", "u", None, None, None)
+            .upsert_server("http://music.example", "jellyfin", "u", None, None, None, None)
             .unwrap();
         let before = db.get_server(&id).unwrap().unwrap().updated_at;
 
@@ -1023,7 +1172,7 @@ mod tests {
         db.init_for_test().unwrap();
         assert_eq!(db.list_servers().unwrap().len(), 0);
         // New-schema operations work post-migration.
-        db.upsert_server("http://new.example", "jellyfin", "u", None, None, None)
+        db.upsert_server("http://new.example", "jellyfin", "u", None, None, None, None)
             .unwrap();
         assert_eq!(db.list_servers().unwrap().len(), 1);
     }
@@ -1060,5 +1209,134 @@ mod tests {
         let server = db.get_server("srv-1").unwrap().unwrap();
         assert_eq!(server.name.as_deref(), Some("Subsonic"));
         assert_eq!(server.icon.as_deref(), Some("music-note-list"));
+        // Story 2.13: server_id is backfilled deterministically (URL basis).
+        assert_eq!(
+            server.server_id.as_deref(),
+            Some(derive_server_id("subsonic", "http://sub.example", "alexis", None).as_str())
+        );
+        assert_eq!(server.server_reported_id, None);
+    }
+
+    // ----- Story 2.13: portable server identity -----
+
+    #[test]
+    fn derive_server_id_is_deterministic_and_cross_machine_equal() {
+        // Same logical server/user → identical id, regardless of machine (the fn is
+        // pure over its inputs; no machine-local state).
+        let a = derive_server_id("jellyfin", "http://media.example", "alexis", None);
+        let b = derive_server_id("jellyfin", "http://media.example", "alexis", None);
+        assert_eq!(a, b);
+        // Lowercase hex SHA-256 → 64 chars.
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        // Matches the documented basis exactly.
+        let expected = {
+            use sha2::{Digest, Sha256};
+            let d = Sha256::digest(b"v1|jellyfin|url:http://media.example|alexis");
+            d.iter().map(|x| format!("{x:02x}")).collect::<String>()
+        };
+        assert_eq!(a, expected);
+    }
+
+    #[test]
+    fn derive_server_id_prefers_reported_id_when_present() {
+        let url_basis = derive_server_id("jellyfin", "http://a.example", "u", None);
+        let rid_basis = derive_server_id("jellyfin", "http://a.example", "u", Some("RID-123"));
+        assert_ne!(url_basis, rid_basis, "rid basis must differ from url basis");
+        // Empty / whitespace reported id falls back to the URL basis.
+        assert_eq!(derive_server_id("jellyfin", "http://a.example", "u", Some("")), url_basis);
+        assert_eq!(derive_server_id("jellyfin", "http://a.example", "u", Some("   ")), url_basis);
+    }
+
+    #[test]
+    fn derive_server_id_url_change_stability_depends_on_reported_id() {
+        // With a reported id, the URL change does NOT change the identity (AC7).
+        let before = derive_server_id("jellyfin", "http://old.example", "u", Some("RID"));
+        let after = derive_server_id("jellyfin", "http://new.example", "u", Some("RID"));
+        assert_eq!(before, after);
+        // Without a reported id, a URL change yields a new identity (documented fallback).
+        let url_before = derive_server_id("jellyfin", "http://old.example", "u", None);
+        let url_after = derive_server_id("jellyfin", "http://new.example", "u", None);
+        assert_ne!(url_before, url_after);
+    }
+
+    #[test]
+    fn upsert_persists_portable_id_and_remove_readd_is_stable() {
+        let db = Database::memory().unwrap();
+        let id1 = db
+            .upsert_server("http://media.example", "jellyfin", "alexis", None, None, None, Some("RID-9"))
+            .unwrap();
+        let portable1 = db.get_server(&id1).unwrap().unwrap().server_id.unwrap();
+        let expected =
+            derive_server_id("jellyfin", "http://media.example", "alexis", Some("RID-9"));
+        assert_eq!(portable1, expected);
+
+        // Remove and re-add the same logical server (reported id known again).
+        assert!(db.remove_server(&id1).unwrap());
+        let id2 = db
+            .upsert_server("http://media.example", "jellyfin", "alexis", None, None, None, Some("RID-9"))
+            .unwrap();
+        assert_ne!(id1, id2, "machine-local id is freshly minted");
+        let portable2 = db.get_server(&id2).unwrap().unwrap().server_id.unwrap();
+        assert_eq!(portable1, portable2, "portable id is stable across remove/re-add");
+    }
+
+    #[test]
+    fn server_id_remap_maps_local_and_composite_to_portable() {
+        let db = Database::memory().unwrap();
+        let local = db
+            .upsert_server("http://sub.example", "subsonic", "alexis", None, None, None, None)
+            .unwrap();
+        let portable = db.get_server(&local).unwrap().unwrap().server_id.unwrap();
+        let composite = legacy_composite_server_id("subsonic", "http://sub.example", "alexis");
+
+        let remap = db.server_id_remap();
+        assert_eq!(remap.get(&local), Some(&portable));
+        assert_eq!(remap.get(&composite), Some(&portable));
+        // The portable id is never itself a key (so reconciliation is idempotent).
+        assert!(!remap.contains_key(&portable));
+    }
+
+    #[test]
+    fn migration_adds_portable_columns_and_backfills_idempotently() {
+        // Legacy TEXT-id table WITHOUT the portable columns.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE server_config (
+                id TEXT PRIMARY KEY,
+                url TEXT NOT NULL,
+                server_type TEXT NOT NULL,
+                username TEXT NOT NULL,
+                server_version TEXT,
+                name TEXT,
+                icon TEXT,
+                updated_at INTEGER NOT NULL,
+                selected INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO server_config (id, url, server_type, username, updated_at, selected)
+             VALUES ('srv-1', 'http://media.example/', 'jellyfin', 'alexis', 1, 1)",
+            [],
+        )
+        .unwrap();
+        let db = Database {
+            conn: Arc::new(Mutex::new(conn)),
+        };
+        db.init_for_test().unwrap();
+
+        let server = db.get_server("srv-1").unwrap().unwrap();
+        // Backfill uses the normalized URL (trailing slash removed) basis.
+        assert_eq!(
+            server.server_id.as_deref(),
+            Some(derive_server_id("jellyfin", "http://media.example", "alexis", None).as_str())
+        );
+
+        // Idempotent: a second init does not change the backfilled portable id.
+        let before = server.server_id.clone();
+        db.init_for_test().unwrap();
+        assert_eq!(db.get_server("srv-1").unwrap().unwrap().server_id, before);
     }
 }

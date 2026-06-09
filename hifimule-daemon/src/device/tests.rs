@@ -2322,3 +2322,71 @@ fn test_synced_item_provider_metadata_serializes_camel_case_and_builds_context()
     manifest.synced_items.clear();
     assert!(manifest.provider_change_context().synced_songs.is_empty());
 }
+
+/// Story 2.13: manifest reconciliation rewrites synced + basket `server_id` tags
+/// from a 2.11 machine-local UUID OR pre-2.11 composite to the portable id, leaves
+/// already-portable / untagged items alone, and is idempotent.
+#[test]
+fn reconcile_manifest_server_ids_maps_legacy_to_portable_idempotently() {
+    fn synced(id: &str, server_id: Option<&str>) -> SyncedItem {
+        SyncedItem {
+            jellyfin_id: id.to_string(),
+            name: id.to_string(),
+            album: None,
+            artist: None,
+            local_path: format!("Music/{id}.mp3"),
+            size_bytes: 1,
+            synced_at: "2026-06-09T00:00:00Z".to_string(),
+            original_name: None,
+            etag: None,
+            provider_album_id: None,
+            provider_content_type: None,
+            provider_suffix: None,
+            original_bitrate: None,
+            original_container: None,
+            track_number: None,
+            server_id: server_id.map(str::to_string),
+        }
+    }
+    fn basket(id: &str, server_id: Option<&str>) -> BasketItem {
+        BasketItem {
+            id: id.to_string(),
+            name: id.to_string(),
+            item_type: "Audio".to_string(),
+            server_id: server_id.map(str::to_string),
+            artist: None,
+            child_count: 0,
+            size_ticks: 0,
+            size_bytes: 1,
+        }
+    }
+
+    let local = "local-uuid-123";
+    let composite = "jellyfin|http://media.example|alexis";
+    let portable = "portablehex";
+    let mut remap = std::collections::HashMap::new();
+    remap.insert(local.to_string(), portable.to_string());
+    remap.insert(composite.to_string(), portable.to_string());
+
+    let mut manifest = DeviceManifest {
+        synced_items: vec![
+            synced("s-local", Some(local)),
+            synced("s-composite", Some(composite)),
+            synced("s-portable", Some(portable)),
+            synced("s-untagged", None),
+        ],
+        basket_items: vec![basket("b-local", Some(local)), basket("b-portable", Some(portable))],
+        ..Default::default()
+    };
+
+    assert!(reconcile_manifest_server_ids(&mut manifest, &remap));
+    assert_eq!(manifest.synced_items[0].server_id.as_deref(), Some(portable));
+    assert_eq!(manifest.synced_items[1].server_id.as_deref(), Some(portable));
+    assert_eq!(manifest.synced_items[2].server_id.as_deref(), Some(portable));
+    assert_eq!(manifest.synced_items[3].server_id, None);
+    assert_eq!(manifest.basket_items[0].server_id.as_deref(), Some(portable));
+    assert_eq!(manifest.basket_items[1].server_id.as_deref(), Some(portable));
+
+    // Idempotent: a second pass changes nothing.
+    assert!(!reconcile_manifest_server_ids(&mut manifest, &remap));
+}

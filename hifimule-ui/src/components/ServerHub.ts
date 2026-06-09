@@ -209,7 +209,10 @@ export class ServerHub {
         try {
             await serverSelect(id);
             this.selectedId = id;
-            basketStore.setActiveServerId(id);
+            // server.select keys on the local id, but the basket's active-server key
+            // is the PORTABLE id (Story 2.13) so own items never render locked.
+            const portableId = this.servers.find(s => s.id === id)?.serverId ?? null;
+            basketStore.setActiveServerId(portableId);
             await this.refresh();
             this.onServerChanged();
         } catch (e) {
@@ -253,8 +256,13 @@ export class ServerHub {
         dialog.querySelector('#server-remove-confirm')?.addEventListener('click', async () => {
             try {
                 await serverRemove(id);
-                // Drop the removed server's basket items and notify (AC7).
-                const removed = basketStore.removeItemsForServer(id);
+                // Drop the removed server's basket items and notify (AC7). Basket
+                // items are tagged with the PORTABLE id (Story 2.13); also sweep any
+                // not-yet-reconciled items still tagged with the local id.
+                let removed = basketStore.removeItemsForServer(id);
+                if (server.serverId && server.serverId !== id) {
+                    removed += basketStore.removeItemsForServer(server.serverId);
+                }
                 if (removed > 0) {
                     window.dispatchEvent(new CustomEvent('toast', {
                         detail: {

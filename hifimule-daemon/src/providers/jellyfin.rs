@@ -23,6 +23,10 @@ pub struct JellyfinProvider {
     token: String,
     user_id: String,
     server_version: Option<String>,
+    /// Server-reported stable id (`System/Info.Id`), captured at connect. Drives the
+    /// portable `server_id` `rid:` basis (Story 2.13). `None` when reconstructed from
+    /// stored credentials (the reported id is only needed at the initial connect).
+    server_reported_id: Option<String>,
 }
 
 impl JellyfinProvider {
@@ -38,6 +42,7 @@ impl JellyfinProvider {
             token: token.into(),
             user_id: user_id.into(),
             server_version: None,
+            server_reported_id: None,
         }
     }
 
@@ -54,7 +59,14 @@ impl JellyfinProvider {
             token: token.into(),
             user_id: user_id.into(),
             server_version,
+            server_reported_id: None,
         }
+    }
+
+    /// Records the server-reported stable id (`System/Info.Id`) captured at connect.
+    pub fn with_reported_id(mut self, server_reported_id: Option<String>) -> Self {
+        self.server_reported_id = server_reported_id;
+        self
     }
 
     fn map_error(error: anyhow::Error) -> ProviderError {
@@ -580,6 +592,10 @@ impl MediaProvider for JellyfinProvider {
 
     fn provider_user_id(&self) -> Option<&str> {
         Some(&self.user_id)
+    }
+
+    fn server_reported_id(&self) -> Option<&str> {
+        self.server_reported_id.as_deref()
     }
 
     fn capabilities(&self) -> Capabilities {

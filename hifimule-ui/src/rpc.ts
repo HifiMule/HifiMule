@@ -113,6 +113,10 @@ export async function rpcCall(method: string, params: any = {}): Promise<any> {
 
 export interface ServerSummary {
     id: string;
+    /** Deterministic, machine-independent portable id (Story 2.13). Used for basket
+     * tagging, active-server tracking, and sync routing. `server.select/remove/update`
+     * still key on the local `id`. */
+    serverId?: string | null;
     url: string;
     serverType: string;
     username: string;

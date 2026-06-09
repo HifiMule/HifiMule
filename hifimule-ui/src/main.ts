@@ -64,6 +64,10 @@ async function init() {
 async function routeFromDaemonState(state: any): Promise<void> {
     const servers: any[] = state?.servers ?? [];
     const selectedServerId: string | null = state?.selectedServerId ?? null;
+    // Story 2.13: the basket's active-server key is the PORTABLE id, not the
+    // machine-local id, so a single-server user's own items never render locked
+    // and newly-tagged items carry the portable identity end-to-end (AC10).
+    const selectedServerPortableId: string | null = state?.selectedServerPortableId ?? null;
 
     if (servers.length === 0) {
         const { initLoginView } = await import('./login');
@@ -74,7 +78,7 @@ async function routeFromDaemonState(state: any): Promise<void> {
     renderMainLayout(state);
 
     const { basketStore } = await import('./state/basket');
-    basketStore.setActiveServerId(selectedServerId);
+    basketStore.setActiveServerId(selectedServerPortableId);
 
     if (selectedServerId) {
         const { initLibraryView } = await import('./library');

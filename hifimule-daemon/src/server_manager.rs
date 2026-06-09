@@ -26,6 +26,10 @@ pub struct ServerRecord {
     pub name: Option<String>,
     pub icon: Option<String>,
     pub selected: bool,
+    /// Deterministic portable identity (Story 2.13) — used for manifest/basket
+    /// tagging and sync routing. Resolved back to `id` for provider lookup.
+    pub server_id: Option<String>,
+    pub server_reported_id: Option<String>,
 }
 
 impl From<ServerConfig> for ServerRecord {
@@ -39,6 +43,8 @@ impl From<ServerConfig> for ServerRecord {
             name: c.name,
             icon: c.icon,
             selected: c.selected,
+            server_id: c.server_id,
+            server_reported_id: c.server_reported_id,
         }
     }
 }
@@ -92,6 +98,9 @@ impl ServerManager {
             name: None,
             icon: None,
             selected: true,
+            // In tests the portable id mirrors the local id (1:1 per machine).
+            server_id: Some(id.clone()),
+            server_reported_id: None,
         }];
         self.selected_server_id = Some(id.clone());
         self.providers.clear();
@@ -182,6 +191,40 @@ pub async fn get_provider(
     Ok(provider)
 }
 
+/// Resolves a PORTABLE `server_id` (Story 2.13) to its machine-local id, then
+/// delegates to [`get_provider`] (which keeps the single provider cache keyed by
+/// local id). On a single machine `server_id ↔ local id` is 1:1 (upsert-by-URL
+/// prevents duplicate rows), so exactly one record matches. As a resilience
+/// fallback — e.g. a not-yet-reconciled tag that already equals a local id — an
+/// id matching no portable `server_id` but matching a local `id` is used directly.
+pub async fn get_provider_by_server_id(
+    manager: &Arc<RwLock<ServerManager>>,
+    db: &Database,
+    server_id: &str,
+) -> Result<Arc<dyn MediaProvider>, ProviderError> {
+    let local_id = {
+        let guard = manager.read().await;
+        guard
+            .servers
+            .iter()
+            .find(|s| s.server_id.as_deref() == Some(server_id))
+            .or_else(|| guard.servers.iter().find(|s| s.id == server_id))
+            .map(|s| s.id.clone())
+    };
+    let local_id = match local_id {
+        Some(id) => id,
+        // Fall back to the DB in case the in-memory manager is stale.
+        None => db
+            .list_servers()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|s| s.server_id.as_deref() == Some(server_id) || s.id == server_id)
+            .map(|s| s.id)
+            .ok_or_else(|| ProviderError::Auth(format!("Unknown server: {server_id}")))?,
+    };
+    get_provider(manager, db, &local_id).await
+}
+
 /// Returns the currently selected server's provider, or `None` if no server is
 /// selected. Lazily connects on first use.
 pub async fn selected_provider(
@@ -197,7 +240,7 @@ mod tests {
     use super::*;
 
     fn seed(db: &Database, url: &str, kind: &str, user: &str) -> String {
-        db.upsert_server(url, kind, user, None, None, None).unwrap()
+        db.upsert_server(url, kind, user, None, None, None, None).unwrap()
     }
 
     // load_from_db reflects the DB's rows and the `selected = 1` row (AC12/AC14:
@@ -282,5 +325,50 @@ mod tests {
             mgr.read().await.selected_server_id.as_deref(),
             Some(id2.as_str())
         );
+    }
+
+    // Story 2.13: get_provider_by_server_id maps a PORTABLE id → local id and reuses
+    // the same local-id-keyed provider cache.
+    #[tokio::test]
+    async fn get_provider_by_server_id_resolves_portable_to_local() {
+        let _lock = crate::api::credential_test_lock();
+        let db = Database::memory().unwrap();
+        let local_id = seed(&db, "http://sub.example", "openSubsonic", "u");
+        let portable = db
+            .get_server(&local_id)
+            .unwrap()
+            .unwrap()
+            .server_id
+            .expect("portable id derived on upsert");
+        assert_ne!(portable, local_id, "portable id differs from machine-local id");
+        CredentialManager::save_server_credential(
+            &local_id,
+            &crate::api::ServerCredentials {
+                token_or_password: "pw".to_string(),
+                user_id: None,
+            },
+        )
+        .unwrap();
+
+        let mgr = Arc::new(RwLock::new(ServerManager::new()));
+        mgr.write().await.load_from_db(&db);
+
+        // Resolve by the PORTABLE id; cache is keyed by the LOCAL id.
+        let provider = get_provider_by_server_id(&mgr, &db, &portable)
+            .await
+            .expect("resolves portable id");
+        assert_eq!(
+            provider.server_type(),
+            crate::providers::ServerType::OpenSubsonic
+        );
+        assert!(
+            mgr.read().await.providers.contains_key(&local_id),
+            "cache keyed by local id"
+        );
+
+        // Unknown portable id errors cleanly.
+        assert!(get_provider_by_server_id(&mgr, &db, "no-such-portable")
+            .await
+            .is_err());
     }
 }

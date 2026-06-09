@@ -259,7 +259,10 @@ export class BasketSidebar {
         if (daemonStateResult.status === 'fulfilled' && daemonStateResult.value) {
             const state = daemonStateResult.value as any;
             this.serverType = state.serverType ?? null;
-            this.currentServerId = state.currentServer?.serverId ?? null;
+            // Story 2.13: currentServerId is the PORTABLE id (used to tag items and
+            // build sync payloads) so the daemon can route by portable id and own
+            // items never render locked.
+            this.currentServerId = state.selectedServerPortableId ?? null;
             this.updateServersById(state.servers);
             basketStore.setActiveServerId(this.currentServerId);
             // Sync multi-device state so the hub renders correctly on every refreshAndRender,
@@ -658,7 +661,8 @@ export class BasketSidebar {
                     this.supportsPlaylistWrite = newSupportsPlaylist;
                     setPlaylistWriteCapability(newSupportsPlaylist);
                 }
-                this.currentServerId = daemonStateResult?.currentServer?.serverId ?? null;
+                // Story 2.13: PORTABLE id (see refreshAndRender above).
+                this.currentServerId = daemonStateResult?.selectedServerPortableId ?? null;
                 this.updateServersById(daemonStateResult?.servers);
                 basketStore.setActiveServerId(this.currentServerId);
                 const currentDeviceId = this.getCurrentDeviceId(currentDevice);
@@ -1584,8 +1588,10 @@ export class BasketSidebar {
 
     private updateServersById(servers: any): void {
         if (!Array.isArray(servers)) return;
+        // Story 2.13: key by the PORTABLE serverId (basket items are tagged with it),
+        // falling back to the local id for rows without a portable id yet.
         this.serversById = new Map(
-            servers.map((s: any) => [s.id, {
+            servers.map((s: any) => [s.serverId ?? s.id, {
                 id: s.id,
                 serverType: s.serverType,
                 username: s.username,
