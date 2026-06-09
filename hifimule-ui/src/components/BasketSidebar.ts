@@ -172,6 +172,8 @@ export class BasketSidebar {
     private lastHydratedDeviceId: string | null = null;
     private serverType: string | null = null;
     private currentServerId: string | null = null;
+    // Server metadata for read-only basket badges (Story 2.11 AC35).
+    private serversById: Map<string, { serverType: string; username: string; url: string }> = new Map();
     private syncSnapshotIds: string[] = [];
     // Auto-fill state
     private autoFillEnabled: boolean = false;
@@ -256,6 +258,7 @@ export class BasketSidebar {
             const state = daemonStateResult.value as any;
             this.serverType = state.serverType ?? null;
             this.currentServerId = state.currentServer?.serverId ?? null;
+            this.updateServersById(state.servers);
             basketStore.setActiveServerId(this.currentServerId);
             // Sync multi-device state so the hub renders correctly on every refreshAndRender,
             // not just during the 2s polling cycle.
@@ -591,18 +594,26 @@ export class BasketSidebar {
         // Device is completely full — show feedback instead of a useless zero-width slider (P11).
         const deviceFull = this.storageInfo !== null && this.storageInfo.freeBytes === 0;
 
+        // AC31: the toggle reads ON only when the auto-fill slot belongs to the
+        // selected server. A slot bound to another server shows OFF (and renders
+        // locked); enabling under the selected server silently rebinds the slot.
+        const slot = basketStore.getItems().find(i => i.id === AUTO_FILL_SLOT_ID);
+        const autoFillOn = slot
+            ? slot.serverId === this.currentServerId
+            : this.autoFillEnabled;
+
         return `
             <div class="auto-fill-controls">
                 <div class="auto-fill-toggle-row">
-                    <sl-switch id="auto-fill-toggle" size="small" ${this.autoFillEnabled ? 'checked' : ''}>
+                    <sl-switch id="auto-fill-toggle" size="small" ${autoFillOn ? 'checked' : ''}>
                         ${t('basket.autofill.name')}
                     </sl-switch>
                     <span class="auto-fill-caption">${t('basket.autofill.hint')}</span>
                 </div>
-                ${this.autoFillEnabled && deviceFull ? `
+                ${autoFillOn && deviceFull ? `
                     <div class="auto-fill-caption">${t('basket.autofill.full')}</div>
                 ` : ''}
-                ${this.autoFillEnabled && !deviceFull ? `
+                ${autoFillOn && !deviceFull ? `
                     <div class="auto-fill-slider-row">
                         <label class="auto-fill-caption" style="display:block; margin-bottom:var(--space-2xs);">
                             ${t('basket.autofill.max_fill_size', { size: `${sliderValue} GB` })}
@@ -646,6 +657,7 @@ export class BasketSidebar {
                     setPlaylistWriteCapability(newSupportsPlaylist);
                 }
                 this.currentServerId = daemonStateResult?.currentServer?.serverId ?? null;
+                this.updateServersById(daemonStateResult?.servers);
                 basketStore.setActiveServerId(this.currentServerId);
                 const currentDeviceId = this.getCurrentDeviceId(currentDevice);
                 const isNewDevice = currentDeviceId && currentDeviceId !== this.lastHydratedDeviceId;
@@ -807,20 +819,28 @@ export class BasketSidebar {
     }
 
     private renderStatusZone(): string {
-        // Collapse entirely when clean; the footer's flex gap closes the space.
-        // The banner fades in on appear, so the small reflow reads as intentional.
-        if (!basketStore.isDirty()) {
-            return '';
-        }
+        // Mixed-server informational note (AC36): shown whenever the basket holds
+        // items from more than one server, independent of the dirty state.
+        const mixedNote = basketStore.hasMultipleServers()
+            ? `
+            <div class="basket-mixed-server-note">
+                <sl-icon name="info-circle"></sl-icon>
+                <span>${t('basket.mixedServerNote')}</span>
+            </div>`
+            : '';
 
-        return `
-            <div class="basket-status-zone">
+        // Collapse the dirty banner entirely when clean; the footer's flex gap
+        // closes the space. The banner fades in on appear.
+        const dirtyBanner = basketStore.isDirty()
+            ? `
                 <div class="sync-proposed-banner">
                     <sl-icon name="arrow-repeat"></sl-icon>
                     <span>${t('basket.sync.proposed')}</span>
-                </div>
-            </div>
-        `;
+                </div>`
+            : '';
+
+        if (!mixedNote && !dirtyBanner) return '';
+        return `<div class="basket-status-zone">${mixedNote}${dirtyBanner}</div>`;
     }
 
     private updateDeviceLockState(): void {
@@ -1114,10 +1134,27 @@ export class BasketSidebar {
         // Take snapshot for race-safe dirty reset (exclude virtual slot — it won't appear in manifest)
         this.syncSnapshotIds = [...manualIds].sort();
 
-        // Build delta request params
-        const syncItemIds = await this.itemIdsWithIncrementalChanges(manualIds);
+        // Build delta request params. Each item carries its originating serverId so
+        // the daemon can route the download to the correct provider (AC27).
+        const serverIdById = new Map<string, string | undefined>();
+        for (const it of currentItems) {
+            if (it.id !== AUTO_FILL_SLOT_ID) serverIdById.set(it.id, it.serverId);
+        }
+        // Incremental change detection is best-effort: if the sync token is stale
+        // or the server doesn't support it, fall back to syncing all basket items.
+        let syncItemIds: string[];
+        try {
+            syncItemIds = await this.itemIdsWithIncrementalChanges(manualIds);
+        } catch (e) {
+            console.warn('[Sync] Incremental change detection failed, falling back to full sync:', e);
+            syncItemIds = manualIds;
+        }
+        const syncItems = syncItemIds.map(id => ({
+            id,
+            serverId: serverIdById.get(id) ?? this.currentServerId ?? undefined,
+        }));
         const deltaParams: Record<string, unknown> = {
-            itemIds: syncItemIds,
+            itemIds: syncItems,
             basketItems: currentItems.filter(i => i.id !== AUTO_FILL_SLOT_ID),
         };
         if (autoFillSlot) {
@@ -1131,6 +1168,8 @@ export class BasketSidebar {
                 enabled: true,
                 maxBytes: maxFillBytes > 0 ? maxFillBytes : undefined,
                 excludeItemIds: syncItemIds,
+                // Auto-fill is bound to a single server (AC32).
+                serverId: autoFillSlot.serverId ?? this.currentServerId ?? undefined,
             };
         }
 
@@ -1330,33 +1369,70 @@ export class BasketSidebar {
 
         this.etaText = this.computeEta(op);
 
-        this.container.innerHTML = `
-            <div class="basket-header">
-                <h2>${t('basket.sync.syncing_title')}</h2>
-                <sl-badge variant="primary" pill>${op.filesCompleted}/${op.filesTotal}</sl-badge>
-            </div>
-            <div class="sync-progress-panel" aria-live="polite" aria-label="${t('basket.sync.progress')}">
-                <sl-progress-bar value="${pct}" style="width: 100%; margin-bottom: 0.75rem;"
-                    label="${t('basket.sync.progress_percent', { pct })}"></sl-progress-bar>
-                <div class="sync-current-file">
-                    <sl-icon name="arrow-down-circle" style="color: var(--sl-color-primary-600);"></sl-icon>
-                    <span title="${this.escapeHtml(op.currentFile || '')}">${this.escapeHtml(currentFileName)}</span>
+        // --- Shell: render once, then patch in-place to avoid Shoelace flash ---
+        // Guard on #sync-progress-bar (present only in the real progress shell),
+        // NOT on .sync-progress-panel — the "Starting" spinner also uses that class
+        // and would falsely satisfy the guard, leaving the spinner frozen.
+        const hasShell = !!this.container.querySelector('#sync-progress-bar');
+        if (!hasShell) {
+            this.container.innerHTML = `
+                <div class="basket-header">
+                    <h2>${t('basket.sync.syncing_title')}</h2>
+                    <sl-badge id="sync-badge" variant="primary" pill>${op.filesCompleted}/${op.filesTotal}</sl-badge>
                 </div>
-                <div class="sync-file-counter">${t('basket.sync.file_counter', { completed: op.filesCompleted, total: op.filesTotal })}</div>
-                <div class="sync-eta">${this.escapeHtml(this.etaText)}</div>
-            </div>
-            <div class="basket-footer">
-                <sl-button id="cancel-sync-btn" variant="default" style="width: 100%;"
-                           ${this.isCancelling ? 'loading disabled' : ''}>
-                    <sl-icon slot="prefix" name="x-circle"></sl-icon>
-                    ${this.isCancelling ? t('basket.sync.cancelling') : t('basket.actions.cancel_sync')}
-                </sl-button>
-            </div>
-        `;
+                <div class="sync-progress-panel" aria-live="polite" aria-label="${t('basket.sync.progress')}">
+                    <sl-progress-bar id="sync-progress-bar" value="${pct}" style="width: 100%; margin-bottom: 0.75rem;"
+                        label="${t('basket.sync.progress_percent', { pct })}"></sl-progress-bar>
+                    <div class="sync-current-file">
+                        <sl-icon name="arrow-down-circle" style="color: var(--sl-color-primary-600);"></sl-icon>
+                        <span id="sync-current-file-name" title="${this.escapeHtml(op.currentFile || '')}">${this.escapeHtml(currentFileName)}</span>
+                    </div>
+                    <div id="sync-file-counter" class="sync-file-counter">${t('basket.sync.file_counter', { completed: op.filesCompleted, total: op.filesTotal })}</div>
+                    <div id="sync-eta" class="sync-eta">${this.escapeHtml(this.etaText)}</div>
+                </div>
+                <div class="basket-footer">
+                    <sl-button id="cancel-sync-btn" variant="default" style="width: 100%;">
+                        <sl-icon slot="prefix" name="x-circle"></sl-icon>
+                        ${t('basket.actions.cancel_sync')}
+                    </sl-button>
+                </div>
+            `;
+            this.container.querySelector('#cancel-sync-btn')?.addEventListener('click', () => {
+                this.handleCancelSync();
+            });
+        }
 
-        this.container.querySelector('#cancel-sync-btn')?.addEventListener('click', () => {
-            this.handleCancelSync();
-        });
+        // --- Patch: update only the leaf values that change each tick ---
+        const progressBar = this.container.querySelector('#sync-progress-bar') as any;
+        if (progressBar) {
+            progressBar.value = pct;
+            progressBar.label = t('basket.sync.progress_percent', { pct });
+        }
+
+        const badge = this.container.querySelector('#sync-badge');
+        if (badge) badge.textContent = `${op.filesCompleted}/${op.filesTotal}`;
+
+        const fileSpan = this.container.querySelector('#sync-current-file-name') as HTMLElement | null;
+        if (fileSpan) {
+            fileSpan.title = op.currentFile || '';
+            fileSpan.textContent = currentFileName;
+        }
+
+        const counter = this.container.querySelector('#sync-file-counter');
+        if (counter) counter.textContent = t('basket.sync.file_counter', { completed: op.filesCompleted, total: op.filesTotal });
+
+        const eta = this.container.querySelector('#sync-eta');
+        if (eta) eta.textContent = this.etaText;
+
+        // Reflect cancelling state on the button without replacing it.
+        const cancelBtn = this.container.querySelector('#cancel-sync-btn') as any;
+        if (cancelBtn) {
+            cancelBtn.loading = this.isCancelling;
+            cancelBtn.disabled = this.isCancelling;
+            cancelBtn.textContent = this.isCancelling
+                ? t('basket.sync.cancelling')
+                : t('basket.actions.cancel_sync');
+        }
     }
 
     private renderSyncComplete() {
@@ -1509,53 +1585,87 @@ export class BasketSidebar {
         return t('basket.priority.auto');
     }
 
+    private updateServersById(servers: any): void {
+        if (!Array.isArray(servers)) return;
+        this.serversById = new Map(
+            servers.map((s: any) => [s.id, { serverType: s.serverType, username: s.username, url: s.url }])
+        );
+    }
+
+    private serverDisplayLabel(serverId: string | undefined): string {
+        const s = serverId ? this.serversById.get(serverId) : undefined;
+        if (!s) return t('basket.other_server');
+        switch (s.serverType) {
+            case 'jellyfin': return 'Jellyfin';
+            case 'openSubsonic': return 'OpenSubsonic';
+            case 'subsonic': return 'Subsonic';
+            default: return s.username || t('basket.other_server');
+        }
+    }
+
+    /** Read-only badge for items belonging to a non-selected server (AC35). */
+    private lockedServerBadge(item: BasketItem): string {
+        if (!basketStore.isItemLocked(item)) return '';
+        return `<span class="basket-item-server-badge" title="${this.escapeHtml(t('basket.locked_hint'))}">${this.escapeHtml(this.serverDisplayLabel(item.serverId))}</span>`;
+    }
+
+    /** Remove control, hidden for locked (non-selected-server) items (AC35). */
+    private removeButtonFor(item: BasketItem, id: string): string {
+        if (basketStore.isItemLocked(item)) return '';
+        return `<sl-icon-button name="x" class="remove-item-btn" data-id="${this.escapeHtml(id)}" label="${t('basket.actions.remove')}"></sl-icon-button>`;
+    }
+
+    private lockedCardClass(item: BasketItem): string {
+        return basketStore.isItemLocked(item) ? ' basket-item--locked' : '';
+    }
+
     private renderAutoFillSlotCard(item: BasketItem): string {
         return `
-            <div class="basket-item-card basket-item-auto-fill-slot" data-id="${AUTO_FILL_SLOT_ID}">
+            <div class="basket-item-card basket-item-auto-fill-slot${this.lockedCardClass(item)}" data-id="${AUTO_FILL_SLOT_ID}">
                 <div class="basket-item-auto-fill-icon">
                     <sl-icon name="stars"></sl-icon>
                 </div>
                 <div class="basket-item-info">
-                    <div class="basket-item-name">${t('basket.autofill.slot')}</div>
+                    <div class="basket-item-name">${this.lockedServerBadge(item)}${t('basket.autofill.slot')}</div>
                     <div class="basket-item-meta">
                         ${t('basket.autofill.slot_meta', { size: formatSize(item.sizeBytes) })}
                     </div>
                 </div>
-                <sl-icon-button name="x" class="remove-item-btn" data-id="${AUTO_FILL_SLOT_ID}" label="${t('basket.actions.remove')}"></sl-icon-button>
+                ${this.removeButtonFor(item, AUTO_FILL_SLOT_ID)}
             </div>
         `;
     }
 
     private renderArtistCard(item: BasketItem): string {
         return `
-            <div class="basket-item-card basket-item-artist" data-id="${this.escapeHtml(item.id)}">
+            <div class="basket-item-card basket-item-artist${this.lockedCardClass(item)}" data-id="${this.escapeHtml(item.id)}">
                 <div class="basket-item-artist-icon">
                     <sl-icon name="person-fill"></sl-icon>
                 </div>
                 <div class="basket-item-info">
-                    <div class="basket-item-name">${this.escapeHtml(item.name)}</div>
+                    <div class="basket-item-name">${this.lockedServerBadge(item)}${this.escapeHtml(item.name)}</div>
                     <div class="basket-item-meta">
                         ${t('basket.item.artist_meta', { count: item.childCount ?? 0, size: formatSize(item.sizeBytes ?? 0) })}
                     </div>
                 </div>
-                <sl-icon-button name="x" class="remove-item-btn" data-id="${this.escapeHtml(item.id)}" label="${t('basket.actions.remove')}"></sl-icon-button>
+                ${this.removeButtonFor(item, item.id)}
             </div>
         `;
     }
 
     private renderGenreCard(item: BasketItem): string {
         return `
-            <div class="basket-item-card basket-item-genre" data-id="${this.escapeHtml(item.id)}">
+            <div class="basket-item-card basket-item-genre${this.lockedCardClass(item)}" data-id="${this.escapeHtml(item.id)}">
                 <div class="basket-item-genre-icon">
                     <sl-icon name="music-note-beamed"></sl-icon>
                 </div>
                 <div class="basket-item-info">
-                    <div class="basket-item-name">${this.escapeHtml(item.name)}</div>
+                    <div class="basket-item-name">${this.lockedServerBadge(item)}${this.escapeHtml(item.name)}</div>
                     <div class="basket-item-meta">
                         ${t('basket.item.genre_meta', { count: item.childCount ?? 0, size: formatSize(item.sizeBytes ?? 0) })}
                     </div>
                 </div>
-                <sl-icon-button name="x" class="remove-item-btn" data-id="${this.escapeHtml(item.id)}" label="${t('basket.actions.remove')}"></sl-icon-button>
+                ${this.removeButtonFor(item, item.id)}
             </div>
         `;
     }
@@ -1580,10 +1690,11 @@ export class BasketSidebar {
             : '';
 
         return `
-            <div class="basket-item-card ${item.autoFilled ? 'basket-item-auto' : ''}" data-id="${item.id}">
+            <div class="basket-item-card ${item.autoFilled ? 'basket-item-auto' : ''}${this.lockedCardClass(item)}" data-id="${item.id}">
                 <div class="basket-item-image" data-image-id="${item.id}"></div>
                 <div class="basket-item-info">
                     <div class="basket-item-name">
+                        ${this.lockedServerBadge(item)}
                         ${autoBadge}
                         ${this.escapeHtml(item.name)}
                     </div>
@@ -1592,7 +1703,7 @@ export class BasketSidebar {
                         ${priorityLabel}
                     </div>
                 </div>
-                <sl-icon-button name="x" class="remove-item-btn" data-id="${item.id}" label="${t('basket.actions.remove')}"></sl-icon-button>
+                ${this.removeButtonFor(item, item.id)}
             </div>
         `;
     }
@@ -1660,9 +1771,23 @@ export class BasketSidebar {
     private handleSaveAsPlaylist(): void {
         const allItems = basketStore.getItems();
         const hasAutoFill = allItems.some(i => i.id === AUTO_FILL_SLOT_ID);
-        const manualIds = allItems
-            .filter(i => i.id !== AUTO_FILL_SLOT_ID)
-            .map(i => i.id);
+        // Pre-filter to the selected server (AC34): playlists are server-scoped, so
+        // items from other servers are excluded before building the request. This
+        // keeps the daemon's cross-server guard (AC33) from ever firing in normal use.
+        const selectedItems = allItems.filter(
+            i => i.id !== AUTO_FILL_SLOT_ID && (!i.serverId || i.serverId === this.currentServerId)
+        );
+        const excludedCount = allItems.filter(
+            i => i.id !== AUTO_FILL_SLOT_ID && i.serverId && i.serverId !== this.currentServerId
+        ).length;
+        const manualIds = selectedItems.map(i => i.id);
+
+        const crossServerNoticeHtml = excludedCount > 0 ? `
+            <sl-alert variant="warning" open style="margin-bottom: 0.75rem;">
+                <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+                ${t('basket.playlist.cross_server_notice', { server: this.serverDisplayLabel(this.currentServerId ?? undefined) })}
+            </sl-alert>
+        ` : '';
 
         const autoFillNoticeHtml = hasAutoFill ? `
             <sl-alert variant="warning" open style="margin-bottom: 0.75rem;">
@@ -1674,6 +1799,7 @@ export class BasketSidebar {
         const dialog = document.createElement('sl-dialog') as any;
         dialog.label = t('basket.playlist.create_title');
         dialog.innerHTML = `
+            ${crossServerNoticeHtml}
             ${autoFillNoticeHtml}
             <sl-input
                 id="playlist-name-input"
@@ -1719,7 +1845,12 @@ export class BasketSidebar {
             if (errorEl) errorEl.style.display = 'none';
 
             try {
-                await rpcCall('playlist.create', { name, itemIds: manualIds });
+                await rpcCall('playlist.create', {
+                    name,
+                    itemIds: manualIds,
+                    // Per-item serverId lets the daemon enforce server scope (AC33).
+                    items: selectedItems.map(i => ({ id: i.id, serverId: i.serverId ?? this.currentServerId })),
+                });
                 invalidatePlaylistsCache();
                 dialog.hide();
             } catch (err) {

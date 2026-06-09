@@ -1783,7 +1783,7 @@ impl JellyfinClient {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 struct Config {
     #[serde(default)]
     pub url: String,
@@ -1791,6 +1791,34 @@ struct Config {
     pub user_id: Option<String>,
     #[serde(default)]
     pub device_id: Option<String>,
+    /// UUID of the currently selected server (Story 2.11). Lets the static
+    /// `get_credentials()` resolve the active server's token from the UUID-keyed
+    /// vault without a daemon handle.
+    #[serde(default)]
+    pub selected_server_id: Option<String>,
+}
+
+/// Per-server credential entry in the multi-server vault (Story 2.11, AC18).
+/// `token_or_password` is the Jellyfin access token or the Subsonic password.
+/// `user_id` carries the Jellyfin UUID user id (None for Subsonic).
+#[derive(Debug, serde::Serialize, serde::Deserialize, Default, Clone, PartialEq, Eq)]
+pub struct ServerCredentials {
+    pub token_or_password: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+}
+
+/// Vault contents: server UUID → credentials (AC18).
+type VaultContents = std::collections::HashMap<String, ServerCredentials>;
+
+/// Legacy vault shape predating multi-server (AC19). `token` was the Jellyfin
+/// access token; `server_secrets` was keyed by server_type (not UUID).
+#[derive(serde::Deserialize)]
+struct LegacySecrets {
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    server_secrets: std::collections::HashMap<String, String>,
 }
 
 pub struct CredentialManager;
@@ -1799,65 +1827,150 @@ pub(crate) static CONFIG_FILE_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 #[cfg(test)]
 pub(crate) static CREDENTIAL_TEST_MUTEX: Mutex<()> = Mutex::new(());
 #[cfg(test)]
-static TEST_SECRETS: Mutex<Option<Secrets>> = Mutex::new(None);
+static TEST_VAULT: Mutex<Option<VaultContents>> = Mutex::new(None);
+/// Raw legacy vault JSON injected by vault-migration tests (AC19).
+#[cfg(test)]
+static TEST_LEGACY_RAW: Mutex<Option<String>> = Mutex::new(None);
 
-/// Acquires the credential test mutex and resets the in-memory secrets store,
+/// Acquires the credential test mutex and resets the in-memory vault store,
 /// ensuring each test starts with a clean credential state.
 #[cfg(test)]
 pub(crate) fn credential_test_lock() -> std::sync::MutexGuard<'static, ()> {
     let guard = CREDENTIAL_TEST_MUTEX.lock().unwrap();
-    *TEST_SECRETS.lock().unwrap() = None;
+    *TEST_VAULT.lock().unwrap() = None;
     guard
 }
 
 const VAULT_APP_SALT: &str = "hifimule.github.io/secrets/v1";
-
-#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
-struct Secrets {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    token: Option<String>,
-    #[serde(default)]
-    server_secrets: std::collections::HashMap<String, String>,
-}
 
 impl CredentialManager {
     fn get_vault_path() -> Result<PathBuf> {
         Ok(crate::paths::get_app_data_dir()?.join("secrets.enc"))
     }
 
-    fn load_secrets() -> Result<Secrets> {
+    /// Loads the multi-server vault (UUID → ServerCredentials). A legacy blob that
+    /// predates migration parses as empty here — `migrate_vault_from_legacy` re-keys
+    /// it during startup before any credential is needed.
+    fn load_vault() -> Result<VaultContents> {
         #[cfg(not(test))]
         {
             let path = Self::get_vault_path()?;
             if !path.exists() {
-                return Ok(Secrets::default());
+                return Ok(VaultContents::default());
             }
             let json = crate::vault::decrypt_file(&path, VAULT_APP_SALT)
                 .map_err(|e| anyhow!("Failed to decrypt secrets vault: {}", e))?;
-            serde_json::from_str(&json)
-                .map_err(|e| anyhow!("Failed to parse secrets blob: {}", e))
+            Ok(serde_json::from_str(&json).unwrap_or_default())
         }
         #[cfg(test)]
         {
-            let guard = TEST_SECRETS.lock().unwrap();
+            let guard = TEST_VAULT.lock().unwrap();
             Ok(guard.clone().unwrap_or_default())
         }
     }
 
-    fn save_secrets(secrets: &Secrets) -> Result<()> {
+    fn save_vault(vault: &VaultContents) -> Result<()> {
         #[cfg(not(test))]
         {
             let path = Self::get_vault_path()?;
-            let json = serde_json::to_string(secrets)?;
+            let json = serde_json::to_string(vault)?;
             crate::vault::encrypt_file(&path, &json, VAULT_APP_SALT)
                 .map_err(|e| anyhow!("Failed to save secrets vault: {}", e))
         }
         #[cfg(test)]
         {
-            let mut guard = TEST_SECRETS.lock().unwrap();
-            *guard = Some(secrets.clone());
+            let mut guard = TEST_VAULT.lock().unwrap();
+            *guard = Some(vault.clone());
             Ok(())
         }
+    }
+
+    /// Returns the raw decrypted vault JSON, if the vault exists. Used only by the
+    /// legacy migration to inspect the on-disk shape before re-keying.
+    #[cfg(not(test))]
+    fn load_raw_vault_json() -> Result<Option<String>> {
+        let path = Self::get_vault_path()?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        let json = crate::vault::decrypt_file(&path, VAULT_APP_SALT)
+            .map_err(|e| anyhow!("Failed to decrypt secrets vault: {}", e))?;
+        Ok(Some(json))
+    }
+
+    /// Re-keys a legacy vault blob (AC19) onto the migrated server's UUID.
+    /// Returns the new vault map when migration is needed, or `None` when `json`
+    /// is already in the new format (or unparseable / unmappable).
+    fn rekey_legacy_vault(
+        json: &str,
+        server: &crate::db::ServerConfig,
+        jellyfin_user_id: Option<String>,
+    ) -> Option<VaultContents> {
+        // Already new format (incl. empty `{}`) → nothing to migrate.
+        if serde_json::from_str::<VaultContents>(json).is_ok() {
+            return None;
+        }
+        let legacy: LegacySecrets = serde_json::from_str(json).ok()?;
+        let token_or_password = match server.server_type.as_str() {
+            "jellyfin" => legacy.token?,
+            "subsonic" | "openSubsonic" => legacy
+                .server_secrets
+                .get(&server.server_type)
+                .or_else(|| legacy.server_secrets.get("openSubsonic"))
+                .or_else(|| legacy.server_secrets.get("subsonic"))
+                .cloned()?,
+            _ => return None,
+        };
+        let user_id = if server.server_type == "jellyfin" {
+            jellyfin_user_id
+        } else {
+            None
+        };
+        let mut vault = VaultContents::new();
+        vault.insert(
+            server.id.clone(),
+            ServerCredentials {
+                token_or_password,
+                user_id,
+            },
+        );
+        Some(vault)
+    }
+
+    /// Migrates a legacy `Secrets` vault to the UUID-keyed multi-server vault
+    /// (AC19). Idempotent: returns early once the vault is already the new shape.
+    /// Must run after the DB migration so the server's UUID is available.
+    /// Never re-encrypts in the legacy shape.
+    pub fn migrate_vault_from_legacy(db: &crate::db::Database) -> Result<()> {
+        let servers = db.list_servers()?;
+        let Some(server) = servers.first() else {
+            return Ok(());
+        };
+
+        #[cfg(not(test))]
+        let raw = match Self::load_raw_vault_json()? {
+            Some(json) => json,
+            None => return Ok(()),
+        };
+        #[cfg(test)]
+        let raw = {
+            let guard = TEST_LEGACY_RAW.lock().unwrap();
+            match guard.clone() {
+                Some(json) => json,
+                None => return Ok(()),
+            }
+        };
+
+        let jellyfin_user_id = Self::read_config().ok().and_then(|c| c.user_id);
+        if let Some(vault) = Self::rekey_legacy_vault(&raw, server, jellyfin_user_id) {
+            Self::save_vault(&vault)?;
+            Self::set_config_selected_server(&server.id)?;
+            #[cfg(test)]
+            {
+                *TEST_LEGACY_RAW.lock().unwrap() = None;
+            }
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -1873,6 +1986,62 @@ impl CredentialManager {
         }
 
         Ok(crate::paths::get_app_data_dir()?.join("config.json"))
+    }
+
+    fn read_config() -> Result<Config> {
+        let path = Self::get_config_path()?;
+        if !path.exists() {
+            return Err(anyhow!("No config file found"));
+        }
+        let content =
+            fs::read_to_string(&path).map_err(|e| anyhow!("Failed to read config file: {}", e))?;
+        serde_json::from_str(&content).map_err(|e| anyhow!("Failed to parse config file: {}", e))
+    }
+
+    fn write_config(config: &Config) -> Result<()> {
+        let json = serde_json::to_string_pretty(config)?;
+        let path = Self::get_config_path()?;
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+            && !parent.exists()
+        {
+            fs::create_dir_all(parent)
+                .map_err(|e| anyhow!("Failed to create config directory: {}", e))?;
+        }
+        fs::write(&path, json).map_err(|e| anyhow!("Failed to write config file: {}", e))
+    }
+
+    /// Records `id` as the selected server in config.json so the static
+    /// `get_credentials()` resolves the active server's token from the vault.
+    pub fn set_config_selected_server(id: &str) -> Result<()> {
+        let mut config = Self::read_config().unwrap_or_default();
+        config.selected_server_id = Some(id.to_string());
+        Self::write_config(&config)
+    }
+
+    /// Persists the selected Jellyfin server's session: config.json gets its
+    /// url/user_id/selected id, and the vault gets the per-UUID credential.
+    pub fn save_jellyfin_session(
+        id: &str,
+        url: &str,
+        token: &str,
+        user_id: Option<&str>,
+    ) -> Result<()> {
+        Self::validate_url(url)?;
+        Self::validate_token(token)?;
+        Self::write_config(&Config {
+            url: url.to_string(),
+            user_id: user_id.map(str::to_string),
+            device_id: Self::get_device_id().ok(),
+            selected_server_id: Some(id.to_string()),
+        })?;
+        Self::save_server_credential(
+            id,
+            &ServerCredentials {
+                token_or_password: token.to_string(),
+                user_id: user_id.map(str::to_string),
+            },
+        )
     }
 
     pub(crate) fn validate_url(url: &str) -> Result<()> {
@@ -1895,44 +2064,42 @@ impl CredentialManager {
         Ok(())
     }
 
+    /// Backward-compatible single-server credential save (legacy `login` RPC and
+    /// tests). Writes config.json and the vault entry under the currently selected
+    /// server id (or a freshly generated UUID if none is selected yet).
     pub fn save_credentials(url: &str, token: &str, user_id: Option<&str>) -> Result<()> {
         Self::validate_url(url)?;
         Self::validate_token(token)?;
-
-        let config = Config {
-            url: url.to_string(),
-            user_id: user_id.map(|s| s.to_string()),
-            device_id: Self::get_device_id().ok(),
-        };
-        let json = serde_json::to_string_pretty(&config)?;
-        let path = Self::get_config_path()?;
-        fs::write(&path, json).map_err(|e| anyhow!("Failed to write config file: {}", e))?;
-
-        let mut secrets = Self::load_secrets()?;
-        secrets.token = Some(token.to_string());
-        Self::save_secrets(&secrets)?;
-
-        Ok(())
+        let id = Self::read_config()
+            .ok()
+            .and_then(|c| c.selected_server_id)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        Self::save_jellyfin_session(&id, url, token, user_id)
     }
 
-    pub fn save_server_secret(server_type: &str, secret: &str) -> Result<()> {
-        if secret.trim().is_empty() {
+    /// Stores a server's credential keyed by its UUID (AC18).
+    pub fn save_server_credential(id: &str, creds: &ServerCredentials) -> Result<()> {
+        if creds.token_or_password.trim().is_empty() {
             return Err(anyhow!("Secret cannot be empty"));
         }
-        let mut secrets = Self::load_secrets()?;
-        secrets
-            .server_secrets
-            .insert(server_type.to_string(), secret.to_string());
-        Self::save_secrets(&secrets)
+        let mut vault = Self::load_vault()?;
+        vault.insert(id.to_string(), creds.clone());
+        Self::save_vault(&vault)
     }
 
-    pub fn get_server_secret(server_type: &str) -> Result<String> {
-        let secrets = Self::load_secrets()?;
-        secrets
-            .server_secrets
-            .get(server_type)
+    /// Returns a server's credential by UUID.
+    pub fn get_server_credential(id: &str) -> Result<ServerCredentials> {
+        Self::load_vault()?
+            .get(id)
             .cloned()
-            .ok_or_else(|| anyhow!("No server secret found in vault: {}", server_type))
+            .ok_or_else(|| anyhow!("No credential found in vault for server: {}", id))
+    }
+
+    /// Evicts a server's credential from the vault (AC6).
+    pub fn remove_server_credential(id: &str) -> Result<()> {
+        let mut vault = Self::load_vault()?;
+        vault.remove(id);
+        Self::save_vault(&vault)
     }
 
     pub fn clear_credentials() -> Result<()> {
@@ -1944,16 +2111,16 @@ impl CredentialManager {
         #[cfg(not(test))]
         {
             if let Ok(vault_path) = Self::get_vault_path()
-            && vault_path.exists()
-        {
-            fs::remove_file(&vault_path)
-                .map_err(|e| anyhow!("Failed to remove vault file: {}", e))?;
-        }
+                && vault_path.exists()
+            {
+                fs::remove_file(&vault_path)
+                    .map_err(|e| anyhow!("Failed to remove vault file: {}", e))?;
+            }
         }
 
         #[cfg(test)]
         {
-            let mut guard = TEST_SECRETS.lock().unwrap();
+            let mut guard = TEST_VAULT.lock().unwrap();
             *guard = None;
         }
 
@@ -1963,26 +2130,26 @@ impl CredentialManager {
     #[cfg(test)]
     #[allow(dead_code)]
     pub fn clear_test_secrets() {
-        let mut guard = TEST_SECRETS.lock().unwrap();
+        let mut guard = TEST_VAULT.lock().unwrap();
         *guard = None;
     }
 
+    /// Seeds a raw legacy vault blob for migration tests (AC19).
+    #[cfg(test)]
+    pub fn set_test_legacy_raw(json: &str) {
+        *TEST_LEGACY_RAW.lock().unwrap() = Some(json.to_string());
+    }
+
+    /// Resolves the currently selected server's Jellyfin session from config.json
+    /// + the UUID-keyed vault. Only meaningful when the selected server is Jellyfin.
     pub fn get_credentials() -> Result<(String, String, Option<String>)> {
-        let path = Self::get_config_path()?;
-        if !path.exists() {
-            return Err(anyhow!("No config file found"));
-        }
-        let content =
-            fs::read_to_string(&path).map_err(|e| anyhow!("Failed to read config file: {}", e))?;
-        let config: Config = serde_json::from_str(&content)
-            .map_err(|e| anyhow!("Failed to parse config file: {}", e))?;
-
-        let secrets = Self::load_secrets()?;
-        let token = secrets
-            .token
-            .ok_or_else(|| anyhow!("No token found in vault"))?;
-
-        Ok((config.url, token, config.user_id))
+        let config = Self::read_config()?;
+        let id = config
+            .selected_server_id
+            .clone()
+            .ok_or_else(|| anyhow!("No selected server in config"))?;
+        let creds = Self::get_server_credential(&id)?;
+        Ok((config.url, creds.token_or_password, config.user_id))
     }
 
     pub fn get_device_id() -> Result<String> {
@@ -1992,17 +2159,9 @@ impl CredentialManager {
         let mut config = if path.exists() {
             let content = fs::read_to_string(&path)
                 .map_err(|e| anyhow!("Failed to read config file: {}", e))?;
-            serde_json::from_str::<Config>(&content).unwrap_or(Config {
-                url: "".to_string(),
-                user_id: None,
-                device_id: None,
-            })
+            serde_json::from_str::<Config>(&content).unwrap_or_default()
         } else {
-            Config {
-                url: "".to_string(),
-                user_id: None,
-                device_id: None,
-            }
+            Config::default()
         };
 
         if let Some(id) = &config.device_id {
@@ -2617,5 +2776,93 @@ mod tests {
         assert_eq!(url, test_url);
         assert_eq!(token, test_token);
         assert_eq!(user_id, Some("test-user-id".to_string()));
+    }
+
+    fn server_config_for_test(id: &str, server_type: &str) -> crate::db::ServerConfig {
+        crate::db::ServerConfig {
+            id: id.to_string(),
+            url: "http://srv.example".to_string(),
+            server_type: server_type.to_string(),
+            username: "alexis".to_string(),
+            server_version: None,
+            updated_at: 0,
+            selected: true,
+        }
+    }
+
+    // AC19: a legacy Jellyfin vault re-keys onto the migrated server's UUID,
+    // carrying the user_id from config.json.
+    #[test]
+    fn test_rekey_legacy_vault_jellyfin() {
+        let server = server_config_for_test("uuid-jf", "jellyfin");
+        let legacy = r#"{"token":"jf-access-token","server_secrets":{}}"#;
+        let vault =
+            CredentialManager::rekey_legacy_vault(legacy, &server, Some("jf-user".to_string()))
+                .expect("should migrate");
+        let creds = vault.get("uuid-jf").unwrap();
+        assert_eq!(creds.token_or_password, "jf-access-token");
+        assert_eq!(creds.user_id.as_deref(), Some("jf-user"));
+    }
+
+    // AC19: a legacy Subsonic vault maps server_secrets[server_type] (with alias
+    // fallback) onto the UUID; no user_id for Subsonic.
+    #[test]
+    fn test_rekey_legacy_vault_subsonic() {
+        let server = server_config_for_test("uuid-sub", "openSubsonic");
+        let legacy = r#"{"server_secrets":{"openSubsonic":"sub-pass"}}"#;
+        let vault =
+            CredentialManager::rekey_legacy_vault(legacy, &server, None).expect("should migrate");
+        let creds = vault.get("uuid-sub").unwrap();
+        assert_eq!(creds.token_or_password, "sub-pass");
+        assert_eq!(creds.user_id, None);
+
+        // Alias fallback: stored under "subsonic" but server_type is openSubsonic.
+        let legacy_alias = r#"{"server_secrets":{"subsonic":"alias-pass"}}"#;
+        let vault =
+            CredentialManager::rekey_legacy_vault(legacy_alias, &server, None).unwrap();
+        assert_eq!(vault.get("uuid-sub").unwrap().token_or_password, "alias-pass");
+    }
+
+    // AC19: an already-new-format vault is a no-op (no re-migration).
+    #[test]
+    fn test_rekey_legacy_vault_already_new() {
+        let server = server_config_for_test("uuid-x", "jellyfin");
+        let new_format = r#"{"uuid-x":{"token_or_password":"tok"}}"#;
+        assert!(CredentialManager::rekey_legacy_vault(new_format, &server, None).is_none());
+        // Empty vault is also "new" (nothing to migrate).
+        assert!(CredentialManager::rekey_legacy_vault("{}", &server, None).is_none());
+    }
+
+    // AC19 end-to-end: migrate_vault_from_legacy re-keys the seeded legacy blob
+    // onto the migrated DB server and sets config.selected_server_id.
+    #[test]
+    fn test_migrate_vault_from_legacy_end_to_end() {
+        let _guard = credential_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp_dir.path().join("config.json"));
+        // Pre-existing config with the legacy Jellyfin user_id but no selected id.
+        CredentialManager::write_config(&Config {
+            url: "http://legacy.example".to_string(),
+            user_id: Some("legacy-user".to_string()),
+            device_id: None,
+            selected_server_id: None,
+        })
+        .unwrap();
+
+        let db = crate::db::Database::memory().unwrap();
+        let id = db
+            .upsert_server("http://legacy.example", "jellyfin", "alexis", None)
+            .unwrap();
+
+        CredentialManager::set_test_legacy_raw(r#"{"token":"legacy-tok","server_secrets":{}}"#);
+        CredentialManager::migrate_vault_from_legacy(&db).unwrap();
+
+        // get_credentials now resolves via the migrated UUID-keyed vault.
+        let (url, token, user_id) = CredentialManager::get_credentials().unwrap();
+        assert_eq!(url, "http://legacy.example");
+        assert_eq!(token, "legacy-tok");
+        assert_eq!(user_id.as_deref(), Some("legacy-user"));
+        let creds = CredentialManager::get_server_credential(&id).unwrap();
+        assert_eq!(creds.token_or_password, "legacy-tok");
     }
 }

@@ -14,32 +14,6 @@ const COMFORT_MIN_MAIN_HEIGHT = 720;
 const ABSOLUTE_MIN_MAIN_WIDTH = 900;
 const ABSOLUTE_MIN_MAIN_HEIGHT = 640;
 
-type CurrentServer = {
-    serverId: string;
-    url: string;
-    username: string;
-    serverType: string;
-    serverVersion?: string | null;
-} | null;
-
-function serverTypeLabel(type?: string | null): string {
-    switch (type) {
-        case 'jellyfin': return 'Jellyfin';
-        case 'openSubsonic': return 'OpenSubsonic';
-        case 'subsonic': return 'Subsonic';
-        default: return t('server.default');
-    }
-}
-
-function serverBadgeVariant(type?: string | null): string {
-    switch (type) {
-        case 'jellyfin': return 'primary';
-        case 'openSubsonic': return 'success';
-        case 'subsonic': return 'neutral';
-        default: return 'neutral';
-    }
-}
-
 async function init() {
     console.log("init() called, path:", window.location.pathname);
 
@@ -64,40 +38,106 @@ async function init() {
     document.body.classList.add('ready');
     await fitMainWindowToMonitor();
 
+    // AC11: a browse RPC hitting an expired/invalid credential surfaces a re-auth
+    // prompt scoped to the selected server's URL.
+    registerReauthHandler();
+
     const { rpcCall } = await import('./rpc');
 
     try {
         const state = await rpcCall('get_daemon_state');
-        renderMainLayout(state.currentServer ?? null);
-
-        if (state.serverConnected) {
-            console.log("Server connected, loading library view");
-            const { initLibraryView } = await import('./library');
-            initLibraryView();
-        } else {
-            console.log("Server not connected, showing login view");
-            const { initLoginView } = await import('./login');
-            // const { initLibraryView } = await import('./library'); // Removed double import
-
-            initLoginView(() => {
-                console.log("Login success callback triggered");
-                rpcCall('get_daemon_state').then((newState) => {
-                    renderMainLayout(newState.currentServer ?? null);
-                    import('./library').then(({ initLibraryView }) => initLibraryView());
-                });
-            });
-        }
+        await routeFromDaemonState(state);
     } catch (e) {
         console.error("Failed to check daemon state", e);
-        renderMainLayout(null);
-        // Fallback to login
+        // Fallback to first-run login.
         const { initLoginView } = await import('./login');
-        initLoginView(() => {
-            rpcCall('get_daemon_state').then((newState) => {
-                renderMainLayout(newState.currentServer ?? null);
-                import('./library').then(({ initLibraryView }) => initLibraryView());
-            });
-        });
+        initLoginView(() => { reloadFromDaemon(); });
+    }
+}
+
+/**
+ * Drives the top-level UI mode from the multi-server daemon state (Story 2.11 AC10):
+ *   - 0 servers configured        → full-screen first-run login (Story 2.5)
+ *   - ≥1 server, none selected    → main layout with the AC9 in-app empty state
+ *   - a server selected           → main layout + library
+ */
+async function routeFromDaemonState(state: any): Promise<void> {
+    const servers: any[] = state?.servers ?? [];
+    const selectedServerId: string | null = state?.selectedServerId ?? null;
+
+    if (servers.length === 0) {
+        const { initLoginView } = await import('./login');
+        initLoginView(() => { reloadFromDaemon(); });
+        return;
+    }
+
+    renderMainLayout(state);
+
+    const { basketStore } = await import('./state/basket');
+    basketStore.setActiveServerId(selectedServerId);
+
+    if (selectedServerId) {
+        const { initLibraryView } = await import('./library');
+        initLibraryView();
+    } else {
+        renderLibraryNoServerSelected();
+    }
+}
+
+/** Re-fetches daemon state and re-routes (after login/select/remove/logout). */
+async function reloadFromDaemon(): Promise<void> {
+    const { rpcCall } = await import('./rpc');
+    try {
+        const state = await rpcCall('get_daemon_state');
+        await routeFromDaemonState(state);
+    } catch (e) {
+        console.error('Failed to reload daemon state', e);
+    }
+}
+
+let reauthInFlight = false;
+
+/** AC11: shows a re-auth dialog scoped to the selected server when a browse RPC
+ * reports an expired/invalid credential. Registered once; debounced so repeated
+ * 401s don't stack dialogs. */
+function registerReauthHandler(): void {
+    window.addEventListener('hifimule:server-unauthorized', async () => {
+        if (reauthInFlight) return;
+        reauthInFlight = true;
+        try {
+            const { rpcCall } = await import('./rpc');
+            const state = await rpcCall('get_daemon_state');
+            const url: string | undefined = state?.currentServer?.url;
+            if (!url) {
+                reauthInFlight = false;
+                return;
+            }
+            const { initLoginView } = await import('./login');
+            initLoginView(
+                () => { reloadFromDaemon(); },
+                {
+                    mode: 'reauth',
+                    prefillUrl: url,
+                    onClose: () => { reauthInFlight = false; },
+                }
+            );
+        } catch (e) {
+            console.error('Re-auth prompt failed', e);
+            reauthInFlight = false;
+        }
+    });
+}
+
+/** AC9: servers exist but none selected — prompt the user to pick one. */
+function renderLibraryNoServerSelected(): void {
+    const content = document.getElementById('library-content');
+    if (content) {
+        content.innerHTML = `
+            <div class="library-empty-state" style="padding: 2rem; text-align: center; opacity: 0.7;">
+                <sl-icon name="hdd-network" style="font-size: 2rem;"></sl-icon>
+                <p>${t('library.selectServerEmpty')}</p>
+            </div>
+        `;
     }
 }
 
@@ -134,24 +174,16 @@ async function fitMainWindowToMonitor() {
     }
 }
 
-function renderMainLayout(currentServer: CurrentServer = null) {
+function renderMainLayout(_state: any = null) {
     const root = document.querySelector('.app-container');
     if (!root) return;
-    import('./state/basket').then(({ basketStore }) => {
-        basketStore.setActiveServerId(currentServer?.serverId ?? null);
-    });
 
-    const serverLabel = serverTypeLabel(currentServer?.serverType);
-    const serverVersion = currentServer?.serverVersion ? ` ${currentServer.serverVersion}` : '';
-    const serverHint = currentServer
-        ? `
-            <div class="server-connection-chip">
-              <sl-badge variant="${serverBadgeVariant(currentServer.serverType)}" pill>${serverLabel}</sl-badge>
-              <span title="${currentServer.url}">${currentServer.username} @ ${currentServer.url}${serverVersion}</span>
-              <sl-icon-button id="logout-btn" name="box-arrow-right" label="${t('ui.logout')}"></sl-icon-button>
-            </div>
-        `
-        : '';
+    // Avoid rebuilding the whole layout (and tearing down the Server Hub /
+    // BasketSidebar) on every reload — only build once. Guard on a marker unique
+    // to the *real* layout (`#server-hub-container`), NOT `.split-panel`, because
+    // index.html ships a static `.split-panel` placeholder that must be replaced
+    // on first render.
+    if (root.querySelector('#server-hub-container')) return;
 
     root.innerHTML = `
     <sl-split-panel position="68" class="split-panel">
@@ -162,7 +194,7 @@ function renderMainLayout(currentServer: CurrentServer = null) {
               <h1>${t('ui.library.title')}</h1>
               <p>${t('ui.library.subtitle')}</p>
             </div>
-            ${serverHint}
+            <div id="server-hub-container"></div>
           </div>
         </header>
 
@@ -179,26 +211,13 @@ function renderMainLayout(currentServer: CurrentServer = null) {
     </sl-split-panel>
     `;
 
-    document.getElementById('logout-btn')?.addEventListener('click', async () => {
-        const { rpcCall } = await import('./rpc');
-        const { basketStore } = await import('./state/basket');
-        try {
-            await rpcCall('server.logout');
-            basketStore.setActiveServerId(null);
-            basketStore.clearLocalOnly();
-            if (activeBasketSidebar) {
-                activeBasketSidebar.destroy();
-                activeBasketSidebar = null;
-            }
-            const { initLoginView } = await import('./login');
-            initLoginView(() => {
-                rpcCall('get_daemon_state').then((newState) => {
-                    renderMainLayout(newState.currentServer ?? null);
-                    import('./library').then(({ initLibraryView }) => initLibraryView());
-                });
-            });
-        } catch (error) {
-            console.error('Logout failed', error);
+    // Mount the Server Hub (list / switch / add / remove / logout). On any change
+    // it re-routes the whole UI from fresh daemon state.
+    import('./components/ServerHub').then(({ ServerHub }) => {
+        const container = document.getElementById('server-hub-container');
+        if (container) {
+            // The instance stays reachable via its DOM event listeners.
+            new ServerHub(container, () => { reloadFromDaemon(); });
         }
     });
 

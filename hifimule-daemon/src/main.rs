@@ -69,6 +69,7 @@ mod paths;
 mod providers;
 mod rpc;
 mod scrobbler;
+mod server_manager;
 mod sync;
 mod transcoding;
 mod vault;
@@ -618,6 +619,7 @@ async fn run_auto_sync(
                             provider_suffix: item.provider_suffix,
                             original_bitrate: None,
                             track_number: None,
+                            server_id: None,
                         });
                     }
                 }
@@ -974,6 +976,7 @@ fn to_desired_item(item: api::JellyfinItem) -> sync::DesiredItem {
         provider_suffix,
         original_bitrate,
         track_number: item.index_number,
+        server_id: None,
     }
 }
 
@@ -1064,35 +1067,25 @@ async fn get_non_jellyfin_provider(
     if !matches!(config.server_type.as_str(), "subsonic" | "openSubsonic") {
         return None;
     }
-    // Try stored password aliases in preference order
-    let candidates: Vec<String> = {
-        let mut out = Vec::new();
-        for alias in [config.server_type.as_str(), "openSubsonic", "subsonic"] {
-            if let Ok(secret) = api::CredentialManager::get_server_secret(alias)
-                && !out.contains(&secret)
-            {
-                out.push(secret);
-            }
-        }
-        out
+    // Look up the selected server's password from the UUID-keyed vault (Story 2.11).
+    let password = api::CredentialManager::get_server_credential(&config.id)
+        .ok()
+        .map(|c| c.token_or_password)?;
+    let credentials = providers::ProviderCredentials {
+        server_url: config.url.clone(),
+        credential: providers::CredentialKind::Password {
+            username: config.username.clone(),
+            password,
+        },
     };
-    for password in candidates {
-        let credentials = providers::ProviderCredentials {
-            server_url: config.url.clone(),
-            credential: providers::CredentialKind::Password {
-                username: config.username.clone(),
-                password,
-            },
-        };
-        if let Ok(provider) = providers::connect(
-            &config.url,
-            &credentials,
-            providers::ServerTypeHint::Subsonic,
-        )
-        .await
-        {
-            return Some(provider);
-        }
+    if let Ok(provider) = providers::connect(
+        &config.url,
+        &credentials,
+        providers::ServerTypeHint::Subsonic,
+    )
+    .await
+    {
+        return Some(provider);
     }
     daemon_log!("[AutoSync] Could not connect to Subsonic provider — skipping provider path");
     None
@@ -1194,6 +1187,7 @@ async fn run_auto_sync_via_provider(
                             provider_suffix: item.provider_suffix,
                             original_bitrate: None,
                             track_number: None,
+                            server_id: None,
                         });
                     }
                 }
@@ -1587,6 +1581,7 @@ fn provider_song_to_desired(song: &crate::domain::models::Song) -> sync::Desired
         provider_suffix: song.suffix.clone(),
         original_bitrate: song.bitrate_kbps.map(|kbps| kbps * 1000),
         track_number: song.track_number,
+        server_id: None,
     }
 }
 

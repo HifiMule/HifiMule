@@ -50,33 +50,83 @@ class BasketStore extends EventTarget {
     public setActiveServerId(serverId: string | null) {
         if (this.activeServerId === serverId) return;
         this.activeServerId = serverId;
-        this.removeItemsFromOtherServers();
+        // Story 2.11 (AC3): switching servers no longer deletes other-server items.
+        // They are retained and rendered read-only; only the selected server changes.
+        this.notify();
     }
 
     public getActiveServerId(): string | null {
         return this.activeServerId;
     }
 
-    private removeItemsFromOtherServers() {
-        if (!this.activeServerId) {
-            if (this.items.size > 0) {
-                this.items.clear();
-                this._dirty = false;
-                this.saveToLocalStorage();
-                this.notify();
-            }
-            return;
-        }
+    /** True when an item belongs to a server other than the selected one and must
+     * render read-only/locked (AC3/AC35). Items with no serverId are editable. */
+    public isItemLocked(item: BasketItem): boolean {
+        return (
+            !!item.serverId &&
+            !!this.activeServerId &&
+            item.serverId !== this.activeServerId
+        );
+    }
 
-        let changed = false;
+    /** True when the basket holds items from more than one distinct server. */
+    public hasMultipleServers(): boolean {
+        const servers = new Set<string>();
+        for (const item of this.items.values()) {
+            if (item.id !== AUTO_FILL_SLOT_ID && item.serverId) servers.add(item.serverId);
+        }
+        return servers.size > 1;
+    }
+
+    /** Distinct serverIds present among non-auto-fill items, in insertion order. */
+    public serverIdsInBasket(): string[] {
+        const out: string[] = [];
+        for (const item of this.items.values()) {
+            if (item.id !== AUTO_FILL_SLOT_ID && item.serverId && !out.includes(item.serverId)) {
+                out.push(item.serverId);
+            }
+        }
+        return out;
+    }
+
+    /** Removes all items belonging to a removed server (AC7). Returns the count. */
+    public removeItemsForServer(serverId: string): number {
+        let removed = 0;
         for (const [id, item] of this.items) {
-            if (item.serverId !== this.activeServerId) {
+            if (item.serverId === serverId) {
                 this.items.delete(id);
+                removed++;
+            }
+        }
+        if (removed > 0) {
+            this._dirty = true;
+            this.saveToLocalStorage();
+            this.saveBasketToDaemon();
+            this.notify();
+        }
+        return removed;
+    }
+
+    /** Reconciles persisted items still keyed by the pre-2.11 composite serverId
+     * (`type|url|username`) to the matching server's UUID (AC22), so a server
+     * switch/migration does not strand or lock the existing basket. */
+    public reconcileServerIds(
+        servers: Array<{ id: string; serverType: string; url: string; username: string }>
+    ): void {
+        if (servers.length === 0) return;
+        const compositeToUuid = new Map<string, string>();
+        for (const s of servers) {
+            const normalizedUrl = s.url.trim().replace(/\/+$/, '').toLowerCase();
+            compositeToUuid.set(`${s.serverType}|${normalizedUrl}|${s.username}`, s.id);
+        }
+        let changed = false;
+        for (const item of this.items.values()) {
+            if (item.serverId && compositeToUuid.has(item.serverId)) {
+                item.serverId = compositeToUuid.get(item.serverId)!;
                 changed = true;
             }
         }
         if (changed) {
-            this._dirty = false;
             this.saveToLocalStorage();
             this.notify();
         }
@@ -104,7 +154,9 @@ class BasketStore extends EventTarget {
         // restored from a stale persisted state.
         this.items.clear();
         for (const item of items) {
-            if (item.id !== AUTO_FILL_SLOT_ID && (!this.activeServerId || item.serverId === this.activeServerId)) {
+            // Retain items from ALL servers (AC3); the daemon already reconciled
+            // serverIds. Read-only rendering for non-selected servers is the view's job.
+            if (item.id !== AUTO_FILL_SLOT_ID) {
                 this.items.set(item.id, item);
             }
         }

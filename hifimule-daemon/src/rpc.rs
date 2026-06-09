@@ -35,6 +35,12 @@ const ERR_STORAGE_ERROR: i32 = -3;
 const ERR_NOT_FOUND: i32 = -4;
 const ERR_UNSUPPORTED_CAPABILITY: i32 = -5;
 const ERR_SYNC_IN_PROGRESS: i32 = -6;
+/// A playlist operation referenced items from a server other than the selected
+/// one (Story 2.11 AC33). JSON-RPC negative code; "cross-server" conveyed via msg.
+const ERR_CROSS_SERVER_CONFLICT: i32 = -7;
+/// The selected server's stored credential is expired/invalid (Story 2.11 AC11).
+/// Distinct from generic connection failures so the UI can scope a re-auth prompt.
+const ERR_UNAUTHORIZED: i32 = -8;
 const JELLYFIN_TICKS_PER_SECOND: u64 = 10_000_000;
 const GENRE_TRACK_PAGE_SIZE: u32 = 500;
 const GENRE_TRACK_MAX_PAGES: u32 = 200;
@@ -65,9 +71,9 @@ pub struct JsonRpcError {
 
 pub struct AppState {
     pub jellyfin_client: JellyfinClient,
-    pub provider: Arc<tokio::sync::RwLock<Option<Arc<dyn MediaProvider>>>>,
-    pub server_type: Arc<tokio::sync::RwLock<Option<String>>>,
-    pub server_version: Arc<tokio::sync::RwLock<Option<String>>>,
+    /// Multi-server runtime state (Story 2.11): replaces the former single
+    /// `provider`/`server_type`/`server_version` fields.
+    pub server_manager: Arc<tokio::sync::RwLock<crate::server_manager::ServerManager>>,
     pub db: Arc<crate::db::Database>,
     pub device_manager: Arc<crate::device::DeviceManager>,
     pub last_connection_check: Arc<tokio::sync::Mutex<Option<(std::time::Instant, bool)>>>,
@@ -86,92 +92,25 @@ fn send_sync_complete_notification() {
     }
 }
 
-fn get_subsonic_server_secret(preferred_server_type: &str) -> anyhow::Result<String> {
-    let mut candidates = vec![preferred_server_type];
-    for fallback in ["openSubsonic", "subsonic"] {
-        if !candidates.contains(&fallback) {
-            candidates.push(fallback);
-        }
-    }
 
-    let mut last_error = None;
-    for candidate in candidates {
-        match CredentialManager::get_server_secret(candidate) {
-            Ok(secret) => return Ok(secret),
-            Err(error) => last_error = Some(error),
-        }
-    }
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No Subsonic server secret candidates")))
-}
-
-fn get_subsonic_server_secret_candidates(preferred_server_type: &str) -> Vec<String> {
-    let mut aliases = vec![preferred_server_type];
-    for fallback in ["openSubsonic", "subsonic"] {
-        if !aliases.contains(&fallback) {
-            aliases.push(fallback);
-        }
-    }
-
-    let mut secrets = Vec::new();
-    for alias in aliases {
-        if let Ok(secret) = CredentialManager::get_server_secret(alias)
-            && !secrets.contains(&secret)
-        {
-            secrets.push(secret);
-        }
-    }
-    secrets
-}
-
-fn save_subsonic_server_secret_aliases(secret: &str) -> Result<(), JsonRpcError> {
-    for alias in ["subsonic", "openSubsonic"] {
-        CredentialManager::save_server_secret(alias, secret).map_err(|error| JsonRpcError {
-            code: ERR_STORAGE_ERROR,
-            message: error.to_string(),
-            data: None,
-        })?;
-    }
-    Ok(())
-}
-
+/// On a Subsonic auth failure, evicts the selected server's cached provider and
+/// rebuilds it from stored credentials, returning the fresh provider.
 async fn reconnect_subsonic_provider_from_config(
     state: &AppState,
 ) -> Option<Arc<dyn MediaProvider>> {
-    let config = state.db.get_server_config().ok().flatten()?;
-    if !matches!(config.server_type.as_str(), "subsonic" | "openSubsonic") {
+    let (id, server_type) = {
+        let guard = state.server_manager.read().await;
+        let rec = guard.selected_record()?;
+        (rec.id.clone(), rec.server_type.clone())
+    };
+    if !matches!(server_type.as_str(), "subsonic" | "openSubsonic") {
         return None;
     }
-
-    for password in get_subsonic_server_secret_candidates(&config.server_type) {
-        let credentials = ProviderCredentials {
-            server_url: config.url.clone(),
-            credential: CredentialKind::Password {
-                username: config.username.clone(),
-                password: password.clone(),
-            },
-        };
-        let Ok(provider) =
-            crate::providers::connect(&config.url, &credentials, ServerTypeHint::Subsonic).await
-        else {
-            continue;
-        };
-        let normalized_type = server_type_slug(provider.server_type())?.to_string();
-        let version = provider.server_version().map(str::to_string);
-        let _ = save_subsonic_server_secret_aliases(&password);
-        let _ = state.db.upsert_server_config(
-            &config.url,
-            &normalized_type,
-            &config.username,
-            version.as_deref(),
-        );
-        *state.provider.write().await = Some(provider.clone());
-        *state.server_type.write().await = Some(normalized_type);
-        *state.server_version.write().await = version;
-        *state.last_connection_check.lock().await = None;
-        return Some(provider);
-    }
-
-    None
+    state.server_manager.write().await.providers.remove(&id);
+    *state.last_connection_check.lock().await = None;
+    crate::server_manager::get_provider(&state.server_manager, &state.db, &id)
+        .await
+        .ok()
 }
 
 pub async fn run_server(
@@ -184,9 +123,9 @@ pub async fn run_server(
 ) {
     let state = Arc::new(AppState {
         jellyfin_client: JellyfinClient::new(),
-        provider: Arc::new(tokio::sync::RwLock::new(None)),
-        server_type: Arc::new(tokio::sync::RwLock::new(None)),
-        server_version: Arc::new(tokio::sync::RwLock::new(None)),
+        server_manager: Arc::new(tokio::sync::RwLock::new(
+            crate::server_manager::ServerManager::new(),
+        )),
         db,
         device_manager,
         last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -195,7 +134,13 @@ pub async fn run_server(
         last_scrobbler_result,
         state_tx,
     });
-    restore_provider_from_config(&state).await;
+    // Startup (Story 2.11): migrate a legacy single-server vault to the UUID-keyed
+    // multi-server vault (if needed), then load server rows into the manager.
+    // Providers connect lazily on first selection/use — never eagerly here (AC14).
+    if let Err(e) = CredentialManager::migrate_vault_from_legacy(&state.db) {
+        eprintln!("[Startup] Vault migration failed: {}", e);
+    }
+    state.server_manager.write().await.load_from_db(&state.db);
 
     let app = Router::new()
         .route("/", post(handler))
@@ -227,68 +172,6 @@ pub async fn run_server(
     axum::serve(listener, app).await.unwrap();
 }
 
-async fn restore_provider_from_config(state: &AppState) {
-    let Ok(Some(config)) = state.db.get_server_config() else {
-        return;
-    };
-
-    let provider: Option<Arc<dyn MediaProvider>> = match config.server_type.as_str() {
-        "jellyfin" => {
-            // saved_creds holds (url, token, user_id_uuid) from the JSON config file.
-            // user_id is the Jellyfin UUID, which differs from the display username.
-            let saved_creds = CredentialManager::get_credentials().ok();
-            // Fall back to legacy keyring key for users who connected via the old `login` RPC.
-            let token = CredentialManager::get_server_secret("jellyfin")
-                .ok()
-                .or_else(|| saved_creds.as_ref().map(|(_, t, _)| t.clone()));
-            let user_id = saved_creds
-                .and_then(|(_, _, uid)| uid)
-                .unwrap_or_else(|| config.username.clone());
-            token.map(|token| {
-                Arc::new(
-                    crate::providers::jellyfin::JellyfinProvider::new_with_version(
-                        JellyfinClient::new(),
-                        config.url.clone(),
-                        token,
-                        user_id,
-                        config.server_version.clone(),
-                    ),
-                ) as Arc<dyn MediaProvider>
-            })
-        }
-        "subsonic" | "openSubsonic" => {
-            let secret = get_subsonic_server_secret(&config.server_type).ok();
-            if let Some(password) = secret {
-                let credentials = ProviderCredentials {
-                    server_url: config.url.clone(),
-                    credential: CredentialKind::Password {
-                        username: config.username.clone(),
-                        password,
-                    },
-                };
-                let open_subsonic = config.server_type == "openSubsonic";
-                crate::providers::subsonic::SubsonicProvider::from_stored_config(
-                    credentials,
-                    open_subsonic,
-                    config.server_version.clone(),
-                )
-                .ok()
-                .map(|p| Arc::new(p) as Arc<dyn MediaProvider>)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    };
-
-    if let Some(provider) = provider {
-        *state.provider.write().await = Some(provider);
-        *state.server_type.write().await = Some(config.server_type);
-        *state.server_version.write().await = config.server_version;
-        *state.last_connection_check.lock().await = None;
-    }
-}
-
 async fn handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<JsonRpcRequest>,
@@ -297,6 +180,9 @@ async fn handler(
         "test_connection" => handle_test_connection(&state, payload.params).await,
         "server.connect" => handle_server_connect(&state, payload.params).await,
         "server.logout" => handle_server_logout(&state).await,
+        "server.list" => handle_server_list(&state).await,
+        "server.select" => handle_server_select(&state, payload.params).await,
+        "server.remove" => handle_server_remove(&state, payload.params).await,
         "login" => handle_login(&state, payload.params).await,
         "save_credentials" => handle_save_credentials(payload.params).await,
         "get_credentials" => handle_get_credentials(&state).await,
@@ -415,7 +301,10 @@ fn normalized_server_url(url: &str) -> String {
     url.trim().trim_end_matches('/').to_ascii_lowercase()
 }
 
-fn server_config_id(config: &crate::db::ServerConfig) -> String {
+/// The pre-2.11 derived composite server id (`type|url|username`). Retained only
+/// to reconcile basket items persisted under the old scheme to the new UUID so
+/// they are not silently wiped after migration (AC22).
+fn legacy_composite_server_id(config: &crate::db::ServerConfig) -> String {
     format!(
         "{}|{}|{}",
         config.server_type,
@@ -424,6 +313,7 @@ fn server_config_id(config: &crate::db::ServerConfig) -> String {
     )
 }
 
+/// The currently selected server config row (`selected = 1`), if any.
 fn current_server_config(
     state: &AppState,
 ) -> Result<Option<crate::db::ServerConfig>, JsonRpcError> {
@@ -434,8 +324,10 @@ fn current_server_config(
     })
 }
 
+/// The currently selected server's UUID, if any.
+#[allow(dead_code)]
 fn current_server_id(state: &AppState) -> Result<Option<String>, JsonRpcError> {
-    Ok(current_server_config(state)?.as_ref().map(server_config_id))
+    Ok(current_server_config(state)?.map(|c| c.id))
 }
 
 async fn handle_test_connection(
@@ -470,20 +362,51 @@ async fn handle_test_connection(
     }
 }
 
+/// Returns the selected server's provider (lazily connecting on first use), or
+/// `NotConnected` if no server is selected. All existing `browse.*`/`sync.*`/
+/// playlist/scrobble call sites keep calling this unchanged (AC13).
 pub async fn require_provider(state: &AppState) -> Result<Arc<dyn MediaProvider>, JsonRpcError> {
-    state.provider.read().await.clone().ok_or(JsonRpcError {
-        code: ERR_CONNECTION_FAILED,
-        message: hifimule_i18n::t("error.no_active_media_provider"),
+    match crate::server_manager::selected_provider(&state.server_manager, &state.db).await {
+        Some(Ok(provider)) => Ok(provider),
+        Some(Err(error)) => Err(provider_error_to_rpc(error)),
+        None => Err(JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: hifimule_i18n::t("error.no_active_media_provider"),
+            data: None,
+        }),
+    }
+}
+
+/// Returns the provider for a specific server id (routing primitive for
+/// multi-provider sync/auto-fill/playlist work). Lazily connects on first use.
+pub async fn get_provider_for_server(
+    state: &AppState,
+    server_id: &str,
+) -> Result<Arc<dyn MediaProvider>, JsonRpcError> {
+    crate::server_manager::get_provider(&state.server_manager, &state.db, server_id)
+        .await
+        .map_err(provider_error_to_rpc)
+}
+
+fn storage_error_to_rpc(error: impl std::fmt::Display) -> JsonRpcError {
+    JsonRpcError {
+        code: ERR_STORAGE_ERROR,
+        message: error.to_string(),
         data: None,
-    })
+    }
 }
 
 fn provider_error_to_rpc(error: ProviderError) -> JsonRpcError {
     match error {
         ProviderError::Auth(msg) => JsonRpcError {
-            code: ERR_CONNECTION_FAILED,
+            // AC11: a distinct code lets the UI surface a server-scoped re-auth
+            // prompt instead of a generic connection error.
+            code: ERR_UNAUTHORIZED,
             message: msg,
-            data: None,
+            data: Some(serde_json::json!({
+                "unauthorized": true,
+                "i18nKey": "error.unauthorized",
+            })),
         },
         ProviderError::UnsupportedCapability(msg) => JsonRpcError {
             code: ERR_UNSUPPORTED_CAPABILITY,
@@ -945,6 +868,26 @@ async fn handle_playlist_create(
         .filter(|id| id != "__auto_fill_slot__")
         .collect();
 
+    // Cross-server scope check (AC33): when the caller supplies per-item serverIds
+    // (`items: [{ id, serverId }]`), every item must belong to the selected server.
+    // The UI pre-filters (AC34) so this normally never trips; it is the daemon-side
+    // guard against a basket holding items from another server.
+    if let Some(items) = params.get("items").and_then(Value::as_array) {
+        let selected_id = current_server_id(state)?;
+        for item in items {
+            let item_server = item.get("serverId").and_then(Value::as_str);
+            if let (Some(item_server), Some(selected)) = (item_server, selected_id.as_deref())
+                && item_server != selected
+            {
+                return Err(JsonRpcError {
+                    code: ERR_CROSS_SERVER_CONFLICT,
+                    message: "Playlist creation requires all items to be from the selected server. Switch server or remove cross-server items.".to_string(),
+                    data: Some(serde_json::json!({ "i18nKey": "error.cross_server_playlist" })),
+                });
+            }
+        }
+    }
+
     let mut track_ids: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut skipped_item_ids: Vec<String> = Vec::new();
@@ -1313,7 +1256,25 @@ async fn handle_server_connect(
         .to_string();
     let version = provider.server_version().map(str::to_string);
 
-    let secret = match provider.server_type() {
+    // Persist the server row (upsert by normalized URL, AC5) and obtain its UUID.
+    let server_id = state
+        .db
+        .upsert_server(url, &normalized_type, username, version.as_deref())
+        .map_err(|error| JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: error.to_string(),
+            data: None,
+        })?;
+
+    // Did this server end up selected? (upsert auto-selects the first-ever server.)
+    let is_selected = current_server_config(state)?
+        .map(|c| c.id == server_id)
+        .unwrap_or(false);
+
+    // Store the credential in the UUID-keyed vault (AC18); update config.json only
+    // when this server is the selected one, so the static get_credentials() resolves
+    // the active Jellyfin session correctly.
+    match provider.server_type() {
         crate::providers::ServerType::Jellyfin => {
             let token = provider
                 .access_token()
@@ -1331,78 +1292,198 @@ async fn handle_server_connect(
                     data: None,
                 })?
                 .to_string();
-            CredentialManager::save_credentials(url, &token, Some(&user_id)).map_err(|error| {
-                JsonRpcError {
-                    code: ERR_STORAGE_ERROR,
-                    message: error.to_string(),
-                    data: None,
-                }
-            })?;
-            token
+            if is_selected {
+                CredentialManager::save_jellyfin_session(&server_id, url, &token, Some(&user_id))
+                    .map_err(storage_error_to_rpc)?;
+            } else {
+                CredentialManager::save_server_credential(
+                    &server_id,
+                    &crate::api::ServerCredentials {
+                        token_or_password: token,
+                        user_id: Some(user_id),
+                    },
+                )
+                .map_err(storage_error_to_rpc)?;
+            }
         }
         crate::providers::ServerType::Subsonic | crate::providers::ServerType::OpenSubsonic => {
-            password.to_string()
-        }
-        crate::providers::ServerType::Unknown => String::new(),
-    };
-    if !secret.is_empty() {
-        CredentialManager::save_server_secret(&normalized_type, &secret).map_err(|error| {
-            JsonRpcError {
-                code: ERR_STORAGE_ERROR,
-                message: error.to_string(),
-                data: None,
+            CredentialManager::save_server_credential(
+                &server_id,
+                &crate::api::ServerCredentials {
+                    token_or_password: password.to_string(),
+                    user_id: None,
+                },
+            )
+            .map_err(storage_error_to_rpc)?;
+            if is_selected {
+                CredentialManager::set_config_selected_server(&server_id)
+                    .map_err(storage_error_to_rpc)?;
             }
-        })?;
-        if matches!(
-            provider.server_type(),
-            crate::providers::ServerType::Subsonic | crate::providers::ServerType::OpenSubsonic
-        ) {
-            save_subsonic_server_secret_aliases(&secret)?;
         }
+        crate::providers::ServerType::Unknown => {}
     }
-    state
-        .db
-        .upsert_server_config(url, &normalized_type, username, version.as_deref())
-        .map_err(|error| JsonRpcError {
-            code: ERR_STORAGE_ERROR,
-            message: error.to_string(),
-            data: None,
-        })?;
 
-    *state.provider.write().await = Some(provider);
-    *state.server_type.write().await = Some(normalized_type.clone());
-    *state.server_version.write().await = version.clone();
+    // Refresh the manager: reload rows, set selection, and cache the live provider.
+    {
+        let mut mgr = state.server_manager.write().await;
+        mgr.load_from_db(&state.db);
+        mgr.providers.insert(server_id.clone(), provider.clone());
+    }
     *state.last_connection_check.lock().await = None;
 
     Ok(serde_json::json!({
         "ok": true,
+        "serverId": server_id,
         "serverType": normalized_type,
         "serverVersion": version,
     }))
 }
 
+/// Full logout (UI "log out" / disconnect): removes ALL configured servers,
+/// clears the vault and config, and resets the in-memory manager.
 async fn handle_server_logout(state: &AppState) -> Result<Value, JsonRpcError> {
-    *state.provider.write().await = None;
-    *state.server_type.write().await = None;
-    *state.server_version.write().await = None;
+    {
+        let mut mgr = state.server_manager.write().await;
+        *mgr = crate::server_manager::ServerManager::new();
+    }
     *state.last_connection_check.lock().await = None;
 
-    state
-        .db
-        .clear_server_config()
-        .map_err(|error| JsonRpcError {
-            code: ERR_STORAGE_ERROR,
-            message: error.to_string(),
-            data: None,
-        })?;
+    state.db.clear_server_config().map_err(storage_error_to_rpc)?;
+    CredentialManager::clear_credentials().map_err(storage_error_to_rpc)?;
 
-    CredentialManager::clear_credentials().map_err(|error| JsonRpcError {
-        code: ERR_STORAGE_ERROR,
-        message: error.to_string(),
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+fn server_row_to_json(config: &crate::db::ServerConfig) -> Value {
+    serde_json::json!({
+        "id": config.id,
+        "url": config.url,
+        "serverType": config.server_type,
+        "username": config.username,
+        "selected": config.selected,
+    })
+}
+
+/// AC20: `server.list → Array<{ id, url, serverType, username, selected }>`.
+async fn handle_server_list(state: &AppState) -> Result<Value, JsonRpcError> {
+    let servers = state.db.list_servers().map_err(storage_error_to_rpc)?;
+    let json: Vec<Value> = servers.iter().map(server_row_to_json).collect();
+    Ok(serde_json::json!(json))
+}
+
+/// Updates config.json to reflect `id` as the active server so the static
+/// `get_credentials()` (Jellyfin paths) resolves the right session.
+fn sync_selected_config(state: &AppState, id: &str) -> Result<(), JsonRpcError> {
+    let Some(record) = state.db.get_server(id).map_err(storage_error_to_rpc)? else {
+        return Ok(());
+    };
+    if record.server_type == "jellyfin" {
+        if let Ok(creds) = CredentialManager::get_server_credential(id) {
+            CredentialManager::save_jellyfin_session(
+                id,
+                &record.url,
+                &creds.token_or_password,
+                creds.user_id.as_deref(),
+            )
+            .map_err(storage_error_to_rpc)?;
+        } else {
+            CredentialManager::set_config_selected_server(id).map_err(storage_error_to_rpc)?;
+        }
+    } else {
+        CredentialManager::set_config_selected_server(id).map_err(storage_error_to_rpc)?;
+    }
+    Ok(())
+}
+
+/// AC2: `server.select({ id })` — persists selection, refreshes the manager, and
+/// lazily connects the newly selected server's provider.
+async fn handle_server_select(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let id = params["id"].as_str().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing id".to_string(),
         data: None,
     })?;
 
+    state.db.set_selected(id).map_err(|e| JsonRpcError {
+        code: ERR_NOT_FOUND,
+        message: e.to_string(),
+        data: None,
+    })?;
+    sync_selected_config(state, id)?;
+
+    state.server_manager.write().await.load_from_db(&state.db);
+    *state.last_connection_check.lock().await = None;
+
+    // Lazily connect (and cache) the selected provider so the library can reload.
+    get_provider_for_server(state, id).await?;
+
     Ok(serde_json::json!({ "ok": true }))
+}
+
+/// AC6/AC8: `server.remove({ id })` — deletes the row, evicts the vault entry and
+/// the cached provider, and reselects the first remaining server (or none) if the
+/// removed server was selected.
+async fn handle_server_remove(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+    let id = params["id"]
+        .as_str()
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing id".to_string(),
+            data: None,
+        })?
+        .to_string();
+
+    let was_selected = current_server_config(state)?
+        .map(|c| c.id == id)
+        .unwrap_or(false);
+
+    let removed = state.db.remove_server(&id).map_err(storage_error_to_rpc)?;
+    if !removed {
+        return Err(JsonRpcError {
+            code: ERR_NOT_FOUND,
+            message: format!("Server not found: {id}"),
+            data: None,
+        });
+    }
+    // Evict credential + cached provider before returning (enforcement rule).
+    let _ = CredentialManager::remove_server_credential(&id);
+    state.server_manager.write().await.providers.remove(&id);
+
+    // Reselect when the removed server was the active one (AC8).
+    let mut reselected: Option<String> = None;
+    if was_selected {
+        let remaining = state.db.list_servers().map_err(storage_error_to_rpc)?;
+        if let Some(next) = remaining.first() {
+            state.db.set_selected(&next.id).map_err(storage_error_to_rpc)?;
+            sync_selected_config(state, &next.id)?;
+            reselected = Some(next.id.clone());
+        }
+    }
+
+    state.server_manager.write().await.load_from_db(&state.db);
+    *state.last_connection_check.lock().await = None;
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "removedServerId": id,
+        "reselectedServerId": reselected,
+    }))
 }
 
 fn parse_server_type_hint(value: &str) -> Result<ServerTypeHint, JsonRpcError> {
@@ -1578,12 +1659,35 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
     });
 
     let active_operation_id = state.sync_operation_manager.get_active_operation_id().await;
-    let server_type = state.server_type.read().await.clone();
-    let server_version = state.server_version.read().await.clone();
-    let server_config = current_server_config(state)?;
-    let current_server = server_config.as_ref().map(|config| {
+
+    // Multi-server snapshot (AC15): full server list + selected id, plus the
+    // legacy `currentServer`/`serverType`/`serverVersion` fields kept for existing
+    // consumers (mapped to the selected server). Read from the in-memory manager
+    // (source of truth, kept in sync with the DB on every mutation).
+    let (servers_snapshot, selected_server_id) = {
+        let mgr = state.server_manager.read().await;
+        (mgr.servers.clone(), mgr.selected_server_id.clone())
+    };
+    let servers_json: Vec<Value> = servers_snapshot
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "id": s.id,
+                "url": s.url,
+                "serverType": s.server_type,
+                "username": s.username,
+                "selected": s.selected,
+            })
+        })
+        .collect();
+    let selected_server = selected_server_id
+        .as_deref()
+        .and_then(|id| servers_snapshot.iter().find(|s| s.id == id));
+    let server_type = selected_server.map(|c| c.server_type.clone());
+    let server_version = selected_server.and_then(|c| c.server_version.clone());
+    let current_server = selected_server.map(|config| {
         serde_json::json!({
-            "serverId": server_config_id(config),
+            "serverId": config.id,
             "url": config.url,
             "username": config.username,
             "serverType": config.server_type,
@@ -1613,13 +1717,12 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         })
         .collect();
 
-    let supports_playlist_write = {
-        let guard = state.provider.read().await;
-        guard
-            .as_ref()
-            .map(|p| p.capabilities().supports_playlist_write)
-            .unwrap_or(false)
-    };
+    // Capabilities of the selected provider (lazily connecting it on first read).
+    let supports_playlist_write =
+        match crate::server_manager::selected_provider(&state.server_manager, &state.db).await {
+            Some(Ok(provider)) => provider.capabilities().supports_playlist_write,
+            _ => false,
+        };
 
     Ok(serde_json::json!({
         "currentDevice": device,
@@ -1628,6 +1731,8 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         "serverType": server_type,
         "serverVersion": server_version,
         "currentServer": current_server,
+        "servers": servers_json,
+        "selectedServerId": selected_server_id,
         "dirtyManifest": dirty,
         "pendingDevicePath": pending_device_path,
         "pendingDeviceFriendlyName": pending_device_friendly_name,
@@ -1640,19 +1745,52 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
     }))
 }
 
+/// Reconciles basket items to current server UUIDs (AC22): items still carrying a
+/// pre-2.11 composite serverId (`type|url|username`) are remapped to the matching
+/// server's UUID; items with no serverId are assigned to the selected server;
+/// items referencing an unknown/removed server are dropped (so a removed server's
+/// items do not linger). Multi-server items from other known servers are retained
+/// (read-only rendering is the UI's job, AC3).
+fn reconcile_basket_server_ids(
+    items: Vec<crate::device::BasketItem>,
+    servers: &[crate::db::ServerConfig],
+    selected_id: Option<&str>,
+) -> Vec<crate::device::BasketItem> {
+    let known: HashSet<&str> = servers.iter().map(|s| s.id.as_str()).collect();
+    let composite_to_uuid: HashMap<String, String> = servers
+        .iter()
+        .map(|s| (legacy_composite_server_id(s), s.id.clone()))
+        .collect();
+    items
+        .into_iter()
+        .filter_map(|mut item| {
+            let resolved = match item.server_id.clone() {
+                None => selected_id.map(|s| s.to_string()),
+                Some(s) if known.contains(s.as_str()) => Some(s),
+                Some(s) => composite_to_uuid.get(&s).cloned(),
+            };
+            resolved.map(|rid| {
+                item.server_id = Some(rid);
+                item
+            })
+        })
+        .collect()
+}
+
 async fn handle_manifest_get_basket(state: &AppState) -> Result<Value, JsonRpcError> {
     let device = state.device_manager.get_current_device().await;
-    let active_server_id = current_server_id(state)?;
-    let mut basket_items = device
+    let servers = state.db.list_servers().map_err(storage_error_to_rpc)?;
+    let selected_id = servers.iter().find(|s| s.selected).map(|s| s.id.clone());
+    let basket_items = device
         .as_ref()
         .map(|d| d.basket_items.clone())
         .unwrap_or_default();
-    if let Some(active_server_id) = active_server_id.as_deref() {
-        basket_items.retain(|item| item.server_id.as_deref() == Some(active_server_id));
-    }
+    // Return items from ALL servers (mixed basket, AC3); only reconcile ids.
+    let basket_items =
+        reconcile_basket_server_ids(basket_items, &servers, selected_id.as_deref());
     Ok(serde_json::json!({
         "basketItems": basket_items,
-        "serverId": active_server_id,
+        "serverId": selected_id,
     }))
 }
 
@@ -1681,14 +1819,11 @@ async fn handle_manifest_save_basket(
             message: format!("Invalid basketItems format: {}", e),
             data: None,
         })?;
-    let active_server_id = current_server_id(state)?;
-    let items: Vec<_> = match active_server_id.as_deref() {
-        Some(server_id) => items
-            .into_iter()
-            .filter(|item| item.server_id.as_deref() == Some(server_id))
-            .collect(),
-        None => Vec::new(),
-    };
+    // Persist items from ALL known servers (mixed basket, AC3/AC25); reconcile
+    // legacy/composite serverIds and drop items from unknown/removed servers.
+    let servers = state.db.list_servers().map_err(storage_error_to_rpc)?;
+    let selected_id = servers.iter().find(|s| s.selected).map(|s| s.id.clone());
+    let items = reconcile_basket_server_ids(items, &servers, selected_id.as_deref());
 
     match state.device_manager.save_basket(items).await {
         Ok(_) => Ok(Value::Bool(true)),
@@ -1701,42 +1836,18 @@ async fn handle_manifest_save_basket(
 }
 
 async fn check_server_connection_cached(state: &AppState) -> bool {
-    const CACHE_DURATION_SECS: u64 = 5;
-
-    if state.provider.read().await.is_some() {
-        return true;
-    }
-
-    let mut cache = state.last_connection_check.lock().await;
-
-    // Check if we have a recent cached result
-    if let Some((timestamp, result)) = *cache
-        && timestamp.elapsed().as_secs() < CACHE_DURATION_SECS
-    {
-        return result;
-    }
-
-    // Perform actual connection check
-    let is_connected = match CredentialManager::get_credentials() {
-        Ok((url, token, _)) => {
-            // Actually test the connection
-            state
-                .jellyfin_client
-                .test_connection(&url, &token)
-                .await
-                .is_ok()
-        }
-        Err(_) => false,
-    };
-
-    // Update cache
-    *cache = Some((std::time::Instant::now(), is_connected));
-
-    is_connected
+    // A selected server means its credentials are stored and a provider can be
+    // lazily connected — treat that as connected without a network round-trip.
+    state
+        .server_manager
+        .read()
+        .await
+        .selected_server_id
+        .is_some()
 }
 
 async fn active_non_jellyfin_provider(state: &AppState) -> Option<Arc<dyn MediaProvider>> {
-    let provider = state.provider.read().await.clone()?;
+    let provider = require_provider(state).await.ok()?;
     if provider.server_type() == ServerType::Jellyfin {
         None
     } else {
@@ -1955,6 +2066,7 @@ fn provider_song_to_desired_item(song: &Song) -> crate::sync::DesiredItem {
         provider_suffix: song.suffix.clone(),
         original_bitrate: song.bitrate_kbps.map(|kbps| kbps * 1000),
         track_number: song.track_number,
+        server_id: None,
     }
 }
 
@@ -2309,6 +2421,7 @@ async fn provider_calculate_delta(
                         provider_suffix: item.provider_suffix,
                         original_bitrate: None,
                         track_number: None,
+                        server_id: None,
                     });
                 }
             }
@@ -2444,6 +2557,7 @@ fn jellyfin_item_to_desired_item(item: crate::api::JellyfinItem) -> crate::sync:
         provider_suffix,
         original_bitrate,
         track_number: item.index_number,
+        server_id: None,
     }
 }
 
@@ -3012,6 +3126,184 @@ async fn handle_sync_get_device_status_map(state: &AppState) -> Result<Value, Js
     }
 }
 
+/// Parses the `itemIds` param which may be legacy `string[]` or the multi-server
+/// `Array<{ id, serverId }>` shape (AC27). Returns (id, optional serverId) pairs.
+fn parse_item_specs(raw: &[Value]) -> Vec<(String, Option<String>)> {
+    raw.iter()
+        .filter_map(|v| {
+            if let Some(s) = v.as_str() {
+                Some((s.to_string(), None))
+            } else if let Some(obj) = v.as_object() {
+                obj.get("id")
+                    .and_then(Value::as_str)
+                    .map(|id| {
+                        (
+                            id.to_string(),
+                            obj.get("serverId")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                        )
+                    })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// True when the basket items resolve to more than one distinct server (each
+/// item's serverId, or the selected server when unspecified).
+fn sync_spans_multiple_servers(
+    item_specs: &[(String, Option<String>)],
+    selected_id: Option<&str>,
+    auto_fill_server: Option<&str>,
+) -> bool {
+    let mut servers: HashSet<String> = HashSet::new();
+    for (_, server) in item_specs {
+        let resolved = server.as_deref().or(selected_id);
+        if let Some(s) = resolved {
+            servers.insert(s.to_string());
+        }
+    }
+    if let Some(af) = auto_fill_server {
+        servers.insert(af.to_string());
+    }
+    servers.len() > 1
+}
+
+/// Resolves a mixed-server basket by routing each item to its originating
+/// provider (AC28). Each resolved DesiredItem is tagged with its `server_id` so
+/// execute can download from the correct server. Works for any provider type
+/// (Jellyfin + Subsonic) via the generic `provider_sync_items_for_id`.
+async fn multi_provider_calculate_delta(
+    state: &AppState,
+    item_specs: &[(String, Option<String>)],
+    manifest: &crate::device::DeviceManifest,
+    params: &Value,
+) -> Result<Value, JsonRpcError> {
+    let selected_id = current_server_id(state)?;
+    let basket_items = basket_items_from_params_or_manifest(params, manifest);
+    let favorite_basket_by_id: HashMap<String, crate::device::BasketItem> = basket_items
+        .into_iter()
+        .filter(|item| matches!(item.item_type.as_str(), "FavoriteArtist" | "FavoriteAlbum"))
+        .map(|item| (item.id.clone(), item))
+        .collect();
+
+    // Group ids by their resolved serverId, preserving order.
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for (id, server) in item_specs {
+        let Some(server_id) = server.clone().or_else(|| selected_id.clone()) else {
+            continue;
+        };
+        match groups.iter_mut().find(|(s, _)| *s == server_id) {
+            Some((_, ids)) => ids.push(id.clone()),
+            None => groups.push((server_id, vec![id.clone()])),
+        }
+    }
+
+    let mut desired_items: Vec<crate::sync::DesiredItem> = Vec::new();
+    let mut playlist_sync_items = Vec::new();
+    let mut seen_ids = HashSet::new();
+
+    for (server_id, ids) in &groups {
+        let provider = get_provider_for_server(state, server_id).await?;
+        for id in ids {
+            if let Some(basket_item) = favorite_basket_by_id.get(id) {
+                let tracks =
+                    provider_favorite_sync_items_for_basket_item(provider.clone(), basket_item)
+                        .await?;
+                for mut item in tracks {
+                    if seen_ids.insert(item.jellyfin_id.clone()) {
+                        item.server_id = Some(server_id.clone());
+                        desired_items.push(item);
+                    }
+                }
+                continue;
+            }
+            let (tracks, playlist) = provider_sync_items_for_id(provider.clone(), id).await?;
+            if let Some(playlist) = playlist {
+                playlist_sync_items.push(playlist);
+            }
+            for mut item in tracks {
+                if seen_ids.insert(item.jellyfin_id.clone()) {
+                    item.server_id = Some(server_id.clone());
+                    desired_items.push(item);
+                }
+            }
+        }
+    }
+
+    // Auto-fill is bound to a single server (AC32): its own serverId, defaulting to
+    // the selected server.
+    if params
+        .get("autoFill")
+        .and_then(|af| af.get("enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let af_server = params
+            .get("autoFill")
+            .and_then(|af| af.get("serverId"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| selected_id.clone());
+        if let Some(af_server) = af_server {
+            let provider = get_provider_for_server(state, &af_server).await?;
+            let auto_fill_budget = params
+                .get("autoFill")
+                .and_then(|af| af.get("maxBytes"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if auto_fill_budget > 0 {
+                let exclude_ids: Vec<String> =
+                    desired_items.iter().map(|i| i.jellyfin_id.clone()).collect();
+                let fill_params = crate::auto_fill::AutoFillParams {
+                    exclude_item_ids: exclude_ids,
+                    max_fill_bytes: auto_fill_budget,
+                };
+                let fill_items = crate::auto_fill::run_auto_fill_provider(provider, fill_params)
+                    .await
+                    .map_err(|e| JsonRpcError {
+                        code: ERR_CONNECTION_FAILED,
+                        message: format!("Auto-fill failed: {}", e),
+                        data: None,
+                    })?;
+                for item in fill_items {
+                    if seen_ids.insert(item.id.clone()) {
+                        desired_items.push(crate::sync::DesiredItem {
+                            jellyfin_id: item.id,
+                            name: item.name,
+                            album: item.album,
+                            artist: item.artist,
+                            size_bytes: item.size_bytes,
+                            etag: None,
+                            provider_album_id: item.provider_album_id,
+                            provider_content_type: item.provider_content_type,
+                            provider_suffix: item.provider_suffix,
+                            original_bitrate: None,
+                            track_number: None,
+                            server_id: Some(af_server.clone()),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
+    delta.playlists = playlist_sync_items;
+    if let Some((_, device_io)) = state.device_manager.get_manifest_and_io().await {
+        crate::sync::augment_delta_with_existence_check(
+            &mut delta,
+            &desired_items,
+            manifest,
+            device_io.as_ref(),
+        )
+        .await;
+    }
+    Ok(delta_value_with_cleanup_metadata(&delta, manifest))
+}
+
 async fn handle_sync_calculate_delta(
     state: &AppState,
     params: Option<Value>,
@@ -3034,16 +3326,15 @@ async fn handle_sync_calculate_delta(
         data: None,
     })?;
 
-    let item_ids = params["itemIds"].as_array().ok_or(JsonRpcError {
+    let raw_item_ids = params["itemIds"].as_array().ok_or(JsonRpcError {
         code: ERR_INVALID_PARAMS,
         message: "Missing or invalid itemIds array".to_string(),
         data: None,
     })?;
 
-    let item_ids: Vec<String> = item_ids
-        .iter()
-        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-        .collect();
+    // itemIds accepts either legacy `string[]` or `Array<{ id, serverId }>` (AC27).
+    let item_specs: Vec<(String, Option<String>)> = parse_item_specs(raw_item_ids);
+    let item_ids: Vec<String> = item_specs.iter().map(|(id, _)| id.clone()).collect();
 
     // Get current device manifest
     let manifest = state
@@ -3055,6 +3346,30 @@ async fn handle_sync_calculate_delta(
             message: "No device connected".to_string(),
             data: None,
         })?;
+
+    // Multi-server routing (AC27/AC28): when the basket (or an auto-fill slot bound
+    // to a different server) spans more than one server, resolve each item against
+    // its originating provider. Single-server baskets keep the existing dispatch
+    // unchanged (AC21).
+    let selected_id = current_server_id(state)?;
+    let auto_fill_server = if params
+        .get("autoFill")
+        .and_then(|af| af.get("enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        params
+            .get("autoFill")
+            .and_then(|af| af.get("serverId"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    } else {
+        None
+    };
+    if sync_spans_multiple_servers(&item_specs, selected_id.as_deref(), auto_fill_server.as_deref())
+    {
+        return multi_provider_calculate_delta(state, &item_specs, &manifest, &params).await;
+    }
 
     if let Some(provider) = active_non_jellyfin_provider(state).await {
         return provider_calculate_delta(state, provider, &item_ids, &manifest, &params).await;
@@ -3109,6 +3424,7 @@ async fn handle_sync_calculate_delta(
             provider_suffix,
             original_bitrate,
             track_number: item.index_number,
+            server_id: None,
         }
     };
 
@@ -3409,6 +3725,7 @@ async fn handle_sync_calculate_delta(
                             provider_suffix: item.provider_suffix,
                             original_bitrate: None,
                             track_number: None,
+                            server_id: None,
                         });
                     }
                 }
@@ -3505,21 +3822,32 @@ async fn handle_sync_detect_changes(
             data: None,
         })?;
 
-    let provider = state.provider.read().await.clone().ok_or(JsonRpcError {
-        code: ERR_CONNECTION_FAILED,
-        message: "No provider connected".to_string(),
-        data: None,
-    })?;
+    let provider = require_provider(state).await?;
 
     let context = manifest.provider_change_context();
-    let changes = provider
+    let changes = match provider
         .changes_since_with_context(token.as_deref(), &context)
         .await
-        .map_err(|e| JsonRpcError {
-            code: ERR_INTERNAL_ERROR,
-            message: format!("Change detection failed: {}", e),
-            data: None,
-        })?;
+    {
+        Ok(changes) => changes,
+        // Subsonic API error 70 ("data not found") means the change-log entry
+        // for this sync token has expired or was never recorded.  Treat it as
+        // an empty delta — the UI will fall back to a full-basket sync, which
+        // is always safe.  Any other error is a genuine failure worth surfacing.
+        Err(crate::providers::ProviderError::NotFound { .. }) => {
+            eprintln!(
+                "[SyncDetect] Sync token stale or not found — returning empty changes (full sync required)"
+            );
+            vec![]
+        }
+        Err(e) => {
+            return Err(JsonRpcError {
+                code: ERR_INTERNAL_ERROR,
+                message: format!("Change detection failed: {}", e),
+                data: None,
+            })
+        }
+    };
 
     // Enrich each change with metadata parsed from the Subsonic version string
     // ("subsonic:{id}|{size}|{contentType}|{suffix}"), so callers can populate
@@ -3644,6 +3972,7 @@ async fn handle_sync_execute(
                 track_number: item.track_number,
                 reason_code: Some("force-sync".to_string()),
                 reason: Some("force sync requested".to_string()),
+                server_id: item.server_id.clone(),
             });
             force_deletes.push(crate::sync::SyncDeleteItem {
                 jellyfin_id: item.jellyfin_id.clone(),
@@ -3731,6 +4060,147 @@ async fn handle_sync_execute(
             message: format!("Failed to mark manifest dirty, aborting sync: {}", e),
             data: None,
         });
+    }
+
+    // Multi-server execute (AC28/AC29): when the delta's adds span more than one
+    // server, route each server's items to its own provider. Single-server syncs
+    // keep the existing dispatch unchanged (AC21).
+    let add_servers: Vec<String> = {
+        let mut seen = HashSet::new();
+        let mut ordered = Vec::new();
+        for add in &delta.adds {
+            if let Some(sid) = add.server_id.clone()
+                && seen.insert(sid.clone())
+            {
+                ordered.push(sid);
+            }
+        }
+        ordered
+    };
+    if add_servers.len() > 1 {
+        // Resolve every group's provider up front so connection errors surface here.
+        let mut group_providers: Vec<(String, Arc<dyn MediaProvider>)> = Vec::new();
+        for sid in &add_servers {
+            let provider = get_provider_for_server(state, sid).await?;
+            group_providers.push((sid.clone(), provider));
+        }
+
+        let op_manager = state.sync_operation_manager.clone();
+        let op_id = operation_id.clone();
+        let device_manager = state.device_manager.clone();
+        let state_tx = state.state_tx.clone();
+        let _ = state_tx.send(crate::DaemonState::Syncing);
+
+        tokio::spawn(async move {
+            let (sync_manifest, device_io) = match device_manager.get_manifest_and_io().await {
+                Some(pair) => pair,
+                None => {
+                    eprintln!("[Sync] No device available — cannot execute multi-server sync");
+                    fail_sync_operation(&op_manager, &op_id, "sync_execute", "No device".to_string())
+                        .await;
+                    let _ = state_tx.send(crate::DaemonState::Error);
+                    return;
+                }
+            };
+            let transcoding_profile = match load_selected_transcoding_profile(
+                sync_manifest.transcoding_profile_id.as_deref(),
+            ) {
+                Ok(profile) => profile,
+                Err(e) => {
+                    fail_sync_operation(
+                        &op_manager,
+                        &op_id,
+                        "sync_execute",
+                        format!("Failed to load transcoding profile: {}", e),
+                    )
+                    .await;
+                    let _ = state_tx.send(crate::DaemonState::Error);
+                    return;
+                }
+            };
+
+            let mut all_errors: Vec<crate::sync::SyncFileError> = Vec::new();
+            let mut first = true;
+            for (sid, provider) in group_providers {
+                if op_manager.is_cancelled(&op_id).await {
+                    break;
+                }
+                // Each group syncs its own adds; deletes/id-changes/playlists are
+                // device-wide and run once, with the first group.
+                let group_adds: Vec<crate::sync::SyncAddItem> = delta
+                    .adds
+                    .iter()
+                    .filter(|a| a.server_id.as_deref() == Some(sid.as_str()))
+                    .cloned()
+                    .collect();
+                let sub_delta = crate::sync::SyncDelta {
+                    adds: group_adds,
+                    deletes: if first { delta.deletes.clone() } else { Vec::new() },
+                    id_changes: if first { delta.id_changes.clone() } else { Vec::new() },
+                    unchanged: 0,
+                    playlists: if first { delta.playlists.clone() } else { Vec::new() },
+                };
+                first = false;
+                let result = crate::sync::execute_provider_sync(
+                    &sub_delta,
+                    &device_path,
+                    crate::sync::ProviderSyncSource {
+                        provider,
+                        transcoding_profile: transcoding_profile.clone(),
+                    },
+                    op_manager.clone(),
+                    op_id.clone(),
+                    device_manager.clone(),
+                    device_io.clone(),
+                )
+                .await;
+                match result {
+                    Ok((_synced, errors)) => all_errors.extend(errors),
+                    Err(e) => all_errors.push(crate::sync::SyncFileError {
+                        jellyfin_id: String::new(),
+                        filename: format!("sync_execute[{sid}]"),
+                        error_message: e.to_string(),
+                    }),
+                }
+            }
+
+            if op_manager.is_cancelled(&op_id).await {
+                if let Some(mut operation) = op_manager.get_operation(&op_id).await {
+                    operation.status = crate::sync::SyncStatus::Cancelled;
+                    op_manager.update_operation(&op_id, operation).await;
+                }
+                let _ = state_tx.send(crate::DaemonState::Idle);
+                return;
+            }
+            if let Err(e) = device_manager
+                .update_manifest(|m| {
+                    m.dirty = false;
+                    m.pending_item_ids = vec![];
+                    if all_errors.is_empty() {
+                        m.last_synced_transcoding_profile_id = m.transcoding_profile_id.clone();
+                        m.transcoding_profile_dirty = false;
+                    }
+                })
+                .await
+            {
+                eprintln!("Failed to clear dirty flag on final manifest: {}", e);
+            }
+            if let Some(mut operation) = op_manager.get_operation(&op_id).await {
+                operation.status = if all_errors.is_empty() {
+                    crate::sync::SyncStatus::Complete
+                } else {
+                    crate::sync::SyncStatus::Failed
+                };
+                operation.errors = all_errors.clone();
+                op_manager.update_operation(&op_id, operation).await;
+            }
+            if all_errors.is_empty() {
+                drop(tokio::task::spawn_blocking(send_sync_complete_notification));
+            }
+            let _ = state_tx.send(crate::DaemonState::Idle);
+        });
+
+        return Ok(serde_json::json!({ "operationId": operation_id }));
     }
 
     if let Some(provider) = active_non_jellyfin_provider(state).await {
@@ -5224,9 +5694,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -5261,6 +5731,7 @@ mod tests {
                 original_bitrate: None,
                 original_container: None,
                 track_number: None,
+                server_id: None,
             }],
             dirty: false,
             pending_item_ids: vec![],
@@ -5569,13 +6040,18 @@ mod tests {
         assert_eq!(result["ok"], true);
         assert_eq!(result["serverType"], "openSubsonic");
 
-        let provider_set = state.provider.read().await.is_some();
+        let provider_set = state
+            .server_manager
+            .read()
+            .await
+            .selected_server_id
+            .is_some();
         assert!(
             provider_set,
             "provider must be set after successful connect"
         );
 
-        let server_type = state.server_type.read().await.clone();
+        let server_type = db.get_server_config().unwrap().map(|c| c.server_type);
         assert_eq!(server_type.as_deref(), Some("openSubsonic"));
 
         let config = db.get_server_config().unwrap().unwrap();
@@ -5620,7 +6096,7 @@ mod tests {
         assert_eq!(result["ok"], true);
         assert_eq!(result["serverType"], "subsonic");
         assert!(
-            state.provider.read().await.is_some(),
+            !state.server_manager.read().await.providers.is_empty(),
             "login must install the detected provider"
         );
 
@@ -5726,7 +6202,7 @@ mod tests {
 
         let db = Arc::new(crate::db::Database::memory().unwrap());
         let state = make_test_state(db);
-        *state.provider.write().await = Some(Arc::new(
+        state.server_manager.write().await.set_test_provider(Arc::new(
             crate::providers::jellyfin::JellyfinProvider::new_with_version(
                 JellyfinClient::new(),
                 server.url(),
@@ -5735,7 +6211,6 @@ mod tests {
                 Some("10.9.0".to_string()),
             ),
         ));
-        *state.server_type.write().await = Some("jellyfin".to_string());
 
         let items = handle_jellyfin_get_items(
             &state,
@@ -5883,7 +6358,7 @@ mod tests {
         CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
 
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        db.upsert_server_config(
+        db.upsert_server(
             "http://subsonic.example",
             "subsonic",
             "subsonic-user",
@@ -6260,7 +6735,7 @@ mod tests {
             .await;
 
         let db = Arc::new(crate::db::Database::memory().unwrap());
-        let state = make_test_state(db);
+        let state = make_test_state(db.clone());
 
         handle_server_connect(
             &state,
@@ -6279,8 +6754,144 @@ mod tests {
         .await
         .unwrap();
 
-        let server_type = state.server_type.read().await.clone();
+        let server_type = db.get_server_config().unwrap().map(|c| c.server_type);
         assert_eq!(server_type.as_deref(), Some("subsonic"));
+    }
+
+    // AC1/AC2/AC6/AC8/AC20: server.list / server.select / server.remove over a
+    // two-server setup, including reselection when the selected server is removed.
+    #[tokio::test]
+    async fn test_server_list_select_remove_multi_server() {
+        let _lock = credential_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp_dir.path().join("config.json"));
+
+        let make_subsonic_server = || async {
+            let mut server = mockito::Server::new_async().await;
+            server
+                .mock("GET", "/rest/ping.view")
+                .match_query(mockito::Matcher::Any)
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+                .create_async()
+                .await;
+            server
+        };
+
+        let server_a = make_subsonic_server().await;
+        let server_b = make_subsonic_server().await;
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db.clone());
+
+        let connect = |url: String, user: &str| {
+            let user = user.to_string();
+            let state = state.clone();
+            async move {
+                handle_server_connect(
+                    &state,
+                    Some(json!({ "url": url, "serverType": "subsonic", "username": user, "password": "pw" })),
+                )
+                .await
+                .expect("connect")
+            }
+        };
+
+        let res_a = connect(server_a.url(), "user-a").await;
+        let id_a = res_a["serverId"].as_str().unwrap().to_string();
+        let res_b = connect(server_b.url(), "user-b").await;
+        let id_b = res_b["serverId"].as_str().unwrap().to_string();
+        assert_ne!(id_a, id_b);
+
+        // server.list → two entries; the first connected is selected (AC1/AC20).
+        let list = handle_server_list(&state).await.unwrap();
+        let arr = list.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        let selected_count = arr.iter().filter(|s| s["selected"] == true).count();
+        assert_eq!(selected_count, 1);
+        assert!(arr.iter().any(|s| s["id"] == id_a.as_str() && s["selected"] == true));
+
+        // server.select(B) switches selection (AC2).
+        handle_server_select(&state, Some(json!({ "id": id_b }))).await.unwrap();
+        assert_eq!(
+            state.server_manager.read().await.selected_server_id.as_deref(),
+            Some(id_b.as_str())
+        );
+
+        // server.remove(A) — non-selected; row + vault + cache gone (AC6).
+        handle_server_remove(&state, Some(json!({ "id": id_a }))).await.unwrap();
+        assert_eq!(db.list_servers().unwrap().len(), 1);
+        assert!(CredentialManager::get_server_credential(&id_a).is_err());
+        assert!(!state.server_manager.read().await.providers.contains_key(&id_a));
+
+        // server.remove(B) — the selected one; nothing remains, selection cleared (AC8).
+        let removed = handle_server_remove(&state, Some(json!({ "id": id_b }))).await.unwrap();
+        assert_eq!(removed["reselectedServerId"], Value::Null);
+        assert_eq!(db.list_servers().unwrap().len(), 0);
+        assert_eq!(state.server_manager.read().await.selected_server_id, None);
+
+        // Removing a non-existent server errors.
+        let err = handle_server_remove(&state, Some(json!({ "id": "nope" }))).await.unwrap_err();
+        assert_eq!(err.code, ERR_NOT_FOUND);
+    }
+
+    // AC27: itemIds accepts legacy strings and {id, serverId} objects.
+    #[test]
+    fn test_parse_item_specs_mixed_shapes() {
+        let raw = vec![
+            json!("legacy-id"),
+            json!({ "id": "a", "serverId": "srv-1" }),
+            json!({ "id": "b" }),
+            json!(42),
+        ];
+        let specs = parse_item_specs(&raw);
+        assert_eq!(
+            specs,
+            vec![
+                ("legacy-id".to_string(), None),
+                ("a".to_string(), Some("srv-1".to_string())),
+                ("b".to_string(), None),
+            ]
+        );
+    }
+
+    // AC28: detect when a basket spans multiple servers (incl. auto-fill server).
+    #[test]
+    fn test_sync_spans_multiple_servers() {
+        let single = vec![("a".into(), Some("s1".into())), ("b".into(), Some("s1".into()))];
+        assert!(!sync_spans_multiple_servers(&single, Some("s1"), None));
+
+        let mixed = vec![("a".into(), Some("s1".into())), ("b".into(), Some("s2".into()))];
+        assert!(sync_spans_multiple_servers(&mixed, Some("s1"), None));
+
+        // Legacy items (no serverId) resolve to the selected server → single.
+        let legacy = vec![("a".into(), None), ("b".into(), None)];
+        assert!(!sync_spans_multiple_servers(&legacy, Some("s1"), None));
+
+        // An auto-fill slot bound to another server makes it multi.
+        let af = vec![("a".into(), Some("s1".into()))];
+        assert!(sync_spans_multiple_servers(&af, Some("s1"), Some("s2")));
+    }
+
+    // AC11: provider auth errors map to ERR_UNAUTHORIZED with an `unauthorized`
+    // data flag, so the UI distinguishes them from generic connection failures.
+    #[test]
+    fn test_provider_auth_error_maps_to_unauthorized() {
+        let err = provider_error_to_rpc(ProviderError::Auth("token expired".into()));
+        assert_eq!(err.code, ERR_UNAUTHORIZED);
+        assert_eq!(err.message, "token expired");
+        assert_eq!(
+            err.data.as_ref().and_then(|d| d["unauthorized"].as_bool()),
+            Some(true)
+        );
+
+        // Non-auth errors keep their own codes.
+        let nf = provider_error_to_rpc(ProviderError::NotFound {
+            item_type: "song".into(),
+            id: "x".into(),
+        });
+        assert_eq!(nf.code, ERR_NOT_FOUND);
     }
 
     #[test]
@@ -6309,9 +6920,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -6338,9 +6949,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -6368,9 +6979,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db: db.clone(),
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -6408,9 +7019,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db: db.clone(),
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -6452,9 +7063,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db: db.clone(),
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -6585,9 +7196,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db: db.clone(),
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -6631,9 +7242,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db: db.clone(),
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -6672,9 +7283,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db: db.clone(),
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -6765,10 +7376,10 @@ mod tests {
         )
         .expect("provider");
         state
-            .provider
+            .server_manager
             .write()
             .await
-            .replace(Arc::new(provider) as Arc<dyn MediaProvider>);
+            .set_test_provider(Arc::new(provider) as Arc<dyn MediaProvider>);
 
         let dir = tempfile::tempdir().unwrap();
         let manifest = crate::device::DeviceManifest {
@@ -6793,6 +7404,7 @@ mod tests {
                 original_bitrate: None,
                 original_container: None,
                 track_number: None,
+                server_id: None,
             }],
             dirty: false,
             pending_item_ids: vec![],
@@ -6845,9 +7457,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db: db.clone(),
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -6891,6 +7503,7 @@ mod tests {
                     original_bitrate: None,
                     original_container: None,
                     track_number: None,
+                    server_id: None,
                 },
                 crate::device::SyncedItem {
                     jellyfin_id: "item-b".to_string(),
@@ -6908,6 +7521,7 @@ mod tests {
                     original_bitrate: None,
                     original_container: None,
                     track_number: None,
+                    server_id: None,
                 },
             ],
             dirty: false,
@@ -6934,9 +7548,9 @@ mod tests {
 
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db: db.clone(),
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -6961,9 +7575,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -7012,9 +7626,9 @@ mod tests {
 
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -7068,9 +7682,9 @@ mod tests {
 
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -7095,9 +7709,9 @@ mod tests {
         // No device — dirtyManifest should be false
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db: db.clone(),
             device_manager: device_manager.clone(),
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -7143,9 +7757,9 @@ mod tests {
 
         let state2 = AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -7170,9 +7784,9 @@ mod tests {
         // No unrecognized device → pendingDevicePath should be null
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db: db.clone(),
             device_manager: device_manager.clone(),
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -7281,9 +7895,9 @@ mod tests {
 
         let state = Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -7387,9 +8001,9 @@ mod tests {
 
         let state = Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -7436,9 +8050,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -7470,9 +8084,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -7506,9 +8120,9 @@ mod tests {
 
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db: db.clone(),
             device_manager: device_manager.clone(),
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -7571,9 +8185,9 @@ mod tests {
 
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db: db.clone(),
             device_manager: device_manager.clone(),
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -7653,9 +8267,9 @@ mod tests {
 
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db: db.clone(),
             device_manager: device_manager.clone(),
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -7745,9 +8359,9 @@ mod tests {
 
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -7772,9 +8386,9 @@ mod tests {
         // No running operation → activeOperationId should be null
         let state = AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db: db.clone(),
             device_manager: device_manager.clone(),
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -7792,7 +8406,7 @@ mod tests {
         assert_eq!(result["serverType"], serde_json::Value::Null);
         assert_eq!(result["serverVersion"], serde_json::Value::Null);
 
-        *state.provider.write().await = Some(Arc::new(
+        state.server_manager.write().await.set_test_provider(Arc::new(
             crate::providers::jellyfin::JellyfinProvider::new_with_version(
                 JellyfinClient::new(),
                 "http://localhost",
@@ -7801,8 +8415,6 @@ mod tests {
                 Some("10.9.0".to_string()),
             ),
         ));
-        *state.server_type.write().await = Some("jellyfin".to_string());
-        *state.server_version.write().await = Some("10.9.0".to_string());
 
         let result = handle_get_daemon_state(&state).await.unwrap();
         assert_eq!(result["serverConnected"], true);
@@ -7816,9 +8428,9 @@ mod tests {
 
         let state2 = AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -7842,9 +8454,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -8008,9 +8620,9 @@ mod tests {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let state = Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
-            provider: Arc::new(tokio::sync::RwLock::new(None)),
-            server_type: Arc::new(tokio::sync::RwLock::new(None)),
-            server_version: Arc::new(tokio::sync::RwLock::new(None)),
+            server_manager: Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
             db,
             device_manager,
             last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -8268,7 +8880,7 @@ mod tests {
         let state = make_test_state(db);
         // Jellyfin provider is set so active_non_jellyfin_provider returns None,
         // causing handle_jellyfin_get_views to fall through to the JellyfinClient path.
-        *state.provider.write().await = Some(Arc::new(
+        state.server_manager.write().await.set_test_provider(Arc::new(
             crate::providers::jellyfin::JellyfinProvider::new_with_version(
                 JellyfinClient::new(),
                 server.url(),
@@ -8277,7 +8889,6 @@ mod tests {
                 Some("10.9.0".to_string()),
             ),
         ));
-        *state.server_type.write().await = Some("jellyfin".to_string());
 
         let views = handle_jellyfin_get_views(&state, None)
             .await
@@ -8583,7 +9194,11 @@ mod tests {
             ],
             vec![],
         );
-        *state.provider.write().await = Some(provider as Arc<dyn MediaProvider>);
+        state
+            .server_manager
+            .write()
+            .await
+            .set_test_provider(provider as Arc<dyn MediaProvider>);
 
         let result = handle_browse_list_modes(&state).await.expect("list modes");
 
@@ -8605,7 +9220,11 @@ mod tests {
         };
         let provider =
             FakeBrowseProvider::new(vec![crate::providers::BrowseMode::Genres], vec![genre]);
-        *state.provider.write().await = Some(provider as Arc<dyn MediaProvider>);
+        state
+            .server_manager
+            .write()
+            .await
+            .set_test_provider(provider as Arc<dyn MediaProvider>);
 
         let result = handle_browse_list_genres(&state, None)
             .await
@@ -8707,7 +9326,8 @@ mod tests {
             .await
             .expect_err("auth failure should not be masked as not found");
 
-        assert_eq!(err.code, ERR_CONNECTION_FAILED);
+        // AC11: provider auth failures map to ERR_UNAUTHORIZED so the UI can re-auth.
+        assert_eq!(err.code, ERR_UNAUTHORIZED);
         assert_eq!(err.message, "auth failed");
     }
 
@@ -8772,7 +9392,11 @@ mod tests {
         let db = Arc::new(crate::db::Database::memory().unwrap());
         let state = make_test_state(db);
         let provider = FakeBrowseProvider::new(vec![crate::providers::BrowseMode::Artists], vec![]);
-        *state.provider.write().await = Some(provider as Arc<dyn MediaProvider>);
+        state
+            .server_manager
+            .write()
+            .await
+            .set_test_provider(provider as Arc<dyn MediaProvider>);
 
         let err = handle_browse_list_recently_added(&state, None)
             .await
@@ -8818,7 +9442,11 @@ mod tests {
             make_fake_song("s3", "Gamma"),
         ];
         let provider = FakeBrowseProvider::with_tracks(tracks);
-        *state.provider.write().await = Some(provider as Arc<dyn MediaProvider>);
+        state
+            .server_manager
+            .write()
+            .await
+            .set_test_provider(provider as Arc<dyn MediaProvider>);
 
         let params = Some(serde_json::json!({
             "startIndex": 0,
@@ -8842,7 +9470,11 @@ mod tests {
         let db = Arc::new(crate::db::Database::memory().unwrap());
         let state = make_test_state(db);
         let provider = FakeBrowseProvider::new(vec![crate::providers::BrowseMode::Artists], vec![]);
-        *state.provider.write().await = Some(provider as Arc<dyn MediaProvider>);
+        state
+            .server_manager
+            .write()
+            .await
+            .set_test_provider(provider as Arc<dyn MediaProvider>);
 
         let err = handle_browse_list_tracks(&state, None)
             .await
@@ -9130,7 +9762,11 @@ mod tests {
             size_bytes: None,
         };
         let provider = FakePlaylistProvider::with_song("playlist-42", song);
-        *state.provider.write().await = Some(provider.clone() as Arc<dyn MediaProvider>);
+        state
+            .server_manager
+            .write()
+            .await
+            .set_test_provider(provider.clone() as Arc<dyn MediaProvider>);
 
         let result = handle_playlist_create(
             &state,
@@ -9177,7 +9813,11 @@ mod tests {
         let state = make_test_state(db);
         let provider =
             FakePlaylistProvider::with_album_and_song("playlist-7", "album-1", fake_song("song1"));
-        *state.provider.write().await = Some(provider.clone() as Arc<dyn MediaProvider>);
+        state
+            .server_manager
+            .write()
+            .await
+            .set_test_provider(provider.clone() as Arc<dyn MediaProvider>);
 
         let result = handle_playlist_create(
             &state,
@@ -9204,7 +9844,11 @@ mod tests {
         let db = Arc::new(crate::db::Database::memory().unwrap());
         let state = make_test_state(db);
         let provider = FakePlaylistProvider::with_song("playlist-77", fake_song("song1"));
-        *state.provider.write().await = Some(provider.clone() as Arc<dyn MediaProvider>);
+        state
+            .server_manager
+            .write()
+            .await
+            .set_test_provider(provider.clone() as Arc<dyn MediaProvider>);
 
         let result = handle_playlist_create(
             &state,
@@ -9229,7 +9873,11 @@ mod tests {
         let db = Arc::new(crate::db::Database::memory().unwrap());
         let state = make_test_state(db);
         let provider = FakePlaylistProvider::new("playlist-99");
-        *state.provider.write().await = Some(provider.clone() as Arc<dyn MediaProvider>);
+        state
+            .server_manager
+            .write()
+            .await
+            .set_test_provider(provider.clone() as Arc<dyn MediaProvider>);
 
         // Only item is the auto-fill slot — should be filtered; create_playlist called with empty list.
         let result = handle_playlist_create(
@@ -9250,7 +9898,11 @@ mod tests {
         let db = Arc::new(crate::db::Database::memory().unwrap());
         let state = make_test_state(db);
         let provider = FakePlaylistProvider::new("ignored");
-        *state.provider.write().await = Some(provider.clone() as Arc<dyn MediaProvider>);
+        state
+            .server_manager
+            .write()
+            .await
+            .set_test_provider(provider.clone() as Arc<dyn MediaProvider>);
 
         let result = handle_playlist_add_tracks(
             &state,
@@ -9271,7 +9923,11 @@ mod tests {
         let db = Arc::new(crate::db::Database::memory().unwrap());
         let state = make_test_state(db);
         let provider = FakePlaylistProvider::new("ignored");
-        *state.provider.write().await = Some(provider.clone() as Arc<dyn MediaProvider>);
+        state
+            .server_manager
+            .write()
+            .await
+            .set_test_provider(provider.clone() as Arc<dyn MediaProvider>);
 
         let result = handle_playlist_remove_tracks(
             &state,
@@ -9292,7 +9948,11 @@ mod tests {
         let db = Arc::new(crate::db::Database::memory().unwrap());
         let state = make_test_state(db);
         let provider = FakePlaylistProvider::new("ignored");
-        *state.provider.write().await = Some(provider.clone() as Arc<dyn MediaProvider>);
+        state
+            .server_manager
+            .write()
+            .await
+            .set_test_provider(provider.clone() as Arc<dyn MediaProvider>);
 
         let result =
             handle_playlist_delete(&state, Some(serde_json::json!({ "playlistId": "p3" })))
@@ -9311,7 +9971,11 @@ mod tests {
         let state = make_test_state(db);
         // FakeBrowseProvider has supports_playlist_write: false
         let provider = FakeBrowseProvider::new(vec![], vec![]);
-        *state.provider.write().await = Some(provider as Arc<dyn MediaProvider>);
+        state
+            .server_manager
+            .write()
+            .await
+            .set_test_provider(provider as Arc<dyn MediaProvider>);
 
         let dummy_create_params = Some(serde_json::json!({ "name": "x", "itemIds": [] }));
         let dummy_modify_params = Some(serde_json::json!({ "playlistId": "p", "trackIds": [] }));

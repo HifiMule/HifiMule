@@ -84,6 +84,8 @@ pub struct DesiredItem {
     /// Current server-side bitrate in bps. Used to detect quality upgrades since last sync.
     pub original_bitrate: Option<u32>,
     pub track_number: Option<u32>,
+    /// Originating server UUID (Story 2.11), set during per-server delta calc.
+    pub server_id: Option<String>,
 }
 
 /// An item to be added to the device.
@@ -110,6 +112,10 @@ pub struct SyncAddItem {
     pub reason_code: Option<String>,
     #[serde(default)]
     pub reason: Option<String>,
+    /// Originating server UUID (Story 2.11). Drives multi-provider download
+    /// routing in execute; `None` for single-server / legacy items.
+    #[serde(default)]
+    pub server_id: Option<String>,
 }
 
 /// An item to be deleted from the device.
@@ -150,6 +156,9 @@ pub struct SyncIdChangeItem {
     pub reason_code: Option<String>,
     #[serde(default)]
     pub reason: Option<String>,
+    /// Originating server UUID (Story 2.11), preserved across id changes.
+    #[serde(default)]
+    pub source_server_id: Option<String>,
 }
 
 /// Metadata for a single track within a playlist, for M3U generation.
@@ -1965,6 +1974,7 @@ pub async fn execute_sync(
                     original_bitrate: add_item.original_bitrate,
                     original_container: add_item.provider_suffix.clone(),
                     track_number: add_item.track_number,
+                    server_id: add_item.server_id.clone(),
                 });
 
                 // Update operation progress and cumulative bytes
@@ -2155,6 +2165,7 @@ pub async fn execute_sync(
             original_bitrate: None,
             original_container: None,
             track_number: None,
+            server_id: id_change.source_server_id.clone(),
         });
 
         // Update operation progress and cumulative bytes (an ID change is instantly completed)
@@ -2608,6 +2619,7 @@ pub async fn execute_provider_sync(
                     original_bitrate: add_item.original_bitrate,
                     original_container: add_item.provider_suffix.clone(),
                     track_number: add_item.track_number,
+                    server_id: add_item.server_id.clone(),
                 });
                 completed_bytes_arc
                     .fetch_add(add_item.size_bytes, std::sync::atomic::Ordering::Relaxed);
@@ -2758,6 +2770,7 @@ pub async fn execute_provider_sync(
             original_bitrate: None,
             original_container: None,
             track_number: None,
+            server_id: id_change.source_server_id.clone(),
         });
         let synced_item = synced_items.last().unwrap().clone();
         let id_to_remove = id_change.old_jellyfin_id.clone();
@@ -2915,6 +2928,7 @@ pub async fn augment_delta_with_existence_check(
                     track_number: desired.track_number,
                     reason_code: None,
                     reason: None,
+                    server_id: desired.server_id.clone(),
                 },
                 "device-file-missing",
             ));
@@ -3239,6 +3253,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
                     track_number: i.track_number,
                     reason_code: None,
                     reason: None,
+                    server_id: i.server_id.clone(),
                 },
                 reason_code,
             )
@@ -3370,6 +3385,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
                         original_name: preserved_original_name,
                         reason_code: None,
                         reason: None,
+                        source_server_id: add.server_id.clone(),
                     },
                     "server-id-change",
                 ));
@@ -3469,6 +3485,7 @@ mod tests {
             original_bitrate: None,
             original_container: None,
             track_number: None,
+            server_id: None,
         }
     }
 
@@ -3840,7 +3857,37 @@ mod tests {
             provider_suffix: None,
             original_bitrate: None,
             track_number: None,
+            server_id: None,
         }
+    }
+
+    // AC27: calculate_delta carries each desired item's server_id onto its add, so
+    // execute can route the download to the correct provider.
+    #[test]
+    fn test_calculate_delta_propagates_server_id() {
+        let mut a = make_desired("track-a", "A", Some("Alb"), Some("Art"));
+        a.server_id = Some("server-jelly".to_string());
+        let mut b = make_desired("track-b", "B", Some("Alb"), Some("Art"));
+        b.server_id = Some("server-navi".to_string());
+
+        let manifest = DeviceManifest {
+            device_id: "dev".to_string(),
+            name: None,
+            icon: None,
+            version: "1.0".to_string(),
+            managed_paths: vec!["Music".to_string()],
+            synced_items: vec![],
+            ..Default::default()
+        };
+        let delta = calculate_delta(&[a, b], &manifest);
+        assert_eq!(delta.adds.len(), 2);
+        let by_id: std::collections::HashMap<_, _> = delta
+            .adds
+            .iter()
+            .map(|add| (add.jellyfin_id.as_str(), add.server_id.as_deref()))
+            .collect();
+        assert_eq!(by_id["track-a"], Some("server-jelly"));
+        assert_eq!(by_id["track-b"], Some("server-navi"));
     }
 
     fn generic_mp3_profile() -> serde_json::Value {
@@ -4065,6 +4112,7 @@ mod tests {
             track_number: None,
             reason_code: Some("new-selection".to_string()),
             reason: Some("new selection".to_string()),
+            server_id: None,
         }
     }
 
@@ -4998,6 +5046,7 @@ mod tests {
                         original_name: None,
                         reason_code: None,
                         reason: None,
+                        source_server_id: None,
                     },
                     "server-id-change",
                 ),
@@ -5017,6 +5066,7 @@ mod tests {
                         original_name: None,
                         reason_code: None,
                         reason: None,
+                        source_server_id: None,
                     },
                     "server-id-change",
                 ),
@@ -5051,6 +5101,7 @@ mod tests {
             original_bitrate: None,
             original_container: None,
             track_number: None,
+            server_id: None,
         };
 
         let value = serde_json::to_value(&item).unwrap();
@@ -5087,6 +5138,7 @@ mod tests {
             original_bitrate: None,
             original_container: None,
             track_number: None,
+            server_id: None,
         }
     }
 
@@ -5104,6 +5156,7 @@ mod tests {
             provider_suffix: Some("flac".to_string()),
             original_bitrate: None,
             track_number: None,
+            server_id: None,
         }];
         let mut manifest = empty_manifest();
         manifest.managed_paths = vec!["Audio".to_string()];
@@ -5165,6 +5218,7 @@ mod tests {
             provider_suffix: Some("flac".to_string()),
             original_bitrate: None,
             track_number: None,
+            server_id: None,
         }];
         let mut manifest = empty_manifest();
         manifest.managed_paths = vec!["Audio".to_string()];
@@ -5184,6 +5238,7 @@ mod tests {
             original_bitrate: None,
             original_container: None,
             track_number: None,
+            server_id: None,
         }];
 
         let delta = calculate_delta(&desired, &manifest);
@@ -5542,6 +5597,7 @@ mod tests {
                     track_number: None,
                     reason_code: None,
                     reason: None,
+                    server_id: None,
                 },
                 "bitrate-increase",
             )],
@@ -5571,6 +5627,7 @@ mod tests {
                     original_name: None,
                     reason_code: None,
                     reason: None,
+                    source_server_id: None,
                 },
                 "server-id-change",
             )],

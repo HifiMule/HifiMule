@@ -17,11 +17,15 @@ pub struct DeviceMapping {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerConfig {
+    /// Stable UUID primary key (Story 2.11). Generated on first insert / migration.
+    pub id: String,
     pub url: String,
     pub server_type: String,
     pub username: String,
     pub server_version: Option<String>,
     pub updated_at: i64,
+    /// True for the single currently-selected server (`selected = 1`).
+    pub selected: bool,
 }
 
 pub struct Database {
@@ -112,71 +116,255 @@ impl Database {
             [],
         )
         .map_err(|e| anyhow!("Failed to create scrobble unique index: {}", e))?;
+        // Multi-server schema (Story 2.11): TEXT UUID primary key + `selected` flag.
+        // Fresh installs create this directly; existing single-server installs are
+        // migrated below (the legacy `id INTEGER PRIMARY KEY CHECK (id = 1)` table
+        // can only be reshaped by recreating it — SQLite cannot drop a CHECK).
         conn.execute(
             "CREATE TABLE IF NOT EXISTS server_config (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
+                id TEXT PRIMARY KEY,
                 url TEXT NOT NULL,
                 server_type TEXT NOT NULL,
                 username TEXT NOT NULL,
                 server_version TEXT,
-                updated_at INTEGER NOT NULL
+                updated_at INTEGER NOT NULL,
+                selected INTEGER NOT NULL DEFAULT 0
             )",
             [],
         )
         .map_err(|e| anyhow!("Failed to create server_config table: {}", e))?;
+
+        Self::migrate_server_config_to_multi(&conn)?;
         Ok(())
     }
 
-    pub fn upsert_server_config(
+    /// Migrates a legacy single-row `server_config` (INTEGER PK + `CHECK (id = 1)`,
+    /// no `selected` column) to the multi-server schema. Idempotent: a no-op once
+    /// the `id` column is already TEXT. Returns the migrated server's UUID when a
+    /// row was migrated (so the caller can re-key the credential vault, AC17).
+    fn migrate_server_config_to_multi(conn: &Connection) -> Result<()> {
+        // Detect the type of the `id` column. New schema → TEXT, legacy → INTEGER.
+        let id_type: Option<String> = conn
+            .query_row(
+                "SELECT type FROM pragma_table_info('server_config') WHERE name = 'id'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+
+        let is_legacy = matches!(id_type.as_deref(), Some(t) if t.eq_ignore_ascii_case("INTEGER"));
+        if !is_legacy {
+            // Already TEXT id. Defensive: ensure the `selected` column exists for
+            // installs that created the TEXT table before `selected` was added.
+            let has_selected = conn
+                .prepare("SELECT selected FROM server_config LIMIT 0")
+                .is_ok();
+            if !has_selected {
+                conn.execute(
+                    "ALTER TABLE server_config ADD COLUMN selected INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )
+                .map_err(|e| anyhow!("Failed to add selected column: {}", e))?;
+            }
+            return Ok(());
+        }
+
+        // Legacy table: read the single existing row (if any) before recreating.
+        let existing: Option<(String, String, String, Option<String>, i64)> = conn
+            .query_row(
+                "SELECT url, server_type, username, server_version, updated_at
+                 FROM server_config WHERE id = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .ok();
+
+        conn.execute("ALTER TABLE server_config RENAME TO server_config_legacy", [])
+            .map_err(|e| anyhow!("Failed to rename legacy server_config: {}", e))?;
+        conn.execute(
+            "CREATE TABLE server_config (
+                id TEXT PRIMARY KEY,
+                url TEXT NOT NULL,
+                server_type TEXT NOT NULL,
+                username TEXT NOT NULL,
+                server_version TEXT,
+                updated_at INTEGER NOT NULL,
+                selected INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )
+        .map_err(|e| anyhow!("Failed to recreate server_config table: {}", e))?;
+
+        if let Some((url, server_type, username, server_version, updated_at)) = existing {
+            let id = uuid::Uuid::new_v4().to_string();
+            conn.execute(
+                "INSERT INTO server_config
+                    (id, url, server_type, username, server_version, updated_at, selected)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
+                params![id, url, server_type, username, server_version, updated_at],
+            )
+            .map_err(|e| anyhow!("Failed to migrate server row: {}", e))?;
+        }
+
+        conn.execute("DROP TABLE server_config_legacy", [])
+            .map_err(|e| anyhow!("Failed to drop legacy server_config: {}", e))?;
+        Ok(())
+    }
+
+    fn row_to_server_config(row: &rusqlite::Row) -> rusqlite::Result<ServerConfig> {
+        Ok(ServerConfig {
+            id: row.get(0)?,
+            url: row.get(1)?,
+            server_type: row.get(2)?,
+            username: row.get(3)?,
+            server_version: row.get(4)?,
+            updated_at: row.get(5)?,
+            selected: row.get::<_, i64>(6)? != 0,
+        })
+    }
+
+    /// Inserts a server (or updates the existing one matching `url` by normalized
+    /// comparison, Story 2.11 AC5) and returns its UUID. When no row was selected
+    /// before, the upserted server becomes selected. Does not change selection for
+    /// an existing selected server.
+    pub fn upsert_server(
         &self,
         url: &str,
         server_type: &str,
         username: &str,
         server_version: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let conn = self.conn.lock().unwrap();
         let updated_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| anyhow!("Failed to calculate timestamp: {}", e))?
             .as_secs() as i64;
+
+        // Match an existing server by normalized URL (trim trailing slash, lowercase).
+        let normalized = url.trim().trim_end_matches('/').to_ascii_lowercase();
+        let existing_id: Option<String> = conn
+            .query_row(
+                "SELECT id FROM server_config
+                 WHERE lower(rtrim(trim(url), '/')) = ?1",
+                params![normalized],
+                |row| row.get(0),
+            )
+            .ok();
+
+        if let Some(id) = existing_id {
+            conn.execute(
+                "UPDATE server_config SET
+                    url = ?2, server_type = ?3, username = ?4,
+                    server_version = ?5, updated_at = ?6
+                 WHERE id = ?1",
+                params![id, url, server_type, username, server_version, updated_at],
+            )
+            .map_err(|e| anyhow!("Failed to update server config: {}", e))?;
+            return Ok(id);
+        }
+
+        let id = uuid::Uuid::new_v4().to_string();
+        // First-ever server is auto-selected; otherwise selection is preserved.
+        let any_selected: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM server_config WHERE selected = 1)",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|n| n != 0)
+            .unwrap_or(false);
+        let selected = if any_selected { 0 } else { 1 };
         conn.execute(
-            "INSERT INTO server_config (id, url, server_type, username, server_version, updated_at)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(id) DO UPDATE SET
-                url = excluded.url,
-                server_type = excluded.server_type,
-                username = excluded.username,
-                server_version = excluded.server_version,
-                updated_at = excluded.updated_at",
-            params![url, server_type, username, server_version, updated_at],
+            "INSERT INTO server_config
+                (id, url, server_type, username, server_version, updated_at, selected)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, url, server_type, username, server_version, updated_at, selected],
         )
-        .map_err(|e| anyhow!("Failed to upsert server config: {}", e))?;
-        Ok(())
+        .map_err(|e| anyhow!("Failed to insert server config: {}", e))?;
+        Ok(id)
     }
 
+    /// Returns all configured servers ordered by insertion (updated_at, then id).
+    pub fn list_servers(&self) -> Result<Vec<ServerConfig>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, url, server_type, username, server_version, updated_at, selected
+             FROM server_config ORDER BY updated_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([], Self::row_to_server_config)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn get_server(&self, id: &str) -> Result<Option<ServerConfig>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, url, server_type, username, server_version, updated_at, selected
+             FROM server_config WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(params![id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(Self::row_to_server_config(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Returns the currently selected server (`selected = 1`), if any.
+    /// Retained under the historical name so single-server callers keep working.
     pub fn get_server_config(&self) -> Result<Option<ServerConfig>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT url, server_type, username, server_version, updated_at
-             FROM server_config WHERE id = 1",
+            "SELECT id, url, server_type, username, server_version, updated_at, selected
+             FROM server_config WHERE selected = 1 LIMIT 1",
         )?;
         let mut rows = stmt.query([])?;
-        if let Some(row) = rows.next()? {
-            Ok(Some(ServerConfig {
-                url: row.get(0)?,
-                server_type: row.get(1)?,
-                username: row.get(2)?,
-                server_version: row.get(3)?,
-                updated_at: row.get(4)?,
-            }))
-        } else {
-            Ok(None)
+        match rows.next()? {
+            Some(row) => Ok(Some(Self::row_to_server_config(row)?)),
+            None => Ok(None),
         }
+    }
+
+    /// Marks `id` as the single selected server (`selected = 1`), clearing all
+    /// others. Errors if `id` does not exist.
+    pub fn set_selected(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE server_config SET selected = 0", [])
+            .map_err(|e| anyhow!("Failed to clear selection: {}", e))?;
+        let rows = conn
+            .execute(
+                "UPDATE server_config SET selected = 1 WHERE id = ?1",
+                params![id],
+            )
+            .map_err(|e| anyhow!("Failed to set selection: {}", e))?;
+        if rows == 0 {
+            return Err(anyhow!("Server not found: {}", id));
+        }
+        Ok(())
+    }
+
+    /// Removes a server row by id. Returns true when a row was deleted.
+    pub fn remove_server(&self, id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn
+            .execute("DELETE FROM server_config WHERE id = ?1", params![id])
+            .map_err(|e| anyhow!("Failed to remove server: {}", e))?;
+        Ok(rows > 0)
     }
 
     pub fn clear_server_config(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM server_config WHERE id = 1", [])
+        conn.execute("DELETE FROM server_config", [])
             .map_err(|e| anyhow!("Failed to clear server config: {}", e))?;
         Ok(())
     }
@@ -496,8 +684,7 @@ mod tests {
         // Second call to init must not fail — all DDL uses CREATE TABLE IF NOT EXISTS.
         db.init_for_test().unwrap();
         // Operations still work after re-init.
-        db.upsert_server_config("http://x", "jellyfin", "u", None)
-            .unwrap();
+        db.upsert_server("http://x", "jellyfin", "u", None).unwrap();
         assert!(db.get_server_config().unwrap().is_some());
     }
 
@@ -507,25 +694,128 @@ mod tests {
 
         assert_eq!(db.get_server_config().unwrap(), None);
 
-        db.upsert_server_config(
-            "http://music.example",
-            "openSubsonic",
-            "alexis",
-            Some("1.16.1"),
-        )
-        .unwrap();
+        // First-ever server is auto-selected.
+        let id1 = db
+            .upsert_server("http://music.example", "openSubsonic", "alexis", Some("1.16.1"))
+            .unwrap();
         let config = db.get_server_config().unwrap().unwrap();
+        assert_eq!(config.id, id1);
         assert_eq!(config.url, "http://music.example");
         assert_eq!(config.server_type, "openSubsonic");
         assert_eq!(config.username, "alexis");
         assert_eq!(config.server_version.as_deref(), Some("1.16.1"));
+        assert!(config.selected);
 
-        db.upsert_server_config("http://jellyfin.example", "jellyfin", "user-id", None)
+        // Re-upsert by normalized URL (trailing slash) updates in place, same id.
+        let id1b = db
+            .upsert_server("http://music.example/", "openSubsonic", "alexis", Some("1.17.0"))
             .unwrap();
-        let config = db.get_server_config().unwrap().unwrap();
-        assert_eq!(config.url, "http://jellyfin.example");
-        assert_eq!(config.server_type, "jellyfin");
-        assert_eq!(config.username, "user-id");
-        assert_eq!(config.server_version, None);
+        assert_eq!(id1, id1b);
+        assert_eq!(db.list_servers().unwrap().len(), 1);
+        assert_eq!(
+            db.get_server(&id1).unwrap().unwrap().server_version.as_deref(),
+            Some("1.17.0")
+        );
+
+        // A second, distinct server does NOT steal the selection.
+        let id2 = db
+            .upsert_server("http://jellyfin.example", "jellyfin", "user-id", None)
+            .unwrap();
+        assert_ne!(id1, id2);
+        assert_eq!(db.list_servers().unwrap().len(), 2);
+        assert_eq!(db.get_server_config().unwrap().unwrap().id, id1);
+
+        // Switch selection.
+        db.set_selected(&id2).unwrap();
+        assert_eq!(db.get_server_config().unwrap().unwrap().id, id2);
+        assert!(!db.get_server(&id1).unwrap().unwrap().selected);
+
+        // Remove the non-selected server.
+        assert!(db.remove_server(&id1).unwrap());
+        assert_eq!(db.list_servers().unwrap().len(), 1);
+        assert!(!db.remove_server("does-not-exist").unwrap());
+    }
+
+    #[test]
+    fn test_set_selected_nonexistent_errors() {
+        let db = Database::memory().unwrap();
+        assert!(db.set_selected("nope").is_err());
+    }
+
+    /// AC16/AC17: a legacy `id INTEGER PRIMARY KEY CHECK (id = 1)` table with one
+    /// row migrates to the TEXT-UUID schema, generating a UUID and selecting it.
+    #[test]
+    fn test_migrate_legacy_server_config() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Recreate the exact legacy schema + single row.
+        conn.execute(
+            "CREATE TABLE server_config (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                url TEXT NOT NULL,
+                server_type TEXT NOT NULL,
+                username TEXT NOT NULL,
+                server_version TEXT,
+                updated_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO server_config (id, url, server_type, username, server_version, updated_at)
+             VALUES (1, 'http://legacy.example', 'jellyfin', 'alexis', '10.9.0', 42)",
+            [],
+        )
+        .unwrap();
+
+        let db = Database {
+            conn: Arc::new(Mutex::new(conn)),
+        };
+        db.init_for_test().unwrap();
+
+        let servers = db.list_servers().unwrap();
+        assert_eq!(servers.len(), 1);
+        let migrated = &servers[0];
+        assert!(!migrated.id.is_empty());
+        assert!(migrated.id.parse::<uuid::Uuid>().is_ok());
+        assert_eq!(migrated.url, "http://legacy.example");
+        assert_eq!(migrated.server_type, "jellyfin");
+        assert_eq!(migrated.username, "alexis");
+        assert_eq!(migrated.server_version.as_deref(), Some("10.9.0"));
+        assert_eq!(migrated.updated_at, 42);
+        assert!(migrated.selected);
+
+        // Idempotent: a second init is a no-op (does not re-migrate or duplicate).
+        let id_before = migrated.id.clone();
+        db.init_for_test().unwrap();
+        let servers = db.list_servers().unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].id, id_before);
+    }
+
+    /// Migration of an empty legacy table produces an empty multi-server table.
+    #[test]
+    fn test_migrate_legacy_server_config_empty() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE server_config (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                url TEXT NOT NULL,
+                server_type TEXT NOT NULL,
+                username TEXT NOT NULL,
+                server_version TEXT,
+                updated_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+        let db = Database {
+            conn: Arc::new(Mutex::new(conn)),
+        };
+        db.init_for_test().unwrap();
+        assert_eq!(db.list_servers().unwrap().len(), 0);
+        // New-schema operations work post-migration.
+        db.upsert_server("http://new.example", "jellyfin", "u", None)
+            .unwrap();
+        assert_eq!(db.list_servers().unwrap().len(), 1);
     }
 }

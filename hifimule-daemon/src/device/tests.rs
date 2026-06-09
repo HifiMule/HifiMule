@@ -486,6 +486,7 @@ async fn test_write_manifest_creates_files() {
             original_bitrate: None,
             original_container: None,
             track_number: None,
+            server_id: None,
         }],
         dirty: false,
         pending_item_ids: vec![],
@@ -570,6 +571,7 @@ async fn test_write_manifest_overwrites_existing() {
             original_bitrate: None,
             original_container: None,
             track_number: None,
+            server_id: None,
         }],
         dirty: false,
         pending_item_ids: vec![],
@@ -623,6 +625,7 @@ async fn test_get_discrepancies_missing_file() {
             original_bitrate: None,
             original_container: None,
             track_number: None,
+            server_id: None,
         }],
         dirty: true,
         pending_item_ids: vec![],
@@ -735,6 +738,7 @@ async fn test_get_discrepancies_no_issues() {
             original_bitrate: None,
             original_container: None,
             track_number: None,
+            server_id: None,
         }],
         dirty: false,
         pending_item_ids: vec![],
@@ -789,6 +793,7 @@ async fn test_prune_items() {
                 original_bitrate: None,
                 original_container: None,
                 track_number: None,
+                server_id: None,
             },
             SyncedItem {
                 jellyfin_id: "item-2".to_string(),
@@ -806,6 +811,7 @@ async fn test_prune_items() {
                 original_bitrate: None,
                 original_container: None,
                 track_number: None,
+                server_id: None,
             },
         ],
         dirty: true,
@@ -868,6 +874,7 @@ async fn test_relink_item() {
             original_bitrate: None,
             original_container: None,
             track_number: None,
+            server_id: None,
         }],
         dirty: true,
         pending_item_ids: vec![],
@@ -2272,6 +2279,7 @@ fn test_synced_item_provider_metadata_serializes_camel_case_and_builds_context()
         original_bitrate: None,
         original_container: None,
         track_number: None,
+        server_id: None,
     };
     let value = serde_json::to_value(&item).expect("synced item json");
 

@@ -38,6 +38,10 @@ pub struct SyncedItem {
     pub original_container: Option<String>,
     #[serde(default)]
     pub track_number: Option<u32>,
+    /// Originating server UUID (Story 2.11). Lets force-sync re-route each item to
+    /// its source provider. `None` for items synced before multi-server support.
+    #[serde(default)]
+    pub server_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]

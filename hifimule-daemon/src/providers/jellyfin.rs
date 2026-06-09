@@ -496,20 +496,34 @@ impl MediaProvider for JellyfinProvider {
         song_id: &str,
         profile: Option<&TranscodeProfile>,
     ) -> Result<String, ProviderError> {
-        if let Some(profile) = profile {
+        // All returned URLs must be fetchable without auth headers because
+        // `execute_provider_sync` uses a plain `reqwest::get(url)`.  Jellyfin
+        // supports URL-based auth via `?api_key=<token>`, which we always append
+        // so that direct-play downloads and transcoding fallbacks both work in the
+        // multi-server provider sync path.
+        let url = if let Some(profile) = profile {
             let profile = transcode_profile_to_device_profile(profile);
             self.client
                 .resolve_stream_url(self.url(), self.token(), self.user_id(), song_id, &profile)
                 .await
                 .map(|(url, _is_transcoded)| url)
-                .map_err(Self::map_error)
+                .map_err(Self::map_error)?
         } else {
-            Ok(format!(
+            format!(
                 "{}/Items/{}/Download",
                 self.url().trim_end_matches('/'),
                 song_id
-            ))
-        }
+            )
+        };
+        // Append api_key only when not already present (TranscodingUrl from
+        // PlaybackInfo already carries Jellyfin session auth).
+        Ok(if url.contains("api_key=") || url.contains("ApiKey=") {
+            url
+        } else if url.contains('?') {
+            format!("{}&api_key={}", url, self.token())
+        } else {
+            format!("{}?api_key={}", url, self.token())
+        })
     }
 
     async fn cover_art_url(&self, cover_art_id: &str) -> Result<String, ProviderError> {
@@ -1500,7 +1514,7 @@ mod tests {
 
         let url = provider.download_url("song1", None).await.expect("url");
 
-        assert_eq!(url, "http://host/jellyfin/Items/song1/Download");
+        assert_eq!(url, format!("http://host/jellyfin/Items/song1/Download?api_key={TOKEN}"));
     }
 
     #[tokio::test]
