@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-06-09  # Story 2.12 ready for review
+last_updated: 2026-06-09  # Story 2.12 code review complete
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -60,7 +60,7 @@ development_status:
   2-9-device-identity-name-and-icon: done
   2-10-mtp-device-detection: done
   2-11-multi-server-hub: done  # code review 2026-06-09: 5 patches applied (incl. HIGH single-non-selected-server sync routing), 2 false positives dismissed, 1 LOW deferred
-  2-12-server-identity-name-and-icon: review
+  2-12-server-identity-name-and-icon: done
   epic-2-retrospective: done
 
   epic-3: done

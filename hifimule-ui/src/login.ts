@@ -47,11 +47,10 @@ function loginFormHtml(prefillUrl?: string, showIdentity = true): string {
     const urlAttrs = prefillUrl
         ? `value="${prefillUrl.replace(/"/g, '&quot;')}" readonly`
         : '';
-    const defaultName = serverTypeLabel('unknown');
     const defaultIcon = defaultServerIcon('unknown');
     const identityFields = showIdentity ? `
             <div class="login-identity-fields">
-                <sl-input name="serverName" label="${t('login.server_name')}" maxlength="40" value="${escapeHtml(defaultName)}" required></sl-input>
+                <sl-input name="serverName" label="${t('login.server_name')}" maxlength="40"></sl-input>
                 <label class="device-settings-label">${t('login.server_icon')}</label>
                 <div class="device-settings-icon-picker login-server-icon-picker">
                     ${iconPickerHtml(defaultIcon)}
@@ -135,7 +134,7 @@ function bindLoginForm(root: HTMLElement, mode: NonNullable<LoginViewOptions['mo
 
     let probeTimer: ReturnType<typeof setTimeout> | null = null;
     let selectedIcon = defaultServerIcon('unknown');
-    let lastDefaultName = serverTypeLabel('unknown');
+    let lastDefaultName = '';
     let nameEdited = false;
     let iconEdited = false;
 

@@ -1,6 +1,6 @@
 # Story 2.12: Server Identity Name and Icon
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -67,6 +67,10 @@ so that I can quickly distinguish servers in the hub, switcher, basket, and play
   - [x] Run `rtk cargo test -p hifimule-daemon`.
   - [x] Run `rtk tsc` for `hifimule-ui`.
   - [x] Run `rtk lint` if the UI lint script exists.
+
+### Review Findings
+
+- [x] [Review][Patch] Add-server defaults can override provider-derived identity before probe completes [hifimule-ui/src/login.ts:50]
 
 ## Dev Notes
 
