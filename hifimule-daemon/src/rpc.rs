@@ -391,6 +391,25 @@ fn current_server_portable_id(state: &AppState) -> Result<Option<String>, JsonRp
     Ok(current_server_config(state)?.and_then(|c| c.server_id))
 }
 
+/// Story 2.13: tag every untagged DesiredItem with the selected server's portable
+/// id so manifest entries always carry the portable identity. Shared by the
+/// single-server delta paths in both `provider_calculate_delta` and
+/// `handle_sync_calculate_delta` — keep one definition to prevent the two from
+/// drifting.
+fn tag_untagged_with_selected_portable(
+    state: &AppState,
+    desired_items: &mut [crate::sync::DesiredItem],
+) -> Result<(), JsonRpcError> {
+    if let Some(portable) = current_server_portable_id(state)? {
+        for item in desired_items.iter_mut() {
+            if item.server_id.is_none() {
+                item.server_id = Some(portable.clone());
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn handle_test_connection(
     state: &AppState,
     params: Option<Value>,
@@ -1361,13 +1380,20 @@ async fn handle_server_connect(
         .map(|c| c.id == local_id)
         .unwrap_or(false);
 
-    // The deterministic portable id persisted by upsert (Story 2.13).
+    // The deterministic portable id persisted by upsert (Story 2.13). Must be
+    // Some after a successful upsert — any DB error or missing row is a server
+    // state inconsistency: the UI keys its active-server + basket tagging on this
+    // value, so returning a null serverId silently breaks tagging for the session.
     let portable_id = state
         .db
         .get_server(&local_id)
-        .ok()
-        .flatten()
-        .and_then(|c| c.server_id);
+        .map_err(storage_error_to_rpc)?
+        .and_then(|c| c.server_id)
+        .ok_or(JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: "server upsert did not persist a portable server_id".to_string(),
+            data: None,
+        })?;
 
     // Store the credential in the UUID-keyed vault (AC18); update config.json only
     // when this server is the selected one, so the static get_credentials() resolves
@@ -1866,8 +1892,12 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
     let server_type = selected_server.map(|c| c.server_type.clone());
     let server_version = selected_server.and_then(|c| c.server_version.clone());
     let current_server = selected_server.map(|config| {
+        // Story 2.13: `serverId` here carries the PORTABLE id to match the rest
+        // of the contract (server.list, server.connect, daemon_state.servers[]).
+        // `localId` exposes the machine-local UUID for callers that need it.
         serde_json::json!({
-            "serverId": config.id,
+            "serverId": config.server_id,
+            "localId": config.id,
             "url": config.url,
             "username": config.username,
             "serverType": config.server_type,
@@ -2631,15 +2661,8 @@ async fn provider_calculate_delta(
         }
     }
 
-    // Story 2.13: single-server path — tag every item with the selected server's
-    // portable id so manifest entries always carry the portable identity.
-    if let Some(portable) = current_server_portable_id(_state)? {
-        for item in &mut desired_items {
-            if item.server_id.is_none() {
-                item.server_id = Some(portable.clone());
-            }
-        }
-    }
+    // Story 2.13: tag untagged items with the selected server's portable id.
+    tag_untagged_with_selected_portable(_state, &mut desired_items)?;
 
     crate::daemon_log!(
         "[Delta] Provider desired set prepared: desired_items={} playlists={}; calculating manifest delta",
@@ -3413,11 +3436,25 @@ async fn multi_provider_calculate_delta(
         .map(|item| (item.id.clone(), item))
         .collect();
 
-    // Group ids by their resolved serverId, preserving order.
+    // Group ids by their resolved serverId, preserving order. Items lacking a
+    // serverId fall back to the selected server's portable id; if neither is
+    // available we surface a clear error instead of silently dropping items
+    // (which previously masked first-launch races where the UI sent untagged
+    // ids before `selectedServerPortableId` was populated).
     let mut groups: Vec<(String, Vec<String>)> = Vec::new();
     for (id, server) in item_specs {
-        let Some(server_id) = server.clone().or_else(|| selected_id.clone()) else {
-            continue;
+        let server_id = match server.clone().or_else(|| selected_id.clone()) {
+            Some(s) => s,
+            None => {
+                return Err(JsonRpcError {
+                    code: ERR_INVALID_PARAMS,
+                    message: format!(
+                        "Item {} has no serverId and no server is selected; cannot route sync request",
+                        id
+                    ),
+                    data: None,
+                });
+            }
         };
         match groups.iter_mut().find(|(s, _)| *s == server_id) {
             Some((_, ids)) => ids.push(id.clone()),
@@ -3970,15 +4007,8 @@ async fn handle_sync_calculate_delta(
         }
     }
 
-    // Story 2.13: single-server (Jellyfin) path — tag every item with the selected
-    // server's portable id so manifest entries always carry the portable identity.
-    if let Some(portable) = current_server_portable_id(state)? {
-        for item in &mut desired_items {
-            if item.server_id.is_none() {
-                item.server_id = Some(portable.clone());
-            }
-        }
-    }
+    // Story 2.13: tag untagged items with the selected server's portable id.
+    tag_untagged_with_selected_portable(state, &mut desired_items)?;
 
     crate::daemon_log!(
         "[Sync] Computing delta: {} desired items vs {} synced in manifest",

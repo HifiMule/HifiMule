@@ -1588,18 +1588,23 @@ export class BasketSidebar {
 
     private updateServersById(servers: any): void {
         if (!Array.isArray(servers)) return;
-        // Story 2.13: key by the PORTABLE serverId (basket items are tagged with it),
-        // falling back to the local id for rows without a portable id yet.
+        // Story 2.13: key STRICTLY by the PORTABLE serverId. Basket items are
+        // tagged with the portable id, and `isItemLocked` compares strings — so
+        // a row with no portable id yet cannot be matched to any item anyway.
+        // Falling back to the local id would let two rows collide when a portable
+        // id of server A happens to equal the local id of server B.
         this.serversById = new Map(
-            servers.map((s: any) => [s.serverId ?? s.id, {
-                id: s.id,
-                serverType: s.serverType,
-                username: s.username,
-                url: s.url,
-                name: s.name ?? null,
-                icon: s.icon ?? null,
-                selected: Boolean(s.selected),
-            }])
+            servers
+                .filter((s: any) => typeof s?.serverId === 'string' && s.serverId.length > 0)
+                .map((s: any) => [s.serverId, {
+                    id: s.id,
+                    serverType: s.serverType,
+                    username: s.username,
+                    url: s.url,
+                    name: s.name ?? null,
+                    icon: s.icon ?? null,
+                    selected: Boolean(s.selected),
+                }])
         );
     }
 

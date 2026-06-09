@@ -211,7 +211,11 @@ export class ServerHub {
             this.selectedId = id;
             // server.select keys on the local id, but the basket's active-server key
             // is the PORTABLE id (Story 2.13) so own items never render locked.
-            const portableId = this.servers.find(s => s.id === id)?.serverId ?? null;
+            const selected = this.servers.find(s => s.id === id);
+            const portableId = selected?.serverId ?? null;
+            if (selected && !portableId) {
+                console.warn('[ServerHub] selected server has no portable serverId; tagging will be disabled until daemon backfills', { localId: id });
+            }
             basketStore.setActiveServerId(portableId);
             await this.refresh();
             this.onServerChanged();
@@ -257,11 +261,15 @@ export class ServerHub {
             try {
                 await serverRemove(id);
                 // Drop the removed server's basket items and notify (AC7). Basket
-                // items are tagged with the PORTABLE id (Story 2.13); also sweep any
-                // not-yet-reconciled items still tagged with the local id.
-                let removed = basketStore.removeItemsForServer(id);
-                if (server.serverId && server.serverId !== id) {
+                // items are tagged with the PORTABLE id (Story 2.13) — sweep that
+                // first; also sweep the local id to catch any pre-reconciliation
+                // legacy tags that slipped through.
+                let removed = 0;
+                if (server.serverId) {
                     removed += basketStore.removeItemsForServer(server.serverId);
+                }
+                if (!server.serverId || server.serverId !== id) {
+                    removed += basketStore.removeItemsForServer(id);
                 }
                 if (removed > 0) {
                     window.dispatchEvent(new CustomEvent('toast', {

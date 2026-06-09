@@ -4,7 +4,7 @@ baseline_commit: d10ba8c1a465ba11628932b00c764c1ea5f77dcc
 
 # Story 2.13: Portable Server Identity
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -94,6 +94,32 @@ The change is **invisible to users** — manifest portability + resync avoidance
   - [x] Rust: schema migration adds columns idempotently; backfill derives correct `server_id`; reconciliation (manifest + `reconcile_basket_server_ids`) is idempotent (second run no-op) and maps local_id & composite → portable.
   - [x] Rust: contract fields present — `server.list` / `get_daemon_state.servers[]` include `serverId`; `server.connect` returns `serverId` + `localId`; `get_daemon_state` includes `selectedServerPortableId`.
   - [x] Run `rtk cargo test -p hifimule-daemon`, then `rtk cargo test` (workspace). Run `rtk tsc` for `hifimule-ui`. Run `rtk lint` if a UI lint script exists.
+
+### Review Findings
+
+- [x] [Review][Decision→Patch] [HIGH] Portable `server_id` is now FROZEN on UPDATE — only derived on INSERT [hifimule-daemon/src/db.rs:482-508]. Resolution: option 1 (freeze after first persist). Prevents URL→rid basis flip on first connect after upgrade from orphaning manifest tags. New test `upsert_does_not_re_derive_server_id_on_update` locks the behavior.
+
+- [x] [Review][Patch] [MEDIUM] `handle_server_connect` now errors if portable_id is None after upsert (instead of shipping null serverId) [hifimule-daemon/src/rpc.rs:1364-1374]
+- [x] [Review][Patch] [MEDIUM] `BasketSidebar.updateServersById` keys strictly by portable serverId; rows without one are skipped (no more local-id fallback collision) [hifimule-ui/src/components/BasketSidebar.ts:1589-1608]
+- [x] [Review][Patch] [MEDIUM] `ServerHub.removeServer` now sweeps portable first, then local id as legacy fallback [hifimule-ui/src/components/ServerHub.ts:256-270]
+- [x] [Review][Patch] [MEDIUM] `ServerManager::set_test_provider` derives a real portable id so tests exercise portable ≠ local mapping [hifimule-daemon/src/server_manager.rs:85-111]
+- [x] [Review][Patch] [MEDIUM] `multi_provider_calculate_delta` returns `JsonRpcError` for items with no resolvable serverId instead of silent `continue` [hifimule-daemon/src/rpc.rs:3417-3450]
+- [x] [Review][Patch] [MEDIUM] `ServerHub.handleSelect` warns when selected server has no portable id (avoids silent setActiveServerId(null)) [hifimule-ui/src/components/ServerHub.ts:206-225]
+- [x] [Review][Patch] [LOW] Single-server portable-tagging extracted to `tag_untagged_with_selected_portable()` helper, called from both delta paths [hifimule-daemon/src/rpc.rs:394-413]
+- [x] [Review][Patch] [LOW] `derive_server_id` hex encoding cleaned — `use` outside loop, infallible `write!` `.expect`-ed [hifimule-daemon/src/db.rs:65-78]
+- [x] [Review][Patch] [LOW] `handle_get_daemon_state.currentServer.serverId` now carries the portable id; `localId` added alongside [hifimule-daemon/src/rpc.rs:1894-1905]
+
+**Verification (post-patch):**
+- `rtk cargo test -p hifimule-daemon` → 452 passed (was 451; +1 new freeze-on-update test)
+- `rtk cargo test` (workspace) → 458 passed
+- `rtk cargo clippy -p hifimule-daemon` → no new warnings (pre-existing only)
+- `npx tsc --noEmit` (hifimule-ui) → only the pre-existing tsconfig.json baseUrl deprecation
+
+- [x] [Review][Defer] [MEDIUM] `get_provider_by_server_id` stale-manager race during concurrent reconnect [hifimule-daemon/src/server_manager.rs:1583-1604] — deferred, narrow concurrency window
+- [x] [Review][Defer] [LOW] `reconcile_manifest_server_ids` silent persistence failure on read-only manifest [hifimule-daemon/src/device/mod.rs:~340-356] — deferred, idempotent retry is harmless
+- [x] [Review][Defer] [LOW] `current_server_portable_id == None` silently no-ops `handle_playlist_create` cross-server guard [hifimule-daemon/src/rpc.rs:~947-953] — deferred, backfill guarantees Some in practice
+- [x] [Review][Defer] [LOW] `current_server_portable_id` connect→sync race vs credential file write [hifimule-daemon/src/rpc.rs:1394-1417] — deferred, no concurrent-connect support documented
+- [x] [Review][Defer] [LOW] `serverIdsInBasket` / `removeItemsForServer` unaware of portable/local duality [hifimule-ui/src/state/basket.ts:82-108] — deferred, addressed indirectly by ServerHub double-sweep
 
 ## Dev Notes
 
@@ -201,3 +227,4 @@ claude-opus-4-8 (Claude Code, dev-story workflow)
 
 - 2026-06-09: Story created from approved sprint-change-proposal-2026-06-09-portable-server-identity. Comprehensive context engine analysis completed — comprehensive developer guide created. Status set to ready-for-dev.
 - 2026-06-09: Implemented portable server identity (Tasks 1–7). Daemon: schema + `derive_server_id`/`server_id_remap`, Jellyfin reported-id capture, portable→local routing, manifest + basket reconciliation, additive RPC contract. UI: portable active-server + tagging coherence. Tests added (derivation determinism/equality, rid-vs-url basis, remove/re-add stability, migration/backfill idempotency, manifest + basket reconciliation, portable→provider resolution, connect/list/daemon-state contract). 457 workspace tests pass; tsc clean. Status → review.
+- 2026-06-10: Code review applied 10 patches. Decision-needed resolved by freezing `server_id` on UPDATE (only derive on INSERT) to prevent URL→rid basis flip on first connect after upgrade. Tightened: connect error on null portable, BasketSidebar strict portable keying, ServerHub sweep order, test seed portable derivation, multi_provider error on unresolvable serverId, ServerHub warn on missing portable, extracted single-server tagging helper, hex encoding cleanup, currentServer.serverId now portable + localId added. 458 workspace tests pass. 5 LOW/narrow-MEDIUM findings moved to `deferred-work.md`. Status → done.

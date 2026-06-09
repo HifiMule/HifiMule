@@ -63,6 +63,7 @@ pub fn derive_server_id(
     server_reported_id: Option<&str>,
 ) -> String {
     use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
     let basis = match server_reported_id.map(str::trim).filter(|s| !s.is_empty()) {
         Some(rid) => format!("v1|{server_type}|rid:{rid}|{username}"),
         None => format!("v1|{server_type}|url:{canonical_base_url}|{username}"),
@@ -70,8 +71,8 @@ pub fn derive_server_id(
     let digest = Sha256::digest(basis.as_bytes());
     let mut hex = String::with_capacity(digest.len() * 2);
     for byte in digest.iter() {
-        use std::fmt::Write;
-        let _ = write!(hex, "{byte:02x}");
+        // write! to a String is infallible.
+        write!(hex, "{byte:02x}").expect("writing to String cannot fail");
     }
     hex
 }
@@ -467,9 +468,6 @@ impl Database {
         // Match an existing server by normalized URL (trim trailing slash, lowercase).
         let normalized = normalized_server_url(url);
         let reported_id = server_reported_id.map(str::trim).filter(|s| !s.is_empty());
-        // Derive the deterministic portable id (Story 2.13). Re-derived on every
-        // upsert so it stays stable across remove/re-add and reconnects.
-        let portable_id = derive_server_id(server_type, &normalized, username, reported_id);
         let existing_id: Option<String> = conn
             .query_row(
                 "SELECT id FROM server_config
@@ -480,6 +478,12 @@ impl Database {
             .ok();
 
         if let Some(id) = existing_id {
+            // Story 2.13: `server_id` is FROZEN once persisted. Backfill or the
+            // initial INSERT determines the basis; UPDATE never re-derives. This
+            // prevents the URL-basis → rid-basis flip on first connect after
+            // upgrade from orphaning manifest tags that were reconciled to the
+            // backfilled portable id. `server_reported_id` is captured opportunistically
+            // for diagnostics and future basis selection on fresh inserts.
             conn.execute(
                 "UPDATE server_config SET
                     url = ?2, server_type = ?3, username = ?4,
@@ -487,8 +491,7 @@ impl Database {
                     name = COALESCE(?6, name),
                     icon = COALESCE(?7, icon),
                     updated_at = ?8,
-                    server_id = ?9,
-                    server_reported_id = COALESCE(?10, server_reported_id)
+                    server_reported_id = COALESCE(?9, server_reported_id)
                  WHERE id = ?1",
                 params![
                     id,
@@ -499,7 +502,6 @@ impl Database {
                     name,
                     icon,
                     updated_at,
-                    portable_id,
                     reported_id
                 ],
             )
@@ -507,6 +509,9 @@ impl Database {
             return Ok(id);
         }
 
+        // Derive the deterministic portable id at INSERT (Story 2.13). Frozen
+        // thereafter — see UPDATE branch comment above.
+        let portable_id = derive_server_id(server_type, &normalized, username, reported_id);
         let id = uuid::Uuid::new_v4().to_string();
         let default_name = server_type_label(server_type).to_string();
         let default_icon = default_server_icon(server_type).to_string();
@@ -1279,6 +1284,36 @@ mod tests {
         assert_ne!(id1, id2, "machine-local id is freshly minted");
         let portable2 = db.get_server(&id2).unwrap().unwrap().server_id.unwrap();
         assert_eq!(portable1, portable2, "portable id is stable across remove/re-add");
+    }
+
+    #[test]
+    fn upsert_does_not_re_derive_server_id_on_update() {
+        // Story 2.13 review patch: `server_id` is frozen once persisted. A second
+        // upsert that would change the derivation basis (e.g. a previously unknown
+        // `reported_id` arriving via System/Info on first connect after upgrade)
+        // must NOT flip the persisted portable id — otherwise manifest tags written
+        // with the original basis are orphaned.
+        let db = Database::memory().unwrap();
+        let id = db
+            .upsert_server("http://media.example", "jellyfin", "alexis", None, None, None, None)
+            .unwrap();
+        let portable_initial = db.get_server(&id).unwrap().unwrap().server_id.unwrap();
+        let url_basis =
+            derive_server_id("jellyfin", "http://media.example", "alexis", None);
+        assert_eq!(portable_initial, url_basis);
+
+        // Reconnect captures a reported id. Portable id must NOT change.
+        let id2 = db
+            .upsert_server("http://media.example", "jellyfin", "alexis", None, None, None, Some("RID-9"))
+            .unwrap();
+        assert_eq!(id, id2, "same logical server resolves to the same row");
+        let portable_after = db.get_server(&id).unwrap().unwrap().server_id.unwrap();
+        assert_eq!(portable_after, url_basis, "server_id is frozen on UPDATE");
+        // But reported id is captured opportunistically for diagnostics.
+        assert_eq!(
+            db.get_server(&id).unwrap().unwrap().server_reported_id.as_deref(),
+            Some("RID-9")
+        );
     }
 
     #[test]

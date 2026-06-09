@@ -89,6 +89,10 @@ impl ServerManager {
             .unwrap_or("jellyfin")
             .to_string();
         let server_version = provider.server_version().map(str::to_string);
+        // Derive a real portable id so tests exercise the portable ≠ local mapping
+        // that production code performs. A previous version mirrored id → server_id,
+        // which silently masked any bug that confused the two identities.
+        let portable_id = crate::db::derive_server_id(&server_type, "", "", None);
         self.servers = vec![ServerRecord {
             id: id.clone(),
             url: String::new(),
@@ -98,8 +102,7 @@ impl ServerManager {
             name: None,
             icon: None,
             selected: true,
-            // In tests the portable id mirrors the local id (1:1 per machine).
-            server_id: Some(id.clone()),
+            server_id: Some(portable_id),
             server_reported_id: None,
         }];
         self.selected_server_id = Some(id.clone());
