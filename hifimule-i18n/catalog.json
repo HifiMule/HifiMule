@@ -262,7 +262,11 @@
     "error.cross_server_playlist": "Playlist creation requires all items to be from the selected server. Switch server or remove cross-server items.",
     "login.reauth_title": "Re-authenticate server",
     "login.reauth_hint": "This server's saved login has expired. Sign in again to continue.",
-    "error.unauthorized": "Authentication failed — your saved login for this server is no longer valid."
+    "error.unauthorized": "Authentication failed — your saved login for this server is no longer valid.",
+    "repair.prune_failed": "Couldn't prune the selected files: {message}",
+    "repair.relink_failed": "Couldn't re-link the file: {message}",
+    "repair.clear_dirty_failed": "Couldn't clear the dirty flag: {message}",
+    "playlist.curation.search_truncated": "Showing the first {count} matches. Refine your search to narrow it down."
   },
   "fr": {
     "app.name": "HifiMule",
@@ -527,7 +531,11 @@
     "error.cross_server_playlist": "La création de playlist nécessite que tous les éléments proviennent du serveur sélectionné. Changez de serveur ou retirez les éléments d'autres serveurs.",
     "login.reauth_title": "Réauthentifier le serveur",
     "login.reauth_hint": "L'identifiant enregistré de ce serveur a expiré. Reconnectez-vous pour continuer.",
-    "error.unauthorized": "Échec de l'authentification — votre identifiant enregistré pour ce serveur n'est plus valide."
+    "error.unauthorized": "Échec de l'authentification — votre identifiant enregistré pour ce serveur n'est plus valide.",
+    "repair.prune_failed": "Impossible de purger les fichiers sélectionnés : {message}",
+    "repair.relink_failed": "Impossible de relier le fichier : {message}",
+    "repair.clear_dirty_failed": "Impossible d'effacer l'indicateur de modification : {message}",
+    "playlist.curation.search_truncated": "Affichage des {count} premiers résultats. Affinez votre recherche pour réduire la liste."
   },
   "es": {
     "app.name": "HifiMule",
@@ -792,7 +800,11 @@
     "error.cross_server_playlist": "La creación de listas requiere que todos los elementos sean del servidor seleccionado. Cambia de servidor o elimina los elementos de otros servidores.",
     "login.reauth_title": "Volver a autenticar el servidor",
     "login.reauth_hint": "El inicio de sesión guardado de este servidor ha caducado. Inicia sesión de nuevo para continuar.",
-    "error.unauthorized": "Error de autenticación: tu inicio de sesión guardado para este servidor ya no es válido."
+    "error.unauthorized": "Error de autenticación: tu inicio de sesión guardado para este servidor ya no es válido.",
+    "repair.prune_failed": "No se pudieron purgar los archivos seleccionados: {message}",
+    "repair.relink_failed": "No se pudo volver a vincular el archivo: {message}",
+    "repair.clear_dirty_failed": "No se pudo borrar el indicador de cambios: {message}",
+    "playlist.curation.search_truncated": "Mostrando los primeros {count} resultados. Refina tu búsqueda para acotarla."
   },
   "de": {
     "app.name": "HifiMule",
@@ -1057,6 +1069,10 @@
     "error.cross_server_playlist": "Zum Erstellen einer Playlist müssen alle Elemente vom ausgewählten Server stammen. Wechsle den Server oder entferne serverübergreifende Elemente.",
     "login.reauth_title": "Server erneut anmelden",
     "login.reauth_hint": "Die gespeicherte Anmeldung dieses Servers ist abgelaufen. Melde dich erneut an, um fortzufahren.",
-    "error.unauthorized": "Authentifizierung fehlgeschlagen — deine gespeicherte Anmeldung für diesen Server ist nicht mehr gültig."
+    "error.unauthorized": "Authentifizierung fehlgeschlagen — deine gespeicherte Anmeldung für diesen Server ist nicht mehr gültig.",
+    "repair.prune_failed": "Die ausgewählten Dateien konnten nicht entfernt werden: {message}",
+    "repair.relink_failed": "Die Datei konnte nicht neu verknüpft werden: {message}",
+    "repair.clear_dirty_failed": "Das Änderungs-Flag konnte nicht zurückgesetzt werden: {message}",
+    "playlist.curation.search_truncated": "Die ersten {count} Treffer werden angezeigt. Verfeinere deine Suche, um sie einzugrenzen."
   }
 }

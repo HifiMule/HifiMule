@@ -543,6 +543,8 @@ export class BasketSidebar {
         dialog.querySelector('#device-settings-cancel')?.addEventListener('click', () => dialog.hide());
         dialog.querySelector('#device-settings-save')?.addEventListener('click', async () => {
             const saveButton = dialog.querySelector('#device-settings-save') as any;
+            // Guard against a rapid double-click firing two device.update_manifest writes.
+            if (saveButton?.loading) return;
             const error = dialog.querySelector('#device-settings-error') as HTMLElement | null;
             if (saveButton) saveButton.loading = true;
             if (error) error.style.display = 'none';
