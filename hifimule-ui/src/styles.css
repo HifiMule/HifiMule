@@ -146,6 +146,34 @@ body {
   white-space: nowrap;
 }
 
+.server-hub-row::part(base) {
+  min-width: 280px;
+}
+
+.server-hub-row-text {
+  display: inline-flex;
+  flex-direction: column;
+  min-width: 0;
+  max-width: 260px;
+  line-height: 1.2;
+}
+
+.server-hub-row-name,
+.server-hub-row-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.server-hub-row-name {
+  color: var(--ink);
+}
+
+.server-hub-row-meta {
+  color: var(--ink-dim);
+  font-size: 0.72rem;
+}
+
 .basket-view {
   min-width: 330px;
   padding: var(--space-lg) var(--space-lg) var(--space-md);
@@ -191,6 +219,34 @@ body {
   gap: var(--space-sm);
 }
 
+/* Per-server section divider/label for mixed-server baskets (AC36). */
+.basket-server-group-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.5);
+  margin-top: var(--space-xs);
+}
+.basket-server-group-label sl-icon {
+  flex-shrink: 0;
+}
+.basket-server-group-label span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.basket-server-group-label::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
 .basket-item-card {
   display: flex;
   align-items: center;
@@ -224,6 +280,17 @@ body {
   background-position: center;
   border-radius: var(--sl-border-radius-small);
   flex-shrink: 0;
+}
+
+/* Foreign-server (locked) item: lock placeholder instead of a blank thumbnail. */
+.basket-item-image--locked {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px dashed rgba(255, 255, 255, 0.15);
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 1.1rem;
 }
 
 .basket-item-info {
@@ -542,6 +609,9 @@ h2 {
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  /* German compound words (and long unbroken artist names) have no break
+     opportunities; force them to wrap inside the clamp box rather than spill. */
+  overflow-wrap: break-word;
 }
 
 .card-year {
@@ -600,20 +670,18 @@ h2 {
   font-size: 0.9rem;
 }
 
-/* Responsive adjustments */
-@media (max-width: 768px) {
-  .media-grid {
-    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-    gap: 1rem;
-  }
-}
-
 /* Quick Navigation A-Z Bar (Story 3.7) */
 .quick-nav-bar {
+  /* 27 letters share the row. Each button grows to fill the available width so
+     the hit target is as large as space allows, and shrinks to a comfortable
+     floor before wrapping (the bar can reach ~500px wide at the 900px minimum
+     window). The taller small-button height enlarges the vertical target for
+     free, regardless of how narrow the row gets. */
+  --sl-input-height-small: 2.25rem;
   display: flex;
   flex-direction: row;
   flex-wrap: wrap;
-  gap: 0.1rem;
+  gap: 0.15rem;
   position: sticky;
   top: 0;
   z-index: 50;
@@ -626,10 +694,14 @@ h2 {
   border-bottom: 1px solid var(--surface-border-soft);
 }
 
+.quick-nav-bar sl-button {
+  flex: 1 1 1.5rem;
+}
+
 .quick-nav-bar sl-button::part(base) {
-  min-width: 1.75rem;
+  width: 100%;
   padding: 0 0.25rem;
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
   font-weight: 600;
   letter-spacing: 0.02em;
 }
@@ -677,18 +749,38 @@ h2 {
   display: flex;
   justify-content: center;
   align-items: center;
+  flex: 1;
+  width: 100%;
+  min-width: 0;
   height: 100vh;
-  background: var(--app-bg);
+  padding: var(--space-lg);
+  box-sizing: border-box;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(var(--accent-rgb), 0.1), transparent 34rem),
+    linear-gradient(135deg, #101827 0%, var(--app-bg) 58%, #0a0d16 100%);
 }
 
 .login-card {
   width: 100%;
   max-width: 400px;
+  max-height: calc(100vh - (2 * var(--space-lg)));
+  overflow-y: auto;
 }
 
 .login-card h3 {
   margin: 0;
   text-align: center;
+}
+
+.login-identity-fields {
+  display: grid;
+  gap: var(--space-xs);
+}
+
+.login-server-icon-picker .init-icon-tile {
+  min-width: 44px;
+  min-height: 44px;
+  justify-content: center;
 }
 
 /* Device Folders Panel (Story 3.4) */
@@ -965,6 +1057,7 @@ h2 {
 
 .repair-item-info {
   flex: 1;
+  min-width: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -1263,7 +1356,8 @@ h2 {
 
 #init-device-dialog::part(panel),
 #repair-dialog::part(panel),
-.device-settings-dialog::part(panel) {
+.device-settings-dialog::part(panel),
+.server-identity-dialog::part(panel) {
   max-width: min(92vw, 720px);
   border-radius: var(--radius);
   background: var(--surface-bg);
@@ -1287,6 +1381,21 @@ h2 {
 .init-device-form {
   display: grid;
   gap: 1rem;
+}
+
+.server-identity-dialog {
+  --width: min(92vw, 460px);
+}
+
+.server-identity-form {
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.server-identity-icon-picker .init-icon-tile {
+  min-width: 44px;
+  min-height: 44px;
+  justify-content: center;
 }
 
 /* ========================
@@ -1445,6 +1554,10 @@ h2 {
 /* Row labels (artist name, album name, track title) */
 .curation-row-label {
   flex: 1;
+  /* Without min-width:0 the nowrap content sets the flex item's min size to its
+     full width, so flex:1 can never shrink it and ellipsis never engages —
+     long names overflow the row. */
+  min-width: 0;
   font-size: var(--sl-font-size-small);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1481,6 +1594,24 @@ h2 {
 .curation-empty-state {
   padding: var(--space-md);
   margin: 0;
+  color: var(--ink-dim);
+  font-size: var(--sl-font-size-small);
+}
+
+/* "Showing first N matches" hint pinned above a capped search result list.
+   Sticky over a scrolling list, so the background must be opaque — the wash is
+   layered over the panel surface (not a bare 3%-white fill) so checkbox rows
+   passing underneath don't bleed through, and a hairline separates it from them.
+   Full-bleed sticky strip flush to the scroll container, so it stays square (no
+   radius) and reads as a header; the bottom hairline is its only edge. */
+.curation-search-note {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: 0;
+  padding: var(--space-xs) var(--space-sm);
+  background: linear-gradient(var(--surface-fill), var(--surface-fill)), var(--surface-bg);
+  border-bottom: 1px solid var(--surface-border-soft);
   color: var(--ink-dim);
   font-size: var(--sl-font-size-small);
 }

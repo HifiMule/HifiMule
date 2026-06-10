@@ -1,7 +1,13 @@
 # Deferred Work
 
 Status: open
-Last updated: 2026-06-08
+Last updated: 2026-06-09
+
+## Deferred from: code review of 2-11-multi-server-hub (2026-06-09)
+
+- **Cross-server playlist guard (AC33) checks only the `items` param, not the `itemIds` used to build the track list** [`hifimule-daemon/src/rpc.rs:875-915` `handle_playlist_create`] — defense-in-depth only. The guard inspects `params["items"]` (`{id, serverId}`), but `track_ids` is built from `params["itemIds"]`. A non-UI caller sending legacy `itemIds: string[]` (no `items`) skips the guard; however those ids resolve only against the *selected* provider, so cross-server ids fail to resolve and are skipped (not mis-assigned). The UI always sends `items` (AC34 pre-filter), so the supported flow is fully covered. A complete fix needs per-item serverIds in the bare-`itemIds` path; forcing `items` would break the documented legacy contract.
+- **load_vault masks decryptable-but-unparseable vault as empty** [`hifimule-daemon/src/api.rs` `load_vault`] — `serde_json::from_str(&json).unwrap_or_default()` turns a corrupted-but-decryptable vault into an empty map (previously errored on parse failure). Worst case the user re-authenticates; the legacy-migration path reads the raw blob separately so migration is unaffected. Low impact.
+- **`handle_server_connect` with `ServerType::Unknown` caches a provider but saves no credential** [`hifimule-daemon/src/rpc.rs` `handle_server_connect`] — the Unknown arm stores no vault entry yet inserts the provider into the cache; a later lazy reconnect fails with "No credential found" → `ERR_UNAUTHORIZED`, leaving a broken row the user must remove. Only reachable for an unrecognized server type.
 
 ## Deferred from: code review of 9-10-tracks-browse-mode-dual-panel-ui (2026-06-08)
 
@@ -192,3 +198,11 @@ If future review findings need follow-up, add them as new story scope or reopen 
 
 - **Stale-mode race in `loadMoreForListView`** [hifimule-ui/src/library.ts:783] — the function reads `state.browseMode` and `breadcrumbStack.length` after the awaited fetch, with no load-sequence/mode token. If the user switches browse mode or navigates during the in-flight fetch, the returned items and `pagination.total` get written into the new view's `state.items`, corrupting the list and virtual-scroll height. Pre-existing pattern (already present for artists/albums prior to 9.8); widened to genres/history modes by this change. No sequence-token guard exists anywhere in the codebase yet.
 - **`subsonic.rs::get_songs_by_genre` full-fetch + local pagination** [hifimule-daemon/src/providers/subsonic.rs:654] — now calls `get_songs_by_genre(genre, 0, 10_000)` and paginates locally. (a) Genres with >10,000 songs are silently truncated and report a capped total; (b) every paginated page request re-downloads the full song set (O(n²) network/CPU per scroll). Contingent on keeping the daemon change — resolve review Decision #1 (AC 5 autoload scope) first. A cache of the full per-genre fetch, or true server-side paging, would fix the perf issue.
+
+## Deferred from: code review of story-2.13 (2026-06-09)
+
+- **`get_provider_by_server_id` stale-manager race during concurrent reconnect** [hifimule-daemon/src/server_manager.rs:1583-1604] — reads in-memory `manager.servers` first, only falls back to `db.list_servers()` if no record found. During a reconnect that flips the portable id, the in-memory manager and DB can disagree for a window; a sync running concurrently may resolve to a stale provider. Narrow concurrency window — daemon currently expects connect operations to be quiescent.
+- **`reconcile_manifest_server_ids` silent persistence failure** [hifimule-daemon/src/device/mod.rs:~340-356] — when `write_manifest` fails after an in-memory remap, the function logs and continues. Idempotent so harmless per session, but a persistent write failure (read-only device, permission error) is never surfaced. Consider one-shot toast or N-retry cap.
+- **`handle_playlist_create` cross-server guard silently no-ops when `current_server_portable_id == None`** [hifimule-daemon/src/rpc.rs:~947-953] — backfill in `Database::init` guarantees `Some` in practice, but the new code introduces a window where the guard is a no-op rather than an error. Treat None as inconsistency error if this ever surfaces in logs.
+- **`current_server_portable_id` connect→sync race vs credential file write** [hifimule-daemon/src/rpc.rs:1394-1417] — DB upsert + credential vault write + config.json `selected_server_id` are not atomic. Concurrent `server.connect` + `sync_calculate_delta` could see a portable id from the new server but credentials/selection from the old. Document "no concurrent connect" invariant or wrap the post-connect writes in a single critical section.
+- **`serverIdsInBasket` / `removeItemsForServer` unaware of portable/local duality** [hifimule-ui/src/state/basket.ts:82-108] — exact-string match on stored `serverId`. If a reconciliation gap leaves some items local-tagged, `serverIdsInBasket()` would count a single logical server twice. Addressed indirectly by `ServerHub.handleRemove`'s double sweep, but other consumers (e.g. future stats panels) could be misled. Consider a canonicalize helper.

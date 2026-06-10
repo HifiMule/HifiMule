@@ -229,7 +229,10 @@ async fn image_proxy(
 /// This bypasses browser security restrictions (mixed content, CORS) that block
 /// fetch() from https://tauri.localhost to http://localhost:19140 in release mode.
 #[tauri::command]
-async fn rpc_proxy(method: String, params: serde_json::Value) -> Result<serde_json::Value, String> {
+async fn rpc_proxy(
+    method: String,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, serde_json::Value> {
     let client = reqwest::Client::new();
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -243,18 +246,17 @@ async fn rpc_proxy(method: String, params: serde_json::Value) -> Result<serde_js
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("RPC connection failed: {}", e))?;
+        .map_err(|e| serde_json::json!({ "message": format!("RPC connection failed: {}", e) }))?;
 
     let data: serde_json::Value = response
         .json()
         .await
-        .map_err(|e| format!("RPC response parse failed: {}", e))?;
+        .map_err(|e| serde_json::json!({ "message": format!("RPC response parse failed: {}", e) }))?;
 
     if let Some(error) = data.get("error").filter(|e| !e.is_null()) {
-        return Err(error["message"]
-            .as_str()
-            .unwrap_or("Unknown RPC error")
-            .to_string());
+        // Forward the full JSON-RPC error envelope (code + message + data) so the
+        // UI can react to specific codes (e.g. ERR_UNAUTHORIZED → scoped re-auth).
+        return Err(error.clone());
     }
 
     Ok(data

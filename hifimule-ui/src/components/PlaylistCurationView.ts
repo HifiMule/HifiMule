@@ -1,6 +1,6 @@
 import { fetchBrowsePlaylist, fetchBrowseSearch, BrowseTrack, rpcCall } from '../rpc';
 import { t } from '../i18n';
-import { showToast } from '../toast';
+import { showToast, ERROR_TOAST_DURATION } from '../toast';
 
 function formatDuration(totalSecs: number): string {
     const h = Math.floor(totalSecs / 3600);
@@ -523,7 +523,7 @@ export class PlaylistCurationView {
                 this.isRenamingPlaylist = false;
             } catch (err) {
                 const message = err instanceof Error ? err.message : String(err);
-                showToast(t('playlist.curation.rename_error', { message }), 'danger');
+                showToast(t('playlist.curation.rename_error', { message }), 'danger', ERROR_TOAST_DURATION);
             } finally {
                 this.isSavingRename = false;
             }
@@ -569,7 +569,7 @@ export class PlaylistCurationView {
                 await rpcCall('playlist.delete', { playlistId: this.playlistId });
             } catch (err) {
                 const message = err instanceof Error ? err.message : String(err);
-                showToast(t('playlist.curation.delete_error', { message }), 'danger');
+                showToast(t('playlist.curation.delete_error', { message }), 'danger', ERROR_TOAST_DURATION);
                 return;
             } finally {
                 this.isDeleting = false;
@@ -750,7 +750,19 @@ export class PlaylistCurationView {
                 el.innerHTML = `<p class="curation-empty-state">${t('playlist.curation.no_search_results')}</p>`;
                 return;
             }
-            for (const track of tracks) {
+            // A broad query ("a") can match the whole library; rendering every hit
+            // as a checkbox row would stall the dialog. Cap the DOM and tell the
+            // user to narrow the search rather than silently dropping matches.
+            const SEARCH_RESULT_CAP = 100;
+            const truncated = tracks.length > SEARCH_RESULT_CAP;
+            const shown = truncated ? tracks.slice(0, SEARCH_RESULT_CAP) : tracks;
+            if (truncated) {
+                const note = document.createElement('p');
+                note.className = 'curation-search-note';
+                note.textContent = t('playlist.curation.search_truncated', { count: SEARCH_RESULT_CAP });
+                el.appendChild(note);
+            }
+            for (const track of shown) {
                 const row = document.createElement('div');
                 row.classList.add('curation-track-result');
                 row.classList.toggle('curation-track-result--selected', selectedIds.has(track.id));

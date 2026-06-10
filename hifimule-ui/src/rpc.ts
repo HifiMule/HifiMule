@@ -72,6 +72,24 @@ function rawErrorMessage(error: unknown): string | null {
     return null;
 }
 
+/** JSON-RPC error code for an expired/invalid server credential (daemon ERR_UNAUTHORIZED). */
+export const ERR_UNAUTHORIZED = -8;
+
+/** Extracts the JSON-RPC error code from a structured rpc_proxy rejection, if present. */
+function rpcErrorCode(error: unknown): number | null {
+    if (error && typeof error === 'object') {
+        const code = (error as Record<string, unknown>).code;
+        if (typeof code === 'number') return code;
+    }
+    return null;
+}
+
+/** Browse/library RPCs whose 401 should trigger a server-scoped re-auth (AC11).
+ * Excludes server.* methods so the re-auth flow itself never re-triggers. */
+function isBrowseMethod(method: string): boolean {
+    return method.startsWith('browse.') || method.startsWith('jellyfin_');
+}
+
 export async function rpcCall(method: string, params: any = {}): Promise<any> {
     console.log(`RPC Call: ${method}`, params);
     // Use Tauri invoke to proxy RPC calls through the Rust backend.
@@ -80,8 +98,59 @@ export async function rpcCall(method: string, params: any = {}): Promise<any> {
     try {
         return await invoke('rpc_proxy', { method, params });
     } catch (error) {
+        // AC11: an expired/invalid credential on a browse RPC surfaces a scoped
+        // re-auth prompt. Dispatch a global event a central handler reacts to.
+        if (rpcErrorCode(error) === ERR_UNAUTHORIZED && isBrowseMethod(method)) {
+            window.dispatchEvent(
+                new CustomEvent('hifimule:server-unauthorized', { detail: { method } })
+            );
+        }
         throw new Error(getErrorMessage(error));
     }
+}
+
+// --- Multi-server (Story 2.11) ---
+
+export interface ServerSummary {
+    id: string;
+    /** Deterministic, machine-independent portable id (Story 2.13). Used for basket
+     * tagging, active-server tracking, and sync routing. `server.select/remove/update`
+     * still key on the local `id`. */
+    serverId?: string | null;
+    url: string;
+    serverType: string;
+    username: string;
+    name: string | null;
+    icon: string | null;
+    selected: boolean;
+}
+
+/** Lists all configured servers (AC1/AC20). */
+export async function serverList(): Promise<ServerSummary[]> {
+    return (await rpcCall('server.list')) as ServerSummary[];
+}
+
+/** Selects the active server (AC2). */
+export async function serverSelect(id: string): Promise<void> {
+    await rpcCall('server.select', { id });
+}
+
+export async function serverUpdate(params: {
+    id: string;
+    name?: string;
+    icon?: string | null;
+}): Promise<void> {
+    await rpcCall('server.update', params);
+}
+
+/** Removes a server; returns the removed id and the reselected id (if any) (AC6/AC8). */
+export async function serverRemove(
+    id: string
+): Promise<{ removedServerId: string; reselectedServerId: string | null }> {
+    return (await rpcCall('server.remove', { id })) as {
+        removedServerId: string;
+        reselectedServerId: string | null;
+    };
 }
 
 /// Fetches a Jellyfin image via the Tauri backend, returning a data URL.

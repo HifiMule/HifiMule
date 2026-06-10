@@ -38,6 +38,10 @@ pub struct SyncedItem {
     pub original_container: Option<String>,
     #[serde(default)]
     pub track_number: Option<u32>,
+    /// Originating server UUID (Story 2.11). Lets force-sync re-route each item to
+    /// its source provider. `None` for items synced before multi-server support.
+    #[serde(default)]
+    pub server_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -161,6 +165,45 @@ impl DeviceManifest {
 pub struct AutoFillPrefs {
     pub enabled: bool,
     pub max_bytes: Option<u64>,
+}
+
+/// Rewrites a single optional `server_id` tag from a legacy machine-local UUID or
+/// pre-2.11 composite to the deterministic portable id (Story 2.13), using `remap`
+/// (`{ legacy → portable }`). Returns true when the tag changed. Idempotent: a tag
+/// that is already portable is not a key in `remap`, so it is left untouched.
+fn remap_server_id_tag(
+    tag: &mut Option<String>,
+    remap: &std::collections::HashMap<String, String>,
+) -> bool {
+    if let Some(current) = tag.as_deref()
+        && let Some(portable) = remap.get(current)
+        && portable.as_str() != current
+    {
+        *tag = Some(portable.clone());
+        return true;
+    }
+    false
+}
+
+/// Reconciles a device manifest's `synced_items` and `basket_items` `server_id`
+/// tags onto the portable identity (Story 2.13 AC6), using `remap`
+/// (`{ machine-local UUID → portable, legacy composite → portable }`). Returns true
+/// when anything changed. Idempotent and order-independent.
+pub fn reconcile_manifest_server_ids(
+    manifest: &mut DeviceManifest,
+    remap: &std::collections::HashMap<String, String>,
+) -> bool {
+    if remap.is_empty() {
+        return false;
+    }
+    let mut changed = false;
+    for item in &mut manifest.synced_items {
+        changed |= remap_server_id_tag(&mut item.server_id, remap);
+    }
+    for item in &mut manifest.basket_items {
+        changed |= remap_server_id_tag(&mut item.server_id, remap);
+    }
+    changed
 }
 
 /// Atomically writes a DeviceManifest via the device's IO backend.
@@ -296,6 +339,22 @@ impl DeviceManager {
             }
         }
         let device_class = device_class_from_path(&path);
+
+        // Story 2.13: reconcile manifest server_id tags (2.11 machine-local UUID or
+        // pre-2.11 composite) onto the deterministic portable id, so a device synced
+        // on another machine — or before this change — is recognized without a
+        // spurious full resync. Idempotent; best-effort persistence (never blocks
+        // device load on a write failure).
+        let mut manifest = manifest;
+        let remap = self.db.server_id_remap();
+        if reconcile_manifest_server_ids(&mut manifest, &remap)
+            && let Err(e) = write_manifest(std::sync::Arc::clone(&device_io), &manifest).await
+        {
+            daemon_log!(
+                "[Device] Manifest server_id reconciliation persist failed (continuing): {}",
+                e
+            );
+        }
 
         // T5.9: Scan for MTP-style dirty markers on reconnect.
         // For MSC devices, leftover `.dirty` markers indicate an interrupted MtpBackend write

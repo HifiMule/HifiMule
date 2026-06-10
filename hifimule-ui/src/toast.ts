@@ -4,6 +4,10 @@
 
 type ToastVariant = 'primary' | 'success' | 'neutral' | 'warning' | 'danger';
 
+// Error toasts often carry a raw backend {message}; give them longer than the
+// 3s default so the detail can actually be read before it auto-dismisses.
+export const ERROR_TOAST_DURATION = 6000;
+
 const VARIANT_ICONS: Record<ToastVariant, string> = {
     primary: 'info-circle',
     success: 'check2-circle',

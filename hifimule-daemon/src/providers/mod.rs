@@ -276,6 +276,13 @@ pub trait MediaProvider: Send + Sync {
         None
     }
 
+    /// Server-reported stable id (e.g. Jellyfin `System/Info.Id`), when the provider
+    /// exposes one. Drives the portable `server_id` `rid:` basis (Story 2.13).
+    /// Subsonic/OpenSubsonic has no such concept → `None` (URL basis).
+    fn server_reported_id(&self) -> Option<&str> {
+        None
+    }
+
     fn capabilities(&self) -> Capabilities;
 }
 
@@ -541,7 +548,8 @@ async fn connect_jellyfin(
         auth.access_token,
         auth.user.id,
         Some(info.version),
-    );
+    )
+    .with_reported_id(Some(info.id));
     Ok(Arc::new(provider))
 }
 

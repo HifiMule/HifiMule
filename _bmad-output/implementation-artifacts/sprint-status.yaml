@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-06-08  # Fix Jellyfin AlbumArtistIds bug (done)
+last_updated: 2026-06-10  # Story 2.13 code review complete (10 patches applied, 5 LOW/narrow-MEDIUM deferred)
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -47,29 +47,32 @@ development_status:
   1-3-detachable-tauri-ui-skeleton: done
   epic-1-retrospective: done
 
-  epic-2: done
-  2-1-secure-jellyfin-server-link: done
+  epic-2: in-progress  # reopened: Story 2.12 added via sprint-change-proposal-2026-06-09-server-identity
+  2-1-secure-jellyfin-server-link: done  # amended: multi-server vault + server.connect returns serverId
   2-2-mass-storage-heartbeat-autodetection: done
   2-3-multi-device-profile-mapping: done
   2-3b-auto-sync-on-connect-trigger: done
   2-4-startup-splash-screen-with-connection-status: done
-  2-5-interactive-login-and-identity-management: done
+  2-5-interactive-login-and-identity-management: done  # amended: first-run vs add-server flow split; re-auth per server
   2-6-initialize-new-device-manifest: done
   2-7-multi-device-selection-panel: done
   2-8-enhanced-multi-device-hub: done
   2-9-device-identity-name-and-icon: done
   2-10-mtp-device-detection: done
+  2-11-multi-server-hub: done  # code review 2026-06-09: 5 patches applied (incl. HIGH single-non-selected-server sync routing), 2 false positives dismissed, 1 LOW deferred
+  2-12-server-identity-name-and-icon: done
+  2-13-portable-server-identity: done  # code review 2026-06-10: 10 patches applied (incl. HIGH server_id freeze-on-update); 5 LOW/narrow-MEDIUM deferred
   epic-2-retrospective: done
 
   epic-3: done
   3-1-immersive-media-browser-jellyfin-integration: done
-  3-2-the-live-selection-basket: done
+  3-2-the-live-selection-basket: done  # amended: BasketItem.serverId + read-only for non-selected server items
   3-3-high-confidence-storage-projection: done
   3-4-managed-zone-hardware-shielding: done
   3-5-music-only-library-filtering: done
   3-6-auto-fill-sync-mode-synchronise-all: done
   3-7-artist-view-cache-scroll-state-quick-navigation: done
-  3-8-lazy-auto-fill-virtual-slot: done
+  3-8-lazy-auto-fill-virtual-slot: done  # amended: AutoFillSlot gains serverId; overwrite-on-enable behavior
   3-9-artist-entity-basket-item: done
   epic-3-retrospective: done
 
@@ -79,7 +82,7 @@ development_status:
   4-2-atomic-buffered-io-streaming: done
   4-3-legacy-hardware-constraints-path-char-validation: done
   4-4-self-healing-dirty-manifest-resume: done
-  4-5-start-sync-ui-to-engine-trigger: done
+  4-5-start-sync-ui-to-engine-trigger: done  # amended: sync.start itemIds becomes Array<{id, serverId}> for multi-provider routing
   4-5b-daemon-initiated-sync-path: done
   4-6-sync-progress-eta: done
   4-7-playlist-m3u-file-generation: done
@@ -110,7 +113,7 @@ development_status:
   7-2-devicemanager-concurrency-refactor: done
   7-3-device-ui-and-identity-polish: done
   7-4-packaging-and-cicd-hardening: done
-  7-5-machine-bound-credential-vault: done
+  7-5-machine-bound-credential-vault: done  # amended: vault stores HashMap<serverId, ServerCredentials>; add save/load/remove per-server + migration AC
   epic-7-retrospective: done
 
   epic-8: done
@@ -143,8 +146,8 @@ development_status:
   11-1-mediaprovider-playlist-write-trait-amendment: done
   11-2-jellyfinprovider-playlist-write-adapter: done
   11-3-subsonicprovider-playlist-write-adapter: done
-  11-4-playlist-rpcs-and-selection-to-tracks-resolution: done
-  11-5-save-selection-as-playlist-ui-and-context-menu: done
+  11-4-playlist-rpcs-and-selection-to-tracks-resolution: done  # amended: server scope validation (409 on cross-server items)
+  11-5-save-selection-as-playlist-ui-and-context-menu: done  # amended: cross-server exclusion notice + UI pre-filter
   11-6-dual-panel-playlist-curation-view-and-stats: done
   11-7-add-tracks-to-playlist-browse-and-curation: done
   11-8-playlist-rename-and-delete: done

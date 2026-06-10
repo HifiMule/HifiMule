@@ -23,6 +23,10 @@ pub struct JellyfinProvider {
     token: String,
     user_id: String,
     server_version: Option<String>,
+    /// Server-reported stable id (`System/Info.Id`), captured at connect. Drives the
+    /// portable `server_id` `rid:` basis (Story 2.13). `None` when reconstructed from
+    /// stored credentials (the reported id is only needed at the initial connect).
+    server_reported_id: Option<String>,
 }
 
 impl JellyfinProvider {
@@ -38,6 +42,7 @@ impl JellyfinProvider {
             token: token.into(),
             user_id: user_id.into(),
             server_version: None,
+            server_reported_id: None,
         }
     }
 
@@ -54,7 +59,14 @@ impl JellyfinProvider {
             token: token.into(),
             user_id: user_id.into(),
             server_version,
+            server_reported_id: None,
         }
+    }
+
+    /// Records the server-reported stable id (`System/Info.Id`) captured at connect.
+    pub fn with_reported_id(mut self, server_reported_id: Option<String>) -> Self {
+        self.server_reported_id = server_reported_id;
+        self
     }
 
     fn map_error(error: anyhow::Error) -> ProviderError {
@@ -496,20 +508,34 @@ impl MediaProvider for JellyfinProvider {
         song_id: &str,
         profile: Option<&TranscodeProfile>,
     ) -> Result<String, ProviderError> {
-        if let Some(profile) = profile {
+        // All returned URLs must be fetchable without auth headers because
+        // `execute_provider_sync` uses a plain `reqwest::get(url)`.  Jellyfin
+        // supports URL-based auth via `?api_key=<token>`, which we always append
+        // so that direct-play downloads and transcoding fallbacks both work in the
+        // multi-server provider sync path.
+        let url = if let Some(profile) = profile {
             let profile = transcode_profile_to_device_profile(profile);
             self.client
                 .resolve_stream_url(self.url(), self.token(), self.user_id(), song_id, &profile)
                 .await
                 .map(|(url, _is_transcoded)| url)
-                .map_err(Self::map_error)
+                .map_err(Self::map_error)?
         } else {
-            Ok(format!(
+            format!(
                 "{}/Items/{}/Download",
                 self.url().trim_end_matches('/'),
                 song_id
-            ))
-        }
+            )
+        };
+        // Append api_key only when not already present (TranscodingUrl from
+        // PlaybackInfo already carries Jellyfin session auth).
+        Ok(if url.contains("api_key=") || url.contains("ApiKey=") {
+            url
+        } else if url.contains('?') {
+            format!("{}&api_key={}", url, self.token())
+        } else {
+            format!("{}?api_key={}", url, self.token())
+        })
     }
 
     async fn cover_art_url(&self, cover_art_id: &str) -> Result<String, ProviderError> {
@@ -566,6 +592,10 @@ impl MediaProvider for JellyfinProvider {
 
     fn provider_user_id(&self) -> Option<&str> {
         Some(&self.user_id)
+    }
+
+    fn server_reported_id(&self) -> Option<&str> {
+        self.server_reported_id.as_deref()
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -1500,7 +1530,7 @@ mod tests {
 
         let url = provider.download_url("song1", None).await.expect("url");
 
-        assert_eq!(url, "http://host/jellyfin/Items/song1/Download");
+        assert_eq!(url, format!("http://host/jellyfin/Items/song1/Download?api_key={TOKEN}"));
     }
 
     #[tokio::test]

@@ -3,6 +3,7 @@
 
 import { rpcCall } from '../rpc';
 import { t } from '../i18n';
+import { showToast, ERROR_TOAST_DURATION } from '../toast';
 
 interface DiscrepancyItem {
     jellyfinId: string;
@@ -21,6 +22,9 @@ export class RepairModal {
     private dialog: HTMLElement | null = null;
     private discrepancies: Discrepancies | null = null;
     private onComplete: (() => void) | null = null;
+    /** Serializes manifest mutations so a rapid double-click (or clicking prune
+     * while a relink is in flight) can't fire two writes against the manifest. */
+    private busy = false;
 
     constructor(private container: HTMLElement, onComplete?: () => void) {
         this.onComplete = onComplete || null;
@@ -236,6 +240,8 @@ export class RepairModal {
     }
 
     private async handlePrune(ids: string[]) {
+        if (this.busy) return;
+        this.busy = true;
         try {
             await rpcCall('manifest_prune', { itemIds: ids });
             // Refresh discrepancies
@@ -243,6 +249,9 @@ export class RepairModal {
             this.renderContent();
         } catch (err) {
             console.error('[Repair] Prune failed:', err);
+            showToast(t('repair.prune_failed', { message: (err as Error).message }), 'danger', ERROR_TOAST_DURATION);
+        } finally {
+            this.busy = false;
         }
     }
 
@@ -268,16 +277,15 @@ export class RepairModal {
         if (!actionsDiv) return;
 
         actionsDiv.innerHTML = `
-            <select class="relink-select" style="font-size: 0.75rem; padding: 0.2rem; background: #1e293b; color: #f1f5f9; border: 1px solid rgba(255,255,255,0.2); border-radius: 4px;">
-                <option value="">${t('repair.link_to')}</option>
+            <sl-select class="relink-select" size="small" placeholder="${this.escapeAttr(t('repair.link_to'))}">
                 ${this.discrepancies.missing.map(m =>
-            `<option value="${this.escapeAttr(m.jellyfinId)}">${this.escapeHtml(m.name)}</option>`
+            `<sl-option value="${this.escapeAttr(m.jellyfinId)}">${this.escapeHtml(m.name)}</sl-option>`
         ).join('')}
-            </select>
+            </sl-select>
         `;
 
         const select = actionsDiv.querySelector('.relink-select') as HTMLSelectElement;
-        select.addEventListener('change', async () => {
+        select.addEventListener('sl-change', async () => {
             const selectedId = select.value;
             if (selectedId) {
                 await this.handleRelink(selectedId, orphanPath);
@@ -286,6 +294,8 @@ export class RepairModal {
     }
 
     private async handleRelink(jellyfinId: string, newLocalPath: string) {
+        if (this.busy) return;
+        this.busy = true;
         try {
             await rpcCall('manifest_relink', { jellyfinId, newLocalPath });
             // Refresh discrepancies
@@ -293,10 +303,15 @@ export class RepairModal {
             this.renderContent();
         } catch (err) {
             console.error('[Repair] Relink failed:', err);
+            showToast(t('repair.relink_failed', { message: (err as Error).message }), 'danger', ERROR_TOAST_DURATION);
+        } finally {
+            this.busy = false;
         }
     }
 
     private async handleClearDirty() {
+        if (this.busy) return;
+        this.busy = true;
         try {
             await rpcCall('manifest_clear_dirty');
             const dialog = this.container.querySelector('#repair-dialog') as any;
@@ -304,6 +319,9 @@ export class RepairModal {
             this.onComplete?.();
         } catch (err) {
             console.error('[Repair] Clear dirty failed:', err);
+            showToast(t('repair.clear_dirty_failed', { message: (err as Error).message }), 'danger', ERROR_TOAST_DURATION);
+        } finally {
+            this.busy = false;
         }
     }
 
