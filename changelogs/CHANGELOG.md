@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.11.0 - 2026-06-10
+
+HifiMule now works with more than one media server. A new **Server Hub** lets you set up several servers — any mix of Jellyfin, Subsonic, and Navidrome — switch between them with a click, and add or remove servers without reconfiguring the app or losing what's in your basket. Your basket can even hold music from several servers at once: items are grouped by server, and a sync sends each one back to the server it came from. Items from a server that isn't currently active simply show as locked until you switch back to it.
+
+You can also give each server a **name and icon of your choice**, so you can tell them apart at a glance in the hub, the switcher, and your basket — instead of squinting at server types and URLs.
+
+Behind the scenes, servers now have a stable identity that travels with your devices. A player you synced on one computer is recognized on another, and removing then re-adding the same server no longer forces a full resync.
+
+This release also fixes a bug where renaming a Jellyfin playlist could fail on newer servers.
+
 ## v0.10.0 - 2026-06-08
 
 You can now edit playlists right from HifiMule. A new playlist curation view lets you create a playlist, add or remove tracks, rename or delete it, and drag tracks into the order you want — with a live count of how many tracks it holds, how long it plays, and how much space it takes. You can also turn whatever is in your basket into a new playlist (or add it to an existing one) in a couple of clicks. Playlist editing works whether you're connected to Jellyfin or to a Subsonic/Navidrome server.
