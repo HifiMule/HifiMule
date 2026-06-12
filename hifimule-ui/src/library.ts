@@ -731,7 +731,11 @@ function ensureSelectionEscapeListener(): void {
     document.addEventListener('keydown', (e: KeyboardEvent) => {
         if (e.key !== 'Escape' || state.selectedIds.size === 0) return;
         if (document.querySelector('sl-dialog[open]')) return;
-        if (document.querySelector('.hm-context-menu.is-open')) return;
+        // Match the menu regardless of `.is-open`: the class is added one frame
+        // after the element mounts, so guarding on `.is-open` would miss an
+        // Escape pressed in that opening frame. The menu element only exists in
+        // the DOM while open (removed on close), so bare `.hm-context-menu` is safe.
+        if (document.querySelector('.hm-context-menu')) return;
         clearSelection();
     }, true);
 }
@@ -796,6 +800,16 @@ function updateBulkBar(content: HTMLElement | null = document.getElementById('li
     const qn = content.querySelector<HTMLElement>('.quick-nav-bar');
     if (qn) bar.style.top = `${qn.offsetHeight}px`;
     content.insertBefore(bar, scroller);
+    // AC 10: an aria-live region only announces mutations made after it is
+    // connected. renderBulkBar populates the count before insertion (silent), so
+    // re-assert it on the next frame to announce the first (0→1) selection too.
+    const count = bar.querySelector<HTMLElement>('.bulk-action-bar__count');
+    if (count) {
+        count.textContent = '';
+        requestAnimationFrame(() => {
+            count.textContent = t('library.selection.count', { count: state.selectedIds.size });
+        });
+    }
 }
 
 function resolveSelectedItems(): BrowseDisplayItem[] {
@@ -898,9 +912,11 @@ function bulkAddSelectionToPlaylist(): void {
     if (selected.length === 0) return;
     const itemIds = selected.map(it => it.id);
     // Selection clears only on success; cancelling the dialog keeps it.
+    // The label is forwarded as the "New playlist" suggested name, so pass a
+    // generic localized default rather than the "N selected" count string.
     MediaCard.openAddToPlaylistDialog(
         itemIds,
-        t('library.selection.count', { count: itemIds.length }),
+        t('library.selection.new_playlist_name'),
         () => clearSelection()
     );
 }

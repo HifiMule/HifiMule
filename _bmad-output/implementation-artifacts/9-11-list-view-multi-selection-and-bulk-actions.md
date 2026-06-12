@@ -4,7 +4,7 @@ baseline_commit: fcc2513
 
 # Story 9.11: List View Multi-Selection & Bulk Actions
 
-Status: review
+Status: done
 
 ## Story
 
@@ -289,3 +289,17 @@ claude-fable-5 (Fable 5)
 
 - 2026-06-12: Story created from sprint-change-proposal-2026-06-12-list-view-multi-selection (Epic 9 reopened). Ultimate context engine analysis completed — comprehensive developer guide created.
 - 2026-06-12: Story 9.11 implemented (Tasks 1–10): list multi-selection state + checkboxes, bulk action bar with batched basket add and multi-item playlist add, selection-clearing hooks + Escape, MediaCard dialog generalization to `itemIds: string[]`, CSS, i18n (en/fr/es/de), pre-existing list-row device-locked gap closed. Build gates green; runtime manual checklist deferred to review. Status → review.
+
+### Review Findings
+
+_Code review 2026-06-12 — 3 adversarial layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor). 1 decision-needed, 2 patch, 6 deferred, 6 dismissed as noise (incl. the refuted `it.id` vs `basketId` playlist concern — `basketId` differs only for non-selectable favorites)._
+
+- [x] [Review][Patch] Bulk "New playlist" pre-fills name with the count string (resolved from decision — option 2: generic localized default) — `bulkAddSelectionToPlaylist` now passes the new `library.selection.new_playlist_name` key (en "New playlist" / fr "Nouvelle playlist" / es "Nueva playlist" / de "Neue Playlist") instead of the "N selected" count string. [library.ts `bulkAddSelectionToPlaylist`; catalog.json ×4]
+- [x] [Review][Patch] ARIA-live count not announced on first selection (0→1) — AC 10. Fixed: `updateBulkBar` clears the count on insert and re-asserts it in a `requestAnimationFrame` so the 0→1 selection registers as a live-region mutation. [hifimule-ui/src/library.ts `updateBulkBar`]
+- [x] [Review][Patch] Escape can clear the selection during the context-menu's pre-`is-open` frame — Fixed: the Escape guard now matches `.hm-context-menu` regardless of `.is-open` (the element only exists in the DOM while open). [hifimule-ui/src/library.ts `ensureSelectionEscapeListener`]
+- [x] [Review][Defer] Partial/empty batched RPC response silently adds zero count/size and the toast overcounts — deferred, generalizes the pre-existing single-item `metadata[0] || {…}` fallback [hifimule-ui/src/library.ts `addBrowseItemsToBasket`]
+- [x] [Review][Defer] device-locked CSS gate does not block keyboard (Enter/Space) activation of bulk "Add to basket" — deferred, faithfully mirrors the pre-existing per-row CSS mechanism that AC 7 explicitly requires [hifimule-ui/src/library.ts]
+- [x] [Review][Defer] Per-row (+) basket-add failure shows no user toast (bulk path does) — deferred, unchanged pre-existing behavior [hifimule-ui/src/library.ts `renderListRow`]
+- [x] [Review][Defer] Bulk-bar sticky `top` offset goes stale after quick-nav reflow on window resize — deferred, minor [hifimule-ui/src/library.ts `updateBulkBar`]
+- [x] [Review][Defer] Shift-range can only grow and anchor resets on deselect — deferred, beyond AC 3 (range-shrink/anchor-move not required) [hifimule-ui/src/library.ts `selectRange`/`toggleRowSelection`]
+- [x] [Review][Defer] Bulk playlist add has no already-in-playlist skip / skipped accounting (basket path does) — deferred, beyond AC 6; daemon resolves server-side [hifimule-ui/src/library.ts `bulkAddSelectionToPlaylist`]

@@ -135,7 +135,7 @@ development_status:
   9-8-extend-view-toggle-all-modes: done  # added via sprint-change-proposal-2026-06-08-extend-view-toggle
   9-9-tracks-browse-mode-provider-contract-and-daemon-rpc: done  # added via sprint-change-proposal-2026-06-08-tracks-browse-mode
   9-10-tracks-browse-mode-dual-panel-ui: done
-  9-11-list-view-multi-selection-and-bulk-actions: review  # added via sprint-change-proposal-2026-06-12-list-view-multi-selection; story created 2026-06-12
+  9-11-list-view-multi-selection-and-bulk-actions: done  # added via sprint-change-proposal-2026-06-12-list-view-multi-selection; story created 2026-06-12; reviewed 2026-06-12
 
   epic-10: done
   10-1-device-manifest-editing-identity-and-folder-settings: done

@@ -1,7 +1,16 @@
 # Deferred Work
 
 Status: open
-Last updated: 2026-06-09
+Last updated: 2026-06-12
+
+## Deferred from: code review of 9-11-list-view-multi-selection-and-bulk-actions (2026-06-12)
+
+- **Partial/empty batched RPC response silently adds zero count/size** [`hifimule-ui/src/library.ts` `addBrowseItemsToBasket`] — `jellyfin_get_item_counts`/`jellyfin_get_item_sizes` results are mapped by `id`; any requested id missing from the response (partial response, id-shape mismatch) falls back to `{recursiveItemCount:0, totalSizeBytes:0}` with no warning, and the success toast counts it as added. Generalizes the pre-existing single-item `metadata[0] || {…}` fallback to N items. A guard would detect needs-fetch ids absent from the result maps and warn/skip.
+- **device-locked gate does not block keyboard activation of bulk "Add to basket"** [`hifimule-ui/src/library.ts`] — the bulk button relies on `#library-content.device-locked .basket-toggle-btn { pointer-events:none }`, which blocks mouse but not keyboard Enter/Space on a focusable `sl-button`. Faithfully mirrors the pre-existing per-row mechanism that AC 7 explicitly mandates; a real fix (set `disabled` from device state) should be applied to both per-row and bulk together.
+- **Per-row (+) basket-add failure shows no user toast** [`hifimule-ui/src/library.ts` `renderListRow`] — the refactored per-row handler only `console.error`s on RPC failure, while the bulk path shows a danger toast. Unchanged pre-existing behavior, surfaced by the factoring.
+- **Bulk-bar sticky `top` offset goes stale on resize** [`hifimule-ui/src/library.ts` `updateBulkBar`] — `bar.style.top` is computed once from `quick-nav` height at 0→1 creation; the quick-nav wraps on window resize, so the offset can drift and overlap/gap. No resize recompute.
+- **Shift-range only grows; anchor resets on deselect** [`hifimule-ui/src/library.ts` `selectRange`/`toggleRowSelection`] — `selectRange` only adds (never shrinks) and never moves the anchor, and `toggleRowSelection` sets the anchor even when deselecting. Beyond AC 3 (which only requires inclusive range selection); standard range-shrink/anchor-move semantics are unimplemented.
+- **Bulk playlist add has no already-in-playlist skip / skipped accounting** [`hifimule-ui/src/library.ts` `bulkAddSelectionToPlaylist`] — unlike the basket path, all N ids are sent to `playlist.addItems` with no duplicate skip or skipped-count feedback. Beyond AC 6; the daemon resolves/dedupes server-side.
 
 ## Deferred from: code review of 2-11-multi-server-hub (2026-06-09)
 
