@@ -121,6 +121,7 @@ FR44: Epic 11 - Playlist Server Scope (Stories 11.4, 11.5, amended)
 FR45: Epic 2 - Server Identity Name and Icon (Story 2.12)
 FR46: Epic 2 - Portable Server Identity (Story 2.13)
 FR47: Epic 9 - List View Multi-Selection & Bulk Actions (Story 9.11)
+FR48: Epic 9 - Track Multi-Selection & Bulk Actions (Story 9.12)
 
 ## Epic List
 
@@ -2373,6 +2374,59 @@ So that I can build my basket or a playlist in seconds instead of clicking every
 - New i18n keys (en/fr/es): `library.selection.count`, `library.selection.add_to_basket`, `library.selection.add_to_playlist`, `library.selection.clear`, `library.selection.added_toast`, `library.selection.skipped_suffix`.
 - No new daemon RPCs; pure UI concern (same classification as Stories 9.7/9.8).
 - Out of scope: grid view multi-select, Tracks dual-panel mode (9.10), Playlist Curation view (11.6), bulk remove from basket.
+
+### Story 9.12: Track Multi-Selection & Bulk Actions
+
+As a Ritualist (Arthur),
+I want to select multiple tracks — in an album's track list or in the Tracks browse view — and act on them all at once,
+So that I can send a batch of individual songs to my basket or a playlist without clicking every row.
+
+**Acceptance Criteria:**
+
+**Given** the virtualized list view shows track rows (resolved type `Audio`, e.g. tracks within an album)
+**When** a row renders
+**Then** it displays the same leading selection checkbox as artist/album rows, and all Story 9.11 selection mechanics (Ctrl/Cmd-click, Shift-range, bulk bar, virtualization survival, clearing rules, keyboard/ARIA) apply unchanged to track rows.
+
+**Given** tracks are selected in the list view and I click "Add to basket"
+**Then** tracks already in the basket are skipped, the remaining tracks are added using their own `sizeBytes`/`sizeTicks` (no count/size batch RPC for tracks), a toast reports added/skipped counts, and the selection clears.
+
+**Given** the Tracks dual-panel browse view is active
+**When** a track row renders in the bottom track panel
+**Then** it displays a leading selection checkbox (visible on hover/focus, always visible while any selection is active), alongside the existing per-row (+)/(-) and "Send to playlist…" actions, which continue to work unchanged.
+
+**Given** I click a track row's checkbox or Ctrl/Cmd-click the row
+**Then** the row's selection toggles.
+
+**Given** a track row is the selection anchor and I Shift-click another track row
+**Then** all track rows between the two indices (inclusive, within the currently loaded track list) become selected.
+
+**Given** at least one track is selected in the Tracks view
+**Then** a bulk action bar appears above the track panel showing the selection count (ARIA-live), an "Add to basket" button (disabled when no device is selected), an "Add to playlist…" button (only when `supports_playlist_write` is true), and a "Clear" affordance.
+
+**Given** I click "Add to basket" with N tracks selected in the Tracks view
+**Then** tracks already in the basket are skipped, each remaining track is added via `basketStore.add` with its own size metadata, a toast reports added/skipped counts, and the selection clears.
+
+**Given** I click "Add to playlist…" with N tracks selected
+**Then** the existing playlist picker dialog opens seeded with all N track ids; existing-playlist and create-new flows behave per Story 9.11, the playlists cache is invalidated on success, a toast confirms, and the selection clears. Cancelling preserves the selection.
+
+**Given** tracks are selected in the Tracks view and autoload appends more pages to any panel
+**Then** the selection is preserved (id-keyed).
+
+**Given** tracks are selected in the Tracks view
+**When** I change the artist filter, the album filter, or the A–Z letter, leave the Tracks mode, or press Escape
+**Then** the selection and the bulk action bar are cleared.
+
+**Given** keyboard-only navigation in the Tracks view
+**Then** checkboxes are focusable and toggleable via Space, bulk bar buttons are reachable in tab order, and the selection count is announced via an ARIA-live region.
+
+**Technical Notes:**
+- Surface A is a one-line predicate widening: `isSelectableListItem` (`library.ts:665`) accepts resolved type `Audio` in addition to `MusicArtist`/`MusicAlbum`. `addBrowseItemsToBasket` already handles `Audio` outside `CONTAINER_TYPES` (no batch RPC); the bulk playlist handler already passes raw ids.
+- Surface B selection state lives in `TracksBrowseView`: `selectedTrackIds: Set<string>` + `selectionAnchorIdx: number | null` indexed into `trackState.items`. Cleared by the same code paths that reset `trackState` (filter changes, mode exit).
+- `buildTrackRow` renders the checkbox and a selected-row class; reuse the 9.11 checkbox/bulk-bar CSS (`.media-list-row__check`, `.bulk-action-bar`) — extract shared row-check styles to apply to `.curation-track-row` rather than duplicating rules.
+- Bulk handlers in `TracksBrowseView` mirror the 9.11 handlers: basket add maps `BrowseTrack` → `basketStore.add({ id, type: 'Audio', sizeBytes, sizeTicks, … })` (same mapping as the per-row (+) handler, factored out and looped); playlist add calls `MediaCard.openAddToPlaylistDialog(ids, label, onSuccess)`.
+- Reuse the existing `library.selection.*` i18n keys (en/fr/es) — no new keys.
+- Track panel is append-rendered (not virtualized), so no unmount/remount concerns; keep selection id-keyed anyway for re-render correctness.
+- No new daemon RPCs; pure UI concern.
 
 ## Epic 10: Device Configuration Editing
 
