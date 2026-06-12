@@ -8,7 +8,8 @@ import {
     BrowseTrack,
 } from '../rpc';
 import { MediaCard } from './MediaCard';
-import { basketStore } from '../state/basket';
+import { basketStore, BasketItem } from '../state/basket';
+import { showToast } from '../toast';
 import { t } from '../i18n';
 
 const ARTIST_LIMIT = 200;
@@ -69,6 +70,13 @@ export class TracksBrowseView {
     private _albumScrollHandler: ((e: Event) => void) | null = null;
     private _trackScrollHandler: ((e: Event) => void) | null = null;
 
+    // Track multi-selection (Story 9.12). Keyed by track.id (the same id
+    // basketStore.has uses). The anchor indexes into trackState.items — valid
+    // across autoload because fetchTracks only ever appends until a reset.
+    private selectedTrackIds: Set<string> = new Set();
+    private selectionAnchorIdx: number | null = null;
+    private _escapeHandler: ((e: KeyboardEvent) => void) | null = null;
+
     constructor(container: HTMLElement, supportsPlaylistWrite = false) {
         this.container = container;
         this.supportsPlaylistWrite = supportsPlaylistWrite;
@@ -82,6 +90,7 @@ export class TracksBrowseView {
             this.fetchTracks(true),
         ]);
         this.subscribeBasket();
+        this.ensureEscapeListener();
     }
 
     remount(): void {
@@ -91,9 +100,15 @@ export class TracksBrowseView {
         this.renderTrackPanel();
         this.restoreScrolls();
         this.subscribeBasket();
+        this.ensureEscapeListener();
     }
 
     destroy(): void {
+        // The instance is cached module-level and remounted on re-entry: clear
+        // the selection here or it resurrects when the user returns (AC 10),
+        // and remove the document-level Escape listener so it doesn't leak.
+        this.clearSelection();
+        this.removeEscapeListener();
         this.teardownScrollHandlers();
         if (this.basketUnsub) {
             this.basketUnsub();
@@ -280,6 +295,9 @@ export class TracksBrowseView {
     private async fetchTracks(reset: boolean): Promise<void> {
         if (!reset && (this.trackState.loading || this.trackState.exhausted || this.trackState.errored)) return;
 
+        // Every filter change (artist, album, either A-Z letter) funnels through
+        // a reset — the single choke point that clears the selection (AC 10).
+        if (reset) this.clearSelection();
         if (reset) this.trackState = makePanelState();
         const gen = ++this.trackGen;
         this.trackState.loading = true;
@@ -361,9 +379,9 @@ export class TracksBrowseView {
             panel.appendChild(empty);
             return;
         }
-        for (const track of this.trackState.items) {
-            panel.appendChild(this.buildTrackRow(track));
-        }
+        this.trackState.items.forEach((track, i) => {
+            panel.appendChild(this.buildTrackRow(track, i));
+        });
         if (this.trackState.loading) panel.appendChild(this.buildSpinner());
     }
 
@@ -395,9 +413,12 @@ export class TracksBrowseView {
         const panel = this.container.querySelector<HTMLElement>(TRACK_PANEL);
         if (!panel) return;
         panel.querySelector('.tracks-spinner')?.remove();
-        for (const track of tracks) {
-            panel.appendChild(this.buildTrackRow(track));
-        }
+        // Called after the new items were pushed onto trackState.items, so the
+        // first appended row sits at (length - tracks.length).
+        const offset = this.trackState.items.length - tracks.length;
+        tracks.forEach((track, i) => {
+            panel.appendChild(this.buildTrackRow(track, offset + i));
+        });
         if (this.trackState.loading) panel.appendChild(this.buildSpinner());
     }
 
@@ -457,11 +478,43 @@ export class TracksBrowseView {
         return row;
     }
 
-    private buildTrackRow(track: BrowseTrack): HTMLElement {
+    private buildTrackRow(track: BrowseTrack, index: number): HTMLElement {
         const row = document.createElement('div');
         row.className = 'curation-track-row';
+        if (this.selectedTrackIds.has(track.id)) row.classList.add('is-checked');
         row.dataset.trackId = track.id;
         row.setAttribute('tabindex', '0');
+
+        // Leading multi-select checkbox (Story 9.12). Native input: focus and
+        // Space-toggle semantics come for free (AC 11).
+        const check = document.createElement('input');
+        check.type = 'checkbox';
+        check.className = 'media-list-row__check';
+        check.checked = this.selectedTrackIds.has(track.id);
+        check.setAttribute('aria-label', track.title);
+        check.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.toggleTrackSelection(track, index, row);
+        });
+        row.appendChild(check);
+
+        // Ctrl/Cmd-click toggles, Shift-click range-selects from the anchor;
+        // plain click stays a no-op (track rows have no navigation). The
+        // per-row buttons all stopPropagation, so they never reach this.
+        row.addEventListener('click', (e) => {
+            if (e.ctrlKey || e.metaKey) {
+                this.toggleTrackSelection(track, index, row);
+                return;
+            }
+            if (e.shiftKey && this.selectionAnchorIdx !== null) {
+                this.selectTrackRange(this.selectionAnchorIdx, index);
+            }
+        });
+        // Shift-click extends the selection — suppress the browser's text-range
+        // selection artifact for that gesture only.
+        row.addEventListener('mousedown', (e) => {
+            if (e.shiftKey && this.selectionAnchorIdx !== null) e.preventDefault();
+        });
 
         const info = document.createElement('div');
         info.style.cssText = 'flex:1; min-width:0; display:flex; flex-direction:column;';
@@ -493,15 +546,7 @@ export class TracksBrowseView {
             if (basketStore.has(track.id)) {
                 basketStore.remove(track.id);
             } else {
-                basketStore.add({
-                    id: track.id,
-                    name: track.title,
-                    type: 'Audio',
-                    artist: track.artistName,
-                    childCount: 1,
-                    sizeBytes: track.sizeBytes ?? 0,
-                    sizeTicks: (track.duration ?? 0) * 10_000_000,
-                });
+                basketStore.add(this.trackToBasketItem(track));
             }
         });
         row.appendChild(toggleBtn);
@@ -539,6 +584,218 @@ export class TracksBrowseView {
             (btn as any).label = isInBasket ? t('tracks.view.remove_from_basket') : t('tracks.view.add_to_basket');
             (btn as any).disabled = noDevice;
         });
+    }
+
+    // ─── Track multi-selection (Story 9.12) ───────────────────────────────────
+
+    // Shared BrowseTrack → basket-item mapping, used by both the per-row (+)
+    // handler and the bulk "Add to basket" action.
+    private trackToBasketItem(track: BrowseTrack): BasketItem {
+        return {
+            id: track.id,
+            name: track.title,
+            type: 'Audio',
+            artist: track.artistName,
+            childCount: 1,
+            sizeBytes: track.sizeBytes ?? 0,
+            sizeTicks: (track.duration ?? 0) * 10_000_000,
+        };
+    }
+
+    private clearSelection(): void {
+        if (this.selectedTrackIds.size === 0 && this.selectionAnchorIdx === null) return;
+        this.selectedTrackIds = new Set();
+        this.selectionAnchorIdx = null;
+        const panel = this.container.querySelector<HTMLElement>(TRACK_PANEL);
+        if (panel) {
+            panel.classList.remove('has-selection');
+            panel.querySelectorAll<HTMLElement>('.curation-track-row.is-checked').forEach(row => {
+                row.classList.remove('is-checked');
+                const check = row.querySelector<HTMLInputElement>('.media-list-row__check');
+                if (check) check.checked = false;
+            });
+        }
+        this.updateBulkBar();
+    }
+
+    // Cheap single-row toggle: updates only the clicked row's class/checkbox
+    // and the bulk bar — no full repaint (toggles can happen rapidly).
+    private toggleTrackSelection(track: BrowseTrack, index: number, row: HTMLElement): void {
+        if (this.selectedTrackIds.has(track.id)) {
+            this.selectedTrackIds.delete(track.id);
+        } else {
+            this.selectedTrackIds.add(track.id);
+        }
+        this.selectionAnchorIdx = index;
+        const checked = this.selectedTrackIds.has(track.id);
+        row.classList.toggle('is-checked', checked);
+        const check = row.querySelector<HTMLInputElement>('.media-list-row__check');
+        if (check) check.checked = checked;
+        const panel = this.container.querySelector<HTMLElement>(TRACK_PANEL);
+        if (panel) panel.classList.toggle('has-selection', this.selectedTrackIds.size > 0);
+        this.updateBulkBar();
+    }
+
+    // Shift-range: indices come from trackState.items, never the DOM. The
+    // anchor stays put. Every track row is selectable, so no type filter.
+    private selectTrackRange(fromIdx: number, toIdx: number): void {
+        const [lo, hi] = fromIdx <= toIdx ? [fromIdx, toIdx] : [toIdx, fromIdx];
+        for (let i = lo; i <= hi; i++) {
+            const it = this.trackState.items[i];
+            if (it) this.selectedTrackIds.add(it.id);
+        }
+        this.refreshRenderedSelection();
+    }
+
+    // Rows are plain appended divs (never unmounted between rebuilds), so after
+    // a range change sync every rendered row's checked state from the set.
+    private refreshRenderedSelection(): void {
+        const panel = this.container.querySelector<HTMLElement>(TRACK_PANEL);
+        if (panel) {
+            panel.classList.toggle('has-selection', this.selectedTrackIds.size > 0);
+            panel.querySelectorAll<HTMLElement>('.curation-track-row').forEach(row => {
+                const checked = !!row.dataset.trackId && this.selectedTrackIds.has(row.dataset.trackId);
+                row.classList.toggle('is-checked', checked);
+                const check = row.querySelector<HTMLInputElement>('.media-list-row__check');
+                if (check) check.checked = checked;
+            });
+        }
+        this.updateBulkBar();
+    }
+
+    // Document-level Escape clears the selection (AC 10). Capture phase so it
+    // runs before the context menu's own capture handler removes the menu — an
+    // open menu/dialog swallows the Escape and the selection survives.
+    // Registered on load/remount, removed in destroy (the instance is cached
+    // module-level, so a leaked listener would outlive the mode).
+    private ensureEscapeListener(): void {
+        if (this._escapeHandler) return;
+        this._escapeHandler = (e: KeyboardEvent) => {
+            if (e.key !== 'Escape' || this.selectedTrackIds.size === 0) return;
+            if (document.querySelector('sl-dialog[open]')) return;
+            // Match the menu regardless of `.is-open`: the class is added one
+            // frame after the element mounts, so guarding on it would miss an
+            // Escape pressed in that opening frame. The menu element only
+            // exists in the DOM while open, so the bare selector is safe.
+            if (document.querySelector('.hm-context-menu')) return;
+            this.clearSelection();
+        };
+        document.addEventListener('keydown', this._escapeHandler, true);
+    }
+
+    private removeEscapeListener(): void {
+        if (!this._escapeHandler) return;
+        document.removeEventListener('keydown', this._escapeHandler, true);
+        this._escapeHandler = null;
+    }
+
+    private renderBulkBar(): HTMLElement {
+        const bar = document.createElement('div');
+        bar.className = 'bulk-action-bar';
+
+        const count = document.createElement('span');
+        count.className = 'bulk-action-bar__count';
+        count.setAttribute('aria-live', 'polite');
+        count.textContent = t('library.selection.count', { count: this.selectedTrackIds.size });
+        bar.appendChild(count);
+
+        const addBtn = document.createElement('sl-button') as any;
+        addBtn.size = 'small';
+        addBtn.variant = 'primary';
+        // basket-toggle-btn: the view mounts inside #library-content, so the
+        // existing `#library-content.device-locked` CSS rule disables it when
+        // no device is selected — same mechanism as the 9.11 bulk bar.
+        addBtn.classList.add('basket-toggle-btn');
+        addBtn.textContent = t('library.selection.add_to_basket');
+        addBtn.addEventListener('click', () => this.bulkAddToBasket());
+        bar.appendChild(addBtn);
+
+        if (this.supportsPlaylistWrite) {
+            const plBtn = document.createElement('sl-button') as any;
+            plBtn.size = 'small';
+            plBtn.textContent = t('library.selection.add_to_playlist');
+            plBtn.addEventListener('click', () => this.bulkAddToPlaylist());
+            bar.appendChild(plBtn);
+        }
+
+        const clearBtn = document.createElement('sl-button') as any;
+        clearBtn.size = 'small';
+        clearBtn.variant = 'text';
+        clearBtn.textContent = t('library.selection.clear');
+        clearBtn.addEventListener('click', () => this.clearSelection());
+        bar.appendChild(clearBtn);
+
+        return bar;
+    }
+
+    // Create the bar when the selection goes 0→1 (inserted directly above the
+    // track panel), update the count in place while it lives, remove it on →0.
+    private updateBulkBar(): void {
+        const existing = this.container.querySelector<HTMLElement>('.bulk-action-bar');
+        if (this.selectedTrackIds.size === 0) {
+            existing?.remove();
+            return;
+        }
+        if (existing) {
+            const count = existing.querySelector('.bulk-action-bar__count');
+            if (count) count.textContent = t('library.selection.count', { count: this.selectedTrackIds.size });
+            return;
+        }
+        const panel = this.container.querySelector<HTMLElement>(TRACK_PANEL);
+        if (!panel || !panel.parentElement) return;
+        const bar = this.renderBulkBar();
+        panel.parentElement.insertBefore(bar, panel);
+        // An aria-live region only announces mutations made after it is
+        // connected. renderBulkBar populates the count before insertion
+        // (silent), so re-assert it on the next frame to announce the first
+        // (0→1) selection too (AC 11).
+        const count = bar.querySelector<HTMLElement>('.bulk-action-bar__count');
+        if (count) {
+            count.textContent = '';
+            requestAnimationFrame(() => {
+                count.textContent = t('library.selection.count', { count: this.selectedTrackIds.size });
+            });
+        }
+    }
+
+    // Resolve in trackState.items order (never iterate the Set) so playlist
+    // insertion order is deterministic and matches the visible list.
+    private resolveSelectedTracks(): BrowseTrack[] {
+        return this.trackState.items.filter(tr => this.selectedTrackIds.has(tr.id));
+    }
+
+    // All local — no RPC, no loading state. basketStore.add itself toasts and
+    // returns early when no active server (belt-and-braces under the CSS gate).
+    private bulkAddToBasket(): void {
+        const selected = this.resolveSelectedTracks();
+        if (selected.length === 0) return;
+        let added = 0;
+        let skipped = 0;
+        for (const track of selected) {
+            if (basketStore.has(track.id)) {
+                skipped++;
+            } else {
+                basketStore.add(this.trackToBasketItem(track));
+                added++;
+            }
+        }
+        let msg = t('library.selection.added_toast', { added });
+        if (skipped > 0) msg += t('library.selection.skipped_suffix', { skipped });
+        showToast(msg, 'success');
+        this.clearSelection();
+    }
+
+    private bulkAddToPlaylist(): void {
+        const selected = this.resolveSelectedTracks();
+        if (selected.length === 0) return;
+        // Selection clears only on success; cancelling the dialog keeps it.
+        // The label is forwarded as the "New playlist" suggested name, so pass
+        // the generic localized default rather than the "N selected" string.
+        MediaCard.openAddToPlaylistDialog(
+            selected.map(tr => tr.id),
+            t('library.selection.new_playlist_name'),
+            () => this.clearSelection()
+        );
     }
 
     // ─── Selection handlers ───────────────────────────────────────────────────

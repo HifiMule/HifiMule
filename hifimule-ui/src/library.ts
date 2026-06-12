@@ -660,11 +660,11 @@ function setViewMode(mode: 'grid' | 'list') {
 
 // --- List multi-selection (Story 9.11) ---
 
-// Only artist/album rows are selectable in v1. Favorite-scoped entries, genres,
-// playlists and tracks render no checkbox and are skipped by Shift-ranges.
+// Artist, album and track rows are selectable. Favorite-scoped containers,
+// genres and playlists render no checkbox and are skipped by Shift-ranges.
 function isSelectableListItem(item: BrowseDisplayItem): boolean {
     const resolved = item.basketType ?? item.type;
-    return resolved === 'MusicArtist' || resolved === 'MusicAlbum';
+    return resolved === 'MusicArtist' || resolved === 'MusicAlbum' || resolved === 'Audio';
 }
 
 // Repaint mounted rows (selection is app state — remounted rows re-read it)

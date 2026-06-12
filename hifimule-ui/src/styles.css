@@ -1783,9 +1783,10 @@ h2 {
   background: rgba(var(--accent-rgb), 0.08);
 }
 
-/* Multi-select checkbox: revealed on hover/focus, and held visible while any
-   selection is active (.has-selection on the scroller). Hidden via opacity —
-   never display/visibility — so it stays in Tab order at rest. */
+/* Multi-select checkbox (shared by list rows and Tracks-view rows): revealed
+   on hover/focus, and held visible while any selection is active
+   (.has-selection on the list scroller / curation track panel). Hidden via
+   opacity — never display/visibility — so it stays in Tab order at rest. */
 .media-list-row__check {
   flex-shrink: 0;
   width: 16px;
@@ -1799,13 +1800,17 @@ h2 {
 
 .media-list-row:hover .media-list-row__check,
 .media-list-row:focus-within .media-list-row__check,
-.media-list.has-selection .media-list-row__check {
+.media-list.has-selection .media-list-row__check,
+.curation-track-row:hover .media-list-row__check,
+.curation-track-row:focus-within .media-list-row__check,
+.curation-track-panel.has-selection .media-list-row__check {
   opacity: 1;
 }
 
 /* Multi-select tint — deliberately stronger than the .is-selected (in-basket)
    tint above plus an inset accent edge, so the two states read differently. */
-.media-list-row.is-checked {
+.media-list-row.is-checked,
+.curation-track-row.is-checked {
   background: rgba(var(--accent-rgb), 0.18);
   box-shadow: inset 2px 0 0 rgba(var(--accent-rgb), 0.8);
 }
