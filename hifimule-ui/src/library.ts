@@ -27,6 +27,7 @@ import { PlaylistCurationView } from './components/PlaylistCurationView';
 import { TracksBrowseView } from './components/TracksBrowseView';
 import { basketStore } from './state/basket';
 import { t } from './i18n';
+import { showToast, ERROR_TOAST_DURATION } from './toast';
 
 let _supportsPlaylistWrite = false;
 export function setPlaylistWriteCapability(v: boolean): void {
@@ -56,6 +57,8 @@ interface AppState {
     activeLetter: string | null;
     favoriteTree: FavoriteTree | null;
     listViewMode: 'grid' | 'list';
+    selectedIds: Set<string>;
+    selectionAnchorIdx: number | null;
 }
 
 interface FavoriteTree {
@@ -81,6 +84,8 @@ let state: AppState = {
     activeLetter: null,
     favoriteTree: null,
     listViewMode: 'grid',
+    selectedIds: new Set(),
+    selectionAnchorIdx: null,
 };
 
 let _tracksBrowseView: TracksBrowseView | null = null;
@@ -647,17 +652,267 @@ function renderViewToggle() {
 
 function setViewMode(mode: 'grid' | 'list') {
     if (state.loading) return;
+    clearSelection();
     state.listViewMode = mode;
     renderModeBar();
     renderCurrentView();
 }
 
+// --- List multi-selection (Story 9.11) ---
+
+// Only artist/album rows are selectable in v1. Favorite-scoped entries, genres,
+// playlists and tracks render no checkbox and are skipped by Shift-ranges.
+function isSelectableListItem(item: BrowseDisplayItem): boolean {
+    const resolved = item.basketType ?? item.type;
+    return resolved === 'MusicArtist' || resolved === 'MusicAlbum';
+}
+
+// Repaint mounted rows (selection is app state — remounted rows re-read it)
+// and refresh the bulk bar. Same wipe-and-paint mechanism as basket updates.
+function syncSelectionUi(): void {
+    const content = document.getElementById('library-content');
+    if (!content) return;
+    const scroller = (content as any).__listScroller as HTMLElement | undefined;
+    if (scroller) {
+        scroller.classList.toggle('has-selection', state.selectedIds.size > 0);
+        scroller.querySelectorAll('.media-list-row').forEach(r => r.remove());
+        (content as any).__listPaint?.();
+    }
+    updateBulkBar(content);
+}
+
+function clearSelection(): void {
+    if (state.selectedIds.size === 0 && state.selectionAnchorIdx === null) return;
+    state.selectedIds = new Set();
+    state.selectionAnchorIdx = null;
+    syncSelectionUi();
+}
+
+// Cheap single-row toggle: updates only the clicked row's class/checkbox and
+// the bulk bar — no full repaint (toggles can happen rapidly).
+function toggleRowSelection(item: BrowseDisplayItem, index: number, row: HTMLElement): void {
+    const itemId = item.basketId ?? item.id;
+    if (state.selectedIds.has(itemId)) {
+        state.selectedIds.delete(itemId);
+    } else {
+        state.selectedIds.add(itemId);
+    }
+    state.selectionAnchorIdx = index;
+    const checked = state.selectedIds.has(itemId);
+    row.classList.toggle('is-checked', checked);
+    const check = row.querySelector<HTMLInputElement>('.media-list-row__check');
+    if (check) check.checked = checked;
+    const content = document.getElementById('library-content');
+    const scroller = content && ((content as any).__listScroller as HTMLElement | undefined);
+    if (scroller) scroller.classList.toggle('has-selection', state.selectedIds.size > 0);
+    updateBulkBar(content);
+}
+
+// Shift-range: ranges come from state.items, never the DOM — virtualized rows
+// outside the viewport are unmounted. The anchor stays put.
+function selectRange(fromIdx: number, toIdx: number): void {
+    const [lo, hi] = fromIdx <= toIdx ? [fromIdx, toIdx] : [toIdx, fromIdx];
+    for (let i = lo; i <= hi; i++) {
+        const it = state.items[i];
+        if (it && isSelectableListItem(it)) {
+            state.selectedIds.add(it.basketId ?? it.id);
+        }
+    }
+    syncSelectionUi();
+}
+
+// Module-level Escape handler, registered once. Capture phase so it runs
+// before the context menu's own capture handler removes the menu — an open
+// menu/dialog swallows the Escape and the selection survives.
+let _selectionEscapeRegistered = false;
+function ensureSelectionEscapeListener(): void {
+    if (_selectionEscapeRegistered) return;
+    _selectionEscapeRegistered = true;
+    document.addEventListener('keydown', (e: KeyboardEvent) => {
+        if (e.key !== 'Escape' || state.selectedIds.size === 0) return;
+        if (document.querySelector('sl-dialog[open]')) return;
+        if (document.querySelector('.hm-context-menu.is-open')) return;
+        clearSelection();
+    }, true);
+}
+
+function renderBulkBar(): HTMLElement {
+    const bar = document.createElement('div');
+    bar.className = 'bulk-action-bar';
+
+    const count = document.createElement('span');
+    count.className = 'bulk-action-bar__count';
+    count.setAttribute('aria-live', 'polite');
+    count.textContent = t('library.selection.count', { count: state.selectedIds.size });
+    bar.appendChild(count);
+
+    const addBtn = document.createElement('sl-button') as any;
+    addBtn.size = 'small';
+    addBtn.variant = 'primary';
+    // basket-toggle-btn: the existing `#library-content.device-locked` CSS rule
+    // disables it when no device is selected — same mechanism as per-row (+).
+    addBtn.classList.add('basket-toggle-btn');
+    addBtn.textContent = t('library.selection.add_to_basket');
+    addBtn.addEventListener('click', () => bulkAddSelectionToBasket(addBtn));
+    bar.appendChild(addBtn);
+
+    if (_supportsPlaylistWrite) {
+        const plBtn = document.createElement('sl-button') as any;
+        plBtn.size = 'small';
+        plBtn.textContent = t('library.selection.add_to_playlist');
+        plBtn.addEventListener('click', () => bulkAddSelectionToPlaylist());
+        bar.appendChild(plBtn);
+    }
+
+    const clearBtn = document.createElement('sl-button') as any;
+    clearBtn.size = 'small';
+    clearBtn.variant = 'text';
+    clearBtn.textContent = t('library.selection.clear');
+    clearBtn.addEventListener('click', () => clearSelection());
+    bar.appendChild(clearBtn);
+
+    return bar;
+}
+
+// Create the bar when the selection goes 0→1, update the count in place while
+// it lives, remove it when the selection empties.
+function updateBulkBar(content: HTMLElement | null = document.getElementById('library-content')): void {
+    if (!content) return;
+    const existing = content.querySelector<HTMLElement>(':scope > .bulk-action-bar');
+    if (state.selectedIds.size === 0) {
+        existing?.remove();
+        return;
+    }
+    if (existing) {
+        const count = existing.querySelector('.bulk-action-bar__count');
+        if (count) count.textContent = t('library.selection.count', { count: state.selectedIds.size });
+        return;
+    }
+    const scroller = (content as any).__listScroller as HTMLElement | undefined;
+    if (!scroller || !scroller.isConnected) return;
+    const bar = renderBulkBar();
+    // The quick-nav is sticky at top: 0 — stick the bar right below it so the
+    // two don't overlap while scrolled.
+    const qn = content.querySelector<HTMLElement>('.quick-nav-bar');
+    if (qn) bar.style.top = `${qn.offsetHeight}px`;
+    content.insertBefore(bar, scroller);
+}
+
+function resolveSelectedItems(): BrowseDisplayItem[] {
+    return state.items.filter(
+        it => isSelectableListItem(it) && state.selectedIds.has(it.basketId ?? it.id)
+    );
+}
+
+// Shared basket-add used by both the per-row (+) toggle and the bulk action.
+// Preserves the per-row semantics exactly: already-basketed items are skipped,
+// container items missing count/size get ONE batched RPC pair, and responses
+// are mapped by id (response order is not guaranteed to match request order).
+async function addBrowseItemsToBasket(items: BrowseDisplayItem[]): Promise<{ added: number; skipped: number }> {
+    const CONTAINER_TYPES = ['MusicArtist', 'MusicAlbum', 'MusicGenre', 'Playlist'];
+    const toAdd: BrowseDisplayItem[] = [];
+    const needsFetch = new Set<BrowseDisplayItem>();
+    let skipped = 0;
+    for (const item of items) {
+        const itemId = item.basketId ?? item.id;
+        if (basketStore.has(itemId)) {
+            skipped++;
+            continue;
+        }
+        toAdd.push(item);
+        const resolvedType = item.basketType ?? item.type;
+        const isFavoriteScoped = resolvedType === 'FavoriteArtist' || resolvedType === 'FavoriteAlbum';
+        if (CONTAINER_TYPES.includes(resolvedType) && !isFavoriteScoped && (!item.childCount || !item.sizeBytes)) {
+            needsFetch.add(item);
+        }
+    }
+
+    const countById = new Map<string, { recursiveItemCount?: number; cumulativeRunTimeTicks?: number }>();
+    const sizeById = new Map<string, { totalSizeBytes?: number }>();
+    if (needsFetch.size > 0) {
+        const itemIds = [...needsFetch].map(it => it.basketId ?? it.id);
+        const [metadata, sizeData] = await Promise.all([
+            rpcCall('jellyfin_get_item_counts', { itemIds }),
+            rpcCall('jellyfin_get_item_sizes', { itemIds }),
+        ]);
+        for (const m of metadata ?? []) countById.set(m.id, m);
+        for (const s of sizeData ?? []) sizeById.set(s.id, s);
+    }
+
+    for (const item of toAdd) {
+        const itemId = item.basketId ?? item.id;
+        const resolvedType = item.basketType ?? item.type;
+        if (needsFetch.has(item)) {
+            const info = countById.get(itemId) ?? { recursiveItemCount: 0, cumulativeRunTimeTicks: 0 };
+            const sizeInfo = sizeById.get(itemId) ?? { totalSizeBytes: 0 };
+            basketStore.add({
+                id: itemId,
+                name: item.name,
+                type: resolvedType,
+                artist: item.subtitle ?? undefined,
+                childCount: info.recursiveItemCount ?? 0,
+                sizeTicks: item.sizeTicks || (info.cumulativeRunTimeTicks ?? 0),
+                sizeBytes: sizeInfo.totalSizeBytes ?? 0,
+            });
+        } else {
+            basketStore.add({
+                id: itemId,
+                name: item.name,
+                type: resolvedType,
+                artist: item.subtitle ?? undefined,
+                childCount: item.childCount ?? 0,
+                sizeTicks: item.sizeTicks ?? 0,
+                sizeBytes: item.sizeBytes ?? 0,
+            });
+        }
+    }
+
+    return { added: toAdd.length, skipped };
+}
+
+async function bulkAddSelectionToBasket(btn: any): Promise<void> {
+    if (btn.loading) return;
+    // Snapshot up front — adds are idempotent via the skip check, so a
+    // selection cleared mid-flight cannot double-add.
+    const selected = resolveSelectedItems();
+    if (selected.length === 0) return;
+    btn.loading = true;
+    try {
+        const { added, skipped } = await addBrowseItemsToBasket(selected);
+        let msg = t('library.selection.added_toast', { added });
+        if (skipped > 0) msg += t('library.selection.skipped_suffix', { skipped });
+        showToast(msg, 'success');
+        clearSelection();
+    } catch (err) {
+        console.error('Bulk add to basket failed:', err);
+        const msg = err instanceof Error ? err.message : String(err);
+        showToast(msg, 'danger', ERROR_TOAST_DURATION);
+        // Selection survives so the user can retry.
+    } finally {
+        btn.loading = false;
+    }
+}
+
+function bulkAddSelectionToPlaylist(): void {
+    const selected = resolveSelectedItems();
+    if (selected.length === 0) return;
+    const itemIds = selected.map(it => it.id);
+    // Selection clears only on success; cancelling the dialog keeps it.
+    MediaCard.openAddToPlaylistDialog(
+        itemIds,
+        t('library.selection.count', { count: itemIds.length }),
+        () => clearSelection()
+    );
+}
+
 function renderListRow(item: BrowseDisplayItem, index: number, onCurate?: (id: string, name: string) => void): HTMLElement {
     const itemId = item.basketId ?? item.id;
     const isSelected = basketStore.has(itemId);
+    const selectable = isSelectableListItem(item);
     const row = document.createElement('div');
     row.className = 'media-list-row';
     if (isSelected) row.classList.add('is-selected');
+    if (selectable && state.selectedIds.has(itemId)) row.classList.add('is-checked');
     row.dataset.idx = String(index);
     row.style.top = `${index * VIRTUAL_ROW_HEIGHT}px`;
     const thumb = document.createElement('div');
@@ -681,55 +936,40 @@ function renderListRow(item: BrowseDisplayItem, index: number, onCurate?: (id: s
     toggleBtn.name = isSelected ? 'dash-circle-fill' : 'plus-circle-fill';
     toggleBtn.label = isSelected ? t('tracks.view.remove_from_basket') : t('tracks.view.add_to_basket');
     toggleBtn.style.fontSize = '1.25rem';
+    // device-locked CSS rule (#library-content.device-locked .basket-toggle-btn)
+    // disables this button when no device is selected, same as grid cards.
+    toggleBtn.classList.add('basket-toggle-btn');
     toggleBtn.addEventListener('click', async (e: Event) => {
         e.stopPropagation();
         if (basketStore.has(itemId)) {
             basketStore.remove(itemId);
-        } else {
-            const resolvedType = item.basketType ?? item.type;
-            const CONTAINER_TYPES = ['MusicArtist', 'MusicAlbum', 'MusicGenre', 'Playlist'];
-            const isFavoriteScoped = resolvedType === 'FavoriteArtist' || resolvedType === 'FavoriteAlbum';
-            const needsFetch = CONTAINER_TYPES.includes(resolvedType) && !isFavoriteScoped && (!item.childCount || !item.sizeBytes);
-            if (needsFetch) {
-                toggleBtn.loading = true;
-                try {
-                    const [metadata, sizeData] = await Promise.all([
-                        rpcCall('jellyfin_get_item_counts', { itemIds: [itemId] }),
-                        rpcCall('jellyfin_get_item_sizes', { itemIds: [itemId] }),
-                    ]);
-                    const info = metadata[0] || { recursiveItemCount: 0, cumulativeRunTimeTicks: 0 };
-                    const sizeInfo = sizeData[0] || { totalSizeBytes: 0 };
-                    basketStore.add({
-                        id: itemId,
-                        name: item.name,
-                        type: resolvedType,
-                        artist: item.subtitle ?? undefined,
-                        childCount: info.recursiveItemCount,
-                        sizeTicks: item.sizeTicks || info.cumulativeRunTimeTicks,
-                        sizeBytes: sizeInfo.totalSizeBytes,
-                    });
-                } catch (err) {
-                    console.error('Failed to fetch item count:', err);
-                } finally {
-                    toggleBtn.loading = false;
-                }
-            } else {
-                basketStore.add({
-                    id: itemId,
-                    name: item.name,
-                    type: resolvedType,
-                    artist: item.subtitle ?? undefined,
-                    childCount: item.childCount ?? 0,
-                    sizeTicks: item.sizeTicks ?? 0,
-                    sizeBytes: item.sizeBytes ?? 0,
-                });
-            }
+            return;
+        }
+        toggleBtn.loading = true;
+        try {
+            await addBrowseItemsToBasket([item]);
+        } catch (err) {
+            console.error('Failed to fetch item count:', err);
+        } finally {
+            toggleBtn.loading = false;
         }
     });
     row.addEventListener('click', async (e) => {
         const path = e.composedPath();
-        const isBtn = path.some(el => (el as HTMLElement).tagName === 'SL-ICON-BUTTON');
-        if (!isBtn && !row.classList.contains('is-navigating')) {
+        const isBtn = path.some(el => {
+            const tag = (el as HTMLElement).tagName;
+            return tag === 'SL-ICON-BUTTON' || tag === 'INPUT';
+        });
+        if (isBtn) return;
+        if (selectable && (e.ctrlKey || e.metaKey)) {
+            toggleRowSelection(item, index, row);
+            return;
+        }
+        if (selectable && e.shiftKey && state.selectionAnchorIdx !== null) {
+            selectRange(state.selectionAnchorIdx, index);
+            return;
+        }
+        if (!row.classList.contains('is-navigating')) {
             row.classList.add('is-navigating');
             try {
                 await navigateToBrowseItem(item);
@@ -738,12 +978,29 @@ function renderListRow(item: BrowseDisplayItem, index: number, onCurate?: (id: s
             }
         }
     });
+    // Shift-click extends the selection — suppress the browser's text-range
+    // selection artifact for that gesture only.
+    row.addEventListener('mousedown', (e) => {
+        if (e.shiftKey && state.selectionAnchorIdx !== null) e.preventDefault();
+    });
     // Context menu for artist/album/track rows
     if (_supportsPlaylistWrite && (item.type === 'MusicArtist' || item.type === 'MusicAlbum' || item.type === 'Audio')) {
         row.addEventListener('contextmenu', (e) => {
             e.preventDefault();
             MediaCard.showItemContextMenu(e.clientX, e.clientY, item.id, item.name);
         });
+    }
+    if (selectable) {
+        const check = document.createElement('input');
+        check.type = 'checkbox';
+        check.className = 'media-list-row__check';
+        check.checked = state.selectedIds.has(itemId);
+        check.setAttribute('aria-label', item.name);
+        check.addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleRowSelection(item, index, row);
+        });
+        row.appendChild(check);
     }
     row.appendChild(thumb);
     row.appendChild(info);
@@ -822,7 +1079,12 @@ function renderList(items: BrowseDisplayItem[], onCurate?: (id: string, name: st
     };
     basketStore.addEventListener('update', basketUpdateHandler);
     (content as any).__listBasketHandler = basketUpdateHandler;
+    ensureSelectionEscapeListener();
+    // Selection is usually cleared before a re-render, but if one is active
+    // (e.g. a repaint without a clearing trigger) restore its UI.
+    scroller.classList.toggle('has-selection', state.selectedIds.size > 0);
     content.appendChild(scroller);
+    updateBulkBar(content);
     paint();
 }
 
@@ -937,6 +1199,7 @@ function renderError(error: Error) {
 async function switchMode(mode: BrowseMode) {
     if (mode === state.browseMode || state.loading) return;
 
+    clearSelection();
     saveScroll();
     // Leaving Tracks mode: tear down the view's basket subscription and scroll
     // handlers. The instance is kept (not nulled) so re-entry can remount and
@@ -960,6 +1223,7 @@ async function switchMode(mode: BrowseMode) {
 // --- Mode root loading ---
 
 async function loadModeRoot() {
+    clearSelection();
     state.breadcrumbStack = [];
     state.pagination.startIndex = 0;
     state.items = [];
@@ -1055,6 +1319,7 @@ async function loadArtistsByLetter(letter: string) {
     const container = document.getElementById('library-content');
     if (!container || state.loading) return;
 
+    clearSelection();
     if (state.activeLetter === letter) {
         state.activeLetter = null;
         await loadArtists(true);
@@ -1101,6 +1366,7 @@ async function loadAlbumsByLetter(letter: string) {
     const container = document.getElementById('library-content');
     if (!container || state.loading) return;
 
+    clearSelection();
     if (state.activeLetter === letter) {
         state.activeLetter = null;
         await loadAlbums(true);
@@ -1719,6 +1985,7 @@ async function navigateToBrowseItem(item: BrowseDisplayItem) {
 }
 
 async function navigateToArtist(artistId: string, artistName: string) {
+    clearSelection();
     saveScroll();
     state.breadcrumbStack.push({ id: artistId, name: artistName });
     state.parentId = artistId;
@@ -1732,6 +1999,7 @@ async function navigateToArtist(artistId: string, artistName: string) {
 }
 
 async function navigateToAlbum(albumId: string, albumName: string) {
+    clearSelection();
     saveScroll();
     state.breadcrumbStack.push({ id: albumId, name: albumName });
     state.parentId = albumId;
@@ -1745,6 +2013,7 @@ async function navigateToAlbum(albumId: string, albumName: string) {
 }
 
 async function navigateToPlaylist(playlistId: string, playlistName: string) {
+    clearSelection();
     saveScroll();
     state.breadcrumbStack.push({ id: playlistId, name: playlistName });
     state.parentId = playlistId;
@@ -1754,6 +2023,7 @@ async function navigateToPlaylist(playlistId: string, playlistName: string) {
 }
 
 async function navigateToGenre(genreIdOrName: string, genreName: string) {
+    clearSelection();
     saveScroll();
     state.breadcrumbStack.push({ id: genreIdOrName, name: genreName });
     state.parentId = genreIdOrName;
@@ -1763,6 +2033,7 @@ async function navigateToGenre(genreIdOrName: string, genreName: string) {
 }
 
 async function navigateToCrumb(index: number) {
+    clearSelection();
     state.activeLetter = null;
     saveScroll();
 

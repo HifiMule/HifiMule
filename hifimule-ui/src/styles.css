@@ -1783,6 +1783,59 @@ h2 {
   background: rgba(var(--accent-rgb), 0.08);
 }
 
+/* Multi-select checkbox: revealed on hover/focus, and held visible while any
+   selection is active (.has-selection on the scroller). Hidden via opacity —
+   never display/visibility — so it stays in Tab order at rest. */
+.media-list-row__check {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+  accent-color: var(--sl-color-primary-600);
+  transition: opacity var(--dur-fast) var(--ease-out-quart);
+}
+
+.media-list-row:hover .media-list-row__check,
+.media-list-row:focus-within .media-list-row__check,
+.media-list.has-selection .media-list-row__check {
+  opacity: 1;
+}
+
+/* Multi-select tint — deliberately stronger than the .is-selected (in-basket)
+   tint above plus an inset accent edge, so the two states read differently. */
+.media-list-row.is-checked {
+  background: rgba(var(--accent-rgb), 0.18);
+  box-shadow: inset 2px 0 0 rgba(var(--accent-rgb), 0.8);
+}
+
+/* Bulk action bar: sticky sibling of the .media-list scroller (the JS offsets
+   `top` below the quick-nav when one is present). Above rows, below the
+   context menu (z-index 800). */
+.bulk-action-bar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.5rem;
+  background: var(--surface-bg);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius);
+}
+
+.bulk-action-bar__count {
+  font-weight: 600;
+  color: var(--sl-color-primary-600);
+}
+
+.bulk-action-bar sl-button[variant="text"] {
+  margin-left: auto;
+}
+
 .media-list-row__thumb {
   width: 36px;
   height: 36px;

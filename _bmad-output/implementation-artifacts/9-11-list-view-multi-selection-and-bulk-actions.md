@@ -4,7 +4,7 @@ baseline_commit: fcc2513
 
 # Story 9.11: List View Multi-Selection & Bulk Actions
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -49,14 +49,14 @@ So that I can build my basket or a playlist in seconds instead of clicking every
 
 ## Tasks / Subtasks
 
-- [ ] **Task 1: Selection state in `library.ts`** (AC: 2, 3, 8, 9)
-  - [ ] Add to the `AppState` interface ([library.ts:43](hifimule-ui/src/library.ts:43)–59) and the `state` initializer (line 69):
+- [x] **Task 1: Selection state in `library.ts`** (AC: 2, 3, 8, 9)
+  - [x] Add to the `AppState` interface ([library.ts:43](hifimule-ui/src/library.ts:43)–59) and the `state` initializer (line 69):
     ```typescript
     selectedIds: Set<string>;            // init: new Set()
     selectionAnchorIdx: number | null;   // init: null
     ```
-  - [ ] Selection key is `item.basketId ?? item.id` — the SAME id `renderListRow` already computes as `itemId` at [library.ts:656](hifimule-ui/src/library.ts:656) and uses for `basketStore.has`. Never key by index or DOM node.
-  - [ ] Selectability predicate helper:
+  - [x] Selection key is `item.basketId ?? item.id` — the SAME id `renderListRow` already computes as `itemId` at [library.ts:656](hifimule-ui/src/library.ts:656) and uses for `basketStore.has`. Never key by index or DOM node.
+  - [x] Selectability predicate helper:
     ```typescript
     function isSelectableListItem(item: BrowseDisplayItem): boolean {
         const resolved = item.basketType ?? item.type;
@@ -64,72 +64,72 @@ So that I can build my basket or a playlist in seconds instead of clicking every
     }
     ```
     `FavoriteArtist`/`FavoriteAlbum`, `MusicGenre`, `Playlist`, and `Audio` rows are NOT selectable in v1 (no checkbox rendered, skipped by Shift-range).
-  - [ ] Add a single `clearSelection()` helper: empties `state.selectedIds`, nulls `selectionAnchorIdx`, updates/removes the bulk bar, and repaints mounted rows (remove all `.media-list-row` then call `(content as any).__listPaint?.()` — same pattern as the basket update handler at [library.ts:819](hifimule-ui/src/library.ts:819)–822). No-op fast path when the set is already empty.
+  - [x] Add a single `clearSelection()` helper: empties `state.selectedIds`, nulls `selectionAnchorIdx`, updates/removes the bulk bar, and repaints mounted rows (remove all `.media-list-row` then call `(content as any).__listPaint?.()` — same pattern as the basket update handler at [library.ts:819](hifimule-ui/src/library.ts:819)–822). No-op fast path when the set is already empty.
 
-- [ ] **Task 2: Checkbox + selection interactions in `renderListRow`** (AC: 1, 2, 3, 4, 8, 10)
-  - [ ] In `renderListRow` ([library.ts:655](hifimule-ui/src/library.ts:655)–764), for selectable items only, prepend a leading native `<input type="checkbox">` with class `media-list-row__check`, `checked = state.selectedIds.has(itemId)`, and `aria-label` = item name (use `escapeHtml`-safe DOM assignment, not innerHTML). Native checkboxes are focusable and Space-toggleable for free (AC 10).
-  - [ ] Add `is-checked` class to the row when selected (alongside the existing basket `is-selected` class at line 660 — do NOT reuse `is-selected`, it means "in basket").
-  - [ ] Checkbox `click` handler: `e.stopPropagation()` (so the row click navigation at lines 729–740 never fires), then toggle `state.selectedIds`, set `state.selectionAnchorIdx = index`, sync row class + bulk bar.
-  - [ ] Extend the existing row click handler (lines 729–740) BEFORE the navigation branch:
+- [x] **Task 2: Checkbox + selection interactions in `renderListRow`** (AC: 1, 2, 3, 4, 8, 10)
+  - [x] In `renderListRow` ([library.ts:655](hifimule-ui/src/library.ts:655)–764), for selectable items only, prepend a leading native `<input type="checkbox">` with class `media-list-row__check`, `checked = state.selectedIds.has(itemId)`, and `aria-label` = item name (use `escapeHtml`-safe DOM assignment, not innerHTML). Native checkboxes are focusable and Space-toggleable for free (AC 10).
+  - [x] Add `is-checked` class to the row when selected (alongside the existing basket `is-selected` class at line 660 — do NOT reuse `is-selected`, it means "in basket").
+  - [x] Checkbox `click` handler: `e.stopPropagation()` (so the row click navigation at lines 729–740 never fires), then toggle `state.selectedIds`, set `state.selectionAnchorIdx = index`, sync row class + bulk bar.
+  - [x] Extend the existing row click handler (lines 729–740) BEFORE the navigation branch:
     - `e.ctrlKey || e.metaKey` → toggle selection, set anchor to this index, `return` (no navigation).
     - `e.shiftKey && state.selectionAnchorIdx !== null` → select all selectable rows in `state.items` between anchor and this index inclusive (anchor stays put), `return` (no navigation).
     - Plain click keeps current navigation behavior unchanged.
     - The existing `isBtn` composedPath guard (line 731) must also skip `INPUT` elements so checkbox clicks never navigate (defense-in-depth with stopPropagation).
-  - [ ] Suppress text-selection artifacts on Shift-click: add a `mousedown` listener on the row that calls `e.preventDefault()` when `e.shiftKey` and a selection anchor exists (or set `user-select: none` on `.media-list-row` in CSS — pick one).
-  - [ ] Shift-range looks up items ONLY from `state.items` (virtualized rows unmount — the DOM never holds the full list). Indices are stable because autoload is append-only.
-  - [ ] Virtualization survival (AC 8) comes for free: `paint()` ([library.ts:782](hifimule-ui/src/library.ts:782)–798) recreates rows via `renderListRow`, which reads `state.selectedIds`. No extra wiring. Verify, don't re-implement.
+  - [x] Suppress text-selection artifacts on Shift-click: add a `mousedown` listener on the row that calls `e.preventDefault()` when `e.shiftKey` and a selection anchor exists (or set `user-select: none` on `.media-list-row` in CSS — pick one).
+  - [x] Shift-range looks up items ONLY from `state.items` (virtualized rows unmount — the DOM never holds the full list). Indices are stable because autoload is append-only.
+  - [x] Virtualization survival (AC 8) comes for free: `paint()` ([library.ts:782](hifimule-ui/src/library.ts:782)–798) recreates rows via `renderListRow`, which reads `state.selectedIds`. No extra wiring. Verify, don't re-implement.
 
-- [ ] **Task 3: Bulk action bar** (AC: 4, 7, 10)
-  - [ ] New `renderBulkBar()` in `library.ts`: a `div.bulk-action-bar` mounted as a sibling of the `.media-list` scroller inside `#library-content`, inserted by `renderList` ([library.ts:768](hifimule-ui/src/library.ts:768)–827) after the quick-nav (line 776) and before the scroller. `#library-content` is the scroll container, so `position: sticky; top: 0` keeps the bar pinned above the list.
-  - [ ] Contents:
+- [x] **Task 3: Bulk action bar** (AC: 4, 7, 10)
+  - [x] New `renderBulkBar()` in `library.ts`: a `div.bulk-action-bar` mounted as a sibling of the `.media-list` scroller inside `#library-content`, inserted by `renderList` ([library.ts:768](hifimule-ui/src/library.ts:768)–827) after the quick-nav (line 776) and before the scroller. `#library-content` is the scroll container, so `position: sticky; top: 0` keeps the bar pinned above the list.
+  - [x] Contents:
     - Count span with `aria-live="polite"` — text from `t('library.selection.count', { count })` (AC 10).
     - "Add to basket" `<sl-button>` with class **`basket-toggle-btn`** — this makes the existing rule `#library-content.device-locked .basket-toggle-btn` ([styles.css:1341](hifimule-ui/src/styles.css:1341)) disable it automatically when no device is selected (`BasketSidebar` toggles `device-locked` on `#library-content` at [BasketSidebar.ts:852](hifimule-ui/src/components/BasketSidebar.ts:852) when `selectedDevicePath === null`). That IS the "mirroring per-row (+) behavior" mechanism of AC 7. Do not invent a new device-state probe.
     - "Add to playlist…" `<sl-button>` — rendered ONLY when `_supportsPlaylistWrite` is true (module flag set via `setPlaylistWriteCapability`, [library.ts:31](hifimule-ui/src/library.ts:31)–34). NOT gated by device-locked (AC 7).
     - "Clear" affordance (`<sl-button variant="text">` or icon-button) → `clearSelection()`.
-  - [ ] Re-render/update the bar on every selection change (create when size goes 0→1, update count text in place, remove when size→0). Keep it cheap — selection toggles happen rapidly.
-  - [ ] Teardown: `renderList` already wipes `#library-content` (`content.innerHTML = ''`, line 773) so the bar dies with the list on re-render; no leak risk (the bar holds no document-level listeners). Escape handling is Task 5.
-  - [ ] AC 4 regression guard: per-row (+)/(−) toggle, row navigation, context menu, and playlist curate button must behave exactly as before when no selection is active.
+  - [x] Re-render/update the bar on every selection change (create when size goes 0→1, update count text in place, remove when size→0). Keep it cheap — selection toggles happen rapidly.
+  - [x] Teardown: `renderList` already wipes `#library-content` (`content.innerHTML = ''`, line 773) so the bar dies with the list on re-render; no leak risk (the bar holds no document-level listeners). Escape handling is Task 5.
+  - [x] AC 4 regression guard: per-row (+)/(−) toggle, row navigation, context menu, and playlist curate button must behave exactly as before when no selection is active.
 
-- [ ] **Task 4: Bulk "Add to basket" handler** (AC: 5, 7)
-  - [ ] Factor the per-row add logic out of `renderListRow`'s toggle handler ([library.ts:684](hifimule-ui/src/library.ts:684)–728) into a reusable async helper, e.g. `addBrowseItemsToBasket(items: BrowseDisplayItem[]): Promise<{added: number; skipped: number}>`, then have BOTH the single-row toggle and the bulk handler call it. Do not duplicate the logic.
-  - [ ] Helper semantics (preserve EXACTLY the current per-row behavior, lines 686–726):
+- [x] **Task 4: Bulk "Add to basket" handler** (AC: 5, 7)
+  - [x] Factor the per-row add logic out of `renderListRow`'s toggle handler ([library.ts:684](hifimule-ui/src/library.ts:684)–728) into a reusable async helper, e.g. `addBrowseItemsToBasket(items: BrowseDisplayItem[]): Promise<{added: number; skipped: number}>`, then have BOTH the single-row toggle and the bulk handler call it. Do not duplicate the logic.
+  - [x] Helper semantics (preserve EXACTLY the current per-row behavior, lines 686–726):
     - Skip items where `basketStore.has(basketId ?? id)` → count as `skipped`.
     - Same `needsFetch` predicate per item: resolved type in `['MusicArtist','MusicAlbum','MusicGenre','Playlist']`, not favorite-scoped, and `(!item.childCount || !item.sizeBytes)`.
     - ONE batched call pair for all needs-fetch items: `Promise.all([rpcCall('jellyfin_get_item_counts', { itemIds }), rpcCall('jellyfin_get_item_sizes', { itemIds })])`. Responses are arrays of `{ id, recursiveItemCount, cumulativeRunTimeTicks }` / `{ id, totalSizeBytes }` — build `Map`s keyed by `id`; do NOT assume response order matches request order (the per-row code uses `metadata[0]` because it sends one id — that shortcut does not generalize).
     - `basketStore.add(...)` per item with the identical field mapping as lines 702–710 / 717–725 (`id: basketId ?? id`, `name`, `type: resolvedType`, `artist: item.subtitle ?? undefined`, `childCount`, `sizeTicks: item.sizeTicks || fetched`, `sizeBytes`). Artist-entity semantics (Story 3.9) flow through `item.basketType` — no special-casing needed beyond the existing mapping.
-  - [ ] Bulk handler: resolve selected items from `state.items` by id (never from DOM), call the helper, show `showToast(...)` ([toast.ts:25](hifimule-ui/src/toast.ts:25)) with `t('library.selection.added_toast', { added })` + `t('library.selection.skipped_suffix', { skipped })` appended when `skipped > 0`, variant `'success'`, then `clearSelection()`.
-  - [ ] While the RPC pair is in flight, set the bulk button's `loading = true` and ignore re-clicks (mirror the per-row `toggleBtn.loading` pattern, lines 694/714). On RPC failure: `console.error` + danger toast, do NOT clear the selection (user can retry).
-  - [ ] Note: `basketStore.add` fires an `update` event per item → the list's basket handler (line 819) wipes and repaints rows after each add. This is acceptable for v1 (N is human-scale); do not refactor basketStore batching in this story.
+  - [x] Bulk handler: resolve selected items from `state.items` by id (never from DOM), call the helper, show `showToast(...)` ([toast.ts:25](hifimule-ui/src/toast.ts:25)) with `t('library.selection.added_toast', { added })` + `t('library.selection.skipped_suffix', { skipped })` appended when `skipped > 0`, variant `'success'`, then `clearSelection()`.
+  - [x] While the RPC pair is in flight, set the bulk button's `loading = true` and ignore re-clicks (mirror the per-row `toggleBtn.loading` pattern, lines 694/714). On RPC failure: `console.error` + danger toast, do NOT clear the selection (user can retry).
+  - [x] Note: `basketStore.add` fires an `update` event per item → the list's basket handler (line 819) wipes and repaints rows after each add. This is acceptable for v1 (N is human-scale); do not refactor basketStore batching in this story.
 
-- [ ] **Task 5: Selection-clearing hooks + Escape** (AC: 9)
-  - [ ] Call `clearSelection()` (the cheap no-op-when-empty helper) in:
+- [x] **Task 5: Selection-clearing hooks + Escape** (AC: 9)
+  - [x] Call `clearSelection()` (the cheap no-op-when-empty helper) in:
     - `switchMode()` — [library.ts:937](hifimule-ui/src/library.ts:937)–958 (browse-mode change)
     - `loadModeRoot()` — [library.ts:962](hifimule-ui/src/library.ts:962)–988 (covers programmatic resets)
     - `navigateToArtist` / `navigateToAlbum` / `navigateToPlaylist` / `navigateToGenre` — [library.ts:1721](hifimule-ui/src/library.ts:1721)–1763 (drill-down)
     - `navigateToCrumb` — [library.ts:1765](hifimule-ui/src/library.ts:1765)–1776 (breadcrumb jumps)
     - `loadArtistsByLetter` / `loadAlbumsByLetter` — [library.ts:1054](hifimule-ui/src/library.ts:1054)–1144 (A–Z filter change, including letter-clear)
     - `setViewMode()` — [library.ts:648](hifimule-ui/src/library.ts:648)–653 (toggle to grid)
-  - [ ] Escape: register ONE module-level `document.addEventListener('keydown', ...)` (guard with a module flag so repeated `renderList` calls don't stack listeners). Handler: only act when `e.key === 'Escape'` and `state.selectedIds.size > 0`; skip when a Shoelace dialog is open (`document.querySelector('sl-dialog[open]')`) or a context menu is open (`.hm-context-menu.is-open`) so Escape closes those first and the selection survives a cancelled dialog.
+  - [x] Escape: register ONE module-level `document.addEventListener('keydown', ...)` (guard with a module flag so repeated `renderList` calls don't stack listeners). Handler: only act when `e.key === 'Escape'` and `state.selectedIds.size > 0`; skip when a Shoelace dialog is open (`document.querySelector('sl-dialog[open]')`) or a context menu is open (`.hm-context-menu.is-open`) so Escape closes those first and the selection survives a cancelled dialog.
 
-- [ ] **Task 6: Generalize MediaCard playlist dialogs to `itemIds: string[]`** (AC: 6)
-  - [ ] `MediaCard.openAddToPlaylistDialog` ([MediaCard.ts:443](hifimule-ui/src/components/MediaCard.ts:443)) → `openAddToPlaylistDialog(itemIds: string[], label: string, onSuccess?: () => void)`. Inside, the existing `rpcCall('playlist.addItems', { playlistId, itemIds: [trackId] })` (line 501) becomes `{ playlistId, itemIds }`. Invoke `onSuccess?.()` after the success toast.
-  - [ ] `MediaCard.openCreatePlaylistDialog` ([MediaCard.ts:373](hifimule-ui/src/components/MediaCard.ts:373)) → `openCreatePlaylistDialog(itemIds: string[], suggestedName: string, onSuccess?: () => void)`. `rpcCall('playlist.create', { name, itemIds: [itemId] })` (line 408) becomes `{ name, itemIds }`. Keep the existing `invalidatePlaylistsCache()` + success toast (lines 409–412); invoke `onSuccess?.()` after.
-  - [ ] Update ALL existing call sites to pass one-element arrays (no behavior change):
+- [x] **Task 6: Generalize MediaCard playlist dialogs to `itemIds: string[]`** (AC: 6)
+  - [x] `MediaCard.openAddToPlaylistDialog` ([MediaCard.ts:443](hifimule-ui/src/components/MediaCard.ts:443)) → `openAddToPlaylistDialog(itemIds: string[], label: string, onSuccess?: () => void)`. Inside, the existing `rpcCall('playlist.addItems', { playlistId, itemIds: [trackId] })` (line 501) becomes `{ playlistId, itemIds }`. Invoke `onSuccess?.()` after the success toast.
+  - [x] `MediaCard.openCreatePlaylistDialog` ([MediaCard.ts:373](hifimule-ui/src/components/MediaCard.ts:373)) → `openCreatePlaylistDialog(itemIds: string[], suggestedName: string, onSuccess?: () => void)`. `rpcCall('playlist.create', { name, itemIds: [itemId] })` (line 408) becomes `{ name, itemIds }`. Keep the existing `invalidatePlaylistsCache()` + success toast (lines 409–412); invoke `onSuccess?.()` after.
+  - [x] Update ALL existing call sites to pass one-element arrays (no behavior change):
     - [MediaCard.ts:364](hifimule-ui/src/components/MediaCard.ts:364) — context menu → `openAddToPlaylistDialog([itemId], itemName)`
     - [MediaCard.ts:479](hifimule-ui/src/components/MediaCard.ts:479) — picker's "New playlist…" fallback → `openCreatePlaylistDialog(itemIds, trackName)` (thread the array through)
     - [TracksBrowseView.ts:516](hifimule-ui/src/components/TracksBrowseView.ts:516) — per-track "Send to playlist…" → `openAddToPlaylistDialog([track.id], track.title)`
-  - [ ] `MediaCard.showItemContextMenu` stays single-item — the per-row context menu is untouched by this story ([MediaCard.ts:302](hifimule-ui/src/components/MediaCard.ts:302); callers at MediaCard.ts:260, TracksBrowseView.ts:522, library.ts:745).
-  - [ ] Bulk handler in `library.ts`: `MediaCard.openAddToPlaylistDialog(selectedIdsArray, t('library.selection.count', { count }), () => clearSelection())` — selection clears only on success (AC 6); cancelling the dialog keeps the selection.
+  - [x] `MediaCard.showItemContextMenu` stays single-item — the per-row context menu is untouched by this story ([MediaCard.ts:302](hifimule-ui/src/components/MediaCard.ts:302); callers at MediaCard.ts:260, TracksBrowseView.ts:522, library.ts:745).
+  - [x] Bulk handler in `library.ts`: `MediaCard.openAddToPlaylistDialog(selectedIdsArray, t('library.selection.count', { count }), () => clearSelection())` — selection clears only on success (AC 6); cancelling the dialog keeps the selection.
 
-- [ ] **Task 7: CSS** (AC: 1, 4)
-  - [ ] In `hifimule-ui/src/styles.css` next to the `.media-list-row` block (lines 1764–1826):
+- [x] **Task 7: CSS** (AC: 1, 4)
+  - [x] In `hifimule-ui/src/styles.css` next to the `.media-list-row` block (lines 1764–1826):
     - `.media-list-row__check` — leading checkbox, hidden by default (`opacity: 0`), visible on `.media-list-row:hover` and `.media-list-row:focus-within`, and ALWAYS visible while any selection is active. Implement "selection active" with a `has-selection` class toggled on the `.media-list` scroller by selection changes: `.media-list.has-selection .media-list-row__check { opacity: 1; }`. Keep the checkbox focusable even at opacity 0 (use opacity, never `display:none`/`visibility:hidden`, or Tab order breaks AC 10).
     - `.media-list-row.is-checked` — selected-row tint, visually distinct from the basket `is-selected` tint (line 1782).
     - `.bulk-action-bar` — sticky (`position: sticky; top: 0;`), surface background + border, flex row, gap, `z-index` above rows but below the context menu (menu is z-index 800, [styles.css:1835](hifimule-ui/src/styles.css:1835)).
-  - [ ] Follow existing token usage in styles.css (CSS variables like `--sl-*`/ink colors — match neighboring rules; no hardcoded hex that the file doesn't already use).
+  - [x] Follow existing token usage in styles.css (CSS variables like `--sl-*`/ink colors — match neighboring rules; no hardcoded hex that the file doesn't already use).
 
-- [ ] **Task 8: i18n keys — en/fr/es/de (FOUR languages)** (AC: 4, 5, 10)
-  - [ ] Add to `hifimule-i18n/catalog.json` in **all four** language objects (`en`, `fr`, `es`, `de` — the catalog has 267 keys per language and German is live in the app; the proposal text says en/fr/es but de parity is mandatory, see [i18n.ts:11](hifimule-ui/src/i18n.ts:11)):
+- [x] **Task 8: i18n keys — en/fr/es/de (FOUR languages)** (AC: 4, 5, 10)
+  - [x] Add to `hifimule-i18n/catalog.json` in **all four** language objects (`en`, `fr`, `es`, `de` — the catalog has 267 keys per language and German is live in the app; the proposal text says en/fr/es but de parity is mandatory, see [i18n.ts:11](hifimule-ui/src/i18n.ts:11)):
     ```
     library.selection.count            "{count} selected"
     library.selection.add_to_basket    "Add to basket"
@@ -138,16 +138,16 @@ So that I can build my basket or a playlist in seconds instead of clicking every
     library.selection.added_toast      "{added} added to basket"
     library.selection.skipped_suffix   " ({skipped} already in basket)"
     ```
-  - [ ] Placeholders use the existing `{name}` convention — `t(key, { count })` interpolation is supported ([i18n.ts:47](hifimule-ui/src/i18n.ts:47)–60).
-  - [ ] Place keys near the existing `library.*` block; keep all four language objects key-complete (same 6 keys each).
+  - [x] Placeholders use the existing `{name}` convention — `t(key, { count })` interpolation is supported ([i18n.ts:47](hifimule-ui/src/i18n.ts:47)–60).
+  - [x] Place keys near the existing `library.*` block; keep all four language objects key-complete (same 6 keys each).
 
-- [ ] **Task 9: Pre-existing list-row device-locked gap (1-line fix, required for AC 7 coherence)**
-  - [ ] The `device-locked` CSS only matches `.basket-toggle-btn`, which grid `MediaCard` buttons have ([MediaCard.ts:89](hifimule-ui/src/components/MediaCard.ts:89)) but the list row's `toggleBtn` ([library.ts:680](hifimule-ui/src/library.ts:680)) does NOT — so list (+) buttons are currently never disabled when no device is selected. AC 7 defines the bulk button as "mirroring per-row (+) behavior"; for the mirror to be true, add `toggleBtn.classList.add('basket-toggle-btn')` to `renderListRow` so both per-row and bulk buttons obey the same rule. (Same 1-line treatment for the curate button is NOT needed — curation is not device-gated.)
+- [x] **Task 9: Pre-existing list-row device-locked gap (1-line fix, required for AC 7 coherence)**
+  - [x] The `device-locked` CSS only matches `.basket-toggle-btn`, which grid `MediaCard` buttons have ([MediaCard.ts:89](hifimule-ui/src/components/MediaCard.ts:89)) but the list row's `toggleBtn` ([library.ts:680](hifimule-ui/src/library.ts:680)) does NOT — so list (+) buttons are currently never disabled when no device is selected. AC 7 defines the bulk button as "mirroring per-row (+) behavior"; for the mirror to be true, add `toggleBtn.classList.add('basket-toggle-btn')` to `renderListRow` so both per-row and bulk buttons obey the same rule. (Same 1-line treatment for the curate button is NOT needed — curation is not device-gated.)
 
-- [ ] **Task 10: Build gates & manual verification** (AC: all)
-  - [ ] `rtk tsc --noEmit` — zero NEW errors. Pre-existing: `tsconfig.json` baseUrl deprecation warning + `MediaCard.ts` TS6133 (`activeContextMenu`) — do not count these, do not "fix" them here.
-  - [ ] `npm run build` — zero new errors.
-  - [ ] No test framework exists in `hifimule-ui` (no vitest/jest config, no test script in package.json) — do NOT scaffold one in this story. Manually verify instead, in artists AND albums list view:
+- [x] **Task 10: Build gates & manual verification** (AC: all)
+  - [x] `rtk tsc --noEmit` — zero NEW errors. Pre-existing: `tsconfig.json` baseUrl deprecation warning + `MediaCard.ts` TS6133 (`activeContextMenu`) — do not count these, do not "fix" them here.
+  - [x] `npm run build` — zero new errors.
+  - [x] No test framework exists in `hifimule-ui` (no vitest/jest config, no test script in package.json) — do NOT scaffold one in this story. Manually verify instead, in artists AND albums list view:
     1. Checkbox hover/focus reveal; always-visible while selection active.
     2. Ctrl/Cmd-click toggles without navigating; plain click still navigates.
     3. Shift-click range from anchor (downward AND upward).
@@ -254,12 +254,38 @@ Commit pattern: `Story 9.11` (this file) → `Dev 9.11` (implementation) → `Re
 
 ### Agent Model Used
 
+claude-fable-5 (Fable 5)
+
 ### Debug Log References
+
+- `npx tsc --noEmit --ignoreDeprecations "6.0"` → zero errors (only pre-existing tsconfig `baseUrl` TS5101 deprecation without the flag, as documented in Task 10).
+- `npm run build` → built successfully, zero errors (pre-existing vite dynamic-import chunking notes only).
+- catalog.json parity check: 273 keys × 4 languages (en/fr/es/de), en↔fr/es/de symmetric difference empty.
 
 ### Completion Notes List
 
+- **Implementation Plan**: selection held as id-keyed app state (`state.selectedIds` keyed by `basketId ?? id`, anchor index for Shift-ranges) so virtualization/autoload survival falls out of `paint()` re-reading state. Bulk bar is a sticky sibling of the `.media-list` scroller, created on 0→1, count updated in place, removed on →0.
+- Task 1: `selectedIds` + `selectionAnchorIdx` added to `AppState`/initializer; `isSelectableListItem()` (resolved type MusicArtist/MusicAlbum only); `clearSelection()` with no-op fast path, wipe-and-paint row refresh (same mechanism as the basket update handler).
+- Task 2: native `<input type="checkbox">` (class `media-list-row__check`, `aria-label` via DOM assignment) prepended for selectable rows; `is-checked` class kept separate from the basket `is-selected`; checkbox click stop-propagates and toggles; row click handler extended with Ctrl/Cmd-toggle and Shift-range (from `state.items`, anchor stays put) before the navigation branch; composedPath guard extended to skip `INPUT`; `mousedown` preventDefault on Shift suppresses text-selection artifacts.
+- Task 3: `renderBulkBar()`/`updateBulkBar()` — count span with `aria-live="polite"`, "Add to basket" `<sl-button>` carrying `basket-toggle-btn` (device-locked CSS disables it — AC 7 mechanism), "Add to playlist…" rendered only when `_supportsPlaylistWrite`, Clear button. Bar sticks below the quick-nav (JS sets `top` to quick-nav height since quick-nav is itself sticky at top:0/z-50). Bar dies with `content.innerHTML = ''`; no document-level listeners.
+- Task 4: per-row add logic factored into `addBrowseItemsToBasket(items)` used by BOTH the per-row (+) toggle and the bulk handler. Exact per-row semantics preserved (skip-if-basketed, same needsFetch predicate, fetched-vs-local field mapping). ONE batched `jellyfin_get_item_counts` + `jellyfin_get_item_sizes` pair; responses mapped by `id`, never by array position. Bulk handler snapshots selected items from `state.items`, sets button `loading`, toasts added/skipped, clears selection on success only; on RPC failure: console.error + danger toast, selection survives for retry.
+- Task 5: `clearSelection()` wired into `switchMode`, `loadModeRoot`, `navigateToArtist/Album/Playlist/Genre`, `navigateToCrumb`, `loadArtistsByLetter`, `loadAlbumsByLetter` (including letter-clear path), `setViewMode`. Escape: single module-flag-guarded `document` keydown listener registered in CAPTURE phase — deliberate: the context menu's own capture handler removes the menu on Escape, so a bubble-phase check of `.hm-context-menu.is-open` would race and clear the selection on the same keypress; in capture (registered first) the open-menu/open-dialog guards run before either closes.
+- Task 6: `MediaCard.openAddToPlaylistDialog(itemIds: string[], label, onSuccess?)` and `openCreatePlaylistDialog(itemIds: string[], suggestedName, onSuccess?)`; `playlist.addItems`/`playlist.create` now receive the full array; `onSuccess` invoked after the success toast (existing `invalidatePlaylistsCache()` kept). All three call sites updated to one-element arrays (MediaCard context menu, picker "New playlist…" fallback threading the array + onSuccess, TracksBrowseView per-track). `showItemContextMenu` untouched (single-item). Bulk playlist handler passes `selected.map(it => it.id)` and clears selection only via onSuccess — dialog cancel keeps it.
+- Task 7: checkbox hidden via `opacity: 0` (never display/visibility — Tab order preserved), revealed on row hover, `:focus-within`, and `.media-list.has-selection`; `is-checked` tint stronger than `is-selected` (0.18 vs 0.08 alpha) plus inset accent edge for distinctness; `.bulk-action-bar` sticky, surface tokens, z-index 40 (above rows, below quick-nav 50 and context menu 800). Only existing token patterns used.
+- Task 8: 6 `library.selection.*` keys added to all FOUR languages (en/fr/es/de) next to the `library.context.*` block; 273 keys per language, parity verified programmatically. German reuses the established "Auswahl" basket vocabulary (matches `tracks.view.add_to_basket`).
+- Task 9: `toggleBtn.classList.add('basket-toggle-btn')` added in `renderListRow` — list (+) buttons now obey the device-locked rule like grid cards, making the bulk button's "mirror" real.
+- Task 10: build gates pass (see Debug Log). No test framework scaffolded per story instruction. ⚠️ The 11-item runtime checklist (checkbox reveal, Shift-ranges, virtualization/autoload survival, bulk basket/playlist flows, device-locked states, clearing triggers, keyboard-only, Subsonic parity) requires the running Tauri app connected to a media server and could not be executed in this headless dev environment — handed to the review step for the reviewer to run.
+- Scope boundary respected: no `hifimule-daemon/**`, no `basket.ts`, no `PlaylistCurationView.ts`, no planning-artifact changes, no new files, no new RPCs.
+
 ### File List
+
+- hifimule-ui/src/library.ts (modified)
+- hifimule-ui/src/components/MediaCard.ts (modified)
+- hifimule-ui/src/components/TracksBrowseView.ts (modified — one call site)
+- hifimule-ui/src/styles.css (modified)
+- hifimule-i18n/catalog.json (modified — 6 keys × 4 languages)
 
 ## Change Log
 
 - 2026-06-12: Story created from sprint-change-proposal-2026-06-12-list-view-multi-selection (Epic 9 reopened). Ultimate context engine analysis completed — comprehensive developer guide created.
+- 2026-06-12: Story 9.11 implemented (Tasks 1–10): list multi-selection state + checkboxes, bulk action bar with batched basket add and multi-item playlist add, selection-clearing hooks + Escape, MediaCard dialog generalization to `itemIds: string[]`, CSS, i18n (en/fr/es/de), pre-existing list-row device-locked gap closed. Build gates green; runtime manual checklist deferred to review. Status → review.

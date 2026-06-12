@@ -513,7 +513,7 @@ export class TracksBrowseView {
             playlistBtn.style.fontSize = '1.1rem';
             playlistBtn.addEventListener('click', (e: Event) => {
                 e.stopPropagation();
-                MediaCard.openAddToPlaylistDialog(track.id, track.title);
+                MediaCard.openAddToPlaylistDialog([track.id], track.title);
             });
             row.appendChild(playlistBtn);
 

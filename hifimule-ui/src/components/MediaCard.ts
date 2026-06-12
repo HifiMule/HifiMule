@@ -361,7 +361,7 @@ export class MediaCard {
 
         menuItem.addEventListener('click', () => {
             cleanup();
-            MediaCard.openAddToPlaylistDialog(itemId, itemName);
+            MediaCard.openAddToPlaylistDialog([itemId], itemName);
         });
 
         document.addEventListener('click', onDocClick, true);
@@ -370,7 +370,7 @@ export class MediaCard {
         document.addEventListener('keydown', onKeyDown, true);
     }
 
-    static openCreatePlaylistDialog(itemId: string, itemName: string): void {
+    static openCreatePlaylistDialog(itemIds: string[], suggestedName: string, onSuccess?: () => void): void {
         const dialog = document.createElement('sl-dialog') as any;
         dialog.label = t('library.context.create_playlist_title');
         dialog.innerHTML = `
@@ -379,7 +379,7 @@ export class MediaCard {
                 placeholder="${t('basket.playlist.name_placeholder')}"
                 autofocus
                 clearable
-                value="${MediaCard.escapeHtml(itemName)}"
+                value="${MediaCard.escapeHtml(suggestedName)}"
             ></sl-input>
             <sl-alert id="ctx-playlist-error" variant="danger" closable style="display:none; margin-top: 0.75rem;"></sl-alert>
             <sl-button slot="footer" variant="default" id="ctx-playlist-cancel">${t('basket.actions.cancel')}</sl-button>
@@ -405,11 +405,12 @@ export class MediaCard {
 
             try {
                 const { rpcCall } = await import('../rpc');
-                await rpcCall('playlist.create', { name, itemIds: [itemId] });
+                await rpcCall('playlist.create', { name, itemIds });
                 const { invalidatePlaylistsCache } = await import('../library');
                 invalidatePlaylistsCache();
                 dialog.hide();
                 showToast(t('playlist.context.created_success'), 'success');
+                onSuccess?.();
             } catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
                 if (errorEl) {
@@ -440,7 +441,7 @@ export class MediaCard {
 
 
 
-    static openAddToPlaylistDialog(trackId: string, trackName: string): void {
+    static openAddToPlaylistDialog(itemIds: string[], label: string, onSuccess?: () => void): void {
         const dialog = document.createElement('sl-dialog') as any;
         dialog.label = t('playlist.context.pick_playlist_title');
         dialog.innerHTML = `
@@ -476,7 +477,7 @@ export class MediaCard {
                 newBtn.innerHTML = `<sl-icon slot="prefix" name="plus-circle"></sl-icon> ${t('playlist.context.new_playlist')}`;
                 newBtn.addEventListener('click', () => {
                     dialog.addEventListener('sl-after-hide', () => {
-                        MediaCard.openCreatePlaylistDialog(trackId, trackName);
+                        MediaCard.openCreatePlaylistDialog(itemIds, label, onSuccess);
                     }, { once: true });
                     dialog.hide();
                 });
@@ -498,9 +499,10 @@ export class MediaCard {
                         btn.disabled = true;
                         if (errorEl) errorEl.style.display = 'none';
                         try {
-                            await rpcCall('playlist.addItems', { playlistId: pl.id, itemIds: [trackId] });
+                            await rpcCall('playlist.addItems', { playlistId: pl.id, itemIds });
                             dialog.hide();
                             showToast(t('playlist.context.added_success'), 'success');
+                            onSuccess?.();
                         } catch (err) {
                             const msg = err instanceof Error ? err.message : String(err);
                             if (errorEl) {
