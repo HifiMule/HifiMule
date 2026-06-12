@@ -84,13 +84,17 @@ export class TracksBrowseView {
 
     async load(): Promise<void> {
         this.renderLayout();
+        // Register before the awaits: the track panel renders selectable rows
+        // as soon as its own fetch resolves (Escape must already work, AC 10),
+        // and a destroy() during the await must find the listener/subscription
+        // to remove — registering after would resurrect them on an exited mode.
+        this.subscribeBasket();
+        this.ensureEscapeListener();
         await Promise.all([
             this.fetchArtists(true),
             this.fetchAlbums(true),
             this.fetchTracks(true),
         ]);
-        this.subscribeBasket();
-        this.ensureEscapeListener();
     }
 
     remount(): void {
@@ -315,13 +319,20 @@ export class TracksBrowseView {
             });
             if (!this.container.isConnected || gen !== this.trackGen) return;
 
-            const newItems = result.tracks;
+            // Drop tracks already in the list: a server-side mutation between
+            // autoload pages can shift boundaries and resend one, and id-keyed
+            // selection cannot represent duplicate rows (toggle/count desync,
+            // duplicate ids in the bulk playlist payload).
+            const existing = new Set(this.trackState.items.map(tr => tr.id));
+            const newItems = result.tracks.filter(tr => !existing.has(tr.id));
             this.trackState.items.push(...newItems);
             this.trackState.total = result.total;
-            this.trackState.startIndex = this.trackState.items.length;
+            // Advance paging by the RAW page size — keyed off items.length it
+            // would re-request (and re-drop) the deduped window forever.
+            this.trackState.startIndex = startIndex + result.tracks.length;
             // Subsonic unfiltered: total == page length on last page; use page length < limit as secondary signal
             this.trackState.exhausted =
-                this.trackState.items.length >= result.total || newItems.length < TRACK_LIMIT;
+                this.trackState.startIndex >= result.total || result.tracks.length < TRACK_LIMIT;
             this.trackState.loading = false;
 
             if (reset) {
@@ -574,9 +585,13 @@ export class TracksBrowseView {
     // ─── Basket button refresh on store update ─────────────────────────────────
 
     private updateTrackButtons(): void {
+        const noDevice = !basketStore.getActiveServerId();
+        // The bulk bar lives outside the track panel (inserted above it) —
+        // keep its add button's disabled state in sync with the per-row ones.
+        const bulkAdd = this.container.querySelector<HTMLElement>('[data-bulk-basket-add]');
+        if (bulkAdd) (bulkAdd as any).disabled = noDevice;
         const panel = this.container.querySelector<HTMLElement>(TRACK_PANEL);
         if (!panel) return;
-        const noDevice = !basketStore.getActiveServerId();
         panel.querySelectorAll<HTMLElement>('[data-basket-toggle]').forEach(btn => {
             const trackId = (btn as any).dataset.basketToggle;
             const isInBasket = basketStore.has(trackId);
@@ -706,6 +721,11 @@ export class TracksBrowseView {
         // existing `#library-content.device-locked` CSS rule disables it when
         // no device is selected — same mechanism as the 9.11 bulk bar.
         addBtn.classList.add('basket-toggle-btn');
+        // The CSS gate is pointer-events only — it doesn't block keyboard
+        // Enter on a focusable sl-button. Set the property like the per-row
+        // (+) buttons (refreshed by updateTrackButtons on store updates).
+        addBtn.disabled = !basketStore.getActiveServerId();
+        addBtn.dataset.bulkBasketAdd = '';
         addBtn.textContent = t('library.selection.add_to_basket');
         addBtn.addEventListener('click', () => this.bulkAddToBasket());
         bar.appendChild(addBtn);
@@ -764,9 +784,13 @@ export class TracksBrowseView {
         return this.trackState.items.filter(tr => this.selectedTrackIds.has(tr.id));
     }
 
-    // All local — no RPC, no loading state. basketStore.add itself toasts and
-    // returns early when no active server (belt-and-braces under the CSS gate).
+    // All local — no RPC, no loading state.
     private bulkAddToBasket(): void {
+        // Belt-and-braces under the disabled/CSS gates: without an active
+        // server basketStore.add error-toasts per item and adds nothing — bail
+        // before the loop so a dead path can't show a false success toast or
+        // wipe a selection the user would have to rebuild.
+        if (!basketStore.getActiveServerId()) return;
         const selected = this.resolveSelectedTracks();
         if (selected.length === 0) return;
         let added = 0;

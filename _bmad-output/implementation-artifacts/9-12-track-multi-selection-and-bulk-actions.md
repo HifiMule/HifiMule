@@ -4,7 +4,7 @@ baseline_commit: 7c018bc
 
 # Story 9.12: Track Multi-Selection & Bulk Actions
 
-Status: review
+Status: done
 
 ## Story
 
@@ -122,6 +122,16 @@ So that I can send a batch of individual songs to my basket or a playlist withou
     9. Each AC-10 clearing trigger: artist filter, album filter, artist A–Z, album A–Z, leaving Tracks mode (then re-entering — selection must NOT resurrect), Escape. Escape with an open dialog/context menu closes those and keeps the selection.
     10. Keyboard-only in Tracks view: Tab to checkbox, Space toggles, bulk bar buttons in tab order, ARIA-live count announced including the first (0→1) selection.
     11. Jellyfin AND Navidrome/Subsonic servers: both surfaces behave identically.
+
+### Review Findings
+
+- [x] [Review][Decision] Playlist tracks in list view are now selectable, and duplicate occurrences of the same track break id-keyed selection — RESOLVED: accepted as-is. Id-keyed selection is what AC 9 mandates; duplicate tracks in a playlist are an edge case whose worst symptom is a visual count mismatch. No code change.
+- [x] [Review][Decision] AC 8 "playlists cache is invalidated on success" is not met for the existing-playlist path ([MediaCard.ts:497](hifimule-ui/src/components/MediaCard.ts:497)–516 never calls `invalidatePlaylistsCache()`; only the create-new flow does) — RESOLVED: deferred, pre-existing 9.11 dialog behavior and the story forbids touching MediaCard.ts; AC 8 clause inherits 9.11 behavior. Logged in deferred-work.md.
+- [x] [Review][Patch] Bulk "Add to basket" reports false success and wipes the selection when no active server [TracksBrowseView.ts:769-786] — APPLIED: `bulkAddToBasket` now bails before the loop when `getActiveServerId()` is null (no false toast, selection preserved), and the bulk button carries `disabled = !basketStore.getActiveServerId()` like the per-row (+) buttons, refreshed by `updateTrackButtons`.
+- [x] [Review][Patch] Keyboard Enter bypasses the device-locked gate on the bulk "Add to basket" button [TracksBrowseView.ts:702-711] — APPLIED: the `disabled` property (same fix as above) blocks keyboard activation; the `pointer-events` CSS gate remains as the device-axis layer. The identical 9.11 list-view hole stays deferred (see Defer below).
+- [x] [Review][Patch] Escape listener and basket subscription register only after `load()`'s awaited fetches settle [TracksBrowseView.ts:85-94] — APPLIED: `subscribeBasket()` + `ensureEscapeListener()` moved before the `await Promise.all` in `load()`, closing both the inert-Escape window and the destroy-during-load leak.
+- [x] [Review][Patch] Duplicate track ids across autoload pages desync the single-row toggle and duplicate the playlist payload [TracksBrowseView.ts:319] — APPLIED: `fetchTracks` drops already-present ids on append; paging `startIndex` now advances by the raw page size (not `items.length`) so dedupe can't cause re-fetch loops or premature exhaustion.
+- [x] [Review][Defer] 9.11 list-view bulk bar has the same keyboard bypass of the device-locked gate [library.ts:753-761] — deferred, pre-existing (same `pointer-events`-only gating; fix alongside or after the 9.12 patch).
 
 ## Dev Notes
 
