@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.11.1 - 2026-06-12
+
+Building your basket and playlists is much faster now: you can **select many items at once** and act on them together. Hover over any row in the list view and a checkbox appears — tick a few, Ctrl/Cmd-click to toggle, or Shift-click to grab a whole range. A bar then lets you **add everything you picked to your basket or a playlist in one click**, instead of clicking every row.
+
+Multi-select works across the library — artists, albums, and individual tracks, including album track lists, your Recently/Frequently Played history, and favorite tracks — as well as in the Tracks browse view. Your selection sticks while you scroll and load more, and clears automatically when you move on. It's fully keyboard- and screen-reader-friendly too.
+
+This release also fixes a few rough edges in the Tracks view: duplicate tracks no longer slip into playlists, and the bulk "Add to basket" button now correctly waits for a device and server before it acts.
+
 ## v0.11.0 - 2026-06-10
 
 HifiMule now works with more than one media server. A new **Server Hub** lets you set up several servers — any mix of Jellyfin, Subsonic, and Navidrome — switch between them with a click, and add or remove servers without reconfiguring the app or losing what's in your basket. Your basket can even hold music from several servers at once: items are grouped by server, and a sync sends each one back to the server it came from. Items from a server that isn't currently active simply show as locked until you switch back to it.
