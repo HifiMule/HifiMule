@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-06-10  # Story 2.13 code review complete (10 patches applied, 5 LOW/narrow-MEDIUM deferred)
+last_updated: 2026-06-12  # Epic 9 reopened with Story 9.11 (list view multi-selection) via sprint-change-proposal-2026-06-12
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -124,7 +124,7 @@ development_status:
   8-5-subsonic-url-credential-sanitization: done
   8-6-incremental-sync-subsonic-album-level-fallback: done
 
-  epic-9: done
+  epic-9: in-progress  # reopened: Story 9.11 added via sprint-change-proposal-2026-06-12-list-view-multi-selection
   9-1-provider-browse-modes-and-capability-contract: done
   9-2-browse-mode-navigation-ui: done
   9-3-genre-browsing-and-genre-entity-basket-item: done
@@ -134,7 +134,8 @@ development_status:
   9-7-virtualized-list-table-browse-views: done  # revised via sprint-change-proposal-2026-06-07 (autoload-on-scroll)
   9-8-extend-view-toggle-all-modes: done  # added via sprint-change-proposal-2026-06-08-extend-view-toggle
   9-9-tracks-browse-mode-provider-contract-and-daemon-rpc: done  # added via sprint-change-proposal-2026-06-08-tracks-browse-mode
-  9-10-tracks-browse-mode-dual-panel-ui: done  # added via sprint-change-proposal-2026-06-08-tracks-browse-mode
+  9-10-tracks-browse-mode-dual-panel-ui: done
+  9-11-list-view-multi-selection-and-bulk-actions: backlog  # added via sprint-change-proposal-2026-06-12-list-view-multi-selection  # added via sprint-change-proposal-2026-06-08-tracks-browse-mode
 
   epic-10: done
   10-1-device-manifest-editing-identity-and-folder-settings: done

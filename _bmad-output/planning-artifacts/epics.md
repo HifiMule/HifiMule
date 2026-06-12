@@ -120,6 +120,7 @@ FR43: Epic 3 - Mixed-Server Basket (Story 3.2, amended)
 FR44: Epic 11 - Playlist Server Scope (Stories 11.4, 11.5, amended)
 FR45: Epic 2 - Server Identity Name and Icon (Story 2.12)
 FR46: Epic 2 - Portable Server Identity (Story 2.13)
+FR47: Epic 9 - List View Multi-Selection & Bulk Actions (Story 9.11)
 
 ## Epic List
 
@@ -2319,6 +2320,59 @@ So that I can quickly find and queue individual songs without drilling through a
 - Track-row right-click context menu re-uses the dispatcher wired in Story 11.7; per-row "Send to playlist…" is a visible button/icon calling the same dispatcher.
 - New i18n keys (en/fr/es): `library.mode.tracks`, `tracks.view.all_artists`, `tracks.view.all_albums`, `tracks.view.no_tracks`, `tracks.view.loading`, `tracks.view.send_to_playlist`.
 - Depends on Story 9.9.
+
+### Story 9.11: List View Multi-Selection & Bulk Actions
+
+As a Ritualist (Arthur),
+I want to select multiple artists or albums in the list view and act on them all at once,
+So that I can build my basket or a playlist in seconds instead of clicking every row.
+
+**Acceptance Criteria:**
+
+**Given** the list/table view is active and a row represents an artist or album (resolved type `MusicArtist` or `MusicAlbum`)
+**When** the row renders
+**Then** it displays a leading selection checkbox (visible on hover/focus, and always visible while any selection is active).
+
+**Given** I click a row's checkbox or Ctrl/Cmd-click the row
+**Then** the row's selection toggles without navigating into the item.
+
+**Given** a row is the selection anchor and I Shift-click another row
+**Then** all selectable rows between the two indices (inclusive) become selected.
+
+**Given** at least one row is selected
+**Then** a bulk action bar appears in the browse area showing the selection count, an "Add to basket" button, an "Add to playlist…" button (only when `supports_playlist_write` is true), and a "Clear" affordance.
+**And** all per-row single-item actions continue to work unchanged.
+
+**Given** I click "Add to basket" with N items selected
+**Then** items already in the basket are skipped, counts/sizes for the remaining items are fetched in a single batched `jellyfin_get_item_counts` + `jellyfin_get_item_sizes` call pair, each item is added to the basket with existing semantics (artist entity items per Story 3.9), a success toast reports added/skipped counts, and the selection clears.
+
+**Given** I click "Add to playlist…" with N items selected
+**Then** the existing playlist picker dialog (Story 11.7) opens; choosing an existing playlist calls `playlist.addItems { playlistId, itemIds: [all N ids] }`, choosing "New playlist" opens the create dialog and calls `playlist.create { name, itemIds: [all N ids] }`; on success the playlists cache is invalidated, a toast confirms, and the selection clears.
+
+**Given** no device is selected (`selectedDevicePath === null`)
+**Then** "Add to basket" renders disabled (mirroring per-row (+) behavior); "Add to playlist…" remains available when `supports_playlist_write` is true.
+
+**Given** rows are selected and I scroll far enough that selected rows unmount and remount (virtualization), or autoload appends pages
+**Then** selection state is preserved and remounted rows render as selected.
+
+**Given** rows are selected
+**When** I change browse mode, drill into an item, change the A–Z filter, toggle to grid view, or press Escape
+**Then** the selection and the bulk action bar are cleared.
+
+**Given** keyboard-only navigation
+**Then** checkboxes are focusable and toggleable via Space, the bulk bar buttons are reachable in tab order, and the selection count is announced via an ARIA-live region.
+
+**Technical Notes:**
+- Selection state in `library.ts` UI state: `selectedIds: Set<string>` + `selectionAnchorIdx: number | null`, keyed by `item.basketId ?? item.id` (same id used by `basketStore.has` in `renderListRow`). Items are looked up from `state.items` at action time — never from the DOM (virtualized rows unmount).
+- Selectability predicate: `(item.basketType ?? item.type)` is `MusicArtist` or `MusicAlbum`. Playlist, genre, and track rows do not render checkboxes in v1.
+- `renderListRow` renders the checkbox + `is-checked` class from `selectedIds`; the existing `paint()` repaint path makes remounted rows pick up selection state for free.
+- Bulk action bar: a sibling of the list scroller in `#library-content` (sticky, above the list), rendered/torn down by the same code path that manages the list (`renderList` / `teardownListScrollHandler`); re-rendered on selection change.
+- Bulk basket add reuses the per-row add logic factored out of `renderListRow`'s toggle handler — including the container metadata fetch — but with a single batched `itemIds` array for counts/sizes.
+- `MediaCard.openAddToPlaylistDialog(itemIds: string[], label: string)` and `openCreatePlaylistDialog(itemIds: string[], suggestedName: string)` generalize their current single-id signatures; existing callers (context menu, track rows) pass one-element arrays. Daemon-side container→track resolution already exists (Story 11.4) — no RPC changes.
+- Cross-server safety: the browse list only ever shows the active server's items, and `playlist.*` RPCs already enforce server scope (409 on cross-server items, Story 11.4 amendment) — no new handling needed.
+- New i18n keys (en/fr/es): `library.selection.count`, `library.selection.add_to_basket`, `library.selection.add_to_playlist`, `library.selection.clear`, `library.selection.added_toast`, `library.selection.skipped_suffix`.
+- No new daemon RPCs; pure UI concern (same classification as Stories 9.7/9.8).
+- Out of scope: grid view multi-select, Tracks dual-panel mode (9.10), Playlist Curation view (11.6), bulk remove from basket.
 
 ## Epic 10: Device Configuration Editing
 
