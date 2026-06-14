@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-06-14  # Story 12.7 → done (code review: 5 patches applied)
+last_updated: 2026-06-14  # Story 13.1 → ready-for-dev (create-story); epic-13 → in-progress
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -167,8 +167,8 @@ development_status:
   12-7-autofill-rpc-state-contract-and-i18n: done  # code review 2026-06-14: 5 patches applied (preview enabled/error-i18n/no-space + stale-result + timer-cleanup). Epic 12 closeout; dev complete 2026-06-14 (live preview affordance + i18n parity lock 57×4 + 3 daemon contract tests; 522 daemon tests pass, frontend tsc+build green)
 
   # Epic 13 — Advanced Auto-Fill Strategies (sprint-change-proposal-2026-06-14-configurable-auto-fill)
-  epic-13: backlog
-  13-1-memory-and-rotation-strategies: backlog
+  epic-13: in-progress  # first story 13.1 created via create-story 2026-06-14
+  13-1-memory-and-rotation-strategies: ready-for-dev  # story created via create-story 2026-06-14
   13-2-quality-and-version-ordering: backlog
   13-3-curation-and-discovery-sources: backlog
   13-4-delight-rarity-draws-and-pity-timer: backlog
