@@ -1,6 +1,10 @@
+---
+baseline_commit: aefee3f7e7625c72130938a5225fb98cba3d3357
+---
+
 # Story 12.1: Auto-Fill Pipeline Domain Model & Pure-Function Engine
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -22,43 +26,43 @@ so that selection logic is testable without UI or network and is validated again
 
 ## Tasks / Subtasks
 
-- [ ] Define the pipeline config domain model (AC: 1, 3)
-  - [ ] **Convert `hifimule-daemon/src/auto_fill.rs` into a directory module:**
-    - [ ] Move the existing file contents to `hifimule-daemon/src/auto_fill/mod.rs` (keeps `run_auto_fill`, `run_auto_fill_provider`, `rank_and_truncate`, `AutoFillItem`, `AutoFillParams`, `ProviderFillState`, and the existing `#[cfg(test)] mod tests` intact with their `super::*` imports). Add `pub mod pipeline;` and `pub use pipeline::*;` so the new types are reachable as `crate::auto_fill::*`.
-    - [ ] Create `hifimule-daemon/src/auto_fill/pipeline.rs` for the new model + engine + their tests.
-    - [ ] Leave `mod auto_fill;` at `hifimule-daemon/src/main.rs:59` unchanged — the directory module resolves through it automatically. Verify no other module path (`crate::auto_fill::*`) breaks after the move.
-    - [ ] Do NOT scatter the selection model into `domain/models.rs` — that module is reserved for provider-neutral entities, not feature config.
-  - [ ] Define `AutoFillPipeline { enabled: bool, filter: FilterStage, sources: Vec<SourceEntry>, unit: Unit, ordering: Vec<OrderingKey>, memory: MemoryStage, budget: BudgetStage, fallback: Vec<SourceEntry> }`.
-  - [ ] Define stage sub-types matching architecture.md#Auto-Fill-Pipeline-Model:
+- [x] Define the pipeline config domain model (AC: 1, 3)
+  - [x] **Convert `hifimule-daemon/src/auto_fill.rs` into a directory module:**
+    - [x] Move the existing file contents to `hifimule-daemon/src/auto_fill/mod.rs` (keeps `run_auto_fill`, `run_auto_fill_provider`, `rank_and_truncate`, `AutoFillItem`, `AutoFillParams`, `ProviderFillState`, and the existing `#[cfg(test)] mod tests` intact with their `super::*` imports). Add `pub mod pipeline;` and `pub use pipeline::*;` so the new types are reachable as `crate::auto_fill::*`.
+    - [x] Create `hifimule-daemon/src/auto_fill/pipeline.rs` for the new model + engine + their tests.
+    - [x] Leave `mod auto_fill;` at `hifimule-daemon/src/main.rs:59` unchanged — the directory module resolves through it automatically. Verify no other module path (`crate::auto_fill::*`) breaks after the move.
+    - [x] Do NOT scatter the selection model into `domain/models.rs` — that module is reserved for provider-neutral entities, not feature config.
+  - [x] Define `AutoFillPipeline { enabled: bool, filter: FilterStage, sources: Vec<SourceEntry>, unit: Unit, ordering: Vec<OrderingKey>, memory: MemoryStage, budget: BudgetStage, fallback: Vec<SourceEntry> }`.
+  - [x] Define stage sub-types matching architecture.md#Auto-Fill-Pipeline-Model:
     - `FilterStage { include_tags, exclude_tags, include_genres, exclude_genres }` (all `Vec<String>`, default empty = pass-through).
     - `SourceEntry { kind: SourceKind, ref_id: Option<String>, share: Option<f32> }` where `SourceKind` enumerates at least `Library`, `Favorites`, `History`, `Playlist` (extensible for Epic 13). `share` is a 0.0–1.0 blend weight; `None`/empty = equal/remainder.
     - `Unit { Track | Album | Artist }` (default `Track`).
     - `OrderingKey` enum (`Favorite`, `PlayCount`, `DateCreated`, `Random`, `Quality`, …) — an **ordered** list applied as a stable multi-key sort. Implement the keys whose data is on `Song` today (`Favorite`, `PlayCount`, `DateCreated`, `Quality` via bitrate); reserve the rest as variants for Epic 13.
     - `MemoryStage { cooldown_weeks: Option<u32>, played_exclusion: bool, stable_core_pct: Option<f32>, repeat_tolerance: Option<f32>, tiers: Option<...> }` — in 12.1 the engine only *consumes* a supplied history snapshot to exclude/cool-down; it does not read or write any DB.
     - `BudgetStage { max_bytes: Option<u64>, target_duration_secs: Option<u64>, headroom_bytes: Option<u64> }`.
-  - [ ] Derive `Debug, Clone, PartialEq` and `Serialize/Deserialize` with `#[serde(rename_all = "camelCase")]` and `#[serde(default)]` on every optional field, matching the JSON shape in architecture.md (config is later persisted verbatim in the manifest by Story 12.2 — get the field names right now). Use `#[serde(default)]` so an empty/partial pipeline deserializes cleanly.
-  - [ ] Provide `AutoFillPipeline::default_legacy(max_bytes: Option<u64>) -> Self` returning `{ ordering: [Favorite, PlayCount, DateCreated], budget: { max_bytes }, .. }` and document it as the backward-compatibility mapping for legacy `{ enabled, maxBytes }`.
+  - [x] Derive `Debug, Clone, PartialEq` and `Serialize/Deserialize` with `#[serde(rename_all = "camelCase")]` and `#[serde(default)]` on every optional field, matching the JSON shape in architecture.md (config is later persisted verbatim in the manifest by Story 12.2 — get the field names right now). Use `#[serde(default)]` so an empty/partial pipeline deserializes cleanly.
+  - [x] Provide `AutoFillPipeline::default_legacy(max_bytes: Option<u64>) -> Self` returning `{ ordering: [Favorite, PlayCount, DateCreated], budget: { max_bytes }, .. }` and document it as the backward-compatibility mapping for legacy `{ enabled, maxBytes }`.
 
-- [ ] Define the pure engine input and implement `run_pipeline` (AC: 2, 3, 5)
-  - [ ] Define `PipelineInput` carrying everything the pure core needs without touching a provider: named candidate pools (e.g. `pools: HashMap<SourceKey, Vec<Song>>` or `Vec<(SourceEntry, Vec<Song>)>`), a `HistorySnapshot` (track ids → last-synced/played info supplied by the caller, **not** read from DB here), and `exclude_item_ids: Vec<String>`. The async layer that materializes pools from a `MediaProvider` is Story 12.3/12.4 — do not build it here.
-  - [ ] Implement each stage as a standalone pure `fn` over `Vec<Song>` (or grouped units), composed in fixed order. Keep each function small and individually unit-testable.
-  - [ ] Implement source-share blending: when multiple `SourceEntry` have shares, interleave/allocate the budget across sources proportionally; remainder/unshared sources fill what's left.
-  - [ ] Reuse the existing size logic: prefer `Song.size_bytes` when present, else estimate `(bitrate_kbps * 1_000 / 8) * duration_seconds`; **skip** tracks whose size is unknown/0 (mirror `ProviderFillState::try_add` and `rank_and_truncate`, do not duplicate-emit). [Source: hifimule-daemon/src/auto_fill.rs:304-331]
-  - [ ] Budget stage: accumulate by estimated size; stop at `min(max_bytes, capacity − headroom_bytes)`; if `target_duration_secs` is set, derive a byte ceiling from it (duration→bytes via the same bitrate estimate). Apply the `fallback` source list in order once primary sources can't reach target. Never exceed the ceiling.
-  - [ ] Produce ordered `Vec<AutoFillItem>` (reuse the existing struct) with a `priority_reason` string describing the winning stage/source (e.g. `"favorite"`, `"playCount:N"`, `"playlist:<id>"`, `"fallback:library"`) so downstream/preview UX keeps working.
+- [x] Define the pure engine input and implement `run_pipeline` (AC: 2, 3, 5)
+  - [x] Define `PipelineInput` carrying everything the pure core needs without touching a provider: named candidate pools (e.g. `pools: HashMap<SourceKey, Vec<Song>>` or `Vec<(SourceEntry, Vec<Song>)>`), a `HistorySnapshot` (track ids → last-synced/played info supplied by the caller, **not** read from DB here), and `exclude_item_ids: Vec<String>`. The async layer that materializes pools from a `MediaProvider` is Story 12.3/12.4 — do not build it here.
+  - [x] Implement each stage as a standalone pure `fn` over `Vec<Song>` (or grouped units), composed in fixed order. Keep each function small and individually unit-testable.
+  - [x] Implement source-share blending: when multiple `SourceEntry` have shares, interleave/allocate the budget across sources proportionally; remainder/unshared sources fill what's left.
+  - [x] Reuse the existing size logic: prefer `Song.size_bytes` when present, else estimate `(bitrate_kbps * 1_000 / 8) * duration_seconds`; **skip** tracks whose size is unknown/0 (mirror `ProviderFillState::try_add` and `rank_and_truncate`, do not duplicate-emit). [Source: hifimule-daemon/src/auto_fill.rs:304-331]
+  - [x] Budget stage: accumulate by estimated size; stop at `min(max_bytes, capacity − headroom_bytes)`; if `target_duration_secs` is set, derive a byte ceiling from it (duration→bytes via the same bitrate estimate). Apply the `fallback` source list in order once primary sources can't reach target. Never exceed the ceiling.
+  - [x] Produce ordered `Vec<AutoFillItem>` (reuse the existing struct) with a `priority_reason` string describing the winning stage/source (e.g. `"favorite"`, `"playCount:N"`, `"playlist:<id>"`, `"fallback:library"`) so downstream/preview UX keeps working.
 
-- [ ] Validate the model against the four personas (AC: 4)
-  - [ ] Write one unit test per persona that constructs an `AutoFillPipeline` and asserts the selection over a hand-built fixture library — proving the algebra expresses each with no engine special cases:
+- [x] Validate the model against the four personas (AC: 4)
+  - [x] Write one unit test per persona that constructs an `AutoFillPipeline` and asserts the selection over a hand-built fixture library — proving the algebra expresses each with no engine special cases:
     - **Claire** — commuter, ~8 GB, hates repeats: small `budget.max_bytes`, `memory.cooldown_weeks`/`repeat_tolerance` low, sources favorites + library. Assert recently-synced (cooled-down) tracks are excluded and the set fits the small budget.
     - **Antoine** — audiophile, 512 GB DAP, quality-first: large budget, `ordering: [Quality, …]`. Assert higher-bitrate tracks rank first and the large budget is filled.
     - **Léo** — gym-goer, tiny device, energy-driven: tiny budget, a `Playlist` source ("energy"), tight budget truncation. Assert only the playlist pool's tracks are picked, truncated to the tiny budget.
     - **Nadia** — parent filling a kid's player: `filter.include_genres`/`exclude_tags` (kids music / no explicit), plus a source. Assert filtered-out tracks never appear.
-  - [ ] Add a comment block in the test module restating "four personas, one model" — these tests are the Story-12.1 success gate (over-abstraction risk mitigation). [Source: sprint-change-proposal-2026-06-14-configurable-auto-fill.md#Section-5]
+  - [x] Add a comment block in the test module restating "four personas, one model" — these tests are the Story-12.1 success gate (over-abstraction risk mitigation). [Source: sprint-change-proposal-2026-06-14-configurable-auto-fill.md#Section-5]
 
-- [ ] Backward-compatibility & guarantee tests (AC: 3, 5, 7)
-  - [ ] Test that `default_legacy(Some(maxBytes))` over a fixture library yields the same favorites→playCount→dateCreated ordering and byte-truncation as today's `rank_and_truncate`/`run_auto_fill_provider` priority order.
-  - [ ] Test budget never exceeded; unknown/0/negative-size skipped; manual-exclude and within-run dedup honored; empty library → empty result; zero budget → empty result; fallback chain reached only after primary exhaustion.
-  - [ ] Run `rtk cargo test -p hifimule-daemon`; confirm existing `auto_fill::tests` still pass unchanged.
+- [x] Backward-compatibility & guarantee tests (AC: 3, 5, 7)
+  - [x] Test that `default_legacy(Some(maxBytes))` over a fixture library yields the same favorites→playCount→dateCreated ordering and byte-truncation as today's `rank_and_truncate`/`run_auto_fill_provider` priority order.
+  - [x] Test budget never exceeded; unknown/0/negative-size skipped; manual-exclude and within-run dedup honored; empty library → empty result; zero budget → empty result; fallback chain reached only after primary exhaustion.
+  - [x] Run `rtk cargo test -p hifimule-daemon`; confirm existing `auto_fill::tests` still pass unchanged.
 
 ## Dev Notes
 
@@ -123,8 +127,38 @@ The pure core must be deterministic for the same input. The `Random` ordering ke
 
 ### Agent Model Used
 
+claude-opus-4-8 (Claude Code dev-story workflow)
+
 ### Debug Log References
+
+- `rtk cargo test -p hifimule-daemon` → 469 passed (17 new `auto_fill::pipeline::tests`, no regressions to the 6 existing `auto_fill::tests`).
+- `rtk cargo clippy -p hifimule-daemon --all-targets` → no warnings for `auto_fill` (pre-existing warnings in unrelated modules untouched).
+
+### Implementation Plan
+
+The selection algebra is implemented as composable pure functions in `auto_fill/pipeline.rs`, in the fixed order `filter → source-blend(by share) → unit → ordering → dedupe-vs-memory → budget(+fallback)`:
+
+- **Fetching/selection split (the core decision):** `run_pipeline(&PipelineInput, &AutoFillPipeline) -> Vec<AutoFillItem>` is fully synchronous and pure — no `async`, no `MediaProvider`, no clock, no RNG. The caller materializes `PipelineInput.pools` (keyed by `SourceKey { kind, ref_id }`) and supplies a `HistorySnapshot { now, entries }`; "now" is a value on the snapshot, never the system clock. The async fetch layer is Story 12.3/12.4.
+- **Stages as standalone fns:** `filter_stage`, `memory_stage`, `unit_stage`, `compare_by_ordering`, and the `Selector` (budget + dedupe + fallback) are each small and independently unit-testable.
+- **Ordering** is a stable multi-key sort; keys present on `Song` are implemented (`Favorite`, `PlayCount`, `DateCreated`, `Quality`/bitrate). `Random` is a deterministic no-op in 12.1 (entropy deferred to Epic 13 via a caller-supplied seed) so the core stays deterministic.
+- **Size & budget** reuse the legacy semantics: prefer `Song.size_bytes`, else `(bitrate_kbps*1000/8)*duration`; unknown/zero-size tracks are skipped (never 0-byte fillers). The `Selector` enforces the global ceiling (`max_bytes − headroom_bytes`), per-source share caps, the optional duration target, manual-exclude ids, and within-run dedup, with the same stop-on-first-oversized behavior as `rank_and_truncate`/`ProviderFillState::try_add`.
+- **Unit grouping** treats `Track` as one-unit-per-song (identical to today's track-level behavior); `Album`/`Artist` group by id and add whole units atomically.
+- **`default_legacy(max_bytes)`** reproduces today's `[Favorite, PlayCount, DateCreated]` ordering over the `Library` source, byte-budgeted — the legacy-equivalence test pins this.
 
 ### Completion Notes List
 
+- **Module conversion:** `auto_fill.rs` → `auto_fill/mod.rs` (via `git mv`, history preserved) + new `auto_fill/pipeline.rs`. All existing `run_auto_fill*`, `rank_and_truncate`, `AutoFillItem`, `AutoFillParams`, `ProviderFillState`, and the 6 existing tests are unchanged. `mod auto_fill;` in `main.rs:59` is untouched; all 12 `crate::auto_fill::*` call-sites in `main.rs`/`rpc.rs` continue to resolve.
+- **Four personas, one model:** Claire/Antoine/Léo/Nadia are each expressed purely by composing the stage algebra — there are **no `if persona == …` branches** in the engine. A comment block in the test module restates this success-gate.
+- **No wiring / no new deps (AC #6):** only the model + engine + tests were added; manifest schema, DB, `sync.start`, provider fetching, RPC, and UI are all untouched. No new crate dependency (only `serde`/`serde_json`/std). The engine is intentionally unreferenced by the binary until later stories, so a documented module-level `#![allow(dead_code)]` (and one `#[allow(unused_imports)]` on the `pub use`) keeps the build clean — consistent with the codebase's "reserved for future use" convention.
+- **Guarantees proven by test:** budget never exceeded; headroom subtracted; unknown/zero-size skipped; manual-exclude + within-run dedup honored; empty library/zero budget → empty; fallback reached only after primary exhaustion; share allocation across sources; camelCase serde round-trip + empty-object default.
+
 ### File List
+
+- `hifimule-daemon/src/auto_fill.rs` → `hifimule-daemon/src/auto_fill/mod.rs` (renamed via `git mv`; added `pub mod pipeline;` + re-export)
+- `hifimule-daemon/src/auto_fill/pipeline.rs` (new — pipeline config model, pure-function engine, and 17 unit tests)
+- `_bmad-output/implementation-artifacts/12-1-autofill-pipeline-domain-model-and-engine.md` (story tracking: frontmatter `baseline_commit`, tasks, Dev Agent Record, Status)
+- `_bmad-output/implementation-artifacts/sprint-status.yaml` (status: ready-for-dev → in-progress → review)
+
+## Change Log
+
+- 2026-06-14 — Story 12.1 implemented: auto-fill pipeline domain model + pure-function engine. Converted `auto_fill.rs` into a directory module and added `auto_fill/pipeline.rs` (model + `run_pipeline` engine + 17 unit tests, incl. the four persona tests and legacy-equivalence). No wiring/I/O/new deps. `rtk cargo test -p hifimule-daemon` → 469 passed; clippy clean for `auto_fill`. Status → review.

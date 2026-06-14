@@ -14,6 +14,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
 
+/// Configurable auto-fill pipeline: pure-function selection model + engine (Epic 12).
+/// The existing `run_auto_fill*` functions above remain the live path; `pipeline`
+/// generalizes them into a composable algebra validated without UI or network.
+pub mod pipeline;
+// Re-export so the model + engine are reachable as `crate::auto_fill::*`. Unreferenced by the
+// binary until the fetch/RPC/UI wiring lands in Stories 12.3/12.4/12.6/12.7.
+#[allow(unused_imports)]
+pub use pipeline::*;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoFillItem {
