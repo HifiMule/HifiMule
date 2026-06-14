@@ -3394,18 +3394,126 @@ fn parse_item_specs(raw: &[Value]) -> Vec<(String, Option<String>)> {
         .collect()
 }
 
+/// One per-server auto-fill slot (Story 12.3). `server_id` is the PORTABLE id
+/// (Story 2.13); `None` means "fall back to the selected server" and is resolved
+/// at the call site where the selected id is known (mirrors `parse_item_specs`,
+/// which also leaves the selected fallback to the caller).
+struct AutoFillDescriptor {
+    server_id: Option<String>,
+    max_bytes: Option<u64>,
+    exclude_item_ids: Vec<String>,
+}
+
+/// Normalizes the `autoFill` sync param into a `Vec<AutoFillDescriptor>` (AC1).
+///
+/// Accepts BOTH the legacy single object `{ enabled, maxBytes?, serverId?,
+/// excludeItemIds? }` and the new array `[{ serverId, maxBytes?, enabled?,
+/// excludeItemIds? }, …]`:
+/// - object form yields a single-element vec only when `enabled == true`;
+///   disabled / absent → empty (no auto-fill).
+/// - array form maps each object element to a descriptor, keeping only those
+///   whose `enabled != false` — in array form a descriptor's *presence* means
+///   "this server has a slot", so a missing `enabled` is treated as enabled.
+/// - any other shape (`null`/absent/scalar) → empty.
+///
+/// The selected-server fallback for a `None` `server_id` is intentionally NOT
+/// applied here (resolved by callers that hold `selected_id`).
+fn parse_auto_fill_descriptors(params: &Value) -> Vec<AutoFillDescriptor> {
+    let af = match params.get("autoFill") {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+
+    let read_descriptor = |el: &Value| AutoFillDescriptor {
+        server_id: el
+            .get("serverId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        max_bytes: el.get("maxBytes").and_then(Value::as_u64),
+        exclude_item_ids: el
+            .get("excludeItemIds")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+
+    if let Some(arr) = af.as_array() {
+        arr.iter()
+            .filter(|el| el.is_object())
+            .filter(|el| el.get("enabled").and_then(Value::as_bool).unwrap_or(true))
+            .map(read_descriptor)
+            .collect()
+    } else if af.is_object() {
+        if af.get("enabled").and_then(Value::as_bool).unwrap_or(false) {
+            vec![read_descriptor(af)]
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    }
+}
+
+/// Merges one slot's auto-fill results into the running desired set (Story 12.3).
+/// Manual items and earlier slots have already populated `seen_ids`, so any id
+/// seen before is skipped — manual items win dedup and slots dedup across each
+/// other (AC3). `remaining`, when present, is decremented by each newly added
+/// item's size so the next slot sees the shrunken shared budget (AC4). Each added
+/// item is tagged with the slot's portable `server_id`. Returns the bytes this
+/// slot actually added.
+fn push_fill_items_dedup(
+    fill_items: Vec<crate::auto_fill::AutoFillItem>,
+    desired_items: &mut Vec<crate::sync::DesiredItem>,
+    seen_ids: &mut HashSet<String>,
+    server_id: &str,
+    remaining: &mut Option<u64>,
+) -> u64 {
+    let mut added: u64 = 0;
+    for item in fill_items {
+        if seen_ids.insert(item.id.clone()) {
+            let size = item.size_bytes;
+            desired_items.push(crate::sync::DesiredItem {
+                jellyfin_id: item.id,
+                name: item.name,
+                album: item.album,
+                artist: item.artist,
+                size_bytes: item.size_bytes,
+                etag: None,
+                provider_album_id: item.provider_album_id,
+                provider_content_type: item.provider_content_type,
+                provider_suffix: item.provider_suffix,
+                original_bitrate: None,
+                track_number: None,
+                server_id: Some(server_id.to_string()),
+            });
+            if let Some(r) = remaining.as_mut() {
+                *r = r.saturating_sub(size);
+            }
+            added = added.saturating_add(size);
+        }
+    }
+    added
+}
+
 /// True when the basket items resolve to more than one distinct server (each
 /// item's serverId, or the selected server when unspecified).
 /// True when the sync must route items to per-server providers rather than the
 /// single-server dispatch. The single-server path always uses the *selected*
-/// provider, so it is only correct when every resolved item (and the auto-fill
+/// provider, so it is only correct when every resolved item (and EVERY auto-fill
 /// slot) belongs to the selected server. Routing is therefore needed when items
-/// span multiple servers OR the sole server is not the selected one — the latter
-/// happens with a basket holding only locked, other-server items (AC26/AC28).
+/// or auto-fill slots span multiple servers OR the sole server is not the
+/// selected one — the latter happens with a basket holding only locked,
+/// other-server items (AC26/AC28), or an auto-fill slot for a non-selected
+/// server (Story 12.3 AC5). `auto_fill_servers` holds the resolved serverIds of
+/// every enabled descriptor (selected-fallback already applied by the caller).
 fn sync_needs_provider_routing(
     item_specs: &[(String, Option<String>)],
     selected_id: Option<&str>,
-    auto_fill_server: Option<&str>,
+    auto_fill_servers: &[String],
 ) -> bool {
     let mut servers: HashSet<String> = HashSet::new();
     for (_, server) in item_specs {
@@ -3414,8 +3522,8 @@ fn sync_needs_provider_routing(
             servers.insert(s.to_string());
         }
     }
-    if let Some(af) = auto_fill_server {
-        servers.insert(af.to_string());
+    for af in auto_fill_servers {
+        servers.insert(af.clone());
     }
     match selected_id {
         Some(sel) => servers.iter().any(|s| s != sel),
@@ -3503,62 +3611,88 @@ async fn multi_provider_calculate_delta(
         }
     }
 
-    // Auto-fill is bound to a single server (AC32): its own serverId, defaulting to
-    // the selected server.
-    if params
-        .get("autoFill")
-        .and_then(|af| af.get("enabled"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        let af_server = params
-            .get("autoFill")
-            .and_then(|af| af.get("serverId"))
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| selected_id.clone());
-        if let Some(af_server) = af_server {
-            let provider = get_provider_by_server_id_for(state, &af_server).await?;
-            let auto_fill_budget = params
-                .get("autoFill")
-                .and_then(|af| af.get("maxBytes"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            if auto_fill_budget > 0 {
-                let exclude_ids: Vec<String> = desired_items
-                    .iter()
-                    .map(|i| i.jellyfin_id.clone())
-                    .collect();
-                let fill_params = crate::auto_fill::AutoFillParams {
-                    exclude_item_ids: exclude_ids,
-                    max_fill_bytes: auto_fill_budget,
-                };
-                let fill_items = crate::auto_fill::run_auto_fill_provider(provider, fill_params)
-                    .await
-                    .map_err(|e| JsonRpcError {
-                        code: ERR_CONNECTION_FAILED,
-                        message: format!("Auto-fill failed: {}", e),
-                        data: None,
-                    })?;
-                for item in fill_items {
-                    if seen_ids.insert(item.id.clone()) {
-                        desired_items.push(crate::sync::DesiredItem {
-                            jellyfin_id: item.id,
-                            name: item.name,
-                            album: item.album,
-                            artist: item.artist,
-                            size_bytes: item.size_bytes,
-                            etag: None,
-                            provider_album_id: item.provider_album_id,
-                            provider_content_type: item.provider_content_type,
-                            provider_suffix: item.provider_suffix,
-                            original_bitrate: None,
-                            track_number: None,
-                            server_id: Some(af_server.clone()),
-                        });
-                    }
-                }
+    // Auto-fill: one slot per server (Story 12.3, AC2/AC3/AC4). Each descriptor
+    // expands against its OWN provider (routed by portable serverId), tagging its
+    // items with that server's id. Manual items already own their ids in
+    // `seen_ids` and win dedup; slots run in descriptor order, each excluding all
+    // already-selected ids (manual + earlier slots). Slots share one remaining
+    // capacity budget so combined fill never oversubscribes the device (AC4).
+    let descriptors = parse_auto_fill_descriptors(params);
+    if !descriptors.is_empty() {
+        // Shared budget = device free + already-synced − already-selected bytes
+        // (mirrors `provider_calculate_delta`'s server-side derivation at
+        // rpc.rs:2599-2616). `None` when device storage is unavailable; that is
+        // tolerated only for slots that supply their own `maxBytes` — matching the
+        // pre-12.3 multi path, which used the UI `maxBytes` without querying storage.
+        let selected_bytes: u64 = desired_items.iter().map(|i| i.size_bytes).sum();
+        let mut remaining: Option<u64> = match state.device_manager.get_device_storage().await {
+            Some(info) => {
+                let synced: u64 = manifest.synced_items.iter().map(|s| s.size_bytes).sum();
+                Some(
+                    info.free_bytes
+                        .saturating_add(synced)
+                        .saturating_sub(selected_bytes),
+                )
             }
+            None => None,
+        };
+
+        for desc in &descriptors {
+            let af_server = match desc.server_id.clone().or_else(|| selected_id.clone()) {
+                Some(s) => s,
+                None => {
+                    crate::daemon_log!(
+                        "[AutoFill] skipping slot: no serverId and no server selected"
+                    );
+                    continue;
+                }
+            };
+
+            // Effective slot budget: cap the descriptor's own maxBytes (if any) by
+            // the shared remaining capacity. For a single slot this is byte-for-byte
+            // identical to today (min(maxBytes, free − manual) == maxBytes).
+            let budget = match (desc.max_bytes, remaining) {
+                (Some(mb), Some(r)) => mb.min(r),
+                (Some(mb), None) => mb,
+                (None, Some(r)) => r,
+                (None, None) => {
+                    return Err(JsonRpcError {
+                        code: ERR_CONNECTION_FAILED,
+                        message: "Cannot determine device capacity for auto-fill".to_string(),
+                        data: None,
+                    });
+                }
+            };
+            if budget == 0 {
+                continue;
+            }
+
+            let provider = get_provider_by_server_id_for(state, &af_server).await?;
+            // Exclude every already-selected id (manual items + earlier slots) plus
+            // any ids the descriptor explicitly excludes.
+            let mut exclude_ids: Vec<String> = desired_items
+                .iter()
+                .map(|i| i.jellyfin_id.clone())
+                .collect();
+            exclude_ids.extend(desc.exclude_item_ids.iter().cloned());
+            let fill_params = crate::auto_fill::AutoFillParams {
+                exclude_item_ids: exclude_ids,
+                max_fill_bytes: budget,
+            };
+            let fill_items = crate::auto_fill::run_auto_fill_provider(provider, fill_params)
+                .await
+                .map_err(|e| JsonRpcError {
+                    code: ERR_CONNECTION_FAILED,
+                    message: format!("Auto-fill failed: {}", e),
+                    data: None,
+                })?;
+            push_fill_items_dedup(
+                fill_items,
+                &mut desired_items,
+                &mut seen_ids,
+                &af_server,
+                &mut remaining,
+            );
         }
     }
 
@@ -3625,25 +3759,15 @@ async fn handle_sync_calculate_delta(
     // unchanged (AC21). Item/auto-fill serverIds are portable (Story 2.13), so the
     // routing decision compares against the selected server's portable id.
     let selected_id = current_server_portable_id(state)?;
-    let auto_fill_server = if params
-        .get("autoFill")
-        .and_then(|af| af.get("enabled"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        params
-            .get("autoFill")
-            .and_then(|af| af.get("serverId"))
-            .and_then(Value::as_str)
-            .map(str::to_string)
-    } else {
-        None
-    };
-    if sync_needs_provider_routing(
-        &item_specs,
-        selected_id.as_deref(),
-        auto_fill_server.as_deref(),
-    ) {
+    // Story 12.3: every auto-fill slot counts toward the routing decision. Resolve
+    // each enabled descriptor's serverId (selected-server fallback for `None`), so
+    // a single-server basket carrying auto-fill slots for other servers still routes
+    // through the per-provider path (AC5).
+    let auto_fill_servers: Vec<String> = parse_auto_fill_descriptors(&params)
+        .into_iter()
+        .filter_map(|d| d.server_id.or_else(|| selected_id.clone()))
+        .collect();
+    if sync_needs_provider_routing(&item_specs, selected_id.as_deref(), &auto_fill_servers) {
         return multi_provider_calculate_delta(state, &item_specs, &manifest, &params).await;
     }
 
@@ -7384,21 +7508,25 @@ mod tests {
             ("a".into(), Some("s1".into())),
             ("b".into(), Some("s1".into())),
         ];
-        assert!(!sync_needs_provider_routing(&single, Some("s1"), None));
+        assert!(!sync_needs_provider_routing(&single, Some("s1"), &[]));
 
         let mixed = vec![
             ("a".into(), Some("s1".into())),
             ("b".into(), Some("s2".into())),
         ];
-        assert!(sync_needs_provider_routing(&mixed, Some("s1"), None));
+        assert!(sync_needs_provider_routing(&mixed, Some("s1"), &[]));
 
         // Legacy items (no serverId) resolve to the selected server → single.
         let legacy = vec![("a".into(), None), ("b".into(), None)];
-        assert!(!sync_needs_provider_routing(&legacy, Some("s1"), None));
+        assert!(!sync_needs_provider_routing(&legacy, Some("s1"), &[]));
 
         // An auto-fill slot bound to another server forces routing.
         let af = vec![("a".into(), Some("s1".into()))];
-        assert!(sync_needs_provider_routing(&af, Some("s1"), Some("s2")));
+        assert!(sync_needs_provider_routing(
+            &af,
+            Some("s1"),
+            &["s2".to_string()]
+        ));
 
         // A basket holding only another server's (locked) items while s1 is
         // selected: a single distinct server, but NOT the selected one — must
@@ -7407,10 +7535,196 @@ mod tests {
             ("a".into(), Some("s2".into())),
             ("b".into(), Some("s2".into())),
         ];
-        assert!(sync_needs_provider_routing(&single_other, Some("s1"), None));
+        assert!(sync_needs_provider_routing(&single_other, Some("s1"), &[]));
 
         // Nothing selected but a concrete server present → route.
-        assert!(sync_needs_provider_routing(&single_other, None, None));
+        assert!(sync_needs_provider_routing(&single_other, None, &[]));
+    }
+
+    // Story 12.3 AC5: every auto-fill slot counts toward the routing decision.
+    #[test]
+    fn test_sync_needs_provider_routing_multi_auto_fill() {
+        // Single-server manual items + 2 auto-fill servers → route (one slot is
+        // for a non-selected server).
+        let manual = vec![("a".into(), Some("s1".into()))];
+        assert!(sync_needs_provider_routing(
+            &manual,
+            Some("s1"),
+            &["s1".to_string(), "s2".to_string()]
+        ));
+
+        // A single auto-fill slot on a non-selected server, with all manual items
+        // on the selected server → route.
+        assert!(sync_needs_provider_routing(
+            &manual,
+            Some("s1"),
+            &["s2".to_string()]
+        ));
+
+        // All on the selected server (1 descriptor for s1) → no routing.
+        assert!(!sync_needs_provider_routing(
+            &manual,
+            Some("s1"),
+            &["s1".to_string()]
+        ));
+
+        // No manual items, single auto-fill slot on the selected server → single.
+        assert!(!sync_needs_provider_routing(
+            &[],
+            Some("s1"),
+            &["s1".to_string()]
+        ));
+    }
+
+    // Story 12.3 AC1: normalize the dual-shape `autoFill` param into descriptors.
+    #[test]
+    fn test_parse_auto_fill_descriptors_shapes() {
+        // Legacy object, enabled → exactly one descriptor carrying its fields.
+        let legacy_enabled = json!({
+            "autoFill": { "enabled": true, "maxBytes": 1000, "serverId": "s1",
+                          "excludeItemIds": ["x", "y"] }
+        });
+        let d = parse_auto_fill_descriptors(&legacy_enabled);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].server_id.as_deref(), Some("s1"));
+        assert_eq!(d[0].max_bytes, Some(1000));
+        assert_eq!(d[0].exclude_item_ids, vec!["x".to_string(), "y".to_string()]);
+
+        // Legacy object, disabled → no descriptors.
+        let legacy_disabled = json!({ "autoFill": { "enabled": false, "maxBytes": 1000 } });
+        assert!(parse_auto_fill_descriptors(&legacy_disabled).is_empty());
+
+        // Absent / null → no descriptors.
+        assert!(parse_auto_fill_descriptors(&json!({})).is_empty());
+        assert!(parse_auto_fill_descriptors(&json!({ "autoFill": null })).is_empty());
+
+        // Array of two → two descriptors; missing serverId left None (selected
+        // fallback applied at the call site, not here).
+        let array = json!({
+            "autoFill": [
+                { "serverId": "s1", "maxBytes": 500 },
+                { "maxBytes": 700 }
+            ]
+        });
+        let d = parse_auto_fill_descriptors(&array);
+        assert_eq!(d.len(), 2);
+        assert_eq!(d[0].server_id.as_deref(), Some("s1"));
+        assert_eq!(d[0].max_bytes, Some(500));
+        assert_eq!(d[1].server_id, None);
+        assert_eq!(d[1].max_bytes, Some(700));
+
+        // Array form: `enabled: false` element is filtered out; missing `enabled`
+        // is treated as enabled (presence = slot).
+        let array_mixed = json!({
+            "autoFill": [
+                { "serverId": "s1" },
+                { "serverId": "s2", "enabled": false },
+                { "serverId": "s3", "enabled": true }
+            ]
+        });
+        let d = parse_auto_fill_descriptors(&array_mixed);
+        assert_eq!(d.len(), 2);
+        assert_eq!(d[0].server_id.as_deref(), Some("s1"));
+        assert_eq!(d[1].server_id.as_deref(), Some("s3"));
+
+        // Empty array → no descriptors.
+        assert!(parse_auto_fill_descriptors(&json!({ "autoFill": [] })).is_empty());
+    }
+
+    // Story 12.3 AC3/AC4: manual-wins dedup, cross-slot dedup, and a shared
+    // remaining budget that shrinks across slots (so a small budget truncates
+    // later slots). Exercises the pure dedup/budget helper used by the loop.
+    #[test]
+    fn test_multi_slot_dedup_and_shared_budget() {
+        fn fill_item(id: &str, size: u64) -> crate::auto_fill::AutoFillItem {
+            crate::auto_fill::AutoFillItem {
+                id: id.to_string(),
+                name: format!("name-{id}"),
+                album: None,
+                artist: None,
+                provider_album_id: None,
+                provider_content_type: None,
+                provider_suffix: None,
+                size_bytes: size,
+                priority_reason: "test".to_string(),
+            }
+        }
+
+        // Manual item "m1" (100 bytes) already resolved on server s1.
+        let mut desired_items: Vec<crate::sync::DesiredItem> = vec![crate::sync::DesiredItem {
+            jellyfin_id: "m1".to_string(),
+            name: "manual".to_string(),
+            album: None,
+            artist: None,
+            size_bytes: 100,
+            etag: None,
+            provider_album_id: None,
+            provider_content_type: None,
+            provider_suffix: None,
+            original_bitrate: None,
+            track_number: None,
+            server_id: Some("s1".to_string()),
+        }];
+        let mut seen_ids: HashSet<String> = desired_items
+            .iter()
+            .map(|i| i.jellyfin_id.clone())
+            .collect();
+        let mut remaining: Option<u64> = Some(1000);
+
+        // Slot 1 (s1): returns the manual id (must be skipped — manual wins) plus
+        // two new tracks (300 + 200).
+        let added1 = push_fill_items_dedup(
+            vec![fill_item("m1", 100), fill_item("f1", 300), fill_item("f2", 200)],
+            &mut desired_items,
+            &mut seen_ids,
+            "s1",
+            &mut remaining,
+        );
+        assert_eq!(added1, 500, "only the two new tracks count");
+        assert_eq!(desired_items.len(), 3, "manual + f1 + f2; m1 not duplicated");
+        assert_eq!(
+            desired_items.iter().filter(|i| i.jellyfin_id == "m1").count(),
+            1,
+            "manual item present exactly once"
+        );
+        assert_eq!(remaining, Some(500), "budget decremented by 500");
+        // f1/f2 tagged with the slot's server.
+        assert!(desired_items
+            .iter()
+            .filter(|i| i.jellyfin_id == "f1" || i.jellyfin_id == "f2")
+            .all(|i| i.server_id.as_deref() == Some("s1")));
+
+        // Slot 2 (s2) with a large maxBytes: the shared remaining (500) truncates
+        // it — this is the budget the loop passes to run_auto_fill_provider.
+        let slot2_max: Option<u64> = Some(10_000);
+        let r = remaining.expect("budget present");
+        let slot2_budget = slot2_max.map_or(r, |mb| mb.min(r));
+        assert_eq!(slot2_budget, 500, "tiny shared budget caps the second slot");
+
+        // Slot 2 returns f1 (cross-slot dup → skipped) and a new f3 (400 bytes).
+        let added2 = push_fill_items_dedup(
+            vec![fill_item("f1", 300), fill_item("f3", 400)],
+            &mut desired_items,
+            &mut seen_ids,
+            "s2",
+            &mut remaining,
+        );
+        assert_eq!(added2, 400, "f1 already seen from slot 1; only f3 added");
+        assert_eq!(desired_items.len(), 4, "manual + f1 + f2 + f3");
+        assert_eq!(
+            desired_items.iter().filter(|i| i.jellyfin_id == "f1").count(),
+            1,
+            "f1 not re-added by slot 2"
+        );
+        assert_eq!(
+            desired_items
+                .iter()
+                .find(|i| i.jellyfin_id == "f3")
+                .and_then(|i| i.server_id.as_deref()),
+            Some("s2"),
+            "f3 tagged with slot 2's server"
+        );
+        assert_eq!(remaining, Some(100), "500 − 400 = 100 remaining");
     }
 
     // AC11: provider auth errors map to ERR_UNAUTHORIZED with an `unauthorized`

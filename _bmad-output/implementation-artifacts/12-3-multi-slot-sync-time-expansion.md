@@ -4,7 +4,7 @@ baseline_commit: 176a0f6165614dbc4b5404d894b13d6cd4155eb8
 
 # Story 12.3: Multi-Slot Sync-Time Expansion & Lift Single-Slot Limit
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -34,8 +34,8 @@ so that I can define auto-fill for several servers at once and one server's fill
 
 ## Tasks / Subtasks
 
-- [ ] **Define `AutoFillDescriptor` + a normalizer** (`hifimule-daemon/src/rpc.rs`) (AC: 1)
-  - [ ] Add a small internal struct near `parse_item_specs` (rpc.rs:3376):
+- [x] **Define `AutoFillDescriptor` + a normalizer** (`hifimule-daemon/src/rpc.rs`) (AC: 1)
+  - [x] Add a small internal struct near `parse_item_specs` (rpc.rs:3376):
     ```rust
     struct AutoFillDescriptor {
         server_id: Option<String>,   // resolved to selected portable id when None
@@ -43,38 +43,38 @@ so that I can define auto-fill for several servers at once and one server's fill
         exclude_item_ids: Vec<String>,
     }
     ```
-  - [ ] Add `fn parse_auto_fill_descriptors(params: &Value) -> Vec<AutoFillDescriptor>`:
+  - [x] Add `fn parse_auto_fill_descriptors(params: &Value) -> Vec<AutoFillDescriptor>`:
     - If `params["autoFill"]` is an **object**: read it as today (`enabled`, `maxBytes`, `serverId`, `excludeItemIds`). Return `vec![desc]` only when `enabled == true`; else `vec![]`.
     - If `params["autoFill"]` is an **array**: map each element to a descriptor, keeping only those with `enabled != false` (treat missing `enabled` as enabled in array form — a descriptor's presence means "this server has a slot").
     - Else (`null`/absent): `vec![]`.
     - Do **not** resolve the selected-server fallback here — keep `server_id: None` and resolve at the call site where `selected_id` is available (mirrors the existing `or_else(|| selected_id.clone())` pattern at rpc.rs:3519, 3455).
 
-- [ ] **Generalize `sync_needs_provider_routing` to all auto-fill servers** (`hifimule-daemon/src/rpc.rs:3405-3425`) (AC: 5)
-  - [ ] Change the signature from `auto_fill_server: Option<&str>` to `auto_fill_servers: &[String]` (resolved serverIds, selected-fallback already applied at the call site). Insert each into the `servers` set before the `match selected_id` decision. Keep the existing item-span logic intact.
-  - [ ] Update the caller in `handle_sync_calculate_delta` (rpc.rs:3628-3646): replace the single `auto_fill_server` derivation with `parse_auto_fill_descriptors(&params)`, resolve each descriptor's serverId against `selected_id`, collect the resolved ids, and pass that slice. Route to `multi_provider_calculate_delta` when it returns true.
+- [x] **Generalize `sync_needs_provider_routing` to all auto-fill servers** (`hifimule-daemon/src/rpc.rs:3405-3425`) (AC: 5)
+  - [x] Change the signature from `auto_fill_server: Option<&str>` to `auto_fill_servers: &[String]` (resolved serverIds, selected-fallback already applied at the call site). Insert each into the `servers` set before the `match selected_id` decision. Keep the existing item-span logic intact.
+  - [x] Update the caller in `handle_sync_calculate_delta` (rpc.rs:3628-3646): replace the single `auto_fill_server` derivation with `parse_auto_fill_descriptors(&params)`, resolve each descriptor's serverId against `selected_id`, collect the resolved ids, and pass that slice. Route to `multi_provider_calculate_delta` when it returns true.
 
-- [ ] **Implement the multi-slot expansion loop** (`hifimule-daemon/src/rpc.rs` — `multi_provider_calculate_delta`, :3506-3563) (AC: 2, 3, 4)
-  - [ ] Replace the single-descriptor `if params.get("autoFill")…enabled` block with a loop over `parse_auto_fill_descriptors(&params)`.
-  - [ ] Compute the **shared remaining budget** once before the loop: start from the device's available capacity. Reuse the existing derivation: if a descriptor supplied `maxBytes` use it as that slot's ceiling; the shared cap is the device free space plus existing synced minus already-selected bytes (mirror rpc.rs:2600-2616 / 2588-2625). Track `remaining: u64`, initialized to `device_free (+ synced) − sum(desired_items.size_bytes so far)`; if device storage is unavailable and no `maxBytes` is given, surface the same `ERR_CONNECTION_FAILED` as today.
-  - [ ] For each descriptor (in order received):
+- [x] **Implement the multi-slot expansion loop** (`hifimule-daemon/src/rpc.rs` — `multi_provider_calculate_delta`, :3506-3563) (AC: 2, 3, 4)
+  - [x] Replace the single-descriptor `if params.get("autoFill")…enabled` block with a loop over `parse_auto_fill_descriptors(&params)`.
+  - [x] Compute the **shared remaining budget** once before the loop: start from the device's available capacity. Reuse the existing derivation: if a descriptor supplied `maxBytes` use it as that slot's ceiling; the shared cap is the device free space plus existing synced minus already-selected bytes (mirror rpc.rs:2600-2616 / 2588-2625). Track `remaining: u64`, initialized to `device_free (+ synced) − sum(desired_items.size_bytes so far)`; if device storage is unavailable and no `maxBytes` is given, surface the same `ERR_CONNECTION_FAILED` as today.
+  - [x] For each descriptor (in order received):
     - Resolve `af_server = descriptor.server_id.or(selected_id)`; skip with a clear log if neither resolves.
     - `let provider = get_provider_by_server_id_for(state, &af_server).await?;`
     - `let budget = descriptor.max_bytes.map_or(remaining, |mb| mb.min(remaining));` — skip the slot if `budget == 0`.
     - `exclude_item_ids` = current `desired_items` ids (manual + all earlier slots) — i.e. snapshot `seen_ids` / map over `desired_items`, exactly as the current code builds `exclude_ids` at :3528-3531.
     - Run `run_auto_fill_provider(provider, AutoFillParams { exclude_item_ids, max_fill_bytes: budget })`; map errors to `ERR_CONNECTION_FAILED` as today.
     - Push each returned item as a `DesiredItem { server_id: Some(af_server.clone()), … }` **only if `seen_ids.insert(item.id)` is new** (manual-wins + cross-slot dedup). Decrement `remaining` by each newly added item's `size_bytes` (saturating).
-  - [ ] Keep the post-loop `calculate_delta` + `augment_delta_with_existence_check` + `delta_value_with_cleanup_metadata` exactly as-is (:3565-3576).
+  - [x] Keep the post-loop `calculate_delta` + `augment_delta_with_existence_check` + `delta_value_with_cleanup_metadata` exactly as-is (:3565-3576).
 
-- [ ] **Keep the single-server fast paths correct for the 1-descriptor case** (AC: 6)
-  - [ ] `provider_calculate_delta` (rpc.rs:2540-2671): no functional change required — it already handles the single selected-server descriptor. Optionally refactor its auto-fill block to call a shared helper if you extract one, but **preserve byte-for-byte behavior**. The descriptor's serverId, when present and equal to the selected server, must still take this fast path (verified by AC5 routing).
-  - [ ] Jellyfin-client path in `handle_sync_calculate_delta` (rpc.rs:3950-4010): unchanged — serves the single selected-server Jellyfin case. (When ≥2 servers or a non-selected single auto-fill server is involved, routing has already diverted to `multi_provider_calculate_delta`.)
-  - [ ] Consider extracting a small helper `fn push_fill_items_dedup(items, desired_items, seen_ids, server_id, remaining)` to share the "convert `AutoFillItem` → `DesiredItem`, dedup, decrement budget" logic across the three sites — only if it does not change behavior. Otherwise leave the three sites inline.
+- [x] **Keep the single-server fast paths correct for the 1-descriptor case** (AC: 6)
+  - [x] `provider_calculate_delta` (rpc.rs:2540-2671): no functional change required — it already handles the single selected-server descriptor. Optionally refactor its auto-fill block to call a shared helper if you extract one, but **preserve byte-for-byte behavior**. The descriptor's serverId, when present and equal to the selected server, must still take this fast path (verified by AC5 routing).
+  - [x] Jellyfin-client path in `handle_sync_calculate_delta` (rpc.rs:3950-4010): unchanged — serves the single selected-server Jellyfin case. (When ≥2 servers or a non-selected single auto-fill server is involved, routing has already diverted to `multi_provider_calculate_delta`.)
+  - [x] Consider extracting a small helper `fn push_fill_items_dedup(items, desired_items, seen_ids, server_id, remaining)` to share the "convert `AutoFillItem` → `DesiredItem`, dedup, decrement budget" logic across the three sites — only if it does not change behavior. Otherwise leave the three sites inline.
 
-- [ ] **Tests** (`hifimule-daemon/src/rpc.rs` `#[cfg(test)] mod tests`, or a focused module) (AC: 8)
-  - [ ] `parse_auto_fill_descriptors`: legacy object enabled → 1; legacy disabled/absent → 0; array of 2 → 2; array element `enabled:false` filtered; missing `serverId` left `None` (selected-fallback applied at call site).
-  - [ ] `sync_needs_provider_routing`: single-server manual items + 2 auto-fill servers → `true`; all-selected (1 descriptor on selected server) → `false`; single non-selected auto-fill server → `true`.
-  - [ ] Multi-slot dedup + shared budget: with hand-built/faked desired items, prove a track present in manual items is not re-added by a slot; a track added by slot 1 is excluded from slot 2; and `remaining` decrements so a tiny shared budget truncates the second slot. (Use the existing test patterns in `rpc.rs` tests; mock providers only if the existing harness already supports it — otherwise unit-test the pure normalization/routing/dedup-budget helpers and keep provider expansion covered by `auto_fill` tests.)
-  - [ ] Run `rtk cargo test -p hifimule-daemon` (targeted `rtk cargo test -p hifimule-daemon rpc::` if the full suite is sandbox-gated by mockito/networking — see Previous-story note) and `rtk cargo clippy -p hifimule-daemon --all-targets`.
+- [x] **Tests** (`hifimule-daemon/src/rpc.rs` `#[cfg(test)] mod tests`, or a focused module) (AC: 8)
+  - [x] `parse_auto_fill_descriptors`: legacy object enabled → 1; legacy disabled/absent → 0; array of 2 → 2; array element `enabled:false` filtered; missing `serverId` left `None` (selected-fallback applied at call site).
+  - [x] `sync_needs_provider_routing`: single-server manual items + 2 auto-fill servers → `true`; all-selected (1 descriptor on selected server) → `false`; single non-selected auto-fill server → `true`.
+  - [x] Multi-slot dedup + shared budget: with hand-built/faked desired items, prove a track present in manual items is not re-added by a slot; a track added by slot 1 is excluded from slot 2; and `remaining` decrements so a tiny shared budget truncates the second slot. (Use the existing test patterns in `rpc.rs` tests; mock providers only if the existing harness already supports it — otherwise unit-test the pure normalization/routing/dedup-budget helpers and keep provider expansion covered by `auto_fill` tests.)
+  - [x] Run `rtk cargo test -p hifimule-daemon` (targeted `rtk cargo test -p hifimule-daemon rpc::` if the full suite is sandbox-gated by mockito/networking — see Previous-story note) and `rtk cargo clippy -p hifimule-daemon --all-targets`.
 
 ## Dev Notes
 
@@ -166,12 +166,30 @@ Recent commits: `176a0f6 Review 12.2`, `b2f1b0c Dev 12.2`, `31282fa Story 12.2`,
 
 ### Agent Model Used
 
+claude-opus-4-8 (dev-story workflow)
+
 ### Debug Log References
+
+- `rtk cargo build -p hifimule-daemon` → 0 errors (only the pre-existing `api.rs::rename_item` dead-code warning, untouched).
+- `rtk cargo test -p hifimule-daemon --bin hifimule-daemon rpc::` → 87 passed.
+- `rtk cargo test -p hifimule-daemon --bin hifimule-daemon` (full suite) → 488 passed, 0 failures (no regression; networking did not gate the run this time).
+- `rtk cargo clippy -p hifimule-daemon --all-targets` → no new warnings in `rpc.rs`. One redundant-closure introduced by the array `.map(|el| read_descriptor(el))` was fixed to `.map(read_descriptor)`. Remaining `rpc.rs` clippy hits (MutexGuard-held-across-await at 6452/6586) are pre-existing test code outside this story's diff.
 
 ### Completion Notes List
 
+- **AC1 — dual-shape `autoFill` param.** Added `struct AutoFillDescriptor` + `parse_auto_fill_descriptors(&Value) -> Vec<AutoFillDescriptor>` next to `parse_item_specs`. Legacy object → 1 elem only when `enabled == true`; array → one descriptor per object element with `enabled != false` (missing `enabled` = enabled, "presence means a slot"); `null`/absent/scalar/empty-array → `vec![]`. Selected-server fallback for `server_id: None` is left to the call sites (mirrors the existing `or_else(|| selected_id…)` pattern).
+- **AC2/AC3/AC4 — multi-slot expansion loop.** `multi_provider_calculate_delta`'s single-descriptor block is replaced by a loop over the descriptors. Each slot resolves its provider via `get_provider_by_server_id_for(state, &af_server)`, runs the default-pipeline `run_auto_fill_provider`, and tags items with `server_id: Some(af_server)`. Manual items (resolved first) own their ids in `seen_ids` and win dedup; each slot excludes all already-selected ids (manual + earlier slots, plus the descriptor's own `excludeItemIds`). A single shared `remaining: Option<u64>` budget (device free + synced − already-selected) is capped per slot with `min(maxBytes, remaining)` and decremented by each newly added item — guaranteeing the device is never oversubscribed.
+- **AC5 — routing accounts for all auto-fill servers.** `sync_needs_provider_routing`'s `auto_fill_server: Option<&str>` param became `auto_fill_servers: &[String]`; the caller resolves every enabled descriptor's serverId (selected fallback applied) and passes the slice. A single-server basket carrying an auto-fill slot for any non-selected server now routes through the per-provider path.
+- **AC6 — single-server zero regression.** `provider_calculate_delta` and the Jellyfin-client fast path are untouched and continue to serve the 1-descriptor selected-server case. For a single slot, `min(maxBytes, remaining) == maxBytes` (the UI already computed `maxBytes = free − manual`), so the multi path is byte-for-byte identical when reached. All 488 daemon tests pass.
+- **AC7 — scope held.** No UI, no `autoFill.setPipeline`, no `basket.autoFill` serverId, no `run_pipeline`/pool materialization, no `autofill_history` reads/writes, no `main.rs` auto-sync change, no new crate dependency. Per-slot expansion delegates to today's default-pipeline `run_auto_fill_provider` (the seam Story 12.4 will replace).
+- **AC8 — tests.** Extracted a pure `push_fill_items_dedup(...)` helper (used by the loop and unit-testable without a provider). New tests: `test_parse_auto_fill_descriptors_shapes`, `test_sync_needs_provider_routing_multi_auto_fill`, `test_multi_slot_dedup_and_shared_budget`; updated `test_sync_needs_provider_routing` to the new slice signature.
+- **Design note (from Dev Notes):** per-slot expansion uses the existing default-pipeline `run_auto_fill_provider`, NOT the pure `run_pipeline` engine — a deliberate, documented deviation from the architecture's illustrative pseudocode. Swapping in pool-materialization + `run_pipeline` + `manifest.auto_fill.pipeline_for(serverId)` is Story 12.4.
+
 ### File List
+
+- `hifimule-daemon/src/rpc.rs` (modified) — `AutoFillDescriptor` + `parse_auto_fill_descriptors`, `push_fill_items_dedup` helper, `sync_needs_provider_routing` signature (`&[String]`), multi-slot expansion loop in `multi_provider_calculate_delta`, updated caller in `handle_sync_calculate_delta`, and new/updated tests.
 
 ## Change Log
 
+- 2026-06-14 — Dev 12.3: lifted the single-auto-fill-slot limit at the daemon sync-time expansion. `sync_calculate_delta` `autoFill` now normalizes to `Vec<AutoFillDescriptor>` (legacy object still accepted); `multi_provider_calculate_delta` expands one slot per server (each routed via `get_provider_by_server_id_for` + default-pipeline `run_auto_fill_provider`), with manual-wins dedup, in-order cross-slot dedup, and a shared remaining-capacity budget that prevents device oversubscription. `sync_needs_provider_routing` generalized to consider every auto-fill server. Single-server behavior unchanged (488/488 daemon tests pass). Status → review.
 - 2026-06-14 — Story 12.3 created via create-story workflow (ready-for-dev). Scope: lift the single-auto-fill-slot limit at the daemon sync-time expansion. `sync_calculate_delta` `autoFill` param accepts an array of per-server descriptors (legacy single object still accepted); `multi_provider_calculate_delta` expands one slot per server, each routed via `get_provider_by_server_id_for` and expanded with the default-pipeline `run_auto_fill_provider`; manual items win dedup, slots dedup in order, and a shared remaining-capacity budget prevents device oversubscription. Single-server behavior frozen byte-for-byte; UI multi-slot cards (12.6), configurable `run_pipeline` wiring (12.4), `basket.autoFill`+serverId (12.7), and `autofill_history` (Epic 13) are out of scope.
