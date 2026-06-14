@@ -2537,11 +2537,13 @@ async fn provider_calculate_delta(
     manifest: &crate::device::DeviceManifest,
     params: &Value,
 ) -> Result<Value, JsonRpcError> {
-    let auto_fill_enabled = params
-        .get("autoFill")
-        .and_then(|auto_fill| auto_fill.get("enabled"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    // Story 12.3: normalize both the legacy single object and the new array form
+    // (AC1). This single-server fast path is reached only when routing resolved
+    // every auto-fill slot to the selected server, so the relevant descriptor (if
+    // any) is for this server. For the legacy object this is byte-for-byte
+    // identical to the old `autoFill.enabled` / `autoFill.maxBytes` reads.
+    let auto_fill_descriptor = parse_auto_fill_descriptors(params).into_iter().next();
+    let auto_fill_enabled = auto_fill_descriptor.is_some();
 
     let mut desired_items = Vec::new();
     let mut playlist_sync_items = Vec::new();
@@ -2585,10 +2587,8 @@ async fn provider_calculate_delta(
         // If the UI provided maxBytes, use it directly — it already represents the intended
         // auto-fill budget (UI subtracted manual-item sizes from free space). If not provided,
         // compute server-side as (free + existing synced - basket).
-        let auto_fill_budget: u64 = if let Some(mb) = params
-            .get("autoFill")
-            .and_then(|af| af.get("maxBytes"))
-            .and_then(Value::as_u64)
+        let auto_fill_budget: u64 = if let Some(mb) =
+            auto_fill_descriptor.as_ref().and_then(|d| d.max_bytes)
         {
             crate::daemon_log!(
                 "[AutoFill] budget from UI maxBytes: {} bytes ({:.1} GB)",
@@ -3425,11 +3425,29 @@ fn parse_auto_fill_descriptors(params: &Value) -> Vec<AutoFillDescriptor> {
     };
 
     let read_descriptor = |el: &Value| AutoFillDescriptor {
+        // A blank/whitespace-only serverId is treated as missing so the
+        // selected-server fallback applies at the call site — `Some("")` would
+        // otherwise bypass the fallback and fail provider resolution.
         server_id: el
             .get("serverId")
             .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .map(str::to_string),
-        max_bytes: el.get("maxBytes").and_then(Value::as_u64),
+        // `maxBytes` is an optional budget ceiling. Absent → `None` (fill up to
+        // the shared remaining budget). Present-but-not-a-valid-u64 (negative,
+        // float, overflow, or non-numeric) must NOT silently fall through to
+        // "no cap" (which would fill the device); floor non-negative numbers and
+        // clamp anything else to 0 so a malformed cap skips the slot.
+        max_bytes: el.get("maxBytes").map(|v| {
+            if let Some(n) = v.as_u64() {
+                n
+            } else if let Some(f) = v.as_f64() {
+                f.max(0.0).min(u64::MAX as f64) as u64
+            } else {
+                0
+            }
+        }),
         exclude_item_ids: el
             .get("excludeItemIds")
             .and_then(Value::as_array)
@@ -3667,7 +3685,20 @@ async fn multi_provider_calculate_delta(
                 continue;
             }
 
-            let provider = get_provider_by_server_id_for(state, &af_server).await?;
+            // Auto-fill slots are best-effort: a single unresolvable/offline server
+            // must not abort the whole multi-server delta (manual items + healthy
+            // slots). Log and skip the failed slot instead of propagating the error.
+            let provider = match get_provider_by_server_id_for(state, &af_server).await {
+                Ok(p) => p,
+                Err(e) => {
+                    crate::daemon_log!(
+                        "[AutoFill] skipping slot for server {}: provider unavailable: {}",
+                        af_server,
+                        e.message
+                    );
+                    continue;
+                }
+            };
             // Exclude every already-selected id (manual items + earlier slots) plus
             // any ids the descriptor explicitly excludes.
             let mut exclude_ids: Vec<String> = desired_items
@@ -3679,13 +3710,19 @@ async fn multi_provider_calculate_delta(
                 exclude_item_ids: exclude_ids,
                 max_fill_bytes: budget,
             };
-            let fill_items = crate::auto_fill::run_auto_fill_provider(provider, fill_params)
+            let fill_items = match crate::auto_fill::run_auto_fill_provider(provider, fill_params)
                 .await
-                .map_err(|e| JsonRpcError {
-                    code: ERR_CONNECTION_FAILED,
-                    message: format!("Auto-fill failed: {}", e),
-                    data: None,
-                })?;
+            {
+                Ok(items) => items,
+                Err(e) => {
+                    crate::daemon_log!(
+                        "[AutoFill] skipping slot for server {}: expansion failed: {}",
+                        af_server,
+                        e
+                    );
+                    continue;
+                }
+            };
             push_fill_items_dedup(
                 fill_items,
                 &mut desired_items,
@@ -4073,10 +4110,12 @@ async fn handle_sync_calculate_delta(
 
     // Auto-fill expansion (Story 3.8): if the basket contained an auto-fill slot,
     // run the priority algorithm now and merge results with manual items.
-    if let Some(af) = params.get("autoFill")
-        && af["enabled"].as_bool().unwrap_or(false)
-    {
-        let max_fill_bytes = if let Some(mb) = af["maxBytes"].as_u64() {
+    // Story 12.3: normalize both the legacy single object and the array form
+    // (AC1). This Jellyfin fast path is reached only when routing resolved every
+    // auto-fill slot to the selected server. For the legacy object this is
+    // byte-for-byte identical to the old `enabled`/`maxBytes`/`excludeItemIds` reads.
+    if let Some(desc) = parse_auto_fill_descriptors(&params).into_iter().next() {
+        let max_fill_bytes = if let Some(mb) = desc.max_bytes {
             mb
         } else {
             match state.device_manager.get_device_storage().await {
@@ -4090,14 +4129,7 @@ async fn handle_sync_calculate_delta(
                 }
             }
         };
-        let exclude_ids: Vec<String> = af["excludeItemIds"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let exclude_ids: Vec<String> = desc.exclude_item_ids;
         let expanded_excludes = expand_exclude_ids(&state.jellyfin_client, exclude_ids).await;
         let fill_params = crate::auto_fill::AutoFillParams {
             exclude_item_ids: expanded_excludes,
