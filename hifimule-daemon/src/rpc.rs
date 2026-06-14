@@ -231,6 +231,7 @@ async fn handler(
             handle_device_set_auto_sync_on_connect(&state, payload.params).await
         }
         "basket.autoFill" => handle_basket_auto_fill(&state, payload.params).await,
+        "autoFill.setPipeline" => handle_auto_fill_set_pipeline(&state, payload.params).await,
         "sync.setAutoFill" => handle_sync_set_auto_fill(&state, payload.params).await,
         "device_profiles.list" => handle_device_profiles_list().await,
         "device.set_transcoding_profile" => {
@@ -1853,8 +1854,10 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         .unwrap_or(false);
 
     // Story 12.2: auto_fill is now a per-server pipeline map. Resolve the selected server's
-    // portable id and read its slot via the server-aware accessors; the emitted JSON shape
-    // `{ enabled, maxBytes }` is unchanged (UI is Story 12.6).
+    // portable id and read its slot via the server-aware accessors; the `{ enabled, maxBytes }`
+    // fields are retained unchanged for the legacy read path. Story 12.6 additionally exposes the
+    // full per-server `pipelines` map so the pipeline-builder UI can hydrate every server's config
+    // (empty `{}` for a legacy device with no per-server map).
     let selected_portable_id = state
         .db
         .get_server_config()
@@ -1865,6 +1868,7 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         serde_json::json!({
             "enabled": d.auto_fill.enabled_for(selected_portable_id.as_deref()),
             "maxBytes": d.auto_fill.max_bytes_for(selected_portable_id.as_deref()),
+            "pipelines": &d.auto_fill.pipelines,
         })
     });
 
@@ -5854,7 +5858,16 @@ async fn handle_device_set_auto_sync_on_connect(
 }
 
 /// basket.autoFill — runs the priority ranking algorithm and returns ranked items.
-/// Params: { deviceId: string, maxBytes?: number, excludeItemIds: string[] }
+///
+/// Params: `{ deviceId?: string, maxBytes?: number, excludeItemIds?: string[], serverId?: string,
+/// pipeline?: AutoFillPipeline }`.
+///
+/// Story 12.6: when `serverId` (a portable id) is supplied, the preview is computed for that
+/// server's provider (resolved via `get_provider_by_server_id_for`) through the shared sync-time
+/// seam [`expand_auto_fill_slot`] — using the supplied inline `pipeline` if given, else the
+/// persisted `pipelines[serverId]`, else the default-legacy pipeline. When `serverId` is absent the
+/// behavior is unchanged: the legacy Jellyfin `run_auto_fill` path (with container-id exclude
+/// expansion). An unknown/unroutable `serverId` returns `ERR_CONNECTION_FAILED`, never a panic.
 async fn handle_basket_auto_fill(
     state: &AppState,
     params: Option<Value>,
@@ -5888,6 +5901,71 @@ async fn handle_basket_auto_fill(
             }
         }
     };
+
+    // Story 12.6: per-server routing. A non-blank serverId routes the preview through the
+    // resolved provider + shared expansion seam, so non-Jellyfin servers and configured pipelines
+    // are previewed exactly as they'll fill at sync time.
+    let server_id = params
+        .get("serverId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    if let Some(server_id) = server_id {
+        // Pipeline precedence: inline (supplied by the UI for a live, unsaved preview) →
+        // persisted per-server pipeline → default-legacy. The default-legacy pipeline keeps the
+        // fast `run_auto_fill_provider` path inside the seam (a bare budget needs no materialization).
+        let inline_pipeline: Option<crate::auto_fill::AutoFillPipeline> =
+            match params.get("pipeline") {
+                Some(v) if !v.is_null() => {
+                    Some(serde_json::from_value(v.clone()).map_err(|e| JsonRpcError {
+                        code: ERR_INVALID_PARAMS,
+                        message: format!("Invalid pipeline: {}", e),
+                        data: None,
+                    })?)
+                }
+                _ => None,
+            };
+        let persisted_pipeline = state
+            .device_manager
+            .get_current_device()
+            .await
+            .and_then(|m| m.auto_fill.pipeline_for(&server_id).cloned());
+        let pipeline = inline_pipeline
+            .or(persisted_pipeline)
+            .unwrap_or_else(|| crate::auto_fill::AutoFillPipeline::default_legacy(None));
+
+        let provider = match get_provider_by_server_id_for(state, &server_id).await {
+            Ok(p) => p,
+            Err(e) => {
+                return Err(JsonRpcError {
+                    code: ERR_CONNECTION_FAILED,
+                    message: format!("Auto-fill failed: provider for {server_id} unavailable: {}", e.message),
+                    data: None,
+                });
+            }
+        };
+
+        // Exclude ids are passed through verbatim (the per-provider seam dedups by id, mirroring
+        // the sync-time path). Container-id expansion is a Jellyfin-only concern of the legacy path.
+        let fill_params = crate::auto_fill::AutoFillParams {
+            exclude_item_ids,
+            max_fill_bytes,
+        };
+        return match expand_auto_fill_slot(provider, Some(&pipeline), fill_params).await {
+            Ok(items) => serde_json::to_value(items).map_err(|e| JsonRpcError {
+                code: ERR_INTERNAL_ERROR,
+                message: format!("Failed to serialize auto-fill results: {}", e),
+                data: None,
+            }),
+            Err(e) => Err(JsonRpcError {
+                code: ERR_CONNECTION_FAILED,
+                message: format!("Auto-fill failed: {}", e),
+                data: None,
+            }),
+        };
+    }
 
     // Expand any container items (albums, playlists) in exclude_item_ids to their
     // constituent track IDs so that tracks inside a manually-added album are correctly
@@ -5988,6 +6066,65 @@ async fn get_items_by_ids_chunked(
         all_items.extend(items);
     }
     Ok(all_items)
+}
+
+/// autoFill.setPipeline — persists a full per-server auto-fill pipeline to the device manifest
+/// (Story 12.6). Params: `{ serverId: <portable id>, pipeline: <AutoFillPipeline JSON> }`.
+///
+/// Writes only the given server's slot via [`AutoFillConfig::set_pipeline`], which inserts/replaces
+/// that key, clears any parked legacy block, and leaves every other server's pipeline untouched.
+/// The manifest is persisted in a single atomic `update_manifest` write. This RPC deliberately does
+/// NOT read or write `auto_sync_on_connect` — that stays server-independent and is configured via
+/// `device_set_auto_sync_on_connect`. A blank/whitespace `serverId` or a malformed `pipeline`
+/// returns `ERR_INVALID_PARAMS`.
+async fn handle_auto_fill_set_pipeline(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let server_id = params
+        .get("serverId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing or blank serverId".to_string(),
+            data: None,
+        })?
+        .to_string();
+
+    let pipeline_value = params.get("pipeline").cloned().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing pipeline".to_string(),
+        data: None,
+    })?;
+    let pipeline: crate::auto_fill::AutoFillPipeline = serde_json::from_value(pipeline_value)
+        .map_err(|e| JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: format!("Invalid pipeline: {}", e),
+            data: None,
+        })?;
+
+    state
+        .device_manager
+        .update_manifest(|m| m.auto_fill.set_pipeline(&server_id, pipeline.clone()))
+        .await
+        .map_err(|e| JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: format!("Failed to save pipeline: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::json!({
+        "status": "success",
+        "serverId": server_id,
+    }))
 }
 
 /// sync.setAutoFill — persists auto-fill preferences to the device manifest.
@@ -7747,6 +7884,209 @@ mod tests {
         assert!(
             auto_fill_needs_configurable_routing(&manifest, &["s3".to_string()]),
             "a duration target must force the provider path"
+        );
+    }
+
+    // --- Story 12.6: autoFill.setPipeline + get_daemon_state.pipelines + basket.autoFill routing ---
+
+    /// Detects a device from a freshly-written manifest so handlers that read/write the manifest
+    /// have a connected device to operate on.
+    async fn connect_device_with_manifest(
+        state: &AppState,
+        dir: &std::path::Path,
+        manifest: crate::device::DeviceManifest,
+    ) {
+        crate::device::write_manifest(
+            Arc::new(crate::device_io::MscBackend::new(dir.to_path_buf())),
+            &manifest,
+        )
+        .await
+        .unwrap();
+        state
+            .device_manager
+            .handle_device_detected(
+                dir.to_path_buf(),
+                manifest,
+                Arc::new(crate::device_io::MscBackend::new(dir.to_path_buf())),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn autofill_set_pipeline_rpc_round_trips_via_get_daemon_state() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let dir = tempfile::tempdir().unwrap();
+        connect_device_with_manifest(&state, dir.path(), manifest_for_update()).await;
+
+        let pipeline_json = json!({
+            "enabled": true,
+            "filter": { "includeGenres": ["Jazz"], "excludeGenres": [], "includeTags": [], "excludeTags": [] },
+            "sources": [ { "kind": "playlist", "ref": "pl-7", "share": 0.6 },
+                         { "kind": "favorites", "share": 0.4 } ],
+            "unit": "album",
+            "ordering": ["favorite", "playCount", "quality"],
+            "memory": { "cooldownWeeks": 3, "playedExclusion": true },
+            "budget": { "maxBytes": 8_000_000_000_u64, "targetDurationSecs": 3600 },
+            "fallback": [ { "kind": "library" } ]
+        });
+
+        let result = handle_auto_fill_set_pipeline(
+            &state,
+            Some(json!({ "serverId": "srv-1", "pipeline": pipeline_json.clone() })),
+        )
+        .await
+        .expect("setPipeline succeeds");
+        assert_eq!(result["status"], "success");
+        assert_eq!(result["serverId"], "srv-1");
+
+        // get_daemon_state exposes the full pipeline under the per-server map and it round-trips.
+        let daemon_state = handle_get_daemon_state(&state).await.unwrap();
+        let returned = &daemon_state["autoFill"]["pipelines"]["srv-1"];
+        let expected: crate::auto_fill::AutoFillPipeline =
+            serde_json::from_value(pipeline_json).unwrap();
+        let actual: crate::auto_fill::AutoFillPipeline =
+            serde_json::from_value(returned.clone()).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn autofill_set_pipeline_rpc_rejects_bad_params() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let dir = tempfile::tempdir().unwrap();
+        connect_device_with_manifest(&state, dir.path(), manifest_for_update()).await;
+
+        // Blank/whitespace serverId → ERR_INVALID_PARAMS.
+        let err = handle_auto_fill_set_pipeline(
+            &state,
+            Some(json!({ "serverId": "   ", "pipeline": { "enabled": true } })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, ERR_INVALID_PARAMS);
+
+        // Missing pipeline → ERR_INVALID_PARAMS.
+        let err = handle_auto_fill_set_pipeline(&state, Some(json!({ "serverId": "srv-1" })))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ERR_INVALID_PARAMS);
+
+        // Malformed pipeline (wrong type for a known field) → ERR_INVALID_PARAMS.
+        let err = handle_auto_fill_set_pipeline(
+            &state,
+            Some(json!({ "serverId": "srv-1", "pipeline": { "ordering": "not-an-array" } })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, ERR_INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn get_daemon_state_legacy_device_has_empty_pipelines_map() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let dir = tempfile::tempdir().unwrap();
+        // Legacy device: AutoFillConfig::default() (no per-server map).
+        connect_device_with_manifest(&state, dir.path(), manifest_for_update()).await;
+
+        let daemon_state = handle_get_daemon_state(&state).await.unwrap();
+        let pipelines = &daemon_state["autoFill"]["pipelines"];
+        assert!(pipelines.is_object(), "pipelines is an object");
+        assert!(
+            pipelines.as_object().unwrap().is_empty(),
+            "legacy device → empty pipelines map"
+        );
+        // Legacy enabled/maxBytes fields retained.
+        assert!(daemon_state["autoFill"]["enabled"].is_boolean());
+    }
+
+    #[tokio::test]
+    async fn basket_auto_fill_unknown_server_errors_cleanly() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+
+        // No provider configured for this serverId → clean ERR_CONNECTION_FAILED, no panic.
+        let err = handle_basket_auto_fill(
+            &state,
+            Some(json!({ "serverId": "no-such-server", "maxBytes": 1_000_000 })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, ERR_CONNECTION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn basket_auto_fill_routes_to_subsonic_provider() {
+        let _lock = credential_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
+
+        let mut server = mockito::Server::new_async().await;
+        let _ping = server
+            .mock("GET", "/rest/ping.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .create_async()
+            .await;
+        // Favorites yields one song; this is the only source that must succeed.
+        let _starred = server
+            .mock("GET", "/rest/getStarred2.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"subsonic-response":{"status":"ok","version":"1.16.1","starred2":{"song":[{"id":"fav1","title":"Fav Track","album":"A","artist":"Artist","size":100,"duration":120,"bitRate":320}]}}}"#,
+            )
+            .create_async()
+            .await;
+        // Library bulk fill returns nothing (empty search3) so the result is just the favorite.
+        let _search = server
+            .mock("GET", "/rest/search3.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1","searchResult3":{}}}"#)
+            .create_async()
+            .await;
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        handle_server_connect(
+            &state,
+            Some(json!({
+                "url": server.url(),
+                "serverType": "subsonic",
+                "username": "subsonic-user",
+                "password": "subsonic-password"
+            })),
+        )
+        .await
+        .expect("connect");
+
+        // The portable serverId is the routing key the UI passes.
+        let portable_id = handle_get_daemon_state(&state).await.unwrap()
+            ["selectedServerPortableId"]
+            .as_str()
+            .expect("portable id present")
+            .to_string();
+
+        // Budget must exceed the song's estimated size (bitrate×duration ≈ 4.8 MB), not its
+        // reported `size` — run_auto_fill_provider sizes by bitrate.
+        let result = handle_basket_auto_fill(
+            &state,
+            Some(json!({ "serverId": portable_id, "maxBytes": 100_000_000 })),
+        )
+        .await
+        .expect("routed auto-fill succeeds");
+
+        let items = result.as_array().expect("array of items");
+        assert!(
+            items.iter().any(|i| i["id"] == "fav1"),
+            "favorite from the routed subsonic provider is returned: {result}"
         );
     }
 

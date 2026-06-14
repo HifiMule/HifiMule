@@ -2591,3 +2591,101 @@ fn set_legacy_updates_sole_pipeline_instead_of_parking_dropped_legacy() {
     );
     assert!(empty.pipelines.is_empty());
 }
+
+// --- Story 12.6: AutoFillConfig::set_pipeline (full per-server pipeline write) ---
+
+/// Builds a non-default pipeline exercising every stage (filter/sources/unit/ordering/memory/
+/// budget/fallback) so round-trip and "untouched" assertions cover the full shape.
+fn rich_pipeline() -> AutoFillPipeline {
+    use crate::auto_fill::{
+        BudgetStage, FilterStage, MemoryStage, OrderingKey, SourceEntry, SourceKind, Unit,
+    };
+    AutoFillPipeline {
+        enabled: true,
+        filter: FilterStage {
+            include_genres: vec!["Jazz".to_string()],
+            exclude_genres: vec!["Metal".to_string()],
+            ..FilterStage::default()
+        },
+        sources: vec![
+            SourceEntry {
+                kind: SourceKind::Playlist,
+                ref_id: Some("pl-42".to_string()),
+                share: Some(0.7),
+            },
+            SourceEntry {
+                kind: SourceKind::Favorites,
+                ref_id: None,
+                share: Some(0.3),
+            },
+        ],
+        unit: Unit::Album,
+        ordering: vec![OrderingKey::Quality, OrderingKey::PlayCount],
+        memory: MemoryStage {
+            cooldown_weeks: Some(4),
+            played_exclusion: true,
+            ..MemoryStage::default()
+        },
+        budget: BudgetStage {
+            max_bytes: Some(8_000_000_000),
+            target_duration_secs: Some(3600),
+            headroom_bytes: Some(100),
+        },
+        fallback: vec![SourceEntry::new(SourceKind::Library)],
+    }
+}
+
+#[test]
+fn set_pipeline_upserts_and_clears_parked_legacy() {
+    let mut cfg = AutoFillConfig::default();
+    // Park a legacy block so we can prove set_pipeline clears it.
+    cfg.set_legacy(true, Some(123));
+    assert!(cfg.legacy.is_some());
+
+    let pipeline = rich_pipeline();
+    cfg.set_pipeline("srv-1", pipeline.clone());
+    assert_eq!(cfg.pipelines.get("srv-1"), Some(&pipeline));
+    assert!(cfg.legacy.is_none(), "parked legacy cleared on set_pipeline");
+
+    // Upsert replaces the same server's entry.
+    let mut replacement = AutoFillPipeline::default_legacy(Some(42));
+    replacement.enabled = false;
+    cfg.set_pipeline("srv-1", replacement.clone());
+    assert_eq!(cfg.pipelines.get("srv-1"), Some(&replacement));
+    assert_eq!(cfg.pipelines.len(), 1);
+}
+
+#[test]
+fn set_pipeline_leaves_other_servers_untouched() {
+    let mut cfg = AutoFillConfig::default();
+    let a = rich_pipeline();
+    let b = AutoFillPipeline::default_legacy(Some(999));
+    cfg.set_pipeline("srv-a", a.clone());
+    cfg.set_pipeline("srv-b", b.clone());
+
+    // Rewrite server A; server B must be byte-for-byte unchanged.
+    let mut a2 = AutoFillPipeline::default_legacy(Some(1));
+    a2.enabled = false;
+    cfg.set_pipeline("srv-a", a2.clone());
+    assert_eq!(cfg.pipelines.get("srv-a"), Some(&a2));
+    assert_eq!(cfg.pipelines.get("srv-b"), Some(&b), "server B untouched");
+}
+
+#[test]
+fn set_pipeline_round_trips_full_pipeline_with_camelcase_and_ref() {
+    let mut cfg = AutoFillConfig::default();
+    cfg.set_pipeline("srv-x", rich_pipeline());
+    let json = serde_json::to_string(&cfg).unwrap();
+    // The playlist source id serializes as `ref` (not refId); enum variants are camelCase.
+    assert!(json.contains(r#""ref":"pl-42""#));
+    assert!(json.contains(r#""kind":"playlist""#));
+    assert!(json.contains(r#""kind":"favorites""#));
+    assert!(json.contains(r#""playCount""#));
+    assert!(json.contains(r#""quality""#));
+    assert!(json.contains(r#""unit":"album""#));
+    assert!(json.contains(r#""targetDurationSecs":3600"#));
+    assert!(json.contains(r#""headroomBytes":100"#));
+    // Full deserialize round-trips the whole pipeline.
+    let back: AutoFillConfig = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, cfg);
+}

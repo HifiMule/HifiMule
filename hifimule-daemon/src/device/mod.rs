@@ -351,6 +351,17 @@ impl AutoFillConfig {
     pub fn pipeline_for(&self, server_id: &str) -> Option<&AutoFillPipeline> {
         self.pipelines.get(server_id)
     }
+
+    /// Upserts a full [`AutoFillPipeline`] for `server_id` and clears any parked legacy block
+    /// (Story 12.6). This is the write path behind `autoFill.setPipeline`: it inserts or replaces
+    /// **only** that server's entry — every other server's pipeline is left byte-for-byte
+    /// unchanged — so reconfiguring one server can never disturb another's slot. Unlike
+    /// [`AutoFillConfig::set_for`] (legacy `{ enabled, maxBytes }` upsert), this persists the
+    /// caller-supplied pipeline verbatim, including reserved Epic 13 fields.
+    pub fn set_pipeline(&mut self, server_id: &str, pipeline: AutoFillPipeline) {
+        self.pipelines.insert(server_id.to_string(), pipeline);
+        self.legacy = None;
+    }
 }
 
 /// Rewrites a single optional `server_id` tag from a legacy machine-local UUID or

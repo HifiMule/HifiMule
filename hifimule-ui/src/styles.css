@@ -1199,6 +1199,96 @@ h2 {
   background: color-mix(in srgb, var(--sl-color-primary-100) 20%, transparent);
 }
 
+/* Story 12.6: per-server slot badge + fallback hint */
+.basket-item-server-badge {
+  font-size: 0.85rem;
+  color: var(--ink-dim);
+  vertical-align: -2px;
+  margin-right: 0.25rem;
+}
+
+.auto-fill-fallback-hint {
+  display: inline-block;
+  margin-left: var(--space-2xs);
+  font-size: 0.7rem;
+  font-style: italic;
+  color: var(--ink-dim);
+}
+
+/* Story 12.6: pipeline-builder panel */
+.auto-fill-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.auto-fill-advanced {
+  border-top: 1px solid var(--surface-border-soft);
+  padding-top: var(--space-xs);
+}
+
+.af-advanced-chevron {
+  transition: transform 0.15s ease;
+}
+
+.af-advanced-chevron--open {
+  transform: rotate(90deg);
+}
+
+.auto-fill-advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  padding-top: var(--space-sm);
+}
+
+.auto-fill-stage {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.auto-fill-stage-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.auto-fill-source-row,
+.auto-fill-ordering-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.auto-fill-source-row .af-source-kind {
+  flex: 1;
+  min-width: 7rem;
+}
+
+.af-share-cell {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  flex: 1;
+}
+
+.af-share-cell sl-range {
+  flex: 1;
+}
+
+.af-share-value {
+  font-size: 0.7rem;
+  color: var(--ink-dim);
+  min-width: 2.5rem;
+  text-align: right;
+}
+
+.af-ordering-label {
+  flex: 1;
+  font-size: 0.85rem;
+}
+
 .basket-item-artist,
 .basket-item-genre {
   border: 1.5px solid var(--sl-color-neutral-600);

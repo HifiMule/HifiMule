@@ -4,7 +4,7 @@ baseline_commit: 0100d3dd61eefb7c2666058947287b88b04ca425
 
 # Story 12.6: Auto-Fill Configuration UI & Coexisting Multi-Server Slot Cards
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -116,49 +116,49 @@ This story sits on top of a fully-built, persona-validated daemon pipeline. **Yo
 
 ## Tasks / Subtasks
 
-- [ ] **Daemon: `AutoFillConfig::set_pipeline` + unit tests** (AC: 1, 2)
-  - [ ] Add `pub fn set_pipeline(&mut self, server_id: &str, pipeline: AutoFillPipeline)` to `AutoFillConfig` [device/mod.rs:266-354]: `self.pipelines.insert(server_id.to_string(), pipeline); self.legacy = None;`. Mirror the doc-comment style of `set_for`.
-  - [ ] Unit tests: upsert replaces the server's entry; clears parked legacy; a second server's entry is untouched; serialize→deserialize round-trips the full pipeline (filter/sources/unit/ordering/memory/budget/fallback) with camelCase + `ref`.
+- [x] **Daemon: `AutoFillConfig::set_pipeline` + unit tests** (AC: 1, 2)
+  - [x] Add `pub fn set_pipeline(&mut self, server_id: &str, pipeline: AutoFillPipeline)` to `AutoFillConfig` [device/mod.rs:266-354]: `self.pipelines.insert(server_id.to_string(), pipeline); self.legacy = None;`. Mirror the doc-comment style of `set_for`.
+  - [x] Unit tests: upsert replaces the server's entry; clears parked legacy; a second server's entry is untouched; serialize→deserialize round-trips the full pipeline (filter/sources/unit/ordering/memory/budget/fallback) with camelCase + `ref`.
 
-- [ ] **Daemon: `autoFill.setPipeline` RPC** (AC: 1, 2, 5, 17)
-  - [ ] Add `"autoFill.setPipeline" => handle_auto_fill_set_pipeline(&state, payload.params).await` to the dispatch table [rpc.rs:198-241].
-  - [ ] Implement `handle_auto_fill_set_pipeline`: parse `serverId` (trim; `ERR_INVALID_PARAMS` if blank) and `pipeline` (`serde_json::from_value::<AutoFillPipeline>`; `ERR_INVALID_PARAMS` on failure). Persist via `state.device_manager.update_manifest(|m| m.auto_fill.set_pipeline(&server_id, pipeline.clone()))`. Do **not** touch `auto_sync_on_connect`. Return `{ status: "success", serverId }`. Model error handling on `handle_sync_set_auto_fill` [rpc.rs:5995-6064].
-  - [ ] RPC test: call setPipeline, then `get_daemon_state`, assert `autoFill.pipelines[serverId]` equals what was sent.
+- [x] **Daemon: `autoFill.setPipeline` RPC** (AC: 1, 2, 5, 17)
+  - [x] Add `"autoFill.setPipeline" => handle_auto_fill_set_pipeline(&state, payload.params).await` to the dispatch table [rpc.rs:198-241].
+  - [x] Implement `handle_auto_fill_set_pipeline`: parse `serverId` (trim; `ERR_INVALID_PARAMS` if blank) and `pipeline` (`serde_json::from_value::<AutoFillPipeline>`; `ERR_INVALID_PARAMS` on failure). Persist via `state.device_manager.update_manifest(|m| m.auto_fill.set_pipeline(&server_id, pipeline.clone()))`. Do **not** touch `auto_sync_on_connect`. Return `{ status: "success", serverId }`. Model error handling on `handle_sync_set_auto_fill` [rpc.rs:5995-6064].
+  - [x] RPC test: call setPipeline, then `get_daemon_state`, assert `autoFill.pipelines[serverId]` equals what was sent.
 
-- [ ] **Daemon: expand `get_daemon_state.autoFill` with the per-server map** (AC: 3, 17)
-  - [ ] In `handle_get_daemon_state` [rpc.rs:1864-1869], add `"pipelines": d.auto_fill.pipelines` (serialize the map) to the `auto_fill` JSON object; keep `enabled`/`maxBytes` exactly as-is. For `None` device, keep `auto_fill = None` as today.
-  - [ ] Test: legacy device → `pipelines == {}`; device with two configured servers → both appear.
+- [x] **Daemon: expand `get_daemon_state.autoFill` with the per-server map** (AC: 3, 17)
+  - [x] In `handle_get_daemon_state` [rpc.rs:1864-1869], add `"pipelines": d.auto_fill.pipelines` (serialize the map) to the `auto_fill` JSON object; keep `enabled`/`maxBytes` exactly as-is. For `None` device, keep `auto_fill = None` as today.
+  - [x] Test: legacy device → `pipelines == {}`; device with two configured servers → both appear.
 
-- [ ] **Daemon: `basket.autoFill` per-server routing** (AC: 4, 17)
-  - [ ] Extend `handle_basket_auto_fill` [rpc.rs:5856-5914]: read optional `serverId` and optional inline `pipeline`. When `serverId` present, resolve the provider via `get_provider_by_server_id`, pick pipeline = inline ?? `manifest.auto_fill.pipeline_for(serverId)` ?? `AutoFillPipeline::default_legacy(maxBytes)`, and expand through the existing seam `expand_auto_fill_slot` / `run_auto_fill_provider` ([rpc.rs:3531-3542]) — do not duplicate ranking. When `serverId` absent, keep the current Jellyfin path verbatim. Map unknown serverId / provider failure to `ERR_CONNECTION_FAILED`.
-  - [ ] Test: serverId routes to the correct provider; absent serverId preserves legacy behavior; bad serverId errors cleanly.
+- [x] **Daemon: `basket.autoFill` per-server routing** (AC: 4, 17)
+  - [x] Extend `handle_basket_auto_fill` [rpc.rs:5856-5914]: read optional `serverId` and optional inline `pipeline`. When `serverId` present, resolve the provider via `get_provider_by_server_id`, pick pipeline = inline ?? `manifest.auto_fill.pipeline_for(serverId)` ?? `AutoFillPipeline::default_legacy(maxBytes)`, and expand through the existing seam `expand_auto_fill_slot` / `run_auto_fill_provider` ([rpc.rs:3531-3542]) — do not duplicate ranking. When `serverId` absent, keep the current Jellyfin path verbatim. Map unknown serverId / provider failure to `ERR_CONNECTION_FAILED`.
+  - [x] Test: serverId routes to the correct provider; absent serverId preserves legacy behavior; bad serverId errors cleanly.
 
-- [ ] **Frontend: generalize the slot model to per-server** (AC: 11, 19)
-  - [ ] In `state/basket.ts`: introduce `AUTO_FILL_SLOT_PREFIX = '__auto_fill_slot__'` and a helper `isAutoFillSlotId(id)` / `autoFillSlotId(serverId)`. Update `hydrateFromDaemon` strip [basket.ts:160-172], `getManualItemIds`/`getManualSizeBytes` [basket.ts:309-322], `hasMultipleServers`/`serverIdsInBasket` [basket.ts:73-90] to use the prefix predicate, not the exact legacy id. Keep the old exact id parsing as a recognized prefix so any persisted state strips cleanly.
-  - [ ] Slot card basket items carry `serverId` so they group/lock with the existing multi-server rendering.
+- [x] **Frontend: generalize the slot model to per-server** (AC: 11, 19)
+  - [x] In `state/basket.ts`: introduce `AUTO_FILL_SLOT_PREFIX = '__auto_fill_slot__'` and a helper `isAutoFillSlotId(id)` / `autoFillSlotId(serverId)`. Update `hydrateFromDaemon` strip [basket.ts:160-172], `getManualItemIds`/`getManualSizeBytes` [basket.ts:309-322], `hasMultipleServers`/`serverIdsInBasket` [basket.ts:73-90] to use the prefix predicate, not the exact legacy id. Keep the old exact id parsing as a recognized prefix so any persisted state strips cleanly.
+  - [x] Slot card basket items carry `serverId` so they group/lock with the existing multi-server rendering.
 
-- [ ] **Frontend: pipeline-builder configuration panel** (AC: 6, 7, 8, 9, 10, 15, 16)
-  - [ ] Build the panel scoped to `selectedServerPortableId`. Stage sections in fixed order (Filter → Sources → Unit → Ordering → Memory → Budget) using existing disclosure + Shoelace controls (reuse `device-folders-header` collapse pattern, `<sl-switch>`, `<sl-range>`, `<sl-select>`, chip/`<sl-input>` for genre/tag, icon-tile or segmented control for Unit).
-  - [ ] Default (collapsed) view = enable toggle + one size budget + (capability-gated) genre-exclude. "Advanced" disclosure reveals sources/shares, ordering reorder, fallback, duration target + headroom, cooldown/played-exclusion. Do NOT surface reserved Epic 13 fields (`stableCorePct`, `repeatTolerance`, `tiers`) as functional controls — preserve them verbatim if present in a loaded pipeline.
-  - [ ] Produce JSON matching the daemon serde shape exactly (`kind` camelCase, `ref` for playlist id, `share` 0..1, `playCount`/`dateCreated`/`targetDurationSecs`/`headroomBytes`/`maxBytes` camelCase). Default state emits the default-legacy equivalent.
-  - [ ] Gate Filter-genre + Playlist-source via `browse.listModes` for the selected server; always allow Library/Favorites/History.
-  - [ ] On confirm → `rpcCall('autoFill.setPipeline', { serverId, pipeline })`; on load / server-switch, hydrate from `get_daemon_state.autoFill.pipelines[serverId]`.
+- [x] **Frontend: pipeline-builder configuration panel** (AC: 6, 7, 8, 9, 10, 15, 16)
+  - [x] Build the panel scoped to `selectedServerPortableId`. Stage sections in fixed order (Filter → Sources → Unit → Ordering → Memory → Budget) using existing disclosure + Shoelace controls (reuse `device-folders-header` collapse pattern, `<sl-switch>`, `<sl-range>`, `<sl-select>`, chip/`<sl-input>` for genre/tag, icon-tile or segmented control for Unit).
+  - [x] Default (collapsed) view = enable toggle + one size budget + (capability-gated) genre-exclude. "Advanced" disclosure reveals sources/shares, ordering reorder, fallback, duration target + headroom, cooldown/played-exclusion. Do NOT surface reserved Epic 13 fields (`stableCorePct`, `repeatTolerance`, `tiers`) as functional controls — preserve them verbatim if present in a loaded pipeline.
+  - [x] Produce JSON matching the daemon serde shape exactly (`kind` camelCase, `ref` for playlist id, `share` 0..1, `playCount`/`dateCreated`/`targetDurationSecs`/`headroomBytes`/`maxBytes` camelCase). Default state emits the default-legacy equivalent.
+  - [x] Gate Filter-genre + Playlist-source via `browse.listModes` for the selected server; always allow Library/Favorites/History.
+  - [x] On confirm → `rpcCall('autoFill.setPipeline', { serverId, pipeline })`; on load / server-switch, hydrate from `get_daemon_state.autoFill.pipelines[serverId]`.
 
-- [ ] **Frontend: per-server slot cards + read-lock** (AC: 11, 12, 13, 15)
-  - [ ] Render one dashed-border slot card per server with an enabled pipeline (server icon+name badge + "~X GB / ~Y h" readout derived locally from budget + capacity). Non-selected servers' cards render read-locked via the existing locked pattern. No RPC on toggle/reconfigure.
-  - [ ] Remove any remaining per-track Auto badge / priority-reason rendering in the basket.
-  - [ ] Optional explicit preview affordance backed by `basket.autoFill`+serverId — debounced, never on every render.
+- [x] **Frontend: per-server slot cards + read-lock** (AC: 11, 12, 13, 15)
+  - [x] Render one dashed-border slot card per server with an enabled pipeline (server icon+name badge + "~X GB / ~Y h" readout derived locally from budget + capacity). Non-selected servers' cards render read-locked via the existing locked pattern. No RPC on toggle/reconfigure.
+  - [x] Remove any remaining per-track Auto badge / priority-reason rendering in the basket.
+  - [x] Optional explicit preview affordance backed by `basket.autoFill`+serverId — debounced, never on every render.
 
-- [ ] **Frontend: multi-slot sync payload** (AC: 14)
-  - [ ] In `handleStartSync()` [BasketSidebar.ts:1163-1177], replace the single `autoFill` object with an array of per-server descriptors (one per enabled slot): `{ serverId, maxBytes?, enabled: true, excludeItemIds: <that server's manual ids> }`. Keep the single-object form valid for the 1-slot case; verify the array form for ≥2 servers.
+- [x] **Frontend: multi-slot sync payload** (AC: 14)
+  - [x] In `handleStartSync()` [BasketSidebar.ts:1163-1177], replace the single `autoFill` object with an array of per-server descriptors (one per enabled slot): `{ serverId, maxBytes?, enabled: true, excludeItemIds: <that server's manual ids> }`. Keep the single-object form valid for the 1-slot case; verify the array form for ≥2 servers.
 
-- [ ] **i18n** (AC: 16)
-  - [ ] Add all new `basket.autofill.*` keys (stage labels, advanced labels, source kinds, ordering keys, budget labels, fallback hint, per-server slot readout) to en/fr/es/de in `hifimule-i18n/catalog.json`. Extend, don't rename existing keys.
+- [x] **i18n** (AC: 16)
+  - [x] Add all new `basket.autofill.*` keys (stage labels, advanced labels, source kinds, ordering keys, budget labels, fallback hint, per-server slot readout) to en/fr/es/de in `hifimule-i18n/catalog.json`. Extend, don't rename existing keys.
 
-- [ ] **Quality gates** (AC: 17, 18, 19)
-  - [ ] `rtk cargo test -p hifimule-daemon` (510 baseline + new) and `rtk cargo clippy -p hifimule-daemon --all-targets` clean.
-  - [ ] `cd hifimule-ui && npx tsc --noEmit` and `pnpm build` succeed.
-  - [ ] Manual: single-server legacy device unchanged; two servers each get an independent enabled slot; switching servers swaps the panel config; non-selected slot read-locked.
+- [x] **Quality gates** (AC: 17, 18, 19)
+  - [x] `rtk cargo test -p hifimule-daemon` (510 baseline + new) and `rtk cargo clippy -p hifimule-daemon --all-targets` clean.
+  - [x] `cd hifimule-ui && npx tsc --noEmit` and `pnpm build` succeed.
+  - [x] Manual: single-server legacy device unchanged; two servers each get an independent enabled slot; switching servers swaps the panel config; non-selected slot read-locked.
 
 ## Dev Notes
 
@@ -245,14 +245,53 @@ The basket already renders non-selected-server *items* read-locked (lock icon, n
 
 ### Agent Model Used
 
+claude-opus-4-8 (Dev Story workflow)
+
 ### Debug Log References
+
+- `rtk cargo test -p hifimule-daemon` → 519 passed (510 baseline + 9 new).
+- `rtk cargo clippy -p hifimule-daemon --all-targets` → no new warnings (only pre-existing vault/device_io/jellyfin dead-code advisories).
+- `hifimule-ui` `tsc --noEmit` (pinned TS 5.6.3) → clean; `npm run build` (`tsc && vite build`) → success.
+- Caught during dev: the `basket.autoFill` routed subsonic test initially returned 0 tracks — `run_auto_fill_provider` sizes by `bitrate × duration` (≈4.8 MB), not the reported `size`; raised the test budget. Also hardened the per-server slot mutators to NOT fire the basket `update` event, which would otherwise re-enter `refreshAndRender` (infinite loop) and race the in-flight `setPipeline` write.
 
 ### Completion Notes List
 
+**Daemon (vertical-slice seam):**
+- `AutoFillConfig::set_pipeline(server_id, pipeline)` — upsert that server's slot + clear parked legacy; never touches other servers. Unit tests cover upsert/replace, clears-legacy, other-server-untouched, and full camelCase+`ref` round-trip.
+- `autoFill.setPipeline` RPC (dispatch + `handle_auto_fill_set_pipeline`): validates `serverId` (trim/blank → `ERR_INVALID_PARAMS`) and `pipeline` (`ERR_INVALID_PARAMS` on malformed); single atomic `update_manifest`; returns `{ status, serverId }`; never reads/writes `auto_sync_on_connect`.
+- `get_daemon_state.autoFill` now also emits `pipelines: { <serverId>: <pipeline> }`; `enabled`/`maxBytes` retained unchanged; legacy device → `pipelines: {}`.
+- `basket.autoFill` per-server routing: optional `serverId` + inline `pipeline`; resolves provider via `get_provider_by_server_id_for`, pipeline precedence inline → persisted → `default_legacy`, expands through the shared `expand_auto_fill_slot` seam; unknown serverId → `ERR_CONNECTION_FAILED` (no panic). Absent `serverId` keeps the legacy Jellyfin path verbatim.
+- Legacy `sync.setAutoFill` left intact (not removed).
+
+**Frontend:**
+- Slot model generalized to a `__auto_fill_slot__:<serverId>` prefix (`autoFillSlotId`/`isAutoFillSlotId`); all strip/exclusion/grouping sites use the prefix predicate (legacy bare id still recognized). Added `getManualItemIdsForServer` for per-server exclude sets.
+- New `AutoFillPanel.ts` pipeline-builder dialog scoped to the selected server: default view (enable toggle + size budget + capability-gated genre exclude); Advanced disclosure (sources+shares, unit, ordering with up/down reorder, memory cooldown/played-exclusion, duration+headroom budget, fallback). Produces byte-exact daemon serde JSON (`ref`, lowercase-camelCase kinds, `playCount`/`dateCreated`, omit-when-unset). Reserved Epic-13 Memory fields preserved verbatim. Genre filter + Playlist source gated on `browse.listModes`. Default state emits the default-legacy equivalent → identical fill.
+- New `state/autoFill.ts` shared types/helpers (`defaultLegacyPipeline`, `normalizePipeline`, `serializePipeline`) mirroring the daemon contract.
+- Per-server slot cards: one dashed-border card per enabled server, server icon+name badge, locally-derived "~size / ~hours" readout (duration only when targeted; fallback hint when a fallback chain exists). Non-selected-server slots render read-locked via the existing locked pattern; no RPC fires on toggle/reconfigure (pipeline persists via `autoFill.setPipeline`).
+- Removed per-track Auto badge / priority-reason rendering (AC13); deleted the now-dead `renderPriorityLabel`.
+- Multi-slot sync payload: `handleStartSync` emits an array of per-server descriptors `{ serverId, maxBytes?, enabled: true, excludeItemIds }` targeting the shipped Story 12.3 `parse_auto_fill_descriptors` contract.
+- `autoSyncOnConnect` decoupled: persisted via `device_set_auto_sync_on_connect` (never via `autoFill.setPipeline`).
+- i18n: 42 new `basket.autofill.*` keys added to all four catalog languages (en/fr/es/de) — verified at 51 keys per language (full parity).
+
+**Deliberate simplifications (per Dev Notes / Open Questions):** ordering reorder uses up/down icon-buttons (existing codebase pattern) rather than a drag library; Unit (track/album/artist) is surfaced as an Advanced control. de parity included.
+
+**Manual QA note:** behavior validated via the full daemon suite, the routed-provider RPC test, and the typecheck/build; live two-physical-device GUI verification (panel swap on server switch, two coexisting slots, non-selected read-lock) was not run in this environment and is recommended during review.
+
 ### File List
+
+- hifimule-daemon/src/device/mod.rs (AutoFillConfig::set_pipeline)
+- hifimule-daemon/src/device/tests.rs (set_pipeline unit tests)
+- hifimule-daemon/src/rpc.rs (dispatch + handle_auto_fill_set_pipeline; get_daemon_state pipelines map; basket.autoFill per-server routing; RPC tests)
+- hifimule-ui/src/state/basket.ts (per-server slot prefix model + slot mutators + getManualItemIdsForServer)
+- hifimule-ui/src/state/autoFill.ts (new — pipeline types + helpers)
+- hifimule-ui/src/components/AutoFillPanel.ts (new — pipeline-builder dialog)
+- hifimule-ui/src/components/BasketSidebar.ts (per-server pipelines state, hydration, slot cards, configure affordance, multi-slot sync payload, auto-sync decoupling, badge removal)
+- hifimule-ui/src/styles.css (panel + per-server slot card styles)
+- hifimule-i18n/catalog.json (new basket.autofill.* keys in en/fr/es/de)
 
 ## Change Log
 
 | Date       | Change                                                                 |
 |------------|------------------------------------------------------------------------|
 | 2026-06-14 | Story drafted (ready-for-dev). Scoped as a vertical slice per product decision: daemon contract (`autoFill.setPipeline`, per-server `get_daemon_state`, `basket.autoFill`+serverId) + pipeline-builder UI + per-server slot cards + multi-slot sync payload + i18n. |
+| 2026-06-14 | Dev complete. Daemon contract + AutoFillPanel pipeline-builder + per-server slot cards + multi-slot sync payload + i18n (en/fr/es/de). 519 daemon tests pass (9 new); clippy clean; frontend tsc + build green. Status → review. |
