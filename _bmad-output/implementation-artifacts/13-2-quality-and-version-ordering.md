@@ -4,7 +4,7 @@ baseline_commit: 6b9a90dc4407c7d46bd013f42f0d52964d64cdaf
 
 # Story 13.2: Quality & Version Ordering
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -94,6 +94,19 @@ This story extends the **pure-function pipeline engine** built in Epic 12 with t
 
 - [x] **Full verification** (AC: 12)
   - [x] `rtk cargo test -p hifimule-daemon` (557 pass), `rtk cargo clippy -p hifimule-daemon --all-targets` (no new warnings in touched modules), `rtk cargo test -p hifimule-i18n` (6 pass), frontend `rtk npx tsc --noEmit` (clean) + `rtk npm run build` (green).
+
+### Review Findings
+
+_Code review 2026-06-14 (baseline 6b9a90d → HEAD 20cb42c). Layers: Blind Hunter, Edge Case Hunter, Acceptance Auditor. 2 decision-needed (both resolved → patch), 3 patch — **all 3 applied & verified** (83 auto_fill tests green, clippy clean), 5 deferred, 13 dismissed as noise/by-design. All 12 ACs verified satisfied by the Acceptance Auditor (no Critical/High). Status → done._
+
+- [x] [Review][Patch] Tighten merge-key stripping to word-anchored markers (Decision 1 → option 1) [hifimule-daemon/src/auto_fill/pipeline.rs] — FIXED: `segment_has_marker` now word-anchors every marker (incl. remix/acoustic/re-mix) so a marker substring embedded in a larger word no longer strips a parenthetical; `detect_version_traits` keeps its looser substring tagging. Test `strip_version_markers_word_anchors_remix_and_acoustic`.
+- [x] [Review][Patch] Make best-version collapse budget-aware (Decision 2 → option 2) [hifimule-daemon/src/auto_fill/pipeline.rs] — FIXED: new `fits_ceiling` helper + a budget-fit tier (0) in `best_version_cmp`; `collapse_best_version`/`run_pipeline` thread the byte ceiling so a winner that can never fit yields to a fitting lesser version. No-op for unbounded budgets. Test `best_version_falls_back_to_a_fitting_version_over_budget`.
+- [x] [Review][Patch] `strip_version_markers` strips only the last ` - ` dash-suffix once [hifimule-daemon/src/auto_fill/pipeline.rs] — FIXED: looped the trailing dash-suffix strip (stops at first non-marker tail). Test `strip_version_markers_strips_stacked_dash_suffixes`.
+- [x] [Review][Defer] Per-comparison recomputation of `detect_version_traits` [hifimule-daemon/src/auto_fill/pipeline.rs:777-786,858-881] — deferred, performance-only (allocations in O(n log n) sort path; fine at typical pool sizes).
+- [x] [Review][Defer] `collapse_best_version` clones the full `PipelineInput` even when nothing collapses [hifimule-daemon/src/auto_fill/pipeline.rs:909] — deferred, performance-only.
+- [x] [Review][Defer] Plural/gerund remaster forms not detected [hifimule-daemon/src/auto_fill/pipeline.rs:754] — deferred; `"Remasters"`/`"remastering"` miss `has_word("remaster")`, inconsistent with remix substring matching. Minor missed-detection, not over-merge.
+- [x] [Review][Defer] Non-ASCII case folding not handled [hifimule-daemon/src/auto_fill/pipeline.rs:742,793] — deferred; ASCII-only lowercase means accented duplicates/markers ("CAFÉ" vs "café") won't fold. No spec requirement for unicode.
+- [x] [Review][Defer] Nested/unbalanced bracket groups leave a stray bracket char [hifimule-daemon/src/auto_fill/pipeline.rs:802-821] — deferred; `"(feat. X (Live))"` strips to a residual `")"`. Rare; proper nested matching is non-trivial.
 
 ## Dev Notes
 

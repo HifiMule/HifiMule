@@ -359,19 +359,20 @@ impl PipelineInput {
 /// Returns a deterministic, budget-bounded, dedup'd `Vec<AutoFillItem>` produced entirely by
 /// synchronous pure functions — no network, no `async`, no `MediaProvider`, no clock/RNG.
 pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<AutoFillItem> {
+    let ceiling = budget_ceiling(&pipeline.budget);
+
     // Best-version collapse (#11) is a pre-pass over the materialized pools: it only *removes*
     // losing-version candidates, so every downstream budget/dedup guarantee is untouched. Done
-    // before any unit grouping/selection so a loser never occupies budget. Default (`false`) keeps
+    // before any unit grouping/selection so a loser never occupies budget. The `ceiling` lets the
+    // winner-selection prefer a version that can actually fit (Decision 2). Default (`false`) keeps
     // the borrowed input as-is — zero clone, zero behavior change.
     let collapsed;
     let input: &PipelineInput = if pipeline.quality.best_version {
-        collapsed = collapse_best_version(input, pipeline);
+        collapsed = collapse_best_version(input, pipeline, ceiling);
         &collapsed
     } else {
         input
     };
-
-    let ceiling = budget_ceiling(&pipeline.budget);
 
     // A one-stage pipeline with no `sources` still draws from the Library source so that the
     // legacy mapping (ordering + budget only) works.
@@ -719,19 +720,21 @@ fn has_word(hay: &str, needle: &str) -> bool {
     false
 }
 
-/// Whether a (lowercased) text segment carries any recognized version marker. Shared by
-/// [`detect_version_traits`] and [`strip_version_markers`] so detection and stripping agree.
-/// `remix`/`acoustic` use substring matching (`remix` is safe per the false-positive analysis;
-/// `mix` alone is intentionally **not** a marker); the rest are word-anchored.
+/// Whether a (lowercased) text segment carries any recognized version marker. Drives the
+/// merge-key path ([`strip_bracketed_markers`]/[`strip_version_markers`]), so **every** marker is
+/// word-anchored here (Story 13.2 review — Decision 1): stripping must be conservative — `acoustic`
+/// inside an unrelated word (or `remix`/`re-mix` embedded in `pre-mixed`, `remixology`, …) must
+/// **not** strip a parenthetical and over-merge two distinct songs. `detect_version_traits` keeps
+/// its own (looser) substring matching for tagging, where a false positive is harmless.
 fn segment_has_marker(low: &str) -> bool {
     has_word(low, "live")
         || has_word(low, "unplugged")
         || has_word(low, "remaster")
         || has_word(low, "remastered")
-        || low.contains("remix")
+        || has_word(low, "remix")
         || has_word(low, "rmx")
-        || low.contains("re-mix")
-        || low.contains("acoustic")
+        || has_word(low, "re-mix")
+        || has_word(low, "acoustic")
         || has_word(low, "demo")
 }
 
@@ -828,7 +831,10 @@ fn strip_bracketed_markers(s: &str, open: char, close: char) -> String {
 fn strip_version_markers(title: &str) -> String {
     let mut s = strip_bracketed_markers(title, '(', ')');
     s = strip_bracketed_markers(&s, '[', ']');
-    if let Some(idx) = s.rfind(" - ")
+    // Strip *stacked* trailing ` - <marker>` suffixes, not just the last one, so a multi-suffix
+    // title (`Song - Live - 2011 Remaster`) collapses to the same base as a clean `Song` (Story
+    // 13.2 review — Patch). Stops at the first non-marker tail, leaving distinct songs distinct.
+    while let Some(idx) = s.rfind(" - ")
         && segment_has_marker(&s[idx + 3..].to_ascii_lowercase())
     {
         s.truncate(idx);
@@ -852,11 +858,29 @@ fn logical_key(song: &Song) -> Option<(String, String)> {
     Some((artist, base))
 }
 
-/// Deterministic best-version comparator (Story 13.2 #11, AC 6): version-preference rank → quality
-/// rank → the full `ordering` → `song.id` lexicographic (the ultimate tiebreak that makes the winner
-/// independent of pool iteration order). Returns `Less` when `a` is the better version.
-fn best_version_cmp(a: &Song, b: &Song, pipeline: &AutoFillPipeline) -> std::cmp::Ordering {
+/// Whether a candidate could fit under the global byte ceiling at all — its estimated size is known
+/// and ≤ `ceiling`. An unbounded ceiling (`u64::MAX`) fits everything (preserving pre-13.2 behavior
+/// when there is no byte budget); an unknown/zero size never fits a bounded budget (the selector
+/// skips zero/unknown-size tracks anyway). Lets [`best_version_cmp`] avoid electing a winner that
+/// can never be selected.
+fn fits_ceiling(song: &Song, ceiling: u64) -> bool {
+    ceiling == u64::MAX || estimated_size(song).is_some_and(|sz| sz <= ceiling)
+}
+
+/// Deterministic best-version comparator (Story 13.2 #11, AC 6): budget fit → version-preference
+/// rank → quality rank → the full `ordering` → `song.id` lexicographic (the ultimate tiebreak that
+/// makes the winner independent of pool iteration order). The budget-fit tier (Story 13.2 review —
+/// Decision 2) prefers a version that can fit the global byte ceiling over one that never can, so
+/// best-version degrades to a smaller copy instead of dropping the song; it is a no-op for an
+/// unbounded ceiling. Returns `Less` when `a` is the better version.
+fn best_version_cmp(a: &Song, b: &Song, pipeline: &AutoFillPipeline, ceiling: u64) -> std::cmp::Ordering {
     use std::cmp::Ordering;
+    // (0) budget fit: a version that can fit the ceiling beats one that never can (Decision 2).
+    match (fits_ceiling(a, ceiling), fits_ceiling(b, ceiling)) {
+        (true, false) => return Ordering::Less,
+        (false, true) => return Ordering::Greater,
+        _ => {}
+    }
     let prefs = &pipeline.quality.version_preference;
     // (1) version preference rank (lower = more preferred)
     if !prefs.is_empty() {
@@ -886,7 +910,11 @@ fn best_version_cmp(a: &Song, b: &Song, pipeline: &AutoFillPipeline) -> std::cmp
 /// candidate whose logical key resolves to a *different* winner. Candidates with no logical key
 /// (`None` — missing artist / empty base title) are always kept. The winner survives wherever it
 /// appeared; the Selector's dedup-by-`song.id` then collapses it to a single emission.
-fn collapse_best_version(input: &PipelineInput, pipeline: &AutoFillPipeline) -> PipelineInput {
+fn collapse_best_version(
+    input: &PipelineInput,
+    pipeline: &AutoFillPipeline,
+    ceiling: u64,
+) -> PipelineInput {
     // Pick the winning Song per logical key. Iteration order over pools/candidates is irrelevant:
     // `best_version_cmp` is a total order (ties broken by id), so the minimum is deterministic.
     let mut winners: HashMap<(String, String), Song> = HashMap::new();
@@ -897,7 +925,7 @@ fn collapse_best_version(input: &PipelineInput, pipeline: &AutoFillPipeline) -> 
             };
             match winners.get(&key) {
                 Some(current)
-                    if best_version_cmp(&cand.song, current, pipeline)
+                    if best_version_cmp(&cand.song, current, pipeline, ceiling)
                         != std::cmp::Ordering::Less => {}
                 _ => {
                     winners.insert(key, cand.song.clone());
@@ -2433,6 +2461,70 @@ mod tests {
         assert_eq!(
             normalize_ws(&strip_version_markers("My Song (feat. Guest)")),
             "my song (feat. guest)",
+        );
+    }
+
+    #[test]
+    fn strip_version_markers_word_anchors_remix_and_acoustic() {
+        // A marker substring embedded in a larger word must NOT strip the parenthetical, so two
+        // genuinely distinct songs don't over-merge (Story 13.2 review — Decision 1).
+        assert_eq!(
+            normalize_ws(&strip_version_markers("My Song (Played Acoustically)")),
+            "my song (played acoustically)",
+        );
+        assert_eq!(
+            normalize_ws(&strip_version_markers("My Song (Premixed Tape)")),
+            "my song (premixed tape)",
+        );
+        // A real standalone marker word still strips.
+        assert_eq!(normalize_ws(&strip_version_markers("My Song (Remix)")), "my song");
+        assert_eq!(normalize_ws(&strip_version_markers("My Song (Acoustic)")), "my song");
+    }
+
+    #[test]
+    fn strip_version_markers_strips_stacked_dash_suffixes() {
+        // Multiple trailing ` - <marker>` suffixes all strip, collapsing to the clean base (Story
+        // 13.2 review — Patch).
+        assert_eq!(
+            normalize_ws(&strip_version_markers("My Song - Live - 2011 Remaster")),
+            "my song",
+        );
+        // Stops at the first non-marker tail (distinct songs stay distinct).
+        assert_eq!(
+            normalize_ws(&strip_version_markers("My Song - Part Two - Live")),
+            "my song - part two",
+        );
+    }
+
+    #[test]
+    fn best_version_falls_back_to_a_fitting_version_over_budget() {
+        // The quality winner (a huge FLAC) can't fit the ceiling; best-version keeps the smaller
+        // lossy cut so the song still lands rather than vanishing (Story 13.2 review — Decision 2).
+        let mut flac = song_meta("flac-studio", "My Song", "The Band", "Album", "flac", 900);
+        flac.size_bytes = Some(50_000_000); // 50 MB — exceeds the ceiling, can never be selected
+        let mut live = song_meta("mp3-live", "My Song (Live)", "The Band", "Live Album", "mp3", 320);
+        live.size_bytes = Some(1_000_000); // 1 MB — fits
+        let input = PipelineInput::default().with_pool(
+            SourceKind::Library,
+            None,
+            vec![cand(flac), cand(live)],
+        );
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            quality: QualityStage {
+                best_version: true,
+                ..Default::default()
+            },
+            budget: BudgetStage {
+                max_bytes: Some(2_000_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            ids(&run_pipeline(&input, &pipeline)),
+            vec!["mp3-live"],
+            "a winner that can't fit the ceiling yields to a fitting lesser version",
         );
     }
 

@@ -3,6 +3,14 @@
 Status: open
 Last updated: 2026-06-14
 
+## Deferred from: code review of 13-2-quality-and-version-ordering (2026-06-14)
+
+- **Per-comparison recomputation of `detect_version_traits`** [`hifimule-daemon/src/auto_fill/pipeline.rs:777-786,858-881`] — `version_rank` (and `best_version_cmp`) call `detect_version_traits`, which allocates a lowercased `title+album` string and runs every `has_word` scan, on each of the O(n log n) comparisons inside `sort_by`. Pure-performance; fine at typical pool sizes, but per-song traits could be precomputed once.
+- **`collapse_best_version` clones the full `PipelineInput` even when nothing collapses** [`hifimule-daemon/src/auto_fill/pipeline.rs:909`] — the enabled-but-no-duplicates path unconditionally deep-clones all pools, contrary to the "zero clone" framing in the surrounding comments. Performance-only.
+- **Plural/gerund remaster forms not detected** [`hifimule-daemon/src/auto_fill/pipeline.rs:754`] — `"Remasters"`/`"remastering"` fail `has_word("remaster")` (trailing alnum breaks the word boundary), so they classify as `Studio`. Inconsistent with `remix`'s substring tolerance. Missed-detection only — never causes over-merge.
+- **Non-ASCII case folding not handled** [`hifimule-daemon/src/auto_fill/pipeline.rs:742,793`] — `to_ascii_lowercase`/`normalize_ws` leave non-ASCII letters un-folded, so accented duplicates ("CAFÉ" vs "café") never collapse and accented markers go undetected. No spec requirement for unicode.
+- **Nested/unbalanced bracket groups leave a stray bracket char** [`hifimule-daemon/src/auto_fill/pipeline.rs:802-821`] — `strip_bracketed_markers` matches the first close after an open, so `"(feat. X (Live))"` strips to a residual `")"` in the base title, weakening the logical key. Rare; proper nested matching is non-trivial.
+
 ## Deferred from: code review of 12-5-budget-headroom-duration-fallback-chain (2026-06-14)
 
 - **Headroom ≥ capacity produces a silent 0-byte ceiling and empty fill** [`hifimule-daemon/src/auto_fill/fetch.rs:132-141`] — when configured `headroom_bytes ≥ params.max_fill_bytes`, `cap_after_reserve` saturates to 0, the ceiling becomes 0, and the fill is empty. Arithmetically correct per FR52 ("never exceed capacity − reserve") and overflow-safe, but indistinguishable from a genuine zero-capacity slot and emitted with no log. Observability nicety (e.g. `daemon_log!` when `cap_after_reserve == 0` while `headroom > 0`), not a correctness defect.
