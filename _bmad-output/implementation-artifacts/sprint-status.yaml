@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-06-12  # Epic 9 reopened with Story 9.11 (list view multi-selection) via sprint-change-proposal-2026-06-12
+last_updated: 2026-06-14  # Epics 12 & 13 added via sprint-change-proposal-2026-06-14-configurable-auto-fill
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -155,3 +155,22 @@ development_status:
   11-8-playlist-rename-and-delete: done
   11-9-playlist-reorder-provider-and-rpc: done
   11-10-curation-view-complete-list-order-numbers-and-reorder: done
+
+  # Epic 12 — Configurable Auto-Fill Pipeline & Multi-Server Auto-Fill (sprint-change-proposal-2026-06-14-configurable-auto-fill)
+  epic-12: backlog
+  12-1-autofill-pipeline-domain-model-and-engine: backlog
+  12-2-autofill-manifest-schema-and-db-history-scaffolding: backlog
+  12-3-multi-slot-sync-time-expansion: backlog
+  12-4-playlist-source-tag-filter-and-shares: backlog
+  12-5-budget-headroom-duration-fallback-chain: backlog
+  12-6-autofill-configuration-ui-and-multi-server-slots: backlog
+  12-7-autofill-rpc-state-contract-and-i18n: backlog
+
+  # Epic 13 — Advanced Auto-Fill Strategies (sprint-change-proposal-2026-06-14-configurable-auto-fill)
+  epic-13: backlog
+  13-1-memory-and-rotation-strategies: backlog
+  13-2-quality-and-version-ordering: backlog
+  13-3-curation-and-discovery-sources: backlog
+  13-4-delight-rarity-draws-and-pity-timer: backlog
+  13-5-context-and-encoding-from-goals: backlog
+  13-6-advanced-units-and-promotion: backlog

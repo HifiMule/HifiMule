@@ -101,7 +101,7 @@ FR24: Epic 2 - Startup Splash Screen with Connection Status
 FR25: Epic 3 - Music-Only Library Filtering (Story 3.5)
 FR27: Epic 6 - Platform-Native Installer Bundling
 FR28: Epic 6 - CI/CD Cross-Platform Build Pipeline
-FR29: Epic 3 - Auto-Fill Virtual Slot (Story 3.8)
+FR29: Epic 3 - Auto-Fill Virtual Slot (Story 3.8); generalized to configurable pipeline + multi-server in Epic 12
 FR30: Epic 2 - Auto-Sync on Known Device Detection
 FR31: Epic 4 - Transcoding Handshake (Story 4.8)
 FR32: Epic 4 - Transcoding Profile RPC (Story 4.8)
@@ -122,6 +122,12 @@ FR45: Epic 2 - Server Identity Name and Icon (Story 2.12)
 FR46: Epic 2 - Portable Server Identity (Story 2.13)
 FR47: Epic 9 - List View Multi-Selection & Bulk Actions (Story 9.11)
 FR48: Epic 9 - Track Multi-Selection & Bulk Actions (Story 9.12)
+FR49: Epic 12 - Configurable Auto-Fill Pipeline (Stories 12.1–12.7)
+FR50: Epic 12 - Source × Strategy Separation / Playlist & Tag Sources (Stories 12.1, 12.4)
+FR51: Epic 12 - Per-Server Auto-Fill / Multi-Slot (Stories 12.2, 12.3, 12.6)
+FR52: Epic 12 - Auto-Fill Budget System (Story 12.5)
+FR53: Epic 13 - Auto-Fill Memory / Rotation Strategies (Story 13.1)
+FR54: Epic 13 - Auto-Fill Quality / Discovery / Delight (Stories 13.2–13.6)
 
 ## Epic List
 
@@ -2992,3 +2998,108 @@ So that I can fine-tune track sequence directly in the editor.
 - `PlaylistCurationView.ts`: allow `selectedArtist = null` ("All"); precompute id→index map for #N; ↑/↓ swap within `getTracksForPanel()` neighbors against full `this.tracks`; `isReordering` guard; reuse `#curation-error` + optimistic-update pattern from `doRemove`.
 - New i18n keys: `playlist.curation.all_artists`, `playlist.curation.all_albums`, `playlist.curation.move_up`, `playlist.curation.move_down` (× en/fr/es).
 - New rpc.ts helper or direct `rpcCall('playlist.reorder', …)`.
+
+## Epic 12: Configurable Auto-Fill Pipeline & Multi-Server Auto-Fill
+
+Replace the fixed single-server auto-fill algorithm (Stories 3.6/3.8) with a configurable, composable selection pipeline (Source × Strategy), and let auto-fill be defined independently per media server. This epic delivers the foundation plus MVP strategies (playlist/tag sources, budget). It builds on the shipped multi-server foundation (Epics 2/8 — `ServerManager`, portable `server_id`, `get_provider_by_server_id`) and the provider capability contract (Epic 9). MVP scope is unaffected — this is an additive Growth feature. Source: [sprint-change-proposal-2026-06-14-configurable-auto-fill.md](sprint-change-proposal-2026-06-14-configurable-auto-fill.md), from brainstorming-session-2026-06-12-1.
+
+**Unifying model:** an auto-fill definition is one pipeline config per `(device, portable serverId)` pair. Pipeline **configuration** lives in the device manifest (portable); transient **runtime state** (cooldown windows, stable-core, pity-timer) lives in the daemon DB keyed by device+server. Today's hardcoded algorithm becomes the default single-Ordering-stage pipeline, so existing devices behave unchanged with zero migration.
+
+### Story 12.1: Auto-Fill Pipeline Domain Model & Pure-Function Engine
+
+As a developer,
+I want the auto-fill pipeline expressed as pure functions over a `MediaProvider` (filter → source → unit → order → dedupe-vs-memory → budget),
+So that selection logic is testable without UI or network and validated against real user needs before any UI is built.
+
+**Acceptance Criteria (to be expanded by create-story):**
+- `run_pipeline` implemented as composable pure functions over a provider's library.
+- Model validated against the 4 brainstorm personas (Claire/Antoine/Léo/Nadia) with no special cases ("four personas, one model").
+- Full unit-test coverage; no UI changes.
+
+### Story 12.2: Auto-Fill Manifest Schema & DB History Scaffolding
+
+As a developer,
+I want `manifest.autoFill` to become `Map<serverId, AutoFillPipeline>` and a daemon DB `autofill_history` table to exist,
+So that per-server pipeline config persists portably and strategies have a place to store runtime state.
+
+**Acceptance Criteria (to be expanded by create-story):**
+- Manifest `autoFill` becomes a per-server map; legacy `{ enabled, maxBytes }` is read as the default pipeline (backward compatible, migration-free).
+- New daemon DB `autofill_history` table (schema only; consumed by Epic 13).
+
+### Story 12.3: Multi-Slot Sync-Time Expansion & Lift Single-Slot Limit
+
+As a multi-server user,
+I want each server's auto-fill slot to expand against its own server at sync time,
+So that I can define auto-fill for several servers at once instead of one overwriting another.
+
+**Acceptance Criteria (to be expanded by create-story):**
+- `sync.start` accepts an array of per-server auto-fill descriptors; daemon runs `run_pipeline` per slot via `get_provider_by_server_id`.
+- Manual items win dedup; single global `run_auto_fill` is replaced.
+- Multiple slots (one per server) coexist; enabling auto-fill on one server never removes another's slot.
+
+### Story 12.4: PlaylistSource, Tag/Genre Filter & Per-Source Shares
+
+As a curator,
+I want to draw fills from specific playlists and pre-filter by genre/tag, blending multiple sources by share,
+So that I can express "70% from 2 playlists, 30% library remainder, no Christmas music."
+
+**Acceptance Criteria (to be expanded by create-story):**
+- First-class `PlaylistSource` and Filter (tag/genre include-exclude) stages.
+- Per-source share blending; capability-gated on genre/playlist enumeration.
+
+### Story 12.5: Budget Stage — Headroom Reserve, Duration Target & Fallback Chain
+
+As a user who trusts the tool with my whole device,
+I want size/duration budgets with a headroom reserve and a guaranteed full fill,
+So that no fill exceeds capacity minus reserve and the target is always reached.
+
+**Acceptance Criteria (to be expanded by create-story):**
+- Headroom reserve; duration-as-budget (bytes derived); terminal fallback chain guaranteeing the target.
+
+### Story 12.6: Auto-Fill Configuration UI & Coexisting Multi-Server Slot Cards
+
+As a user,
+I want a pipeline-builder configuration surface and a separate auto-fill slot card per server,
+So that I can configure and see each server's fill independently in one basket.
+
+**Acceptance Criteria (to be expanded by create-story):**
+- Pipeline-builder panel (stage sections + Advanced disclosure + Default simple state) replacing the toggle+slider.
+- One slot card per server; non-selected-server slots render read-locked per the existing pattern.
+
+### Story 12.7: Auto-Fill RPC/State Contract & i18n
+
+As a developer,
+I want the daemon contract and UI state wired for per-server pipelines,
+So that config persists and is exposed consistently.
+
+**Acceptance Criteria (to be expanded by create-story):**
+- `autoFill.setPipeline`, `basket.autoFill` (+serverId), `get_daemon_state` exposes per-server configs.
+- `autoSyncOnConnect` stays server-independent; en/fr/es i18n keys added.
+
+## Epic 13: Advanced Auto-Fill Strategies
+
+The delight and depth layers from the brainstorm catalog, built on the Epic 12 pipeline and DB-history scaffolding. Each strategy is an additive Picker/modifier; every smart strategy is offered alongside its cheap playlist/tag-based equivalent (ambition tiers). Source: [sprint-change-proposal-2026-06-14-configurable-auto-fill.md](sprint-change-proposal-2026-06-14-configurable-auto-fill.md). Consciously cut (not deferred): listener profiles (#22), smart refill triggers, skip-based negative feedback.
+
+### Story 13.1: Memory & Rotation Strategies
+
+Sync cooldown (#4), played-track exclusion (#5), stable-core + delta (#24), rotation tiers / playlist-backed tiers (#25/#26), repeat-tolerance dial (#23). DB-history backed.
+
+### Story 13.2: Quality & Version Ordering
+
+Best-version resolution (#11), quality-ordering modifier (#13), version preference (#34).
+
+### Story 13.3: Curation & Discovery Sources
+
+Deep-cuts excavator (#14), acclaimed-classics (#16), community-rating fallback (#15), musical-memories cheap version (#31).
+
+### Story 13.4: Delight — Rarity Draws & Pity Timer
+
+Weighted rarity draws (#29), pity timer (#30).
+
+### Story 13.5: Context & Encoding-From-Goals
+
+Time-of-day (#3), energy-curve (#17), seasonal drift cheap version (#32); encoding computed from size/duration goals (#20, depends on transcode-on-sync).
+
+### Story 13.6: Advanced Units & Promotion
+
+Artist Spotlight (#33), album/track space ratio (#8), affinity-triggered album promotion (#9), coherence-optimized fill (#27).
