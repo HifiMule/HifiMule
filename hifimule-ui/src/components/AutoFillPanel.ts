@@ -50,11 +50,35 @@ export class AutoFillPanel {
     private advancedOpen = false;
     private readonly genresSupported: boolean;
     private readonly playlistsSupported: boolean;
+    private readonly initialMaxBytes?: number;
+    private readonly initialBudgetGbInput: string;
+    private readonly initialTargetDurationSecs?: number;
+    private readonly initialDurationHoursInput: string;
+    private readonly initialHeadroomBytes?: number;
+    private readonly initialHeadroomGbInput: string;
+    private budgetGbInput: string;
+    private excludeGenresInput: string;
+    private cooldownInput: string;
+    private durationHoursInput: string;
+    private headroomGbInput: string;
 
     constructor(private opts: AutoFillPanelOptions) {
         this.pipeline = normalizePipeline(opts.pipeline);
         this.genresSupported = opts.modes.includes('genres');
         this.playlistsSupported = opts.modes.includes('playlists');
+        this.initialMaxBytes = this.pipeline.budget.maxBytes;
+        this.initialBudgetGbInput = this.bytesToGbInput(this.initialMaxBytes);
+        this.initialTargetDurationSecs = this.pipeline.budget.targetDurationSecs;
+        this.initialDurationHoursInput = this.secondsToHoursInput(this.initialTargetDurationSecs);
+        this.initialHeadroomBytes = this.pipeline.budget.headroomBytes;
+        this.initialHeadroomGbInput = this.bytesToGbInput(this.initialHeadroomBytes);
+        this.budgetGbInput = this.initialBudgetGbInput;
+        this.excludeGenresInput = this.pipeline.filter.excludeGenres.join(', ');
+        this.cooldownInput = typeof this.pipeline.memory.cooldownWeeks === 'number'
+            ? String(this.pipeline.memory.cooldownWeeks)
+            : '';
+        this.durationHoursInput = this.initialDurationHoursInput;
+        this.headroomGbInput = this.initialHeadroomGbInput;
     }
 
     public open(): void {
@@ -78,10 +102,6 @@ export class AutoFillPanel {
     private renderBody(): void {
         if (!this.dialog) return;
         const p = this.pipeline;
-        const budgetGb = typeof p.budget.maxBytes === 'number'
-            ? Math.round(p.budget.maxBytes / GB)
-            : '';
-        const excludeGenres = p.filter.excludeGenres.join(', ');
 
         this.dialog.innerHTML = `
             <div class="auto-fill-panel">
@@ -90,16 +110,7 @@ export class AutoFillPanel {
                         ${t('basket.autofill.enable')}
                     </sl-switch>
                 </div>
-                <sl-input id="af-budget-gb" type="number" min="0" step="1" clearable
-                    label="${t('basket.autofill.size_budget')}"
-                    help-text="${t('basket.autofill.size_budget_hint')}"
-                    value="${budgetGb}"></sl-input>
-                ${this.genresSupported ? `
-                    <sl-input id="af-exclude-genres" clearable
-                        label="${t('basket.autofill.exclude_genres')}"
-                        help-text="${t('basket.autofill.genres_hint')}"
-                        value="${escapeHtml(excludeGenres)}"></sl-input>
-                ` : ''}
+                ${this.renderFilterStage()}
 
                 <div class="auto-fill-advanced">
                     <div id="af-advanced-header" class="device-folders-header" role="button" tabindex="0"
@@ -109,6 +120,7 @@ export class AutoFillPanel {
                     </div>
                     ${this.advancedOpen ? this.renderAdvanced() : ''}
                 </div>
+                ${this.renderBudgetStage()}
             </div>
             <sl-button slot="footer" variant="default" id="af-cancel">${t('basket.actions.cancel')}</sl-button>
             <sl-button slot="footer" variant="primary" id="af-save">
@@ -119,43 +131,74 @@ export class AutoFillPanel {
         this.bindEvents();
     }
 
+    private renderStage(label: string, body: string): string {
+        return `
+            <details class="auto-fill-stage" open>
+                <summary class="auto-fill-stage-label">${label}</summary>
+                <div class="auto-fill-stage-body">${body}</div>
+            </details>
+        `;
+    }
+
+    private renderFilterStage(): string {
+        if (!this.genresSupported) return '';
+        return this.renderStage(t('basket.autofill.filter'), `
+            <sl-input id="af-exclude-genres" clearable
+                label="${t('basket.autofill.exclude_genres')}"
+                help-text="${t('basket.autofill.genres_hint')}"
+                value="${escapeHtml(this.excludeGenresInput)}"></sl-input>
+        `);
+    }
+
+    private renderBudgetStage(): string {
+        return this.renderStage(t('basket.autofill.budget_advanced'), `
+            <sl-input id="af-budget-gb" type="number" min="0" step="any" clearable
+                label="${t('basket.autofill.size_budget')}"
+                help-text="${t('basket.autofill.size_budget_hint')}"
+                value="${escapeHtml(this.budgetGbInput)}"></sl-input>
+            ${this.advancedOpen ? `
+                <sl-input id="af-duration-hours" type="number" min="0" step="0.5" clearable
+                    label="${t('basket.autofill.target_duration_hours')}"
+                    value="${escapeHtml(this.durationHoursInput)}"></sl-input>
+                <sl-input id="af-headroom-gb" type="number" min="0" step="any" clearable
+                    label="${t('basket.autofill.headroom_gb')}"
+                    value="${escapeHtml(this.headroomGbInput)}"></sl-input>
+            ` : ''}
+        `);
+    }
+
     private renderAdvanced(): string {
         return `
             <div class="auto-fill-advanced-body">
-                ${this.renderSourcesSection(t('basket.autofill.sources'), this.pipeline.sources, 'source')}
-                <div class="auto-fill-stage">
-                    <label class="auto-fill-stage-label">${t('basket.autofill.unit')}</label>
+                ${this.renderSourcesStage()}
+                ${this.renderStage(t('basket.autofill.unit'), `
                     <sl-select id="af-unit" size="small" value="${this.pipeline.unit}">
                         ${UNITS.map((u) => `<sl-option value="${u}">${t('basket.autofill.unit_' + u)}</sl-option>`).join('')}
                     </sl-select>
-                </div>
+                `)}
                 ${this.renderOrderingSection()}
-                <div class="auto-fill-stage">
-                    <label class="auto-fill-stage-label">${t('basket.autofill.memory')}</label>
+                ${this.renderStage(t('basket.autofill.memory'), `
                     <sl-input id="af-cooldown" type="number" min="0" step="1" clearable
                         label="${t('basket.autofill.cooldown_weeks')}"
-                        value="${typeof this.pipeline.memory.cooldownWeeks === 'number' ? this.pipeline.memory.cooldownWeeks : ''}"></sl-input>
+                        value="${escapeHtml(this.cooldownInput)}"></sl-input>
                     <sl-switch id="af-played-exclusion" size="small" ${this.pipeline.memory.playedExclusion ? 'checked' : ''}>
                         ${t('basket.autofill.played_exclusion')}
                     </sl-switch>
-                </div>
-                <div class="auto-fill-stage">
-                    <label class="auto-fill-stage-label">${t('basket.autofill.budget_advanced')}</label>
-                    <sl-input id="af-duration-hours" type="number" min="0" step="0.5" clearable
-                        label="${t('basket.autofill.target_duration_hours')}"
-                        value="${typeof this.pipeline.budget.targetDurationSecs === 'number' && this.pipeline.budget.targetDurationSecs > 0 ? (this.pipeline.budget.targetDurationSecs / 3600) : ''}"></sl-input>
-                    <sl-input id="af-headroom-gb" type="number" min="0" step="1" clearable
-                        label="${t('basket.autofill.headroom_gb')}"
-                        value="${typeof this.pipeline.budget.headroomBytes === 'number' && this.pipeline.budget.headroomBytes > 0 ? Math.round(this.pipeline.budget.headroomBytes / GB) : ''}"></sl-input>
-                </div>
-                ${this.renderSourcesSection(t('basket.autofill.fallback'), this.pipeline.fallback, 'fallback')}
+                `)}
             </div>
         `;
     }
 
+    private renderSourcesStage(): string {
+        return this.renderStage(t('basket.autofill.sources'), `
+            ${this.renderSourcesList(t('basket.autofill.sources'), this.pipeline.sources, 'source')}
+            ${this.renderSourcesList(t('basket.autofill.fallback'), this.pipeline.fallback, 'fallback')}
+        `);
+    }
+
     /** Renders a sources OR fallback list. `group` discriminates the two so element ids/handlers
      * don't collide. Share sliders appear only when a list holds more than one entry (AC10). */
-    private renderSourcesSection(label: string, list: SourceEntry[], group: 'source' | 'fallback'): string {
+    private renderSourcesList(label: string, list: SourceEntry[], group: 'source' | 'fallback'): string {
         const showShares = list.length > 1;
         const kinds = this.availableKinds();
         const rows = list.map((src, i) => {
@@ -184,8 +227,8 @@ export class AutoFillPanel {
             `;
         }).join('');
         return `
-            <div class="auto-fill-stage">
-                <label class="auto-fill-stage-label">${label}</label>
+            <div class="auto-fill-source-list">
+                <label class="auto-fill-substage-label">${label}</label>
                 ${rows || `<div class="auto-fill-caption">${t('basket.autofill.no_sources')}</div>`}
                 <sl-button class="af-source-add" size="small" variant="text" data-group="${group}">
                     <sl-icon slot="prefix" name="plus-circle"></sl-icon>${t('basket.autofill.add_source')}
@@ -205,17 +248,14 @@ export class AutoFillPanel {
                 <sl-icon-button class="af-ordering-remove" name="x" label="${t('basket.actions.remove')}" data-index="${i}"></sl-icon-button>
             </div>
         `).join('');
-        return `
-            <div class="auto-fill-stage">
-                <label class="auto-fill-stage-label">${t('basket.autofill.ordering')}</label>
-                ${rows || `<div class="auto-fill-caption">${t('basket.autofill.no_ordering')}</div>`}
-                ${unused.length > 0 ? `
-                    <sl-select id="af-ordering-add" size="small" placeholder="${t('basket.autofill.add_ordering')}" value="">
-                        ${unused.map((k) => `<sl-option value="${k}">${t('basket.autofill.ordering_' + k)}</sl-option>`).join('')}
-                    </sl-select>
-                ` : ''}
-            </div>
-        `;
+        return this.renderStage(t('basket.autofill.ordering'), `
+            ${rows || `<div class="auto-fill-caption">${t('basket.autofill.no_ordering')}</div>`}
+            ${unused.length > 0 ? `
+                <sl-select id="af-ordering-add" size="small" placeholder="${t('basket.autofill.add_ordering')}" value="">
+                    ${unused.map((k) => `<sl-option value="${k}">${t('basket.autofill.ordering_' + k)}</sl-option>`).join('')}
+                </sl-select>
+            ` : ''}
+        `);
     }
 
     private listFor(group: 'source' | 'fallback'): SourceEntry[] {
@@ -228,9 +268,15 @@ export class AutoFillPanel {
         d.querySelector('#af-enabled')?.addEventListener('sl-change', (e: Event) => {
             this.pipeline.enabled = (e.target as HTMLInputElement).checked;
         });
+        this.bindTextState('#af-budget-gb', (value) => { this.budgetGbInput = value; });
+        this.bindTextState('#af-exclude-genres', (value) => { this.excludeGenresInput = value; });
+        this.bindTextState('#af-cooldown', (value) => { this.cooldownInput = value; });
+        this.bindTextState('#af-duration-hours', (value) => { this.durationHoursInput = value; });
+        this.bindTextState('#af-headroom-gb', (value) => { this.headroomGbInput = value; });
 
         // --- Advanced disclosure toggle ---
         d.querySelector('#af-advanced-header')?.addEventListener('click', () => {
+            this.captureInputs();
             this.advancedOpen = !this.advancedOpen;
             this.renderBody();
         });
@@ -246,6 +292,7 @@ export class AutoFillPanel {
         // --- Sources / fallback ---
         d.querySelectorAll('.af-source-kind').forEach((el: Element) => {
             el.addEventListener('sl-change', (e: Event) => {
+                this.captureInputs();
                 const { group, index } = this.rowRef(e.target as HTMLElement);
                 this.listFor(group)[index].kind = (e.target as any).value as SourceKind;
                 this.renderBody(); // a playlist kind reveals the ref picker
@@ -259,6 +306,7 @@ export class AutoFillPanel {
         });
         d.querySelectorAll('.af-source-share').forEach((el: Element) => {
             el.addEventListener('sl-change', (e: Event) => {
+                this.captureInputs();
                 const { group, index } = this.rowRef(e.target as HTMLElement);
                 const pct = Number((e.target as any).value);
                 this.listFor(group)[index].share = isNaN(pct) ? undefined : pct / 100;
@@ -267,6 +315,7 @@ export class AutoFillPanel {
         });
         d.querySelectorAll('.af-source-remove').forEach((el: Element) => {
             el.addEventListener('click', (e: Event) => {
+                this.captureInputs();
                 const { group, index } = this.rowRef(e.currentTarget as HTMLElement);
                 this.listFor(group).splice(index, 1);
                 this.renderBody();
@@ -274,6 +323,7 @@ export class AutoFillPanel {
         });
         d.querySelectorAll('.af-source-add').forEach((el: Element) => {
             el.addEventListener('click', (e: Event) => {
+                this.captureInputs();
                 const group = (e.currentTarget as HTMLElement).dataset.group as 'source' | 'fallback';
                 this.listFor(group).push({ kind: 'library' });
                 this.renderBody();
@@ -282,18 +332,26 @@ export class AutoFillPanel {
 
         // --- Ordering ---
         d.querySelectorAll('.af-ordering-up').forEach((el: Element) => {
-            el.addEventListener('click', (e: Event) => this.moveOrdering(this.idxOf(e), -1));
+            el.addEventListener('click', (e: Event) => {
+                this.captureInputs();
+                this.moveOrdering(this.idxOf(e), -1);
+            });
         });
         d.querySelectorAll('.af-ordering-down').forEach((el: Element) => {
-            el.addEventListener('click', (e: Event) => this.moveOrdering(this.idxOf(e), 1));
+            el.addEventListener('click', (e: Event) => {
+                this.captureInputs();
+                this.moveOrdering(this.idxOf(e), 1);
+            });
         });
         d.querySelectorAll('.af-ordering-remove').forEach((el: Element) => {
             el.addEventListener('click', (e: Event) => {
+                this.captureInputs();
                 this.pipeline.ordering.splice(this.idxOf(e), 1);
                 this.renderBody();
             });
         });
         d.querySelector('#af-ordering-add')?.addEventListener('sl-change', (e: Event) => {
+            this.captureInputs();
             const key = (e.target as any).value as OrderingKey;
             if (key && !this.pipeline.ordering.includes(key)) this.pipeline.ordering.push(key);
             this.renderBody();
@@ -302,6 +360,26 @@ export class AutoFillPanel {
         // --- Footer ---
         d.querySelector('#af-cancel')?.addEventListener('click', () => d.hide());
         d.querySelector('#af-save')?.addEventListener('click', () => this.handleSave());
+    }
+
+    private bindTextState(selector: string, update: (value: string) => void): void {
+        const el = this.dialog.querySelector(selector);
+        const listener = (e: Event) => update(String((e.target as any).value ?? ''));
+        el?.addEventListener('sl-input', listener);
+        el?.addEventListener('sl-change', listener);
+    }
+
+    private captureInputs(): void {
+        this.budgetGbInput = this.readInputValue('#af-budget-gb') ?? this.budgetGbInput;
+        this.excludeGenresInput = this.readInputValue('#af-exclude-genres') ?? this.excludeGenresInput;
+        this.cooldownInput = this.readInputValue('#af-cooldown') ?? this.cooldownInput;
+        this.durationHoursInput = this.readInputValue('#af-duration-hours') ?? this.durationHoursInput;
+        this.headroomGbInput = this.readInputValue('#af-headroom-gb') ?? this.headroomGbInput;
+    }
+
+    private readInputValue(selector: string): string | null {
+        const el = this.dialog?.querySelector(selector) as any;
+        return el ? String(el.value ?? '') : null;
     }
 
     private rowRef(el: HTMLElement): { group: 'source' | 'fallback'; index: number } {
@@ -326,28 +404,37 @@ export class AutoFillPanel {
     /** Reads the free-text/number inputs into the model, then serializes and hands back. */
     private handleSave(): void {
         const d = this.dialog;
+        this.captureInputs();
         // Budget (GB → bytes); empty clears the ceiling.
-        const budgetGb = this.numInput('#af-budget-gb');
-        this.pipeline.budget.maxBytes = budgetGb != null && budgetGb > 0 ? Math.round(budgetGb * GB) : undefined;
+        this.pipeline.budget.maxBytes = this.bytesFromGbInput(
+            this.budgetGbInput,
+            this.initialBudgetGbInput,
+            this.initialMaxBytes,
+        );
 
         // Genre exclude (comma-separated). Only meaningful when the provider supports genres.
         if (this.genresSupported) {
-            const raw = (d.querySelector('#af-exclude-genres') as any)?.value ?? '';
-            this.pipeline.filter.excludeGenres = String(raw)
+            this.pipeline.filter.excludeGenres = this.excludeGenresInput
                 .split(',')
                 .map((s) => s.trim())
                 .filter((s) => s.length > 0);
         }
 
         if (this.advancedOpen) {
-            const cooldown = this.numInput('#af-cooldown');
+            const cooldown = this.numberFromInput(this.cooldownInput);
             this.pipeline.memory.cooldownWeeks = cooldown != null && cooldown > 0 ? Math.round(cooldown) : undefined;
             // 12.5 lesson: emit null/omit rather than 0 so a cleared field reads as "unset", not an
             // inert empty fill. serializePipeline drops 0/undefined for duration & headroom.
-            const hours = this.numInput('#af-duration-hours');
-            this.pipeline.budget.targetDurationSecs = hours != null && hours > 0 ? Math.round(hours * 3600) : undefined;
-            const headroomGb = this.numInput('#af-headroom-gb');
-            this.pipeline.budget.headroomBytes = headroomGb != null && headroomGb > 0 ? Math.round(headroomGb * GB) : undefined;
+            this.pipeline.budget.targetDurationSecs = this.secondsFromHoursInput(
+                this.durationHoursInput,
+                this.initialDurationHoursInput,
+                this.initialTargetDurationSecs,
+            );
+            this.pipeline.budget.headroomBytes = this.bytesFromGbInput(
+                this.headroomGbInput,
+                this.initialHeadroomGbInput,
+                this.initialHeadroomBytes,
+            );
         }
 
         const out = serializePipeline(this.pipeline);
@@ -355,10 +442,29 @@ export class AutoFillPanel {
         d.hide();
     }
 
-    private numInput(selector: string): number | null {
-        const raw = (this.dialog.querySelector(selector) as any)?.value;
+    private numberFromInput(raw: string): number | null {
         if (raw === '' || raw == null) return null;
         const n = Number(raw);
         return isNaN(n) || n < 0 ? null : n;
+    }
+
+    private bytesFromGbInput(raw: string, initialRaw: string, initialBytes?: number): number | undefined {
+        if (raw === initialRaw && typeof initialBytes === 'number') return initialBytes;
+        const gb = this.numberFromInput(raw);
+        return gb != null && gb > 0 ? Math.round(gb * GB) : undefined;
+    }
+
+    private secondsFromHoursInput(raw: string, initialRaw: string, initialSeconds?: number): number | undefined {
+        if (raw === initialRaw && typeof initialSeconds === 'number') return initialSeconds;
+        const hours = this.numberFromInput(raw);
+        return hours != null && hours > 0 ? Math.round(hours * 3600) : undefined;
+    }
+
+    private bytesToGbInput(bytes?: number): string {
+        return typeof bytes === 'number' && bytes > 0 ? String(bytes / GB) : '';
+    }
+
+    private secondsToHoursInput(seconds?: number): string {
+        return typeof seconds === 'number' && seconds > 0 ? String(seconds / 3600) : '';
     }
 }

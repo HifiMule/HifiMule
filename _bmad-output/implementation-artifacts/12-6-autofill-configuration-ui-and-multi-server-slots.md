@@ -4,7 +4,7 @@ baseline_commit: 0100d3dd61eefb7c2666058947287b88b04ca425
 
 # Story 12.6: Auto-Fill Configuration UI & Coexisting Multi-Server Slot Cards
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -159,6 +159,17 @@ This story sits on top of a fully-built, persona-validated daemon pipeline. **Yo
   - [x] `rtk cargo test -p hifimule-daemon` (510 baseline + new) and `rtk cargo clippy -p hifimule-daemon --all-targets` clean.
   - [x] `cd hifimule-ui && npx tsc --noEmit` and `pnpm build` succeed.
   - [x] Manual: single-server legacy device unchanged; two servers each get an independent enabled slot; switching servers swaps the panel config; non-selected slot read-locked.
+
+### Review Findings
+
+- [x] [Review][Patch] Legacy auto-fill configs are ignored when `pipelines` is empty [hifimule-ui/src/components/BasketSidebar.ts:347]
+- [x] [Review][Patch] Server-routed `basket.autoFill` preview ignores persisted `maxBytes` for default-equivalent pipelines [hifimule-daemon/src/rpc.rs:5888]
+- [x] [Review][Patch] Pipeline save is optimistic with no rollback, allowing stale unsaved slots to sync [hifimule-ui/src/components/BasketSidebar.ts:406]
+- [x] [Review][Patch] Auto-fill panel rerenders can discard unsaved simple and advanced input edits [hifimule-ui/src/components/AutoFillPanel.ts:232]
+- [x] [Review][Patch] Hidden single-source `share` values can persist and cap fills unexpectedly [hifimule-ui/src/state/autoFill.ts:98]
+- [x] [Review][Patch] Multi-slot sync excludes only incrementally changed manual IDs instead of all manual selections [hifimule-ui/src/components/BasketSidebar.ts:1251]
+- [x] [Review][Patch] Saving the panel rounds arbitrary byte budgets to whole GB and changes round-tripped legacy behavior [hifimule-ui/src/components/AutoFillPanel.ts:81]
+- [x] [Review][Patch] Pipeline builder does not implement collapsible stage sections in the required `Filter → Sources → Unit → Ordering → Memory → Budget` order [hifimule-ui/src/components/AutoFillPanel.ts:104]
 
 ## Dev Notes
 

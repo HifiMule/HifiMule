@@ -99,7 +99,9 @@ export function serializePipeline(p: AutoFillPipeline): AutoFillPipeline {
         list.map((s) => {
             const out: SourceEntry = { kind: s.kind };
             if (s.kind === 'playlist' && s.ref) out.ref = s.ref;
-            if (typeof s.share === 'number') out.share = s.share;
+            if (list.length > 1 && typeof s.share === 'number') {
+                out.share = Math.max(0, Math.min(1, s.share));
+            }
             return out;
         });
     const memory: MemoryStage = {};

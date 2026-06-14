@@ -5885,23 +5885,6 @@ async fn handle_basket_auto_fill(
         })
         .unwrap_or_default();
 
-    // Determine available capacity for auto-fill
-    let max_fill_bytes = if let Some(mb) = max_bytes_param {
-        mb
-    } else {
-        // Fall back to device free bytes
-        match state.device_manager.get_device_storage().await {
-            Some(info) => info.free_bytes,
-            None => {
-                return Err(JsonRpcError {
-                    code: ERR_INVALID_PARAMS,
-                    message: "No device connected and no maxBytes specified".to_string(),
-                    data: None,
-                });
-            }
-        }
-    };
-
     // Story 12.6: per-server routing. A non-blank serverId routes the preview through the
     // resolved provider + shared expansion seam, so non-Jellyfin servers and configured pipelines
     // are previewed exactly as they'll fill at sync time.
@@ -5935,6 +5918,20 @@ async fn handle_basket_auto_fill(
         let pipeline = inline_pipeline
             .or(persisted_pipeline)
             .unwrap_or_else(|| crate::auto_fill::AutoFillPipeline::default_legacy(None));
+        let max_fill_bytes = if let Some(mb) = max_bytes_param.or(pipeline.budget.max_bytes) {
+            mb
+        } else {
+            match state.device_manager.get_device_storage().await {
+                Some(info) => info.free_bytes,
+                None => {
+                    return Err(JsonRpcError {
+                        code: ERR_INVALID_PARAMS,
+                        message: "No device connected and no maxBytes specified".to_string(),
+                        data: None,
+                    });
+                }
+            }
+        };
 
         let provider = match get_provider_by_server_id_for(state, &server_id).await {
             Ok(p) => p,
@@ -5966,6 +5963,23 @@ async fn handle_basket_auto_fill(
             }),
         };
     }
+
+    // Determine available capacity for the legacy no-serverId Jellyfin preview path.
+    let max_fill_bytes = if let Some(mb) = max_bytes_param {
+        mb
+    } else {
+        // Fall back to device free bytes
+        match state.device_manager.get_device_storage().await {
+            Some(info) => info.free_bytes,
+            None => {
+                return Err(JsonRpcError {
+                    code: ERR_INVALID_PARAMS,
+                    message: "No device connected and no maxBytes specified".to_string(),
+                    data: None,
+                });
+            }
+        }
+    };
 
     // Expand any container items (albums, playlists) in exclude_item_ids to their
     // constituent track IDs so that tracks inside a manually-added album are correctly

@@ -347,9 +347,20 @@ export class BasketSidebar {
     private hydrateAutoFillPipelines(autoFill: any): void {
         this.autoFillPipelines.clear();
         const map = autoFill?.pipelines;
+        let hydrated = false;
         if (map && typeof map === 'object') {
             for (const [serverId, raw] of Object.entries(map)) {
                 this.autoFillPipelines.set(serverId, normalizePipeline(raw as any));
+                hydrated = true;
+            }
+        }
+        if (!hydrated && this.currentServerId) {
+            const enabled = autoFill?.enabled === true;
+            const maxBytes = typeof autoFill?.maxBytes === 'number' ? autoFill.maxBytes : undefined;
+            if (enabled || maxBytes != null) {
+                const legacyPipeline = defaultLegacyPipeline(maxBytes);
+                legacyPipeline.enabled = enabled;
+                this.autoFillPipelines.set(this.currentServerId, legacyPipeline);
             }
         }
         this.syncSlotsFromPipelines();
@@ -402,13 +413,13 @@ export class BasketSidebar {
         });
     }
 
-    /** Persists one server's pipeline (AC1). Updates local state + slot card; no basket save. */
+    /** Persists one server's pipeline (AC1). Updates local state + slot card only after save. */
     private async persistPipeline(serverId: string, pipeline: AutoFillPipeline): Promise<void> {
-        this.autoFillPipelines.set(serverId, normalizePipeline(pipeline));
-        this.syncSlotsFromPipelines();
-        this.render();
         try {
             await rpcCall('autoFill.setPipeline', { serverId, pipeline });
+            this.autoFillPipelines.set(serverId, normalizePipeline(pipeline));
+            this.syncSlotsFromPipelines();
+            this.render();
         } catch (err) {
             console.error('[AutoFill] Failed to persist pipeline:', err);
             window.dispatchEvent(new CustomEvent('toast', { detail: { type: 'error', message: t('basket.autofill.save_failed') } }));
@@ -1249,8 +1260,8 @@ export class BasketSidebar {
                 // This server's manual ids being synced — the per-server exclude set (the daemon's
                 // manual-wins dedup is the safety net).
                 const excludeItemIds = serverId
-                    ? syncItemIds.filter(id => (serverIdById.get(id) ?? this.currentServerId) === serverId)
-                    : syncItemIds;
+                    ? basketStore.getManualItemIdsForServer(serverId)
+                    : manualIds;
                 return { serverId, maxBytes, enabled: true, excludeItemIds };
             });
         }
