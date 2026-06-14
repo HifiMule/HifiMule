@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-06-14  # Story 12.5 created (ready-for-dev)
+last_updated: 2026-06-14  # Story 12.5 dev complete → review
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -162,7 +162,7 @@ development_status:
   12-2-autofill-manifest-schema-and-db-history-scaffolding: done  # story created via create-story 2026-06-14; dev complete 2026-06-14 (483 daemon tests pass); code review 2026-06-14 (2 patches applied, 2 deferred to 12.3/Epic 13)
   12-3-multi-slot-sync-time-expansion: done  # story created via create-story 2026-06-14; dev complete 2026-06-14 (488 daemon tests pass); review complete 2026-06-14 (4 patches applied)
   12-4-playlist-source-tag-filter-and-shares: done  # story created via create-story 2026-06-14; dev complete 2026-06-14; review complete 2026-06-14 (5 patches applied; 505 daemon tests pass)
-  12-5-budget-headroom-duration-fallback-chain: ready-for-dev  # story created via create-story 2026-06-14
+  12-5-budget-headroom-duration-fallback-chain: review  # story created via create-story 2026-06-14; dev complete 2026-06-14 (510 daemon tests pass)
   12-6-autofill-configuration-ui-and-multi-server-slots: backlog
   12-7-autofill-rpc-state-contract-and-i18n: backlog
 

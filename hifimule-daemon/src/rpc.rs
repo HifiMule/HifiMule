@@ -7707,6 +7707,49 @@ mod tests {
         assert!(!auto_fill_needs_configurable_routing(&manifest, &[]));
     }
 
+    // Story 12.5: a headroom/duration budget on a slot's pipeline propagates through the
+    // discriminator and forces the per-provider path; a bare maxBytes budget does not.
+    #[test]
+    fn test_auto_fill_budget_headroom_forces_routing() {
+        use crate::auto_fill::AutoFillPipeline;
+
+        let mut manifest = manifest_for_update();
+
+        // Default-legacy + bare maxBytes for s1 → fast path stays.
+        manifest.auto_fill.pipelines.insert(
+            "s1".to_string(),
+            AutoFillPipeline::default_legacy(Some(8_000_000_000)),
+        );
+        assert!(
+            !auto_fill_needs_configurable_routing(&manifest, &["s1".to_string()]),
+            "a bare maxBytes budget must NOT force the provider path"
+        );
+
+        // Headroom reserve on s2 → forces routing.
+        let mut headroom = AutoFillPipeline::default();
+        headroom.budget.headroom_bytes = Some(1_000_000_000);
+        manifest
+            .auto_fill
+            .pipelines
+            .insert("s2".to_string(), headroom);
+        assert!(
+            auto_fill_needs_configurable_routing(&manifest, &["s2".to_string()]),
+            "a headroom reserve must force the provider path"
+        );
+
+        // Duration target on s3 → forces routing.
+        let mut duration = AutoFillPipeline::default();
+        duration.budget.target_duration_secs = Some(3600);
+        manifest
+            .auto_fill
+            .pipelines
+            .insert("s3".to_string(), duration);
+        assert!(
+            auto_fill_needs_configurable_routing(&manifest, &["s3".to_string()]),
+            "a duration target must force the provider path"
+        );
+    }
+
     // Story 12.3 AC1: normalize the dual-shape `autoFill` param into descriptors.
     #[test]
     fn test_parse_auto_fill_descriptors_shapes() {

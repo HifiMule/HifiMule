@@ -4,7 +4,7 @@ baseline_commit: 180e59ae26b99db28f2e1b49584ab9581aa39637
 
 # Story 12.5: Budget Stage — Headroom Reserve, Duration Target & Fallback Chain
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -45,32 +45,32 @@ What exists today:
 
 ## Tasks / Subtasks
 
-- [ ] **Activate headroom + duration in the materialization seam** (AC: 1, 2, 5, 6)
-  - [ ] In `expand_with_pipeline` ([fetch.rs:115-126]) replace the budget-cap block. Compute `let capacity = params.max_fill_bytes;`, `let headroom = normalized.budget.headroom_bytes.unwrap_or(0);`, `let cap_after_reserve = capacity.saturating_sub(headroom);`, then `let ceiling = normalized.budget.max_bytes.map(|m| m.min(cap_after_reserve)).unwrap_or(cap_after_reserve);`. Set `normalized.budget.max_bytes = Some(ceiling)` and `normalized.budget.headroom_bytes = None` (reserve already consumed against capacity — prevents double-subtract in the pure engine's `budget_ceiling`).
-  - [ ] Delete the two `normalized.budget.target_duration_secs = None;` / `normalized.budget.headroom_bytes = None;` inert lines from the old block (the new `headroom_bytes = None` above is intentional and different in meaning; keep `target_duration_secs` live).
-  - [ ] Do **not** modify the pure engine (`pipeline.rs`) budget math — `budget_ceiling`, `Selector`, `estimated_size`, and the fallback loop are already correct and tested. Verify by reading them before editing anything.
+- [x] **Activate headroom + duration in the materialization seam** (AC: 1, 2, 5, 6)
+  - [x] In `expand_with_pipeline` ([fetch.rs:115-126]) replace the budget-cap block. Compute `let capacity = params.max_fill_bytes;`, `let headroom = normalized.budget.headroom_bytes.unwrap_or(0);`, `let cap_after_reserve = capacity.saturating_sub(headroom);`, then `let ceiling = normalized.budget.max_bytes.map(|m| m.min(cap_after_reserve)).unwrap_or(cap_after_reserve);`. Set `normalized.budget.max_bytes = Some(ceiling)` and `normalized.budget.headroom_bytes = None` (reserve already consumed against capacity — prevents double-subtract in the pure engine's `budget_ceiling`).
+  - [x] Delete the two `normalized.budget.target_duration_secs = None;` / `normalized.budget.headroom_bytes = None;` inert lines from the old block (the new `headroom_bytes = None` above is intentional and different in meaning; keep `target_duration_secs` live).
+  - [x] Do **not** modify the pure engine (`pipeline.rs`) budget math — `budget_ceiling`, `Selector`, `estimated_size`, and the fallback loop are already correct and tested. Verify by reading them before editing anything.
 
-- [ ] **Route non-trivial budgets through the configurable path** (AC: 4)
-  - [ ] Extend `needs_configurable_expansion` ([fetch.rs:62-86]) so it returns `true` when `p.budget.headroom_bytes.is_some_and(|h| h > 0)` OR `p.budget.target_duration_secs.is_some_and(|t| t > 0)`. Keep `max_bytes`-only budgets on the fast path (the fast path honors `max_fill_bytes`, so a bare `maxBytes` needs no materialization).
-  - [ ] Update the doc-comment that currently says "`enabled` and `budget` are intentionally NOT part of the discriminator" to reflect that headroom/duration now force the configurable path (max_bytes alone still does not).
-  - [ ] Confirm `auto_fill_needs_configurable_routing` ([rpc.rs:3548-3558]) — which delegates to `needs_configurable_expansion` — automatically picks up the new behavior so multi-slot routing forces per-provider expansion when any slot has a headroom/duration budget. No separate edit expected; add a routing test to prove it.
+- [x] **Route non-trivial budgets through the configurable path** (AC: 4)
+  - [x] Extend `needs_configurable_expansion` ([fetch.rs:62-86]) so it returns `true` when `p.budget.headroom_bytes.is_some_and(|h| h > 0)` OR `p.budget.target_duration_secs.is_some_and(|t| t > 0)`. Keep `max_bytes`-only budgets on the fast path (the fast path honors `max_fill_bytes`, so a bare `maxBytes` needs no materialization).
+  - [x] Update the doc-comment that currently says "`enabled` and `budget` are intentionally NOT part of the discriminator" to reflect that headroom/duration now force the configurable path (max_bytes alone still does not).
+  - [x] Confirm `auto_fill_needs_configurable_routing` ([rpc.rs:3548-3558]) — which delegates to `needs_configurable_expansion` — automatically picks up the new behavior so multi-slot routing forces per-provider expansion when any slot has a headroom/duration budget. No separate edit expected; add a routing test to prove it.
 
-- [ ] **Replace the inert guard test with active-behavior tests** (AC: 1, 2, 3, 5, 8)
-  - [ ] Remove/rewrite `headroom_and_duration_budget_fields_are_inert_until_12_5` ([fetch.rs:1034-1060]).
-  - [ ] Add `headroom_reserve_subtracts_from_device_capacity`: capacity `C` via `params(C)`, pipeline with `headroom_bytes = R` and no `max_bytes` → fill total ≤ `C − R`; assert the count/ids match a `C − R` ceiling.
-  - [ ] Add `config_max_bytes_and_headroom_reconcile`: `max_bytes = 8 units`, `C = 10 units`, `R = 1 unit` → ceiling is `8` (not `7`); `max_bytes = 8`, `C = 5`, `R = 1` → ceiling is `4`.
-  - [ ] Add `duration_target_live_through_async_path`: pipeline with `target_duration_secs = T` over a materialized pool → fill stops at real accumulated `duration_seconds ≤ T`, mirroring `pipeline.rs::duration_target_is_never_overshot` but through `expand_with_pipeline`.
-  - [ ] Add `fallback_reaches_target_through_async_path`: a `Playlist` primary source too small to fill the budget + a `Library` fallback → fallback pool is materialized (provider stub returns library songs) and fill reaches the byte ceiling. Mirror `pipeline.rs::fallback_reached_only_after_primary_exhaustion` but verify the async layer actually fetches the fallback pool.
-  - [ ] Use the existing `fetch.rs` test fixtures/stubs (mock `MediaProvider`, `params(bytes)`, `ids(&result)`) — match the established style; do not introduce a new mocking approach.
+- [x] **Replace the inert guard test with active-behavior tests** (AC: 1, 2, 3, 5, 8)
+  - [x] Remove/rewrite `headroom_and_duration_budget_fields_are_inert_until_12_5` ([fetch.rs:1034-1060]).
+  - [x] Add `headroom_reserve_subtracts_from_device_capacity`: capacity `C` via `params(C)`, pipeline with `headroom_bytes = R` and no `max_bytes` → fill total ≤ `C − R`; assert the count/ids match a `C − R` ceiling.
+  - [x] Add `config_max_bytes_and_headroom_reconcile`: `max_bytes = 8 units`, `C = 10 units`, `R = 1 unit` → ceiling is `8` (not `7`); `max_bytes = 8`, `C = 5`, `R = 1` → ceiling is `4`.
+  - [x] Add `duration_target_live_through_async_path`: pipeline with `target_duration_secs = T` over a materialized pool → fill stops at real accumulated `duration_seconds ≤ T`, mirroring `pipeline.rs::duration_target_is_never_overshot` but through `expand_with_pipeline`.
+  - [x] Add `fallback_reaches_target_through_async_path`: a `Playlist` primary source too small to fill the budget + a `Library` fallback → fallback pool is materialized (provider stub returns library songs) and fill reaches the byte ceiling. Mirror `pipeline.rs::fallback_reached_only_after_primary_exhaustion` but verify the async layer actually fetches the fallback pool.
+  - [x] Use the existing `fetch.rs` test fixtures/stubs (mock `MediaProvider`, `params(bytes)`, `ids(&result)`) — match the established style; do not introduce a new mocking approach.
 
-- [ ] **Discriminator routing tests** (AC: 4)
-  - [ ] Add a `needs_configurable_expansion` unit test table: `{headroom_bytes: Some(N)}` → true; `{target_duration_secs: Some(N)}` → true; `{max_bytes: Some(N)}` only → false; all-`None` budget on an otherwise-default pipeline → false.
-  - [ ] Confirm a default pipeline (no budget refinements) still resolves to the fast path via `expand_auto_fill_slot` (existing `discriminator_default_pipelines_take_fast_path` should remain green).
+- [x] **Discriminator routing tests** (AC: 4)
+  - [x] Add a `needs_configurable_expansion` unit test table: `{headroom_bytes: Some(N)}` → true; `{target_duration_secs: Some(N)}` → true; `{max_bytes: Some(N)}` only → false; all-`None` budget on an otherwise-default pipeline → false.
+  - [x] Confirm a default pipeline (no budget refinements) still resolves to the fast path via `expand_auto_fill_slot` (existing `discriminator_default_pipelines_take_fast_path` should remain green).
 
-- [ ] **Regression + green build** (AC: 6, 7, 8)
-  - [ ] Run `rtk cargo test -p hifimule-daemon`; confirm the 505-test baseline plus the new tests pass with no regressions (especially the 12.1 `auto_fill::pipeline::tests` guarantee tests and 12.4 `fetch` tests).
-  - [ ] Run `rtk cargo clippy -p hifimule-daemon --all-targets`; no new warnings.
-  - [ ] Confirm no new crate added to `Cargo.toml` and no RPC/UI/manifest files touched.
+- [x] **Regression + green build** (AC: 6, 7, 8)
+  - [x] Run `rtk cargo test -p hifimule-daemon`; confirm the 505-test baseline plus the new tests pass with no regressions (especially the 12.1 `auto_fill::pipeline::tests` guarantee tests and 12.4 `fetch` tests).
+  - [x] Run `rtk cargo clippy -p hifimule-daemon --all-targets`; no new warnings.
+  - [x] Confirm no new crate added to `Cargo.toml` and no RPC/UI/manifest files touched.
 
 ## Dev Notes
 
@@ -159,10 +159,30 @@ The fast path (`run_auto_fill_provider`) only knows `max_fill_bytes`; it cannot 
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+claude-opus-4-8[1m] (Opus 4.8, 1M context)
 
 ### Debug Log References
 
+- `rtk cargo test -p hifimule-daemon` → 510 passed (505 baseline − 1 removed inert test + 6 new tests).
+- `rtk cargo test -p hifimule-daemon auto_fill` → 53 passed.
+- `rtk cargo clippy -p hifimule-daemon --all-targets` → no new warnings in touched files (`fetch.rs` clean; the pre-existing `field_reassign_with_default` at `rpc.rs:7685-7686` is the 12.4 test, not introduced here).
+
 ### Completion Notes List
 
+- **Activation, not rewrite.** Only `expand_with_pipeline` and `needs_configurable_expansion` in `fetch.rs` were changed in production. The pure engine (`pipeline.rs`) was read but left untouched — its `budget_ceiling`/`Selector`/fallback math is already correct and tested.
+- **Headroom reconciliation (the subtle bit).** The reserve subtracts from *device capacity* (`params.max_fill_bytes`), not from the user's configured `max_bytes`. Implemented as `ceiling = min(config.max_bytes.unwrap_or(capacity), capacity − headroom)`, baked into `normalized.budget.max_bytes`, with `headroom_bytes` then zeroed so the engine's `budget_ceiling` does not double-subtract. `target_duration_secs` is left live for the engine to enforce via real accumulated playtime (`Selector.cum_secs`).
+- **Routing.** A headroom reserve or duration target now forces the configurable materialization path; a bare `maxBytes` (or all-`None`) budget stays on the fast `run_auto_fill_provider` path (zero regression to default-legacy). Zero-valued headroom/duration are treated as inert. The change propagates automatically through `auto_fill_needs_configurable_routing` in `rpc.rs` (verified by a new test; no production edit in `rpc.rs`).
+- **Tests.** Removed the inert guard test; added `headroom_reserve_subtracts_from_device_capacity`, `config_max_bytes_and_headroom_reconcile`, `duration_target_live_through_async_path`, `fallback_reaches_target_through_async_path` (fetch.rs) plus `discriminator_budget_headroom_and_duration_force_configurable` (fetch.rs) and `test_auto_fill_budget_headroom_forces_routing` (rpc.rs). Existing fixtures (`song`, `params`, `ids`, `arc`, `MockProvider`) reused — no new mocking approach.
+- **Scope honored (AC7).** No new crate, no RPC method add/change, no UI/i18n/manifest-schema edits. The only `rpc.rs` change is a unit test.
+- **Open Questions resolution.** Q1 (duration real-seconds vs bytes-derived) and Q2 (force configurable path vs `rpc.rs` capacity subtraction) were both resolved per the story's recommended approach: real-seconds duration enforcement, and forcing the configurable path for headroom/duration budgets.
+
 ### File List
+
+- `hifimule-daemon/src/auto_fill/fetch.rs` (modified — production: `expand_with_pipeline` budget reconciliation, `needs_configurable_expansion` budget discriminator + doc-comment; tests: replaced inert guard with 4 active-behavior tests + 1 discriminator test)
+- `hifimule-daemon/src/rpc.rs` (modified — test only: `test_auto_fill_budget_headroom_forces_routing` routing-propagation test)
+
+## Change Log
+
+| Date       | Change                                                                                              |
+|------------|-----------------------------------------------------------------------------------------------------|
+| 2026-06-14 | Activated headroom reserve + duration target at the sync-time materialization seam; routed headroom/duration budgets through the configurable path; replaced the 12.4 inert guard test with active-behavior + routing tests (510 daemon tests pass, no new clippy warnings). |

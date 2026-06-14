@@ -56,9 +56,12 @@ const MAX_BULK_PAGES: u32 = 200;
 /// - `fallback` is empty.
 ///
 /// Any deviation (a playlist/genre source, a filter, a share weight, an album/artist unit, a
-/// quality ordering, a memory modifier, a fallback chain) returns `true`. `enabled` and `budget`
-/// are intentionally NOT part of the discriminator: enabling is a caller concern and the budget is
-/// already honored by the fast path's `max_fill_bytes`, so neither requires materialization.
+/// quality ordering, a memory modifier, a fallback chain) returns `true`. `enabled` is a caller
+/// concern and not part of the discriminator. For the budget (Story 12.5): a headroom reserve or a
+/// duration target forces the configurable path, because the fast `run_auto_fill_provider` path
+/// only knows `max_fill_bytes` — it can neither reserve device headroom nor count playtime. A bare
+/// `maxBytes` budget keeps the fast path (it honors `max_fill_bytes` directly, so no materialization
+/// is needed).
 pub fn needs_configurable_expansion(p: &AutoFillPipeline) -> bool {
     let sources_default = match p.sources.as_slice() {
         [] => true,
@@ -76,13 +79,18 @@ pub fn needs_configurable_expansion(p: &AutoFillPipeline) -> bool {
     let unit_default = p.unit == Unit::Track;
     let memory_default = p.memory == MemoryStage::default();
     let fallback_default = p.fallback.is_empty();
+    // A headroom reserve or duration target can only be honored by the materialized engine path;
+    // `max_bytes` alone is honored by the fast path's `max_fill_bytes` and stays default-legacy.
+    let budget_default = !(p.budget.headroom_bytes.is_some_and(|h| h > 0)
+        || p.budget.target_duration_secs.is_some_and(|t| t > 0));
 
     !(sources_default
         && filter_default
         && ordering_default
         && unit_default
         && memory_default
-        && fallback_default)
+        && fallback_default
+        && budget_default)
 }
 
 /// Materialize a configured pipeline's source pools from the provider, then run the pure engine.
@@ -112,17 +120,24 @@ pub async fn expand_with_pipeline(
     // --- Genre membership (AC 3): capability-gated, drop-to-pass-through on unsupported.
     let genre_map = resolve_genre_membership(provider.as_ref(), &mut normalized).await;
 
-    // --- Budget cap (AC 6): honor a smaller user budget but never exceed the slot's ceiling.
-    let max_fill_bytes = params.max_fill_bytes;
-    let capped = normalized
+    // --- Budget reconciliation (Story 12.5, AC 1/2/5/6). Two distinct byte numbers meet here:
+    //   * `capacity` = the slot's available device bytes (`params.max_fill_bytes`, manual items
+    //     already subtracted in rpc.rs);
+    //   * `budget.max_bytes` = the user's optional configured cap ("never fill past 8 GB").
+    // FR52's headroom reserve subtracts from *device capacity*, not from the configured cap, so the
+    // effective ceiling is `min(config.max_bytes.unwrap_or(capacity), capacity - headroom)`. Bake
+    // that ceiling into `max_bytes` and zero `headroom_bytes` so the pure engine's `budget_ceiling`
+    // (which subtracts headroom from max_bytes) does not double-subtract. `target_duration_secs`
+    // stays live for the engine to enforce via real accumulated playtime.
+    let capacity = params.max_fill_bytes;
+    let headroom = normalized.budget.headroom_bytes.unwrap_or(0);
+    let cap_after_reserve = capacity.saturating_sub(headroom);
+    let ceiling = normalized
         .budget
         .max_bytes
-        .unwrap_or(max_fill_bytes)
-        .min(max_fill_bytes);
-    normalized.budget.max_bytes = Some(capped);
-    // Story 12.4 only honors max_bytes capped by the slot budget. Headroom and duration-target
-    // refinements belong to Story 12.5, so keep them inert in the materialized path for now.
-    normalized.budget.target_duration_secs = None;
+        .map(|m| m.min(cap_after_reserve))
+        .unwrap_or(cap_after_reserve);
+    normalized.budget.max_bytes = Some(ceiling);
     normalized.budget.headroom_bytes = None;
 
     // --- Materialize one pool per distinct (kind, ref) across sources ∪ fallback.
@@ -677,6 +692,45 @@ mod tests {
         assert!(needs_configurable_expansion(&p));
     }
 
+    #[test]
+    fn discriminator_budget_headroom_and_duration_force_configurable() {
+        // Story 12.5: a headroom reserve or duration target forces the configurable path; a bare
+        // maxBytes (or all-None) budget stays on the fast path.
+        let mut p = AutoFillPipeline::default_legacy(None);
+        p.budget.headroom_bytes = Some(1_000_000);
+        assert!(
+            needs_configurable_expansion(&p),
+            "headroom reserve forces materialization"
+        );
+
+        let mut p = AutoFillPipeline::default_legacy(None);
+        p.budget.target_duration_secs = Some(3600);
+        assert!(
+            needs_configurable_expansion(&p),
+            "duration target forces materialization"
+        );
+
+        // maxBytes-only stays on the fast path (honored by max_fill_bytes).
+        let mut p = AutoFillPipeline::default_legacy(None);
+        p.budget.max_bytes = Some(8_000_000_000);
+        assert!(
+            !needs_configurable_expansion(&p),
+            "a bare maxBytes budget keeps the fast path"
+        );
+
+        // A zero headroom/duration is treated as no refinement.
+        let mut p = AutoFillPipeline::default_legacy(None);
+        p.budget.headroom_bytes = Some(0);
+        p.budget.target_duration_secs = Some(0);
+        assert!(
+            !needs_configurable_expansion(&p),
+            "zero headroom/duration is inert and stays on the fast path"
+        );
+
+        // All-None budget on an otherwise-default pipeline stays on the fast path.
+        assert!(!needs_configurable_expansion(&AutoFillPipeline::default()));
+    }
+
     // ===================================================================
     // expand_with_pipeline (AC 2, 3, 4, 5, 7).
     // ===================================================================
@@ -1030,32 +1084,133 @@ mod tests {
         assert_eq!(result.len(), 3, "slot ceiling caps the configured budget");
     }
 
+    // -------------------------------------------------------------------
+    // Story 12.5: headroom reserve, live duration target, fallback-reaches-target through the
+    // async materialization seam. These replace the 12.4 inert guard test.
+    // -------------------------------------------------------------------
+
     #[tokio::test]
-    async fn headroom_and_duration_budget_fields_are_inert_until_12_5() {
+    async fn headroom_reserve_subtracts_from_device_capacity() {
+        // Capacity C = 10 units, reserve R = 1 unit, no configured max_bytes.
+        // Effective ceiling = C − R = 9 units, so the fill never exceeds 9 of the 10 songs.
         let provider = arc(MockProvider {
-            library: vec![
-                song("t1", 1_000_000),
-                song("t2", 1_000_000),
-                song("t3", 1_000_000),
-            ],
+            library: (0..10).map(|i| song(&format!("l{i}"), 1_000_000)).collect(),
             ..Default::default()
         });
         let pipeline = AutoFillPipeline {
             sources: vec![SourceEntry::new(SourceKind::Library)],
             budget: BudgetStage {
-                max_bytes: Some(5_000_000),
-                target_duration_secs: Some(100),
-                headroom_bytes: Some(4_000_000),
+                headroom_bytes: Some(1_000_000),
+                ..Default::default()
             },
+            ..Default::default()
+        };
+        let result = expand_with_pipeline(provider, &pipeline, params(10_000_000))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.len(),
+            9,
+            "fill ≤ capacity − reserve (10 − 1 = 9 units)"
+        );
+        assert_eq!(
+            ids(&result),
+            (0..9).map(|i| format!("l{i}")).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn config_max_bytes_and_headroom_reconcile() {
+        // The reserve subtracts from capacity, NOT from the configured max_bytes.
+        // Case A: max_bytes = 8, C = 10, R = 1 → min(8, 10 − 1) = 8 (not 7).
+        let provider = arc(MockProvider {
+            library: (0..10).map(|i| song(&format!("l{i}"), 1_000_000)).collect(),
+            ..Default::default()
+        });
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            budget: BudgetStage {
+                max_bytes: Some(8_000_000),
+                headroom_bytes: Some(1_000_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let result = expand_with_pipeline(provider, &pipeline, params(10_000_000))
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 8, "ceiling = min(8, 10 − 1) = 8 units");
+
+        // Case B: max_bytes = 8, C = 5, R = 1 → min(8, 5 − 1) = 4.
+        let provider = arc(MockProvider {
+            library: (0..10).map(|i| song(&format!("l{i}"), 1_000_000)).collect(),
+            ..Default::default()
+        });
+        let result = expand_with_pipeline(provider, &pipeline, params(5_000_000))
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 4, "ceiling = min(8, 5 − 1) = 4 units");
+    }
+
+    #[tokio::test]
+    async fn duration_target_live_through_async_path() {
+        // Each fixture track is 180s. With a 400s target, two tracks (360s) fit; a third (540s)
+        // would overshoot, so the fill stops at two. Byte ceiling is generous so duration binds.
+        let provider = arc(MockProvider {
+            library: (0..5).map(|i| song(&format!("l{i}"), 1_000_000)).collect(),
+            ..Default::default()
+        });
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            budget: BudgetStage {
+                target_duration_secs: Some(400),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let result = expand_with_pipeline(provider, &pipeline, params(1_000_000_000))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.len(),
+            2,
+            "real accumulated playtime stops the fill before overshooting the duration target"
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_reaches_target_through_async_path() {
+        // Primary playlist holds a single small track — too little to fill the budget. A Library
+        // fallback pool must be materialized (provider stub serves it) and drawn to reach the
+        // byte ceiling. Capacity 5 units → 5 songs total = 1 playlist + 4 fallback library.
+        let mut playlists = HashMap::new();
+        playlists.insert("p1".to_string(), vec![song("p0", 1_000_000)]);
+        let provider = arc(MockProvider {
+            library: (0..6).map(|i| song(&format!("l{i}"), 1_000_000)).collect(),
+            playlists,
+            ..Default::default()
+        });
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry {
+                kind: SourceKind::Playlist,
+                ref_id: Some("p1".into()),
+                share: None,
+            }],
+            fallback: vec![SourceEntry::new(SourceKind::Library)],
             ..Default::default()
         };
         let result = expand_with_pipeline(provider, &pipeline, params(5_000_000))
             .await
             .unwrap();
+        assert_eq!(result.len(), 5, "fallback fills the budget after the primary runs dry");
+        assert!(
+            result.iter().any(|i| i.id == "p0"),
+            "the primary playlist track is included"
+        );
         assert_eq!(
-            ids(&result),
-            vec!["t1", "t2", "t3"],
-            "12.4 honors max_bytes only; duration/headroom are 12.5 concerns"
+            result.iter().filter(|i| i.id.starts_with('l')).count(),
+            4,
+            "the fallback Library pool was materialized and drawn to reach the ceiling"
         );
     }
 
