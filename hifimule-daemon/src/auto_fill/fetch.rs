@@ -31,12 +31,78 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::pipeline::{
-    AutoFillPipeline, Candidate, FilterStage, HistorySnapshot, MemoryStage, OrderingKey,
-    PipelineInput, SourceKey, SourceKind, Unit, run_pipeline,
+    AutoFillPipeline, Candidate, FilterStage, MemoryStage, OrderingKey, PipelineInput, SourceEntry,
+    SourceKey, SourceKind, Unit, run_pipeline,
 };
 use super::{AutoFillItem, AutoFillParams};
 use crate::domain::models::Song;
 use crate::providers::{BrowseMode, MediaProvider, ProviderError};
+
+/// One rotation-tier definition parsed from `MemoryStage::tiers` (Story 13.1, #25/#26). Conservative
+/// shape: a playlist-backed tier (`{ "kind": "playlist", "ref": "<id>" }`) or the whole library
+/// (`{ "kind": "library" }`). Malformed input parses to no tiers (rotation disabled).
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum TierDef {
+    Playlist {
+        #[serde(rename = "ref")]
+        ref_id: String,
+    },
+    Library,
+}
+
+impl TierDef {
+    fn source_key(&self) -> SourceKey {
+        match self {
+            TierDef::Playlist { ref_id } => {
+                SourceKey::new(SourceKind::Playlist, Some(ref_id.clone()))
+            }
+            TierDef::Library => SourceKey::new(SourceKind::Library, None),
+        }
+    }
+
+    fn source_entry(&self, share: Option<f32>) -> SourceEntry {
+        match self {
+            TierDef::Playlist { ref_id } => SourceEntry {
+                kind: SourceKind::Playlist,
+                ref_id: Some(ref_id.clone()),
+                share,
+            },
+            TierDef::Library => SourceEntry {
+                kind: SourceKind::Library,
+                ref_id: None,
+                share,
+            },
+        }
+    }
+}
+
+/// Parse `MemoryStage::tiers` into an ordered list of [`TierDef`]. `None`/empty/malformed → no tiers
+/// (a log on malformed), so rotation never aborts the slot and an unset value is today's behavior.
+fn parse_tiers(tiers: &Option<serde_json::Value>) -> Vec<TierDef> {
+    let Some(value) = tiers else {
+        return Vec::new();
+    };
+    if value.is_null() {
+        return Vec::new();
+    }
+    match serde_json::from_value::<Vec<TierDef>>(value.clone()) {
+        Ok(defs) => defs,
+        Err(e) => {
+            crate::daemon_log!("[AutoFill] malformed memory.tiers ({}) — ignoring (no rotation)", e);
+            Vec::new()
+        }
+    }
+}
+
+/// Derive a present-or-absent `last_played_at` for a candidate song (AC 5). A track counts as
+/// played when the **media server** reports `play_count > 0` or any `last_played_at`. The pure
+/// engine's played-exclusion only checks `.is_some()`, so the concrete value is never compared — we
+/// use `now` as a present-but-unknown sentinel rather than parsing the provider ISO timestamp.
+fn derive_last_played(song: &Song, now: i64) -> Option<i64> {
+    let played = song.play_count.unwrap_or(0) > 0 || song.last_played_at.is_some();
+    played.then_some(now)
+}
 
 /// Fetch bounds, mirrored verbatim from `run_auto_fill_provider` so the configurable path never
 /// re-derives different constants (Story 12.4 task note).
@@ -104,6 +170,13 @@ pub async fn expand_with_pipeline(
     pipeline: &AutoFillPipeline,
     params: AutoFillParams,
 ) -> Result<Vec<AutoFillItem>> {
+    crate::daemon_log!(
+        "[AutoFill] expanding slot device={} server={} (history entries={}, cursor={})",
+        params.device_id,
+        params.server_id,
+        params.history.entries.len(),
+        params.rotation_cursor
+    );
     // Work on a normalized clone: drop tag constraints (no data), capability-gate genre
     // constraints, and cap the budget by the slot's shared-remaining ceiling.
     let mut normalized = pipeline.clone();
@@ -147,6 +220,35 @@ pub async fn expand_with_pipeline(
         normalized.budget.target_duration_secs = None;
     }
 
+    // --- Rotation tiers (#25/#26, AC 8): when `memory.tiers` is configured, the (rotated) tier list
+    // defines this run's sources. The cursor (caller-supplied, machine-local) rotates the list so the
+    // lead tier shifts each sync; the lead tier gets the dominant budget share (50%), the rest split
+    // the remaining 50% equally. `tier_defs`/`lead` are kept to map each emitted track to its
+    // *original* tier index after the engine runs. Unset/empty/malformed tiers → today's behavior.
+    let tier_defs = parse_tiers(&normalized.memory.tiers);
+    let tier_lead = if tier_defs.is_empty() {
+        0
+    } else {
+        let n = tier_defs.len();
+        let lead = params.rotation_cursor.rem_euclid(n as i64) as usize;
+        let rest_share = if n > 1 { 0.5 / (n as f32 - 1.0) } else { 0.0 };
+        let mut sources = Vec::with_capacity(n);
+        for rot in 0..n {
+            let orig = (lead + rot) % n;
+            let share = if n == 1 {
+                None
+            } else if rot == 0 {
+                Some(0.5)
+            } else {
+                Some(rest_share)
+            };
+            sources.push(tier_defs[orig].source_entry(share));
+        }
+        normalized.sources = sources;
+        normalized.fallback = Vec::new();
+        lead
+    };
+
     // --- Materialize one pool per distinct (kind, ref) across sources ∪ fallback.
     let mut keys: Vec<SourceKey> = Vec::new();
     let mut seen_keys: HashSet<SourceKey> = HashSet::new();
@@ -179,14 +281,53 @@ pub async fn expand_with_pipeline(
         pools.insert(key, candidates);
     }
 
-    // --- History (AC 7): empty snapshot — cooldown/played-exclusion inert until Epic 13. No DB read.
+    // --- Map each candidate to its original tier index (AC 8). First tier (in rotation order) that
+    // contains a song wins, so the recorded index is stable regardless of which tier currently leads.
+    let mut tier_of: HashMap<String, usize> = HashMap::new();
+    if !tier_defs.is_empty() {
+        let n = tier_defs.len();
+        for rot in 0..n {
+            let orig = (tier_lead + rot) % n;
+            if let Some(cands) = pools.get(&tier_defs[orig].source_key()) {
+                for c in cands {
+                    tier_of.entry(c.song.id.clone()).or_insert(orig);
+                }
+            }
+        }
+    }
+
+    // --- History (AC 3/4/5): start from the DB-sourced snapshot (last_synced_at/tier per track),
+    // override `now` with the caller's value, then merge per-candidate `last_played_at` derived from
+    // the materialized provider songs. The DB read already happened in the RPC layer (best-effort:
+    // an empty snapshot means memory is inert), keeping this fetch layer DB-free.
+    let mut history = params.history;
+    history.now = params.now_unix;
+    for cands in pools.values() {
+        for c in cands {
+            if let Some(played) = derive_last_played(&c.song, history.now) {
+                history
+                    .entries
+                    .entry(c.song.id.clone())
+                    .or_default()
+                    .last_played_at = Some(played);
+            }
+        }
+    }
+
     let input = PipelineInput {
         pools,
-        history: HistorySnapshot::default(),
+        history,
         exclude_item_ids: params.exclude_item_ids,
     };
 
-    Ok(run_pipeline(&input, &normalized))
+    let mut items = run_pipeline(&input, &normalized);
+    // Tag each emitted track with its source tier index (string) for sync-completion recording.
+    if !tier_of.is_empty() {
+        for item in &mut items {
+            item.tier = tier_of.get(&item.id).map(|idx| idx.to_string());
+        }
+    }
+    Ok(items)
 }
 
 /// Resolve `track_id -> [genre]` membership for the filter's referenced genres, mutating
@@ -382,7 +523,7 @@ async fn fetch_playlist(provider: &dyn MediaProvider, ref_id: Option<&str>) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auto_fill::pipeline::{BudgetStage, SourceEntry};
+    use crate::auto_fill::pipeline::{BudgetStage, HistorySnapshot, SourceEntry, TrackHistory};
     use crate::domain::models::{Playlist, PlaylistWithTracks, SearchResult, Song};
     use crate::providers::{
         BrowseCapabilities, Capabilities, ProviderChangeContext, ScrobbleRequest, ServerType,
@@ -624,6 +765,29 @@ mod tests {
         AutoFillParams {
             exclude_item_ids: Vec::new(),
             max_fill_bytes,
+            device_id: String::new(),
+            server_id: String::new(),
+            now_unix: 0,
+            history: HistorySnapshot::default(),
+            rotation_cursor: 0,
+        }
+    }
+
+    /// `params` with a pre-built DB history snapshot + rotation cursor (Story 13.1 tests).
+    fn params_with(
+        max_fill_bytes: u64,
+        now_unix: i64,
+        history: HistorySnapshot,
+        rotation_cursor: i64,
+    ) -> AutoFillParams {
+        AutoFillParams {
+            exclude_item_ids: Vec::new(),
+            max_fill_bytes,
+            device_id: "dev".to_string(),
+            server_id: "srv".to_string(),
+            now_unix,
+            history,
+            rotation_cursor,
         }
     }
 
@@ -697,6 +861,24 @@ mod tests {
         let mut p = AutoFillPipeline::default_legacy(Some(1));
         p.fallback = vec![SourceEntry::new(SourceKind::Library)];
         assert!(needs_configurable_expansion(&p));
+    }
+
+    #[test]
+    fn discriminator_new_memory_fields_force_configurable() {
+        // Story 13.1 (AC 9): a pipeline whose only deviation is a new Memory field must route through
+        // the materialized engine path. This already holds via the `memory == MemoryStage::default()`
+        // check; this test locks it in for stableCorePct/repeatTolerance/tiers.
+        let mut p = AutoFillPipeline::default_legacy(Some(1));
+        p.memory.stable_core_pct = Some(0.5);
+        assert!(needs_configurable_expansion(&p), "stableCorePct forces configurable");
+
+        let mut p = AutoFillPipeline::default_legacy(Some(1));
+        p.memory.repeat_tolerance = Some(0.5);
+        assert!(needs_configurable_expansion(&p), "repeatTolerance forces configurable");
+
+        let mut p = AutoFillPipeline::default_legacy(Some(1));
+        p.memory.tiers = Some(serde_json::json!([{ "kind": "library" }]));
+        assert!(needs_configurable_expansion(&p), "tiers forces configurable");
     }
 
     #[test]
@@ -1287,6 +1469,176 @@ mod tests {
             vec!["t1", "t2"],
             "empty history → cooldown/played config inert"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Story 13.1: cooldown/played-exclusion with populated history, and rotation tiers.
+    // -------------------------------------------------------------------
+
+    fn played_song(id: &str, size_bytes: u64) -> Song {
+        Song {
+            play_count: Some(5),
+            ..song(id, size_bytes)
+        }
+    }
+
+    #[tokio::test]
+    async fn cooldown_excludes_recently_synced_with_populated_history() {
+        let now = 1_000_000_000i64;
+        let week = 7 * 86_400i64;
+        let provider = arc(MockProvider {
+            library: vec![song("recent", 1_000_000), song("old", 1_000_000)],
+            ..Default::default()
+        });
+        let mut history = HistorySnapshot {
+            now,
+            ..Default::default()
+        };
+        history.entries.insert(
+            "recent".to_string(),
+            TrackHistory {
+                last_synced_at: Some(now - week), // 1 week ago — inside the 2-week cooldown
+                ..Default::default()
+            },
+        );
+        history.entries.insert(
+            "old".to_string(),
+            TrackHistory {
+                last_synced_at: Some(now - 100 * week), // long ago — eligible
+                ..Default::default()
+            },
+        );
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            memory: MemoryStage {
+                cooldown_weeks: Some(2),
+                ..Default::default()
+            },
+            budget: BudgetStage {
+                max_bytes: Some(100_000_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let result = expand_with_pipeline(provider, &pipeline, params_with(100_000_000, now, history, 0))
+            .await
+            .unwrap();
+        assert_eq!(
+            ids(&result),
+            vec!["old"],
+            "recently-synced track excluded; old one survives"
+        );
+    }
+
+    #[tokio::test]
+    async fn played_exclusion_drops_server_played_tracks() {
+        // play_count > 0 on the provider Song → excluded; no autofill_history row needed.
+        let provider = arc(MockProvider {
+            library: vec![played_song("played", 1_000_000), song("fresh", 1_000_000)],
+            ..Default::default()
+        });
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            memory: MemoryStage {
+                played_exclusion: true,
+                ..Default::default()
+            },
+            budget: BudgetStage {
+                max_bytes: Some(100_000_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let result = expand_with_pipeline(provider, &pipeline, params(100_000_000))
+            .await
+            .unwrap();
+        assert_eq!(ids(&result), vec!["fresh"], "server-played track excluded");
+    }
+
+    #[tokio::test]
+    async fn rotation_tiers_shift_lead_and_tag_tier_index() {
+        // 3 playlist tiers (A/B/C), 4 × 1 MB tracks each. Lead tier gets 50% of the 4 MB ceiling
+        // (2 tracks); the other two split the rest (1 track each). Advancing the cursor shifts which
+        // tier dominates. Emitted tracks carry their ORIGINAL tier index (stable across rotation).
+        let mk = |p: &str| (0..4).map(|i| song(&format!("{p}{i}"), 1_000_000)).collect::<Vec<_>>();
+        let playlists = HashMap::from([
+            ("A".to_string(), mk("a")),
+            ("B".to_string(), mk("b")),
+            ("C".to_string(), mk("c")),
+        ]);
+        let tiers = serde_json::json!([
+            { "kind": "playlist", "ref": "A" },
+            { "kind": "playlist", "ref": "B" },
+            { "kind": "playlist", "ref": "C" },
+        ]);
+        let pipeline = AutoFillPipeline {
+            memory: MemoryStage {
+                tiers: Some(tiers),
+                ..Default::default()
+            },
+            budget: BudgetStage {
+                max_bytes: Some(4_000_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        // cursor 0 → tier A leads (2 tracks); B, C contribute 1 each.
+        let provider = arc(MockProvider {
+            playlists: playlists.clone(),
+            ..Default::default()
+        });
+        let r0 = expand_with_pipeline(provider, &pipeline, params_with(4_000_000, 0, HistorySnapshot::default(), 0))
+            .await
+            .unwrap();
+        let a0 = r0.iter().filter(|i| i.id.starts_with('a')).count();
+        assert_eq!(a0, 2, "cursor 0 → tier A dominates");
+        // Each emitted track is tagged with its original tier index (a→0, b→1, c→2).
+        for item in &r0 {
+            let expected = match item.id.chars().next().unwrap() {
+                'a' => "0",
+                'b' => "1",
+                _ => "2",
+            };
+            assert_eq!(item.tier.as_deref(), Some(expected), "tier index tagged");
+        }
+
+        // cursor 1 → tier B leads (2 tracks).
+        let provider = arc(MockProvider {
+            playlists,
+            ..Default::default()
+        });
+        let r1 = expand_with_pipeline(provider, &pipeline, params_with(4_000_000, 0, HistorySnapshot::default(), 1))
+            .await
+            .unwrap();
+        let b1 = r1.iter().filter(|i| i.id.starts_with('b')).count();
+        assert_eq!(b1, 2, "cursor 1 → lead shifts to tier B");
+    }
+
+    #[tokio::test]
+    async fn malformed_tiers_disable_rotation_without_aborting() {
+        // A malformed tiers value must not abort the slot — the configured library source still fills.
+        let provider = arc(MockProvider {
+            library: vec![song("l0", 1_000_000), song("l1", 1_000_000)],
+            ..Default::default()
+        });
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            memory: MemoryStage {
+                tiers: Some(serde_json::json!({ "not": "an array" })),
+                ..Default::default()
+            },
+            budget: BudgetStage {
+                max_bytes: Some(100_000_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let result = expand_with_pipeline(provider, &pipeline, params(100_000_000))
+            .await
+            .unwrap();
+        assert_eq!(ids(&result), vec!["l0", "l1"], "malformed tiers ignored, normal fill");
+        assert!(result.iter().all(|i| i.tier.is_none()), "no tier tags without rotation");
     }
 
     #[tokio::test]

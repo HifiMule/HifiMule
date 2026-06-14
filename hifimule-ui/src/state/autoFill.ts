@@ -22,13 +22,19 @@ export interface SourceEntry {
     share?: number;
 }
 
+/** A rotation-tier definition (Story 13.1, #25/#26): a playlist-backed tier or the whole library.
+ * Mirrors the daemon `TierDef` serde shape (`{ kind: 'playlist', ref } | { kind: 'library' }`). */
+export type TierDef = { kind: 'playlist'; ref: string } | { kind: 'library' };
+
 export interface MemoryStage {
     cooldownWeeks?: number;
     playedExclusion?: boolean;
-    // Reserved for Epic 13 — never surfaced as functional controls, persisted verbatim.
+    /** Fraction (0.0–1.0) of the budget kept stable across syncs (Story 13.1 #24). */
     stableCorePct?: number;
+    /** How tolerant of repeats the cooldown is (0.0 strict … 1.0 off) (Story 13.1 #23). */
     repeatTolerance?: number;
-    tiers?: unknown;
+    /** Ordered playlist-backed rotation tiers (Story 13.1 #25/#26). */
+    tiers?: TierDef[];
 }
 
 export interface BudgetStage {
@@ -107,10 +113,17 @@ export function serializePipeline(p: AutoFillPipeline): AutoFillPipeline {
     const memory: MemoryStage = {};
     if (typeof p.memory.cooldownWeeks === 'number') memory.cooldownWeeks = p.memory.cooldownWeeks;
     if (p.memory.playedExclusion) memory.playedExclusion = true;
-    // Reserved Epic 13 fields — persist verbatim if a loaded pipeline carried them.
-    if (p.memory.stableCorePct !== undefined) memory.stableCorePct = p.memory.stableCorePct;
-    if (p.memory.repeatTolerance !== undefined) memory.repeatTolerance = p.memory.repeatTolerance;
-    if (p.memory.tiers !== undefined) memory.tiers = p.memory.tiers;
+    // Story 13.1 Memory fields — emit only when meaningful so a default pipeline round-trips clean.
+    if (typeof p.memory.stableCorePct === 'number' && p.memory.stableCorePct > 0) {
+        memory.stableCorePct = Math.max(0, Math.min(1, p.memory.stableCorePct));
+    }
+    if (typeof p.memory.repeatTolerance === 'number' && p.memory.repeatTolerance > 0) {
+        memory.repeatTolerance = Math.max(0, Math.min(1, p.memory.repeatTolerance));
+    }
+    if (Array.isArray(p.memory.tiers)) {
+        const tiers = p.memory.tiers.filter((tier) => tier.kind !== 'playlist' || !!tier.ref);
+        if (tiers.length > 0) memory.tiers = tiers;
+    }
     const budget: BudgetStage = {};
     if (typeof p.budget.maxBytes === 'number') budget.maxBytes = p.budget.maxBytes;
     if (typeof p.budget.targetDurationSecs === 'number' && p.budget.targetDurationSecs > 0) {

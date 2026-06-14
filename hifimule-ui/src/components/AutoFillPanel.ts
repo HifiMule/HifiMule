@@ -16,6 +16,7 @@ import {
     ORDERING_KEYS,
     SourceEntry,
     SourceKind,
+    TierDef,
     Unit,
     normalizePipeline,
     serializePipeline,
@@ -250,16 +251,77 @@ export class AutoFillPanel {
                     </sl-select>
                 `)}
                 ${this.renderOrderingSection()}
-                ${this.renderStage(t('basket.autofill.memory'), `
-                    <sl-input id="af-cooldown" type="number" min="0" step="1" clearable
-                        label="${t('basket.autofill.cooldown_weeks')}"
-                        value="${escapeHtml(this.cooldownInput)}"></sl-input>
-                    <sl-switch id="af-played-exclusion" size="small" ${this.pipeline.memory.playedExclusion ? 'checked' : ''}>
-                        ${t('basket.autofill.played_exclusion')}
-                    </sl-switch>
-                `)}
+                ${this.renderMemoryStage()}
             </div>
         `;
+    }
+
+    /** Memory stage controls: cooldown + played-exclusion (existing), plus the Story 13.1 stable-core
+     * %, repeat-tolerance dial, and rotation-tiers editor. */
+    private renderMemoryStage(): string {
+        const mem = this.pipeline.memory;
+        const corePct = typeof mem.stableCorePct === 'number' ? Math.round(mem.stableCorePct * 100) : 0;
+        const tolPct = typeof mem.repeatTolerance === 'number' ? Math.round(mem.repeatTolerance * 100) : 0;
+        return this.renderStage(t('basket.autofill.memory'), `
+            <sl-input id="af-cooldown" type="number" min="0" step="1" clearable
+                label="${t('basket.autofill.cooldown_weeks')}"
+                value="${escapeHtml(this.cooldownInput)}"></sl-input>
+            <sl-switch id="af-played-exclusion" size="small" ${mem.playedExclusion ? 'checked' : ''}>
+                ${t('basket.autofill.played_exclusion')}
+            </sl-switch>
+            <div class="auto-fill-memory-dial">
+                <label class="auto-fill-substage-label">${t('basket.autofill.stable_core_pct')}</label>
+                <div class="af-share-cell">
+                    <sl-range id="af-stable-core" min="0" max="100" step="5" value="${corePct}"></sl-range>
+                    <span class="af-share-value">${corePct}%</span>
+                </div>
+                <div class="auto-fill-caption">${t('basket.autofill.stable_core_pct_hint')}</div>
+            </div>
+            <div class="auto-fill-memory-dial">
+                <label class="auto-fill-substage-label">${t('basket.autofill.repeat_tolerance')}</label>
+                <div class="af-share-cell">
+                    <sl-range id="af-repeat-tolerance" min="0" max="100" step="5" value="${tolPct}"></sl-range>
+                    <span class="af-share-value">${tolPct}%</span>
+                </div>
+                <div class="auto-fill-caption">${t('basket.autofill.repeat_tolerance_hint')}</div>
+            </div>
+            ${this.renderTiersEditor()}
+        `);
+    }
+
+    /** Ordered rotation-tiers editor (Story 13.1): add/remove playlist-backed or library tiers. */
+    private renderTiersEditor(): string {
+        const tiers = this.memoryTiers();
+        const rows = tiers.map((tier, i) => `
+            <div class="auto-fill-source-row" data-index="${i}">
+                <sl-select class="af-tier-kind" size="small" value="${tier.kind}" data-index="${i}">
+                    <sl-option value="library">${t('basket.autofill.source_library')}</sl-option>
+                    ${this.playlistsSupported ? `<sl-option value="playlist">${t('basket.autofill.source_playlist')}</sl-option>` : ''}
+                </sl-select>
+                ${tier.kind === 'playlist' && this.playlistsSupported ? `
+                    <sl-select class="af-tier-ref" size="small" placeholder="${t('basket.autofill.pick_playlist')}"
+                        value="${escapeHtml(tier.ref ?? '')}" data-index="${i}">
+                        ${this.opts.playlists.map((pl) => `<sl-option value="${escapeHtml(pl.id)}">${escapeHtml(pl.name)}</sl-option>`).join('')}
+                    </sl-select>
+                ` : ''}
+                <sl-icon-button class="af-tier-remove" name="x" label="${t('basket.actions.remove')}" data-index="${i}"></sl-icon-button>
+            </div>
+        `).join('');
+        return `
+            <div class="auto-fill-source-list">
+                <label class="auto-fill-substage-label">${t('basket.autofill.tiers')}</label>
+                ${rows || `<div class="auto-fill-caption">${t('basket.autofill.tiers_hint')}</div>`}
+                <sl-button class="af-tier-add" size="small" variant="text">
+                    <sl-icon slot="prefix" name="plus-circle"></sl-icon>${t('basket.autofill.tiers_add')}
+                </sl-button>
+            </div>
+        `;
+    }
+
+    /** The live tiers array (lazily initialized so editing never dereferences undefined). */
+    private memoryTiers(): TierDef[] {
+        if (!Array.isArray(this.pipeline.memory.tiers)) this.pipeline.memory.tiers = [];
+        return this.pipeline.memory.tiers;
     }
 
     private renderSourcesStage(): string {
@@ -360,6 +422,50 @@ export class AutoFillPanel {
         });
         d.querySelector('#af-played-exclusion')?.addEventListener('sl-change', (e: Event) => {
             this.pipeline.memory.playedExclusion = (e.target as HTMLInputElement).checked;
+        });
+
+        // --- Memory: stable-core %, repeat-tolerance dial, rotation tiers (Story 13.1) ---
+        d.querySelector('#af-stable-core')?.addEventListener('sl-change', (e: Event) => {
+            this.captureInputs();
+            const pct = Number((e.target as any).value);
+            this.pipeline.memory.stableCorePct = isNaN(pct) || pct <= 0 ? undefined : pct / 100;
+            this.renderBody(); // refresh the % readout
+        });
+        d.querySelector('#af-repeat-tolerance')?.addEventListener('sl-change', (e: Event) => {
+            this.captureInputs();
+            const pct = Number((e.target as any).value);
+            this.pipeline.memory.repeatTolerance = isNaN(pct) || pct <= 0 ? undefined : pct / 100;
+            this.renderBody();
+        });
+        d.querySelectorAll('.af-tier-kind').forEach((el: Element) => {
+            el.addEventListener('sl-change', (e: Event) => {
+                this.captureInputs();
+                const i = Number((e.target as HTMLElement).dataset.index ?? '0');
+                const kind = (e.target as any).value as 'library' | 'playlist';
+                this.memoryTiers()[i] = kind === 'playlist' ? { kind: 'playlist', ref: '' } : { kind: 'library' };
+                this.renderBody(); // a playlist kind reveals the ref picker
+            });
+        });
+        d.querySelectorAll('.af-tier-ref').forEach((el: Element) => {
+            el.addEventListener('sl-change', (e: Event) => {
+                const i = Number((e.target as HTMLElement).dataset.index ?? '0');
+                const tier = this.memoryTiers()[i];
+                if (tier && tier.kind === 'playlist') tier.ref = (e.target as any).value || '';
+                this.invalidatePreview();
+            });
+        });
+        d.querySelectorAll('.af-tier-remove').forEach((el: Element) => {
+            el.addEventListener('click', (e: Event) => {
+                this.captureInputs();
+                const i = Number((e.currentTarget as HTMLElement).dataset.index ?? '0');
+                this.memoryTiers().splice(i, 1);
+                this.renderBody();
+            });
+        });
+        d.querySelector('.af-tier-add')?.addEventListener('click', () => {
+            this.captureInputs();
+            this.memoryTiers().push(this.playlistsSupported ? { kind: 'playlist', ref: '' } : { kind: 'library' });
+            this.renderBody();
         });
 
         // --- Sources / fallback ---

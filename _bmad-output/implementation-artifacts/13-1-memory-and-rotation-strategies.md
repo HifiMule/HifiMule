@@ -4,7 +4,7 @@ baseline_commit: 8dc855a3b0eafe724db43ff506cb61aad7cd1bab
 
 # Story 13.1: Memory & Rotation Strategies
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -52,53 +52,53 @@ This story **activates the Memory stage end-to-end**. Story 12.1 already built t
 
 ## Tasks / Subtasks
 
-- [ ] **DB data-access layer for `autofill_history` + rotation cursor** (`hifimule-daemon/src/db.rs`) (AC: 1, 8)
-  - [ ] Add a `TrackHistoryRow` struct (or reuse a tuple) and `pub fn upsert_autofill_history(&self, device_id, server_id, track_id, last_synced_at: Option<i64>, tier: Option<&str>) -> Result<()>` using `INSERT … ON CONFLICT(device_id, server_id, track_id) DO UPDATE SET last_synced_at=excluded.last_synced_at, tier=excluded.tier`. Mirror `record_scrobble` ([db.rs:719-735](../../hifimule-daemon/src/db.rs#L719-L735)).
-  - [ ] `pub fn get_autofill_history(&self, device_id, server_id) -> Result<Vec<(String /*track_id*/, Option<i64>, Option<String>)>>` (bulk read for snapshot build).
-  - [ ] `pub fn prune_autofill_history(&self, device_id, server_id, older_than_unix: i64) -> Result<usize>` (retention; call after recording — see Dev Notes for cutoff).
-  - [ ] Rotation cursor: add a tiny `autofill_rotation(device_id TEXT, server_id TEXT, cursor INTEGER, PRIMARY KEY(device_id, server_id))` table in `Database::init()` after the `autofill_history` block ([db.rs:230](../../hifimule-daemon/src/db.rs#L230)), `CREATE TABLE IF NOT EXISTS` style. Add `get_rotation_cursor(device_id, server_id) -> Result<i64>` (default 0) and `advance_rotation_cursor(device_id, server_id) -> Result<i64>` (upsert cursor+1, return new value).
-  - [ ] Tests: in-memory DB upsert→read round-trip; conflict update overwrites `last_synced_at`; prune deletes old rows only; cursor defaults to 0 and advances.
+- [x] **DB data-access layer for `autofill_history` + rotation cursor** (`hifimule-daemon/src/db.rs`) (AC: 1, 8)
+  - [x] Add a `TrackHistoryRow` struct (or reuse a tuple) and `pub fn upsert_autofill_history(&self, device_id, server_id, track_id, last_synced_at: Option<i64>, tier: Option<&str>) -> Result<()>` using `INSERT … ON CONFLICT(device_id, server_id, track_id) DO UPDATE SET last_synced_at=excluded.last_synced_at, tier=excluded.tier`. Mirror `record_scrobble` ([db.rs:719-735](../../hifimule-daemon/src/db.rs#L719-L735)).
+  - [x] `pub fn get_autofill_history(&self, device_id, server_id) -> Result<Vec<(String /*track_id*/, Option<i64>, Option<String>)>>` (bulk read for snapshot build).
+  - [x] `pub fn prune_autofill_history(&self, device_id, server_id, older_than_unix: i64) -> Result<usize>` (retention; call after recording — see Dev Notes for cutoff).
+  - [x] Rotation cursor: add a tiny `autofill_rotation(device_id TEXT, server_id TEXT, cursor INTEGER, PRIMARY KEY(device_id, server_id))` table in `Database::init()` after the `autofill_history` block ([db.rs:230](../../hifimule-daemon/src/db.rs#L230)), `CREATE TABLE IF NOT EXISTS` style. Add `get_rotation_cursor(device_id, server_id) -> Result<i64>` (default 0) and `advance_rotation_cursor(device_id, server_id) -> Result<i64>` (upsert cursor+1, return new value).
+  - [x] Tests: in-memory DB upsert→read round-trip; conflict update overwrites `last_synced_at`; prune deletes old rows only; cursor defaults to 0 and advances.
 
-- [ ] **Thread `device_id`/`server_id`/`now` through the fetch seam** (`hifimule-daemon/src/auto_fill/mod.rs`, `fetch.rs`) (AC: 3)
-  - [ ] Extend `AutoFillParams` ([auto_fill/mod.rs:52-57](../../hifimule-daemon/src/auto_fill/mod.rs#L52-L57)) with `pub device_id: String`, `pub server_id: String`, `pub now_unix: i64`. Update every `AutoFillParams { … }` construction site (grep — primarily `rpc.rs` `handle_basket_auto_fill` ~[rpc.rs:5871-5990](../../hifimule-daemon/src/rpc.rs#L5871-L5990) and the sync-expand path ~[rpc.rs:2636-2680](../../hifimule-daemon/src/rpc.rs#L2636-L2680)). The fast legacy path (`run_auto_fill`) ignores the new fields.
-  - [ ] In `expand_with_pipeline` ([fetch.rs:182-187](../../hifimule-daemon/src/auto_fill/fetch.rs#L182-L187)) accept a `&Database` (or pass a pre-built `HistorySnapshot` from the RPC caller — **preferred**, keeps `fetch.rs` provider-only and pure-adjacent; decide and document). Build `HistorySnapshot { now: params.now_unix, entries }` where entries merge DB `last_synced_at`/`tier` with per-candidate `last_played_at` (AC 5). Best-effort on DB error → empty snapshot.
+- [x] **Thread `device_id`/`server_id`/`now` through the fetch seam** (`hifimule-daemon/src/auto_fill/mod.rs`, `fetch.rs`) (AC: 3)
+  - [x] Extend `AutoFillParams` ([auto_fill/mod.rs:52-57](../../hifimule-daemon/src/auto_fill/mod.rs#L52-L57)) with `pub device_id: String`, `pub server_id: String`, `pub now_unix: i64`. Update every `AutoFillParams { … }` construction site (grep — primarily `rpc.rs` `handle_basket_auto_fill` ~[rpc.rs:5871-5990](../../hifimule-daemon/src/rpc.rs#L5871-L5990) and the sync-expand path ~[rpc.rs:2636-2680](../../hifimule-daemon/src/rpc.rs#L2636-L2680)). The fast legacy path (`run_auto_fill`) ignores the new fields.
+  - [x] In `expand_with_pipeline` ([fetch.rs:182-187](../../hifimule-daemon/src/auto_fill/fetch.rs#L182-L187)) accept a `&Database` (or pass a pre-built `HistorySnapshot` from the RPC caller — **preferred**, keeps `fetch.rs` provider-only and pure-adjacent; decide and document). Build `HistorySnapshot { now: params.now_unix, entries }` where entries merge DB `last_synced_at`/`tier` with per-candidate `last_played_at` (AC 5). Best-effort on DB error → empty snapshot.
 
-- [ ] **Activate cooldown (#4) + played-exclusion (#5)** (`hifimule-daemon/src/auto_fill/fetch.rs` or RPC) (AC: 4, 5)
-  - [ ] Cooldown: rely on existing `memory_allows`; just supply real `last_synced_at`. Add an integration-style test that a recently-synced track is dropped and an old one survives.
-  - [ ] Played-exclusion: when building the snapshot, set `entry.last_played_at = Some(ts)` for candidates with `play_count > 0` or a parseable `last_played_at`. Parse provider ISO timestamps to Unix secs; on parse failure but a play signal exists, use `now` as a present sentinel.
+- [x] **Activate cooldown (#4) + played-exclusion (#5)** (`hifimule-daemon/src/auto_fill/fetch.rs` or RPC) (AC: 4, 5)
+  - [x] Cooldown: rely on existing `memory_allows`; just supply real `last_synced_at`. Add an integration-style test that a recently-synced track is dropped and an old one survives.
+  - [x] Played-exclusion: when building the snapshot, set `entry.last_played_at = Some(ts)` for candidates with `play_count > 0` or a parseable `last_played_at`. Parse provider ISO timestamps to Unix secs; on parse failure but a play signal exists, use `now` as a present sentinel.
 
-- [ ] **Repeat-tolerance dial (#23)** (`hifimule-daemon/src/auto_fill/pipeline.rs`) (AC: 7)
-  - [ ] In `memory_allows` ([pipeline.rs:417-433](../../hifimule-daemon/src/auto_fill/pipeline.rs#L417-L433)), compute `effective_secs = (weeks × 7 × 86400) as f32 × (1.0 − repeat_tolerance.clamp(0,1))` and compare against it. Guard: tolerance only applies when `cooldown_weeks` is `Some`. Keep saturating arithmetic.
-  - [ ] Unit tests: t=0 == current; t=1 → no cooldown exclusion; t=0.5 → half window.
+- [x] **Repeat-tolerance dial (#23)** (`hifimule-daemon/src/auto_fill/pipeline.rs`) (AC: 7)
+  - [x] In `memory_allows` ([pipeline.rs:417-433](../../hifimule-daemon/src/auto_fill/pipeline.rs#L417-L433)), compute `effective_secs = (weeks × 7 × 86400) as f32 × (1.0 − repeat_tolerance.clamp(0,1))` and compare against it. Guard: tolerance only applies when `cooldown_weeks` is `Some`. Keep saturating arithmetic.
+  - [x] Unit tests: t=0 == current; t=1 → no cooldown exclusion; t=0.5 → half window.
 
-- [ ] **Stable-core + delta (#24)** (`hifimule-daemon/src/auto_fill/pipeline.rs`) (AC: 6)
-  - [ ] In `run_pipeline` ([pipeline.rs:306-343](../../hifimule-daemon/src/auto_fill/pipeline.rs#L306-L343)) / `Selector::fill`, when `memory.stable_core_pct` is `Some(p > 0)`: compute `core_cap = round(ceiling × p)`. **Pass 1** fills `core_cap` from candidates with a history entry having `last_synced_at.is_some()` (the device's current set), bypassing the cooldown check (these are kept on purpose) but honoring filter/ordering/unit/dedup and played-exclusion. **Pass 2** fills the remaining ceiling from all candidates honoring full memory rules; dedup against Pass 1.
-  - [ ] Ensure the total respects `ceiling` and the existing budget guarantees (no 0-byte fillers). Reuse `estimated_size`/`Selector` accounting; do not double-count.
-  - [ ] Tests: with history present, ~p fraction of bytes comes from previously-synced tracks; p=0 unchanged; first-sync (empty history) → core empty, normal fill.
+- [x] **Stable-core + delta (#24)** (`hifimule-daemon/src/auto_fill/pipeline.rs`) (AC: 6)
+  - [x] In `run_pipeline` ([pipeline.rs:306-343](../../hifimule-daemon/src/auto_fill/pipeline.rs#L306-L343)) / `Selector::fill`, when `memory.stable_core_pct` is `Some(p > 0)`: compute `core_cap = round(ceiling × p)`. **Pass 1** fills `core_cap` from candidates with a history entry having `last_synced_at.is_some()` (the device's current set), bypassing the cooldown check (these are kept on purpose) but honoring filter/ordering/unit/dedup and played-exclusion. **Pass 2** fills the remaining ceiling from all candidates honoring full memory rules; dedup against Pass 1.
+  - [x] Ensure the total respects `ceiling` and the existing budget guarantees (no 0-byte fillers). Reuse `estimated_size`/`Selector` accounting; do not double-count.
+  - [x] Tests: with history present, ~p fraction of bytes comes from previously-synced tracks; p=0 unchanged; first-sync (empty history) → core empty, normal fill.
 
-- [ ] **Rotation tiers (#25/#26)** (`hifimule-daemon/src/auto_fill/{pipeline.rs,fetch.rs}`, `rpc.rs`) (AC: 8)
-  - [ ] Define a typed `TierDef { kind: TierKind (Playlist{ref}|Library), }` parsed from `memory.tiers` (`serde_json::Value` → typed via `serde_json::from_value`); tolerate malformed → treat as no tiers (log).
-  - [ ] Caller reads `cursor = db.get_rotation_cursor(device, server)`; rotate `tiers` by `cursor % len`; assign budget shares so the lead tier dominates (e.g. lead gets 50%, rest split remainder, or a documented schedule). Materialize each tier's pool via existing `materialize_pool`/`fetch_playlist` ([fetch.rs:318-379](../../hifimule-daemon/src/auto_fill/fetch.rs#L318-L379)).
-  - [ ] After a **successful sync** that used tiers, call `db.advance_rotation_cursor(device, server)`. Record each emitted track's tier index into `autofill_history.tier` via the upsert (AC 2).
-  - [ ] Tests: cursor advance shifts the lead tier; emitted tracks carry tier strings; empty/malformed `tiers` → no rotation.
+- [x] **Rotation tiers (#25/#26)** (`hifimule-daemon/src/auto_fill/{pipeline.rs,fetch.rs}`, `rpc.rs`) (AC: 8)
+  - [x] Define a typed `TierDef { kind: TierKind (Playlist{ref}|Library), }` parsed from `memory.tiers` (`serde_json::Value` → typed via `serde_json::from_value`); tolerate malformed → treat as no tiers (log).
+  - [x] Caller reads `cursor = db.get_rotation_cursor(device, server)`; rotate `tiers` by `cursor % len`; assign budget shares so the lead tier dominates (e.g. lead gets 50%, rest split remainder, or a documented schedule). Materialize each tier's pool via existing `materialize_pool`/`fetch_playlist` ([fetch.rs:318-379](../../hifimule-daemon/src/auto_fill/fetch.rs#L318-L379)).
+  - [x] After a **successful sync** that used tiers, call `db.advance_rotation_cursor(device, server)`. Record each emitted track's tier index into `autofill_history.tier` via the upsert (AC 2).
+  - [x] Tests: cursor advance shifts the lead tier; emitted tracks carry tier strings; empty/malformed `tiers` → no rotation.
 
-- [ ] **Sync-completion recording hook** (`hifimule-daemon/src/sync.rs` and/or `rpc.rs` sync path) (AC: 2, 8)
-  - [ ] Identify the once-per-run post-transfer completion point (sync.rs ~2944+ per exploration; confirm). For each successfully transferred track that belongs to an auto-fill slot's server, upsert `autofill_history` with `last_synced_at = now`, `tier = <assigned index or NULL>`. Best-effort. Prune stale rows (cutoff e.g. `now − max(cooldownWeeks across pipelines, default 26) weeks`, or a fixed generous retention — document).
-  - [ ] Advance the rotation cursor here if the run used tiers.
+- [x] **Sync-completion recording hook** (`hifimule-daemon/src/sync.rs` and/or `rpc.rs` sync path) (AC: 2, 8)
+  - [x] Identify the once-per-run post-transfer completion point (sync.rs ~2944+ per exploration; confirm). For each successfully transferred track that belongs to an auto-fill slot's server, upsert `autofill_history` with `last_synced_at = now`, `tier = <assigned index or NULL>`. Best-effort. Prune stale rows (cutoff e.g. `now − max(cooldownWeeks across pipelines, default 26) weeks`, or a fixed generous retention — document).
+  - [x] Advance the rotation cursor here if the run used tiers.
 
-- [ ] **Routing verification** (`hifimule-daemon/src/auto_fill/fetch.rs`) (AC: 9)
-  - [ ] Add tests proving `needs_configurable_expansion` returns `true` for pipelines whose only deviation is `stableCorePct`/`repeatTolerance`/`tiers`. The `memory_default` check at [fetch.rs:80](../../hifimule-daemon/src/auto_fill/fetch.rs#L80) should already cover this since `MemoryStage` derives `PartialEq` and these fields are non-default — confirm, no logic change expected.
+- [x] **Routing verification** (`hifimule-daemon/src/auto_fill/fetch.rs`) (AC: 9)
+  - [x] Add tests proving `needs_configurable_expansion` returns `true` for pipelines whose only deviation is `stableCorePct`/`repeatTolerance`/`tiers`. The `memory_default` check at [fetch.rs:80](../../hifimule-daemon/src/auto_fill/fetch.rs#L80) should already cover this since `MemoryStage` derives `PartialEq` and these fields are non-default — confirm, no logic change expected.
 
-- [ ] **Frontend Memory controls** (`hifimule-ui/src/components/AutoFillPanel.ts`, `state/autoFill.ts`) (AC: 10)
-  - [ ] In `renderStage('memory', …)` ([AutoFillPanel.ts:253-260](../../hifimule-ui/src/components/AutoFillPanel.ts#L253-L260)) add: a stable-core % input/slider, a repeat-tolerance slider (0–100% → 0.0–1.0), and a tiers editor (list of playlist pickers, add/remove, ordered). Bind them in the input-capture handlers (mirror `#af-cooldown` at ~line 346 and `#af-played-exclusion` at ~line 361).
-  - [ ] Ensure `serializePipeline` ([state/autoFill.ts:107-113](../../hifimule-ui/src/state/autoFill.ts#L107-L113)) emits `stableCorePct`/`repeatTolerance`/`tiers` from real controls (they're already preserved verbatim — now they have UI sources). Keep them inside the Advanced disclosure.
-  - [ ] Wire the live preview (`previewAutoFill` / `basket.autoFill`) so the new controls re-trigger the debounced preview ([AutoFillPanel.ts:567-618](../../hifimule-ui/src/components/AutoFillPanel.ts#L567-L618)).
+- [x] **Frontend Memory controls** (`hifimule-ui/src/components/AutoFillPanel.ts`, `state/autoFill.ts`) (AC: 10)
+  - [x] In `renderStage('memory', …)` ([AutoFillPanel.ts:253-260](../../hifimule-ui/src/components/AutoFillPanel.ts#L253-L260)) add: a stable-core % input/slider, a repeat-tolerance slider (0–100% → 0.0–1.0), and a tiers editor (list of playlist pickers, add/remove, ordered). Bind them in the input-capture handlers (mirror `#af-cooldown` at ~line 346 and `#af-played-exclusion` at ~line 361).
+  - [x] Ensure `serializePipeline` ([state/autoFill.ts:107-113](../../hifimule-ui/src/state/autoFill.ts#L107-L113)) emits `stableCorePct`/`repeatTolerance`/`tiers` from real controls (they're already preserved verbatim — now they have UI sources). Keep them inside the Advanced disclosure.
+  - [x] Wire the live preview (`previewAutoFill` / `basket.autoFill`) so the new controls re-trigger the debounced preview ([AutoFillPanel.ts:567-618](../../hifimule-ui/src/components/AutoFillPanel.ts#L567-L618)).
 
-- [ ] **i18n keys ×4 locales** (`hifimule-i18n/catalog.json`) (AC: 11)
-  - [ ] Add `basket.autofill.stable_core_pct` (+ `_hint`), `basket.autofill.repeat_tolerance` (+ `_hint`), `basket.autofill.tiers` (+ `_hint`, + add/remove labels) to `en`, `fr`, `es`, `de`. Keep parity test green.
+- [x] **i18n keys ×4 locales** (`hifimule-i18n/catalog.json`) (AC: 11)
+  - [x] Add `basket.autofill.stable_core_pct` (+ `_hint`), `basket.autofill.repeat_tolerance` (+ `_hint`), `basket.autofill.tiers` (+ `_hint`, + add/remove labels) to `en`, `fr`, `es`, `de`. Keep parity test green.
 
-- [ ] **Full verification** (AC: 13)
-  - [ ] `rtk cargo test -p hifimule-daemon` (or targeted `auto_fill::`, `db::`, `device::` if sandbox blocks mockito — see Dev Notes), `rtk cargo clippy -p hifimule-daemon --all-targets`, frontend `rtk tsc` + build.
+- [x] **Full verification** (AC: 13)
+  - [x] `rtk cargo test -p hifimule-daemon` (or targeted `auto_fill::`, `db::`, `device::` if sandbox blocks mockito — see Dev Notes), `rtk cargo clippy -p hifimule-daemon --all-targets`, frontend `rtk tsc` + build.
 
 ## Dev Notes
 
@@ -186,12 +186,52 @@ Recent commits (`8dc855a Fix issue`, `f1790db Review 12.7`, `db30397 Dev 12.7`, 
 
 ### Agent Model Used
 
+claude-opus-4-8 (Opus 4.8, 1M context) — bmad-dev-story workflow.
+
 ### Debug Log References
+
+- `rtk cargo test -p hifimule-daemon` → **534 passed** (full suite; includes the new `auto_fill::`, `db::` tests).
+- `rtk cargo test -p hifimule-daemon auto_fill::` → 57 passed; `… db::` → 29 passed; `… sync::` → 66 passed.
+- `rtk cargo clippy -p hifimule-daemon --all-targets` → 0 errors; **no new warnings in touched modules** (pre-existing warnings only).
+- `rtk cargo test -p hifimule-i18n` → 6 passed (catalog embeds + parses).
+- Frontend `rtk npx tsc --noEmit` → No errors found; `rtk npm run build` → built green.
 
 ### Completion Notes List
 
+**Engine (pure, deterministic — pipeline.rs):**
+- **Repeat-tolerance dial (#23, AC 7):** `memory_allows` now scales the cooldown window by `(1 − repeat_tolerance)`. Only modulates cooldown (inert when `cooldown_weeks` is `None`). Boundary-tested (t=0 strict, t=1 off, t=0.5 half-width).
+- **Stable-core + delta (#24, AC 6):** `run_pipeline` runs a `FillMode::Core` pass first (up to `round(ceiling × p)` bytes, on-device candidates only, cooldown bypassed, played-exclusion still applied) then the normal delta pass on the same `Selector` (dedup automatic). No-op when `p = 0`, unbounded ceiling, or no history. `FillMode` enum (Core/Primary/Fallback) replaced the old `is_fallback` bool to keep `fill` within the arg-count lint.
+- Determinism preserved: no clock/RNG in the engine; the four-persona suite still green.
+
+**Async/DB seam (fetch.rs, db.rs, rpc.rs):**
+- **DB layer (AC 1):** `Database` gained `upsert_autofill_history` (`INSERT … ON CONFLICT … DO UPDATE`), `get_autofill_history`, `prune_autofill_history`, and a new `autofill_rotation(device_id, server_id, cursor)` table with `get_rotation_cursor`/`advance_rotation_cursor`. All Unix-seconds; callers pass `now`. NULL `last_synced_at` = never synced, NULL `tier` = untiered (resolves 12.2's deferred timestamp-semantics item).
+- **History snapshot (AC 3/4/5):** the RPC layer builds the DB-sourced snapshot (`build_autofill_history`) and threads it via new `AutoFillParams` fields (`device_id`, `server_id`, `now_unix`, `history`, `rotation_cursor`) — chosen over handing `fetch.rs` a `&Database`, keeping the fetch layer DB-free. `expand_with_pipeline` overrides `now` and merges per-candidate `last_played_at` from provider `Song` play signals (AC 5). Played-exclusion uses `now` as a present-sentinel (the value is never compared — only `.is_some()`), so no ISO-date parser/dep was added.
+- **Cooldown/played activation (AC 4/5):** purely a matter of feeding real history — `memory_allows` was not reimplemented.
+
+**Rotation tiers (#25/#26, AC 8) — kept conservative per Dev Notes:**
+- `TierDef` (`{kind:playlist,ref}` | `{kind:library}`) parsed from `memory.tiers`; malformed → no rotation (logged, never aborts). Tiers define the run's sources; the cursor rotates the list (`cursor mod len`) so the lead tier shifts each sync; lead gets 50% of the ceiling, the rest split 50% equally (documented schedule). Each emitted track is tagged with its **original** tier index. `AutoFillItem` gained `tier: Option<String>`.
+- **Recording (AC 2/8):** `tier` flows AutoFillItem → `delta.adds` (via `patch_delta_tiers`, set on `SyncAddItem` which survives the delta JSON round-trip to sync-execute) — DesiredItem was deliberately **not** widened. At sync completion `record_autofill_history_after_sync` upserts `(device, server, track, now, tier)` for each add carrying a portable `server_id` (best-effort; never fails the sync), prunes rows older than 52 weeks, and advances the rotation cursor once per completed sync for servers whose pipeline uses tiers. Wired into both provider sync-completion paths (multi-server grouped + single non-Jellyfin); the legacy Jellyfin path has no portable id so is naturally skipped.
+
+**Routing (AC 9):** verified `needs_configurable_expansion` already returns `true` for `stableCorePct`/`repeatTolerance`/`tiers`-only pipelines via the existing `memory == default` check; locked in with a test (no logic change).
+
+**Frontend (AC 10) + i18n (AC 11):** `AutoFillPanel` Memory section (under Advanced) now renders a stable-core % range, a repeat-tolerance range, and an add/remove ordered rotation-tiers editor (playlist/library), all reading/writing the `MemoryStage` fields and round-tripping through `serializePipeline`; edits invalidate the live preview. `MemoryStage.tiers` is now typed (`TierDef[]`). 7 new keys (`stable_core_pct`(+`_hint`), `repeat_tolerance`(+`_hint`), `tiers`(+`_hint`), `tiers_add`) added to all 4 locales — **65×4 parity** (was 58×4).
+
+**Scope/backward-compat (AC 12):** default-Memory pipelines and the legacy fast path are byte-for-byte unchanged; config stays in the manifest, runtime history/rotation in the daemon DB. No later-Epic-13 features implemented (tier is *recorded* here; pity-timer *consumption* is 13.4).
+
 ### File List
+
+- `hifimule-daemon/src/db.rs` — `autofill_rotation` table; `upsert_autofill_history`/`get_autofill_history`/`prune_autofill_history`/`get_rotation_cursor`/`advance_rotation_cursor` + tests.
+- `hifimule-daemon/src/auto_fill/pipeline.rs` — repeat-tolerance scaling + `is_on_device` in `memory_allows`; stable-core pass + `FillMode` enum in `run_pipeline`/`Selector::fill`; `tier: None` in `make_item`; repeat-tolerance/stable-core tests.
+- `hifimule-daemon/src/auto_fill/fetch.rs` — `TierDef`/`parse_tiers`/`derive_last_played`; history-snapshot merge + tier rotation/tagging in `expand_with_pipeline`; cooldown/played/tier + routing tests.
+- `hifimule-daemon/src/auto_fill/mod.rs` — `AutoFillItem.tier`; `AutoFillParams` new fields (`device_id`/`server_id`/`now_unix`/`history`/`rotation_cursor`); `tier: None` in legacy item builders.
+- `hifimule-daemon/src/rpc.rs` — `now_unix_secs`/`build_autofill_history`/`patch_delta_tiers`/`record_autofill_history_after_sync`; `AutoFillParams` construction updated at all sites; tier patch on both provider delta paths; recording wired into both provider sync-completion paths.
+- `hifimule-daemon/src/sync.rs` — `SyncAddItem.tier` field (serde-default) + construction sites.
+- `hifimule-daemon/src/main.rs` — `AutoFillParams` construction updated at the two daemon-auto-sync legacy sites.
+- `hifimule-ui/src/state/autoFill.ts` — `TierDef` type; typed `MemoryStage` fields; `serializePipeline` emits the new Memory fields only when meaningful.
+- `hifimule-ui/src/components/AutoFillPanel.ts` — stable-core %, repeat-tolerance, rotation-tiers editor + handlers.
+- `hifimule-i18n/catalog.json` — 7 new `basket.autofill.*` keys × 4 locales (en/fr/es/de).
 
 ## Change Log
 
+- 2026-06-14 — Dev complete (Status → review). Activated the Memory stage end-to-end: DB read/write for `autofill_history` + new `autofill_rotation` cursor table; repeat-tolerance (#23), stable-core (#24), and playlist-backed rotation tiers (#25/#26) implemented; cooldown (#4) and played-exclusion (#5) wired via a DB+provider history snapshot threaded through `AutoFillParams`; sync-completion recording hook (best-effort) + cursor advance + pruning; UI controls under Advanced + 7 i18n keys ×4 locales (65×4 parity). Verification: 534 daemon tests pass, clippy clean (no new warnings in touched modules), frontend tsc + build green. Backward compatible (default Memory == today; legacy fast path untouched; storage split enforced).
 - 2026-06-14 — Story 13.1 created via create-story workflow (ready-for-dev). Scope: activate the Memory stage end-to-end (DB read/write wiring for `autofill_history` + a new `autofill_rotation` cursor table), implement the three reserved `MemoryStage` fields (`stable_core_pct` #24, `repeat_tolerance` #23, `tiers` #25/#26), activate cooldown (#4) and played-exclusion (#5) by populating the `HistorySnapshot` from DB + provider play data, surface the new controls in the pipeline-builder UI under Advanced, and add i18n keys across 4 locales. Backward compatible (default Memory == today's behavior); storage split enforced (config in manifest, runtime state in DB); legacy fast path untouched.

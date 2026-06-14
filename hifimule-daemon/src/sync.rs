@@ -116,6 +116,11 @@ pub struct SyncAddItem {
     /// routing in execute; `None` for single-server / legacy items.
     #[serde(default)]
     pub server_id: Option<String>,
+    /// Story 13.1: auto-fill rotation-tier index (string) when this add came from a Memory-tiered
+    /// slot. Survives the delta round-trip to sync-execute, where it is recorded into
+    /// `autofill_history.tier`. `None` for manual items and non-tiered fills.
+    #[serde(default)]
+    pub tier: Option<String>,
 }
 
 /// An item to be deleted from the device.
@@ -2929,6 +2934,7 @@ pub async fn augment_delta_with_existence_check(
                     reason_code: None,
                     reason: None,
                     server_id: desired.server_id.clone(),
+                    tier: None,
                 },
                 "device-file-missing",
             ));
@@ -3254,6 +3260,9 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
                     reason_code: None,
                     reason: None,
                     server_id: i.server_id.clone(),
+                    // Story 13.1: tier is patched onto delta.adds post-calculation (patch_delta_tiers)
+                    // from the auto-fill results, since DesiredItem does not carry it.
+                    tier: None,
                 },
                 reason_code,
             )
@@ -4113,6 +4122,7 @@ mod tests {
             reason_code: Some("new-selection".to_string()),
             reason: Some("new selection".to_string()),
             server_id: None,
+            tier: None,
         }
     }
 
@@ -5598,6 +5608,7 @@ mod tests {
                     reason_code: None,
                     reason: None,
                     server_id: None,
+                    tier: None,
                 },
                 "bitrate-increase",
             )],

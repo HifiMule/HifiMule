@@ -46,6 +46,10 @@ pub struct AutoFillItem {
     pub provider_suffix: Option<String>,
     pub size_bytes: u64,
     pub priority_reason: String,
+    /// Story 13.1: source rotation-tier index (as a string) when the pipeline used Memory tiers;
+    /// `None` otherwise. Recorded into `autofill_history.tier` at sync completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
 }
 
 #[derive(Debug)]
@@ -54,6 +58,20 @@ pub struct AutoFillParams {
     pub exclude_item_ids: Vec<String>,
     /// Maximum bytes available for auto-fill items (device free bytes minus manual selection size).
     pub max_fill_bytes: u64,
+    /// Story 13.1: the device manifest id, for history/rotation keying (`""` on legacy paths).
+    pub device_id: String,
+    /// Story 13.1: the slot's portable server id, for history/rotation keying (`""` on legacy paths).
+    pub server_id: String,
+    /// Story 13.1: caller-supplied current Unix seconds. The pure engine never reads the clock —
+    /// every time-based Memory decision derives from this value via the [`pipeline::HistorySnapshot`].
+    pub now_unix: i64,
+    /// Story 13.1: DB-sourced runtime history (per-track `last_synced_at`/`tier`) pre-built by the
+    /// RPC layer. Keeps the fetch layer DB-free; per-candidate `last_played_at` is merged in here
+    /// from the materialized provider songs. Empty on legacy/default paths (memory stays inert).
+    pub history: pipeline::HistorySnapshot,
+    /// Story 13.1: the rotation cursor for Memory tiers (read from the DB by the caller). The lead
+    /// tier is `cursor mod tiers.len()`; ignored when no tiers are configured.
+    pub rotation_cursor: i64,
 }
 
 /// Retry delays (ms) for transient 5xx server errors. Two entries = up to 3 total attempts.
@@ -92,6 +110,7 @@ pub async fn run_auto_fill(
     let AutoFillParams {
         exclude_item_ids,
         max_fill_bytes,
+        ..
     } = params;
     let exclude_count = exclude_item_ids.len();
     let exclude_set: std::collections::HashSet<String> = exclude_item_ids.into_iter().collect();
@@ -289,6 +308,7 @@ pub fn rank_and_truncate(
                 .or(track.container),
             size_bytes,
             priority_reason,
+            tier: None,
         });
     }
 
@@ -341,6 +361,7 @@ impl ProviderFillState {
             provider_suffix: song.suffix,
             size_bytes,
             priority_reason,
+            tier: None,
         });
         true
     }
@@ -373,6 +394,7 @@ pub async fn run_auto_fill_provider(
     let AutoFillParams {
         exclude_item_ids,
         max_fill_bytes,
+        ..
     } = params;
     let exclude_set: HashSet<String> = exclude_item_ids.into_iter().collect();
     let mut state = ProviderFillState::new(exclude_set, max_fill_bytes);

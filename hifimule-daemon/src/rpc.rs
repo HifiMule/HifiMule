@@ -2587,6 +2587,8 @@ async fn provider_calculate_delta(
     // Step 2: If auto-fill is enabled, fill remaining space after basket items.
     // When basket is empty this is a pure auto-fill (device fully managed by auto-fill).
     // When basket has items this augments them — playlists/albums stay, free space is filled.
+    // Story 13.1: rotation-tier index per emitted track, patched onto delta.adds below.
+    let mut af_tier_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     if auto_fill_enabled {
         // If the UI provided maxBytes, use it directly — it already represents the intended
         // auto-fill budget (UI subtracted manual-item sizes from free space). If not provided,
@@ -2638,13 +2640,31 @@ async fn provider_calculate_delta(
                 .iter()
                 .map(|i| i.jellyfin_id.clone())
                 .collect();
-            let fill_params = crate::auto_fill::AutoFillParams {
-                exclude_item_ids: exclude_ids,
-                max_fill_bytes: auto_fill_budget,
-            };
             // Story 12.4: route the selected server's slot through the shared seam, reading its
             // configured pipeline (portable serverId). Default-equivalent → fast path (AC 8).
             let selected_portable = current_server_portable_id(_state).ok().flatten();
+            // Story 13.1: supply the DB-sourced history snapshot + rotation cursor so the Memory
+            // stage (cooldown/played/stable-core/tiers) is live for this slot.
+            let now = now_unix_secs();
+            let (history, rotation_cursor) = match selected_portable.as_deref() {
+                Some(sid) => build_autofill_history(&_state.db, &manifest.device_id, sid, now),
+                None => (
+                    crate::auto_fill::HistorySnapshot {
+                        now,
+                        ..Default::default()
+                    },
+                    0,
+                ),
+            };
+            let fill_params = crate::auto_fill::AutoFillParams {
+                exclude_item_ids: exclude_ids,
+                max_fill_bytes: auto_fill_budget,
+                device_id: manifest.device_id.clone(),
+                server_id: selected_portable.clone().unwrap_or_default(),
+                now_unix: now,
+                history,
+                rotation_cursor,
+            };
             let pipeline_opt = selected_portable
                 .as_deref()
                 .and_then(|id| manifest.auto_fill.pipeline_for(id));
@@ -2660,6 +2680,9 @@ async fn provider_calculate_delta(
                 fill_items.len()
             );
             for item in fill_items {
+                if let Some(tier) = item.tier.clone() {
+                    af_tier_map.insert(item.id.clone(), tier);
+                }
                 if seen_ids.insert(item.id.clone()) {
                     desired_items.push(crate::sync::DesiredItem {
                         jellyfin_id: item.id,
@@ -2689,6 +2712,7 @@ async fn provider_calculate_delta(
         playlist_sync_items.len()
     );
     let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
+    patch_delta_tiers(&mut delta, &af_tier_map);
     delta.playlists = playlist_sync_items;
     crate::daemon_log!(
         "[Delta] Provider delta calculated: adds={} deletes={} id_changes={} unchanged={} playlists={} reasons={}",
@@ -3545,6 +3569,109 @@ async fn expand_auto_fill_slot(
     }
 }
 
+/// Story 13.1: current time as Unix seconds — the single clock read for auto-fill. The pure engine
+/// never reads the clock; it consumes this value via the history snapshot.
+pub(crate) fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Story 13.1: build the DB-sourced auto-fill history snapshot + rotation cursor for a
+/// `(device, portable server)` pair. Best-effort: a DB read error yields an empty snapshot so the
+/// Memory stage becomes inert rather than aborting the slot.
+fn build_autofill_history(
+    db: &crate::db::Database,
+    device_id: &str,
+    server_id: &str,
+    now: i64,
+) -> (crate::auto_fill::HistorySnapshot, i64) {
+    let mut entries = std::collections::HashMap::new();
+    match db.get_autofill_history(device_id, server_id) {
+        Ok(rows) => {
+            for (track_id, last_synced_at, tier) in rows {
+                entries.insert(
+                    track_id,
+                    crate::auto_fill::TrackHistory {
+                        last_synced_at,
+                        last_played_at: None,
+                        tier,
+                    },
+                );
+            }
+        }
+        Err(e) => crate::daemon_log!("[AutoFill] history read failed (memory inert): {}", e),
+    }
+    let cursor = db.get_rotation_cursor(device_id, server_id).unwrap_or(0);
+    (crate::auto_fill::HistorySnapshot { now, entries }, cursor)
+}
+
+/// Story 13.1: copy the rotation-tier index from auto-fill results onto the matching `delta.adds`
+/// entries (keyed by provider track id), so the tier survives the delta round-trip to sync-execute
+/// where it is recorded into `autofill_history.tier`.
+fn patch_delta_tiers(
+    delta: &mut crate::sync::SyncDelta,
+    tier_by_track: &std::collections::HashMap<String, String>,
+) {
+    if tier_by_track.is_empty() {
+        return;
+    }
+    for add in &mut delta.adds {
+        if let Some(tier) = tier_by_track.get(&add.jellyfin_id) {
+            add.tier = Some(tier.clone());
+        }
+    }
+}
+
+/// Story 13.1: record auto-fill runtime history at sync completion (best-effort; never fails the
+/// sync). For each add that carries a portable `server_id`, upsert `(device, server, track)` with
+/// `last_synced_at = now` and the add's tier; then advance the rotation cursor once per server whose
+/// configured pipeline uses Memory tiers, and prune rows older than the retention window.
+fn record_autofill_history_after_sync(
+    db: &crate::db::Database,
+    manifest: &crate::device::DeviceManifest,
+    delta: &crate::sync::SyncDelta,
+    now: i64,
+) {
+    use std::collections::HashSet;
+    let device_id = manifest.device_id.as_str();
+    let mut servers_synced: HashSet<String> = HashSet::new();
+    for add in &delta.adds {
+        let Some(server_id) = add.server_id.as_deref().filter(|s| !s.is_empty()) else {
+            continue; // no portable server id (legacy/Jellyfin) → not tracked for cooldown
+        };
+        if let Err(e) = db.upsert_autofill_history(
+            device_id,
+            server_id,
+            &add.jellyfin_id,
+            Some(now),
+            add.tier.as_deref(),
+        ) {
+            crate::daemon_log!("[AutoFill] history record failed (non-fatal): {}", e);
+        }
+        servers_synced.insert(server_id.to_string());
+    }
+
+    // Retention: keep ~1 year of history. Prune per touched server.
+    const RETENTION_SECS: i64 = 52 * 7 * 86_400;
+    let cutoff = now.saturating_sub(RETENTION_SECS);
+    for server_id in &servers_synced {
+        let _ = db.prune_autofill_history(device_id, server_id, cutoff);
+        // Advance the rotation cursor once per completed sync for servers whose pipeline uses tiers.
+        let uses_tiers = manifest
+            .auto_fill
+            .pipeline_for(server_id)
+            .and_then(|p| p.memory.tiers.as_ref())
+            .is_some_and(|t| !t.is_null());
+        if uses_tiers {
+            if let Err(e) = db.advance_rotation_cursor(device_id, server_id) {
+                crate::daemon_log!("[AutoFill] rotation cursor advance failed (non-fatal): {}", e);
+            }
+        }
+    }
+}
+
 /// Story 12.4: true when any auto-fill slot's resolved server has a configured NON-default
 /// pipeline. The Jellyfin-client fast path cannot run a configurable pipeline, so this forces the
 /// per-provider routing path. `auto_fill_servers` are the resolved portable serverIds
@@ -3680,6 +3807,8 @@ async fn multi_provider_calculate_delta(
     // already-selected ids (manual + earlier slots). Slots share one remaining
     // capacity budget so combined fill never oversubscribes the device (AC4).
     let descriptors = parse_auto_fill_descriptors(params);
+    // Story 13.1: rotation-tier index per emitted track across all slots, patched onto delta.adds.
+    let mut af_tier_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     if !descriptors.is_empty() {
         // Shared budget = device free + already-synced − already-selected bytes
         // (mirrors `provider_calculate_delta`'s server-side derivation at
@@ -3750,9 +3879,18 @@ async fn multi_provider_calculate_delta(
                 .map(|i| i.jellyfin_id.clone())
                 .collect();
             exclude_ids.extend(desc.exclude_item_ids.iter().cloned());
+            // Story 13.1: DB-sourced history snapshot + rotation cursor for this slot's server.
+            let now = now_unix_secs();
+            let (history, rotation_cursor) =
+                build_autofill_history(&state.db, &manifest.device_id, &af_server, now);
             let fill_params = crate::auto_fill::AutoFillParams {
                 exclude_item_ids: exclude_ids,
                 max_fill_bytes: budget,
+                device_id: manifest.device_id.clone(),
+                server_id: af_server.clone(),
+                now_unix: now,
+                history,
+                rotation_cursor,
             };
             // Story 12.4: route this slot through the shared seam — the configurable engine
             // when this server has a non-default pipeline, else the default fast path.
@@ -3768,6 +3906,11 @@ async fn multi_provider_calculate_delta(
                     continue;
                 }
             };
+            for item in &fill_items {
+                if let Some(tier) = item.tier.clone() {
+                    af_tier_map.insert(item.id.clone(), tier);
+                }
+            }
             push_fill_items_dedup(
                 fill_items,
                 &mut desired_items,
@@ -3779,6 +3922,7 @@ async fn multi_provider_calculate_delta(
     }
 
     let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
+    patch_delta_tiers(&mut delta, &af_tier_map);
     delta.playlists = playlist_sync_items;
     if let Some((_, device_io)) = state.device_manager.get_manifest_and_io().await {
         crate::sync::augment_delta_with_existence_check(
@@ -4184,9 +4328,15 @@ async fn handle_sync_calculate_delta(
         };
         let exclude_ids: Vec<String> = desc.exclude_item_ids;
         let expanded_excludes = expand_exclude_ids(&state.jellyfin_client, exclude_ids).await;
+        // Legacy Jellyfin fast path: Memory features don't apply (Story 13.1 fields are inert).
         let fill_params = crate::auto_fill::AutoFillParams {
             exclude_item_ids: expanded_excludes,
             max_fill_bytes,
+            device_id: String::new(),
+            server_id: String::new(),
+            now_unix: now_unix_secs(),
+            history: crate::auto_fill::HistorySnapshot::default(),
+            rotation_cursor: 0,
         };
         match crate::auto_fill::run_auto_fill(&state.jellyfin_client, fill_params).await {
             Ok(af_items) => {
@@ -4461,6 +4611,7 @@ async fn handle_sync_execute(
                 reason_code: Some("force-sync".to_string()),
                 reason: Some("force sync requested".to_string()),
                 server_id: item.server_id.clone(),
+                tier: None,
             });
             force_deletes.push(crate::sync::SyncDeleteItem {
                 jellyfin_id: item.jellyfin_id.clone(),
@@ -4587,6 +4738,7 @@ async fn handle_sync_execute(
         let op_id = operation_id.clone();
         let device_manager = state.device_manager.clone();
         let state_tx = state.state_tx.clone();
+        let db = state.db.clone();
         let _ = state_tx.send(crate::DaemonState::Syncing);
 
         tokio::spawn(async move {
@@ -4700,6 +4852,9 @@ async fn handle_sync_execute(
             {
                 eprintln!("Failed to clear dirty flag on final manifest: {}", e);
             }
+            // Story 13.1: record auto-fill history (last_synced_at + tier) for the synced tracks and
+            // advance rotation cursors. Best-effort — never affects sync status.
+            record_autofill_history_after_sync(&db, &sync_manifest, &delta, now_unix_secs());
             if let Some(mut operation) = op_manager.get_operation(&op_id).await {
                 operation.status = if all_errors.is_empty() {
                     crate::sync::SyncStatus::Complete
@@ -4723,6 +4878,7 @@ async fn handle_sync_execute(
         let op_id = operation_id.clone();
         let device_manager = state.device_manager.clone();
         let state_tx = state.state_tx.clone();
+        let db = state.db.clone();
         let _ = state_tx.send(crate::DaemonState::Syncing);
 
         tokio::spawn(async move {
@@ -4796,6 +4952,8 @@ async fn handle_sync_execute(
                     {
                         eprintln!("Failed to clear dirty flag on final manifest: {}", e);
                     }
+                    // Story 13.1: record auto-fill history + advance rotation cursors (best-effort).
+                    record_autofill_history_after_sync(&db, &sync_manifest, &delta, now_unix_secs());
                     if let Some(mut operation) = op_manager.get_operation(&op_id).await {
                         operation.status = if errors.is_empty() {
                             crate::sync::SyncStatus::Complete
@@ -5946,9 +6104,25 @@ async fn handle_basket_auto_fill(
 
         // Exclude ids are passed through verbatim (the per-provider seam dedups by id, mirroring
         // the sync-time path). Container-id expansion is a Jellyfin-only concern of the legacy path.
+        // Story 13.1: build the same DB-sourced history + rotation cursor as sync-time so the
+        // preview reflects cooldown/played/stable-core/tiers exactly as the fill will.
+        let now = now_unix_secs();
+        let device_id = state
+            .device_manager
+            .get_current_device()
+            .await
+            .map(|m| m.device_id)
+            .unwrap_or_default();
+        let (history, rotation_cursor) =
+            build_autofill_history(&state.db, &device_id, &server_id, now);
         let fill_params = crate::auto_fill::AutoFillParams {
             exclude_item_ids,
             max_fill_bytes,
+            device_id,
+            server_id: server_id.clone(),
+            now_unix: now,
+            history,
+            rotation_cursor,
         };
         return match expand_auto_fill_slot(provider, Some(&pipeline), fill_params).await {
             Ok(items) => serde_json::to_value(items).map_err(|e| JsonRpcError {
@@ -5986,9 +6160,15 @@ async fn handle_basket_auto_fill(
     // excluded from auto-fill results (AC-2).
     let expanded_exclude_ids = expand_exclude_ids(&state.jellyfin_client, exclude_item_ids).await;
 
+    // Legacy Jellyfin preview (no serverId): Memory features don't apply (Story 13.1 fields inert).
     let fill_params = crate::auto_fill::AutoFillParams {
         exclude_item_ids: expanded_exclude_ids,
         max_fill_bytes,
+        device_id: String::new(),
+        server_id: String::new(),
+        now_unix: now_unix_secs(),
+        history: crate::auto_fill::HistorySnapshot::default(),
+        rotation_cursor: 0,
     };
 
     match crate::auto_fill::run_auto_fill(&state.jellyfin_client, fill_params).await {
@@ -8267,6 +8447,7 @@ mod tests {
                 provider_suffix: None,
                 size_bytes: size,
                 priority_reason: "test".to_string(),
+                tier: None,
             }
         }
 

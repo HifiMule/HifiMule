@@ -319,27 +319,48 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
     let exclude: HashSet<String> = input.exclude_item_ids.iter().cloned().collect();
     let mut selector = Selector::new(ceiling, pipeline.budget.target_duration_secs, exclude);
 
-    // Primary sources, each capped by its share allocation.
+    // Stable-core (#24, AC 6): when `stable_core_pct = p > 0` and the budget is bounded, fill up to
+    // `round(ceiling × p)` bytes FIRST from candidates already on the device (have a `last_synced_at`
+    // row), exempt from cooldown — the *stable core*. The remaining budget then fills as the *delta*
+    // from all candidates honoring full memory rules. Same Filter/Ordering/Unit/dedup as the delta;
+    // dedup against the core is automatic via the shared selector. `p = 0`/unbounded ceiling = no-op.
+    let core_pct = pipeline.memory.stable_core_pct.unwrap_or(0.0).clamp(0.0, 1.0);
+    if core_pct > 0.0 && ceiling != u64::MAX {
+        let core_cap = ((ceiling as f64) * f64::from(core_pct)).round() as u64;
+        if core_cap > 0 {
+            selector.ceiling = core_cap;
+            for source in sources.iter() {
+                let units = build_source_units(input, pipeline, source);
+                selector.fill(units, source, core_cap, &pipeline.memory, &input.history, FillMode::Core);
+            }
+            selector.ceiling = ceiling; // restore the full ceiling for the delta pass
+        }
+    }
+
+    // Primary sources (delta), each capped by its share allocation.
     let caps = source_caps(sources, ceiling);
     for (source, cap) in sources.iter().zip(caps) {
         let units = build_source_units(input, pipeline, source);
-        selector.fill(units, source, cap, false, &pipeline.memory, &input.history);
+        selector.fill(units, source, cap, &pipeline.memory, &input.history, FillMode::Primary);
     }
 
     // Terminal fallback chain — only reached once primary sources can't fill the budget.
     for source in &pipeline.fallback {
         let units = build_source_units(input, pipeline, source);
-        selector.fill(
-            units,
-            source,
-            ceiling,
-            true,
-            &pipeline.memory,
-            &input.history,
-        );
+        selector.fill(units, source, ceiling, &pipeline.memory, &input.history, FillMode::Fallback);
     }
 
     selector.into_items()
+}
+
+/// Which fill pass is running. `Core` (stable-core, AC 6) restricts to on-device candidates and
+/// exempts them from cooldown; `Primary` and `Fallback` apply the full Memory rules and differ only
+/// in how the source reason is tagged (`Fallback` items are prefixed `fallback:`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FillMode {
+    Core,
+    Primary,
+    Fallback,
 }
 
 /// A selection unit: one or more candidates that are added to the budget atomically (a single
@@ -410,26 +431,44 @@ fn memory_stage(
     }
     cands
         .into_iter()
-        .filter(|c| memory_allows(&c.song, mem, hist))
+        .filter(|c| memory_allows(&c.song, mem, hist, false))
         .collect()
 }
 
-fn memory_allows(song: &Song, mem: &MemoryStage, hist: &HistorySnapshot) -> bool {
+/// Whether a candidate survives the Memory stage. `skip_cooldown` exempts the candidate from the
+/// cooldown window (used by the stable-core pass, AC 6) while still honoring played-exclusion.
+///
+/// Cooldown window (AC 4) is `cooldown_weeks × 7 × 86400` seconds, scaled by the repeat-tolerance
+/// dial (AC 7): `effective = window × (1 − repeat_tolerance)`. `repeat_tolerance` only modulates
+/// cooldown (no effect when `cooldown_weeks` is `None`). Deterministic — no clock/RNG.
+fn memory_allows(song: &Song, mem: &MemoryStage, hist: &HistorySnapshot, skip_cooldown: bool) -> bool {
     let Some(h) = hist.entries.get(&song.id) else {
         return true; // no history → never cooled down
     };
     if mem.played_exclusion && h.last_played_at.is_some() {
         return false;
     }
-    if let Some(weeks) = mem.cooldown_weeks
+    if !skip_cooldown
+        && let Some(weeks) = mem.cooldown_weeks
         && let Some(synced) = h.last_synced_at
     {
-        let window_secs = i64::from(weeks) * 7 * 86_400;
+        let base = (i64::from(weeks) * 7 * 86_400) as f64;
+        let tolerance = f64::from(mem.repeat_tolerance.unwrap_or(0.0).clamp(0.0, 1.0));
+        let window_secs = (base * (1.0 - tolerance)) as i64;
         if hist.now.saturating_sub(synced) < window_secs {
-            return false; // synced too recently
+            return false; // synced too recently (within the tolerance-scaled window)
         }
     }
     true
+}
+
+/// True when the candidate is currently on the device (has a recorded `last_synced_at`). Drives the
+/// stable-core partition (AC 6) — only on-device tracks are eligible for the core.
+fn is_on_device(song: &Song, hist: &HistorySnapshot) -> bool {
+    hist.entries
+        .get(&song.id)
+        .and_then(|h| h.last_synced_at)
+        .is_some()
 }
 
 /// Group candidates into selection units. `Track` = one unit per song; `Album`/`Artist` group by
@@ -610,10 +649,12 @@ impl Selector {
         units: Vec<UnitGroup>,
         source: &SourceEntry,
         cap: u64,
-        is_fallback: bool,
         memory: &MemoryStage,
         history: &HistorySnapshot,
+        mode: FillMode,
     ) {
+        let core = mode == FillMode::Core;
+        let is_fallback = mode == FillMode::Fallback;
         let mut source_bytes: u64 = 0;
         for unit in units {
             if let Some(target) = self.duration_target
@@ -628,10 +669,13 @@ impl Selector {
             let mut unit_secs: u64 = 0;
             for cand in &unit {
                 let song = &cand.song;
-                if self.exclude.contains(&song.id)
+                // The core pass only draws candidates already on the device; cooldown is skipped for
+                // them (they are kept on purpose) but played-exclusion still applies.
+                if (core && !is_on_device(song, history))
+                    || self.exclude.contains(&song.id)
                     || self.seen.contains(&song.id)
                     || !local_seen.insert(song.id.clone())
-                    || !memory_allows(song, memory, history)
+                    || !memory_allows(song, memory, history, core)
                 {
                     continue;
                 }
@@ -687,6 +731,9 @@ fn make_item(song: &Song, size_bytes: u64, reason: String) -> AutoFillItem {
         provider_suffix: song.suffix.clone(),
         size_bytes,
         priority_reason: reason,
+        // Tier is assigned by the fetch layer (which owns the rotated tier→pool mapping); the pure
+        // engine never knows about tiers, so it always emits `None` here.
+        tier: None,
     }
 }
 
@@ -973,6 +1020,159 @@ mod tests {
             vec!["kids-clean"],
             "only non-explicit kids tracks survive the filter"
         );
+    }
+
+    // ===================================================================
+    // Story 13.1 — repeat-tolerance dial (#23) & stable-core (#24).
+    // ===================================================================
+
+    #[test]
+    fn repeat_tolerance_scales_the_cooldown_window() {
+        let now = 1_000_000_000i64;
+        let week = 7 * 86_400i64;
+        let song = song_sized("t", false, 0, "2024-01-01", 1_000_000);
+
+        let mut hist = HistorySnapshot {
+            now,
+            ..Default::default()
+        };
+        hist.entries.insert(
+            "t".to_string(),
+            TrackHistory {
+                last_synced_at: Some(now - week), // synced one week ago
+                ..Default::default()
+            },
+        );
+
+        // t = 0 → full 2-week window → a 1-week-old sync is still cooled down (current behavior).
+        let strict = MemoryStage {
+            cooldown_weeks: Some(2),
+            repeat_tolerance: Some(0.0),
+            ..Default::default()
+        };
+        assert!(!memory_allows(&song, &strict, &hist, false), "t=0 strict");
+
+        // t = 1 → zero window → recently-synced tracks fully allowed.
+        let lax = MemoryStage {
+            cooldown_weeks: Some(2),
+            repeat_tolerance: Some(1.0),
+            ..Default::default()
+        };
+        assert!(memory_allows(&song, &lax, &hist, false), "t=1 no cooldown");
+
+        // t = 0.5 → 1-week effective window. Synced exactly one week ago sits on the boundary
+        // (`elapsed < window` is false) → allowed.
+        let mid = MemoryStage {
+            cooldown_weeks: Some(2),
+            repeat_tolerance: Some(0.5),
+            ..Default::default()
+        };
+        assert!(memory_allows(&song, &mid, &hist, false), "t=0.5 boundary allowed");
+
+        // …but a 3-day-old sync is still inside the half-width window → excluded.
+        let mut hist_recent = HistorySnapshot {
+            now,
+            ..Default::default()
+        };
+        hist_recent.entries.insert(
+            "t".to_string(),
+            TrackHistory {
+                last_synced_at: Some(now - 3 * 86_400),
+                ..Default::default()
+            },
+        );
+        assert!(!memory_allows(&song, &mid, &hist_recent, false), "t=0.5 inside window");
+
+        // repeat_tolerance only modulates cooldown — with no cooldown it is inert.
+        let no_cooldown = MemoryStage {
+            cooldown_weeks: None,
+            repeat_tolerance: Some(0.5),
+            ..Default::default()
+        };
+        assert!(memory_allows(&song, &no_cooldown, &hist, false), "tolerance is inert without cooldown");
+    }
+
+    #[test]
+    fn stable_core_fills_core_fraction_from_on_device_tracks() {
+        let now = 1_000_000_000i64;
+        let mut hist = HistorySnapshot {
+            now,
+            ..Default::default()
+        };
+        let mut library = Vec::new();
+        // 4 tracks already on the device (have last_synced_at).
+        for i in 0..4 {
+            let id = format!("dev{i}");
+            hist.entries.insert(
+                id.clone(),
+                TrackHistory {
+                    last_synced_at: Some(now - 100 * 7 * 86_400),
+                    ..Default::default()
+                },
+            );
+            library.push(cand(song_sized(&id, false, 0, "2024-01-01", 1_000_000)));
+        }
+        // 4 fresh tracks never synced.
+        for i in 0..4 {
+            library.push(cand(song_sized(&format!("fresh{i}"), false, 0, "2024-01-01", 1_000_000)));
+        }
+        let input = PipelineInput {
+            history: hist,
+            ..Default::default()
+        }
+        .with_pool(SourceKind::Library, None, library);
+
+        // 8 MB budget, p = 0.5 → ~4 MB core from on-device, ~4 MB delta from fresh.
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            memory: MemoryStage {
+                stable_core_pct: Some(0.5),
+                ..Default::default()
+            },
+            budget: BudgetStage {
+                max_bytes: Some(8_000_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let result = run_pipeline(&input, &pipeline);
+        let total: u64 = result.iter().map(|i| i.size_bytes).sum();
+        assert!(total <= 8_000_000, "never exceeds the ceiling");
+        let core_bytes: u64 = result
+            .iter()
+            .filter(|i| i.id.starts_with("dev"))
+            .map(|i| i.size_bytes)
+            .sum();
+        assert!(core_bytes >= 4_000_000, "≈p of the budget is the on-device core");
+        assert!(
+            result.iter().any(|i| i.id.starts_with("fresh")),
+            "the delta still draws fresh tracks"
+        );
+        // No within-run duplicates between the core and delta passes.
+        let mut seen = std::collections::HashSet::new();
+        assert!(result.iter().all(|i| seen.insert(i.id.clone())));
+    }
+
+    #[test]
+    fn stable_core_empty_history_first_sync_is_a_normal_fill() {
+        let library = (0..4)
+            .map(|i| cand(song_sized(&format!("t{i}"), false, 0, "2024-01-01", 1_000_000)))
+            .collect();
+        let input = PipelineInput::default().with_pool(SourceKind::Library, None, library);
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            memory: MemoryStage {
+                stable_core_pct: Some(0.5),
+                ..Default::default()
+            },
+            budget: BudgetStage {
+                max_bytes: Some(4_000_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // No history → the core is empty → the whole budget fills normally.
+        assert_eq!(run_pipeline(&input, &pipeline).len(), 4);
     }
 
     // ===================================================================

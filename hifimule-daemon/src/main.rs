@@ -597,6 +597,11 @@ async fn run_auto_sync(
             let fill_params = crate::auto_fill::AutoFillParams {
                 exclude_item_ids,
                 max_fill_bytes,
+                device_id: manifest.device_id.clone(),
+                server_id: String::new(),
+                now_unix: crate::rpc::now_unix_secs(),
+                history: crate::auto_fill::HistorySnapshot::default(),
+                rotation_cursor: 0,
             };
             match crate::auto_fill::run_auto_fill(&jellyfin_client, fill_params).await {
                 Ok(items) if items.is_empty() => {
@@ -1162,6 +1167,11 @@ async fn run_auto_sync_via_provider(
             let fill_params = auto_fill::AutoFillParams {
                 exclude_item_ids,
                 max_fill_bytes: auto_fill_budget,
+                device_id: manifest.device_id.clone(),
+                server_id: String::new(),
+                now_unix: crate::rpc::now_unix_secs(),
+                history: auto_fill::HistorySnapshot::default(),
+                rotation_cursor: 0,
             };
             match auto_fill::run_auto_fill_provider(provider.clone(), fill_params).await {
                 Ok(items) if items.is_empty() && desired_items.is_empty() => {
