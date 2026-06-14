@@ -157,7 +157,7 @@ development_status:
   11-10-curation-view-complete-list-order-numbers-and-reorder: done
 
   # Epic 12 — Configurable Auto-Fill Pipeline & Multi-Server Auto-Fill (sprint-change-proposal-2026-06-14-configurable-auto-fill)
-  epic-12: in-progress  # first story 12.1 created via create-story 2026-06-14
+  epic-12: done  # first story 12.1 created via create-story 2026-06-14
   12-1-autofill-pipeline-domain-model-and-engine: done  # code review patches applied 2026-06-14; 21 pipeline tests pass
   12-2-autofill-manifest-schema-and-db-history-scaffolding: done  # story created via create-story 2026-06-14; dev complete 2026-06-14 (483 daemon tests pass); code review 2026-06-14 (2 patches applied, 2 deferred to 12.3/Epic 13)
   12-3-multi-slot-sync-time-expansion: done  # story created via create-story 2026-06-14; dev complete 2026-06-14 (488 daemon tests pass); review complete 2026-06-14 (4 patches applied)
