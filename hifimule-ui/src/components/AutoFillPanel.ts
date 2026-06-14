@@ -9,6 +9,7 @@
 
 import { t } from '../i18n';
 import type { BrowseMode, BrowsePlaylist } from '../rpc';
+import { previewAutoFill } from '../rpc';
 import {
     AutoFillPipeline,
     OrderingKey,
@@ -42,6 +43,15 @@ export interface AutoFillPanelOptions {
     /** Playlists for the playlist-source picker (empty when `playlists` mode unsupported). */
     playlists: BrowsePlaylist[];
     onSave: (pipeline: AutoFillPipeline) => void;
+    /** Manual (non-slot) item ids for this server — passed to the preview as `excludeItemIds` so it
+     * dedups against manual selections exactly as sync-time fill does (Story 12.7). */
+    excludeItemIds?: string[];
+    /** Capacity available for the fill (free − manual), derived identically to the slot-card readout.
+     * The preview caps its `maxBytes` by this so it never overstates beyond real free space.
+     * `undefined` when no device capacity is known — the daemon then falls back to device free bytes. */
+    availableBytes?: number;
+    /** The project's byte formatter (reused, not reinvented) for the preview's "~size" readout. */
+    formatSize: (bytes: number) => string;
 }
 
 export class AutoFillPanel {
@@ -61,6 +71,13 @@ export class AutoFillPanel {
     private cooldownInput: string;
     private durationHoursInput: string;
     private headroomGbInput: string;
+
+    // --- Live preview state (Story 12.7) ---
+    private previewResult: { count: number; bytes: number } | null = null;
+    private previewError: string | null = null;
+    private previewLoading = false;
+    private previewInFlight = false;
+    private previewTimer: number | null = null;
 
     constructor(private opts: AutoFillPanelOptions) {
         this.pipeline = normalizePipeline(opts.pipeline);
@@ -101,6 +118,12 @@ export class AutoFillPanel {
 
     private renderBody(): void {
         if (!this.dialog) return;
+        // A structural change (toggle/source/ordering edit, advanced disclosure) invalidates any
+        // prior preview so we never show a stale count. Text-input edits clear it via their own
+        // handler (they don't re-render). The in-flight flag is preserved — a request mid-render
+        // still resolves and repaints through updatePreviewUi().
+        this.previewResult = null;
+        this.previewError = null;
         const p = this.pipeline;
 
         this.dialog.innerHTML = `
@@ -121,7 +144,12 @@ export class AutoFillPanel {
                     ${this.advancedOpen ? this.renderAdvanced() : ''}
                 </div>
                 ${this.renderBudgetStage()}
+                <div id="af-preview" class="auto-fill-preview">${this.renderPreviewContent()}</div>
             </div>
+            <sl-button slot="footer" variant="default" id="af-preview-btn" ${this.previewLoading ? 'loading' : ''}>
+                <sl-icon slot="prefix" name="eye"></sl-icon>
+                ${t('basket.autofill.preview')}
+            </sl-button>
             <sl-button slot="footer" variant="default" id="af-cancel">${t('basket.actions.cancel')}</sl-button>
             <sl-button slot="footer" variant="primary" id="af-save">
                 <sl-icon slot="prefix" name="check2"></sl-icon>
@@ -129,6 +157,36 @@ export class AutoFillPanel {
             </sl-button>
         `;
         this.bindEvents();
+    }
+
+    /** Renders the current preview state: loading, error, empty-result, or "~N tracks · ~size".
+     * Empty string when no preview has run, so the area is invisible until first invoked. */
+    private renderPreviewContent(): string {
+        if (this.previewLoading) {
+            return `<sl-spinner></sl-spinner> <span>${t('basket.autofill.preview_loading')}</span>`;
+        }
+        if (this.previewError) {
+            return `<span class="auto-fill-preview-error">${escapeHtml(this.previewError)}</span>`;
+        }
+        if (this.previewResult) {
+            if (this.previewResult.count === 0) {
+                return `<span class="auto-fill-preview-empty">${t('basket.autofill.preview_empty')}</span>`;
+            }
+            return `<span class="auto-fill-preview-result">${t('basket.autofill.preview_result', {
+                count: this.previewResult.count,
+                size: this.opts.formatSize(this.previewResult.bytes),
+            })}</span>`;
+        }
+        return '';
+    }
+
+    /** Repaints just the preview area + button loading state without a full re-render, so a
+     * resolved preview survives (a full renderBody would clear `previewResult`). */
+    private updatePreviewUi(): void {
+        const el = this.dialog?.querySelector('#af-preview');
+        if (el) el.innerHTML = this.renderPreviewContent();
+        const btn = this.dialog?.querySelector('#af-preview-btn') as any;
+        if (btn) btn.loading = this.previewLoading;
     }
 
     private renderStage(label: string, body: string): string {
@@ -358,15 +416,29 @@ export class AutoFillPanel {
         });
 
         // --- Footer ---
+        d.querySelector('#af-preview-btn')?.addEventListener('click', () => this.onPreviewClick());
         d.querySelector('#af-cancel')?.addEventListener('click', () => d.hide());
         d.querySelector('#af-save')?.addEventListener('click', () => this.handleSave());
     }
 
     private bindTextState(selector: string, update: (value: string) => void): void {
         const el = this.dialog.querySelector(selector);
-        const listener = (e: Event) => update(String((e.target as any).value ?? ''));
+        const listener = (e: Event) => {
+            update(String((e.target as any).value ?? ''));
+            // Edits invalidate any shown preview (text inputs don't re-render the whole body).
+            this.invalidatePreview();
+        };
         el?.addEventListener('sl-input', listener);
         el?.addEventListener('sl-change', listener);
+    }
+
+    /** Clears a shown preview result/error and repaints (used when an input changes without a full
+     * re-render). No-op when nothing is shown, to avoid clobbering an in-flight loading state. */
+    private invalidatePreview(): void {
+        if (!this.previewResult && !this.previewError) return;
+        this.previewResult = null;
+        this.previewError = null;
+        this.updatePreviewUi();
     }
 
     private captureInputs(): void {
@@ -401,9 +473,10 @@ export class AutoFillPanel {
         this.renderBody();
     }
 
-    /** Reads the free-text/number inputs into the model, then serializes and hands back. */
-    private handleSave(): void {
-        const d = this.dialog;
+    /** Reads the free-text/number inputs into the in-memory model and returns the serialized
+     * pipeline. Shared by Save (which persists the result) and Preview (which does not) so the two
+     * can never diverge — the preview always reflects the exact config a Save would write. */
+    private buildPipeline(): AutoFillPipeline {
         this.captureInputs();
         // Budget (GB → bytes); empty clears the ceiling.
         this.pipeline.budget.maxBytes = this.bytesFromGbInput(
@@ -437,9 +510,65 @@ export class AutoFillPanel {
             );
         }
 
-        const out = serializePipeline(this.pipeline);
+        return serializePipeline(this.pipeline);
+    }
+
+    /** Reads the free-text/number inputs into the model, then serializes and hands back. */
+    private handleSave(): void {
+        const out = this.buildPipeline();
         this.opts.onSave(out);
-        d.hide();
+        this.dialog.hide();
+    }
+
+    /** Preview entry point (AC2): explicit, debounced (≥300 ms), never fired on open/edit/toggle.
+     * A request already in flight is ignored (the button is in its loading state). */
+    private onPreviewClick(): void {
+        if (this.previewInFlight) return;
+        if (this.previewTimer !== null) clearTimeout(this.previewTimer);
+        this.previewLoading = true;
+        this.previewError = null;
+        this.updatePreviewUi();
+        this.previewTimer = window.setTimeout(() => { void this.runPreview(); }, 300);
+    }
+
+    /** Runs the preview through the shared `basket.autoFill`+serverId seam using the current unsaved
+     * pipeline (via `buildPipeline()`), the per-server manual exclude ids, and a capacity-capped
+     * `maxBytes`. Surfaces all outcomes (result / empty / error) and always clears loading. */
+    private async runPreview(): Promise<void> {
+        this.previewTimer = null;
+        this.previewInFlight = true;
+        try {
+            const pipeline = this.buildPipeline();
+            const items = await previewAutoFill({
+                serverId: this.opts.serverId,
+                pipeline,
+                excludeItemIds: this.opts.excludeItemIds,
+                maxBytes: this.previewMaxBytes(pipeline),
+            });
+            const bytes = items.reduce((sum, i) => sum + (i.sizeBytes ?? 0), 0);
+            this.previewResult = { count: items.length, bytes };
+            this.previewError = null;
+        } catch (err) {
+            this.previewResult = null;
+            this.previewError = err instanceof Error ? err.message : t('basket.autofill.preview_error');
+            window.dispatchEvent(new CustomEvent('toast', {
+                detail: { type: 'error', message: t('basket.autofill.preview_error') },
+            }));
+        } finally {
+            this.previewInFlight = false;
+            this.previewLoading = false;
+            this.updatePreviewUi();
+        }
+    }
+
+    /** The capacity-capped byte ceiling for the preview, mirroring the slot-card readout
+     * (`slotSizeBytes`): cap the pipeline's budget by real available capacity, else use all of it.
+     * `undefined` available → send the pipeline budget (or let the daemon default to device free). */
+    private previewMaxBytes(pipeline: AutoFillPipeline): number | undefined {
+        const max = pipeline.budget.maxBytes;
+        const available = this.opts.availableBytes;
+        if (available == null) return max;
+        return typeof max === 'number' ? Math.min(max, available) : available;
     }
 
     private numberFromInput(raw: string): number | null {

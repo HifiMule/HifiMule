@@ -1227,6 +1227,32 @@ h2 {
   padding-top: var(--space-xs);
 }
 
+/* Live preview readout (Story 12.7) — empty (no preview run) collapses to nothing. */
+.auto-fill-preview:empty {
+  display: none;
+}
+
+.auto-fill-preview {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding-top: var(--space-xs);
+  border-top: 1px solid var(--surface-border-soft);
+  font-size: 0.9em;
+}
+
+.auto-fill-preview-result {
+  font-weight: 600;
+}
+
+.auto-fill-preview-empty {
+  color: var(--text-muted, #888);
+}
+
+.auto-fill-preview-error {
+  color: var(--sl-color-danger-600, #c0392b);
+}
+
 .af-advanced-chevron {
   transition: transform 0.15s ease;
 }

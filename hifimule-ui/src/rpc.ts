@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { t } from './i18n';
+import type { AutoFillPipeline } from './state/autoFill';
 
 export const RPC_PORT = (import.meta as any).env?.VITE_RPC_PORT || '19140';
 export const RPC_URL = `http://localhost:${RPC_PORT}`;
@@ -364,4 +365,36 @@ export async function fetchBrowseSearch(
     query: string,
 ): Promise<{ tracks: BrowseTrack[] }> {
     return await rpcCall('browse.search', { query });
+}
+
+// --- Auto-Fill live preview (Story 12.7) ---
+
+/** The minimal slice of the daemon `AutoFillItem` (camelCase serde) the preview needs: enough to
+ * count items and sum their on-device size. The daemon returns richer fields (album/artist/etc.)
+ * which we intentionally ignore here. */
+export interface AutoFillPreviewItem {
+    id: string;
+    name: string;
+    sizeBytes: number;
+}
+
+/** Computes a live, provider-routed preview of what the given (unsaved) pipeline would fill for
+ * `serverId`, via the shared `basket.autoFill`+serverId sync-time seam (Story 12.7). Always routes
+ * by portable `serverId` — never the legacy no-serverId Jellyfin path — so it previews correctly
+ * for Subsonic/Navidrome servers too. Surfaced errors (unknown serverId → ERR_CONNECTION_FAILED,
+ * malformed pipeline → ERR_INVALID_PARAMS, any RPC failure) propagate as thrown Errors for the
+ * caller to display. */
+export async function previewAutoFill(params: {
+    serverId: string;
+    pipeline: AutoFillPipeline;
+    excludeItemIds?: string[];
+    maxBytes?: number;
+}): Promise<AutoFillPreviewItem[]> {
+    const result = await rpcCall('basket.autoFill', {
+        serverId: params.serverId,
+        pipeline: params.pipeline,
+        ...(params.excludeItemIds !== undefined && { excludeItemIds: params.excludeItemIds }),
+        ...(params.maxBytes !== undefined && { maxBytes: params.maxBytes }),
+    });
+    return Array.isArray(result) ? (result as AutoFillPreviewItem[]) : [];
 }

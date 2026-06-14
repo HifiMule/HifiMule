@@ -450,6 +450,13 @@ export class BasketSidebar {
             }
         }
 
+        // Capacity available for this fill (free − manual), derived identically to slotSizeBytes so
+        // the preview's capped maxBytes matches the slot-card readout. Undefined when no device is
+        // connected → the daemon falls back to device free bytes.
+        const availableBytes = this.storageInfo
+            ? Math.max(this.storageInfo.freeBytes - basketStore.getManualSizeBytes(), 0)
+            : undefined;
+
         new AutoFillPanel({
             serverId,
             serverLabel,
@@ -457,6 +464,9 @@ export class BasketSidebar {
             modes,
             playlists,
             onSave: (pipeline) => { void this.persistPipeline(serverId, pipeline); },
+            excludeItemIds: basketStore.getManualItemIdsForServer(serverId),
+            availableBytes,
+            formatSize,
         }).open();
     }
 
