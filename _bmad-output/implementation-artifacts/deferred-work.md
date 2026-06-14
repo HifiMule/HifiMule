@@ -229,3 +229,7 @@ If future review findings need follow-up, add them as new story scope or reopen 
 ## Deferred from: code review of story-12.3 (2026-06-14)
 
 - **Duplicate `serverId` across two enabled auto-fill descriptors → redundant full provider pagination** (`hifimule-daemon/src/rpc.rs:~3640`, `multi_provider_calculate_delta` loop). When the array carries two enabled descriptors for the same server, `run_auto_fill_provider` paginates that server's entire library twice; the second pass excludes everything the first already selected via `seen_ids`, so the result is correct but the network/server cost is doubled. Deferred: low priority — the Story 12.6 UI owns descriptor generation and will not emit duplicate per-server slots, and no current caller triggers it. Revisit if manual/array payloads can ever carry duplicate serverIds.
+
+## Deferred from: code review of story-12.4 (2026-06-14)
+
+- **Invalid share totals can starve later sources** (`hifimule-daemon/src/auto_fill/pipeline.rs:559`). `SourceEntry.share` is documented as `0.0..=1.0`, but the 12.1 pure engine does not validate total explicit share weight. A malformed hand-written manifest with shares summing above 1.0 can let earlier sources consume the global ceiling before later sources get useful budget. Deferred as pre-existing engine/config-validation work; address with future pipeline validation or UI/RPC config hardening.

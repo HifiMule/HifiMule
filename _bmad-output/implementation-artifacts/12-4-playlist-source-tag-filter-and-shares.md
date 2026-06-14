@@ -4,7 +4,7 @@ baseline_commit: 5538ecf88e16a34cb258ba7978b9a391abb0fd04
 
 # Story 12.4: PlaylistSource, Tag/Genre Filter & Per-Source Shares
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -77,6 +77,15 @@ so that I can express "70% from 2 playlists, 30% library remainder, no Christmas
   - [x] `expand_with_pipeline` over a **mock `MediaProvider`** (build a minimal in-test impl, or reuse an existing test provider in `auto_fill`/`providers` tests if one exists — check before writing a new one): playlist source returns only that playlist's tracks; missing `ref` → that source skipped; genre filter attaches genres and includes/excludes correctly; provider without `BrowseMode::Genres` → genre constraints dropped (fill not emptied); tag constraints dropped; two shared sources blend by share; empty `HistorySnapshot` ⇒ cooldown/played config has no effect.
   - [x] Routing: a basket whose selected server has a configured non-default pipeline forces the provider path (does not take the Jellyfin-client fast path); a default-pipeline single-server basket still takes the fast path (parity with 12.3 `test_sync_needs_provider_routing*`).
   - [x] Run `rtk cargo test -p hifimule-daemon` (targeted `rtk cargo test -p hifimule-daemon auto_fill::` / `rpc::` if the full suite is sandbox-gated by mockito/networking — see Previous-story note), and `rtk cargo clippy -p hifimule-daemon --all-targets`.
+
+### Review Findings
+
+- [x] [Review][Patch] Source-less configurable pipelines materialize no Library pool [hifimule-daemon/src/auto_fill/fetch.rs:124]
+- [x] [Review][Patch] Headroom and duration budget fields still affect 12.4 materialized fills [hifimule-daemon/src/auto_fill/fetch.rs:115]
+- [x] [Review][Patch] Large genre memberships are truncated at the first 2,000 tracks [hifimule-daemon/src/auto_fill/fetch.rs:199]
+- [x] [Review][Patch] Genre fetch errors leave filters enforced with incomplete membership [hifimule-daemon/src/auto_fill/fetch.rs:199]
+- [x] [Review][Patch] Required edge tests miss implicit Library and runtime UnsupportedCapability paths [hifimule-daemon/src/auto_fill/fetch.rs:695]
+- [x] [Review][Defer] Invalid share totals can starve later sources [hifimule-daemon/src/auto_fill/pipeline.rs:559] — deferred, pre-existing
 
 ## Dev Notes
 

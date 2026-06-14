@@ -120,10 +120,19 @@ pub async fn expand_with_pipeline(
         .unwrap_or(max_fill_bytes)
         .min(max_fill_bytes);
     normalized.budget.max_bytes = Some(capped);
+    // Story 12.4 only honors max_bytes capped by the slot budget. Headroom and duration-target
+    // refinements belong to Story 12.5, so keep them inert in the materialized path for now.
+    normalized.budget.target_duration_secs = None;
+    normalized.budget.headroom_bytes = None;
 
     // --- Materialize one pool per distinct (kind, ref) across sources ∪ fallback.
     let mut keys: Vec<SourceKey> = Vec::new();
     let mut seen_keys: HashSet<SourceKey> = HashSet::new();
+    if normalized.sources.is_empty() {
+        let key = SourceKey::new(SourceKind::Library, None);
+        seen_keys.insert(key.clone());
+        keys.push(key);
+    }
     for entry in normalized.sources.iter().chain(normalized.fallback.iter()) {
         let key = SourceKey::new(entry.kind, entry.ref_id.clone());
         if seen_keys.insert(key.clone()) {
@@ -165,8 +174,8 @@ async fn resolve_genre_membership(
     provider: &dyn MediaProvider,
     pipeline: &mut AutoFillPipeline,
 ) -> HashMap<String, Vec<String>> {
-    let wants_genre = !pipeline.filter.include_genres.is_empty()
-        || !pipeline.filter.exclude_genres.is_empty();
+    let wants_genre =
+        !pipeline.filter.include_genres.is_empty() || !pipeline.filter.exclude_genres.is_empty();
     if !wants_genre {
         return HashMap::new();
     }
@@ -198,28 +207,49 @@ async fn resolve_genre_membership(
 
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
     for genre in &genres {
-        match provider.get_genre_tracks(genre, 0, MAX_PER_LIST).await {
-            Ok((songs, _)) => {
-                for song in songs {
-                    map.entry(song.id).or_default().push(genre.clone());
+        let mut offset = 0u32;
+        let mut pages = 0u32;
+        loop {
+            match provider.get_genre_tracks(genre, offset, MAX_PER_LIST).await {
+                Ok((songs, total)) => {
+                    let count = songs.len() as u32;
+                    if count == 0 {
+                        break;
+                    }
+
+                    for song in songs {
+                        map.entry(song.id).or_default().push(genre.clone());
+                    }
+
+                    pages += 1;
+                    let next_offset = offset.saturating_add(count);
+                    if count < MAX_PER_LIST || next_offset >= total || pages >= MAX_BULK_PAGES {
+                        break;
+                    }
+                    offset = next_offset;
                 }
-            }
-            Err(ProviderError::UnsupportedCapability(_)) => {
-                // Belt-and-suspenders: a runtime UnsupportedCapability is treated as the same
-                // graceful drop as a missing BrowseMode::Genres. Clear constraints and bail.
-                crate::daemon_log!(
-                    "[AutoFill] get_genre_tracks returned UnsupportedCapability — dropping genre constraints (pass-through)"
-                );
-                pipeline.filter.include_genres.clear();
-                pipeline.filter.exclude_genres.clear();
-                return HashMap::new();
-            }
-            Err(e) => {
-                crate::daemon_log!(
-                    "[AutoFill] get_genre_tracks({}) failed (non-fatal): {}",
-                    genre,
-                    e
-                );
+                Err(ProviderError::UnsupportedCapability(_)) => {
+                    // Belt-and-suspenders: a runtime UnsupportedCapability is treated as the same
+                    // graceful drop as a missing BrowseMode::Genres. Clear constraints and bail.
+                    crate::daemon_log!(
+                        "[AutoFill] get_genre_tracks returned UnsupportedCapability — dropping genre constraints (pass-through)"
+                    );
+                    pipeline.filter.include_genres.clear();
+                    pipeline.filter.exclude_genres.clear();
+                    return HashMap::new();
+                }
+                Err(e) => {
+                    // Enforcing include/exclude with incomplete membership would silently empty or
+                    // pollute fills. Treat provider lookup failures as pass-through for this slot.
+                    crate::daemon_log!(
+                        "[AutoFill] get_genre_tracks({}) failed: {} — dropping genre constraints (pass-through)",
+                        genre,
+                        e
+                    );
+                    pipeline.filter.include_genres.clear();
+                    pipeline.filter.exclude_genres.clear();
+                    return HashMap::new();
+                }
             }
         }
     }
@@ -231,9 +261,10 @@ async fn resolve_genre_membership(
 async fn materialize_pool(provider: &dyn MediaProvider, key: &SourceKey) -> Vec<Song> {
     match key.kind {
         SourceKind::Library => fetch_library(provider).await,
-        SourceKind::Favorites => {
-            fetch_priority_list(provider.list_favorites(None, 0, MAX_PER_LIST).await, "list_favorites")
-        }
+        SourceKind::Favorites => fetch_priority_list(
+            provider.list_favorites(None, 0, MAX_PER_LIST).await,
+            "list_favorites",
+        ),
         SourceKind::History => fetch_priority_list(
             provider.list_recently_played(None, 0, MAX_PER_LIST).await,
             "list_recently_played",
@@ -278,7 +309,9 @@ async fn fetch_library(provider: &dyn MediaProvider) -> Vec<Song> {
                 offset += PAGE_SIZE;
             }
             Err(ProviderError::UnsupportedCapability(_)) => {
-                crate::daemon_log!("[AutoFill] list_all_songs_page: UnsupportedCapability, empty pool");
+                crate::daemon_log!(
+                    "[AutoFill] list_all_songs_page: UnsupportedCapability, empty pool"
+                );
                 break;
             }
             Err(e) => {
@@ -327,12 +360,12 @@ async fn fetch_playlist(provider: &dyn MediaProvider, ref_id: Option<&str>) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auto_fill::pipeline::{BudgetStage, SourceEntry};
     use crate::domain::models::{Playlist, PlaylistWithTracks, SearchResult, Song};
     use crate::providers::{
         BrowseCapabilities, Capabilities, ProviderChangeContext, ScrobbleRequest, ServerType,
         TranscodeProfile,
     };
-    use crate::auto_fill::pipeline::{BudgetStage, SourceEntry};
     use async_trait::async_trait;
 
     // -------------------------------------------------------------------
@@ -348,6 +381,9 @@ mod tests {
         /// genre name -> song objects (so get_genre_tracks can return Songs).
         genre_songs: HashMap<String, Vec<Song>>,
         supports_genres: bool,
+        genre_unsupported_at_runtime: bool,
+        genre_error_at_runtime: bool,
+        unsupported_recently_played: bool,
     }
 
     #[async_trait]
@@ -481,7 +517,15 @@ mod tests {
             _offset: u32,
             _limit: u32,
         ) -> Result<(Vec<Song>, u32), ProviderError> {
-            Ok((self.recently_played.clone(), self.recently_played.len() as u32))
+            if self.unsupported_recently_played {
+                return Err(ProviderError::UnsupportedCapability(
+                    "list_recently_played".into(),
+                ));
+            }
+            Ok((
+                self.recently_played.clone(),
+                self.recently_played.len() as u32,
+            ))
         }
 
         async fn list_all_songs_page(
@@ -503,19 +547,31 @@ mod tests {
         async fn get_genre_tracks(
             &self,
             genre_id_or_name: &str,
-            _offset: u32,
-            _limit: u32,
+            offset: u32,
+            limit: u32,
         ) -> Result<(Vec<Song>, u32), ProviderError> {
-            if !self.supports_genres {
-                return Err(ProviderError::UnsupportedCapability("get_genre_tracks".into()));
+            if !self.supports_genres || self.genre_unsupported_at_runtime {
+                return Err(ProviderError::UnsupportedCapability(
+                    "get_genre_tracks".into(),
+                ));
             }
-            let songs = self
+            if self.genre_error_at_runtime {
+                return Err(ProviderError::Other(anyhow::anyhow!("genre fetch failed")));
+            }
+            let all = self
                 .genre_songs
                 .get(genre_id_or_name)
                 .cloned()
                 .unwrap_or_default();
-            let total = songs.len() as u32;
-            Ok((songs, total))
+            let total = all.len() as u32;
+            let start = offset as usize;
+            let end = (start + limit as usize).min(all.len());
+            let page = if start >= all.len() {
+                Vec::new()
+            } else {
+                all[start..end].to_vec()
+            };
+            Ok((page, total))
         }
     }
 
@@ -564,10 +620,12 @@ mod tests {
     #[test]
     fn discriminator_default_pipelines_take_fast_path() {
         assert!(!needs_configurable_expansion(&AutoFillPipeline::default()));
-        assert!(!needs_configurable_expansion(&AutoFillPipeline::default_legacy(Some(
-            8_000_000_000
-        ))));
-        assert!(!needs_configurable_expansion(&AutoFillPipeline::default_legacy(None)));
+        assert!(!needs_configurable_expansion(
+            &AutoFillPipeline::default_legacy(Some(8_000_000_000))
+        ));
+        assert!(!needs_configurable_expansion(
+            &AutoFillPipeline::default_legacy(None)
+        ));
     }
 
     #[test]
@@ -629,7 +687,11 @@ mod tests {
             library: vec![song("lib-x", 1_000_000)],
             playlists: HashMap::from([(
                 "energy".to_string(),
-                vec![song("e1", 3_000_000), song("e2", 3_000_000), song("e3", 3_000_000)],
+                vec![
+                    song("e1", 3_000_000),
+                    song("e2", 3_000_000),
+                    song("e3", 3_000_000),
+                ],
             )]),
             ..Default::default()
         });
@@ -648,8 +710,15 @@ mod tests {
         let result = expand_with_pipeline(provider, &pipeline, params(7_000_000))
             .await
             .unwrap();
-        assert_eq!(ids(&result), vec!["e1", "e2"], "only playlist tracks, budget-truncated");
-        assert!(!ids(&result).contains(&"lib-x".to_string()), "library must not leak in");
+        assert_eq!(
+            ids(&result),
+            vec!["e1", "e2"],
+            "only playlist tracks, budget-truncated"
+        );
+        assert!(
+            !ids(&result).contains(&"lib-x".to_string()),
+            "library must not leak in"
+        );
     }
 
     #[tokio::test]
@@ -673,7 +742,10 @@ mod tests {
         let result = expand_with_pipeline(provider, &pipeline, params(10_000_000))
             .await
             .unwrap();
-        assert!(result.is_empty(), "missing playlist ref yields an empty pool");
+        assert!(
+            result.is_empty(),
+            "missing playlist ref yields an empty pool"
+        );
     }
 
     #[tokio::test]
@@ -687,7 +759,10 @@ mod tests {
             ],
             supports_genres: true,
             genre_songs: HashMap::from([
-                ("kids".to_string(), vec![song("t1", 1_000_000), song("t2", 1_000_000)]),
+                (
+                    "kids".to_string(),
+                    vec![song("t1", 1_000_000), song("t2", 1_000_000)],
+                ),
                 ("explicit".to_string(), vec![song("t2", 1_000_000)]),
             ]),
             ..Default::default()
@@ -709,6 +784,33 @@ mod tests {
             .await
             .unwrap();
         // t1 is "kids" and not "explicit" → kept. t2 is excluded. t3 not in "kids" → dropped.
+        assert_eq!(ids(&result), vec!["t1"]);
+    }
+
+    #[tokio::test]
+    async fn implicit_library_source_is_materialized_for_filter_only_pipeline() {
+        // Empty `sources` defaults to Library inside run_pipeline; the fetch layer must materialize
+        // the same implicit Library pool when any other stage makes the pipeline configurable.
+        let provider = arc(MockProvider {
+            library: vec![song("t1", 1_000_000), song("t2", 1_000_000)],
+            supports_genres: true,
+            genre_songs: HashMap::from([("kids".to_string(), vec![song("t1", 1_000_000)])]),
+            ..Default::default()
+        });
+        let pipeline = AutoFillPipeline {
+            filter: FilterStage {
+                include_genres: vec!["kids".into()],
+                ..Default::default()
+            },
+            budget: BudgetStage {
+                max_bytes: Some(100_000_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let result = expand_with_pipeline(provider, &pipeline, params(100_000_000))
+            .await
+            .unwrap();
         assert_eq!(ids(&result), vec!["t1"]);
     }
 
@@ -736,7 +838,103 @@ mod tests {
         let result = expand_with_pipeline(provider, &pipeline, params(100_000_000))
             .await
             .unwrap();
-        assert_eq!(ids(&result), vec!["t1", "t2"], "genre filter dropped → all library tracks");
+        assert_eq!(
+            ids(&result),
+            vec!["t1", "t2"],
+            "genre filter dropped → all library tracks"
+        );
+    }
+
+    #[tokio::test]
+    async fn genre_filter_dropped_when_runtime_lookup_is_unsupported() {
+        // Provider advertises Genres but the method returns UnsupportedCapability at runtime; this
+        // must use the same pass-through fallback as a missing advertised capability.
+        let provider = arc(MockProvider {
+            library: vec![song("t1", 1_000_000), song("t2", 1_000_000)],
+            supports_genres: true,
+            genre_unsupported_at_runtime: true,
+            ..Default::default()
+        });
+        let pipeline = AutoFillPipeline {
+            filter: FilterStage {
+                include_genres: vec!["kids".into()],
+                ..Default::default()
+            },
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            budget: BudgetStage {
+                max_bytes: Some(100_000_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let result = expand_with_pipeline(provider, &pipeline, params(100_000_000))
+            .await
+            .unwrap();
+        assert_eq!(
+            ids(&result),
+            vec!["t1", "t2"],
+            "runtime unsupported → pass-through"
+        );
+    }
+
+    #[tokio::test]
+    async fn genre_filter_dropped_when_membership_lookup_errors() {
+        // Partial/incomplete genre membership would make include filters silently empty the fill.
+        // Treat lookup failures as pass-through for the slot.
+        let provider = arc(MockProvider {
+            library: vec![song("t1", 1_000_000), song("t2", 1_000_000)],
+            supports_genres: true,
+            genre_error_at_runtime: true,
+            ..Default::default()
+        });
+        let pipeline = AutoFillPipeline {
+            filter: FilterStage {
+                include_genres: vec!["kids".into()],
+                ..Default::default()
+            },
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            budget: BudgetStage {
+                max_bytes: Some(100_000_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let result = expand_with_pipeline(provider, &pipeline, params(100_000_000))
+            .await
+            .unwrap();
+        assert_eq!(
+            ids(&result),
+            vec!["t1", "t2"],
+            "genre lookup error → pass-through"
+        );
+    }
+
+    #[tokio::test]
+    async fn genre_membership_is_paginated_beyond_first_page() {
+        let library: Vec<Song> = (0..2001).map(|i| song(&format!("t{i}"), 1)).collect();
+        let provider = arc(MockProvider {
+            library: library.clone(),
+            supports_genres: true,
+            genre_songs: HashMap::from([("deep".to_string(), library)]),
+            ..Default::default()
+        });
+        let pipeline = AutoFillPipeline {
+            filter: FilterStage {
+                include_genres: vec!["deep".into()],
+                ..Default::default()
+            },
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            budget: BudgetStage {
+                max_bytes: Some(10_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let result = expand_with_pipeline(provider, &pipeline, params(10_000))
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 2001);
+        assert_eq!(result.last().map(|i| i.id.as_str()), Some("t2000"));
     }
 
     #[tokio::test]
@@ -762,7 +960,11 @@ mod tests {
             .await
             .unwrap();
         // No candidate carries tags; an enforced include_tags would empty the fill. Dropped → kept.
-        assert_eq!(ids(&result), vec!["t1", "t2"], "tag constraints dropped → all tracks kept");
+        assert_eq!(
+            ids(&result),
+            vec!["t1", "t2"],
+            "tag constraints dropped → all tracks kept"
+        );
     }
 
     #[tokio::test]
@@ -829,6 +1031,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn headroom_and_duration_budget_fields_are_inert_until_12_5() {
+        let provider = arc(MockProvider {
+            library: vec![
+                song("t1", 1_000_000),
+                song("t2", 1_000_000),
+                song("t3", 1_000_000),
+            ],
+            ..Default::default()
+        });
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            budget: BudgetStage {
+                max_bytes: Some(5_000_000),
+                target_duration_secs: Some(100),
+                headroom_bytes: Some(4_000_000),
+            },
+            ..Default::default()
+        };
+        let result = expand_with_pipeline(provider, &pipeline, params(5_000_000))
+            .await
+            .unwrap();
+        assert_eq!(
+            ids(&result),
+            vec!["t1", "t2", "t3"],
+            "12.4 honors max_bytes only; duration/headroom are 12.5 concerns"
+        );
+    }
+
+    #[tokio::test]
     async fn empty_history_makes_cooldown_inert() {
         // Memory cooldown/played-exclusion are configured, but the empty HistorySnapshot means
         // nothing is excluded — all library tracks survive.
@@ -852,7 +1083,11 @@ mod tests {
         let result = expand_with_pipeline(provider, &pipeline, params(100_000_000))
             .await
             .unwrap();
-        assert_eq!(ids(&result), vec!["t1", "t2"], "empty history → cooldown/played config inert");
+        assert_eq!(
+            ids(&result),
+            vec!["t1", "t2"],
+            "empty history → cooldown/played config inert"
+        );
     }
 
     #[tokio::test]
@@ -861,6 +1096,7 @@ mod tests {
         // still fills the slot (best-effort, no abort).
         let provider = arc(MockProvider {
             playlists: HashMap::from([("energy".to_string(), vec![song("e1", 1_000_000)])]),
+            unsupported_recently_played: true,
             ..Default::default()
         });
         let pipeline = AutoFillPipeline {
@@ -881,6 +1117,10 @@ mod tests {
         let result = expand_with_pipeline(provider, &pipeline, params(100_000_000))
             .await
             .unwrap();
-        assert_eq!(ids(&result), vec!["e1"], "playlist still fills despite unsupported history");
+        assert_eq!(
+            ids(&result),
+            vec!["e1"],
+            "playlist still fills despite unsupported history"
+        );
     }
 }
