@@ -2545,3 +2545,49 @@ fn manifest_round_trips_per_server_autofill_map() {
     let back: DeviceManifest = serde_json::from_str(&reser).unwrap();
     assert!(back.auto_fill.pipelines.contains_key("srv-xyz"));
 }
+
+// --- Code-review regression tests (2026-06-14) ---
+
+#[test]
+fn autofill_config_deserializes_partial_legacy_block() {
+    // Review fix: a partial legacy block (missing `enabled`) must not fail the whole manifest.
+    // `#[serde(default)]` on AutoFillPrefs supplies `enabled = false`.
+    let cfg: AutoFillConfig = serde_json::from_str(r#"{ "maxBytes": 123 }"#).unwrap();
+    assert_eq!(
+        cfg.legacy,
+        Some(AutoFillPrefs {
+            enabled: false,
+            max_bytes: Some(123),
+        })
+    );
+    assert!(cfg.pipelines.is_empty());
+    // A whole manifest carrying the partial block also loads.
+    let manifest: DeviceManifest =
+        serde_json::from_str(r#"{ "device_id": "d", "version": "1.0", "auto_fill": { "maxBytes": 123 } }"#)
+            .unwrap();
+    assert_eq!(manifest.auto_fill.legacy_max_bytes(), Some(123));
+}
+
+#[test]
+fn set_legacy_updates_sole_pipeline_instead_of_parking_dropped_legacy() {
+    // Review fix: with one existing pipeline and no selected server, set_legacy must update the
+    // pipeline in place (a parked legacy block would be silently dropped by serialize).
+    let mut cfg = AutoFillConfig::default();
+    cfg.set_for("srv-1", true, Some(1000));
+    cfg.set_legacy(false, Some(2000));
+    assert!(cfg.legacy.is_none(), "no dangling legacy block");
+    assert_eq!(cfg.pipelines.len(), 1);
+    assert!(!cfg.pipelines["srv-1"].enabled, "new value applied in place");
+    assert_eq!(cfg.pipelines["srv-1"].budget.max_bytes, Some(2000));
+    // The write survives a serialize → deserialize round-trip.
+    let back: AutoFillConfig = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+    assert_eq!(back, cfg);
+    // With no pipelines configured, set_legacy still parks a legacy block (unchanged fallback).
+    let mut empty = AutoFillConfig::default();
+    empty.set_legacy(true, Some(50));
+    assert_eq!(
+        empty.legacy,
+        Some(AutoFillPrefs { enabled: true, max_bytes: Some(50) })
+    );
+    assert!(empty.pipelines.is_empty());
+}

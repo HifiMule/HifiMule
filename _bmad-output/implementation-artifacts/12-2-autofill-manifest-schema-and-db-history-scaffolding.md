@@ -4,7 +4,7 @@ baseline_commit: 8b4ff3781ad53fc07d1fcc86338dc2f4f3d5d0eb
 
 # Story 12.2: Auto-Fill Manifest Schema & DB History Scaffolding
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -112,6 +112,15 @@ so that per-server pipeline config becomes the real on-disk shape (visible, not 
   - [x] Accessor parity: `enabled_for(Some(id))`, single-entry fallback `enabled_for(None)`, and legacy fallback all return the expected enabled/max_bytes; `set_for` upserts the pipeline; `legacy_enabled()`/`legacy_max_bytes()` match.
   - [x] DB: temp/in-memory `Database::new(...)` → `SELECT … FROM autofill_history LIMIT 0` succeeds; calling `init()` twice does not error (idempotent).
   - [x] Run `rtk cargo test -p hifimule-daemon`; zero regressions, all new tests pass.
+
+### Review Findings
+
+_Code review 2026-06-14 (Blind Hunter + Edge Case Hunter + Acceptance Auditor). All 8 ACs verified satisfied for 12.2's frozen single-server behavior; findings below are latent/corner-case hazards._
+
+- [x] [Review][Patch] `set_legacy` write silently lost when a pipeline already exists [hifimule-daemon/src/device/mod.rs:329-343] — FIXED 2026-06-14: `set_legacy` now updates the sole existing pipeline in place; regression test `set_legacy_updates_sole_pipeline_instead_of_parking_dropped_legacy`. — `setAutoFill` with no selected server (`get_server_config()` → `None`, reachable per `db.rs:1021`) calls `set_legacy`, which parks a `legacy` block. But `AutoFillConfig::serialize` (`device/mod.rs:262`) emits the non-empty `pipelines` map and **drops the parked `legacy`**, and `get_daemon_state` (`enabled_for(None)` → single-entry fallback) ignores it → the toggle is silently discarded on persist. Resolution (Alexis, 2026-06-14): `set_legacy` writes into the sole existing pipeline when one exists (mirror `resolve_pipeline`'s single-entry logic). (blind+edge)
+- [x] [Review][Patch] `AutoFillPrefs` lacks field-level `#[serde(default)]` — a partial legacy block (`{"maxBytes":123}`, missing `enabled`) failed *both* untagged variants → the **whole manifest** failed to deserialize [hifimule-daemon/src/device/mod.rs:168-173]. FIXED 2026-06-14: added `#[serde(default)]` to `AutoFillPrefs`; regression test `autofill_config_deserializes_partial_legacy_block`. (edge)
+- [x] [Review][Defer] Multi-server accessor seam — `resolve_pipeline` single-entry fallback + unkeyed `main.rs` reads [hifimule-daemon/src/device/mod.rs:279-305; main.rs:578,581,1119,1141] — deferred, latent (not triggerable in 12.2; live in Story 12.3)
+- [x] [Review][Defer] `autofill_history` timestamp unit & NULL semantics undefined [hifimule-daemon/src/db.rs:215-231] — deferred, Epic 13 (scaffolding)
 
 ## Dev Notes
 

@@ -165,8 +165,12 @@ impl DeviceManifest {
 
 /// Legacy single-block auto-fill shape (`{ "enabled", "maxBytes" }`). Retained as both the
 /// pre-12.2 on-disk shape and the transient migration carrier inside [`AutoFillConfig`].
+///
+/// `default` tolerates a partial legacy block (e.g. a hand-edited `{ "maxBytes": 123 }` missing
+/// `enabled`): without it the missing scalar fails *both* untagged `AutoFillConfig` variants and
+/// the entire manifest fails to load. Missing fields fall back to the `Default` (`false`/`None`).
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct AutoFillPrefs {
     pub enabled: bool,
     pub max_bytes: Option<u64>,
@@ -325,9 +329,20 @@ impl AutoFillConfig {
         self.legacy = None;
     }
 
-    /// Sets the legacy block — the fallback write path when no selected portable id is available.
+    /// Write path when no selected portable id is available (e.g. the server is momentarily
+    /// unselected). When a single pipeline already exists (single-server install), update it in
+    /// place — parking a `legacy` block here would be silently dropped by `serialize`, which emits
+    /// the non-empty `pipelines` map (mirrors `resolve_pipeline`'s single-entry fallback). Only an
+    /// empty (or genuinely multi-server, Story 12.3) config falls back to parking the legacy block.
     pub fn set_legacy(&mut self, enabled: bool, max_bytes: Option<u64>) {
-        self.legacy = Some(AutoFillPrefs { enabled, max_bytes });
+        if self.pipelines.len() == 1 {
+            let key = self.pipelines.keys().next().expect("len == 1").clone();
+            self.pipelines
+                .insert(key, pipeline_from_legacy(&AutoFillPrefs { enabled, max_bytes }));
+            self.legacy = None;
+        } else {
+            self.legacy = Some(AutoFillPrefs { enabled, max_bytes });
+        }
     }
 
     /// The pipeline for `server_id`, if one is configured. Reserved for Story 12.3 expansion
