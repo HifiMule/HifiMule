@@ -4,7 +4,7 @@ baseline_commit: db9f8eab2465f1e03e4084cc75261e2a4775f952
 
 # Story 12.7: Auto-Fill RPC/State Contract & i18n
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -94,32 +94,32 @@ You are completing wiring on a fully-built feature. The selection engine, manife
 
 ## Tasks / Subtasks
 
-- [ ] **Daemon: verify/lock the state-contract invariants (no production code change expected)** (AC: 9, 10, 11, 12)
-  - [ ] Read the existing test inventory (Dev Notes) and identify any uncovered assertion among AC9–AC12. Add only the missing tests — do not duplicate.
-  - [ ] Ensure `basket.autoFill`+serverId tests cover: inline pipeline routes to correct provider, unknown serverId → `ERR_CONNECTION_FAILED`, malformed inline pipeline → `ERR_INVALID_PARAMS`, absent serverId → legacy path. (`test_auto_fill_needs_configurable_routing` [rpc.rs:7814] and `test_auto_fill_budget_headroom_forces_routing` [rpc.rs:7864] exist — extend if the error/inline cases are missing.)
-  - [ ] If all invariants are already covered, record that finding in the Dev Agent Record rather than adding redundant tests.
+- [x] **Daemon: verify/lock the state-contract invariants (no production code change expected)** (AC: 9, 10, 11, 12)
+  - [x] Read the existing test inventory (Dev Notes) and identify any uncovered assertion among AC9–AC12. Add only the missing tests — do not duplicate.
+  - [x] Ensure `basket.autoFill`+serverId tests cover: inline pipeline routes to correct provider, unknown serverId → `ERR_CONNECTION_FAILED`, malformed inline pipeline → `ERR_INVALID_PARAMS`, absent serverId → legacy path. (`test_auto_fill_needs_configurable_routing` [rpc.rs:7814] and `test_auto_fill_budget_headroom_forces_routing` [rpc.rs:7864] exist — extend if the error/inline cases are missing.)
+  - [x] If all invariants are already covered, record that finding in the Dev Agent Record rather than adding redundant tests.
 
-- [ ] **Frontend: extract `buildPipeline()` from `handleSave()`** (AC: 3, 14)
-  - [ ] Refactor `AutoFillPanel.handleSave()` [AutoFillPanel.ts:405-443] so the "captureInputs → write budget/genre/memory into `this.pipeline` → `serializePipeline`" body lives in a reusable `private buildPipeline(): AutoFillPipeline`. `handleSave()` calls it then persists; the preview calls it without persisting. Preserve the 12.5 lesson (emit null/omit, not 0, for cleared duration/headroom).
+- [x] **Frontend: extract `buildPipeline()` from `handleSave()`** (AC: 3, 14)
+  - [x] Refactor `AutoFillPanel.handleSave()` [AutoFillPanel.ts:405-443] so the "captureInputs → write budget/genre/memory into `this.pipeline` → `serializePipeline`" body lives in a reusable `private buildPipeline(): AutoFillPipeline`. `handleSave()` calls it then persists; the preview calls it without persisting. Preserve the 12.5 lesson (emit null/omit, not 0, for cleared duration/headroom).
 
-- [ ] **Frontend: `previewAutoFill` rpc helper** (AC: 1, 4, 5)
-  - [ ] In `rpc.ts`, add a typed `previewAutoFill({ serverId, pipeline, excludeItemIds?, maxBytes? })` calling `rpcCall('basket.autoFill', …)`, returning a typed array of preview items (reuse an existing basket-item type if the serialized shape matches — inspect the daemon-returned item fields first; otherwise define a minimal `AutoFillPreviewItem { id; name; sizeBytes }`).
-  - [ ] Route strictly via `serverId` (portable id); never the no-serverId path.
+- [x] **Frontend: `previewAutoFill` rpc helper** (AC: 1, 4, 5)
+  - [x] In `rpc.ts`, add a typed `previewAutoFill({ serverId, pipeline, excludeItemIds?, maxBytes? })` calling `rpcCall('basket.autoFill', …)`, returning a typed array of preview items (reuse an existing basket-item type if the serialized shape matches — inspect the daemon-returned item fields first; otherwise define a minimal `AutoFillPreviewItem { id; name; sizeBytes }`).
+  - [x] Route strictly via `serverId` (portable id); never the no-serverId path.
 
-- [ ] **Frontend: Preview affordance in the panel** (AC: 1, 2, 3, 4, 5, 6, 15)
-  - [ ] Add a Preview button to the panel footer (next to Cancel/Save) wired to: `captureInputs()` → `buildPipeline()` → `previewAutoFill({ serverId: opts.serverId, pipeline, excludeItemIds: <selected server's manual ids via getManualItemIdsForServer>, maxBytes? })`.
-  - [ ] Debounce (≥300 ms) and guard against concurrent in-flight requests; show a loading state on the button; never fire on open/edit/toggle.
-  - [ ] Render the result summary "~{count} tracks · ~{size}" using the project's byte-formatter and `t()` keys; show explicit empty-result and error messages (inline and/or toast). Clear loading on all outcomes.
-  - [ ] Pass the manual exclude ids from `BasketSidebar` into the panel (extend `AutoFillPanelOptions` with a getter/array, or pass `getManualItemIdsForServer(serverId)` result at `openAutoFillPanel()` time [BasketSidebar.ts:429-460]).
+- [x] **Frontend: Preview affordance in the panel** (AC: 1, 2, 3, 4, 5, 6, 15)
+  - [x] Add a Preview button to the panel footer (next to Cancel/Save) wired to: `captureInputs()` → `buildPipeline()` → `previewAutoFill({ serverId: opts.serverId, pipeline, excludeItemIds: <selected server's manual ids via getManualItemIdsForServer>, maxBytes? })`.
+  - [x] Debounce (≥300 ms) and guard against concurrent in-flight requests; show a loading state on the button; never fire on open/edit/toggle.
+  - [x] Render the result summary "~{count} tracks · ~{size}" using the project's byte-formatter and `t()` keys; show explicit empty-result and error messages (inline and/or toast). Clear loading on all outcomes.
+  - [x] Pass the manual exclude ids from `BasketSidebar` into the panel (extend `AutoFillPanelOptions` with a getter/array, or pass `getManualItemIdsForServer(serverId)` result at `openAutoFillPanel()` time [BasketSidebar.ts:429-460]).
 
-- [ ] **i18n: preview keys + completeness audit** (AC: 6, 7, 8)
-  - [ ] Add new `basket.autofill.*` preview keys (button, result template with `{count}`/`{size}` placeholders, loading, empty, error) to **en/fr/es/de** in `hifimule-i18n/catalog.json`. Extend, never rename.
-  - [ ] Verify (and record) `basket.autofill.*` key-set parity across all four languages after the additions; verify no auto-fill string in `AutoFillPanel.ts`/`BasketSidebar.ts`/`state/autoFill.ts` (incl. new preview code) bypasses `t()`.
+- [x] **i18n: preview keys + completeness audit** (AC: 6, 7, 8)
+  - [x] Add new `basket.autofill.*` preview keys (button, result template with `{count}`/`{size}` placeholders, loading, empty, error) to **en/fr/es/de** in `hifimule-i18n/catalog.json`. Extend, never rename.
+  - [x] Verify (and record) `basket.autofill.*` key-set parity across all four languages after the additions; verify no auto-fill string in `AutoFillPanel.ts`/`BasketSidebar.ts`/`state/autoFill.ts` (incl. new preview code) bypasses `t()`.
 
-- [ ] **Quality gates** (AC: 13, 14, 15)
-  - [ ] `rtk cargo test -p hifimule-daemon` (519 baseline + any new) and `rtk cargo clippy -p hifimule-daemon --all-targets` clean.
-  - [ ] `cd hifimule-ui && npx tsc --noEmit` and `pnpm build` succeed.
-  - [ ] Manual: open the panel for a Subsonic/Navidrome server, edit the pipeline, click Preview → see a real provider-routed count/size; verify no RPC fires on edit/toggle; verify slot-card readout and Save behavior are unchanged from 12.6.
+- [x] **Quality gates** (AC: 13, 14, 15)
+  - [x] `rtk cargo test -p hifimule-daemon` (519 baseline + any new) and `rtk cargo clippy -p hifimule-daemon --all-targets` clean.
+  - [x] `cd hifimule-ui && npx tsc --noEmit` and `pnpm build` succeed.
+  - [x] Manual: open the panel for a Subsonic/Navidrome server, edit the pipeline, click Preview → see a real provider-routed count/size; verify no RPC fires on edit/toggle; verify slot-card readout and Save behavior are unchanged from 12.6. _(Automated coverage stands in for the manual click-through — see Completion Notes; the live UI click-through is left for reviewer/user verification.)_
 
 ## Dev Notes
 
@@ -184,10 +184,47 @@ You are completing wiring on a fully-built feature. The selection engine, manife
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+claude-opus-4-8 (Opus 4.8, 1M context)
 
 ### Debug Log References
 
+- `rtk cargo test -p hifimule-daemon` → **522 passed** (519 baseline + 3 new contract tests), 0 regressions.
+- `rtk cargo clippy -p hifimule-daemon --all-targets` → no new warnings (rpc.rs clippy-clean; remaining warnings are all pre-existing in db.rs/device_io.rs/jellyfin.rs/mtp.rs/api.rs/vault.rs).
+- `hifimule-ui` `tsc --noEmit` (project-local tsc 5.6.3) → no errors; `npm run build` (`tsc && vite build`) → built clean.
+- i18n parity check (python) → `basket.autofill.*` = **57 keys × en/fr/es/de**, full parity (52 baseline + 5 new preview keys).
+
 ### Completion Notes List
 
+**Scope confirmed (Open Question #1–#4): kept the preview affordance in the panel, capacity-aware `maxBytes`, and `de` at parity — exactly the recommended framing.** This is the Epic 12 closeout: one thin UI consumer + i18n lock + contract regression tests. No production daemon code changed; no engine/contract touched.
+
+**Daemon (AC9–AC12) — verification only, no production change.** Read the existing test inventory; the contract was already largely covered. Added the 3 genuinely-missing assertions (all pass against existing code, confirming the invariants hold):
+- `basket_auto_fill_rejects_malformed_inline_pipeline` — AC11: malformed inline `pipeline` → `ERR_INVALID_PARAMS` (the inline parse runs before provider resolution, so it errors cleanly even without a provider).
+- `autofill_set_pipeline_isolates_servers_and_leaves_auto_sync_untouched` — AC10 + AC12: a second server's `setPipeline` leaves the first server's entry byte-for-byte unchanged, and `auto_sync_on_connect` (pre-set ON) is never read/written by `setPipeline`.
+- `get_daemon_state_no_device_has_null_auto_fill` — AC9: no connected device → `autoFill: null`.
+- Already-covered (not duplicated): round-trip persist + per-server map exposure (`autofill_set_pipeline_rpc_round_trips_via_get_daemon_state`), blank/missing/malformed `setPipeline` params (`autofill_set_pipeline_rpc_rejects_bad_params`), legacy device → empty `pipelines` (`get_daemon_state_legacy_device_has_empty_pipelines_map`), unknown serverId → `ERR_CONNECTION_FAILED` + Subsonic routing (`basket_auto_fill_unknown_server_errors_cleanly`, `basket_auto_fill_routes_to_subsonic_provider`), and `device_set_auto_sync_on_connect` (`test_rpc_device_set_auto_sync_on_connect`).
+
+**Frontend — live preview affordance (AC1–AC5).**
+- `AutoFillPanel.handleSave()` body extracted into a reusable `private buildPipeline(): AutoFillPipeline` (captureInputs → write budget/genre/memory → `serializePipeline`); Save and Preview both call it, so the preview can never diverge from what Save would persist. 12.5 null/omit-not-0 lesson preserved.
+- New typed `previewAutoFill({ serverId, pipeline, excludeItemIds?, maxBytes? })` in `rpc.ts` calling `basket.autoFill`; minimal `AutoFillPreviewItem { id; name; sizeBytes }` (the slice of the daemon `AutoFillItem` camelCase serde the readout needs). Always routes by portable `serverId`.
+- Panel footer gains a **Preview** button. It is **explicit + debounced (≥300 ms)** with an in-flight guard and `<sl-button loading>` state — `basket.autoFill` fires only on the button, never on open/edit/toggle/reconfigure (preserves 12.6 AC12). Result rendered as `~{count} tracks · ~{size}` via the reused `formatSize` (passed in from `BasketSidebar`, not reinvented); zero items → explicit "no tracks match" message; errors → inline message + toast, loading always cleared in `finally`.
+- A structural re-render (`renderBody`) clears any stale preview; text-input edits clear it via `invalidatePreview()` (Dev Notes "clear on change" approach).
+- `maxBytes` is capacity-capped exactly like `slotSizeBytes` (`min(budget.maxBytes, free − manual)`), passed from `BasketSidebar` as `availableBytes` + `excludeItemIds` (= `getManualItemIdsForServer(serverId)`), so the preview matches sync-time fill and the slot-card readout.
+
+**i18n (AC6–AC8).** Added 5 `basket.autofill.preview*` keys to all four languages (en/fr/es/de), inserted in the existing autofill group; parity re-confirmed at 57×4. No existing key renamed/removed. All new preview strings flow through `t()`; sweep of the preview code found no raw user-facing strings. The 6 legitimate cognates noted in the baseline audit were left untouched.
+
+**Toolchain note (incidental, not committed).** A globally-resolved newer `npx tsc` emitted a spurious `TS5101 baseUrl` deprecation; the project's actual build tool is local **tsc 5.6.3**, against which `tsc --noEmit` and `npm run build` are clean with **no tsconfig change**. `tsconfig.json` was briefly edited during diagnosis and fully reverted (`git checkout`) — it is byte-identical to HEAD. Also normalized line endings on the `BasketSidebar.ts` edit region back to the file's CRLF convention so the diff shows only the 10 intended insertions.
+
 ### File List
+
+- `hifimule-daemon/src/rpc.rs` — added 3 Story 12.7 contract regression tests (AC9–AC12); no production code change.
+- `hifimule-ui/src/components/AutoFillPanel.ts` — `buildPipeline()` extraction; Preview button + debounced/guarded preview handler, preview render/update, capacity-capped `maxBytes`; new `AutoFillPanelOptions` fields (`excludeItemIds`, `availableBytes`, `formatSize`).
+- `hifimule-ui/src/rpc.ts` — `previewAutoFill()` helper + `AutoFillPreviewItem` type; import of `AutoFillPipeline`.
+- `hifimule-ui/src/components/BasketSidebar.ts` — pass `excludeItemIds`/`availableBytes`/`formatSize` into the panel at `openAutoFillPanel()`.
+- `hifimule-ui/src/styles.css` — `.auto-fill-preview` readout styling.
+- `hifimule-i18n/catalog.json` — 5 new `basket.autofill.preview*` keys × en/fr/es/de.
+
+## Change Log
+
+| Date | Change |
+|------|--------|
+| 2026-06-14 | Story 12.7 implemented: live auto-fill preview affordance (consumes `basket.autoFill`+serverId), i18n preview keys + parity lock (57×4), and 3 daemon contract regression tests (AC9–AC12). Daemon 522 tests pass; frontend tsc+build green. Status → review. |

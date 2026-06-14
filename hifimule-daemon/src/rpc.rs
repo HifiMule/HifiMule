@@ -8104,6 +8104,98 @@ mod tests {
         );
     }
 
+    // --- Story 12.7: contract regression locks (AC9–AC12) ---
+
+    /// AC11: a malformed inline `pipeline` on `basket.autoFill`+serverId surfaces as
+    /// `ERR_INVALID_PARAMS` (the preview must show a user-visible error, not a silent failure).
+    /// The inline parse runs before provider resolution, so this holds even without a provider.
+    #[tokio::test]
+    async fn basket_auto_fill_rejects_malformed_inline_pipeline() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+
+        let err = handle_basket_auto_fill(
+            &state,
+            Some(json!({
+                "serverId": "srv-1",
+                "maxBytes": 1_000_000,
+                "pipeline": { "ordering": "not-an-array" }
+            })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, ERR_INVALID_PARAMS);
+    }
+
+    /// AC10 + AC12: `autoFill.setPipeline` inserts/replaces only the targeted server's entry —
+    /// every other server's pipeline is left byte-for-byte unchanged — and it never reads or writes
+    /// `auto_sync_on_connect` (which stays server-independent, set only via its own RPC).
+    #[tokio::test]
+    async fn autofill_set_pipeline_isolates_servers_and_leaves_auto_sync_untouched() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let dir = tempfile::tempdir().unwrap();
+        // Connect a device whose auto_sync_on_connect is already ON, so we can prove setPipeline
+        // doesn't disturb it.
+        let mut manifest = manifest_for_update();
+        manifest.auto_sync_on_connect = true;
+        connect_device_with_manifest(&state, dir.path(), manifest).await;
+
+        let pipeline_a = json!({
+            "enabled": true,
+            "filter": { "includeGenres": [], "excludeGenres": ["Spoken"], "includeTags": [], "excludeTags": [] },
+            "sources": [ { "kind": "library" } ],
+            "unit": "track",
+            "ordering": ["favorite", "playCount"],
+            "memory": { "playedExclusion": true },
+            "budget": { "maxBytes": 4_000_000_000_u64 },
+            "fallback": []
+        });
+        let pipeline_b = json!({
+            "enabled": true,
+            "filter": { "includeGenres": [], "excludeGenres": [], "includeTags": [], "excludeTags": [] },
+            "sources": [ { "kind": "favorites" } ],
+            "unit": "album",
+            "ordering": ["dateCreated"],
+            "memory": {},
+            "budget": { "maxBytes": 2_000_000_000_u64 },
+            "fallback": []
+        });
+
+        handle_auto_fill_set_pipeline(&state, Some(json!({ "serverId": "srv-1", "pipeline": pipeline_a.clone() })))
+            .await
+            .expect("set srv-1");
+        handle_auto_fill_set_pipeline(&state, Some(json!({ "serverId": "srv-2", "pipeline": pipeline_b.clone() })))
+            .await
+            .expect("set srv-2");
+
+        let device = state.device_manager.get_current_device().await.unwrap();
+        // srv-1's entry is untouched by the srv-2 write — byte-for-byte equal to what we persisted.
+        let expected_a: crate::auto_fill::AutoFillPipeline =
+            serde_json::from_value(pipeline_a).unwrap();
+        assert_eq!(device.auto_fill.pipeline_for("srv-1"), Some(&expected_a));
+        assert!(device.auto_fill.pipeline_for("srv-2").is_some());
+        // auto_sync_on_connect remains ON — setPipeline neither reads nor writes it.
+        assert!(
+            device.auto_sync_on_connect,
+            "autoFill.setPipeline must not touch auto_sync_on_connect"
+        );
+    }
+
+    /// AC9: a daemon with no connected device exposes `autoFill: null` (never a pipelines map).
+    #[tokio::test]
+    async fn get_daemon_state_no_device_has_null_auto_fill() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+
+        let daemon_state = handle_get_daemon_state(&state).await.unwrap();
+        assert!(
+            daemon_state["autoFill"].is_null(),
+            "no device → autoFill is null, got: {}",
+            daemon_state["autoFill"]
+        );
+    }
+
     // Story 12.3 AC1: normalize the dual-shape `autoFill` param into descriptors.
     #[test]
     fn test_parse_auto_fill_descriptors_shapes() {
