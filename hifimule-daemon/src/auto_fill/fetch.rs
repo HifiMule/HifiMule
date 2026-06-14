@@ -139,6 +139,13 @@ pub async fn expand_with_pipeline(
         .unwrap_or(cap_after_reserve);
     normalized.budget.max_bytes = Some(ceiling);
     normalized.budget.headroom_bytes = None;
+    // A zero duration target is inert (matching `needs_configurable_expansion`'s `> 0` guard). If a
+    // pipeline reaches this seam for some other reason (a non-default source/filter/fallback) while
+    // carrying `target_duration_secs = Some(0)`, leaving it live would make the engine break on the
+    // first unit (`cum_secs 0 >= target 0`) and silently empty the fill. Normalize it to `None`.
+    if normalized.budget.target_duration_secs == Some(0) {
+        normalized.budget.target_duration_secs = None;
+    }
 
     // --- Materialize one pool per distinct (kind, ref) across sources ∪ fallback.
     let mut keys: Vec<SourceKey> = Vec::new();
@@ -1175,6 +1182,43 @@ mod tests {
             result.len(),
             2,
             "real accumulated playtime stops the fill before overshooting the duration target"
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_duration_target_is_inert_not_empty_fill() {
+        // A `target_duration_secs = Some(0)` is inert (the discriminator treats it as no refinement).
+        // When a pipeline reaches this seam for another reason — here a non-default Playlist source —
+        // the zero target must be normalized away, NOT left live (which would make the engine break
+        // on the first unit at `cum_secs 0 >= target 0` and silently empty the fill).
+        let mut playlists = HashMap::new();
+        playlists.insert(
+            "p1".to_string(),
+            (0..3).map(|i| song(&format!("p{i}"), 1_000_000)).collect(),
+        );
+        let provider = arc(MockProvider {
+            playlists,
+            ..Default::default()
+        });
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry {
+                kind: SourceKind::Playlist,
+                ref_id: Some("p1".into()),
+                share: None,
+            }],
+            budget: BudgetStage {
+                target_duration_secs: Some(0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let result = expand_with_pipeline(provider, &pipeline, params(10_000_000))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.len(),
+            3,
+            "zero duration target is inert — the playlist fills normally, not empty"
         );
     }
 

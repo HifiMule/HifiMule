@@ -4,7 +4,7 @@ baseline_commit: 180e59ae26b99db28f2e1b49584ab9581aa39637
 
 # Story 12.5: Budget Stage — Headroom Reserve, Duration Target & Fallback Chain
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -71,6 +71,14 @@ What exists today:
   - [x] Run `rtk cargo test -p hifimule-daemon`; confirm the 505-test baseline plus the new tests pass with no regressions (especially the 12.1 `auto_fill::pipeline::tests` guarantee tests and 12.4 `fetch` tests).
   - [x] Run `rtk cargo clippy -p hifimule-daemon --all-targets`; no new warnings.
   - [x] Confirm no new crate added to `Cargo.toml` and no RPC/UI/manifest files touched.
+
+## Review Findings
+
+<!-- Appended by bmad-code-review on 2026-06-14 (baseline 180e59a..HEAD). 1 patch, 2 deferred, noise dismissed. -->
+
+- [x] [Review][Patch] `target_duration_secs = Some(0)` flows live into the engine and silently empties the fill [hifimule-daemon/src/auto_fill/fetch.rs:142-148] — **FIXED 2026-06-14**: normalized `Some(0)` → `None` after the headroom reconciliation, with regression test `zero_duration_target_is_inert_not_empty_fill`. — The discriminator (`needs_configurable_expansion`) treats `target_duration_secs = Some(0)` as **inert** (`is_some_and(|t| t > 0)`), but the new `expand_with_pipeline` budget block no longer normalizes duration — it only rewrites `max_bytes`/`headroom_bytes`. A pipeline that is non-default for some *other* reason (a Playlist source, a filter, a fallback chain) **and** carries `target_duration_secs = Some(0)` now reaches the engine with the target live. `Selector::fill` breaks on the first unit (`0 >= 0`), yielding an empty fill. This is a behavior change introduced by this diff: pre-12.5 the removed `target_duration_secs = None` line neutralized it. Fix: mirror the discriminator's convention — normalize `Some(0)` → `None` for `target_duration_secs` in `expand_with_pipeline` (e.g. `if matches!(normalized.budget.target_duration_secs, Some(0)) { normalized.budget.target_duration_secs = None; }`). Add a regression test. [source: edge]
+- [x] [Review][Defer] Headroom ≥ capacity produces a silent 0-byte ceiling and empty fill [hifimule-daemon/src/auto_fill/fetch.rs:132-141] — deferred. When configured `headroom_bytes ≥ params.max_fill_bytes`, `cap_after_reserve` saturates to 0 → ceiling 0 → empty fill. Arithmetically correct per FR52 ("never exceed capacity − reserve"), and overflow-safe (`saturating_sub`), but indistinguishable from a genuine zero-capacity slot and emitted with no log. Observability nicety, not a correctness bug. [source: edge]
+- [x] [Review][Defer] Fast-vs-configurable selection equivalence is asserted, not tested [hifimule-daemon/src/auto_fill/fetch.rs:84-93] — deferred. Routing a default-but-headroom/duration pipeline through `expand_with_pipeline` instead of `run_auto_fill_provider` switches selection engines. The story claims selection is "equivalent," and the new tests assert only result *length* — never that the selected set/order matches what the fast path would pick at the reduced ceiling. Design decision already resolved (Open Question 2); this is a test-completeness gap, not a defect. [source: edge]
 
 ## Dev Notes
 

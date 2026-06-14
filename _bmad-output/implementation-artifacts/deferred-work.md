@@ -1,7 +1,12 @@
 # Deferred Work
 
 Status: open
-Last updated: 2026-06-12
+Last updated: 2026-06-14
+
+## Deferred from: code review of 12-5-budget-headroom-duration-fallback-chain (2026-06-14)
+
+- **Headroom ≥ capacity produces a silent 0-byte ceiling and empty fill** [`hifimule-daemon/src/auto_fill/fetch.rs:132-141`] — when configured `headroom_bytes ≥ params.max_fill_bytes`, `cap_after_reserve` saturates to 0, the ceiling becomes 0, and the fill is empty. Arithmetically correct per FR52 ("never exceed capacity − reserve") and overflow-safe, but indistinguishable from a genuine zero-capacity slot and emitted with no log. Observability nicety (e.g. `daemon_log!` when `cap_after_reserve == 0` while `headroom > 0`), not a correctness defect.
+- **Fast-vs-configurable selection equivalence is asserted, not tested** [`hifimule-daemon/src/auto_fill/fetch.rs:84-93`] — routing a default-but-headroom/duration pipeline through `expand_with_pipeline` instead of `run_auto_fill_provider` switches selection engines. The story claims selection is "equivalent," but the new tests assert only result *length*, never that the selected set/order matches the fast path at the reduced ceiling. Design decision already resolved (story Open Question 2); a stronger set-equivalence test would close the regression-surface gap.
 
 ## Deferred from: code review of 9-11-list-view-multi-selection-and-bulk-actions (2026-06-12)
 
