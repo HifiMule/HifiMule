@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-06-14  # Story 13.1 → review (dev-story)
+last_updated: 2026-06-14  # Story 13.1 → done (code-review: 9 patches applied)
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -168,7 +168,7 @@ development_status:
 
   # Epic 13 — Advanced Auto-Fill Strategies (sprint-change-proposal-2026-06-14-configurable-auto-fill)
   epic-13: in-progress  # first story 13.1 created via create-story 2026-06-14
-  13-1-memory-and-rotation-strategies: review  # dev complete 2026-06-14 (534 daemon tests pass, clippy clean, frontend tsc+build green; Memory stage activated end-to-end)
+  13-1-memory-and-rotation-strategies: done  # code review 2026-06-14: 9 patches applied (D1 stable-core prune erosion, D2 id_changes history carry, D3 lead-tier spillover, P4 success-gated recording/cursor, P5 tier dedup, P6 uses_tiers gate, P7 post-core budget caps, P8 slider step, P9 tier-ref captureInputs); 4 dismissed; auto_fill/db/sync tests green, clippy clean, tsc+build green
   13-2-quality-and-version-ordering: backlog
   13-3-curation-and-discovery-sources: backlog
   13-4-delight-rarity-draws-and-pity-timer: backlog

@@ -272,7 +272,7 @@ export class AutoFillPanel {
             <div class="auto-fill-memory-dial">
                 <label class="auto-fill-substage-label">${t('basket.autofill.stable_core_pct')}</label>
                 <div class="af-share-cell">
-                    <sl-range id="af-stable-core" min="0" max="100" step="5" value="${corePct}"></sl-range>
+                    <sl-range id="af-stable-core" min="0" max="100" step="1" value="${corePct}"></sl-range>
                     <span class="af-share-value">${corePct}%</span>
                 </div>
                 <div class="auto-fill-caption">${t('basket.autofill.stable_core_pct_hint')}</div>
@@ -280,7 +280,7 @@ export class AutoFillPanel {
             <div class="auto-fill-memory-dial">
                 <label class="auto-fill-substage-label">${t('basket.autofill.repeat_tolerance')}</label>
                 <div class="af-share-cell">
-                    <sl-range id="af-repeat-tolerance" min="0" max="100" step="5" value="${tolPct}"></sl-range>
+                    <sl-range id="af-repeat-tolerance" min="0" max="100" step="1" value="${tolPct}"></sl-range>
                     <span class="af-share-value">${tolPct}%</span>
                 </div>
                 <div class="auto-fill-caption">${t('basket.autofill.repeat_tolerance_hint')}</div>
@@ -448,6 +448,7 @@ export class AutoFillPanel {
         });
         d.querySelectorAll('.af-tier-ref').forEach((el: Element) => {
             el.addEventListener('sl-change', (e: Event) => {
+                this.captureInputs();
                 const i = Number((e.target as HTMLElement).dataset.index ?? '0');
                 const tier = this.memoryTiers()[i];
                 if (tier && tier.kind === 'playlist') tier.ref = (e.target as any).value || '';

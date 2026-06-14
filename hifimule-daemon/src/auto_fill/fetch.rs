@@ -87,12 +87,25 @@ fn parse_tiers(tiers: &Option<serde_json::Value>) -> Vec<TierDef> {
         return Vec::new();
     }
     match serde_json::from_value::<Vec<TierDef>>(value.clone()) {
-        Ok(defs) => defs,
+        Ok(defs) => {
+            // Drop duplicate tiers (same kind+ref): they collapse to one materialized pool, so a
+            // second copy would claim a budget share it can never fill (the pool is already `seen`).
+            let mut seen: HashSet<SourceKey> = HashSet::new();
+            defs.into_iter().filter(|d| seen.insert(d.source_key())).collect()
+        }
         Err(e) => {
             crate::daemon_log!("[AutoFill] malformed memory.tiers ({}) — ignoring (no rotation)", e);
             Vec::new()
         }
     }
+}
+
+/// Whether a pipeline's Memory stage configures *usable* rotation tiers — i.e. `parse_tiers` yields
+/// at least one tier. The sync-completion cursor-advance check must use this (not a bare
+/// `tiers.is_some()`) so a malformed/empty `tiers` value that produced no rotation does not still
+/// advance the rotation cursor.
+pub fn pipeline_uses_tiers(p: &AutoFillPipeline) -> bool {
+    !parse_tiers(&p.memory.tiers).is_empty()
 }
 
 /// Derive a present-or-absent `last_played_at` for a candidate song (AC 5). A track counts as
@@ -233,6 +246,7 @@ pub async fn expand_with_pipeline(
         let lead = params.rotation_cursor.rem_euclid(n as i64) as usize;
         let rest_share = if n > 1 { 0.5 / (n as f32 - 1.0) } else { 0.0 };
         let mut sources = Vec::with_capacity(n);
+        let mut fallback = Vec::with_capacity(n);
         for rot in 0..n {
             let orig = (lead + rot) % n;
             let share = if n == 1 {
@@ -243,9 +257,14 @@ pub async fn expand_with_pipeline(
                 Some(rest_share)
             };
             sources.push(tier_defs[orig].source_entry(share));
+            // Spillover: when a tier's pool is smaller than its budget share (e.g. a short lead
+            // playlist that can't fill its 50%), the leftover budget would otherwise go unused. Mirror
+            // the tiers (uncapped, same rotation order) into the terminal fallback chain so the engine
+            // back-fills the remainder from the other tiers after the share-capped primary passes.
+            fallback.push(tier_defs[orig].source_entry(None));
         }
         normalized.sources = sources;
-        normalized.fallback = Vec::new();
+        normalized.fallback = fallback;
         lead
     };
 

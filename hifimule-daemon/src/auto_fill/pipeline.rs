@@ -329,16 +329,27 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
         let core_cap = ((ceiling as f64) * f64::from(core_pct)).round() as u64;
         if core_cap > 0 {
             selector.ceiling = core_cap;
-            for source in sources.iter() {
+            // Split the core budget across sources by their share so one source can't monopolize the
+            // whole core allocation (otherwise every source got the full `core_cap` cap).
+            let core_caps = source_caps(sources, core_cap);
+            for (source, cap) in sources.iter().zip(core_caps) {
                 let units = build_source_units(input, pipeline, source);
-                selector.fill(units, source, core_cap, &pipeline.memory, &input.history, FillMode::Core);
+                selector.fill(units, source, cap, &pipeline.memory, &input.history, FillMode::Core);
             }
             selector.ceiling = ceiling; // restore the full ceiling for the delta pass
         }
     }
 
-    // Primary sources (delta), each capped by its share allocation.
-    let caps = source_caps(sources, ceiling);
+    // Primary sources (delta), each capped by its share of the budget *remaining* after the core
+    // pass. Computing caps against the full ceiling would let early sources spend the bytes the core
+    // already consumed and starve later sources; with no core (p = 0) `remaining == ceiling`, so
+    // legacy multi-source behavior is unchanged.
+    let remaining = if ceiling == u64::MAX {
+        u64::MAX
+    } else {
+        ceiling.saturating_sub(selector.cum_bytes)
+    };
+    let caps = source_caps(sources, remaining);
     for (source, cap) in sources.iter().zip(caps) {
         let units = build_source_units(input, pipeline, source);
         selector.fill(units, source, cap, &pipeline.memory, &input.history, FillMode::Primary);

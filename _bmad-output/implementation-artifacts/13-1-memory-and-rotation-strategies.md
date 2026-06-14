@@ -4,7 +4,7 @@ baseline_commit: 8dc855a3b0eafe724db43ff506cb61aad7cd1bab
 
 # Story 13.1: Memory & Rotation Strategies
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -234,4 +234,31 @@ claude-opus-4-8 (Opus 4.8, 1M context) — bmad-dev-story workflow.
 ## Change Log
 
 - 2026-06-14 — Dev complete (Status → review). Activated the Memory stage end-to-end: DB read/write for `autofill_history` + new `autofill_rotation` cursor table; repeat-tolerance (#23), stable-core (#24), and playlist-backed rotation tiers (#25/#26) implemented; cooldown (#4) and played-exclusion (#5) wired via a DB+provider history snapshot threaded through `AutoFillParams`; sync-completion recording hook (best-effort) + cursor advance + pruning; UI controls under Advanced + 7 i18n keys ×4 locales (65×4 parity). Verification: 534 daemon tests pass, clippy clean (no new warnings in touched modules), frontend tsc + build green. Backward compatible (default Memory == today; legacy fast path untouched; storage split enforced).
+- 2026-06-14 — Code review (bmad-code-review, 3 layers: Blind Hunter, Edge Case Hunter, Acceptance Auditor). 3 decision-needed, 6 patch, 0 defer, 4 dismissed. See Review Findings below.
 - 2026-06-14 — Story 13.1 created via create-story workflow (ready-for-dev). Scope: activate the Memory stage end-to-end (DB read/write wiring for `autofill_history` + a new `autofill_rotation` cursor table), implement the three reserved `MemoryStage` fields (`stable_core_pct` #24, `repeat_tolerance` #23, `tiers` #25/#26), activate cooldown (#4) and played-exclusion (#5) by populating the `HistorySnapshot` from DB + provider play data, surface the new controls in the pipeline-builder UI under Advanced, and add i18n keys across 4 locales. Backward compatible (default Memory == today's behavior); storage split enforced (config in manifest, runtime state in DB); legacy fast path untouched.
+
+## Review Findings
+
+_Code review 2026-06-14 — baseline `8dc855a..HEAD`. Layers: Blind Hunter (diff-only), Edge Case Hunter (diff + repo), Acceptance Auditor (diff + spec). No layers failed._
+
+### Decision-needed
+
+- [x] [Review][Decision→Patch] Stable-core erodes after the 52-week prune — **Resolved 2026-06-14: Patch — re-record `last_synced_at` for resident/unchanged on-device tracks each sync (record beyond just `delta.adds`).** — Recording only covers `delta.adds`; a stable-core track that stays continuously on the device is never an "add", so its `last_synced_at` is never refreshed. After `RETENTION_SECS = 52*7*86400` ([rpc.rs:3657](../../hifimule-daemon/src/rpc.rs#L3657)) the row is pruned ([db.rs:831](../../hifimule-daemon/src/db.rs#L831)), `is_on_device` then returns false ([pipeline.rs](../../hifimule-daemon/src/auto_fill/pipeline.rs)), and the track silently drops out of the stable core — the opposite of AC 6's intent. Fix is ambiguous (re-record unchanged/resident tracks each sync vs. exempt on-device rows from prune vs. lengthen retention). [Edge]
+- [x] [Review][Decision→Patch] `delta.id_changes` tracks lose history & tier on server re-key — **Resolved 2026-06-14: Patch — also record `delta.id_changes`, carrying tier/last_synced_at to the new id.** — Recording iterates only `delta.adds`, never `delta.id_changes` ([rpc.rs:3640](../../hifimule-daemon/src/rpc.rs#L3640)). When a track's server id changes, the new id gets no `autofill_history` row, resetting cooldown / stable-core membership / tier tag. Whether to record id_changes is a scope/intent call. [Edge]
+- [x] [Review][Decision→Patch] Rotation lead-tier 50% share has no spillover → under-fill — **Resolved 2026-06-14: Patch — add spillover so other tiers/fallback back-fill the lead tier's unused slice.** — Lead tier gets 0.5×ceiling, rest split 0.5, and `normalized.fallback` is cleared ([fetch.rs:110-132](../../hifimule-daemon/src/auto_fill/fetch.rs#L110)). When the lead tier's pool is smaller than its 50% slice, the device under-fills with no back-fill from other tiers. Documented design choice — needs a product decision (keep fixed shares vs. add spillover). [Edge]
+
+### Patch
+
+- [x] [Review][Patch] Recording & cursor advance run on failed / partially-failed syncs [rpc.rs:4857,4956,3640-3672] — `record_autofill_history_after_sync` runs unconditionally over every `delta.adds` after `all_errors` is computed but is not gated on it: failed-transfer tracks get a spurious cooldown row (AC 2 "actually written" deviation) and `advance_rotation_cursor` fires even on a fully-errored, non-cancelled sync (AC 8 "completed sync"). Cancellation path is safe (returns before recording). [Auditor+Blind]
+- [x] [Review][Patch] Duplicate tier sources collide on SourceKey → silent under-fill [fetch.rs:110-132; state/autoFill.ts serialize; AutoFillPanel.ts add handler] — Two `{kind:library}` tiers, or two playlists with the same `ref`, each receive a budget share, but the second draws from an already-`seen` pool and contributes nothing while consuming its slice. UI allows it (serialize only filters empty-ref). Dedup tiers in the engine and/or validate in the UI. [Edge]
+- [x] [Review][Patch] `uses_tiers` advance-gate disagrees with `parse_tiers` → cursor drift [rpc.rs:3662-3666] — The cursor-advance gate uses `tiers.is_some_and(|t| !t.is_null())`, which accepts malformed tier JSON that `parse_tiers` ([fetch.rs](../../hifimule-daemon/src/auto_fill/fetch.rs)) silently ignores; the cursor advances although no rotation occurred. Align the two checks. [Blind]
+- [x] [Review][Patch] Stable-core / multi-source budget blend distortion [pipeline.rs:521-525,341] — The core pass passes `core_cap` as each source's cap (first source can consume the entire core), and the delta pass computes `source_caps` against the full `ceiling` rather than the post-core remainder; with ≥2 shared sources the configured blend is skewed. Global ceiling still bounds total bytes (no over-fill). [Blind+Edge]
+- [x] [Review][Patch] Memory sliders `step="5"` snap externally-authored non-5% values on edit [AutoFillPanel.ts range inputs] — `af-stable-core` / `af-repeat-tolerance` use `step="5"`; a pipeline authored with e.g. `stableCorePct=0.07` is coerced to the nearest 5% on the next interaction. Use a finer step. [Edge]
+- [x] [Review][Patch] `.af-tier-ref` handler skips `captureInputs()` [AutoFillPanel.ts:428-434] — Sibling kind/add/remove handlers call `captureInputs()` first; the tier-ref change handler only invalidates the preview, so pending unsynced sibling input (e.g. an edited cooldown field) is lost when a tier ref changes before blur. [Edge]
+
+### Dismissed (4)
+
+- Portable `server_id` propagation contract (Blind, "verify") — verified handled: single-server adds tagged via `tag_untagged_with_selected_portable`, multi-provider passes `&af_server`; recording keys line up with fill-time history.
+- DB read error → empty `HistorySnapshot` makes memory inert (Blind) — by-design, documented best-effort fallback (`build_autofill_history`).
+- `derive_last_played` writes a `now` sentinel even when `played_exclusion` is off (Blind+Edge) — currently inert; `memory_allows` only checks `.is_some()`, never the value. Latent footgun only; no functional impact.
+- Cursor read (delta-calc) vs advance (sync-execute) desync if tiers edited mid-sync (Edge) — very narrow timing window (editing the pipeline between preview/calc and execute); acceptable.

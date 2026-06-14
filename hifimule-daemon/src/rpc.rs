@@ -3632,15 +3632,74 @@ fn record_autofill_history_after_sync(
     db: &crate::db::Database,
     manifest: &crate::device::DeviceManifest,
     delta: &crate::sync::SyncDelta,
+    errors: &[crate::sync::SyncFileError],
     now: i64,
 ) {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     let device_id = manifest.device_id.as_str();
-    let mut servers_synced: HashSet<String> = HashSet::new();
+
+    // Per-track transfer failures: these tracks were NOT written to the device, so they must not be
+    // recorded as synced (AC 2 — "actually written to the device").
+    let failed_ids: HashSet<&str> = errors
+        .iter()
+        .map(|e| e.jellyfin_id.as_str())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // Every portable server id this sync touches: freshly-added items, id-changed items, and the
+    // resident on-device set (needed to refresh the stable core — see step 3).
+    let mut servers: HashSet<String> = HashSet::new();
+    for add in &delta.adds {
+        if let Some(s) = add.server_id.as_deref().filter(|s| !s.is_empty()) {
+            servers.insert(s.to_string());
+        }
+    }
+    for ch in &delta.id_changes {
+        if let Some(s) = ch.source_server_id.as_deref().filter(|s| !s.is_empty()) {
+            servers.insert(s.to_string());
+        }
+    }
+    for item in &manifest.synced_items {
+        if let Some(s) = item.server_id.as_deref().filter(|s| !s.is_empty()) {
+            servers.insert(s.to_string());
+        }
+    }
+    if servers.is_empty() {
+        return; // legacy/Jellyfin items have no portable id → not tracked for cooldown
+    }
+
+    // Load existing history once per server: track_id -> tier. Reused to preserve the tier when
+    // refreshing resident rows and when carrying history across an id change.
+    let mut history: HashMap<String, HashMap<String, Option<String>>> = HashMap::new();
+    for server_id in &servers {
+        let rows = db.get_autofill_history(device_id, server_id).unwrap_or_default();
+        let map = rows
+            .into_iter()
+            .map(|(track, _last, tier)| (track, tier))
+            .collect();
+        history.insert(server_id.clone(), map);
+    }
+
+    // Tracks leaving the device this sync — never refresh these.
+    let removed: HashSet<&str> = delta
+        .deletes
+        .iter()
+        .map(|d| d.jellyfin_id.as_str())
+        .chain(delta.id_changes.iter().map(|c| c.old_jellyfin_id.as_str()))
+        .collect();
+
+    // Servers that actually had a track written this run — gates the rotation-cursor advance so a
+    // fully-failed sync does not rotate the lead tier (AC 8 — "completed sync").
+    let mut servers_wrote: HashSet<String> = HashSet::new();
+
+    // 1. Freshly-added auto-fill tracks (skip ones that failed to transfer).
     for add in &delta.adds {
         let Some(server_id) = add.server_id.as_deref().filter(|s| !s.is_empty()) else {
-            continue; // no portable server id (legacy/Jellyfin) → not tracked for cooldown
+            continue;
         };
+        if failed_ids.contains(add.jellyfin_id.as_str()) {
+            continue;
+        }
         if let Err(e) = db.upsert_autofill_history(
             device_id,
             server_id,
@@ -3650,24 +3709,82 @@ fn record_autofill_history_after_sync(
         ) {
             crate::daemon_log!("[AutoFill] history record failed (non-fatal): {}", e);
         }
-        servers_synced.insert(server_id.to_string());
+        servers_wrote.insert(server_id.to_string());
     }
 
-    // Retention: keep ~1 year of history. Prune per touched server.
+    // 2. Id-changed tracks: carry history (last_synced_at + tier) from the old id to the new id, so a
+    //    server re-key does not reset cooldown / stable-core membership / tier for that track.
+    for ch in &delta.id_changes {
+        let Some(server_id) = ch.source_server_id.as_deref().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        if failed_ids.contains(ch.new_jellyfin_id.as_str()) {
+            continue;
+        }
+        // Only carry forward tracks we were already tracking (preserves their tier).
+        let Some(tier) = history
+            .get(server_id)
+            .and_then(|m| m.get(&ch.old_jellyfin_id))
+            .cloned()
+        else {
+            continue;
+        };
+        if let Err(e) = db.upsert_autofill_history(
+            device_id,
+            server_id,
+            &ch.new_jellyfin_id,
+            Some(now),
+            tier.as_deref(),
+        ) {
+            crate::daemon_log!("[AutoFill] history id-change carry failed (non-fatal): {}", e);
+        }
+    }
+
+    // 3. Refresh `last_synced_at` for resident on-device tracks we already track, so a long-lived
+    //    stable core is not pruned out from under itself by the retention cutoff. Preserves the
+    //    existing tier and never creates rows for manual/untracked items.
+    for item in &manifest.synced_items {
+        let Some(server_id) = item.server_id.as_deref().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        if removed.contains(item.jellyfin_id.as_str()) {
+            continue;
+        }
+        let Some(tier) = history
+            .get(server_id)
+            .and_then(|m| m.get(&item.jellyfin_id))
+            .cloned()
+        else {
+            continue;
+        };
+        if let Err(e) = db.upsert_autofill_history(
+            device_id,
+            server_id,
+            &item.jellyfin_id,
+            Some(now),
+            tier.as_deref(),
+        ) {
+            crate::daemon_log!("[AutoFill] history refresh failed (non-fatal): {}", e);
+        }
+    }
+
+    // 4. Retention prune (~1 year) + rotation-cursor advance, per touched server.
     const RETENTION_SECS: i64 = 52 * 7 * 86_400;
     let cutoff = now.saturating_sub(RETENTION_SECS);
-    for server_id in &servers_synced {
+    for server_id in &servers {
         let _ = db.prune_autofill_history(device_id, server_id, cutoff);
-        // Advance the rotation cursor once per completed sync for servers whose pipeline uses tiers.
+        // Advance only for tier-using pipelines that actually wrote a track this run. `pipeline_uses_tiers`
+        // matches `parse_tiers`, so a malformed/empty `tiers` value (which produced no rotation) does
+        // not drift the cursor.
         let uses_tiers = manifest
             .auto_fill
             .pipeline_for(server_id)
-            .and_then(|p| p.memory.tiers.as_ref())
-            .is_some_and(|t| !t.is_null());
-        if uses_tiers {
-            if let Err(e) = db.advance_rotation_cursor(device_id, server_id) {
-                crate::daemon_log!("[AutoFill] rotation cursor advance failed (non-fatal): {}", e);
-            }
+            .is_some_and(crate::auto_fill::fetch::pipeline_uses_tiers);
+        if uses_tiers
+            && servers_wrote.contains(server_id)
+            && let Err(e) = db.advance_rotation_cursor(device_id, server_id)
+        {
+            crate::daemon_log!("[AutoFill] rotation cursor advance failed (non-fatal): {}", e);
         }
     }
 }
@@ -4854,7 +4971,7 @@ async fn handle_sync_execute(
             }
             // Story 13.1: record auto-fill history (last_synced_at + tier) for the synced tracks and
             // advance rotation cursors. Best-effort — never affects sync status.
-            record_autofill_history_after_sync(&db, &sync_manifest, &delta, now_unix_secs());
+            record_autofill_history_after_sync(&db, &sync_manifest, &delta, &all_errors, now_unix_secs());
             if let Some(mut operation) = op_manager.get_operation(&op_id).await {
                 operation.status = if all_errors.is_empty() {
                     crate::sync::SyncStatus::Complete
@@ -4953,7 +5070,7 @@ async fn handle_sync_execute(
                         eprintln!("Failed to clear dirty flag on final manifest: {}", e);
                     }
                     // Story 13.1: record auto-fill history + advance rotation cursors (best-effort).
-                    record_autofill_history_after_sync(&db, &sync_manifest, &delta, now_unix_secs());
+                    record_autofill_history_after_sync(&db, &sync_manifest, &delta, &errors, now_unix_secs());
                     if let Some(mut operation) = op_manager.get_operation(&op_id).await {
                         operation.status = if errors.is_empty() {
                             crate::sync::SyncStatus::Complete
