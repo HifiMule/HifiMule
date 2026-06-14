@@ -4,7 +4,7 @@ baseline_commit: aefee3f7e7625c72130938a5225fb98cba3d3357
 
 # Story 12.1: Auto-Fill Pipeline Domain Model & Pure-Function Engine
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -63,6 +63,15 @@ so that selection logic is testable without UI or network and is validated again
   - [x] Test that `default_legacy(Some(maxBytes))` over a fixture library yields the same favorites→playCount→dateCreated ordering and byte-truncation as today's `rank_and_truncate`/`run_auto_fill_provider` priority order.
   - [x] Test budget never exceeded; unknown/0/negative-size skipped; manual-exclude and within-run dedup honored; empty library → empty result; zero budget → empty result; fallback chain reached only after primary exhaustion.
   - [x] Run `rtk cargo test -p hifimule-daemon`; confirm existing `auto_fill::tests` still pass unchanged.
+
+### Review Findings
+
+- [x] [Review][Patch] Explicit zero-size songs can still be emitted via bitrate fallback [hifimule-daemon/src/auto_fill/pipeline.rs:507] — fixed 2026-06-14
+- [x] [Review][Patch] Unshared sources are not equal/remainder blended when all sources omit share [hifimule-daemon/src/auto_fill/pipeline.rs:530] — fixed 2026-06-14
+- [x] [Review][Patch] Pipeline stage order runs memory before unit and ordering instead of the specified fixed order [hifimule-daemon/src/auto_fill/pipeline.rs:349] — fixed 2026-06-14
+- [x] [Review][Patch] `target_duration_secs` is not converted into a byte ceiling and can overshoot the target [hifimule-daemon/src/auto_fill/pipeline.rs:520] — fixed 2026-06-14
+- [x] [Review][Patch] Empty album/artist IDs collapse unrelated tracks into one atomic unit [hifimule-daemon/src/auto_fill/pipeline.rs:426] — fixed 2026-06-14
+- [x] [Review][Patch] Unchecked size arithmetic can overflow and break the budget guarantee [hifimule-daemon/src/auto_fill/pipeline.rs:514] — fixed 2026-06-14
 
 ## Dev Notes
 
@@ -133,6 +142,7 @@ claude-opus-4-8 (Claude Code dev-story workflow)
 
 - `rtk cargo test -p hifimule-daemon` → 469 passed (17 new `auto_fill::pipeline::tests`, no regressions to the 6 existing `auto_fill::tests`).
 - `rtk cargo clippy -p hifimule-daemon --all-targets` → no warnings for `auto_fill` (pre-existing warnings in unrelated modules untouched).
+- Code review patch pass 2026-06-14: `rtk cargo test -p hifimule-daemon auto_fill::pipeline::tests` → 21 passed, 452 filtered out; `rtk cargo check -p hifimule-daemon` → 0 errors, 1 pre-existing warning outside `auto_fill`. Full `rtk cargo test -p hifimule-daemon` could not complete in the sandbox because mockito/local networking returned `Operation not permitted` and macOS system-configuration calls returned null.
 
 ### Implementation Plan
 
@@ -151,6 +161,7 @@ The selection algebra is implemented as composable pure functions in `auto_fill/
 - **Four personas, one model:** Claire/Antoine/Léo/Nadia are each expressed purely by composing the stage algebra — there are **no `if persona == …` branches** in the engine. A comment block in the test module restates this success-gate.
 - **No wiring / no new deps (AC #6):** only the model + engine + tests were added; manifest schema, DB, `sync.start`, provider fetching, RPC, and UI are all untouched. No new crate dependency (only `serde`/`serde_json`/std). The engine is intentionally unreferenced by the binary until later stories, so a documented module-level `#![allow(dead_code)]` (and one `#[allow(unused_imports)]` on the `pub use`) keeps the build clean — consistent with the codebase's "reserved for future use" convention.
 - **Guarantees proven by test:** budget never exceeded; headroom subtracted; unknown/zero-size skipped; manual-exclude + within-run dedup honored; empty library/zero budget → empty; fallback reached only after primary exhaustion; share allocation across sources; camelCase serde round-trip + empty-object default.
+- **Code review patches:** hardened explicit zero-size handling, no-share source caps, memory stage ordering, duration target enforcement, empty album/artist ID grouping, and overflow-safe size/budget math. Added four regression tests (21 pipeline tests total).
 
 ### File List
 
@@ -162,3 +173,4 @@ The selection algebra is implemented as composable pure functions in `auto_fill/
 ## Change Log
 
 - 2026-06-14 — Story 12.1 implemented: auto-fill pipeline domain model + pure-function engine. Converted `auto_fill.rs` into a directory module and added `auto_fill/pipeline.rs` (model + `run_pipeline` engine + 17 unit tests, incl. the four persona tests and legacy-equivalence). No wiring/I/O/new deps. `rtk cargo test -p hifimule-daemon` → 469 passed; clippy clean for `auto_fill`. Status → review.
+- 2026-06-14 — Code review patches applied: fixed 6 findings, added 4 regression tests, targeted pipeline tests pass (21). Status → done.

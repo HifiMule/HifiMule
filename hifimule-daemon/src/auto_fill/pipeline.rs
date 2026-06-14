@@ -283,7 +283,12 @@ pub struct PipelineInput {
 
 impl PipelineInput {
     /// Insert (or replace) a materialized pool for a source kind/ref.
-    pub fn with_pool(mut self, kind: SourceKind, ref_id: Option<&str>, pool: Vec<Candidate>) -> Self {
+    pub fn with_pool(
+        mut self,
+        kind: SourceKind,
+        ref_id: Option<&str>,
+        pool: Vec<Candidate>,
+    ) -> Self {
         self.pools
             .insert(SourceKey::new(kind, ref_id.map(str::to_string)), pool);
         self
@@ -318,13 +323,20 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
     let caps = source_caps(sources, ceiling);
     for (source, cap) in sources.iter().zip(caps) {
         let units = build_source_units(input, pipeline, source);
-        selector.fill(units, source, cap, false);
+        selector.fill(units, source, cap, false, &pipeline.memory, &input.history);
     }
 
     // Terminal fallback chain — only reached once primary sources can't fill the budget.
     for source in &pipeline.fallback {
         let units = build_source_units(input, pipeline, source);
-        selector.fill(units, source, ceiling, true);
+        selector.fill(
+            units,
+            source,
+            ceiling,
+            true,
+            &pipeline.memory,
+            &input.history,
+        );
     }
 
     selector.into_items()
@@ -335,24 +347,19 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
 type UnitGroup = Vec<Candidate>;
 
 /// filter → unit → ordering for a single source's materialized pool.
+/// Memory/dedup is intentionally applied later by the selector so the full pipeline order stays
+/// `filter → source-blend → unit → ordering → dedupe-vs-memory → budget`.
 fn build_source_units(
     input: &PipelineInput,
     pipeline: &AutoFillPipeline,
     source: &SourceEntry,
 ) -> Vec<UnitGroup> {
-    let pool = input
-        .pools
-        .get(&source.key())
-        .cloned()
-        .unwrap_or_default();
+    let pool = input.pools.get(&source.key()).cloned().unwrap_or_default();
 
     // filter (genres/tags)
     let filtered = filter_stage(pool, &pipeline.filter);
-    // dedupe-vs-memory: cooldown / played-exclusion (manual-exclude + within-run dedup happen in
-    // the budget selector, which needs the shared cross-source seen-set).
-    let surviving = memory_stage(filtered, &pipeline.memory, &input.history);
     // unit grouping
-    let mut units = unit_stage(surviving, pipeline.unit);
+    let mut units = unit_stage(filtered, pipeline.unit);
     // ordering — sort within each unit (so its first track is its best), then sort units by their
     // best track. For Unit::Track this reduces to a single stable global sort.
     for unit in units.iter_mut() {
@@ -371,7 +378,8 @@ fn filter_stage(cands: Vec<Candidate>, f: &FilterStage) -> Vec<Candidate> {
     cands
         .into_iter()
         .filter(|c| {
-            if !f.include_genres.is_empty() && !c.genres.iter().any(|g| f.include_genres.contains(g))
+            if !f.include_genres.is_empty()
+                && !c.genres.iter().any(|g| f.include_genres.contains(g))
             {
                 return false;
             }
@@ -392,30 +400,36 @@ fn filter_stage(cands: Vec<Candidate>, f: &FilterStage) -> Vec<Candidate> {
 /// Apply the consumed memory modifiers: drop tracks still in their cooldown window and, when
 /// `played_exclusion` is set, drop any track with a recorded play. Time math derives "now" from
 /// the snapshot — never from a clock.
-fn memory_stage(cands: Vec<Candidate>, mem: &MemoryStage, hist: &HistorySnapshot) -> Vec<Candidate> {
+fn memory_stage(
+    cands: Vec<Candidate>,
+    mem: &MemoryStage,
+    hist: &HistorySnapshot,
+) -> Vec<Candidate> {
     if mem.cooldown_weeks.is_none() && !mem.played_exclusion {
         return cands;
     }
     cands
         .into_iter()
-        .filter(|c| {
-            let Some(h) = hist.entries.get(&c.song.id) else {
-                return true; // no history → never cooled down
-            };
-            if mem.played_exclusion && h.last_played_at.is_some() {
-                return false;
-            }
-            if let Some(weeks) = mem.cooldown_weeks
-                && let Some(synced) = h.last_synced_at
-            {
-                let window_secs = i64::from(weeks) * 7 * 86_400;
-                if hist.now.saturating_sub(synced) < window_secs {
-                    return false; // synced too recently
-                }
-            }
-            true
-        })
+        .filter(|c| memory_allows(&c.song, mem, hist))
         .collect()
+}
+
+fn memory_allows(song: &Song, mem: &MemoryStage, hist: &HistorySnapshot) -> bool {
+    let Some(h) = hist.entries.get(&song.id) else {
+        return true; // no history → never cooled down
+    };
+    if mem.played_exclusion && h.last_played_at.is_some() {
+        return false;
+    }
+    if let Some(weeks) = mem.cooldown_weeks
+        && let Some(synced) = h.last_synced_at
+    {
+        let window_secs = i64::from(weeks) * 7 * 86_400;
+        if hist.now.saturating_sub(synced) < window_secs {
+            return false; // synced too recently
+        }
+    }
+    true
 }
 
 /// Group candidates into selection units. `Track` = one unit per song; `Album`/`Artist` group by
@@ -430,7 +444,10 @@ fn unit_stage(cands: Vec<Candidate>, unit: Unit) -> Vec<UnitGroup> {
 
 /// Group candidates by an optional key, preserving first-seen group order. Candidates whose key
 /// is `None` each become their own singleton group.
-fn group_by(cands: Vec<Candidate>, key_of: impl Fn(&Candidate) -> Option<String>) -> Vec<UnitGroup> {
+fn group_by(
+    cands: Vec<Candidate>,
+    key_of: impl Fn(&Candidate) -> Option<String>,
+) -> Vec<UnitGroup> {
     let mut order: Vec<String> = Vec::new();
     let mut groups: HashMap<String, UnitGroup> = HashMap::new();
     let mut singletons: Vec<UnitGroup> = Vec::new();
@@ -442,7 +459,7 @@ fn group_by(cands: Vec<Candidate>, key_of: impl Fn(&Candidate) -> Option<String>
         Single(usize),
     }
     for c in cands {
-        match key_of(&c) {
+        match key_of(&c).filter(|k| !k.trim().is_empty()) {
             Some(k) => {
                 if !groups.contains_key(&k) {
                     order.push(k.clone());
@@ -486,7 +503,10 @@ fn compare_by_ordering(a: &Song, b: &Song, keys: &[OrderingKey]) -> std::cmp::Or
                 .unwrap_or("")
                 .cmp(a.date_added.as_deref().unwrap_or("")),
             // higher bitrate first
-            OrderingKey::Quality => b.bitrate_kbps.unwrap_or(0).cmp(&a.bitrate_kbps.unwrap_or(0)),
+            OrderingKey::Quality => b
+                .bitrate_kbps
+                .unwrap_or(0)
+                .cmp(&a.bitrate_kbps.unwrap_or(0)),
             // deterministic no-op in 12.1 — no entropy in the pure core (Epic 13 adds seeding)
             OrderingKey::Random => Ordering::Equal,
         };
@@ -505,13 +525,14 @@ fn fav_rank(s: &Song) -> u8 {
 /// Returns `None` for unknown/zero size so the caller skips the track (never a 0-byte filler).
 /// Mirrors `ProviderFillState::try_add` / `rank_and_truncate`.
 fn estimated_size(song: &Song) -> Option<u64> {
-    if let Some(sz) = song.size_bytes
-        && sz > 0
-    {
-        return Some(sz);
+    if let Some(sz) = song.size_bytes {
+        return (sz > 0).then_some(sz);
     }
     let kbps = song.bitrate_kbps?;
-    let est = (u64::from(kbps) * 1_000 / 8) * u64::from(song.duration_seconds);
+    let est = u64::from(kbps)
+        .checked_mul(1_000)?
+        .checked_div(8)?
+        .checked_mul(u64::from(song.duration_seconds))?;
     (est > 0).then_some(est)
 }
 
@@ -524,13 +545,16 @@ fn budget_ceiling(b: &BudgetStage) -> u64 {
     }
 }
 
-/// Per-source byte caps derived from `share`. With no shares anywhere, every source is capped at
-/// the global ceiling (so sources simply fill in listed order). With shares, shared sources get
-/// `share * ceiling` and unshared sources split the remainder equally.
+/// Per-source byte caps derived from `share`. With no shares anywhere, sources split the global
+/// ceiling equally. With shares, shared sources get `share * ceiling` and unshared sources split
+/// the remainder equally.
 fn source_caps(sources: &[SourceEntry], ceiling: u64) -> Vec<u64> {
+    if sources.is_empty() {
+        return Vec::new();
+    }
     let any_share = sources.iter().any(|s| s.share.is_some());
     if !any_share {
-        return vec![ceiling; sources.len()];
+        return vec![ceiling / sources.len() as u64; sources.len()];
     }
     let explicit: f32 = sources.iter().filter_map(|s| s.share).sum();
     let n_unshared = sources.iter().filter(|s| s.share.is_none()).count();
@@ -581,7 +605,15 @@ impl Selector {
     /// Add units from one source (in order) until the source cap, the global ceiling, or the
     /// duration target stops us. Units are atomic: a unit whose syncable tracks don't all fit
     /// stops this source (smaller later units are not back-filled — matching legacy semantics).
-    fn fill(&mut self, units: Vec<UnitGroup>, source: &SourceEntry, cap: u64, is_fallback: bool) {
+    fn fill(
+        &mut self,
+        units: Vec<UnitGroup>,
+        source: &SourceEntry,
+        cap: u64,
+        is_fallback: bool,
+        memory: &MemoryStage,
+        history: &HistorySnapshot,
+    ) {
         let mut source_bytes: u64 = 0;
         for unit in units {
             if let Some(target) = self.duration_target
@@ -599,36 +631,49 @@ impl Selector {
                 if self.exclude.contains(&song.id)
                     || self.seen.contains(&song.id)
                     || !local_seen.insert(song.id.clone())
+                    || !memory_allows(song, memory, history)
                 {
                     continue;
                 }
                 let Some(size) = estimated_size(song) else {
                     continue; // unknown/zero size — never a 0-byte filler
                 };
-                unit_bytes += size;
-                unit_secs += u64::from(song.duration_seconds);
+                unit_bytes = unit_bytes.saturating_add(size);
+                unit_secs = unit_secs.saturating_add(u64::from(song.duration_seconds));
                 let reason = reason_for(song, source, is_fallback);
                 staged.push((make_item(song, size, reason), size));
             }
             if staged.is_empty() {
                 continue; // whole unit unsyncable/duplicate/excluded — skip, keep going
             }
-            if self.cum_bytes + unit_bytes > self.ceiling || source_bytes + unit_bytes > cap {
+            if exceeds(self.cum_bytes, unit_bytes, self.ceiling)
+                || exceeds(source_bytes, unit_bytes, cap)
+                || self.would_exceed_duration(unit_secs)
+            {
                 break; // would exceed global ceiling or this source's allocation
             }
             for (item, size) in staged {
                 self.seen.insert(item.id.clone());
-                self.cum_bytes += size;
-                source_bytes += size;
+                self.cum_bytes = self.cum_bytes.saturating_add(size);
+                source_bytes = source_bytes.saturating_add(size);
                 self.items.push(item);
             }
-            self.cum_secs += unit_secs;
+            self.cum_secs = self.cum_secs.saturating_add(unit_secs);
         }
     }
 
     fn into_items(self) -> Vec<AutoFillItem> {
         self.items
     }
+
+    fn would_exceed_duration(&self, unit_secs: u64) -> bool {
+        self.duration_target
+            .is_some_and(|target| exceeds(self.cum_secs, unit_secs, target))
+    }
+}
+
+fn exceeds(current: u64, add: u64, ceiling: u64) -> bool {
+    current.checked_add(add).is_none_or(|total| total > ceiling)
 }
 
 fn make_item(song: &Song, size_bytes: u64, reason: String) -> AutoFillItem {
@@ -868,12 +913,20 @@ mod tests {
 
         let result = run_pipeline(&input, &pipeline);
         let result_ids = ids(&result);
-        assert_eq!(result_ids, vec!["e1", "e2"], "only playlist tracks, truncated to budget");
+        assert_eq!(
+            result_ids,
+            vec!["e1", "e2"],
+            "only playlist tracks, truncated to budget"
+        );
         assert!(
             !result_ids.iter().any(|id| id == "lib-x"),
             "unreferenced library source must not leak in"
         );
-        assert!(result.iter().all(|i| i.priority_reason == "playlist:energy"));
+        assert!(
+            result
+                .iter()
+                .all(|i| i.priority_reason == "playlist:energy")
+        );
     }
 
     #[test]
@@ -881,13 +934,21 @@ mod tests {
         // Nadia: parent filling a kid's player. Filter to kids genres, exclude explicit tag.
         // Filtered-out tracks must never appear.
         let library = vec![
-            cand_meta(song_sized("kids-clean", false, 0, "2024-01-01", 1_000_000), &["kids"], &[]),
+            cand_meta(
+                song_sized("kids-clean", false, 0, "2024-01-01", 1_000_000),
+                &["kids"],
+                &[],
+            ),
             cand_meta(
                 song_sized("kids-explicit", false, 0, "2024-01-01", 1_000_000),
                 &["kids"],
                 &["explicit"],
             ),
-            cand_meta(song_sized("metal", false, 0, "2024-01-01", 1_000_000), &["metal"], &[]),
+            cand_meta(
+                song_sized("metal", false, 0, "2024-01-01", 1_000_000),
+                &["metal"],
+                &[],
+            ),
         ];
         let input = PipelineInput::default().with_pool(SourceKind::Library, None, library);
 
@@ -907,7 +968,11 @@ mod tests {
 
         let result = run_pipeline(&input, &pipeline);
         let result_ids = ids(&result);
-        assert_eq!(result_ids, vec!["kids-clean"], "only non-explicit kids tracks survive the filter");
+        assert_eq!(
+            result_ids,
+            vec!["kids-clean"],
+            "only non-explicit kids tracks survive the filter"
+        );
     }
 
     // ===================================================================
@@ -923,7 +988,7 @@ mod tests {
             song_sized("old-new", false, 0, "2023-01-01", 1_000_000), // neither
             song_sized("fav", true, 0, "2020-01-01", 1_000_000),      // favorite (wins)
             song_sized("played-lots", false, 50, "2021-01-01", 1_000_000), // play count
-            song_sized("newest", false, 0, "2024-12-31", 1_000_000),  // newest of the non-fav/non-played
+            song_sized("newest", false, 0, "2024-12-31", 1_000_000), // newest of the non-fav/non-played
             song_sized("played-few", false, 2, "2022-01-01", 1_000_000), // some plays
         ]
         .into_iter()
@@ -963,20 +1028,39 @@ mod tests {
     #[test]
     fn budget_never_exceeded() {
         let library = (0..10)
-            .map(|i| cand(song_sized(&format!("t{i}"), false, 0, "2024-01-01", 3_000_000)))
+            .map(|i| {
+                cand(song_sized(
+                    &format!("t{i}"),
+                    false,
+                    0,
+                    "2024-01-01",
+                    3_000_000,
+                ))
+            })
             .collect();
         let input = PipelineInput::default().with_pool(SourceKind::Library, None, library);
         let pipeline = AutoFillPipeline::default_legacy(Some(10_000_000)); // fits 3 × 3 MB = 9 MB
         let result = run_pipeline(&input, &pipeline);
         let total: u64 = result.iter().map(|i| i.size_bytes).sum();
-        assert!(total <= 10_000_000, "cumulative bytes must never exceed the budget");
+        assert!(
+            total <= 10_000_000,
+            "cumulative bytes must never exceed the budget"
+        );
         assert_eq!(result.len(), 3);
     }
 
     #[test]
     fn headroom_is_subtracted_from_ceiling() {
         let library = (0..5)
-            .map(|i| cand(song_sized(&format!("t{i}"), false, 0, "2024-01-01", 1_000_000)))
+            .map(|i| {
+                cand(song_sized(
+                    &format!("t{i}"),
+                    false,
+                    0,
+                    "2024-01-01",
+                    1_000_000,
+                ))
+            })
             .collect();
         let input = PipelineInput::default().with_pool(SourceKind::Library, None, library);
         let pipeline = AutoFillPipeline {
@@ -1002,14 +1086,88 @@ mod tests {
         no_size.bitrate_kbps = None;
         let mut zero = song_sized("zero", true, 0, "2024-01-01", 0);
         zero.size_bytes = Some(0);
-        zero.bitrate_kbps = None;
+        zero.bitrate_kbps = Some(320);
         let good = song_sized("good", false, 0, "2024-01-01", 1_000_000);
 
         let library = vec![cand(no_size), cand(zero), cand(good)];
         let input = PipelineInput::default().with_pool(SourceKind::Library, None, library);
         let pipeline = AutoFillPipeline::default_legacy(Some(10_000_000));
         let result = run_pipeline(&input, &pipeline);
-        assert_eq!(ids(&result), vec!["good"], "unknown/zero-size tracks must be skipped");
+        assert_eq!(
+            ids(&result),
+            vec!["good"],
+            "unknown/zero-size tracks must be skipped"
+        );
+    }
+
+    #[test]
+    fn duration_target_is_never_overshot() {
+        let library = vec![
+            cand(song_sized("a", false, 0, "2024-01-01", 1_000_000)),
+            cand(song_sized("b", false, 0, "2024-01-01", 1_000_000)),
+        ];
+        let input = PipelineInput::default().with_pool(SourceKind::Library, None, library);
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            budget: BudgetStage {
+                max_bytes: Some(10_000_000),
+                target_duration_secs: Some(300), // each fixture track is 180s; two would overshoot
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let result = run_pipeline(&input, &pipeline);
+        assert_eq!(ids(&result), vec!["a"]);
+    }
+
+    #[test]
+    fn empty_album_ids_are_singletons() {
+        let mut first = song_sized("a", false, 0, "2024-01-01", 1_000_000);
+        first.album_id = Some(String::new());
+        let mut second = song_sized("b", false, 0, "2024-01-01", 1_000_000);
+        second.album_id = Some(String::new());
+
+        let input = PipelineInput::default().with_pool(
+            SourceKind::Library,
+            None,
+            vec![cand(first), cand(second)],
+        );
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            unit: Unit::Album,
+            budget: BudgetStage {
+                max_bytes: Some(1_500_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let result = run_pipeline(&input, &pipeline);
+        assert_eq!(
+            ids(&result),
+            vec!["a"],
+            "empty album IDs must not form one atomic group"
+        );
+    }
+
+    #[test]
+    fn overflowing_size_estimates_are_skipped_without_breaking_budget() {
+        let mut impossible = song_bitrate("overflow", u32::MAX, u32::MAX);
+        impossible.size_bytes = None;
+        let good = song_sized("good", false, 0, "2024-01-01", 1_000_000);
+
+        let input = PipelineInput::default().with_pool(
+            SourceKind::Library,
+            None,
+            vec![cand(impossible), cand(good)],
+        );
+        let pipeline = AutoFillPipeline::default_legacy(Some(10_000_000));
+        let result = run_pipeline(&input, &pipeline);
+
+        assert_eq!(ids(&result), vec!["good"]);
+        let total: u64 = result.iter().map(|i| i.size_bytes).sum();
+        assert!(total <= 10_000_000);
     }
 
     #[test]
@@ -1044,8 +1202,15 @@ mod tests {
         };
         let result = run_pipeline(&input, &pipeline);
         let result_ids = ids(&result);
-        assert_eq!(result_ids.iter().filter(|id| *id == "dup").count(), 1, "no within-run duplicate");
-        assert!(!result_ids.contains(&"excluded".to_string()), "manual-exclude honored");
+        assert_eq!(
+            result_ids.iter().filter(|id| *id == "dup").count(),
+            1,
+            "no within-run duplicate"
+        );
+        assert!(
+            !result_ids.contains(&"excluded".to_string()),
+            "manual-exclude honored"
+        );
         assert!(result_ids.contains(&"only-lib".to_string()));
     }
 
@@ -1061,7 +1226,10 @@ mod tests {
         let library = vec![cand(song_sized("a", true, 0, "2024-01-01", 1_000_000))];
         let input = PipelineInput::default().with_pool(SourceKind::Library, None, library);
         let pipeline = AutoFillPipeline::default_legacy(Some(0));
-        assert!(run_pipeline(&input, &pipeline).is_empty(), "zero budget selects nothing");
+        assert!(
+            run_pipeline(&input, &pipeline).is_empty(),
+            "zero budget selects nothing"
+        );
     }
 
     #[test]
@@ -1090,7 +1258,11 @@ mod tests {
             ..Default::default()
         };
         let result = run_pipeline(&input, &pipeline);
-        assert_eq!(ids(&result), vec!["e1", "lib1", "lib2"], "primary first, then fallback fills");
+        assert_eq!(
+            ids(&result),
+            vec!["e1", "lib1", "lib2"],
+            "primary first, then fallback fills"
+        );
         // The primary item keeps its source reason; fallback items are tagged as such.
         assert_eq!(result[0].priority_reason, "playlist:energy");
         assert!(result[1].priority_reason.starts_with("fallback:"));
@@ -1101,10 +1273,26 @@ mod tests {
         // Two equal-share sources over a 10 MB budget → ~5 MB each (5 × 1 MB tracks available
         // per source, but each capped at 5 MB → 5 tracks each = 10 total).
         let favorites = (0..8)
-            .map(|i| cand(song_sized(&format!("f{i}"), false, 0, "2024-01-01", 1_000_000)))
+            .map(|i| {
+                cand(song_sized(
+                    &format!("f{i}"),
+                    false,
+                    0,
+                    "2024-01-01",
+                    1_000_000,
+                ))
+            })
             .collect();
         let library = (0..8)
-            .map(|i| cand(song_sized(&format!("l{i}"), false, 0, "2024-01-01", 1_000_000)))
+            .map(|i| {
+                cand(song_sized(
+                    &format!("l{i}"),
+                    false,
+                    0,
+                    "2024-01-01",
+                    1_000_000,
+                ))
+            })
             .collect();
         let input = PipelineInput::default()
             .with_pool(SourceKind::Favorites, None, favorites)
@@ -1134,6 +1322,53 @@ mod tests {
         let lib_count = result.iter().filter(|i| i.id.starts_with('l')).count();
         assert_eq!(fav_count, 5, "favorites capped at its 50% share");
         assert_eq!(lib_count, 5, "library capped at its 50% share");
+    }
+
+    #[test]
+    fn unshared_sources_split_budget_equally() {
+        let favorites = (0..8)
+            .map(|i| {
+                cand(song_sized(
+                    &format!("f{i}"),
+                    false,
+                    0,
+                    "2024-01-01",
+                    1_000_000,
+                ))
+            })
+            .collect();
+        let library = (0..8)
+            .map(|i| {
+                cand(song_sized(
+                    &format!("l{i}"),
+                    false,
+                    0,
+                    "2024-01-01",
+                    1_000_000,
+                ))
+            })
+            .collect();
+        let input = PipelineInput::default()
+            .with_pool(SourceKind::Favorites, None, favorites)
+            .with_pool(SourceKind::Library, None, library);
+
+        let pipeline = AutoFillPipeline {
+            sources: vec![
+                SourceEntry::new(SourceKind::Favorites),
+                SourceEntry::new(SourceKind::Library),
+            ],
+            budget: BudgetStage {
+                max_bytes: Some(10_000_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let result = run_pipeline(&input, &pipeline);
+        let fav_count = result.iter().filter(|i| i.id.starts_with('f')).count();
+        let lib_count = result.iter().filter(|i| i.id.starts_with('l')).count();
+        assert_eq!(fav_count, 5);
+        assert_eq!(lib_count, 5);
     }
 
     // ===================================================================
@@ -1185,7 +1420,11 @@ mod tests {
         assert!(p.enabled);
         assert_eq!(
             p.ordering,
-            vec![OrderingKey::Favorite, OrderingKey::PlayCount, OrderingKey::DateCreated]
+            vec![
+                OrderingKey::Favorite,
+                OrderingKey::PlayCount,
+                OrderingKey::DateCreated
+            ]
         );
         assert_eq!(p.sources, vec![SourceEntry::new(SourceKind::Library)]);
         assert_eq!(p.budget.max_bytes, Some(1_234));

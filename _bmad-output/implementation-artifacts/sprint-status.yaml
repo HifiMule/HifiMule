@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-06-14  # Story 12.1 dev-story complete (review)
+last_updated: 2026-06-14  # Story 12.1 code review patches applied (done)
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -158,7 +158,7 @@ development_status:
 
   # Epic 12 — Configurable Auto-Fill Pipeline & Multi-Server Auto-Fill (sprint-change-proposal-2026-06-14-configurable-auto-fill)
   epic-12: in-progress  # first story 12.1 created via create-story 2026-06-14
-  12-1-autofill-pipeline-domain-model-and-engine: review  # dev-story complete 2026-06-14; 17 new tests, 469 total pass
+  12-1-autofill-pipeline-domain-model-and-engine: done  # code review patches applied 2026-06-14; 21 pipeline tests pass
   12-2-autofill-manifest-schema-and-db-history-scaffolding: backlog
   12-3-multi-slot-sync-time-expansion: backlog
   12-4-playlist-source-tag-filter-and-shares: backlog
