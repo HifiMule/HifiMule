@@ -75,9 +75,14 @@ export class AutoFillPanel {
     // --- Live preview state (Story 12.7) ---
     private previewResult: { count: number; bytes: number } | null = null;
     private previewError: string | null = null;
+    /** Set when the fill is capped to zero free space — distinguishes "no room" from "no match". */
+    private previewNoSpace = false;
     private previewLoading = false;
     private previewInFlight = false;
     private previewTimer: number | null = null;
+    /** Bumped on every preview-invalidating edit; a resolving request whose generation is stale is
+     * discarded so it can't repaint a count for a since-edited pipeline. */
+    private previewGeneration = 0;
 
     constructor(private opts: AutoFillPanelOptions) {
         this.pipeline = normalizePipeline(opts.pipeline);
@@ -106,7 +111,11 @@ export class AutoFillPanel {
         document.body.appendChild(dialog);
         this.renderBody();
         dialog.addEventListener('sl-after-hide', (event: Event) => {
-            if (event.target === dialog) dialog.remove();
+            if (event.target !== dialog) return;
+            // Cancel a debounced preview so it can't fire (wasted RPC + detached paint) after close.
+            this.cancelPreviewTimer();
+            this.previewGeneration++; // discard any in-flight request resolving post-close
+            dialog.remove();
         });
         dialog.show();
     }
@@ -120,10 +129,13 @@ export class AutoFillPanel {
         if (!this.dialog) return;
         // A structural change (toggle/source/ordering edit, advanced disclosure) invalidates any
         // prior preview so we never show a stale count. Text-input edits clear it via their own
-        // handler (they don't re-render). The in-flight flag is preserved — a request mid-render
-        // still resolves and repaints through updatePreviewUi().
+        // handler (they don't re-render). Bumping the generation also discards any in-flight
+        // request so its result can't repaint a count for this since-edited pipeline.
+        this.previewGeneration++;
+        this.cancelPreviewTimer();
         this.previewResult = null;
         this.previewError = null;
+        this.previewNoSpace = false;
         const p = this.pipeline;
 
         this.dialog.innerHTML = `
@@ -167,6 +179,9 @@ export class AutoFillPanel {
         }
         if (this.previewError) {
             return `<span class="auto-fill-preview-error">${escapeHtml(this.previewError)}</span>`;
+        }
+        if (this.previewNoSpace) {
+            return `<span class="auto-fill-preview-empty">${t('basket.autofill.preview_no_space')}</span>`;
         }
         if (this.previewResult) {
             if (this.previewResult.count === 0) {
@@ -432,13 +447,28 @@ export class AutoFillPanel {
         el?.addEventListener('sl-change', listener);
     }
 
-    /** Clears a shown preview result/error and repaints (used when an input changes without a full
-     * re-render). No-op when nothing is shown, to avoid clobbering an in-flight loading state. */
+    /** Clears a shown preview and discards any pending/in-flight request (used when an input changes
+     * without a full re-render). Bumping the generation makes a resolving request no-op rather than
+     * repaint a count for the now-edited pipeline; we also drop the loading state so the area resets. */
     private invalidatePreview(): void {
-        if (!this.previewResult && !this.previewError) return;
+        this.previewGeneration++;
+        this.cancelPreviewTimer();
+        const wasActive = this.previewLoading || this.previewInFlight;
+        if (!wasActive && !this.previewResult && !this.previewError && !this.previewNoSpace) return;
+        this.previewLoading = false;
         this.previewResult = null;
         this.previewError = null;
+        this.previewNoSpace = false;
         this.updatePreviewUi();
+    }
+
+    /** Cancels a pending debounced preview so it can't fire after the dialog closes or the config
+     * changes (a fired `runPreview` against a closed dialog would do a wasted RPC + detached paint). */
+    private cancelPreviewTimer(): void {
+        if (this.previewTimer !== null) {
+            clearTimeout(this.previewTimer);
+            this.previewTimer = null;
+        }
     }
 
     private captureInputs(): void {
@@ -524,7 +554,7 @@ export class AutoFillPanel {
      * A request already in flight is ignored (the button is in its loading state). */
     private onPreviewClick(): void {
         if (this.previewInFlight) return;
-        if (this.previewTimer !== null) clearTimeout(this.previewTimer);
+        this.cancelPreviewTimer();
         this.previewLoading = true;
         this.previewError = null;
         this.updatePreviewUi();
@@ -536,28 +566,54 @@ export class AutoFillPanel {
      * `maxBytes`. Surfaces all outcomes (result / empty / error) and always clears loading. */
     private async runPreview(): Promise<void> {
         this.previewTimer = null;
+        this.previewLoading = true;
         this.previewInFlight = true;
+        const generation = this.previewGeneration;
         try {
             const pipeline = this.buildPipeline();
+            // A disabled pipeline contributes nothing at sync time — mirror that instead of querying
+            // the provider, so the preview can never imply a disabled pipeline would fill tracks.
+            if (!this.pipeline.enabled) {
+                this.previewResult = { count: 0, bytes: 0 };
+                this.previewError = null;
+                this.previewNoSpace = false;
+                return;
+            }
+            // Zero capacity (device full once manual selections are subtracted) is a space problem,
+            // not a filter miss — surface it distinctly rather than as "no tracks match".
+            const maxBytes = this.previewMaxBytes(pipeline);
+            if (maxBytes === 0) {
+                this.previewResult = null;
+                this.previewError = null;
+                this.previewNoSpace = true;
+                return;
+            }
             const items = await previewAutoFill({
                 serverId: this.opts.serverId,
                 pipeline,
                 excludeItemIds: this.opts.excludeItemIds,
-                maxBytes: this.previewMaxBytes(pipeline),
+                maxBytes,
             });
+            if (generation !== this.previewGeneration) return; // superseded by a later edit
             const bytes = items.reduce((sum, i) => sum + (i.sizeBytes ?? 0), 0);
             this.previewResult = { count: items.length, bytes };
             this.previewError = null;
-        } catch (err) {
+            this.previewNoSpace = false;
+        } catch {
+            if (generation !== this.previewGeneration) return; // superseded — don't surface a stale error
             this.previewResult = null;
-            this.previewError = err instanceof Error ? err.message : t('basket.autofill.preview_error');
+            this.previewNoSpace = false;
+            this.previewError = t('basket.autofill.preview_error');
             window.dispatchEvent(new CustomEvent('toast', {
                 detail: { type: 'error', message: t('basket.autofill.preview_error') },
             }));
         } finally {
+            // Always release the in-flight latch, even when stale, so later previews aren't blocked.
             this.previewInFlight = false;
-            this.previewLoading = false;
-            this.updatePreviewUi();
+            if (generation === this.previewGeneration) {
+                this.previewLoading = false;
+                this.updatePreviewUi();
+            }
         }
     }
 

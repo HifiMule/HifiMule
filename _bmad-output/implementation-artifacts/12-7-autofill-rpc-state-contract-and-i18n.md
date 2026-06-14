@@ -4,7 +4,7 @@ baseline_commit: db9f8eab2465f1e03e4084cc75261e2a4775f952
 
 # Story 12.7: Auto-Fill RPC/State Contract & i18n
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -120,6 +120,20 @@ You are completing wiring on a fully-built feature. The selection engine, manife
   - [x] `rtk cargo test -p hifimule-daemon` (519 baseline + any new) and `rtk cargo clippy -p hifimule-daemon --all-targets` clean.
   - [x] `cd hifimule-ui && npx tsc --noEmit` and `pnpm build` succeed.
   - [x] Manual: open the panel for a Subsonic/Navidrome server, edit the pipeline, click Preview → see a real provider-routed count/size; verify no RPC fires on edit/toggle; verify slot-card readout and Save behavior are unchanged from 12.6. _(Automated coverage stands in for the manual click-through — see Completion Notes; the live UI click-through is left for reviewer/user verification.)_
+
+### Review Findings
+
+_Code review 2026-06-14 — Blind Hunter + Edge Case Hunter + Acceptance Auditor (all 3 layers passed; Acceptance Auditor found zero AC violations — the `basket.autoFill`+serverId consumer is genuinely wired, i18n parity verified 57×4)._
+
+- [x] [Review][Patch] (resolved from Decision) Preview ignores the `enabled` toggle — clicking Preview on a *disabled* pipeline still returns/shows tracks. The full pipeline is sent verbatim ([AutoFillPanel.ts:541](../../hifimule-ui/src/components/AutoFillPanel.ts#L541)) and the daemon never branches on `pipeline.enabled` in the expansion path. **Decision: short-circuit a disabled pipeline to an empty preview to match sync-time behavior.**
+- [x] [Review][Patch] (resolved from Decision) Unmapped daemon errors render as raw English in the inline preview area — `runPreview`'s catch sets `previewError = err.message` ([AutoFillPanel.ts:553](../../hifimule-ui/src/components/AutoFillPanel.ts#L553)) and renders it inline, while the toast uses the localized `basket.autofill.preview_error`. **Decision: show the localized generic `preview_error` inline too, to match the toast.**
+- [x] [Review][Patch] (resolved from Decision) Device-full case shows the generic "No tracks match this configuration" — when free space minus manual selections is 0, `previewMaxBytes` sends `maxBytes: 0` ([AutoFillPanel.ts:567-572](../../hifimule-ui/src/components/AutoFillPanel.ts#L567-L572)); the daemon uses 0 literally ([rpc.rs:5921](../../hifimule-daemon/src/rpc.rs#L5921)) → empty result → `preview_empty`. **Decision: add a capacity-specific "not enough free space" message (+ i18n keys in all 4 locales).**
+- [x] [Review][Patch] Stale preview count repaints after a mid-flight edit — `invalidatePreview()` early-returns while a request is loading (both result/error are null), so edits during the ~300 ms debounce + RPC window are not flagged and `runPreview` repaints a count from the pre-edit pipeline. Needs a request-generation token checked before applying. [AutoFillPanel.ts:537-562](../../hifimule-ui/src/components/AutoFillPanel.ts#L537-L562), [AutoFillPanel.ts:437-442](../../hifimule-ui/src/components/AutoFillPanel.ts#L437-L442)
+- [x] [Review][Patch] Debounce timer not cleared on dialog close — `sl-after-hide` only calls `dialog.remove()` ([AutoFillPanel.ts:108-110](../../hifimule-ui/src/components/AutoFillPanel.ts#L108-L110)); a Preview clicked then Cancel/Save within the 300 ms window leaves the timer to fire `runPreview()` after close → a wasted `basket.autoFill` RPC (paints are null-guarded, so no crash). Clear `previewTimer` on hide.
+
+**Resolution (2026-06-14):** All 5 patches applied to [AutoFillPanel.ts](../../hifimule-ui/src/components/AutoFillPanel.ts) + `preview_no_space` key added to all 4 locales in [catalog.json](../../hifimule-i18n/catalog.json). Disabled pipelines short-circuit to an empty preview; inline errors now use the localized `preview_error`; device-full shows the new `preview_no_space` message; a `previewGeneration` token discards stale results from mid-flight edits; the debounce timer is cancelled on dialog close/edit. `tsc --noEmit` clean, i18n parity 58×4. No daemon code touched (this story's daemon changes were test-only).
+
+_Dismissed as noise (1): `previewAutoFill` returns `[]` for a non-array response ([rpc.ts](../../hifimule-ui/src/rpc.ts)) — the daemon contract always returns an array on success and `rpcCall` throws on error responses, so the fallback is defensive, not a masked contract break._
 
 ## Dev Notes
 

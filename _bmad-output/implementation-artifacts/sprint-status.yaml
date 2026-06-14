@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-06-14  # Story 12.7 → review
+last_updated: 2026-06-14  # Story 12.7 → done (code review: 5 patches applied)
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -164,7 +164,7 @@ development_status:
   12-4-playlist-source-tag-filter-and-shares: done  # story created via create-story 2026-06-14; dev complete 2026-06-14; review complete 2026-06-14 (5 patches applied; 505 daemon tests pass)
   12-5-budget-headroom-duration-fallback-chain: done  # story created via create-story 2026-06-14; dev complete 2026-06-14; review complete 2026-06-14 (1 patch applied: Some(0) duration empty-fill; 2 deferred; 54 auto_fill tests pass)
   12-6-autofill-configuration-ui-and-multi-server-slots: done  # story created via create-story 2026-06-14; dev complete 2026-06-14; review complete 2026-06-14 (8 patches applied; frontend tsc+build green; targeted auto_fill/device tests pass; full daemon suite blocked by sandbox)
-  12-7-autofill-rpc-state-contract-and-i18n: review  # Epic 12 closeout; dev complete 2026-06-14 (live preview affordance + i18n parity lock 57×4 + 3 daemon contract tests; 522 daemon tests pass, frontend tsc+build green)
+  12-7-autofill-rpc-state-contract-and-i18n: done  # code review 2026-06-14: 5 patches applied (preview enabled/error-i18n/no-space + stale-result + timer-cleanup). Epic 12 closeout; dev complete 2026-06-14 (live preview affordance + i18n parity lock 57×4 + 3 daemon contract tests; 522 daemon tests pass, frontend tsc+build green)
 
   # Epic 13 — Advanced Auto-Fill Strategies (sprint-change-proposal-2026-06-14-configurable-auto-fill)
   epic-13: backlog
