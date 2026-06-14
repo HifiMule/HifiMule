@@ -70,6 +70,10 @@ pub struct AutoFillPipeline {
     /// Terminal fallback sources, applied in order to reach the budget once primary sources
     /// are exhausted.
     pub fallback: Vec<SourceEntry>,
+    /// Quality & version modifiers (Story 13.2): lossless-aware quality ordering (#13 — see the
+    /// [`OrderingKey::Quality`] arm), an ordered version-trait preference (#34), and best-version
+    /// collapse (#11). All default ⇒ zero behavior change.
+    pub quality: QualityStage,
 }
 
 /// Tag/genre filter. All fields default to empty, which means "pass everything through".
@@ -188,6 +192,56 @@ pub struct BudgetStage {
     pub headroom_bytes: Option<u64>,
 }
 
+/// A recording-version trait, detected purely from a song's title/album text (Story 13.2 #34).
+/// `Song` carries no version field, so this is a heuristic over a **closed** marker set. A song may
+/// match several traits at once. `Studio` is the *absence* of any other recognized marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VersionTrait {
+    Studio,
+    Live,
+    Remastered,
+    Remix,
+    Acoustic,
+    Demo,
+}
+
+/// Quality & version modifiers (Story 13.2). Both fields default to "off", so a default
+/// `QualityStage` is byte-for-byte today's behavior and is omitted from the routing discriminator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct QualityStage {
+    /// #11 — collapse same-logical-song duplicates to a single winning version globally across all
+    /// pools (primary + fallback) before unit grouping. `false` ⇒ no collapse (today's behavior).
+    pub best_version: bool,
+    /// #34 — ordered version-trait preference (earlier = more preferred). A candidate's version rank
+    /// is the index of the first listed trait it matches; non-matches rank last. Empty ⇒ no
+    /// preference (every candidate ties on version). Deduplicated; unknown traits are dropped on
+    /// parse (best-effort, like 13.1's `parse_tiers`) — a malformed entry never aborts the slot.
+    #[serde(default, deserialize_with = "deserialize_version_preference")]
+    pub version_preference: Vec<VersionTrait>,
+}
+
+/// Malformed-tolerant deserializer for [`QualityStage::version_preference`] (Story 13.2 #34, AC 4),
+/// mirroring 13.1's `parse_tiers` discipline: read a list of arbitrary JSON values, keep the ones
+/// that name a known [`VersionTrait`], silently drop the rest, and de-duplicate preserving order. A
+/// bad config therefore degrades to "no preference" instead of aborting the whole pipeline parse.
+fn deserialize_version_preference<'de, D>(deserializer: D) -> Result<Vec<VersionTrait>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    let mut out: Vec<VersionTrait> = Vec::new();
+    for value in raw {
+        if let Ok(trait_) = serde_json::from_value::<VersionTrait>(value)
+            && !out.contains(&trait_)
+        {
+            out.push(trait_);
+        }
+    }
+    Ok(out)
+}
+
 impl AutoFillPipeline {
     /// The backward-compatibility mapping for a legacy `{ enabled, maxBytes }` block.
     ///
@@ -212,6 +266,7 @@ impl AutoFillPipeline {
                 headroom_bytes: None,
             },
             fallback: Vec::new(),
+            quality: QualityStage::default(),
         }
     }
 }
@@ -304,6 +359,18 @@ impl PipelineInput {
 /// Returns a deterministic, budget-bounded, dedup'd `Vec<AutoFillItem>` produced entirely by
 /// synchronous pure functions — no network, no `async`, no `MediaProvider`, no clock/RNG.
 pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<AutoFillItem> {
+    // Best-version collapse (#11) is a pre-pass over the materialized pools: it only *removes*
+    // losing-version candidates, so every downstream budget/dedup guarantee is untouched. Done
+    // before any unit grouping/selection so a loser never occupies budget. Default (`false`) keeps
+    // the borrowed input as-is — zero clone, zero behavior change.
+    let collapsed;
+    let input: &PipelineInput = if pipeline.quality.best_version {
+        collapsed = collapse_best_version(input, pipeline);
+        &collapsed
+    } else {
+        input
+    };
+
     let ceiling = budget_ceiling(&pipeline.budget);
 
     // A one-stage pipeline with no `sources` still draws from the Library source so that the
@@ -394,11 +461,12 @@ fn build_source_units(
     let mut units = unit_stage(filtered, pipeline.unit);
     // ordering — sort within each unit (so its first track is its best), then sort units by their
     // best track. For Unit::Track this reduces to a single stable global sort.
+    let version_pref = &pipeline.quality.version_preference;
     for unit in units.iter_mut() {
-        unit.sort_by(|a, b| compare_by_ordering(&a.song, &b.song, &pipeline.ordering));
+        unit.sort_by(|a, b| compare_by_ordering(&a.song, &b.song, &pipeline.ordering, version_pref));
     }
     units.sort_by(|a, b| match (a.first(), b.first()) {
-        (Some(x), Some(y)) => compare_by_ordering(&x.song, &y.song, &pipeline.ordering),
+        (Some(x), Some(y)) => compare_by_ordering(&x.song, &y.song, &pipeline.ordering, version_pref),
         _ => std::cmp::Ordering::Equal,
     });
     units
@@ -536,9 +604,19 @@ fn group_by(
         .collect()
 }
 
-/// Compare two songs by the ordered ranking keys. Returns the ordering that places the "better"
-/// song first (i.e. ascending sort yields the desired ranking). Stable on full ties.
-fn compare_by_ordering(a: &Song, b: &Song, keys: &[OrderingKey]) -> std::cmp::Ordering {
+/// Compare two songs by the ordered ranking keys, then by version preference as a final tiebreak.
+/// Returns the ordering that places the "better" song first (i.e. ascending sort yields the desired
+/// ranking). Stable on full ties.
+///
+/// Version preference (Story 13.2 #34, AC 5) is applied **after** the explicit `keys` so the
+/// user-chosen ordering (favorites/playCount/quality/…) still dominates; it only breaks ties the
+/// configured keys leave open. An empty `version_pref` makes this a no-op (today's behavior).
+fn compare_by_ordering(
+    a: &Song,
+    b: &Song,
+    keys: &[OrderingKey],
+    version_pref: &[VersionTrait],
+) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     for key in keys {
         let ord = match key {
@@ -552,14 +630,21 @@ fn compare_by_ordering(a: &Song, b: &Song, keys: &[OrderingKey]) -> std::cmp::Or
                 .as_deref()
                 .unwrap_or("")
                 .cmp(a.date_added.as_deref().unwrap_or("")),
-            // higher bitrate first
-            OrderingKey::Quality => b
-                .bitrate_kbps
-                .unwrap_or(0)
-                .cmp(&a.bitrate_kbps.unwrap_or(0)),
+            // Story 13.2 #13: lossless formats rank above lossy regardless of bitrate, then by
+            // bitrate descending within each tier (so a FLAC with no reported bitrate still beats a
+            // 320 kbps MP3). The format tier comes from `suffix`/`content_type`, never the title.
+            OrderingKey::Quality => (format_quality_rank(b), b.bitrate_kbps.unwrap_or(0))
+                .cmp(&(format_quality_rank(a), a.bitrate_kbps.unwrap_or(0))),
             // deterministic no-op in 12.1 — no entropy in the pure core (Epic 13 adds seeding)
             OrderingKey::Random => Ordering::Equal,
         };
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    // Version preference: lower rank = more preferred = sorts first.
+    if !version_pref.is_empty() {
+        let ord = version_rank(a, version_pref).cmp(&version_rank(b, version_pref));
         if ord != Ordering::Equal {
             return ord;
         }
@@ -569,6 +654,266 @@ fn compare_by_ordering(a: &Song, b: &Song, keys: &[OrderingKey]) -> std::cmp::Or
 
 fn fav_rank(s: &Song) -> u8 {
     u8::from(s.is_favorite == Some(true))
+}
+
+/// Format-aware quality tier (Story 13.2 #13): lossless (2) > lossy (1) > unknown (0). Read
+/// case-insensitively from `suffix` first, then the `content_type` mime subtype — **never** the
+/// title. A present-but-unrecognized format string is "lossy" (1); only the total absence of any
+/// format hint is "unknown" (0), so a known FLAC always outranks a bare MP3 which outranks a song
+/// with no format metadata at all.
+fn format_quality_rank(song: &Song) -> u8 {
+    /// Lossless container/codec tokens (suffixes and mime subtypes, sans any `x-` mime prefix).
+    const LOSSLESS: &[&str] = &[
+        "flac", "alac", "wav", "wave", "aiff", "aif", "ape", "wavpack", "wv",
+    ];
+
+    let suffix = song
+        .suffix
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    if !suffix.is_empty() {
+        return if LOSSLESS.contains(&suffix.as_str()) { 2 } else { 1 };
+    }
+
+    // Fall back to the mime subtype (`audio/flac` → `flac`, `audio/x-flac` → `flac`).
+    let mime_sub = song
+        .content_type
+        .as_deref()
+        .and_then(|c| c.rsplit('/').next())
+        .map(|s| s.trim().trim_start_matches("x-").to_ascii_lowercase())
+        .unwrap_or_default();
+    if !mime_sub.is_empty() {
+        return if LOSSLESS.contains(&mime_sub.as_str()) { 2 } else { 1 };
+    }
+
+    0 // no format metadata at all → unknown, ranked last
+}
+
+// ---------------------------------------------------------------------------
+// Version-trait detection (Story 13.2 #34) — pure text heuristics over a closed marker set.
+// ---------------------------------------------------------------------------
+
+/// True when `needle` (ASCII) appears in `hay` bounded by a non-alphanumeric byte (or a string
+/// edge) on both sides — so `live` matches `(live)`, `- live`, `live at`, but **not** `alive` or
+/// `believe`, and `demo` matches `(demo)` but not `demolition`/`demon`. `hay` is expected
+/// pre-lowercased. Multibyte (≥0x80) neighbors count as boundaries, which only ever loosens toward
+/// "not a word char" — acceptable for these conservative markers.
+fn has_word(hay: &str, needle: &str) -> bool {
+    let bytes = hay.as_bytes();
+    let nlen = needle.len();
+    if nlen == 0 {
+        return false;
+    }
+    let mut start = 0;
+    while let Some(rel) = hay[start..].find(needle) {
+        let i = start + rel;
+        let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+        let after = i + nlen;
+        let after_ok = after >= bytes.len() || !bytes[after].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+        start = i + 1;
+    }
+    false
+}
+
+/// Whether a (lowercased) text segment carries any recognized version marker. Shared by
+/// [`detect_version_traits`] and [`strip_version_markers`] so detection and stripping agree.
+/// `remix`/`acoustic` use substring matching (`remix` is safe per the false-positive analysis;
+/// `mix` alone is intentionally **not** a marker); the rest are word-anchored.
+fn segment_has_marker(low: &str) -> bool {
+    has_word(low, "live")
+        || has_word(low, "unplugged")
+        || has_word(low, "remaster")
+        || has_word(low, "remastered")
+        || low.contains("remix")
+        || has_word(low, "rmx")
+        || low.contains("re-mix")
+        || low.contains("acoustic")
+        || has_word(low, "demo")
+}
+
+/// Classify a song into the closed set of version traits (Story 13.2 #34), reading only `title` and
+/// `album_title`, case-insensitively. Returns the **set** of matched traits; `Studio` is returned
+/// (alone) when no other marker is recognized. Deterministic — no clock, no RNG.
+fn detect_version_traits(song: &Song) -> Vec<VersionTrait> {
+    let mut hay = song.title.to_ascii_lowercase();
+    if let Some(album) = song.album_title.as_deref() {
+        hay.push(' ');
+        hay.push_str(&album.to_ascii_lowercase());
+    }
+
+    let mut traits = Vec::new();
+    // Live: `live` (word-anchored, so "Alive"/"Believe" don't match) or `unplugged`.
+    if has_word(&hay, "live") || has_word(&hay, "unplugged") {
+        traits.push(VersionTrait::Live);
+    }
+    // Remastered: `remaster` (covers `(2011 Remaster)`, `remaster)`) or the `-ed` form.
+    if has_word(&hay, "remaster") || has_word(&hay, "remastered") {
+        traits.push(VersionTrait::Remastered);
+    }
+    // Remix: `remix` substring (catches remixed/remixes), `rmx` word, or `re-mix`.
+    if hay.contains("remix") || has_word(&hay, "rmx") || hay.contains("re-mix") {
+        traits.push(VersionTrait::Remix);
+    }
+    if hay.contains("acoustic") {
+        traits.push(VersionTrait::Acoustic);
+    }
+    // Demo: word-anchored so "Demolition"/"Demon" don't match.
+    if has_word(&hay, "demo") {
+        traits.push(VersionTrait::Demo);
+    }
+    if traits.is_empty() {
+        traits.push(VersionTrait::Studio);
+    }
+    traits
+}
+
+/// A song's version rank against an ordered preference list (Story 13.2 #34): the index of the first
+/// listed trait the song matches; a song matching none of the listed traits ranks **last**
+/// (`prefs.len()`, the worst). An empty preference list makes every song tie (rank 0).
+fn version_rank(song: &Song, prefs: &[VersionTrait]) -> usize {
+    if prefs.is_empty() {
+        return 0;
+    }
+    let traits = detect_version_traits(song);
+    prefs
+        .iter()
+        .position(|p| traits.contains(p))
+        .unwrap_or(prefs.len())
+}
+
+// ---------------------------------------------------------------------------
+// Best-version resolution (Story 13.2 #11) — collapse same-logical-song duplicates, keep the best.
+// ---------------------------------------------------------------------------
+
+/// Lowercase, trim, and collapse internal whitespace runs to single spaces.
+fn normalize_ws(s: &str) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+/// Remove `open…close` bracket groups whose inner text carries a recognized version marker, keeping
+/// every other (non-version) bracket group intact. `open`/`close` are single ASCII chars.
+fn strip_bracketed_markers(s: &str, open: char, close: char) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(start) = rest.find(open) {
+        match rest[start..].find(close) {
+            Some(end_rel) => {
+                let end = start + end_rel; // byte index of the closing char (ASCII, 1 byte)
+                out.push_str(&rest[..start]);
+                let inner = &rest[start + 1..end];
+                if !segment_has_marker(&inner.to_ascii_lowercase()) {
+                    out.push_str(&rest[start..=end]); // not a version marker → keep verbatim
+                }
+                rest = &rest[end + 1..];
+            }
+            None => break, // unbalanced bracket — leave the remainder untouched
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Strip recognized version markers from a title so two recordings of the same song share a base
+/// title: parenthetical/bracketed marker groups (`(Live)`, `[Acoustic]`, `(2011 Remaster)`) and a
+/// trailing ` - <…marker…>` dash suffix (`- 2011 Remaster`, `- Live at Wembley`). Conservative — an
+/// unrecognized suffix is left intact so distinct songs stay distinct. Whitespace is **not**
+/// collapsed here (the caller normalizes).
+fn strip_version_markers(title: &str) -> String {
+    let mut s = strip_bracketed_markers(title, '(', ')');
+    s = strip_bracketed_markers(&s, '[', ']');
+    if let Some(idx) = s.rfind(" - ")
+        && segment_has_marker(&s[idx + 3..].to_ascii_lowercase())
+    {
+        s.truncate(idx);
+    }
+    s
+}
+
+/// The logical-song key for best-version collapse (Story 13.2 #11): `(normalized_artist,
+/// normalized_base_title)`. Returns `None` — meaning "never collapse this candidate" — when the
+/// artist is missing/empty (never merge across unknown artists) or the base title is empty after
+/// stripping (nothing left to match on). Conservative by design: when in doubt, don't merge.
+fn logical_key(song: &Song) -> Option<(String, String)> {
+    let artist = normalize_ws(song.artist_name.as_deref().unwrap_or(""));
+    if artist.is_empty() {
+        return None;
+    }
+    let base = normalize_ws(&strip_version_markers(&song.title));
+    if base.is_empty() {
+        return None;
+    }
+    Some((artist, base))
+}
+
+/// Deterministic best-version comparator (Story 13.2 #11, AC 6): version-preference rank → quality
+/// rank → the full `ordering` → `song.id` lexicographic (the ultimate tiebreak that makes the winner
+/// independent of pool iteration order). Returns `Less` when `a` is the better version.
+fn best_version_cmp(a: &Song, b: &Song, pipeline: &AutoFillPipeline) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let prefs = &pipeline.quality.version_preference;
+    // (1) version preference rank (lower = more preferred)
+    if !prefs.is_empty() {
+        let ord = version_rank(a, prefs).cmp(&version_rank(b, prefs));
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    // (2) quality rank (lossless-first, then bitrate desc) — higher quality is better
+    let ord = (format_quality_rank(b), b.bitrate_kbps.unwrap_or(0))
+        .cmp(&(format_quality_rank(a), a.bitrate_kbps.unwrap_or(0)));
+    if ord != Ordering::Equal {
+        return ord;
+    }
+    // (3) the configured ordering keys (version preference already applied above → pass empty)
+    let ord = compare_by_ordering(a, b, &pipeline.ordering, &[]);
+    if ord != Ordering::Equal {
+        return ord;
+    }
+    // (4) ultimate deterministic tiebreak
+    a.id.cmp(&b.id)
+}
+
+/// Collapse same-logical-song duplicates across **all** pools, keeping the single best version
+/// (Story 13.2 #11). Builds the global `logical_key → winning song id` map over the union of pools
+/// (so the winner is chosen even when versions span sources), then drops from every pool any
+/// candidate whose logical key resolves to a *different* winner. Candidates with no logical key
+/// (`None` — missing artist / empty base title) are always kept. The winner survives wherever it
+/// appeared; the Selector's dedup-by-`song.id` then collapses it to a single emission.
+fn collapse_best_version(input: &PipelineInput, pipeline: &AutoFillPipeline) -> PipelineInput {
+    // Pick the winning Song per logical key. Iteration order over pools/candidates is irrelevant:
+    // `best_version_cmp` is a total order (ties broken by id), so the minimum is deterministic.
+    let mut winners: HashMap<(String, String), Song> = HashMap::new();
+    for pool in input.pools.values() {
+        for cand in pool {
+            let Some(key) = logical_key(&cand.song) else {
+                continue;
+            };
+            match winners.get(&key) {
+                Some(current)
+                    if best_version_cmp(&cand.song, current, pipeline)
+                        != std::cmp::Ordering::Less => {}
+                _ => {
+                    winners.insert(key, cand.song.clone());
+                }
+            }
+        }
+    }
+
+    let mut out = input.clone();
+    for pool in out.pools.values_mut() {
+        pool.retain(|cand| match logical_key(&cand.song) {
+            Some(key) => winners.get(&key).is_none_or(|w| w.id == cand.song.id),
+            None => true, // no logical key → never collapsed
+        });
+    }
+    out
 }
 
 /// Estimated playable size in bytes: prefer `size_bytes`, else `(bitrate_kbps*1000/8)*duration`.
@@ -912,12 +1257,17 @@ mod tests {
 
     #[test]
     fn persona_antoine_audiophile_quality_first() {
-        // Antoine: 512 GB DAP, quality-first. Large budget, ordering [Quality]. Higher-bitrate
-        // tracks rank first and the (relatively) large budget is filled.
+        // Antoine: 512 GB DAP, quality-first. Large budget, ordering [Quality]. Story 13.2 makes
+        // Quality lossless-aware: a FLAC ranks above every lossy file regardless of bitrate, then
+        // bitrate breaks ties within a tier. So a 900 kbps FLAC beats a 1411 kbps "HD" MP3.
+        let mut flac = song_bitrate("flac-lo", 900, 200);
+        flac.suffix = Some("flac".to_string());
+        flac.content_type = Some("audio/flac".to_string());
         let library = vec![
             cand(song_bitrate("low", 128, 200)),
-            cand(song_bitrate("hi", 1_411, 200)), // FLAC-ish
+            cand(song_bitrate("hi", 1_411, 200)), // high-bitrate MP3 (still lossy)
             cand(song_bitrate("mid", 320, 200)),
+            cand(flac),
         ];
         let input = PipelineInput::default().with_pool(SourceKind::Library, None, library);
 
@@ -934,8 +1284,8 @@ mod tests {
         let result = run_pipeline(&input, &pipeline);
         assert_eq!(
             ids(&result),
-            vec!["hi", "mid", "low"],
-            "tracks must rank by descending bitrate"
+            vec!["flac-lo", "hi", "mid", "low"],
+            "lossless ranks above lossy regardless of bitrate, then bitrate breaks ties within a tier"
         );
     }
 
@@ -1639,5 +1989,477 @@ mod tests {
         );
         assert_eq!(p.sources, vec![SourceEntry::new(SourceKind::Library)]);
         assert_eq!(p.budget.max_bytes, Some(1_234));
+    }
+
+    // ===================================================================
+    // Story 13.2 — Quality & Version ordering.
+    // ===================================================================
+
+    /// A song with explicit title/artist/album/format, for version + best-version tests.
+    fn song_meta(
+        id: &str,
+        title: &str,
+        artist: &str,
+        album: &str,
+        suffix: &str,
+        bitrate: u32,
+    ) -> Song {
+        Song {
+            title: title.to_string(),
+            artist_name: Some(artist.to_string()),
+            album_title: Some(album.to_string()),
+            suffix: Some(suffix.to_string()),
+            content_type: Some(format!("audio/{suffix}")),
+            bitrate_kbps: Some(bitrate),
+            size_bytes: Some(1_000_000),
+            ..song_sized(id, false, 0, "2024-01-01", 1_000_000)
+        }
+    }
+
+    // ---- AC 1: format_quality_rank --------------------------------------
+
+    #[test]
+    fn format_quality_rank_lossless_beats_lossy_beats_unknown() {
+        let mut flac = song_bitrate("a", 0, 200);
+        flac.suffix = Some("FLAC".to_string()); // case-insensitive
+        flac.content_type = Some("audio/flac".to_string());
+        assert_eq!(format_quality_rank(&flac), 2, "flac suffix → lossless");
+
+        let mut alac_mime = song_bitrate("b", 0, 200);
+        alac_mime.suffix = None;
+        alac_mime.content_type = Some("audio/x-alac".to_string()); // x- prefix stripped
+        assert_eq!(format_quality_rank(&alac_mime), 2, "alac mime → lossless");
+
+        let mp3 = song_bitrate("c", 320, 200); // suffix "mp3" from fixture
+        assert_eq!(format_quality_rank(&mp3), 1, "mp3 → lossy");
+
+        let mut unknown = song_bitrate("d", 320, 200);
+        unknown.suffix = None;
+        unknown.content_type = None;
+        assert_eq!(format_quality_rank(&unknown), 0, "no format metadata → unknown");
+    }
+
+    #[test]
+    fn quality_ordering_is_lossless_first_then_bitrate() {
+        // FLAC (no bitrate) > FLAC (low bitrate)?  flac-hi has higher bitrate so it leads its tier;
+        // both lossless beat the 320 MP3, which beats the format-less unknown.
+        let mut flac_hi = song_meta("flac-hi", "S1", "A", "Al", "flac", 1000);
+        flac_hi.bitrate_kbps = Some(1000);
+        let mut flac_lo = song_meta("flac-lo", "S2", "A", "Al", "flac", 500);
+        flac_lo.bitrate_kbps = Some(500);
+        let mp3 = song_meta("mp3", "S3", "A", "Al", "mp3", 320);
+        let mut unknown = song_meta("unknown", "S4", "A", "Al", "mp3", 320);
+        unknown.suffix = None;
+        unknown.content_type = None;
+
+        let input = PipelineInput::default().with_pool(
+            SourceKind::Library,
+            None,
+            vec![cand(unknown), cand(mp3), cand(flac_lo), cand(flac_hi)],
+        );
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            ordering: vec![OrderingKey::Quality],
+            budget: BudgetStage {
+                max_bytes: Some(100_000_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            ids(&run_pipeline(&input, &pipeline)),
+            vec!["flac-hi", "flac-lo", "mp3", "unknown"],
+        );
+    }
+
+    #[test]
+    fn quality_ordering_breaks_ties_by_bitrate_within_a_tier() {
+        let hi = song_meta("hi", "S", "A", "Al", "mp3", 320);
+        let lo = song_meta("lo", "S", "A", "Al", "mp3", 128);
+        let input = PipelineInput::default().with_pool(
+            SourceKind::Library,
+            None,
+            vec![cand(lo), cand(hi)],
+        );
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            ordering: vec![OrderingKey::Quality],
+            budget: BudgetStage {
+                max_bytes: Some(100_000_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(ids(&run_pipeline(&input, &pipeline)), vec!["hi", "lo"]);
+    }
+
+    #[test]
+    fn pipelines_without_quality_key_are_unaffected_by_format() {
+        // Default-legacy ordering never lists Quality, so a FLAC and an MP3 sort purely by the
+        // legacy keys (here: equal favorite/playcount, so date desc) — format is irrelevant.
+        let flac = song_meta("flac", "S1", "A", "Al", "flac", 100);
+        let mp3 = song_meta("mp3", "S2", "B", "Al2", "mp3", 320);
+        let input = PipelineInput::default().with_pool(
+            SourceKind::Library,
+            None,
+            vec![cand(flac), cand(mp3)],
+        );
+        let pipeline = AutoFillPipeline::default_legacy(Some(100_000_000));
+        // Same date → stable order preserved (flac first as inserted) — NOT reordered by format.
+        assert_eq!(ids(&run_pipeline(&input, &pipeline)), vec!["flac", "mp3"]);
+    }
+
+    // ---- AC 3: version-trait detection ----------------------------------
+
+    fn traits_of(title: &str) -> Vec<VersionTrait> {
+        let mut s = song_sized("x", false, 0, "2024-01-01", 1);
+        s.title = title.to_string();
+        s.album_title = None;
+        detect_version_traits(&s)
+    }
+
+    #[test]
+    fn version_trait_detection_each_trait() {
+        assert_eq!(traits_of("My Song"), vec![VersionTrait::Studio]);
+        assert!(traits_of("My Song (Live)").contains(&VersionTrait::Live));
+        assert!(traits_of("My Song - Live at Wembley").contains(&VersionTrait::Live));
+        assert!(traits_of("MTV Unplugged").contains(&VersionTrait::Live));
+        assert!(traits_of("My Song (2011 Remaster)").contains(&VersionTrait::Remastered));
+        assert!(traits_of("My Song - Remastered").contains(&VersionTrait::Remastered));
+        assert!(traits_of("My Song (Club Remix)").contains(&VersionTrait::Remix));
+        assert!(traits_of("My Song (Acoustic)").contains(&VersionTrait::Acoustic));
+        assert!(traits_of("My Song (Demo)").contains(&VersionTrait::Demo));
+    }
+
+    #[test]
+    fn version_trait_false_positive_guards() {
+        // "Alive"/"Believe" must NOT be Live; "Demolition"/"Demon" must NOT be Demo.
+        assert_eq!(traits_of("Stayin' Alive"), vec![VersionTrait::Studio]);
+        assert_eq!(traits_of("Don't Believe"), vec![VersionTrait::Studio]);
+        assert_eq!(traits_of("Demolition Man"), vec![VersionTrait::Studio]);
+        assert_eq!(traits_of("Speak of the Demon"), vec![VersionTrait::Studio]);
+        // "mix" alone is not a remix marker.
+        assert_eq!(traits_of("Mixtape Intro"), vec![VersionTrait::Studio]);
+    }
+
+    #[test]
+    fn version_trait_multi_match() {
+        let t = traits_of("My Song (Live) [2011 Remaster]");
+        assert!(t.contains(&VersionTrait::Live));
+        assert!(t.contains(&VersionTrait::Remastered));
+        assert!(!t.contains(&VersionTrait::Studio), "studio is only the absence of markers");
+    }
+
+    #[test]
+    fn version_trait_reads_album_title_too() {
+        let mut s = song_sized("x", false, 0, "2024-01-01", 1);
+        s.title = "My Song".to_string();
+        s.album_title = Some("Unplugged in New York".to_string());
+        assert!(detect_version_traits(&s).contains(&VersionTrait::Live));
+    }
+
+    // ---- AC 4/5: version preference parse + ordering tiebreak -----------
+
+    #[test]
+    fn version_rank_empty_preference_is_no_op() {
+        let s = song_meta("s", "Song (Live)", "A", "Al", "mp3", 320);
+        assert_eq!(version_rank(&s, &[]), 0);
+    }
+
+    #[test]
+    fn version_rank_index_of_first_match_else_last() {
+        let prefs = [VersionTrait::Studio, VersionTrait::Live];
+        let live = song_meta("a", "Song (Live)", "A", "Al", "mp3", 320);
+        let studio = song_meta("b", "Song", "A", "Al", "mp3", 320);
+        let remix = song_meta("c", "Song (Remix)", "A", "Al", "mp3", 320);
+        assert_eq!(version_rank(&studio, &prefs), 0, "studio is first preference");
+        assert_eq!(version_rank(&live, &prefs), 1, "live is second preference");
+        assert_eq!(version_rank(&remix, &prefs), 2, "no listed trait → last (len)");
+    }
+
+    #[test]
+    fn version_preference_orders_preferred_versions_first() {
+        // Prefer Live over Studio; with no other distinguishing keys, the live cut leads.
+        let studio = song_meta("studio", "Song", "A", "Al", "mp3", 320);
+        let live = song_meta("live", "Song (Live)", "A", "Al", "mp3", 320);
+        let input = PipelineInput::default().with_pool(
+            SourceKind::Library,
+            None,
+            vec![cand(studio), cand(live)],
+        );
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            quality: QualityStage {
+                version_preference: vec![VersionTrait::Live],
+                ..Default::default()
+            },
+            budget: BudgetStage {
+                max_bytes: Some(100_000_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(ids(&run_pipeline(&input, &pipeline)), vec!["live", "studio"]);
+    }
+
+    #[test]
+    fn version_preference_is_a_trailing_tiebreak_under_explicit_keys() {
+        // Favorite dominates version preference: the favored studio cut wins even though Live is
+        // the preferred version (AC 5 — version pref applies AFTER the explicit ordering keys).
+        let studio_fav = song_meta("studio-fav", "Song", "A", "Al", "mp3", 320);
+        let mut studio_fav = studio_fav;
+        studio_fav.is_favorite = Some(true);
+        let live = song_meta("live", "Song (Live)", "A", "Al", "mp3", 320);
+        let input = PipelineInput::default().with_pool(
+            SourceKind::Library,
+            None,
+            vec![cand(live), cand(studio_fav)],
+        );
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            ordering: vec![OrderingKey::Favorite],
+            quality: QualityStage {
+                version_preference: vec![VersionTrait::Live],
+                ..Default::default()
+            },
+            budget: BudgetStage {
+                max_bytes: Some(100_000_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            ids(&run_pipeline(&input, &pipeline)),
+            vec!["studio-fav", "live"],
+            "explicit Favorite key dominates the version-preference tiebreak",
+        );
+    }
+
+    #[test]
+    fn version_preference_parse_is_malformed_tolerant_and_dedups() {
+        // AC 4 / 13.1 parse_tiers precedent: an unknown trait, a non-string entry, and a duplicate
+        // are all dropped on parse — the slot is never aborted. Order of the survivors is preserved.
+        let q: QualityStage = serde_json::from_str(
+            r#"{ "versionPreference": ["live", "bogus", 42, "remastered", "live"] }"#,
+        )
+        .expect("malformed entries are tolerated, never an error");
+        assert_eq!(
+            q.version_preference,
+            vec![VersionTrait::Live, VersionTrait::Remastered],
+            "unknown/non-string dropped, duplicates collapsed, order preserved",
+        );
+
+        // An all-bogus list degrades cleanly to "no preference".
+        let empty: QualityStage =
+            serde_json::from_str(r#"{ "versionPreference": ["nope", null] }"#).unwrap();
+        assert!(empty.version_preference.is_empty());
+    }
+
+    // ---- AC 6/7: best-version resolution --------------------------------
+
+    #[test]
+    fn best_version_keeps_lossless_studio_over_lossy_live() {
+        // Same song, same artist: a FLAC studio cut and a lossy live cut collapse to the FLAC.
+        let flac = song_meta("flac-studio", "My Song", "The Band", "Album", "flac", 900);
+        let live = song_meta("mp3-live", "My Song (Live)", "The Band", "Live Album", "mp3", 320);
+        let input = PipelineInput::default().with_pool(
+            SourceKind::Library,
+            None,
+            vec![cand(live), cand(flac)],
+        );
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            quality: QualityStage {
+                best_version: true,
+                ..Default::default()
+            },
+            budget: BudgetStage {
+                max_bytes: Some(100_000_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            ids(&run_pipeline(&input, &pipeline)),
+            vec!["flac-studio"],
+            "best-version collapses the duplicate, keeping the lossless cut",
+        );
+    }
+
+    #[test]
+    fn best_version_preference_flips_the_winner() {
+        // With Live preferred, the live cut wins the collapse even though it's lossy.
+        let flac = song_meta("flac-studio", "My Song", "The Band", "Album", "flac", 900);
+        let live = song_meta("mp3-live", "My Song (Live)", "The Band", "Live Album", "mp3", 320);
+        let input = PipelineInput::default().with_pool(
+            SourceKind::Library,
+            None,
+            vec![cand(flac), cand(live)],
+        );
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            quality: QualityStage {
+                best_version: true,
+                version_preference: vec![VersionTrait::Live],
+            },
+            budget: BudgetStage {
+                max_bytes: Some(100_000_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(ids(&run_pipeline(&input, &pipeline)), vec!["mp3-live"]);
+    }
+
+    #[test]
+    fn best_version_never_over_merges_distinct_songs_or_unknown_artist() {
+        // Different titles, different artists, and a None-artist candidate all survive.
+        let a = song_meta("a", "Song One", "Artist X", "Al", "mp3", 320);
+        let b = song_meta("b", "Song Two", "Artist X", "Al", "mp3", 320);
+        let c = song_meta("c", "Song One", "Artist Y", "Al", "mp3", 320); // same title, other artist
+        let mut d = song_meta("d", "Song One", "Artist X", "Al", "flac", 900);
+        d.artist_name = None; // unknown artist → never collapsed even though title matches `a`
+        let input = PipelineInput::default().with_pool(
+            SourceKind::Library,
+            None,
+            vec![cand(a), cand(b), cand(c), cand(d)],
+        );
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            quality: QualityStage {
+                best_version: true,
+                ..Default::default()
+            },
+            budget: BudgetStage {
+                max_bytes: Some(100_000_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let got = ids(&run_pipeline(&input, &pipeline));
+        for id in ["a", "b", "c", "d"] {
+            assert!(got.contains(&id.to_string()), "{id} must survive (no over-merge)");
+        }
+    }
+
+    #[test]
+    fn best_version_collapses_across_pools() {
+        // Winner (FLAC studio) in the library, loser (lossy live) in a playlist → the playlist
+        // loser is dropped; the library winner remains.
+        let flac = song_meta("flac-studio", "My Song", "The Band", "Album", "flac", 900);
+        let live = song_meta("mp3-live", "My Song (Live)", "The Band", "Live Album", "mp3", 320);
+        let input = PipelineInput::default()
+            .with_pool(SourceKind::Library, None, vec![cand(flac)])
+            .with_pool(SourceKind::Playlist, Some("set"), vec![cand(live)]);
+        let pipeline = AutoFillPipeline {
+            sources: vec![
+                SourceEntry {
+                    kind: SourceKind::Playlist,
+                    ref_id: Some("set".to_string()),
+                    share: None,
+                },
+                SourceEntry::new(SourceKind::Library),
+            ],
+            quality: QualityStage {
+                best_version: true,
+                ..Default::default()
+            },
+            budget: BudgetStage {
+                max_bytes: Some(100_000_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let got = ids(&run_pipeline(&input, &pipeline));
+        assert_eq!(got, vec!["flac-studio"], "cross-pool collapse keeps the global winner only");
+    }
+
+    #[test]
+    fn best_version_disabled_keeps_all_duplicates() {
+        let flac = song_meta("flac-studio", "My Song", "The Band", "Album", "flac", 900);
+        let live = song_meta("mp3-live", "My Song (Live)", "The Band", "Live Album", "mp3", 320);
+        let input = PipelineInput::default().with_pool(
+            SourceKind::Library,
+            None,
+            vec![cand(flac), cand(live)],
+        );
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            budget: BudgetStage {
+                max_bytes: Some(100_000_000),
+                ..Default::default()
+            },
+            ..Default::default() // best_version defaults to false
+        };
+        assert_eq!(run_pipeline(&input, &pipeline).len(), 2, "no collapse when disabled");
+    }
+
+    #[test]
+    fn best_version_never_emits_zero_byte_or_over_budget() {
+        // Collapse only removes candidates; the surviving winner still respects the budget ceiling.
+        let flac = song_meta("flac-studio", "My Song", "The Band", "Album", "flac", 900);
+        let live = song_meta("mp3-live", "My Song (Live)", "The Band", "Live Album", "mp3", 320);
+        let other = song_meta("other", "Another", "The Band", "Album", "mp3", 320);
+        let input = PipelineInput::default().with_pool(
+            SourceKind::Library,
+            None,
+            vec![cand(flac), cand(live), cand(other)],
+        );
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            quality: QualityStage {
+                best_version: true,
+                ..Default::default()
+            },
+            budget: BudgetStage {
+                max_bytes: Some(1_500_000), // fits exactly one 1 MB track
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let result = run_pipeline(&input, &pipeline);
+        let total: u64 = result.iter().map(|i| i.size_bytes).sum();
+        assert!(total <= 1_500_000, "budget respected");
+        assert!(result.iter().all(|i| i.size_bytes > 0), "never a 0-byte filler");
+    }
+
+    #[test]
+    fn strip_version_markers_normalizes_to_a_shared_base() {
+        assert_eq!(normalize_ws(&strip_version_markers("My Song (Live)")), "my song");
+        assert_eq!(normalize_ws(&strip_version_markers("My Song - 2011 Remaster")), "my song");
+        assert_eq!(normalize_ws(&strip_version_markers("My Song [Acoustic]")), "my song");
+        assert_eq!(normalize_ws(&strip_version_markers("My Song - Live at Wembley")), "my song");
+        // A non-version parenthetical is preserved (distinct songs stay distinct).
+        assert_eq!(
+            normalize_ws(&strip_version_markers("My Song (feat. Guest)")),
+            "my song (feat. guest)",
+        );
+    }
+
+    // ---- AC 8/11: routing + serde round-trip ----------------------------
+
+    #[test]
+    fn quality_stage_serde_round_trips() {
+        let json = r#"{
+            "ordering": ["quality"],
+            "quality": { "bestVersion": true, "versionPreference": ["live", "remastered"] }
+        }"#;
+        let p: AutoFillPipeline = serde_json::from_str(json).unwrap();
+        assert!(p.quality.best_version);
+        assert_eq!(
+            p.quality.version_preference,
+            vec![VersionTrait::Live, VersionTrait::Remastered]
+        );
+        let back: AutoFillPipeline = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(p, back);
+    }
+
+    #[test]
+    fn quality_stage_default_omitted_pipeline_is_default() {
+        // A pipeline with no `quality` key deserializes to the default QualityStage (today's behavior).
+        let p: AutoFillPipeline = serde_json::from_str("{}").unwrap();
+        assert_eq!(p.quality, QualityStage::default());
+        assert!(!p.quality.best_version);
+        assert!(p.quality.version_preference.is_empty());
     }
 }

@@ -31,8 +31,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::pipeline::{
-    AutoFillPipeline, Candidate, FilterStage, MemoryStage, OrderingKey, PipelineInput, SourceEntry,
-    SourceKey, SourceKind, Unit, run_pipeline,
+    AutoFillPipeline, Candidate, FilterStage, MemoryStage, OrderingKey, PipelineInput, QualityStage,
+    SourceEntry, SourceKey, SourceKind, Unit, run_pipeline,
 };
 use super::{AutoFillItem, AutoFillParams};
 use crate::domain::models::Song;
@@ -135,7 +135,8 @@ const MAX_BULK_PAGES: u32 = 200;
 /// - `fallback` is empty.
 ///
 /// Any deviation (a playlist/genre source, a filter, a share weight, an album/artist unit, a
-/// quality ordering, a memory modifier, a fallback chain) returns `true`. `enabled` is a caller
+/// quality ordering, a memory modifier, a fallback chain, a best-version/version-preference quality
+/// setting) returns `true`. `enabled` is a caller
 /// concern and not part of the discriminator. For the budget (Story 12.5): a headroom reserve or a
 /// duration target forces the configurable path, because the fast `run_auto_fill_provider` path
 /// only knows `max_fill_bytes` — it can neither reserve device headroom nor count playtime. A bare
@@ -158,6 +159,11 @@ pub fn needs_configurable_expansion(p: &AutoFillPipeline) -> bool {
     let unit_default = p.unit == Unit::Track;
     let memory_default = p.memory == MemoryStage::default();
     let fallback_default = p.fallback.is_empty();
+    // Story 13.2: a quality-only pipeline (default ordering, but `best_version`/`version_preference`
+    // set) must still route to the engine path. The `OrderingKey::Quality` case is already caught by
+    // `ordering_default` (it makes the ordering non-legacy). `QualityStage::default()` is today's
+    // behavior, so it keeps the fast path.
+    let quality_default = p.quality == QualityStage::default();
     // A headroom reserve or duration target can only be honored by the materialized engine path;
     // `max_bytes` alone is honored by the fast path's `max_fill_bytes` and stays default-legacy.
     let budget_default = !(p.budget.headroom_bytes.is_some_and(|h| h > 0)
@@ -169,7 +175,8 @@ pub fn needs_configurable_expansion(p: &AutoFillPipeline) -> bool {
         && unit_default
         && memory_default
         && fallback_default
-        && budget_default)
+        && budget_default
+        && quality_default)
 }
 
 /// Materialize a configured pipeline's source pools from the provider, then run the pure engine.
@@ -898,6 +905,31 @@ mod tests {
         let mut p = AutoFillPipeline::default_legacy(Some(1));
         p.memory.tiers = Some(serde_json::json!([{ "kind": "library" }]));
         assert!(needs_configurable_expansion(&p), "tiers forces configurable");
+    }
+
+    #[test]
+    fn discriminator_new_quality_fields_force_configurable() {
+        use crate::auto_fill::pipeline::VersionTrait;
+
+        // Story 13.2 (AC 8): a quality-only pipeline must route to the engine path.
+        // (1) best_version-only (default ordering otherwise).
+        let mut p = AutoFillPipeline::default_legacy(Some(1));
+        p.quality.best_version = true;
+        assert!(needs_configurable_expansion(&p), "best_version forces configurable");
+
+        // (2) version_preference-only.
+        let mut p = AutoFillPipeline::default_legacy(Some(1));
+        p.quality.version_preference = vec![VersionTrait::Live];
+        assert!(needs_configurable_expansion(&p), "version_preference forces configurable");
+
+        // (3) Quality-ordering-only is already caught by the ordering discriminator.
+        let mut p = AutoFillPipeline::default_legacy(Some(1));
+        p.ordering = vec![OrderingKey::Quality];
+        assert!(needs_configurable_expansion(&p), "quality ordering key forces configurable");
+
+        // A default QualityStage keeps the fast path (legacy pipeline stays default-equivalent).
+        let p = AutoFillPipeline::default_legacy(Some(1));
+        assert!(!needs_configurable_expansion(&p), "default quality stage stays on the fast path");
     }
 
     #[test]

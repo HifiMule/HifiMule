@@ -18,6 +18,8 @@ import {
     SourceKind,
     TierDef,
     Unit,
+    VersionTrait,
+    VERSION_TRAITS,
     normalizePipeline,
     serializePipeline,
 } from '../state/autoFill';
@@ -252,8 +254,55 @@ export class AutoFillPanel {
                 `)}
                 ${this.renderOrderingSection()}
                 ${this.renderMemoryStage()}
+                ${this.renderQualityStage()}
             </div>
         `;
+    }
+
+    /** Quality & Version stage (Story 13.2): a best-version switch + an ordered version-preference
+     * editor. The "Highest quality" ordering key lives in the Ordering section (unchanged). */
+    private renderQualityStage(): string {
+        const q = this.pipeline.quality;
+        return this.renderStage(t('basket.autofill.quality_version'), `
+            <sl-switch id="af-best-version" size="small" ${q.bestVersion ? 'checked' : ''}>
+                ${t('basket.autofill.best_version')}
+            </sl-switch>
+            <div class="auto-fill-caption">${t('basket.autofill.best_version_hint')}</div>
+            ${this.renderVersionPreferenceEditor()}
+        `);
+    }
+
+    /** Ordered version-preference editor (mirrors the Ordering editor): reorder/remove chosen traits
+     * and add unused ones from a picker. Earlier = more preferred. */
+    private renderVersionPreferenceEditor(): string {
+        const used = this.versionPreference();
+        const unused = VERSION_TRAITS.filter((trait) => !used.includes(trait));
+        const rows = used.map((trait, i) => `
+            <div class="auto-fill-ordering-row" data-index="${i}">
+                <span class="af-ordering-label">${i + 1}. ${t('basket.autofill.version_trait_' + trait)}</span>
+                <sl-icon-button class="af-version-up" name="chevron-up" label="${t('basket.autofill.move_up')}" data-index="${i}" ${i === 0 ? 'disabled' : ''}></sl-icon-button>
+                <sl-icon-button class="af-version-down" name="chevron-down" label="${t('basket.autofill.move_down')}" data-index="${i}" ${i === used.length - 1 ? 'disabled' : ''}></sl-icon-button>
+                <sl-icon-button class="af-version-remove" name="x" label="${t('basket.actions.remove')}" data-index="${i}"></sl-icon-button>
+            </div>
+        `).join('');
+        return `
+            <div class="auto-fill-source-list">
+                <label class="auto-fill-substage-label">${t('basket.autofill.version_preference')}</label>
+                ${rows || `<div class="auto-fill-caption">${t('basket.autofill.no_version_preference')}</div>`}
+                <div class="auto-fill-caption">${t('basket.autofill.version_preference_hint')}</div>
+                ${unused.length > 0 ? `
+                    <sl-select id="af-version-add" size="small" placeholder="${t('basket.autofill.version_preference_add')}" value="">
+                        ${unused.map((trait) => `<sl-option value="${trait}">${t('basket.autofill.version_trait_' + trait)}</sl-option>`).join('')}
+                    </sl-select>
+                ` : ''}
+            </div>
+        `;
+    }
+
+    /** The live version-preference array (lazily initialized so editing never dereferences undefined). */
+    private versionPreference(): VersionTrait[] {
+        if (!Array.isArray(this.pipeline.quality.versionPreference)) this.pipeline.quality.versionPreference = [];
+        return this.pipeline.quality.versionPreference;
     }
 
     /** Memory stage controls: cooldown + played-exclusion (existing), plus the Story 13.1 stable-core
@@ -537,6 +586,38 @@ export class AutoFillPanel {
             this.renderBody();
         });
 
+        // --- Quality & Version (Story 13.2) ---
+        d.querySelector('#af-best-version')?.addEventListener('sl-change', (e: Event) => {
+            this.captureInputs();
+            this.pipeline.quality.bestVersion = (e.target as HTMLInputElement).checked || undefined;
+            this.invalidatePreview();
+        });
+        d.querySelectorAll('.af-version-up').forEach((el: Element) => {
+            el.addEventListener('click', (e: Event) => {
+                this.captureInputs();
+                this.moveVersionPreference(this.idxOf(e), -1);
+            });
+        });
+        d.querySelectorAll('.af-version-down').forEach((el: Element) => {
+            el.addEventListener('click', (e: Event) => {
+                this.captureInputs();
+                this.moveVersionPreference(this.idxOf(e), 1);
+            });
+        });
+        d.querySelectorAll('.af-version-remove').forEach((el: Element) => {
+            el.addEventListener('click', (e: Event) => {
+                this.captureInputs();
+                this.versionPreference().splice(this.idxOf(e), 1);
+                this.renderBody();
+            });
+        });
+        d.querySelector('#af-version-add')?.addEventListener('sl-change', (e: Event) => {
+            this.captureInputs();
+            const trait = (e.target as any).value as VersionTrait;
+            if (trait && !this.versionPreference().includes(trait)) this.versionPreference().push(trait);
+            this.renderBody();
+        });
+
         // --- Footer ---
         d.querySelector('#af-preview-btn')?.addEventListener('click', () => this.onPreviewClick());
         d.querySelector('#af-cancel')?.addEventListener('click', () => d.hide());
@@ -605,6 +686,14 @@ export class AutoFillPanel {
     private moveOrdering(index: number, delta: number): void {
         const target = index + delta;
         const list = this.pipeline.ordering;
+        if (target < 0 || target >= list.length) return;
+        [list[index], list[target]] = [list[target], list[index]];
+        this.renderBody();
+    }
+
+    private moveVersionPreference(index: number, delta: number): void {
+        const target = index + delta;
+        const list = this.versionPreference();
         if (target < 0 || target >= list.length) return;
         [list[index], list[target]] = [list[target], list[index]];
         this.renderBody();

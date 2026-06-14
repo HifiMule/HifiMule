@@ -6,6 +6,9 @@
 export type SourceKind = 'library' | 'favorites' | 'history' | 'playlist';
 export type OrderingKey = 'favorite' | 'playCount' | 'dateCreated' | 'random' | 'quality';
 export type Unit = 'track' | 'album' | 'artist';
+/** Recording-version traits the auto-fill engine detects from title/album text (Story 13.2 #34).
+ * Mirrors the daemon `VersionTrait` enum (camelCase serde). */
+export type VersionTrait = 'studio' | 'live' | 'remastered' | 'remix' | 'acoustic' | 'demo';
 
 export interface FilterStage {
     includeTags: string[];
@@ -43,6 +46,15 @@ export interface BudgetStage {
     headroomBytes?: number;
 }
 
+/** Quality & version modifiers (Story 13.2). Mirrors the daemon `QualityStage` serde shape;
+ * defaults (`bestVersion: false`, empty `versionPreference`) are today's behavior. */
+export interface QualityStage {
+    /** Collapse same-logical-song duplicates to a single best version globally (#11). */
+    bestVersion?: boolean;
+    /** Ordered version-trait preference (earlier = more preferred) (#34). Empty = no preference. */
+    versionPreference?: VersionTrait[];
+}
+
 export interface AutoFillPipeline {
     enabled: boolean;
     filter: FilterStage;
@@ -52,10 +64,14 @@ export interface AutoFillPipeline {
     memory: MemoryStage;
     budget: BudgetStage;
     fallback: SourceEntry[];
+    quality: QualityStage;
 }
 
 /** The user-facing ordering keys (the reserved `random` no-op is not surfaced). */
 export const ORDERING_KEYS: OrderingKey[] = ['favorite', 'playCount', 'dateCreated', 'quality'];
+
+/** The selectable version traits, in the order the preference editor offers them. */
+export const VERSION_TRAITS: VersionTrait[] = ['studio', 'live', 'remastered', 'remix', 'acoustic', 'demo'];
 
 export function emptyFilter(): FilterStage {
     return { includeTags: [], excludeTags: [], includeGenres: [], excludeGenres: [] };
@@ -74,6 +90,7 @@ export function defaultLegacyPipeline(maxBytes?: number): AutoFillPipeline {
         memory: { playedExclusion: false },
         budget: maxBytes != null ? { maxBytes } : {},
         fallback: [],
+        quality: {},
     };
 }
 
@@ -95,6 +112,12 @@ export function normalizePipeline(raw: Partial<AutoFillPipeline> | null | undefi
         memory: { ...(raw.memory ?? {}) },
         budget: { ...(raw.budget ?? {}) },
         fallback: Array.isArray(raw.fallback) ? raw.fallback.map((s) => ({ ...s })) : [],
+        quality: {
+            ...(raw.quality ?? {}),
+            versionPreference: Array.isArray(raw.quality?.versionPreference)
+                ? [...raw.quality.versionPreference]
+                : [],
+        },
     };
 }
 
@@ -132,6 +155,17 @@ export function serializePipeline(p: AutoFillPipeline): AutoFillPipeline {
     if (typeof p.budget.headroomBytes === 'number' && p.budget.headroomBytes > 0) {
         budget.headroomBytes = p.budget.headroomBytes;
     }
+    // Story 13.2 Quality stage — emit only meaningful fields (mirrors the Memory-fields pattern) so a
+    // default pipeline round-trips clean and stays backward-compatible.
+    const quality: QualityStage = {};
+    if (p.quality?.bestVersion) quality.bestVersion = true;
+    if (Array.isArray(p.quality?.versionPreference)) {
+        // De-duplicate, preserving order (first occurrence wins) — mirrors the engine's parse.
+        const prefs = p.quality.versionPreference.filter(
+            (trait, i, arr) => arr.indexOf(trait) === i,
+        );
+        if (prefs.length > 0) quality.versionPreference = prefs;
+    }
     return {
         enabled: p.enabled,
         filter: {
@@ -146,5 +180,6 @@ export function serializePipeline(p: AutoFillPipeline): AutoFillPipeline {
         memory,
         budget,
         fallback: cleanSources(p.fallback),
+        quality,
     };
 }

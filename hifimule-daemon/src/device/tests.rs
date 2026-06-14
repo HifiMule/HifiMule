@@ -2598,7 +2598,8 @@ fn set_legacy_updates_sole_pipeline_instead_of_parking_dropped_legacy() {
 /// budget/fallback) so round-trip and "untouched" assertions cover the full shape.
 fn rich_pipeline() -> AutoFillPipeline {
     use crate::auto_fill::{
-        BudgetStage, FilterStage, MemoryStage, OrderingKey, SourceEntry, SourceKind, Unit,
+        BudgetStage, FilterStage, MemoryStage, OrderingKey, QualityStage, SourceEntry, SourceKind,
+        Unit,
     };
     AutoFillPipeline {
         enabled: true,
@@ -2632,6 +2633,10 @@ fn rich_pipeline() -> AutoFillPipeline {
             headroom_bytes: Some(100),
         },
         fallback: vec![SourceEntry::new(SourceKind::Library)],
+        quality: QualityStage {
+            best_version: true,
+            version_preference: vec![crate::auto_fill::VersionTrait::Live],
+        },
     }
 }
 
