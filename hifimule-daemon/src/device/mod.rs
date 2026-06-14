@@ -345,9 +345,9 @@ impl AutoFillConfig {
         }
     }
 
-    /// The pipeline for `server_id`, if one is configured. Reserved for Story 12.3 expansion
-    /// (multi-slot sync-time fan-out); unreferenced by the binary until then.
-    #[allow(dead_code)]
+    /// The pipeline for `server_id`, if one is configured. Read at each sync-time auto-fill
+    /// expansion site (Story 12.4) to route the slot through the configurable engine when a
+    /// non-default pipeline is configured for that portable serverId.
     pub fn pipeline_for(&self, server_id: &str) -> Option<&AutoFillPipeline> {
         self.pipelines.get(server_id)
     }

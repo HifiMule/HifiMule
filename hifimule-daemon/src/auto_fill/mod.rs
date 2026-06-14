@@ -23,6 +23,12 @@ pub mod pipeline;
 #[allow(unused_imports)]
 pub use pipeline::*;
 
+/// Async pool-materialization layer (Story 12.4): turns a configured `AutoFillPipeline` into the
+/// materialized pools the pure `pipeline::run_pipeline` engine consumes, and decides (via
+/// `needs_configurable_expansion`) whether a slot can keep the fast default path.
+pub mod fetch;
+pub use fetch::*;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoFillItem {

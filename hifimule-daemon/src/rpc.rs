@@ -2638,7 +2638,13 @@ async fn provider_calculate_delta(
                 exclude_item_ids: exclude_ids,
                 max_fill_bytes: auto_fill_budget,
             };
-            let fill_items = crate::auto_fill::run_auto_fill_provider(provider, fill_params)
+            // Story 12.4: route the selected server's slot through the shared seam, reading its
+            // configured pipeline (portable serverId). Default-equivalent → fast path (AC 8).
+            let selected_portable = current_server_portable_id(_state).ok().flatten();
+            let pipeline_opt = selected_portable
+                .as_deref()
+                .and_then(|id| manifest.auto_fill.pipeline_for(id));
+            let fill_items = expand_auto_fill_slot(provider, pipeline_opt, fill_params)
                 .await
                 .map_err(|e| JsonRpcError {
                     code: ERR_CONNECTION_FAILED,
@@ -2646,7 +2652,7 @@ async fn provider_calculate_delta(
                     data: None,
                 })?;
             crate::daemon_log!(
-                "[AutoFill] run_auto_fill_provider returned {} tracks",
+                "[AutoFill] slot expansion returned {} tracks",
                 fill_items.len()
             );
             for item in fill_items {
@@ -3517,6 +3523,40 @@ fn push_fill_items_dedup(
     added
 }
 
+/// The single shared slot-expansion seam (Story 12.4): every sync-time auto-fill
+/// expansion site routes through this so the configurable-vs-default decision lives in
+/// exactly one place. When `pipeline` is a configured NON-default pipeline, materialize
+/// its pools and run the pure engine (`expand_with_pipeline`); otherwise keep the smart
+/// incremental default path (`run_auto_fill_provider`) — byte-for-byte unchanged (AC 8).
+async fn expand_auto_fill_slot(
+    provider: Arc<dyn MediaProvider>,
+    pipeline: Option<&crate::auto_fill::AutoFillPipeline>,
+    params: crate::auto_fill::AutoFillParams,
+) -> anyhow::Result<Vec<crate::auto_fill::AutoFillItem>> {
+    match pipeline {
+        Some(p) if crate::auto_fill::needs_configurable_expansion(p) => {
+            crate::auto_fill::expand_with_pipeline(provider, p, params).await
+        }
+        _ => crate::auto_fill::run_auto_fill_provider(provider, params).await,
+    }
+}
+
+/// Story 12.4: true when any auto-fill slot's resolved server has a configured NON-default
+/// pipeline. The Jellyfin-client fast path cannot run a configurable pipeline, so this forces the
+/// per-provider routing path. `auto_fill_servers` are the resolved portable serverIds
+/// (selected-server fallback already applied by the caller).
+fn auto_fill_needs_configurable_routing(
+    manifest: &crate::device::DeviceManifest,
+    auto_fill_servers: &[String],
+) -> bool {
+    auto_fill_servers.iter().any(|sid| {
+        manifest
+            .auto_fill
+            .pipeline_for(sid)
+            .is_some_and(crate::auto_fill::needs_configurable_expansion)
+    })
+}
+
 /// True when the basket items resolve to more than one distinct server (each
 /// item's serverId, or the selected server when unspecified).
 /// True when the sync must route items to per-server providers rather than the
@@ -3710,9 +3750,10 @@ async fn multi_provider_calculate_delta(
                 exclude_item_ids: exclude_ids,
                 max_fill_bytes: budget,
             };
-            let fill_items = match crate::auto_fill::run_auto_fill_provider(provider, fill_params)
-                .await
-            {
+            // Story 12.4: route this slot through the shared seam — the configurable engine
+            // when this server has a non-default pipeline, else the default fast path.
+            let pipeline_opt = manifest.auto_fill.pipeline_for(&af_server);
+            let fill_items = match expand_auto_fill_slot(provider, pipeline_opt, fill_params).await {
                 Ok(items) => items,
                 Err(e) => {
                     crate::daemon_log!(
@@ -3804,7 +3845,15 @@ async fn handle_sync_calculate_delta(
         .into_iter()
         .filter_map(|d| d.server_id.or_else(|| selected_id.clone()))
         .collect();
-    if sync_needs_provider_routing(&item_specs, selected_id.as_deref(), &auto_fill_servers) {
+    // Story 12.4: the Jellyfin-client fast path (`run_auto_fill`) cannot express a configurable
+    // pipeline, so when any auto-fill slot's server has a configured NON-default pipeline, force
+    // the per-provider path (which routes each slot through `expand_auto_fill_slot`). The pure
+    // default case still takes the Jellyfin-direct path unchanged (AC 6, AC 8).
+    let configured_pipeline_applies =
+        auto_fill_needs_configurable_routing(&manifest, &auto_fill_servers);
+    if configured_pipeline_applies
+        || sync_needs_provider_routing(&item_specs, selected_id.as_deref(), &auto_fill_servers)
+    {
         return multi_provider_calculate_delta(state, &item_specs, &manifest, &params).await;
     }
 
@@ -7606,6 +7655,56 @@ mod tests {
             Some("s1"),
             &["s1".to_string()]
         ));
+    }
+
+    // Story 12.4: a configured non-default pipeline for an auto-fill slot's server forces the
+    // per-provider path (off the Jellyfin-client fast path); a default pipeline does not.
+    #[test]
+    fn test_auto_fill_needs_configurable_routing() {
+        use crate::auto_fill::{AutoFillPipeline, SourceEntry, SourceKind};
+
+        let mut manifest = manifest_for_update();
+
+        // Default-legacy pipeline for s1 → fast path stays (no forced routing).
+        manifest.auto_fill.pipelines.insert(
+            "s1".to_string(),
+            AutoFillPipeline::default_legacy(Some(8_000_000_000)),
+        );
+        assert!(
+            !auto_fill_needs_configurable_routing(&manifest, &["s1".to_string()]),
+            "default-legacy pipeline must NOT force the provider path"
+        );
+
+        // A slot whose server has no configured pipeline → no forced routing.
+        assert!(!auto_fill_needs_configurable_routing(
+            &manifest,
+            &["unknown-server".to_string()]
+        ));
+
+        // Configure a NON-default pipeline (playlist source) for s2 → forces routing.
+        let mut configured = AutoFillPipeline::default();
+        configured.sources = vec![SourceEntry {
+            kind: SourceKind::Playlist,
+            ref_id: Some("energy".to_string()),
+            share: None,
+        }];
+        manifest
+            .auto_fill
+            .pipelines
+            .insert("s2".to_string(), configured);
+        assert!(
+            auto_fill_needs_configurable_routing(&manifest, &["s2".to_string()]),
+            "a configured non-default pipeline must force the provider path"
+        );
+
+        // Mixed: s1 default + s2 configured → still forced (any non-default slot).
+        assert!(auto_fill_needs_configurable_routing(
+            &manifest,
+            &["s1".to_string(), "s2".to_string()]
+        ));
+
+        // No auto-fill slots at all → never forced.
+        assert!(!auto_fill_needs_configurable_routing(&manifest, &[]));
     }
 
     // Story 12.3 AC1: normalize the dual-shape `autoFill` param into descriptors.
