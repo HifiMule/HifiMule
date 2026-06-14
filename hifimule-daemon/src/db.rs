@@ -212,6 +212,24 @@ impl Database {
         .map_err(|e| anyhow!("Failed to create server_config table: {}", e))?;
 
         Self::migrate_server_config_to_multi(&conn)?;
+
+        // Story 12.2 scaffolding: machine-local auto-fill runtime history, consumed by Epic 13
+        // (cooldown windows, stable-core, pity-timer). `server_id` is the **portable** id (matches
+        // the manifest's per-server pipeline keys), keyed per device+server. Config lives in the
+        // manifest, never here (storage split, architecture.md line 922). No reads/writes in 12.2.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS autofill_history (
+                device_id TEXT NOT NULL,
+                server_id TEXT NOT NULL,
+                track_id TEXT NOT NULL,
+                last_synced_at INTEGER,
+                tier TEXT,
+                PRIMARY KEY (device_id, server_id, track_id)
+            )",
+            [],
+        )
+        .map_err(|e| anyhow!("Failed to create autofill_history table: {}", e))?;
+
         Ok(())
     }
 
@@ -1373,5 +1391,25 @@ mod tests {
         let before = server.server_id.clone();
         db.init_for_test().unwrap();
         assert_eq!(db.get_server("srv-1").unwrap().unwrap().server_id, before);
+    }
+
+    #[test]
+    fn test_autofill_history_table_exists_and_init_idempotent() {
+        // Story 12.2 scaffolding: the table is created by init() and selectable; init() twice
+        // (CREATE TABLE IF NOT EXISTS) must not error.
+        let db = Database::memory().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.prepare(
+                "SELECT device_id, server_id, track_id, last_synced_at, tier \
+                 FROM autofill_history LIMIT 0",
+            )
+            .expect("autofill_history table should exist with the scaffolded columns");
+        }
+        // Idempotent re-init.
+        db.init_for_test().unwrap();
+        let conn = db.conn.lock().unwrap();
+        conn.prepare("SELECT * FROM autofill_history LIMIT 0")
+            .expect("autofill_history still present after re-init");
     }
 }

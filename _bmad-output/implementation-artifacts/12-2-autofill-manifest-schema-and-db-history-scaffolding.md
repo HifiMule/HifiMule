@@ -4,7 +4,7 @@ baseline_commit: 8b4ff3781ad53fc07d1fcc86338dc2f4f3d5d0eb
 
 # Story 12.2: Auto-Fill Manifest Schema & DB History Scaffolding
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -30,9 +30,9 @@ so that per-server pipeline config becomes the real on-disk shape (visible, not 
 
 ## Tasks / Subtasks
 
-- [ ] **Design the manifest config type** (`hifimule-daemon/src/device/mod.rs`) (AC: 1, 3)
-  - [ ] Add `use crate::auto_fill::AutoFillPipeline;` (`HashMap` is already used in the module for `folder_ids`).
-  - [ ] Introduce a public type `AutoFillConfig` holding both the new map and a transient legacy carrier:
+- [x] **Design the manifest config type** (`hifimule-daemon/src/device/mod.rs`) (AC: 1, 3)
+  - [x] Add `use crate::auto_fill::AutoFillPipeline;` (`HashMap` is already used in the module for `folder_ids`).
+  - [x] Introduce a public type `AutoFillConfig` holding both the new map and a transient legacy carrier:
     ```rust
     #[derive(Debug, Clone, Default, PartialEq)]
     pub struct AutoFillConfig {
@@ -44,15 +44,15 @@ so that per-server pipeline config becomes the real on-disk shape (visible, not 
         pub legacy: Option<AutoFillPrefs>,
     }
     ```
-  - [ ] Keep `AutoFillPrefs { enabled, max_bytes }` (`device/mod.rs:163-168`) — it is the legacy on-disk shape and the migration carrier. Do not delete it.
-  - [ ] Implement **custom `Serialize`/`Deserialize`** for `AutoFillConfig`:
+  - [x] Keep `AutoFillPrefs { enabled, max_bytes }` (`device/mod.rs:163-168`) — it is the legacy on-disk shape and the migration carrier. Do not delete it.
+  - [x] Implement **custom `Serialize`/`Deserialize`** for `AutoFillConfig`:
     - **Deserialize:** Distinguish shapes robustly (recommended: an internal `#[serde(untagged)]` enum `{ PerServer(HashMap<String, AutoFillPipeline>), Legacy(AutoFillPrefs) }` with `PerServer` tried first, or a `serde_json::Value` peek). Per-server map values are pipeline **objects**; legacy `enabled`/`maxBytes` values are scalar/null, so `HashMap<String, AutoFillPipeline>` deserialization fails and falls back to `AutoFillPrefs`. Then normalize: a legacy block equal to the empty default (`enabled == false && max_bytes.is_none()`) → `legacy: None`; otherwise `legacy: Some(prefs)`. Empty `{}` → empty `pipelines`.
     - **Serialize:** If `pipelines` non-empty → serialize the map (serverId keys verbatim, values `AutoFillPipeline`). Else if `legacy` is `Some` → serialize the legacy block as `AutoFillPrefs` does (`{ "enabled", "maxBytes" }`). Else → serialize the empty default `{ "enabled": false, "maxBytes": null }`. **Verify the empty/default case matches today's `AutoFillPrefs::default()` JSON byte-for-byte** (so `get_daemon_state` and new-device manifests are unchanged).
-  - [ ] Change the manifest field to `pub auto_fill: AutoFillConfig,` (keep `#[serde(default)]`). [device/mod.rs:101-102]
+  - [x] Change the manifest field to `pub auto_fill: AutoFillConfig,` (keep `#[serde(default)]`). [device/mod.rs:101-102]
 
-- [ ] **Implement migration onto the selected server** (`hifimule-daemon/src/device/mod.rs`) (AC: 2)
-  - [ ] On `AutoFillConfig`, add `pub fn migrate_legacy_to(&mut self, server_id: &str) -> bool`: if `legacy` is `Some(prefs)` and `!self.pipelines.contains_key(server_id)`, insert `pipelines.insert(server_id.to_string(), pipeline_from_legacy(&prefs))`, set `legacy = None`, return `true` (changed). `pipeline_from_legacy` builds `AutoFillPipeline::default_legacy(prefs.max_bytes)` and sets its `enabled = prefs.enabled`. Idempotent: returns `false` when there is nothing to migrate.
-  - [ ] Wire it into `DeviceManager::handle_device_detected` (`device/mod.rs:329-357`), immediately after the existing `reconcile_manifest_server_ids` + best-effort `write_manifest` block. Resolve the selected portable id and migrate:
+- [x] **Implement migration onto the selected server** (`hifimule-daemon/src/device/mod.rs`) (AC: 2)
+  - [x] On `AutoFillConfig`, add `pub fn migrate_legacy_to(&mut self, server_id: &str) -> bool`: if `legacy` is `Some(prefs)` and `!self.pipelines.contains_key(server_id)`, insert `pipelines.insert(server_id.to_string(), pipeline_from_legacy(&prefs))`, set `legacy = None`, return `true` (changed). `pipeline_from_legacy` builds `AutoFillPipeline::default_legacy(prefs.max_bytes)` and sets its `enabled = prefs.enabled`. Idempotent: returns `false` when there is nothing to migrate.
+  - [x] Wire it into `DeviceManager::handle_device_detected` (`device/mod.rs:329-357`), immediately after the existing `reconcile_manifest_server_ids` + best-effort `write_manifest` block. Resolve the selected portable id and migrate:
     ```rust
     if let Ok(Some(sel)) = self.db.get_server_config()      // selected = 1 row
         && let Some(portable) = sel.server_id
@@ -63,30 +63,30 @@ so that per-server pipeline config becomes the real on-disk shape (visible, not 
     }
     ```
     (Match the surrounding best-effort style — never block device load on a write failure. `self.db` is available on `DeviceManager`; `get_server_config()` returns the selected server, whose `.server_id` is the portable id — `db.rs:630-643,30-39`.)
-  - [ ] **Caveat to document:** the legacy block carries no serverId, so it is attributed to the **currently selected** server (the only faithful target). If no server is selected / no portable id exists yet, leave `legacy` in place — migration runs on a later detect once a server is selected.
+  - [x] **Caveat to document:** the legacy block carries no serverId, so it is attributed to the **currently selected** server (the only faithful target). If no server is selected / no portable id exists yet, leave `legacy` in place — migration runs on a later detect once a server is selected.
 
-- [ ] **Add behavior-preserving accessors** (`hifimule-daemon/src/device/mod.rs`) (AC: 4)
-  - [ ] `pub fn enabled_for(&self, server_id: Option<&str>) -> bool` and `pub fn max_bytes_for(&self, server_id: Option<&str>) -> Option<u64>`: resolve `pipelines.get(server_id)` when `server_id` is `Some` and present; else if `pipelines.len() == 1` use that single entry (single-server install / no-context callers); else fall back to the `legacy` block. Read `enabled` from the pipeline's `enabled`, max-bytes from `pipeline.budget.max_bytes`.
-  - [ ] `pub fn legacy_enabled(&self) -> bool { self.enabled_for(None) }` and `pub fn legacy_max_bytes(&self) -> Option<u64> { self.max_bytes_for(None) }` — thin wrappers for the no-server-context call sites.
-  - [ ] `pub fn set_for(&mut self, server_id: &str, enabled: bool, max_bytes: Option<u64>)`: upsert `pipelines[server_id]` from `pipeline_from_legacy(&AutoFillPrefs { enabled, max_bytes })`; clear `legacy`. Used by `setAutoFill` (which has db context to resolve the selected portable id).
-  - [ ] `pub fn set_legacy(&mut self, enabled: bool, max_bytes: Option<u64>)`: sets the `legacy` block (fallback used only when no selected portable id is available at write time).
-  - [ ] Optional but cheap: `pub fn pipeline_for(&self, server_id: &str) -> Option<&AutoFillPipeline>` for Story 12.3.
+- [x] **Add behavior-preserving accessors** (`hifimule-daemon/src/device/mod.rs`) (AC: 4)
+  - [x] `pub fn enabled_for(&self, server_id: Option<&str>) -> bool` and `pub fn max_bytes_for(&self, server_id: Option<&str>) -> Option<u64>`: resolve `pipelines.get(server_id)` when `server_id` is `Some` and present; else if `pipelines.len() == 1` use that single entry (single-server install / no-context callers); else fall back to the `legacy` block. Read `enabled` from the pipeline's `enabled`, max-bytes from `pipeline.budget.max_bytes`.
+  - [x] `pub fn legacy_enabled(&self) -> bool { self.enabled_for(None) }` and `pub fn legacy_max_bytes(&self) -> Option<u64> { self.max_bytes_for(None) }` — thin wrappers for the no-server-context call sites.
+  - [x] `pub fn set_for(&mut self, server_id: &str, enabled: bool, max_bytes: Option<u64>)`: upsert `pipelines[server_id]` from `pipeline_from_legacy(&AutoFillPrefs { enabled, max_bytes })`; clear `legacy`. Used by `setAutoFill` (which has db context to resolve the selected portable id).
+  - [x] `pub fn set_legacy(&mut self, enabled: bool, max_bytes: Option<u64>)`: sets the `legacy` block (fallback used only when no selected portable id is available at write time).
+  - [x] Optional but cheap: `pub fn pipeline_for(&self, server_id: &str) -> Option<&AutoFillPipeline>` for Story 12.3.
 
-- [ ] **Update consumers (behavior-preserving)** (AC: 4, 8)
-  - [ ] `main.rs:225` → `manifest.auto_fill.legacy_enabled()`
-  - [ ] `main.rs:578` `if manifest.auto_fill.enabled` → `if manifest.auto_fill.legacy_enabled()`
-  - [ ] `main.rs:581` `manifest.auto_fill.max_bytes` → `manifest.auto_fill.legacy_max_bytes()`
-  - [ ] `main.rs:1119` `!manifest.auto_fill.enabled` → `!manifest.auto_fill.legacy_enabled()`
-  - [ ] `main.rs:1141,1143` → `legacy_enabled()` / `legacy_max_bytes()`
-  - [ ] `rpc.rs:1855-1860` (`get_daemon_state`): resolve selected portable id via `state.db.get_server_config()` (or the daemon-state field already computed nearby — check for `selectedServerPortableId` resolution already present in this RPC) and emit `{ "enabled": d.auto_fill.enabled_for(portable), "maxBytes": d.auto_fill.max_bytes_for(portable) }`. JSON shape unchanged.
-  - [ ] `rpc.rs:5805-5813` (`setAutoFill`): resolve selected portable id; if `Some(id)` → `m.auto_fill.set_for(&id, auto_fill_enabled, max_fill_bytes)`; else `m.auto_fill.set_legacy(auto_fill_enabled, max_fill_bytes)`.
-  - [ ] After edits: `grep -rn "auto_fill\.\(enabled\|max_bytes\)" hifimule-daemon/src` must return zero direct field accesses.
+- [x] **Update consumers (behavior-preserving)** (AC: 4, 8)
+  - [x] `main.rs:225` → `manifest.auto_fill.legacy_enabled()`
+  - [x] `main.rs:578` `if manifest.auto_fill.enabled` → `if manifest.auto_fill.legacy_enabled()`
+  - [x] `main.rs:581` `manifest.auto_fill.max_bytes` → `manifest.auto_fill.legacy_max_bytes()`
+  - [x] `main.rs:1119` `!manifest.auto_fill.enabled` → `!manifest.auto_fill.legacy_enabled()`
+  - [x] `main.rs:1141,1143` → `legacy_enabled()` / `legacy_max_bytes()`
+  - [x] `rpc.rs:1855-1860` (`get_daemon_state`): resolve selected portable id via `state.db.get_server_config()` (or the daemon-state field already computed nearby — check for `selectedServerPortableId` resolution already present in this RPC) and emit `{ "enabled": d.auto_fill.enabled_for(portable), "maxBytes": d.auto_fill.max_bytes_for(portable) }`. JSON shape unchanged.
+  - [x] `rpc.rs:5805-5813` (`setAutoFill`): resolve selected portable id; if `Some(id)` → `m.auto_fill.set_for(&id, auto_fill_enabled, max_fill_bytes)`; else `m.auto_fill.set_legacy(auto_fill_enabled, max_fill_bytes)`.
+  - [x] After edits: `grep -rn "auto_fill\.\(enabled\|max_bytes\)" hifimule-daemon/src` must return zero direct field accesses.
 
-- [ ] **Update all struct-literal initializers** (AC: 8)
-  - [ ] Replace every `auto_fill: crate::device::AutoFillPrefs::default(),` / `auto_fill: AutoFillPrefs::default(),` with `AutoFillConfig::default()`. Sites: `sync.rs:3442`, `device/mod.rs:815`, `rpc.rs` (6037, 6819, 7000, 7941, 8050, 8131, 8187, 8260, 8402, 8504, 8766, 8862, 9014, 9031, 9094), `tests.rs:71,149,217`, `device/tests.rs` (many — grep the full list). `grep -rn "AutoFillPrefs::default()" hifimule-daemon/src` should return zero in non-test field positions afterward (`AutoFillPrefs` itself is still referenced by `AutoFillConfig`'s serde/migration).
+- [x] **Update all struct-literal initializers** (AC: 8)
+  - [x] Replace every `auto_fill: crate::device::AutoFillPrefs::default(),` / `auto_fill: AutoFillPrefs::default(),` with `AutoFillConfig::default()`. Sites: `sync.rs:3442`, `device/mod.rs:815`, `rpc.rs` (6037, 6819, 7000, 7941, 8050, 8131, 8187, 8260, 8402, 8504, 8766, 8862, 9014, 9031, 9094), `tests.rs:71,149,217`, `device/tests.rs` (many — grep the full list). `grep -rn "AutoFillPrefs::default()" hifimule-daemon/src` should return zero in non-test field positions afterward (`AutoFillPrefs` itself is still referenced by `AutoFillConfig`'s serde/migration).
 
-- [ ] **Scaffold the `autofill_history` DB table** (`hifimule-daemon/src/db.rs`) (AC: 5, 6)
-  - [ ] In `Database::init()` (`db.rs:135-216`), after the `server_config`/`migrate_server_config_to_multi` block and before `Ok(())`, add:
+- [x] **Scaffold the `autofill_history` DB table** (`hifimule-daemon/src/db.rs`) (AC: 5, 6)
+  - [x] In `Database::init()` (`db.rs:135-216`), after the `server_config`/`migrate_server_config_to_multi` block and before `Ok(())`, add:
     ```rust
     conn.execute(
         "CREATE TABLE IF NOT EXISTS autofill_history (
@@ -101,17 +101,17 @@ so that per-server pipeline config becomes the real on-disk shape (visible, not 
     )
     .map_err(|e| anyhow!("Failed to create autofill_history table: {}", e))?;
     ```
-  - [ ] Doc-comment: Epic-12.2 scaffolding consumed by Epic 13 (cooldown windows, stable-core, pity-timer); `server_id` is the **portable** id (matches manifest keys), keyed machine-local per device+server. No reads/writes in 12.2. [Source: architecture.md lines 809-812, 922]
+  - [x] Doc-comment: Epic-12.2 scaffolding consumed by Epic 13 (cooldown windows, stable-core, pity-timer); `server_id` is the **portable** id (matches manifest keys), keyed machine-local per device+server. No reads/writes in 12.2. [Source: architecture.md lines 809-812, 922]
 
-- [ ] **Tests** (`device/tests.rs` and `db` tests) (AC: 2, 3, 4, 8)
-  - [ ] Deserialize legacy `{ "enabled": true, "maxBytes": 8000000000 }` → `legacy == Some(AutoFillPrefs { true, Some(8_000_000_000) })`, `pipelines` empty.
-  - [ ] Deserialize empty default `{ "enabled": false, "maxBytes": null }` → `legacy == None`, `pipelines` empty (no spurious migration trigger).
-  - [ ] Migration: build a config with a meaningful legacy block, call `migrate_legacy_to("srv-portable")` → `pipelines["srv-portable"]` is `default_legacy(maxBytes)` with `enabled` carried, `legacy == None`, returns `true`; calling again returns `false` (idempotent); calling on a config that already has `pipelines["srv-portable"]` does not overwrite it and returns `false`.
-  - [ ] Round-trip map: deserialize `{ "<serverId>": { "enabled": true, "ordering": ["favorite"], "budget": { "maxBytes": 1000 } } }` → `pipelines["<serverId>"]` as expected; serialize re-emits the map shape.
-  - [ ] Default serialize: `AutoFillConfig::default()` serializes `autoFill` as `{ "enabled": false, "maxBytes": null }` (pin so `get_daemon_state` stays stable).
-  - [ ] Accessor parity: `enabled_for(Some(id))`, single-entry fallback `enabled_for(None)`, and legacy fallback all return the expected enabled/max_bytes; `set_for` upserts the pipeline; `legacy_enabled()`/`legacy_max_bytes()` match.
-  - [ ] DB: temp/in-memory `Database::new(...)` → `SELECT … FROM autofill_history LIMIT 0` succeeds; calling `init()` twice does not error (idempotent).
-  - [ ] Run `rtk cargo test -p hifimule-daemon`; zero regressions, all new tests pass.
+- [x] **Tests** (`device/tests.rs` and `db` tests) (AC: 2, 3, 4, 8)
+  - [x] Deserialize legacy `{ "enabled": true, "maxBytes": 8000000000 }` → `legacy == Some(AutoFillPrefs { true, Some(8_000_000_000) })`, `pipelines` empty.
+  - [x] Deserialize empty default `{ "enabled": false, "maxBytes": null }` → `legacy == None`, `pipelines` empty (no spurious migration trigger).
+  - [x] Migration: build a config with a meaningful legacy block, call `migrate_legacy_to("srv-portable")` → `pipelines["srv-portable"]` is `default_legacy(maxBytes)` with `enabled` carried, `legacy == None`, returns `true`; calling again returns `false` (idempotent); calling on a config that already has `pipelines["srv-portable"]` does not overwrite it and returns `false`.
+  - [x] Round-trip map: deserialize `{ "<serverId>": { "enabled": true, "ordering": ["favorite"], "budget": { "maxBytes": 1000 } } }` → `pipelines["<serverId>"]` as expected; serialize re-emits the map shape.
+  - [x] Default serialize: `AutoFillConfig::default()` serializes `autoFill` as `{ "enabled": false, "maxBytes": null }` (pin so `get_daemon_state` stays stable).
+  - [x] Accessor parity: `enabled_for(Some(id))`, single-entry fallback `enabled_for(None)`, and legacy fallback all return the expected enabled/max_bytes; `set_for` upserts the pipeline; `legacy_enabled()`/`legacy_max_bytes()` match.
+  - [x] DB: temp/in-memory `Database::new(...)` → `SELECT … FROM autofill_history LIMIT 0` succeeds; calling `init()` twice does not error (idempotent).
+  - [x] Run `rtk cargo test -p hifimule-daemon`; zero regressions, all new tests pass.
 
 ## Dev Notes
 
@@ -201,12 +201,35 @@ Recent commits (`8b4ff37 Review 12.1`, `3af9768 Dev 12.1`, `aefee3f Story 12.1`,
 
 ### Agent Model Used
 
+Opus 4.8 (claude-opus-4-8[1m]) — BMad dev-story workflow.
+
 ### Debug Log References
+
+- `rtk cargo check -p hifimule-daemon` — clean (only pre-existing `rename_item` dead-code warning in `api.rs`, untouched module).
+- `rtk cargo clippy -p hifimule-daemon --all-targets` — no new warnings in touched modules (`device/mod.rs`, `db.rs`); all reported warnings pre-existing (vault, api, device_io, mtp, jellyfin, sync + the pre-existing redundant `use serde_json;` at `device/tests.rs:2`).
+- `rtk cargo test -p hifimule-daemon` — 483 passed, 0 failed (full suite ran in sandbox; mockito-gated tests included).
 
 ### Completion Notes List
 
+- **AutoFillConfig type (AC 1, 3):** Added `AutoFillConfig { pipelines: HashMap<String, AutoFillPipeline>, legacy: Option<AutoFillPrefs> }` in `device/mod.rs` with hand-written `Serialize`/`Deserialize`. Deserialize uses an internal `#[serde(untagged)]` enum (`PerServer` tried first, then `Legacy`); per-server values are pipeline objects while legacy `enabled`/`maxBytes` are scalars/null, so the map deserialize fails and falls through unambiguously. An empty default `{ enabled:false, maxBytes:null }` normalizes to `legacy: None` (no spurious migration). Serialize emits the map when non-empty, else the legacy block, else the empty default — pinned **byte-for-byte** equal to `AutoFillPrefs::default()` so `get_daemon_state` and new-device manifests are unchanged.
+- **Migration (AC 2):** `migrate_legacy_to(server_id)` maps a parked legacy block onto the selected server's portable id (via `default_legacy(max_bytes)` with `enabled` carried over), clears `legacy`, returns `true`. Idempotent; never overwrites an existing pipeline. Wired into `DeviceManager::handle_device_detected` immediately after the `reconcile_manifest_server_ids` block, resolving the selected portable id via `db.get_server_config()?.server_id`, with the same best-effort persist style (never blocks device load).
+- **Accessors (AC 4):** `enabled_for`/`max_bytes_for` resolve the keyed pipeline → single-entry fallback → legacy block. `legacy_enabled()`/`legacy_max_bytes()` are the no-server-context wrappers; `set_for`/`set_legacy` are the write paths; `pipeline_for` reserved for 12.3 (`#[allow(dead_code)]`).
+- **Consumers (AC 4):** `main.rs` auto-sync paths (no db context) use `legacy_enabled()`/`legacy_max_bytes()`. `rpc.rs` `get_daemon_state` and `setAutoFill` (both have `state.db`) resolve the selected portable id and use `enabled_for(Some(id))`/`max_bytes_for(Some(id))` / `set_for(id,…)` (falling back to `set_legacy` when no server selected). Emitted `{ enabled, maxBytes }` JSON shape unchanged — UI untouched (Story 12.6). Zero direct `auto_fill.enabled`/`.max_bytes` field accesses remain.
+- **Fixtures (AC 8):** All ~37 `auto_fill: AutoFillPrefs::default()` struct-literal initializers across `sync.rs`, `tests.rs`, `device/tests.rs`, `rpc.rs`, and `device/mod.rs:815` updated to `AutoFillConfig::default()`. `AutoFillPrefs` retained (legacy on-disk shape + migration carrier + serde fallback).
+- **DB scaffolding (AC 5, 6):** `CREATE TABLE IF NOT EXISTS autofill_history (device_id, server_id, track_id, last_synced_at, tier, PRIMARY KEY(device_id, server_id, track_id))` added to `Database::init()`. `server_id` documented as the portable id matching manifest keys; no reads/writes in 12.2 (Epic 13 consumes). Storage split honored — config only in manifest, history only in DB.
+- **Scope (AC 7):** No sync-time expansion, no `sync.start` change, no new RPC params, no UI, no provider fetch, no `autofill_history` reads/writes, no new crate dependency. Behavior frozen to today's single-slot selected-server algorithm.
+
 ### File List
+
+- `hifimule-daemon/src/device/mod.rs` — `AutoFillConfig` type + custom serde + `migrate_legacy_to`/accessors/`pipeline_from_legacy`; manifest field `auto_fill: AutoFillConfig`; migration wired into `handle_device_detected`; `initialize_device` fixture updated.
+- `hifimule-daemon/src/db.rs` — `autofill_history` table in `init()`; `test_autofill_history_table_exists_and_init_idempotent`.
+- `hifimule-daemon/src/main.rs` — auto-sync consumers use `legacy_enabled()`/`legacy_max_bytes()`.
+- `hifimule-daemon/src/rpc.rs` — `get_daemon_state` + `setAutoFill` resolve selected portable id; server-aware read/write; fixture initializers updated.
+- `hifimule-daemon/src/sync.rs` — fixture initializer updated.
+- `hifimule-daemon/src/tests.rs` — fixture initializers updated.
+- `hifimule-daemon/src/device/tests.rs` — fixture initializers updated; new AutoFillConfig serde/migration/accessor + manifest round-trip tests.
 
 ## Change Log
 
 - 2026-06-14 — Story 12.2 created via create-story workflow (ready-for-dev). Scope: manifest `auto_fill` → `AutoFillConfig` (per-server `Map<serverId, AutoFillPipeline>`), **active migration of the legacy `{ enabled, maxBytes }` block onto the selected server's portable serverId on device-detect (persisted)**, behavior-preserving server-aware accessors, and `autofill_history` DB table scaffolding (schema only). Behavior frozen (single-slot, selected server); multi-slot expansion deferred to 12.3; no UI/RPC-contract/new deps.
+- 2026-06-14 — Dev complete (status → review). Implemented `AutoFillConfig` with custom dual-shape serde, legacy→selected-server migration wired into `handle_device_detected`, server-aware accessors, consumer + ~37 fixture updates, and the `autofill_history` table. All 8 ACs satisfied; `rtk cargo test -p hifimule-daemon` = 483 passed; no new clippy warnings in touched modules.

@@ -164,7 +164,7 @@ async fn test_dirty_manifest_roundtrip() {
         pending_item_ids: vec!["id-1".to_string(), "id-2".to_string()],
         basket_items: vec![],
         auto_sync_on_connect: false,
-        auto_fill: crate::device::AutoFillPrefs::default(),
+        auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
@@ -492,7 +492,7 @@ async fn test_write_manifest_creates_files() {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: false,
-        auto_fill: crate::device::AutoFillPrefs::default(),
+        auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
@@ -540,7 +540,7 @@ async fn test_write_manifest_overwrites_existing() {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: false,
-        auto_fill: crate::device::AutoFillPrefs::default(),
+        auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
@@ -577,7 +577,7 @@ async fn test_write_manifest_overwrites_existing() {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: false,
-        auto_fill: crate::device::AutoFillPrefs::default(),
+        auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
@@ -631,7 +631,7 @@ async fn test_get_discrepancies_missing_file() {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: false,
-        auto_fill: crate::device::AutoFillPrefs::default(),
+        auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
@@ -678,7 +678,7 @@ async fn test_get_discrepancies_orphaned_file() {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: false,
-        auto_fill: crate::device::AutoFillPrefs::default(),
+        auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
@@ -744,7 +744,7 @@ async fn test_get_discrepancies_no_issues() {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: false,
-        auto_fill: crate::device::AutoFillPrefs::default(),
+        auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
@@ -818,7 +818,7 @@ async fn test_prune_items() {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: false,
-        auto_fill: crate::device::AutoFillPrefs::default(),
+        auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
@@ -880,7 +880,7 @@ async fn test_relink_item() {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: false,
-        auto_fill: crate::device::AutoFillPrefs::default(),
+        auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
@@ -928,7 +928,7 @@ async fn test_relink_item_path_traversal() {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: false,
-        auto_fill: crate::device::AutoFillPrefs::default(),
+        auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
@@ -964,7 +964,7 @@ async fn test_clear_dirty_flag() {
         pending_item_ids: vec!["pending-1".to_string()],
         basket_items: vec![],
         auto_sync_on_connect: false,
-        auto_fill: crate::device::AutoFillPrefs::default(),
+        auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
@@ -1011,7 +1011,7 @@ async fn test_clear_dirty_flag_with_orphaned_files() {
         pending_item_ids: vec!["pending-1".to_string()],
         basket_items: vec![],
         auto_sync_on_connect: false,
-        auto_fill: crate::device::AutoFillPrefs::default(),
+        auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
@@ -1557,7 +1557,7 @@ async fn test_save_basket_roundtrip() {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: false,
-        auto_fill: crate::device::AutoFillPrefs::default(),
+        auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
@@ -1623,7 +1623,7 @@ async fn test_handle_device_detected_syncs_auto_sync_manifest_to_db() {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: true,
-        auto_fill: crate::device::AutoFillPrefs::default(),
+        auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
@@ -1667,7 +1667,7 @@ async fn test_auto_sync_on_connect_roundtrip() {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: true,
-        auto_fill: crate::device::AutoFillPrefs::default(),
+        auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
@@ -1714,7 +1714,7 @@ fn make_manifest(device_id: &str, name: &str) -> DeviceManifest {
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: false,
-        auto_fill: crate::device::AutoFillPrefs::default(),
+        auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
@@ -2301,7 +2301,7 @@ fn test_synced_item_provider_metadata_serializes_camel_case_and_builds_context()
         pending_item_ids: vec![],
         basket_items: vec![],
         auto_sync_on_connect: false,
-        auto_fill: crate::device::AutoFillPrefs::default(),
+        auto_fill: crate::device::AutoFillConfig::default(),
         transcoding_profile_id: None,
         playlists: vec![],
         storage_id: None,
@@ -2389,4 +2389,159 @@ fn reconcile_manifest_server_ids_maps_legacy_to_portable_idempotently() {
 
     // Idempotent: a second pass changes nothing.
     assert!(!reconcile_manifest_server_ids(&mut manifest, &remap));
+}
+
+// ===================================================================
+// Story 12.2 — AutoFillConfig serde, migration, and accessor parity (AC 2, 3, 4, 8).
+// ===================================================================
+
+#[test]
+fn autofill_config_deserializes_legacy_block() {
+    let cfg: AutoFillConfig =
+        serde_json::from_str(r#"{ "enabled": true, "maxBytes": 8000000000 }"#).unwrap();
+    assert_eq!(
+        cfg.legacy,
+        Some(AutoFillPrefs {
+            enabled: true,
+            max_bytes: Some(8_000_000_000),
+        })
+    );
+    assert!(cfg.pipelines.is_empty());
+}
+
+#[test]
+fn autofill_config_empty_default_legacy_is_none() {
+    // The empty default is "no config" — it must not park a legacy block (no spurious migration).
+    let cfg: AutoFillConfig =
+        serde_json::from_str(r#"{ "enabled": false, "maxBytes": null }"#).unwrap();
+    assert_eq!(cfg.legacy, None);
+    assert!(cfg.pipelines.is_empty());
+    // An absent/empty object also yields the empty config.
+    let empty: AutoFillConfig = serde_json::from_str("{}").unwrap();
+    assert_eq!(empty, AutoFillConfig::default());
+}
+
+#[test]
+fn autofill_config_migrates_legacy_onto_selected_server() {
+    // A meaningful legacy block (maxBytes set, enabled false) migrates onto the selected id,
+    // carrying `enabled` distinctly from default_legacy's `true`.
+    let mut cfg: AutoFillConfig =
+        serde_json::from_str(r#"{ "enabled": false, "maxBytes": 5000 }"#).unwrap();
+    assert!(cfg.migrate_legacy_to("srv-portable"));
+    let expected = {
+        let mut p = crate::auto_fill::AutoFillPipeline::default_legacy(Some(5000));
+        p.enabled = false;
+        p
+    };
+    assert_eq!(cfg.pipelines.get("srv-portable"), Some(&expected));
+    assert!(!cfg.pipelines["srv-portable"].enabled, "enabled carried over");
+    assert_eq!(cfg.pipelines["srv-portable"].budget.max_bytes, Some(5000));
+    assert_eq!(cfg.legacy, None);
+    // Idempotent: nothing left to migrate.
+    assert!(!cfg.migrate_legacy_to("srv-portable"));
+}
+
+#[test]
+fn autofill_config_migration_never_overwrites_existing_pipeline() {
+    let mut cfg = AutoFillConfig::default();
+    cfg.set_for("srv-portable", false, Some(999));
+    // Synthetically park a legacy block alongside the existing pipeline.
+    cfg.legacy = Some(AutoFillPrefs {
+        enabled: true,
+        max_bytes: Some(1),
+    });
+    assert!(!cfg.migrate_legacy_to("srv-portable"));
+    assert_eq!(cfg.pipelines["srv-portable"].budget.max_bytes, Some(999));
+    assert!(!cfg.pipelines["srv-portable"].enabled);
+}
+
+#[test]
+fn autofill_config_round_trips_per_server_map() {
+    let json = r#"{ "srv-abc": { "enabled": true, "ordering": ["favorite"], "budget": { "maxBytes": 1000 } } }"#;
+    let cfg: AutoFillConfig = serde_json::from_str(json).unwrap();
+    let pipeline = cfg.pipelines.get("srv-abc").expect("pipeline present");
+    assert!(pipeline.enabled);
+    assert_eq!(pipeline.ordering, vec![crate::auto_fill::OrderingKey::Favorite]);
+    assert_eq!(pipeline.budget.max_bytes, Some(1000));
+    assert!(cfg.legacy.is_none());
+    // Serialize re-emits the per-server map shape and round-trips.
+    let reser = serde_json::to_string(&cfg).unwrap();
+    assert!(reser.contains("srv-abc"));
+    let back: AutoFillConfig = serde_json::from_str(&reser).unwrap();
+    assert_eq!(cfg, back);
+}
+
+#[test]
+fn autofill_config_default_serializes_as_legacy_empty_block() {
+    // Pin the empty/default serialization so get_daemon_state and new-device manifests are stable.
+    let json = serde_json::to_string(&AutoFillConfig::default()).unwrap();
+    assert_eq!(json, r#"{"enabled":false,"maxBytes":null}"#);
+    // Byte-for-byte identical to the pre-12.2 AutoFillPrefs::default() output.
+    assert_eq!(json, serde_json::to_string(&AutoFillPrefs::default()).unwrap());
+}
+
+#[test]
+fn autofill_config_accessor_parity() {
+    // Keyed read of a per-server pipeline.
+    let mut keyed = AutoFillConfig::default();
+    keyed.set_for("srv-1", true, Some(4242));
+    assert!(keyed.enabled_for(Some("srv-1")));
+    assert_eq!(keyed.max_bytes_for(Some("srv-1")), Some(4242));
+    // Single-entry fallback for unkeyed (no-server-context) callers.
+    assert!(keyed.legacy_enabled());
+    assert_eq!(keyed.legacy_max_bytes(), Some(4242));
+
+    // Legacy-block fallback when no pipelines exist.
+    let mut legacy_cfg = AutoFillConfig::default();
+    legacy_cfg.set_legacy(true, Some(77));
+    assert!(legacy_cfg.legacy_enabled());
+    assert_eq!(legacy_cfg.legacy_max_bytes(), Some(77));
+    assert!(legacy_cfg.enabled_for(Some("srv-x")));
+
+    // Empty config: disabled, no budget.
+    let empty = AutoFillConfig::default();
+    assert!(!empty.legacy_enabled());
+    assert_eq!(empty.legacy_max_bytes(), None);
+
+    // set_for clears any parked legacy block.
+    let mut mixed = AutoFillConfig::default();
+    mixed.set_legacy(true, Some(1));
+    mixed.set_for("srv-2", false, None);
+    assert_eq!(mixed.legacy, None);
+    assert!(!mixed.enabled_for(Some("srv-2")));
+}
+
+#[test]
+fn manifest_reads_legacy_autofill_block() {
+    let json = r#"{
+        "device_id": "dev-1",
+        "version": "1.0",
+        "auto_fill": { "enabled": true, "maxBytes": 8000 }
+    }"#;
+    let manifest: DeviceManifest = serde_json::from_str(json).unwrap();
+    assert_eq!(
+        manifest.auto_fill.legacy,
+        Some(AutoFillPrefs {
+            enabled: true,
+            max_bytes: Some(8000),
+        })
+    );
+    assert!(manifest.auto_fill.legacy_enabled());
+    assert_eq!(manifest.auto_fill.legacy_max_bytes(), Some(8000));
+}
+
+#[test]
+fn manifest_round_trips_per_server_autofill_map() {
+    let json = r#"{
+        "device_id": "dev-1",
+        "version": "1.0",
+        "auto_fill": { "srv-xyz": { "enabled": true, "budget": { "maxBytes": 500 } } }
+    }"#;
+    let manifest: DeviceManifest = serde_json::from_str(json).unwrap();
+    assert!(manifest.auto_fill.enabled_for(Some("srv-xyz")));
+    assert_eq!(manifest.auto_fill.max_bytes_for(Some("srv-xyz")), Some(500));
+    // Re-serialize: auto_fill stays a per-server map.
+    let reser = serde_json::to_string(&manifest).unwrap();
+    let back: DeviceManifest = serde_json::from_str(&reser).unwrap();
+    assert!(back.auto_fill.pipelines.contains_key("srv-xyz"));
 }

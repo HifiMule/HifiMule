@@ -1852,10 +1852,19 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         .or_else(|| mapping.as_ref().map(|m| m.auto_sync_on_connect))
         .unwrap_or(false);
 
+    // Story 12.2: auto_fill is now a per-server pipeline map. Resolve the selected server's
+    // portable id and read its slot via the server-aware accessors; the emitted JSON shape
+    // `{ enabled, maxBytes }` is unchanged (UI is Story 12.6).
+    let selected_portable_id = state
+        .db
+        .get_server_config()
+        .ok()
+        .flatten()
+        .and_then(|s| s.server_id);
     let auto_fill = device.as_ref().map(|d| {
         serde_json::json!({
-            "enabled": d.auto_fill.enabled,
-            "maxBytes": d.auto_fill.max_bytes,
+            "enabled": d.auto_fill.enabled_for(selected_portable_id.as_deref()),
+            "maxBytes": d.auto_fill.max_bytes_for(selected_portable_id.as_deref()),
         })
     });
 
@@ -5802,13 +5811,24 @@ async fn handle_sync_set_auto_fill(
         data: None,
     })?;
 
+    // Story 12.2: write into the selected server's portable pipeline slot when a server is
+    // selected; otherwise fall back to the legacy block (no portable id available yet).
+    let selected_portable_id = state
+        .db
+        .get_server_config()
+        .ok()
+        .flatten()
+        .and_then(|s| s.server_id);
+
     // Persist both auto_fill prefs and auto_sync_on_connect in a single atomic
     // write-temp-rename operation to prevent inconsistent manifest state on crash.
     state
         .device_manager
         .update_manifest(|m| {
-            m.auto_fill.enabled = auto_fill_enabled;
-            m.auto_fill.max_bytes = max_fill_bytes;
+            match selected_portable_id.as_deref() {
+                Some(id) => m.auto_fill.set_for(id, auto_fill_enabled, max_fill_bytes),
+                None => m.auto_fill.set_legacy(auto_fill_enabled, max_fill_bytes),
+            }
             m.auto_sync_on_connect = auto_sync_on_connect;
         })
         .await
@@ -6034,7 +6054,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: Some("legacy-profile".to_string()),
             last_synced_transcoding_profile_id: Some("legacy-profile".to_string()),
             transcoding_profile_dirty: false,
@@ -6816,7 +6836,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -6997,7 +7017,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -7938,7 +7958,7 @@ mod tests {
                 size_bytes: 4000,
             }],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -8047,7 +8067,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -8128,7 +8148,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -8184,7 +8204,7 @@ mod tests {
             pending_item_ids: vec!["id-1".to_string()],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -8257,7 +8277,7 @@ mod tests {
             pending_item_ids: vec!["id-1".to_string()],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -8399,7 +8419,7 @@ mod tests {
                     pending_item_ids: vec![],
                     basket_items: vec![],
                     auto_sync_on_connect: false,
-                    auto_fill: crate::device::AutoFillPrefs::default(),
+                    auto_fill: crate::device::AutoFillConfig::default(),
                     transcoding_profile_id: None,
                     playlists: vec![],
                     storage_id: None,
@@ -8501,7 +8521,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -8763,7 +8783,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -8859,7 +8879,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: true,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -9011,7 +9031,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -9028,7 +9048,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -9091,7 +9111,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,

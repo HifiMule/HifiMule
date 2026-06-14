@@ -3439,7 +3439,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,

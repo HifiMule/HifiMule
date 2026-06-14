@@ -222,7 +222,7 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                             daemon_log!("Device detected at {:?}: {:?}", path, manifest);
                             let auto_sync_enabled = manifest.auto_sync_on_connect;
                             let has_basket = !manifest.basket_items.is_empty();
-                            let auto_fill_enabled = manifest.auto_fill.enabled;
+                            let auto_fill_enabled = manifest.auto_fill.legacy_enabled();
                             let has_synced_items = !manifest.synced_items.is_empty();
                             let manifest_device_id = manifest.device_id.clone();
                             let scrobble_manifest = Arc::new(manifest.clone());
@@ -575,10 +575,10 @@ async fn run_auto_sync(
     let mut playlist_sync_items: Vec<sync::PlaylistSyncItem> = Vec::new();
 
     if manifest.basket_items.is_empty() {
-        if manifest.auto_fill.enabled {
+        if manifest.auto_fill.legacy_enabled() {
             // No manual basket — run auto-fill algorithm to derive desired items
             daemon_log!("[AutoSync] Basket empty, running auto-fill algorithm");
-            let max_fill_bytes = if let Some(mb) = manifest.auto_fill.max_bytes {
+            let max_fill_bytes = if let Some(mb) = manifest.auto_fill.legacy_max_bytes() {
                 mb
             } else {
                 match device_manager.get_device_storage().await {
@@ -1116,7 +1116,7 @@ async fn run_auto_sync_via_provider(
     let mut desired_items: Vec<sync::DesiredItem> = Vec::new();
     let mut playlist_sync_items: Vec<sync::PlaylistSyncItem> = Vec::new();
 
-    if manifest.basket_items.is_empty() && !manifest.auto_fill.enabled {
+    if manifest.basket_items.is_empty() && !manifest.auto_fill.legacy_enabled() {
         if manifest.synced_items.is_empty() {
             daemon_log!("[AutoSync] No basket items and no synced items, skipping");
             let _ = state_tx.send(DaemonState::Idle);
@@ -1138,9 +1138,9 @@ async fn run_auto_sync_via_provider(
     }
 
     // Auto-fill: fill remaining space after basket items (or fill entirely when basket is empty).
-    if manifest.auto_fill.enabled {
+    if manifest.auto_fill.legacy_enabled() {
         let synced_bytes: u64 = manifest.synced_items.iter().map(|s| s.size_bytes).sum();
-        let total_budget = if let Some(mb) = manifest.auto_fill.max_bytes {
+        let total_budget = if let Some(mb) = manifest.auto_fill.legacy_max_bytes() {
             mb
         } else {
             match device_manager.get_device_storage().await {
