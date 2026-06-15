@@ -121,6 +121,12 @@ pub struct SyncAddItem {
     /// `autofill_history.tier`. `None` for manual items and non-tiered fills.
     #[serde(default)]
     pub tier: Option<String>,
+    /// Story 13.5 #20: encoding-from-goals derived per-slot max-bitrate (kbps) override. Set only on
+    /// auto-fill tracks of a slot whose pipeline enabled encoding-from-goals AND for which a transcode
+    /// profile is active. At sync-execute it overrides `TranscodeProfile.max_bitrate_kbps` for this
+    /// item only — never for manual items, never mutating the device-wide profile. `None` otherwise.
+    #[serde(default)]
+    pub max_bitrate_override_kbps: Option<u32>,
 }
 
 /// An item to be deleted from the device.
@@ -2383,7 +2389,15 @@ pub async fn execute_provider_sync(
         let source_direct_compatible = compatibility.source_is_direct_compatible(&source_format);
         let profile = if compatibility.is_constrained() && !source_direct_compatible {
             match compatibility.transcode_profile.clone() {
-                Some(profile) => Some(profile),
+                Some(mut profile) => {
+                    // Story 13.5 #20: an auto-fill track from an encoding-from-goals slot carries a
+                    // per-slot derived bitrate — override the profile's max bitrate for THIS download
+                    // only (manual items carry `None`; the device-wide profile is never mutated).
+                    if let Some(kbps) = add_item.max_bitrate_override_kbps {
+                        profile.max_bitrate_kbps = Some(kbps);
+                    }
+                    Some(profile)
+                }
                 None => {
                     sync_warnings.push(format!(
                         "[Sync] Skipped '{}' ({}) because the source format is incompatible and no compatible transcode profile is available",
@@ -2943,6 +2957,7 @@ pub async fn augment_delta_with_existence_check(
                     reason: None,
                     server_id: desired.server_id.clone(),
                     tier: None,
+                    max_bitrate_override_kbps: None,
                 },
                 "device-file-missing",
             ));
@@ -3271,6 +3286,9 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
                     // Story 13.1: tier is patched onto delta.adds post-calculation (patch_delta_tiers)
                     // from the auto-fill results, since DesiredItem does not carry it.
                     tier: None,
+                    // Story 13.5 #20: patched post-calculation (patch_delta_bitrate_overrides) from the
+                    // auto-fill results, since DesiredItem does not carry it.
+                    max_bitrate_override_kbps: None,
                 },
                 reason_code,
             )
@@ -4134,6 +4152,7 @@ mod tests {
             reason: Some("new selection".to_string()),
             server_id: None,
             tier: None,
+            max_bitrate_override_kbps: None,
         }
     }
 
@@ -5626,6 +5645,7 @@ mod tests {
                     reason: None,
                     server_id: None,
                     tier: None,
+                    max_bitrate_override_kbps: None,
                 },
                 "bitrate-increase",
             )],

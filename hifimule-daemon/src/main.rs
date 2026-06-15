@@ -604,6 +604,8 @@ async fn run_auto_sync(
                 rotation_cursor: 0,
                 seed: 0,
                 pity_streak: 0,
+                // Story 13.5: legacy auto-sync path — civil time inert (Context stage never runs here).
+                local: crate::auto_fill::CivilTime::default(),
             };
             match crate::auto_fill::run_auto_fill(&jellyfin_client, fill_params).await {
                 Ok(items) if items.is_empty() => {
@@ -1176,6 +1178,8 @@ async fn run_auto_sync_via_provider(
                 rotation_cursor: 0,
                 seed: 0,
                 pity_streak: 0,
+                // Story 13.5: legacy auto-sync path — civil time inert (Context stage never runs here).
+                local: auto_fill::CivilTime::default(),
             };
             match auto_fill::run_auto_fill_provider(provider.clone(), fill_params).await {
                 Ok(items) if items.is_empty() && desired_items.is_empty() => {

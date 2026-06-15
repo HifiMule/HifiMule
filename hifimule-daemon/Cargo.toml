@@ -32,6 +32,10 @@ sha2 = "0.10"
 chacha20poly1305 = "0.10"
 secrecy = "0.8"
 rand = "0.8"
+# Story 13.5: local civil time for the auto-fill Context stage. Default `clock` feature only —
+# `chrono::Local::now()` uses `localtime_r` for a sound local offset. Do NOT use the `time` crate's
+# `local-offset` feature in this multi-threaded daemon (it returns None/errs by design).
+chrono = "0.4"
 futures = "0.3"
 async-trait = "0.1"
 uuid = { version = "1.0", features = ["v4"] }

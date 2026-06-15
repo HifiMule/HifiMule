@@ -12,6 +12,9 @@ import type { BrowseMode, BrowsePlaylist } from '../rpc';
 import { previewAutoFill } from '../rpc';
 import {
     AutoFillPipeline,
+    ContextRule,
+    ContextWindow,
+    ContextWindowKind,
     OrderingKey,
     ORDERING_KEYS,
     SourceEntry,
@@ -23,6 +26,56 @@ import {
     normalizePipeline,
     serializePipeline,
 } from '../state/autoFill';
+
+/** Parse a comma-separated text input into a trimmed, non-empty string list (Story 13.5 context rule
+ * editor). */
+function parseCommaList(s: string): string[] {
+    return s.split(',').map((part) => part.trim()).filter((part) => part.length > 0);
+}
+
+/** Parse a comma-separated month list into `1..=12` integers, dropping anything out of range. */
+function parseMonthList(s: string): number[] {
+    return parseCommaList(s)
+        .map((part) => Number(part))
+        .filter((n) => Number.isInteger(n) && n >= 1 && n <= 12);
+}
+
+function clampInt(v: number, lo: number, hi: number): number {
+    if (Number.isNaN(v)) return lo;
+    return Math.max(lo, Math.min(hi, Math.round(v)));
+}
+
+/** The discriminator of a context window (Story 13.5). */
+function contextWindowKind(w: ContextWindow): ContextWindowKind {
+    if ('timeOfDay' in w) return 'timeOfDay';
+    if ('months' in w) return 'months';
+    return 'dateRange';
+}
+
+/** A sensible default window for each kind (seeded when the user switches a rule's window type). */
+function defaultContextWindow(kind: ContextWindowKind): ContextWindow {
+    switch (kind) {
+        case 'months':
+            return { months: { months: [12] } };
+        case 'dateRange':
+            return { dateRange: { start: [12, 15], end: [1, 5] } };
+        case 'timeOfDay':
+        default:
+            return { timeOfDay: { startHour: 6, endHour: 11 } };
+    }
+}
+
+/** A fresh context rule seeded with a morning time-of-day window (Story 13.5 Dev Notes guidance). */
+function newContextRule(): ContextRule {
+    return {
+        window: defaultContextWindow('timeOfDay'),
+        sourceRefs: [],
+        includeTags: [],
+        excludeTags: [],
+        includeGenres: [],
+        excludeGenres: [],
+    };
+}
 
 const GB = 1024 * 1024 * 1024;
 const ALL_SOURCE_KINDS: SourceKind[] = ['library', 'favorites', 'history', 'playlist'];
@@ -239,6 +292,10 @@ export class AutoFillPanel {
                 <sl-input id="af-headroom-gb" type="number" min="0" step="any" clearable
                     label="${t('basket.autofill.headroom_gb')}"
                     value="${escapeHtml(this.headroomGbInput)}"></sl-input>
+                <sl-switch id="af-encoding-from-goals" size="small" ${this.pipeline.budget.encodingFromGoals ? 'checked' : ''}>
+                    ${t('basket.autofill.encoding_from_goals')}
+                </sl-switch>
+                <div class="auto-fill-caption">${t('basket.autofill.encoding_from_goals_hint')}</div>
             ` : ''}
         `);
     }
@@ -257,8 +314,105 @@ export class AutoFillPanel {
                 ${this.renderQualityStage()}
                 ${this.renderRarityStage()}
                 ${this.renderPityStage()}
+                ${this.renderContextStage()}
             </div>
         `;
+    }
+
+    /** Context stage (Story 13.5 #3/#17/#32): an enable switch + an ordered rule editor. Each rule has
+     * a time/calendar window, the source `ref`s it activates (+ an optional weight), and scheduled
+     * tag/genre filter additions. Off ⇒ no behavior change. Modeled on the Memory tiers editor. */
+    private renderContextStage(): string {
+        const ctx = this.pipeline.context;
+        const enabled = !!ctx.enabled;
+        const rules = Array.isArray(ctx.rules) ? ctx.rules : [];
+        return this.renderStage(t('basket.autofill.context'), `
+            <sl-switch id="af-context-enabled" size="small" ${enabled ? 'checked' : ''}>
+                ${t('basket.autofill.context_enable')}
+            </sl-switch>
+            <div class="auto-fill-caption">${t('basket.autofill.context_hint')}</div>
+            ${enabled ? `
+                <div class="auto-fill-source-list">
+                    ${rules.length > 0
+                        ? rules.map((r, i) => this.renderContextRule(r, i)).join('')
+                        : `<div class="auto-fill-caption">${t('basket.autofill.context_no_rules')}</div>`}
+                    <sl-button class="af-context-add" size="small" variant="default">
+                        <sl-icon slot="prefix" name="plus"></sl-icon>${t('basket.autofill.context_add_rule')}
+                    </sl-button>
+                </div>
+            ` : ''}
+        `);
+    }
+
+    private renderContextRule(r: ContextRule, i: number): string {
+        const kind = contextWindowKind(r.window);
+        return `
+            <div class="auto-fill-context-rule" data-index="${i}">
+                <div class="auto-fill-ordering-row">
+                    <sl-select class="af-ctx-window-kind" size="small" data-index="${i}" value="${kind}">
+                        <sl-option value="timeOfDay">${t('basket.autofill.context_window_time_of_day')}</sl-option>
+                        <sl-option value="months">${t('basket.autofill.context_window_months')}</sl-option>
+                        <sl-option value="dateRange">${t('basket.autofill.context_window_date_range')}</sl-option>
+                    </sl-select>
+                    <sl-icon-button class="af-context-remove" name="x" label="${t('basket.actions.remove')}" data-index="${i}"></sl-icon-button>
+                </div>
+                ${this.renderContextWindowFields(r.window, i)}
+                <sl-input class="af-ctx-source-refs" size="small" data-index="${i}"
+                    label="${t('basket.autofill.context_source_refs')}"
+                    value="${escapeHtml((r.sourceRefs ?? []).join(', '))}"></sl-input>
+                <sl-input class="af-ctx-weight" type="number" min="0" step="0.5" size="small" data-index="${i}"
+                    label="${t('basket.autofill.context_weight')}"
+                    value="${typeof r.weight === 'number' ? r.weight : ''}"></sl-input>
+                <sl-input class="af-ctx-inc-genres" size="small" data-index="${i}"
+                    label="${t('basket.autofill.context_include_genres')}"
+                    value="${escapeHtml((r.includeGenres ?? []).join(', '))}"></sl-input>
+                <sl-input class="af-ctx-exc-genres" size="small" data-index="${i}"
+                    label="${t('basket.autofill.context_exclude_genres')}"
+                    value="${escapeHtml((r.excludeGenres ?? []).join(', '))}"></sl-input>
+                <sl-input class="af-ctx-inc-tags" size="small" data-index="${i}"
+                    label="${t('basket.autofill.context_include_tags')}"
+                    value="${escapeHtml((r.includeTags ?? []).join(', '))}"></sl-input>
+                <sl-input class="af-ctx-exc-tags" size="small" data-index="${i}"
+                    label="${t('basket.autofill.context_exclude_tags')}"
+                    value="${escapeHtml((r.excludeTags ?? []).join(', '))}"></sl-input>
+            </div>
+        `;
+    }
+
+    private renderContextWindowFields(w: ContextWindow, i: number): string {
+        if ('timeOfDay' in w) {
+            return `
+                <div class="auto-fill-context-window-fields">
+                    <sl-input class="af-ctx-start-hour" type="number" min="0" max="23" step="1" size="small" data-index="${i}"
+                        label="${t('basket.autofill.context_start_hour')}" value="${w.timeOfDay.startHour}"></sl-input>
+                    <sl-input class="af-ctx-end-hour" type="number" min="0" max="23" step="1" size="small" data-index="${i}"
+                        label="${t('basket.autofill.context_end_hour')}" value="${w.timeOfDay.endHour}"></sl-input>
+                </div>`;
+        }
+        if ('months' in w) {
+            return `
+                <sl-input class="af-ctx-months" size="small" data-index="${i}"
+                    label="${t('basket.autofill.context_months')}"
+                    help-text="${t('basket.autofill.context_months_hint')}"
+                    value="${escapeHtml(w.months.months.join(', '))}"></sl-input>`;
+        }
+        return `
+            <div class="auto-fill-context-window-fields">
+                <sl-input class="af-ctx-start-month" type="number" min="1" max="12" step="1" size="small" data-index="${i}"
+                    label="${t('basket.autofill.context_start_month')}" value="${w.dateRange.start[0]}"></sl-input>
+                <sl-input class="af-ctx-start-day" type="number" min="1" max="31" step="1" size="small" data-index="${i}"
+                    label="${t('basket.autofill.context_start_day')}" value="${w.dateRange.start[1]}"></sl-input>
+                <sl-input class="af-ctx-end-month" type="number" min="1" max="12" step="1" size="small" data-index="${i}"
+                    label="${t('basket.autofill.context_end_month')}" value="${w.dateRange.end[0]}"></sl-input>
+                <sl-input class="af-ctx-end-day" type="number" min="1" max="31" step="1" size="small" data-index="${i}"
+                    label="${t('basket.autofill.context_end_day')}" value="${w.dateRange.end[1]}"></sl-input>
+            </div>`;
+    }
+
+    /** The live context-rule array (lazily initialized so editing never dereferences undefined). */
+    private contextRules(): ContextRule[] {
+        if (!Array.isArray(this.pipeline.context.rules)) this.pipeline.context.rules = [];
+        return this.pipeline.context.rules;
     }
 
     /** Rarity stage (Story 13.4 #29): a loot-table weighted draw. Enable + three class weights +
@@ -731,6 +885,77 @@ export class AutoFillPanel {
             const pct = Number((e.target as any).value);
             this.pipeline.pity.guaranteedRatio = isNaN(pct) ? undefined : pct / 100;
             this.renderBody(); // refresh the % readout
+        });
+
+        // --- Encoding-from-goals (Story 13.5 #20): a budget-area boolean (no field reveal). ---
+        d.querySelector('#af-encoding-from-goals')?.addEventListener('sl-change', (e: Event) => {
+            this.captureInputs();
+            this.pipeline.budget.encodingFromGoals = (e.target as HTMLInputElement).checked || undefined;
+            this.invalidatePreview();
+        });
+
+        // --- Context stage (Story 13.5 #3/#17/#32) ---
+        d.querySelector('#af-context-enabled')?.addEventListener('sl-change', (e: Event) => {
+            this.captureInputs();
+            const on = (e.target as HTMLInputElement).checked;
+            this.pipeline.context.enabled = on || undefined;
+            // Seed a first rule on enable so the editor isn't empty (Dev Notes: a morning rule).
+            if (on && this.contextRules().length === 0) this.contextRules().push(newContextRule());
+            this.renderBody(); // reveals/hides the rule editor
+        });
+        d.querySelector('.af-context-add')?.addEventListener('click', () => {
+            this.captureInputs();
+            this.contextRules().push(newContextRule());
+            this.renderBody();
+        });
+        d.querySelectorAll('.af-context-remove').forEach((el: Element) => {
+            el.addEventListener('click', (e: Event) => {
+                this.captureInputs();
+                const i = Number((e.currentTarget as HTMLElement).dataset.index ?? '0');
+                this.contextRules().splice(i, 1);
+                this.renderBody();
+            });
+        });
+        d.querySelectorAll('.af-ctx-window-kind').forEach((el: Element) => {
+            el.addEventListener('sl-change', (e: Event) => {
+                this.captureInputs();
+                const i = Number((e.target as HTMLElement).dataset.index ?? '0');
+                const rule = this.contextRules()[i];
+                if (rule) rule.window = defaultContextWindow((e.target as any).value as ContextWindowKind);
+                this.renderBody(); // a different window kind shows different bound fields
+            });
+        });
+        // Window/field edits commit straight to the model on every input so a sibling re-render never
+        // loses them (mirrors how the source/tier editors avoid string buffering), invalidating preview.
+        const ctxRuleAt = (e: Event): ContextRule | undefined =>
+            this.contextRules()[Number((e.target as HTMLElement).dataset.index ?? '0')];
+        const bindCtxField = (selector: string, apply: (rule: ContextRule, value: string) => void): void => {
+            d.querySelectorAll(selector).forEach((el: Element) => {
+                const handler = (e: Event): void => {
+                    const rule = ctxRuleAt(e);
+                    if (!rule) return;
+                    apply(rule, String((e.target as any).value ?? ''));
+                    this.invalidatePreview();
+                };
+                el.addEventListener('sl-input', handler);
+                el.addEventListener('sl-change', handler);
+            });
+        };
+        bindCtxField('.af-ctx-start-hour', (r, v) => { if ('timeOfDay' in r.window) r.window.timeOfDay.startHour = clampInt(Number(v), 0, 23); });
+        bindCtxField('.af-ctx-end-hour', (r, v) => { if ('timeOfDay' in r.window) r.window.timeOfDay.endHour = clampInt(Number(v), 0, 23); });
+        bindCtxField('.af-ctx-months', (r, v) => { if ('months' in r.window) r.window.months.months = parseMonthList(v); });
+        bindCtxField('.af-ctx-start-month', (r, v) => { if ('dateRange' in r.window) r.window.dateRange.start[0] = clampInt(Number(v), 1, 12); });
+        bindCtxField('.af-ctx-start-day', (r, v) => { if ('dateRange' in r.window) r.window.dateRange.start[1] = clampInt(Number(v), 1, 31); });
+        bindCtxField('.af-ctx-end-month', (r, v) => { if ('dateRange' in r.window) r.window.dateRange.end[0] = clampInt(Number(v), 1, 12); });
+        bindCtxField('.af-ctx-end-day', (r, v) => { if ('dateRange' in r.window) r.window.dateRange.end[1] = clampInt(Number(v), 1, 31); });
+        bindCtxField('.af-ctx-source-refs', (r, v) => { r.sourceRefs = parseCommaList(v); });
+        bindCtxField('.af-ctx-inc-genres', (r, v) => { r.includeGenres = parseCommaList(v); });
+        bindCtxField('.af-ctx-exc-genres', (r, v) => { r.excludeGenres = parseCommaList(v); });
+        bindCtxField('.af-ctx-inc-tags', (r, v) => { r.includeTags = parseCommaList(v); });
+        bindCtxField('.af-ctx-exc-tags', (r, v) => { r.excludeTags = parseCommaList(v); });
+        bindCtxField('.af-ctx-weight', (r, v) => {
+            const n = Number(String(v).trim());
+            r.weight = String(v).trim() === '' || isNaN(n) || n < 0 ? undefined : n;
         });
 
         // --- Footer ---

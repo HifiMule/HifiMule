@@ -81,6 +81,11 @@ pub struct AutoFillPipeline {
     /// Default (`enabled:false`) ⇒ zero behavior change; the dry-streak counter is machine-local DB
     /// state carried via [`PipelineInput::pity_streak`], never stored in the manifest.
     pub pity: PityStage,
+    /// Clock-driven Context stage (Story 13.5 #3 time-of-day / #17 energy-curve / #32 seasonal) — the
+    /// brainstorm's *cheap proxies* expressed as one ordered list of context rules (time/calendar
+    /// window + source-activation/weighting + scheduled tag filter). Evaluated purely against
+    /// [`HistorySnapshot::local`]. Default (`enabled:false`, no rules) ⇒ zero behavior change.
+    pub context: ContextStage,
 }
 
 /// Tag/genre filter. All fields default to empty, which means "pass everything through".
@@ -212,6 +217,13 @@ pub struct BudgetStage {
     pub max_bytes: Option<u64>,
     pub target_duration_secs: Option<u64>,
     pub headroom_bytes: Option<u64>,
+    /// Story 13.5 #20 (encoding-from-goals): derive the transcode bitrate backwards from the
+    /// size + duration goals instead of guessing. When `true` AND both `max_bytes` and a positive
+    /// `target_duration_secs` are set, [`target_bitrate_kbps`] yields a clamped target bitrate that
+    /// (a) makes the byte estimate bitrate-aware so the fill packs to the duration goal within the
+    /// byte ceiling, and (b) overrides the device profile's `max_bitrate_kbps` for that slot's
+    /// auto-fill downloads at sync. Default `false` ⇒ today's behavior.
+    pub encoding_from_goals: bool,
 }
 
 /// A recording-version trait, detected purely from a song's title/album text (Story 13.2 #34).
@@ -304,6 +316,237 @@ pub struct PityStage {
     pub discovery_max_plays: u32,
 }
 
+/// Clock-driven Context stage (Story 13.5) — one mechanism for three brainstorm ideas (#3 time-of-day,
+/// #17 energy-curve, #32 seasonal), each delivered as its prescribed *cheap proxy*. The stage is an
+/// ordered list of [`ContextRule`]s; a rule is *active* when its [`ContextWindow`] matches the
+/// caller-supplied [`CivilTime`] ([`context_rule_active`]). Active rules (a) gate/weight which
+/// already-configured sources run (the playlist proxy for #3/#17) and (b) augment the effective
+/// [`FilterStage`] with scheduled include/exclude tags+genres (the seasonal proxy for #32). The stage
+/// never invents candidates, so every downstream budget/dedup/memory guarantee is unchanged.
+///
+/// All-default (`enabled:false`, no rules) ⇒ today's behavior, exactly like [`QualityStage::default()`],
+/// so a default `ContextStage` is omitted from the routing discriminator.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ContextStage {
+    /// Off ⇒ zero behavior change: no rule is ever consulted (AC 4).
+    pub enabled: bool,
+    /// Context rules, evaluated in order against [`HistorySnapshot::local`]. A malformed rule/window
+    /// degrades to "no effect" via the parse-tolerant [`deserialize_context_rules`] (AC 3), never
+    /// aborting the pipeline parse.
+    #[serde(default, deserialize_with = "deserialize_context_rules")]
+    pub rules: Vec<ContextRule>,
+}
+
+/// One context rule: a time/calendar window plus its effect (source activation/weighting +
+/// scheduled tag/genre filter). See [`ContextStage`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ContextRule {
+    /// When this rule is active.
+    pub window: ContextWindow,
+    /// `ref_id`s of pipeline sources this rule activates/boosts while active (#3/#17). A source named
+    /// here is *retained* whenever any rule mentioning it is active; a source mentioned only in
+    /// currently-inactive rules is suppressed; a source named in no rule always runs (AC 5).
+    pub source_refs: Vec<String>,
+    /// Optional share multiplier for this rule's activated sources (energy-curve phase emphasis).
+    /// `None` ⇒ `1.0`. Multiple active rules touching one source compose by taking the **max** (AC 5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<f32>,
+    /// Scheduled filter additions while active (#32 seasonal). Unioned with the static `FilterStage`;
+    /// exclude wins over include on conflict (AC 6).
+    pub include_tags: Vec<String>,
+    pub exclude_tags: Vec<String>,
+    pub include_genres: Vec<String>,
+    pub exclude_genres: Vec<String>,
+}
+
+/// A context rule's time/calendar predicate (Story 13.5). All three kinds are evaluated purely
+/// against the caller-supplied [`CivilTime`]; see [`context_rule_active`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ContextWindow {
+    /// #3/#17: hour-of-day window, `start_hour <= hour < end_hour` (inclusive start, exclusive end).
+    /// Wraps past midnight when `start_hour > end_hour` (e.g. `22..6` = "≥22 OR <6").
+    TimeOfDay { start_hour: u8, end_hour: u8 },
+    /// #32: active in any of these calendar months (`1..=12`), e.g. `[12]` = December, `[6,7,8]` = summer.
+    Months { months: Vec<u8> },
+    /// #32: `(month, day)` within `[start, end]` inclusive, wrapping across year-end when `start > end`
+    /// (e.g. Dec 15 → Jan 5).
+    DateRange { start: (u8, u8), end: (u8, u8) },
+}
+
+impl Default for ContextWindow {
+    /// A default window matches nothing useful (an empty month list) — a `ContextRule::default()` is
+    /// inert until configured. Used only as the serde container default.
+    fn default() -> Self {
+        ContextWindow::Months { months: Vec::new() }
+    }
+}
+
+/// Parse-tolerant deserializer for [`ContextStage::rules`] (Story 13.5 AC 3), mirroring 13.2's
+/// `deserialize_version_preference` and 13.1's `parse_tiers`: read a list of arbitrary JSON values,
+/// keep the ones that deserialize into a well-formed [`ContextRule`], and silently drop the rest. A
+/// malformed rule/window therefore degrades to "no effect" instead of aborting the whole pipeline parse.
+fn deserialize_context_rules<'de, D>(deserializer: D) -> Result<Vec<ContextRule>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    let mut out: Vec<ContextRule> = Vec::new();
+    for value in raw {
+        if let Ok(rule) = serde_json::from_value::<ContextRule>(value) {
+            out.push(rule);
+        }
+    }
+    Ok(out)
+}
+
+/// Story 13.5 AC 4: whether a context rule's window matches the caller-supplied civil time. Pure —
+/// no clock/RNG. Mirrors the pure-predicate style of [`is_on_device`].
+/// - `TimeOfDay`: `start <= hour < end`, with midnight-wrap when `start > end` (`hour >= start || hour < end`).
+///   A degenerate `start == end` matches nothing.
+/// - `Months`: the local month is listed.
+/// - `DateRange`: `(month, day)` within `[start, end]` inclusive, with year-end wrap when `start > end`.
+fn context_rule_active(rule: &ContextRule, local: &CivilTime) -> bool {
+    match &rule.window {
+        ContextWindow::TimeOfDay { start_hour, end_hour } => {
+            let h = local.hour;
+            if start_hour == end_hour {
+                false
+            } else if start_hour < end_hour {
+                h >= *start_hour && h < *end_hour
+            } else {
+                // midnight wrap: e.g. 22..6 ⇒ hour >= 22 OR hour < 6
+                h >= *start_hour || h < *end_hour
+            }
+        }
+        ContextWindow::Months { months } => months.contains(&local.month),
+        ContextWindow::DateRange { start, end } => {
+            // Encode (month, day) as a comparable ordinal `month*100 + day`.
+            let key = u16::from(local.month) * 100 + u16::from(local.day);
+            let s = u16::from(start.0) * 100 + u16::from(start.1);
+            let e = u16::from(end.0) * 100 + u16::from(end.1);
+            if s <= e {
+                key >= s && key <= e
+            } else {
+                // year-end wrap: e.g. Dec 15 → Jan 5 ⇒ key >= Dec15 OR key <= Jan5
+                key >= s || key <= e
+            }
+        }
+    }
+}
+
+/// Story 13.5 AC 4: the context rules active for this run (window matches the civil time).
+fn active_context_rules<'a>(stage: &'a ContextStage, local: &CivilTime) -> Vec<&'a ContextRule> {
+    stage
+        .rules
+        .iter()
+        .filter(|r| context_rule_active(r, local))
+        .collect()
+}
+
+/// Story 13.5 AC 6: the effective filter for this run — the static [`FilterStage`] unioned with the
+/// include/exclude tags+genres of every active rule. Exclude-wins-over-include is preserved by
+/// [`filter_stage`] (an exclude match rejects regardless of include), so a plain union suffices. With
+/// no active rules the static filter is returned unchanged.
+fn effective_filter_with(base: &FilterStage, active: &[&ContextRule]) -> FilterStage {
+    if active.is_empty() {
+        return base.clone();
+    }
+    let mut f = base.clone();
+    for r in active {
+        f.include_tags.extend(r.include_tags.iter().cloned());
+        f.exclude_tags.extend(r.exclude_tags.iter().cloned());
+        f.include_genres.extend(r.include_genres.iter().cloned());
+        f.exclude_genres.extend(r.exclude_genres.iter().cloned());
+    }
+    f
+}
+
+/// Story 13.5 AC 5: the effective source set for this run. Context gates only the sources its rules
+/// *mention* (by `ref_id`): a source named in **no** rule always runs; a source named in **any active**
+/// rule runs (weighted by the **max** of those rules' weights — documented choice to avoid unbounded
+/// products); a source named **only in inactive** rules is suppressed. When a non-trivial weight is in
+/// play, the retained sources' shares are recomputed as `base_share × weight`, normalized to explicit
+/// shares — so the energy-phase emphasis rides the existing [`source_caps`] machinery. With no weighting,
+/// only suppression is applied (shares untouched, so a pure seasonal/time gate is byte-identical to the
+/// configured blend minus the suppressed sources).
+fn effective_sources(
+    sources: &[SourceEntry],
+    all_rules: &[ContextRule],
+    active: &[&ContextRule],
+) -> Vec<SourceEntry> {
+    // ref_ids mentioned anywhere, and the max weight among *active* rules per ref_id.
+    let mut mentioned_any: HashSet<&str> = HashSet::new();
+    for r in all_rules {
+        for rid in &r.source_refs {
+            mentioned_any.insert(rid.as_str());
+        }
+    }
+    let mut active_weight: HashMap<&str, f32> = HashMap::new();
+    for r in active {
+        let w = r.weight.unwrap_or(1.0);
+        for rid in &r.source_refs {
+            active_weight
+                .entry(rid.as_str())
+                .and_modify(|e| *e = e.max(w))
+                .or_insert(w);
+        }
+    }
+
+    // Retain: sources with no ref_id, or whose ref_id is in no rule, always run; a mentioned source
+    // runs only when an active rule names it.
+    let retained: Vec<SourceEntry> = sources
+        .iter()
+        .filter(|s| match s.ref_id.as_deref() {
+            Some(rid) if mentioned_any.contains(rid) => active_weight.contains_key(rid),
+            _ => true,
+        })
+        .cloned()
+        .collect();
+
+    let weight_of = |s: &SourceEntry| -> f32 {
+        s.ref_id
+            .as_deref()
+            .and_then(|rid| active_weight.get(rid).copied())
+            .unwrap_or(1.0)
+    };
+    let any_weight = retained.iter().any(|s| (weight_of(s) - 1.0).abs() > 1e-6);
+    if !any_weight || retained.is_empty() {
+        return retained;
+    }
+
+    // Recompute shares as base × weight, normalized to sum 1. `base` mirrors `source_caps`'
+    // share/no-share split so a source's pre-existing share still informs the weighted blend.
+    let n = retained.len() as f32;
+    let any_share = retained.iter().any(|s| s.share.is_some());
+    let explicit: f32 = retained.iter().filter_map(|s| s.share).sum();
+    let n_unshared = retained.iter().filter(|s| s.share.is_none()).count();
+    let remainder = (1.0 - explicit).max(0.0);
+    let base_of = |s: &SourceEntry| -> f32 {
+        if !any_share {
+            1.0 / n
+        } else {
+            match s.share {
+                Some(sh) => sh,
+                None if n_unshared > 0 => remainder / n_unshared as f32,
+                None => 0.0,
+            }
+        }
+    };
+    let weighted: Vec<f32> = retained.iter().map(|s| base_of(s) * weight_of(s)).collect();
+    let total: f32 = weighted.iter().sum();
+    retained
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut s)| {
+            s.share = Some(if total > 0.0 { weighted[i] / total } else { 1.0 / n });
+            s
+        })
+        .collect()
+}
+
 /// Story 13.4: the size in bytes of the pity discovery reserve for this run — `0` when the reserve
 /// does **not** fire. The reserve fires iff the feature is enabled, the dry streak has reached the
 /// threshold, the budget is bounded (`ceiling != u64::MAX`), and the reserved fraction rounds to a
@@ -345,11 +588,13 @@ impl AutoFillPipeline {
                 max_bytes,
                 target_duration_secs: None,
                 headroom_bytes: None,
+                encoding_from_goals: false,
             },
             fallback: Vec::new(),
             quality: QualityStage::default(),
             rarity: RarityStage::default(),
             pity: PityStage::default(),
+            context: ContextStage::default(),
         }
     }
 }
@@ -400,12 +645,37 @@ pub struct TrackHistory {
     pub tier: Option<String>,
 }
 
+/// Caller-supplied **local civil time** (Story 13.5) — the clock-as-value carrier for the Context
+/// stage (#3 time-of-day, #17 energy-curve, #32 seasonal). Exactly like [`HistorySnapshot::now`] and
+/// [`PipelineInput::seed`], civil time enters the deliberately clock-free engine as a *value*, never
+/// a read: the pure core derives every time-of-day / calendar decision from these fields and there is
+/// **no** `Local::now`/`Utc::now`/`SystemTime`/`chrono` call anywhere in `pipeline.rs` or the
+/// `fetch.rs` selection path. The single mint site is `rpc.rs`'s `now_civil()`, beside `now_unix_secs()`.
+///
+/// `#[derive(Default)]` ⇒ all-zero (`hour 0`, `month 0`, `day 0`, `weekday 0`). An all-zero value
+/// matches no `Months`/`DateRange` rule and matches a `TimeOfDay` only at hour 0 — acceptable because
+/// the Context stage is gated on `ContextStage::enabled` (AC 4), so a default value is never consulted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CivilTime {
+    /// Hour of day, `0..=23` (local).
+    pub hour: u8,
+    /// Month, `1..=12` (local). `0` ⇒ "unset" (matches no calendar rule).
+    pub month: u8,
+    /// Day of month, `1..=31` (local). `0` ⇒ "unset".
+    pub day: u8,
+    /// Day of week, `0 = Monday ..= 6 = Sunday` (local). Reserved for future weekday windows.
+    pub weekday: u8,
+}
+
 /// A snapshot of runtime history plus the caller's notion of "now" (Unix seconds). The engine
 /// derives every time-based decision from this snapshot — never from the system clock.
 #[derive(Debug, Clone, Default)]
 pub struct HistorySnapshot {
     pub now: i64,
     pub entries: HashMap<String, TrackHistory>,
+    /// Story 13.5: caller-supplied local civil time (hour/month/day/weekday). Drives the Context
+    /// stage's window predicates. Defaults to all-zero (inert unless `context.enabled`).
+    pub local: CivilTime,
 }
 
 /// Everything the pure core needs, materialized up front so it can run without a provider.
@@ -476,8 +746,36 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
         &pipeline.sources
     };
 
+    // Context stage (Story 13.5 #3/#17/#32): when enabled, the active rules (matched purely against
+    // the caller-supplied civil time) adjust *only* (a) the effective source set + weights and (b) the
+    // effective filter — every budget/dedup/memory guarantee below is untouched. Disabled ⇒ byte-for-
+    // byte today's behavior: the static `filter` and the configured sources/fallback verbatim (AC 4).
+    let ctx_sources;
+    let ctx_fallback;
+    let ctx_filter;
+    let (sources, fallback_sources, effective_filter): (
+        &[SourceEntry],
+        &[SourceEntry],
+        &FilterStage,
+    ) = if pipeline.context.enabled {
+        let active = active_context_rules(&pipeline.context, &input.history.local);
+        ctx_filter = effective_filter_with(&pipeline.filter, &active);
+        ctx_sources = effective_sources(sources, &pipeline.context.rules, &active);
+        ctx_fallback = effective_sources(&pipeline.fallback, &pipeline.context.rules, &active);
+        (&ctx_sources, &ctx_fallback, &ctx_filter)
+    } else {
+        (sources, pipeline.fallback.as_slice(), &pipeline.filter)
+    };
+
     let exclude: HashSet<String> = input.exclude_item_ids.iter().cloned().collect();
-    let mut selector = Selector::new(ceiling, pipeline.budget.target_duration_secs, exclude);
+    // Story 13.5 #20: derive the encoding-from-goals target bitrate once; `None` ⇒ today's estimate.
+    let target_kbps = target_bitrate_kbps(&pipeline.budget);
+    let mut selector = Selector::new(
+        ceiling,
+        pipeline.budget.target_duration_secs,
+        target_kbps,
+        exclude,
+    );
 
     // Stable-core (#24, AC 6): when `stable_core_pct = p > 0` and the budget is bounded, fill up to
     // `round(ceiling × p)` bytes FIRST from candidates already on the device (have a `last_synced_at`
@@ -493,7 +791,7 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
             // whole core allocation (otherwise every source got the full `core_cap` cap).
             let core_caps = source_caps(sources, core_cap);
             for (source, cap) in sources.iter().zip(core_caps) {
-                let units = build_source_units(input, pipeline, source);
+                let units = build_source_units(input, pipeline, source, effective_filter);
                 selector.fill(units, source, cap, &pipeline.memory, &input.history, FillMode::Core);
             }
             selector.ceiling = ceiling; // restore the full ceiling for the delta pass
@@ -514,7 +812,7 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
         selector.ceiling = selector.cum_bytes.saturating_add(reserve_bytes).min(ceiling);
         let reserve_caps = source_caps(sources, reserve_bytes);
         for (source, cap) in sources.iter().zip(reserve_caps) {
-            let units = build_source_units(input, pipeline, source);
+            let units = build_source_units(input, pipeline, source, effective_filter);
             selector.fill(
                 units,
                 source,
@@ -538,13 +836,15 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
     };
     let caps = source_caps(sources, remaining);
     for (source, cap) in sources.iter().zip(caps) {
-        let units = build_source_units(input, pipeline, source);
+        let units = build_source_units(input, pipeline, source, effective_filter);
         selector.fill(units, source, cap, &pipeline.memory, &input.history, FillMode::Primary);
     }
 
-    // Terminal fallback chain — only reached once primary sources can't fill the budget.
-    for source in &pipeline.fallback {
-        let units = build_source_units(input, pipeline, source);
+    // Terminal fallback chain — only reached once primary sources can't fill the budget. Context
+    // suppression applies here too (a fallback source named only in inactive rules is dropped); the
+    // share/weight is irrelevant since fallback fills against the full ceiling.
+    for source in fallback_sources {
+        let units = build_source_units(input, pipeline, source, effective_filter);
         selector.fill(units, source, ceiling, &pipeline.memory, &input.history, FillMode::Fallback);
     }
 
@@ -575,11 +875,12 @@ fn build_source_units(
     input: &PipelineInput,
     pipeline: &AutoFillPipeline,
     source: &SourceEntry,
+    filter: &FilterStage,
 ) -> Vec<UnitGroup> {
     let pool = input.pools.get(&source.key()).cloned().unwrap_or_default();
 
-    // filter (genres/tags)
-    let filtered = filter_stage(pool, &pipeline.filter);
+    // filter (genres/tags) — the *effective* filter (static ∪ active context rules, Story 13.5 AC 6).
+    let filtered = filter_stage(pool, filter);
     // unit grouping
     let mut units = unit_stage(filtered, pipeline.unit);
     // ordering — sort within each unit (so its first track is its best), then sort units by their
@@ -1086,8 +1387,8 @@ fn logical_key(song: &Song) -> Option<(String, String)> {
 /// when there is no byte budget); an unknown/zero size never fits a bounded budget (the selector
 /// skips zero/unknown-size tracks anyway). Lets [`best_version_cmp`] avoid electing a winner that
 /// can never be selected.
-fn fits_ceiling(song: &Song, ceiling: u64) -> bool {
-    ceiling == u64::MAX || estimated_size(song).is_some_and(|sz| sz <= ceiling)
+fn fits_ceiling(song: &Song, ceiling: u64, target_kbps: Option<u32>) -> bool {
+    ceiling == u64::MAX || estimated_size(song, target_kbps).is_some_and(|sz| sz <= ceiling)
 }
 
 /// Deterministic best-version comparator (Story 13.2 #11, AC 6): budget fit → version-preference
@@ -1104,8 +1405,11 @@ fn fits_ceiling(song: &Song, ceiling: u64) -> bool {
 /// tiebreak (4) still makes the winner stable).
 fn best_version_cmp(a: &Song, b: &Song, pipeline: &AutoFillPipeline, ceiling: u64, seed: u64) -> std::cmp::Ordering {
     use std::cmp::Ordering;
+    // Story 13.5: budget-fit uses the same bitrate-aware estimate as selection, so a version that
+    // fits *after* transcode is preferred consistently with how it will actually be packed.
+    let target_kbps = target_bitrate_kbps(&pipeline.budget);
     // (0) budget fit: a version that can fit the ceiling beats one that never can (Decision 2).
-    match (fits_ceiling(a, ceiling), fits_ceiling(b, ceiling)) {
+    match (fits_ceiling(a, ceiling, target_kbps), fits_ceiling(b, ceiling, target_kbps)) {
         (true, false) => return Ordering::Less,
         (false, true) => return Ordering::Greater,
         _ => {}
@@ -1177,15 +1481,35 @@ fn collapse_best_version(
 /// Estimated playable size in bytes: prefer `size_bytes`, else `(bitrate_kbps*1000/8)*duration`.
 /// Returns `None` for unknown/zero size so the caller skips the track (never a 0-byte filler).
 /// Mirrors `ProviderFillState::try_add` / `rank_and_truncate`.
-fn estimated_size(song: &Song) -> Option<u64> {
-    if let Some(sz) = song.size_bytes {
-        return (sz > 0).then_some(sz);
-    }
-    let kbps = song.bitrate_kbps?;
-    let est = u64::from(kbps)
-        .checked_mul(1_000)?
-        .checked_div(8)?
-        .checked_mul(u64::from(song.duration_seconds))?;
+///
+/// Story 13.5 #20 (encoding-from-goals): when `target_kbps` is `Some(b)` the size becomes
+/// **bitrate-aware** — the post-transcode size is `min(source_estimate, b×1000/8 × duration)`.
+/// Transcoding only ever *shrinks*: a source already below the target bitrate is unchanged, and a
+/// zero/unknown target size (e.g. unknown duration) is ignored so we never produce a 0-byte item.
+/// `None` ⇒ byte-for-byte the source estimate (today's behavior).
+fn estimated_size(song: &Song, target_kbps: Option<u32>) -> Option<u64> {
+    let base = if let Some(sz) = song.size_bytes {
+        if sz > 0 { sz } else { return None }
+    } else {
+        let kbps = song.bitrate_kbps?;
+        u64::from(kbps)
+            .checked_mul(1_000)?
+            .checked_div(8)?
+            .checked_mul(u64::from(song.duration_seconds))?
+    };
+    let est = match target_kbps {
+        Some(b) if b > 0 => {
+            let transcoded = u64::from(b)
+                .checked_mul(1_000)
+                .and_then(|x| x.checked_div(8))
+                .and_then(|x| x.checked_mul(u64::from(song.duration_seconds)));
+            match transcoded {
+                Some(t) if t > 0 => base.min(t), // transcoding down only shrinks
+                _ => base,
+            }
+        }
+        _ => base,
+    };
     (est > 0).then_some(est)
 }
 
@@ -1196,6 +1520,32 @@ fn budget_ceiling(b: &BudgetStage) -> u64 {
         Some(m) => m.saturating_sub(b.headroom_bytes.unwrap_or(0)),
         None => u64::MAX,
     }
+}
+
+/// Story 13.5 #20 (encoding-from-goals): derive the target transcode bitrate (kbps) backwards from
+/// the size + duration goals. Returns `Some(clamped)` only when `encoding_from_goals` is set AND both
+/// a byte ceiling (`max_bytes`) and a positive `target_duration_secs` are present:
+/// `effective_bytes × 8 / (target_duration_secs × 1000)` where `effective_bytes = budget_ceiling`
+/// (i.e. `max_bytes − headroom`), clamped to a sane audio range so a tiny/huge goal can't produce a
+/// nonsense encode. Returns `None` (no derivation — today's behavior) when the flag is off or either
+/// goal is missing. Pure, unit-testable, no I/O.
+pub fn target_bitrate_kbps(budget: &BudgetStage) -> Option<u32> {
+    /// Clamp bounds for a derived audio bitrate (kbps).
+    const MIN_KBPS: u64 = 32;
+    const MAX_KBPS: u64 = 320;
+    if !budget.encoding_from_goals {
+        return None;
+    }
+    let secs = budget.target_duration_secs.filter(|s| *s > 0)?;
+    budget.max_bytes?; // a byte ceiling must be configured for the derivation to be meaningful
+    let effective_bytes = budget_ceiling(budget);
+    if effective_bytes == 0 || effective_bytes == u64::MAX {
+        return None;
+    }
+    let raw = effective_bytes
+        .checked_mul(8)
+        .and_then(|x| x.checked_div(secs.checked_mul(1_000)?))?;
+    Some(raw.clamp(MIN_KBPS, MAX_KBPS) as u32)
 }
 
 /// Per-source byte caps derived from `share`. With no shares anywhere, sources split the global
@@ -1235,6 +1585,10 @@ fn frac_bytes(frac: f32, ceiling: u64) -> u64 {
 struct Selector {
     ceiling: u64,
     duration_target: Option<u64>,
+    /// Story 13.5 #20: when encoding-from-goals derived a target bitrate, every size estimate is
+    /// bitrate-aware so the byte math packs to the duration goal within the byte ceiling. `None` ⇒
+    /// today's source-based estimate.
+    target_kbps: Option<u32>,
     exclude: HashSet<String>,
     seen: HashSet<String>,
     items: Vec<AutoFillItem>,
@@ -1243,10 +1597,16 @@ struct Selector {
 }
 
 impl Selector {
-    fn new(ceiling: u64, duration_target: Option<u64>, exclude: HashSet<String>) -> Self {
+    fn new(
+        ceiling: u64,
+        duration_target: Option<u64>,
+        target_kbps: Option<u32>,
+        exclude: HashSet<String>,
+    ) -> Self {
         Self {
             ceiling,
             duration_target,
+            target_kbps,
             exclude,
             seen: HashSet::new(),
             items: Vec::new(),
@@ -1305,7 +1665,7 @@ impl Selector {
                 {
                     continue;
                 }
-                let Some(size) = estimated_size(song) else {
+                let Some(size) = estimated_size(song, self.target_kbps) else {
                     continue; // unknown/zero size — never a 0-byte filler
                 };
                 unit_bytes = unit_bytes.saturating_add(size);
@@ -1675,6 +2035,60 @@ mod tests {
         assert!(
             !fresh_ids.contains(&"e-deep2".to_string()),
             "no dry streak ⇒ no guarantee ⇒ the never-played gem stays buried under PlayCount"
+        );
+
+        // Story 13.5 — Léo's gym energy follows the CLOCK (config-driven, no `if persona`). His "energy"
+        // playlist is gated to morning gym hours (6–11). At 07:00 it drives the fill; at 20:00 it is
+        // suppressed (the only configured source ⇒ empty fill). With context OFF the gate is inert.
+        let energy_pool = vec![
+            cand(song_sized("e-deep2", false, 0, "2024-01-01", 3_000_000)),
+            cand(song_sized("e-deep1", false, 1, "2024-01-01", 3_000_000)),
+        ];
+        let context_pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry {
+                kind: SourceKind::Playlist,
+                ref_id: Some("energy".to_string()),
+                share: None,
+            }],
+            ordering: vec![OrderingKey::Excavation],
+            budget: BudgetStage { max_bytes: Some(7_000_000), ..Default::default() },
+            context: ContextStage {
+                enabled: true,
+                rules: vec![ContextRule {
+                    window: ContextWindow::TimeOfDay { start_hour: 6, end_hour: 11 },
+                    source_refs: vec!["energy".to_string()],
+                    ..Default::default()
+                }],
+            },
+            ..Default::default()
+        };
+        let make_input = |hour: u8| {
+            let mut i = PipelineInput::default().with_pool(
+                SourceKind::Playlist,
+                Some("energy"),
+                energy_pool.clone(),
+            );
+            i.history.local = CivilTime { hour, month: 1, day: 1, weekday: 0 };
+            i
+        };
+        assert_eq!(
+            ids(&run_pipeline(&make_input(7), &context_pipeline)),
+            vec!["e-deep2", "e-deep1"],
+            "07:00 ⇒ the morning-gated energy playlist drives the fill"
+        );
+        assert!(
+            run_pipeline(&make_input(20), &context_pipeline).is_empty(),
+            "20:00 ⇒ the energy playlist is suppressed; no un-gated source remains"
+        );
+        // Context OFF ⇒ the gate is inert: the energy playlist fills regardless of the hour.
+        let context_off = AutoFillPipeline {
+            context: ContextStage { enabled: false, ..context_pipeline.context.clone() },
+            ..context_pipeline.clone()
+        };
+        assert_eq!(
+            ids(&run_pipeline(&make_input(20), &context_off)),
+            vec!["e-deep2", "e-deep1"],
+            "context disabled ⇒ byte-identical to no-context (the 20:00 fill is unchanged)"
         );
     }
 
@@ -3364,5 +3778,455 @@ mod tests {
             6_000_000,
             "ratio clamps to 1.0"
         );
+    }
+
+    // ===================================================================
+    // Story 13.5 — Context stage (#3/#17/#32) + encoding-from-goals (#20).
+    // ===================================================================
+
+    fn civil(hour: u8, month: u8, day: u8) -> CivilTime {
+        CivilTime { hour, month, day, weekday: 0 }
+    }
+
+    fn playlist_src(ref_id: &str) -> SourceEntry {
+        SourceEntry {
+            kind: SourceKind::Playlist,
+            ref_id: Some(ref_id.to_string()),
+            share: None,
+        }
+    }
+
+    #[test]
+    fn context_window_time_of_day_normal_and_midnight_wrap() {
+        // Normal window 6..11 (inclusive start, exclusive end).
+        let morning = ContextRule {
+            window: ContextWindow::TimeOfDay { start_hour: 6, end_hour: 11 },
+            ..Default::default()
+        };
+        assert!(context_rule_active(&morning, &civil(6, 1, 1)), "06:00 is in [6,11)");
+        assert!(context_rule_active(&morning, &civil(10, 1, 1)), "10:00 is in [6,11)");
+        assert!(!context_rule_active(&morning, &civil(11, 1, 1)), "11:00 is exclusive end");
+        assert!(!context_rule_active(&morning, &civil(5, 1, 1)), "05:00 is before start");
+
+        // Midnight wrap 22..6 ⇒ active if hour >= 22 OR hour < 6.
+        let night = ContextRule {
+            window: ContextWindow::TimeOfDay { start_hour: 22, end_hour: 6 },
+            ..Default::default()
+        };
+        assert!(context_rule_active(&night, &civil(23, 1, 1)), "23:00 wraps");
+        assert!(context_rule_active(&night, &civil(2, 1, 1)), "02:00 wraps");
+        assert!(!context_rule_active(&night, &civil(6, 1, 1)), "06:00 is the exclusive end");
+        assert!(!context_rule_active(&night, &civil(12, 1, 1)), "12:00 is outside the wrap");
+
+        // Degenerate start==end matches nothing.
+        let degenerate = ContextRule {
+            window: ContextWindow::TimeOfDay { start_hour: 9, end_hour: 9 },
+            ..Default::default()
+        };
+        assert!(!context_rule_active(&degenerate, &civil(9, 1, 1)));
+    }
+
+    #[test]
+    fn context_window_months_and_date_range_with_year_end_wrap() {
+        let december = ContextRule {
+            window: ContextWindow::Months { months: vec![12] },
+            ..Default::default()
+        };
+        assert!(context_rule_active(&december, &civil(0, 12, 25)));
+        assert!(!context_rule_active(&december, &civil(0, 11, 30)));
+        // A default (all-zero) civil time matches no Months rule (month 0 is unlisted).
+        assert!(!context_rule_active(&december, &CivilTime::default()));
+
+        let summer = ContextRule {
+            window: ContextWindow::Months { months: vec![6, 7, 8] },
+            ..Default::default()
+        };
+        assert!(context_rule_active(&summer, &civil(0, 7, 15)));
+        assert!(!context_rule_active(&summer, &civil(0, 9, 1)));
+
+        // DateRange normal: Mar 1 .. May 31.
+        let spring = ContextRule {
+            window: ContextWindow::DateRange { start: (3, 1), end: (5, 31) },
+            ..Default::default()
+        };
+        assert!(context_rule_active(&spring, &civil(0, 4, 10)));
+        assert!(!context_rule_active(&spring, &civil(0, 6, 1)));
+
+        // DateRange year-end wrap: Dec 15 .. Jan 5.
+        let holidays = ContextRule {
+            window: ContextWindow::DateRange { start: (12, 15), end: (1, 5) },
+            ..Default::default()
+        };
+        assert!(context_rule_active(&holidays, &civil(0, 12, 25)), "Dec 25 wraps");
+        assert!(context_rule_active(&holidays, &civil(0, 1, 3)), "Jan 3 wraps");
+        assert!(!context_rule_active(&holidays, &civil(0, 1, 6)), "Jan 6 is past the end");
+        assert!(!context_rule_active(&holidays, &civil(0, 6, 1)), "June is well outside");
+    }
+
+    #[test]
+    fn context_disabled_is_byte_identical_and_civil_time_determines_result() {
+        // Two playlist phase sources; a morning rule activates only "morning".
+        let pools = || {
+            PipelineInput::default()
+                .with_pool(
+                    SourceKind::Playlist,
+                    Some("morning"),
+                    vec![cand(song_sized("m1", false, 0, "2024-01-01", 1_000_000))],
+                )
+                .with_pool(
+                    SourceKind::Playlist,
+                    Some("evening"),
+                    vec![cand(song_sized("e1", false, 0, "2024-01-01", 1_000_000))],
+                )
+        };
+        let context = ContextStage {
+            enabled: true,
+            rules: vec![
+                ContextRule {
+                    window: ContextWindow::TimeOfDay { start_hour: 6, end_hour: 11 },
+                    source_refs: vec!["morning".to_string()],
+                    ..Default::default()
+                },
+                ContextRule {
+                    window: ContextWindow::TimeOfDay { start_hour: 18, end_hour: 23 },
+                    source_refs: vec!["evening".to_string()],
+                    ..Default::default()
+                },
+            ],
+        };
+        let base = AutoFillPipeline {
+            sources: vec![playlist_src("morning"), playlist_src("evening")],
+            budget: BudgetStage { max_bytes: Some(10_000_000), ..Default::default() },
+            ..Default::default()
+        };
+
+        // context.enabled = false ⇒ both phase sources run (today's behavior).
+        let disabled = AutoFillPipeline { context: ContextStage { enabled: false, ..context.clone() }, ..base.clone() };
+        let mut disabled_ids = {
+            let mut input = pools();
+            input.history.local = civil(8, 1, 1); // ignored because disabled
+            ids(&run_pipeline(&input, &disabled))
+        };
+        disabled_ids.sort();
+        assert_eq!(disabled_ids, vec!["e1", "m1"], "disabled ⇒ no gating, both phases fill");
+
+        // Enabled at 08:00 ⇒ only the morning phase; the evening source is suppressed.
+        let enabled = AutoFillPipeline { context: context.clone(), ..base.clone() };
+        let mut morning_input = pools();
+        morning_input.history.local = civil(8, 1, 1);
+        assert_eq!(ids(&run_pipeline(&morning_input, &enabled)), vec!["m1"]);
+
+        // Enabled at 20:00 ⇒ only the evening phase. Same config, different civil time ⇒ different result.
+        let mut evening_input = pools();
+        evening_input.history.local = civil(20, 1, 1);
+        assert_eq!(ids(&run_pipeline(&evening_input, &enabled)), vec!["e1"]);
+
+        // Determinism: same civil time ⇒ byte-identical repeat.
+        let mut again = pools();
+        again.history.local = civil(8, 1, 1);
+        assert_eq!(ids(&run_pipeline(&again, &enabled)), vec!["m1"]);
+    }
+
+    #[test]
+    fn context_unmentioned_source_always_runs_and_only_inactive_is_suppressed() {
+        let input = PipelineInput::default()
+            .with_pool(
+                SourceKind::Playlist,
+                Some("morning"),
+                vec![cand(song_sized("m1", false, 0, "2024-01-01", 1_000_000))],
+            )
+            .with_pool(
+                SourceKind::Playlist,
+                Some("evening"),
+                vec![cand(song_sized("e1", false, 0, "2024-01-01", 1_000_000))],
+            )
+            .with_pool(
+                SourceKind::Library,
+                None,
+                vec![cand(song_sized("lib", false, 0, "2024-01-01", 1_000_000))],
+            );
+        let mut input = input;
+        input.history.local = civil(8, 1, 1);
+
+        let pipeline = AutoFillPipeline {
+            sources: vec![playlist_src("morning"), playlist_src("evening"), SourceEntry::new(SourceKind::Library)],
+            budget: BudgetStage { max_bytes: Some(10_000_000), ..Default::default() },
+            context: ContextStage {
+                enabled: true,
+                rules: vec![
+                    ContextRule {
+                        window: ContextWindow::TimeOfDay { start_hour: 6, end_hour: 11 },
+                        source_refs: vec!["morning".to_string()],
+                        ..Default::default()
+                    },
+                    ContextRule {
+                        window: ContextWindow::TimeOfDay { start_hour: 18, end_hour: 23 },
+                        source_refs: vec!["evening".to_string()],
+                        ..Default::default()
+                    },
+                ],
+            },
+            ..Default::default()
+        };
+        let mut got = ids(&run_pipeline(&input, &pipeline));
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["lib", "m1"],
+            "active morning + unmentioned library run; the inactive evening source is suppressed"
+        );
+    }
+
+    #[test]
+    fn context_weight_boosts_share_and_max_composes() {
+        // Two playlist sources, 10×1MB tracks each, 10MB ceiling. A weight on "a" biases its share.
+        let pools = || {
+            let mk = |prefix: &str| {
+                (0..10)
+                    .map(|i| cand(song_sized(&format!("{prefix}{i}"), false, 0, "2024-01-01", 1_000_000)))
+                    .collect::<Vec<_>>()
+            };
+            PipelineInput::default()
+                .with_pool(SourceKind::Playlist, Some("a"), mk("a"))
+                .with_pool(SourceKind::Playlist, Some("b"), mk("b"))
+        };
+        let base = AutoFillPipeline {
+            sources: vec![playlist_src("a"), playlist_src("b")],
+            budget: BudgetStage { max_bytes: Some(10_000_000), ..Default::default() },
+            ..Default::default()
+        };
+        let count = |items: &[AutoFillItem], prefix: &str| {
+            items.iter().filter(|i| i.id.starts_with(prefix)).count()
+        };
+
+        // Single active rule: weight 3.0 on "a" ⇒ a share 0.75 (cap 7.5MB → 7), b share 0.25 (2.5MB → 2).
+        let weighted = AutoFillPipeline {
+            context: ContextStage {
+                enabled: true,
+                rules: vec![ContextRule {
+                    window: ContextWindow::Months { months: vec![7] },
+                    source_refs: vec!["a".to_string()],
+                    weight: Some(3.0),
+                    ..Default::default()
+                }],
+            },
+            ..base.clone()
+        };
+        let mut wi = pools();
+        wi.history.local = civil(0, 7, 1); // July ⇒ rule active
+        let w = run_pipeline(&wi, &weighted);
+        assert_eq!(count(&w, "a"), 7, "weight 3 ⇒ a gets the 0.75 share (7 of 1MB)");
+        assert_eq!(count(&w, "b"), 2, "b gets the residual 0.25 share (2 of 1MB)");
+
+        // Max-compose: TWO active rules each weight 2.0 on "a" ⇒ effective weight 2.0 (NOT 4.0 product).
+        // weight 2 ⇒ a share = 0.5·2/(0.5·2+0.5·1) = 0.667 (cap 6.67MB → 6), b → 0.333 (3.33MB → 3).
+        let composed = AutoFillPipeline {
+            context: ContextStage {
+                enabled: true,
+                rules: vec![
+                    ContextRule {
+                        window: ContextWindow::Months { months: vec![7] },
+                        source_refs: vec!["a".to_string()],
+                        weight: Some(2.0),
+                        ..Default::default()
+                    },
+                    ContextRule {
+                        window: ContextWindow::Months { months: vec![7] },
+                        source_refs: vec!["a".to_string()],
+                        weight: Some(2.0),
+                        ..Default::default()
+                    },
+                ],
+            },
+            ..base.clone()
+        };
+        let mut ci = pools();
+        ci.history.local = civil(0, 7, 1);
+        let c = run_pipeline(&ci, &composed);
+        assert_eq!(count(&c, "a"), 6, "max-compose keeps weight 2 (6 tracks), not the 4.0 product (8)");
+        assert_eq!(count(&c, "b"), 3);
+    }
+
+    #[test]
+    fn context_scheduled_filter_unions_and_exclude_beats_include() {
+        // Seasonal proxy: in December, include genre "Christmas"; exclude tag "explicit" always.
+        let input = PipelineInput::default().with_pool(
+            SourceKind::Library,
+            None,
+            vec![
+                cand_meta(song_sized("xmas", false, 0, "2024-01-01", 1_000_000), &["Christmas"], &[]),
+                cand_meta(song_sized("pop", false, 0, "2024-01-01", 1_000_000), &["Pop"], &[]),
+                cand_meta(song_sized("xmas-explicit", false, 0, "2024-01-01", 1_000_000), &["Christmas"], &["explicit"]),
+            ],
+        );
+        let pipeline = |month: u8| {
+            let mut i = input.clone();
+            i.history.local = civil(0, month, 1);
+            (
+                i,
+                AutoFillPipeline {
+                    sources: vec![SourceEntry::new(SourceKind::Library)],
+                    budget: BudgetStage { max_bytes: Some(10_000_000), ..Default::default() },
+                    context: ContextStage {
+                        enabled: true,
+                        rules: vec![ContextRule {
+                            window: ContextWindow::Months { months: vec![12] },
+                            include_genres: vec!["Christmas".to_string()],
+                            exclude_tags: vec!["explicit".to_string()],
+                            ..Default::default()
+                        }],
+                    },
+                    ..Default::default()
+                },
+            )
+        };
+
+        // December ⇒ rule active: only Christmas genre, and the explicit one is excluded.
+        let (dec_in, dec_pipe) = pipeline(12);
+        assert_eq!(
+            ids(&run_pipeline(&dec_in, &dec_pipe)),
+            vec!["xmas"],
+            "active rule restricts to Christmas (include) and drops the explicit one (exclude wins)"
+        );
+
+        // July ⇒ rule inactive: the static (empty) filter applies, all three pass.
+        let (jul_in, jul_pipe) = pipeline(7);
+        let mut jul = ids(&run_pipeline(&jul_in, &jul_pipe));
+        jul.sort();
+        assert_eq!(jul, vec!["pop", "xmas", "xmas-explicit"], "inactive rule contributes nothing");
+    }
+
+    #[test]
+    fn target_bitrate_kbps_off_missing_and_clamped() {
+        // Off ⇒ None even with both goals.
+        assert_eq!(
+            target_bitrate_kbps(&BudgetStage {
+                max_bytes: Some(10_000_000),
+                target_duration_secs: Some(600),
+                ..Default::default()
+            }),
+            None,
+            "flag off ⇒ no derivation"
+        );
+        let on = |max_bytes, secs, headroom| BudgetStage {
+            max_bytes,
+            target_duration_secs: secs,
+            headroom_bytes: headroom,
+            encoding_from_goals: true,
+        };
+        // Missing either goal ⇒ None.
+        assert_eq!(target_bitrate_kbps(&on(None, Some(600), None)), None);
+        assert_eq!(target_bitrate_kbps(&on(Some(10_000_000), None, None)), None);
+        assert_eq!(target_bitrate_kbps(&on(Some(10_000_000), Some(0), None)), None, "zero duration ⇒ None");
+        // Nominal: 10MB over 600s ⇒ 10_000_000*8/600_000 = 133 kbps.
+        assert_eq!(target_bitrate_kbps(&on(Some(10_000_000), Some(600), None)), Some(133));
+        // Headroom reduces the effective bytes: (10MB-2MB)*8/600_000 = 106 kbps.
+        assert_eq!(target_bitrate_kbps(&on(Some(10_000_000), Some(600), Some(2_000_000))), Some(106));
+        // Tiny goal clamps up to 32; huge goal clamps down to 320.
+        assert_eq!(target_bitrate_kbps(&on(Some(1_000_000), Some(3600), None)), Some(32), "clamp floor");
+        assert_eq!(target_bitrate_kbps(&on(Some(1_000_000_000), Some(60), None)), Some(320), "clamp ceiling");
+    }
+
+    #[test]
+    fn bitrate_aware_estimate_shrinks_but_never_enlarges() {
+        // Oversize source (10MB, 180s) at 128 kbps ⇒ transcoded 128*1000/8*180 = 2_880_000.
+        let big = song_sized("big", false, 0, "2024-01-01", 10_000_000);
+        assert_eq!(estimated_size(&big, None), Some(10_000_000), "None ⇒ source estimate");
+        assert_eq!(estimated_size(&big, Some(128)), Some(2_880_000), "transcode shrinks the oversize source");
+
+        // A source already smaller than the target is unchanged (transcoding only shrinks).
+        let small = Song { size_bytes: Some(1_000_000), ..song_sized("small", false, 0, "2024-01-01", 0) };
+        assert_eq!(estimated_size(&small, Some(128)), Some(1_000_000), "never enlarge a smaller source");
+
+        // Zero/unknown duration can't produce a transcoded size ⇒ keep the source estimate (no 0-byte item).
+        let no_dur = Song { duration_seconds: 0, size_bytes: Some(2_000_000), ..song_sized("nd", false, 0, "2024-01-01", 0) };
+        assert_eq!(estimated_size(&no_dur, Some(128)), Some(2_000_000));
+    }
+
+    #[test]
+    fn encoding_from_goals_lets_duration_goal_fit_the_byte_ceiling() {
+        // Three 3MB / 300s songs; 4MB ceiling, 600s target. Without encoding only 1 fits (3MB).
+        // With encoding: target = 4MB*8/600_000 = 53 kbps ⇒ each transcodes to ~1.99MB, so 2 fit (≈4MB)
+        // and the 600s duration target is met exactly.
+        let pool = || {
+            (0..3)
+                .map(|i| cand(song_sized(&format!("s{i}"), false, 0, "2024-01-01", 3_000_000)))
+                .map(|mut c| {
+                    c.song.duration_seconds = 300;
+                    c
+                })
+                .collect::<Vec<_>>()
+        };
+        let base_budget = BudgetStage {
+            max_bytes: Some(4_000_000),
+            target_duration_secs: Some(600),
+            ..Default::default()
+        };
+
+        let plain = AutoFillPipeline { budget: base_budget.clone(), ..Default::default() };
+        let plain_input = PipelineInput::default().with_pool(SourceKind::Library, None, pool());
+        assert_eq!(run_pipeline(&plain_input, &plain).len(), 1, "no encoding ⇒ only one 3MB song fits 4MB");
+
+        let encoded = AutoFillPipeline {
+            budget: BudgetStage { encoding_from_goals: true, ..base_budget },
+            ..Default::default()
+        };
+        let encoded_input = PipelineInput::default().with_pool(SourceKind::Library, None, pool());
+        let result = run_pipeline(&encoded_input, &encoded);
+        assert_eq!(result.len(), 2, "encoding-from-goals shrinks each song so two fit the byte ceiling");
+        assert!(
+            result.iter().map(|i| i.size_bytes).sum::<u64>() <= 4_000_000,
+            "the bitrate-aware fill still respects the byte ceiling"
+        );
+    }
+
+    #[test]
+    fn context_and_encoding_serde_round_trip() {
+        let pipeline = AutoFillPipeline {
+            sources: vec![playlist_src("morning")],
+            budget: BudgetStage {
+                max_bytes: Some(8_000_000),
+                target_duration_secs: Some(3600),
+                encoding_from_goals: true,
+                ..Default::default()
+            },
+            context: ContextStage {
+                enabled: true,
+                rules: vec![
+                    ContextRule {
+                        window: ContextWindow::TimeOfDay { start_hour: 6, end_hour: 11 },
+                        source_refs: vec!["morning".to_string()],
+                        weight: Some(2.0),
+                        ..Default::default()
+                    },
+                    ContextRule {
+                        window: ContextWindow::Months { months: vec![12] },
+                        include_genres: vec!["Christmas".to_string()],
+                        exclude_tags: vec!["explicit".to_string()],
+                        ..Default::default()
+                    },
+                    ContextRule {
+                        window: ContextWindow::DateRange { start: (12, 15), end: (1, 5) },
+                        source_refs: vec!["holiday".to_string()],
+                        ..Default::default()
+                    },
+                ],
+            },
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&pipeline).unwrap();
+        let back: AutoFillPipeline = serde_json::from_str(&json).unwrap();
+        assert_eq!(pipeline, back, "context (all 3 window kinds) + encoding_from_goals round-trip");
+
+        // A malformed rule degrades to "no effect" (parse-tolerant) without aborting the parse.
+        let with_bad_rule = r#"{"context":{"enabled":true,"rules":[{"window":{"bogusWindow":{}}},{"window":{"months":{"months":[12]}}}]}}"#;
+        let parsed: AutoFillPipeline = serde_json::from_str(with_bad_rule).unwrap();
+        assert_eq!(parsed.context.rules.len(), 1, "the malformed rule is dropped; the valid one survives");
+
+        // A default ContextStage / encoding flag round-trips and keeps the engine's default behavior.
+        let default_back: AutoFillPipeline =
+            serde_json::from_str(&serde_json::to_string(&AutoFillPipeline::default()).unwrap()).unwrap();
+        assert_eq!(default_back.context, ContextStage::default());
+        assert!(!default_back.budget.encoding_from_goals);
     }
 }

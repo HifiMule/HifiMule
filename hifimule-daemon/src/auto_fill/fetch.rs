@@ -31,8 +31,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::pipeline::{
-    AutoFillPipeline, Candidate, FilterStage, MemoryStage, OrderingKey, PipelineInput, PityStage,
-    QualityStage, RarityStage, SourceEntry, SourceKey, SourceKind, Unit, run_pipeline,
+    AutoFillPipeline, Candidate, ContextStage, FilterStage, MemoryStage, OrderingKey,
+    PipelineInput, PityStage, QualityStage, RarityStage, SourceEntry, SourceKey, SourceKind, Unit,
+    run_pipeline,
 };
 use super::{AutoFillItem, AutoFillParams};
 use crate::domain::models::Song;
@@ -169,8 +170,15 @@ pub fn needs_configurable_expansion(p: &AutoFillPipeline) -> bool {
     // `ordering_default` (they make the ordering non-legacy). A default stage keeps the fast path.
     let rarity_default = p.rarity == RarityStage::default();
     let pity_default = p.pity == PityStage::default();
+    // Story 13.5: a context-only pipeline (default everything else but `context.enabled`/rules set)
+    // must route to the engine path — the fast `run_auto_fill_provider` path can't run a clock-driven
+    // source/filter gate. A default `ContextStage` is today's behavior and keeps the fast path.
+    let context_default = p.context == ContextStage::default();
     // A headroom reserve or duration target can only be honored by the materialized engine path;
     // `max_bytes` alone is honored by the fast path's `max_fill_bytes` and stays default-legacy.
+    // Story 13.5 #20: `encoding_from_goals` is only meaningful WITH a `target_duration_secs`, which
+    // already forces the engine path here (any `target_duration_secs > 0` is non-legacy) — so it needs
+    // no separate clause. The `encoding_from_goals_only` test verifies an encoding pipeline routes.
     let budget_default = !(p.budget.headroom_bytes.is_some_and(|h| h > 0)
         || p.budget.target_duration_secs.is_some_and(|t| t > 0));
 
@@ -183,7 +191,8 @@ pub fn needs_configurable_expansion(p: &AutoFillPipeline) -> bool {
         && budget_default
         && quality_default
         && rarity_default
-        && pity_default)
+        && pity_default
+        && context_default)
 }
 
 /// Materialize a configured pipeline's source pools from the provider, then run the pure engine.
@@ -335,6 +344,8 @@ pub async fn expand_with_pipeline(
     // an empty snapshot means memory is inert), keeping this fetch layer DB-free.
     let mut history = params.history;
     history.now = params.now_unix;
+    // Story 13.5: the caller-supplied local civil time drives the Context stage (clock-as-value).
+    history.local = params.local;
     for cands in pools.values() {
         for c in cands {
             if let Some(played) = derive_last_played(&c.song, history.now) {
@@ -560,7 +571,9 @@ async fn fetch_playlist(provider: &dyn MediaProvider, ref_id: Option<&str>) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auto_fill::pipeline::{BudgetStage, HistorySnapshot, SourceEntry, TrackHistory};
+    use crate::auto_fill::pipeline::{
+        BudgetStage, CivilTime, HistorySnapshot, SourceEntry, TrackHistory,
+    };
     use crate::domain::models::{Playlist, PlaylistWithTracks, SearchResult, Song};
     use crate::providers::{
         BrowseCapabilities, Capabilities, ProviderChangeContext, ScrobbleRequest, ServerType,
@@ -809,6 +822,7 @@ mod tests {
             rotation_cursor: 0,
             seed: 0,
             pity_streak: 0,
+            local: CivilTime::default(),
         }
     }
 
@@ -829,6 +843,7 @@ mod tests {
             rotation_cursor,
             seed: 0,
             pity_streak: 0,
+            local: CivilTime::default(),
         }
     }
 
@@ -992,6 +1007,37 @@ mod tests {
         // A default RarityStage/PityStage keeps the fast path (legacy stays default-equivalent).
         let p = AutoFillPipeline::default_legacy(Some(1));
         assert!(!needs_configurable_expansion(&p), "default rarity/pity stages stay on the fast path");
+    }
+
+    #[test]
+    fn discriminator_context_and_encoding_force_configurable() {
+        use crate::auto_fill::pipeline::{ContextRule, ContextStage, ContextWindow};
+
+        // Story 13.5 (AC 10): a context-only pipeline (default everything else) routes to the engine.
+        let mut p = AutoFillPipeline::default_legacy(Some(1));
+        p.context = ContextStage {
+            enabled: true,
+            rules: vec![ContextRule {
+                window: ContextWindow::TimeOfDay { start_hour: 6, end_hour: 11 },
+                source_refs: vec!["morning".to_string()],
+                ..Default::default()
+            }],
+        };
+        assert!(needs_configurable_expansion(&p), "context stage forces configurable");
+
+        // A default ContextStage keeps the fast path.
+        let p = AutoFillPipeline::default_legacy(Some(1));
+        assert!(!needs_configurable_expansion(&p), "default context stage stays on the fast path");
+
+        // Encoding-from-goals is only meaningful WITH a duration target, which already forces the
+        // engine path via `budget_default` — verify an encoding pipeline routes (AC 10).
+        let mut p = AutoFillPipeline::default_legacy(Some(8_000_000));
+        p.budget.target_duration_secs = Some(3600);
+        p.budget.encoding_from_goals = true;
+        assert!(
+            needs_configurable_expansion(&p),
+            "encoding-from-goals (with its required duration goal) routes to the engine"
+        );
     }
 
     #[test]

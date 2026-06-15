@@ -2589,6 +2589,10 @@ async fn provider_calculate_delta(
     // When basket has items this augments them — playlists/albums stay, free space is filled.
     // Story 13.1: rotation-tier index per emitted track, patched onto delta.adds below.
     let mut af_tier_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // Story 13.5 #20: encoding-from-goals derived per-slot max-bitrate (kbps) per emitted auto-fill
+    // track, patched onto delta.adds below (mirrors `af_tier_map`). Only populated when a transcode
+    // profile is active for the slot — passthrough tracks never get a forced re-encode.
+    let mut af_bitrate_map: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     // Story 13.4 review: portable server ids whose pity discovery reserve genuinely fired this run
     // (shared `pity_reserve_bytes` gate, computed with the per-run budget). Set on the delta below so
     // the sync-completion recorder resets the dry-streak only for servers that actually fired.
@@ -2672,10 +2676,20 @@ async fn provider_calculate_delta(
                 // Story 13.4: mint the seed from `now` (varies per run, deterministic within it).
                 seed: now as u64,
                 pity_streak,
+                // Story 13.5: mint local civil time at this engine fill site (drives the Context stage).
+                local: now_civil(),
             };
-            let pipeline_opt = selected_portable
+            let pipeline_ref = selected_portable
                 .as_deref()
                 .and_then(|id| manifest.auto_fill.pipeline_for(id));
+            // Story 13.5 #20: derive the encoding-from-goals per-slot transcode bitrate (only when a
+            // transcode profile is active), and in passthrough clear the flag so the byte estimate
+            // stays source-based. The override travels onto each emitted track via `af_bitrate_map`.
+            let transcode_active =
+                transcode_profile_active(manifest.transcoding_profile_id.as_deref());
+            let af_bitrate_override = encoding_override_kbps(pipeline_ref, transcode_active);
+            let encoding_cleared = encoding_passthrough_clear(pipeline_ref, transcode_active);
+            let pipeline_opt = encoding_cleared.as_ref().or(pipeline_ref);
             // Story 13.4 review: record whether the pity reserve genuinely fired for this slot
             // (same gate the engine uses, with this run's budget) so the recorder resets the
             // dry-streak only on a real fire.
@@ -2702,6 +2716,11 @@ async fn provider_calculate_delta(
             for item in fill_items {
                 if let Some(tier) = item.tier.clone() {
                     af_tier_map.insert(item.id.clone(), tier);
+                }
+                // Story 13.5 #20: stamp the slot's derived bitrate onto this auto-fill track so the
+                // sync transcode applies it to this item only (manual items carry nothing).
+                if let Some(kbps) = af_bitrate_override {
+                    af_bitrate_map.insert(item.id.clone(), kbps);
                 }
                 if seen_ids.insert(item.id.clone()) {
                     desired_items.push(crate::sync::DesiredItem {
@@ -2733,6 +2752,7 @@ async fn provider_calculate_delta(
     );
     let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
     patch_delta_tiers(&mut delta, &af_tier_map);
+    patch_delta_bitrate_overrides(&mut delta, &af_bitrate_map);
     delta.pity_fired_servers = af_pity_fired;
     delta.playlists = playlist_sync_items;
     crate::daemon_log!(
@@ -3599,6 +3619,61 @@ pub(crate) fn now_unix_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// Story 13.5: mint the caller-supplied **local civil time** for the auto-fill Context stage — the
+/// single clock-reading sibling of [`now_unix_secs`]. The pure engine never reads the clock; it
+/// consumes these fields via [`crate::auto_fill::HistorySnapshot::local`]. Uses `chrono::Local::now()`
+/// (`localtime_r` under the hood — a sound local offset; the `time` crate's `local-offset` feature is
+/// deliberately avoided as it returns `None`/errs in this multi-threaded daemon by design).
+pub(crate) fn now_civil() -> crate::auto_fill::CivilTime {
+    use chrono::{Datelike, Local, Timelike};
+    let now = Local::now();
+    crate::auto_fill::CivilTime {
+        hour: now.hour() as u8,
+        month: now.month() as u8,
+        day: now.day() as u8,
+        // chrono: Mon=0 .. Sun=6 via `num_days_from_monday` — matches our `0=Mon..=6=Sun` convention.
+        weekday: now.weekday().num_days_from_monday() as u8,
+    }
+}
+
+/// Story 13.5 #20: whether the device's selected transcoding profile implies a real (non-passthrough)
+/// transcode — i.e. there is something to re-encode and a per-slot bitrate override can take effect.
+fn transcode_profile_active(profile_id: Option<&str>) -> bool {
+    profile_id.is_some_and(|id| !id.is_empty() && id != "passthrough")
+}
+
+/// Story 13.5 #20: a cloned pipeline with `encoding_from_goals` cleared when the flag is set but no
+/// transcode profile is active (passthrough). Returns `None` (keep the original borrow) otherwise.
+/// Suppressing the flag in passthrough keeps the engine's bitrate-aware byte estimate aligned with
+/// reality — there is nothing to re-encode, so the estimate must stay source-based (AC 9 caveat).
+fn encoding_passthrough_clear(
+    pipeline: Option<&crate::auto_fill::AutoFillPipeline>,
+    transcode_active: bool,
+) -> Option<crate::auto_fill::AutoFillPipeline> {
+    match pipeline {
+        Some(p) if p.budget.encoding_from_goals && !transcode_active => {
+            let mut cleared = p.clone();
+            cleared.budget.encoding_from_goals = false;
+            Some(cleared)
+        }
+        _ => None,
+    }
+}
+
+/// Story 13.5 #20: the derived per-slot max-bitrate (kbps) to override on the transcode profile for a
+/// slot's auto-fill downloads — `None` unless the pipeline enabled encoding-from-goals (with both a
+/// byte ceiling and a positive duration goal) AND a transcode profile is active (passthrough can't
+/// re-encode). Best-effort and per-slot: it never mutates the device-wide `transcoding_profile_id`.
+fn encoding_override_kbps(
+    pipeline: Option<&crate::auto_fill::AutoFillPipeline>,
+    transcode_active: bool,
+) -> Option<u32> {
+    if !transcode_active {
+        return None;
+    }
+    pipeline.and_then(|p| crate::auto_fill::pipeline::target_bitrate_kbps(&p.budget))
+}
+
 /// Story 13.1: build the DB-sourced auto-fill history snapshot + rotation cursor for a
 /// `(device, portable server)` pair. Best-effort: a DB read error yields an empty snapshot so the
 /// Memory stage becomes inert rather than aborting the slot.
@@ -3627,7 +3702,17 @@ fn build_autofill_history(
     let cursor = db.get_rotation_cursor(device_id, server_id).unwrap_or(0);
     // Story 13.4: the pity dry-streak (best-effort, default 0) drives the discovery reserve.
     let pity_streak = db.get_pity_streak(device_id, server_id).unwrap_or(0);
-    (crate::auto_fill::HistorySnapshot { now, entries }, cursor, pity_streak)
+    // Story 13.5: `local` is set at the engine fill site (overwritten in `expand_with_pipeline`); the
+    // DB-sourced snapshot carries the default (civil time is runtime, never persisted).
+    (
+        crate::auto_fill::HistorySnapshot {
+            now,
+            entries,
+            local: crate::auto_fill::CivilTime::default(),
+        },
+        cursor,
+        pity_streak,
+    )
 }
 
 /// Story 13.1: copy the rotation-tier index from auto-fill results onto the matching `delta.adds`
@@ -3643,6 +3728,25 @@ fn patch_delta_tiers(
     for add in &mut delta.adds {
         if let Some(tier) = tier_by_track.get(&add.jellyfin_id) {
             add.tier = Some(tier.clone());
+        }
+    }
+}
+
+/// Story 13.5 #20: copy the encoding-from-goals derived per-slot max-bitrate (kbps) onto the matching
+/// `delta.adds` entries (keyed by provider track id), so the sync transcode applies it to those
+/// auto-fill downloads only. Mirrors [`patch_delta_tiers`]. Manual items are never in the map, so the
+/// override is naturally scoped to the slot's auto-fill items and never touches manual selections or
+/// the device-wide profile.
+fn patch_delta_bitrate_overrides(
+    delta: &mut crate::sync::SyncDelta,
+    kbps_by_track: &std::collections::HashMap<String, u32>,
+) {
+    if kbps_by_track.is_empty() {
+        return;
+    }
+    for add in &mut delta.adds {
+        if let Some(kbps) = kbps_by_track.get(&add.jellyfin_id) {
+            add.max_bitrate_override_kbps = Some(*kbps);
         }
     }
 }
@@ -3974,6 +4078,9 @@ async fn multi_provider_calculate_delta(
     let descriptors = parse_auto_fill_descriptors(params);
     // Story 13.1: rotation-tier index per emitted track across all slots, patched onto delta.adds.
     let mut af_tier_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // Story 13.5 #20: encoding-from-goals derived per-slot max-bitrate (kbps) per emitted auto-fill
+    // track across all slots, patched onto delta.adds (mirrors `af_tier_map`).
+    let mut af_bitrate_map: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     // Story 13.4 review: portable server ids whose pity discovery reserve genuinely fired this run.
     let mut af_pity_fired: Vec<String> = Vec::new();
     if !descriptors.is_empty() {
@@ -4060,10 +4167,19 @@ async fn multi_provider_calculate_delta(
                 rotation_cursor,
                 seed: now as u64,
                 pity_streak,
+                // Story 13.5: engine fill site → mint local civil time for the Context stage.
+                local: now_civil(),
             };
             // Story 12.4: route this slot through the shared seam — the configurable engine
             // when this server has a non-default pipeline, else the default fast path.
-            let pipeline_opt = manifest.auto_fill.pipeline_for(&af_server);
+            let pipeline_ref = manifest.auto_fill.pipeline_for(&af_server);
+            // Story 13.5 #20: derive this slot's encoding-from-goals transcode bitrate (only when a
+            // transcode profile is active) and gate the bitrate-aware estimate in passthrough.
+            let transcode_active =
+                transcode_profile_active(manifest.transcoding_profile_id.as_deref());
+            let af_bitrate_override = encoding_override_kbps(pipeline_ref, transcode_active);
+            let encoding_cleared = encoding_passthrough_clear(pipeline_ref, transcode_active);
+            let pipeline_opt = encoding_cleared.as_ref().or(pipeline_ref);
             // Story 13.4 review: did the pity reserve genuinely fire for this slot (same gate the
             // engine uses, with this slot's budget)? Drives the dry-streak reset at sync completion.
             if let Some(pipeline) = pipeline_opt
@@ -4087,6 +4203,11 @@ async fn multi_provider_calculate_delta(
                 if let Some(tier) = item.tier.clone() {
                     af_tier_map.insert(item.id.clone(), tier);
                 }
+                // Story 13.5 #20: stamp the slot's derived bitrate onto each auto-fill track (manual
+                // items carry nothing), so the sync transcode applies it to these items only.
+                if let Some(kbps) = af_bitrate_override {
+                    af_bitrate_map.insert(item.id.clone(), kbps);
+                }
             }
             push_fill_items_dedup(
                 fill_items,
@@ -4100,6 +4221,7 @@ async fn multi_provider_calculate_delta(
 
     let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
     patch_delta_tiers(&mut delta, &af_tier_map);
+    patch_delta_bitrate_overrides(&mut delta, &af_bitrate_map);
     delta.pity_fired_servers = af_pity_fired;
     delta.playlists = playlist_sync_items;
     if let Some((_, device_io)) = state.device_manager.get_manifest_and_io().await {
@@ -4517,6 +4639,8 @@ async fn handle_sync_calculate_delta(
             rotation_cursor: 0,
             seed: 0,
             pity_streak: 0,
+            // Story 13.5: legacy Jellyfin path — civil time inert (Context stage never runs here).
+            local: crate::auto_fill::CivilTime::default(),
         };
         match crate::auto_fill::run_auto_fill(&state.jellyfin_client, fill_params).await {
             Ok(af_items) => {
@@ -4792,6 +4916,9 @@ async fn handle_sync_execute(
                 reason: Some("force sync requested".to_string()),
                 server_id: item.server_id.clone(),
                 tier: None,
+                // Story 13.5 #20: force-sync re-adds an existing managed item — not an auto-fill slot
+                // expansion — so it never carries an encoding-from-goals override.
+                max_bitrate_override_kbps: None,
             });
             force_deletes.push(crate::sync::SyncDeleteItem {
                 jellyfin_id: item.jellyfin_id.clone(),
@@ -6308,6 +6435,8 @@ async fn handle_basket_auto_fill(
             rotation_cursor,
             seed: now as u64,
             pity_streak,
+            // Story 13.5: engine preview path → mint local civil time so the preview matches the fill.
+            local: now_civil(),
         };
         return match expand_auto_fill_slot(provider, Some(&pipeline), fill_params).await {
             Ok(items) => serde_json::to_value(items).map_err(|e| JsonRpcError {
@@ -6356,6 +6485,8 @@ async fn handle_basket_auto_fill(
         rotation_cursor: 0,
         seed: 0,
         pity_streak: 0,
+        // Story 13.5: legacy Jellyfin preview — civil time inert (Context stage never runs here).
+        local: crate::auto_fill::CivilTime::default(),
     };
 
     match crate::auto_fill::run_auto_fill(&state.jellyfin_client, fill_params).await {
@@ -6729,6 +6860,107 @@ mod tests {
     use crate::api::credential_test_lock;
     use serde_json::json;
     use std::sync::Mutex;
+
+    // ---- Story 13.5 #20: encoding-from-goals per-slot transcode override (RPC-level). ----
+
+    fn add_item(id: &str, server_id: Option<&str>) -> crate::sync::SyncAddItem {
+        crate::sync::SyncAddItem {
+            jellyfin_id: id.to_string(),
+            name: id.to_string(),
+            album: None,
+            artist: None,
+            size_bytes: 1_000,
+            etag: None,
+            provider_album_id: None,
+            provider_content_type: None,
+            provider_suffix: None,
+            original_bitrate: None,
+            track_number: None,
+            reason_code: None,
+            reason: None,
+            server_id: server_id.map(str::to_string),
+            tier: None,
+            max_bitrate_override_kbps: None,
+        }
+    }
+
+    #[test]
+    fn patch_delta_bitrate_overrides_scopes_to_autofill_items_only() {
+        // A manual item (not in the map) and two auto-fill items (in the map) on the same server.
+        let mut delta = crate::sync::SyncDelta {
+            adds: vec![
+                add_item("manual-1", Some("srv")),
+                add_item("af-1", Some("srv")),
+                add_item("af-2", Some("srv")),
+            ],
+            deletes: Vec::new(),
+            id_changes: Vec::new(),
+            unchanged: 0,
+            playlists: Vec::new(),
+            pity_fired_servers: Vec::new(),
+        };
+        let mut map = std::collections::HashMap::new();
+        map.insert("af-1".to_string(), 96u32);
+        map.insert("af-2".to_string(), 96u32);
+        patch_delta_bitrate_overrides(&mut delta, &map);
+
+        let by_id = |id: &str| {
+            delta
+                .adds
+                .iter()
+                .find(|a| a.jellyfin_id == id)
+                .unwrap()
+                .max_bitrate_override_kbps
+        };
+        assert_eq!(by_id("af-1"), Some(96), "auto-fill item gets the per-slot override");
+        assert_eq!(by_id("af-2"), Some(96));
+        assert_eq!(by_id("manual-1"), None, "manual item on the same server is untouched");
+
+        // An empty map is a no-op (nothing stamped).
+        let mut delta2 = crate::sync::SyncDelta {
+            adds: vec![add_item("x", Some("srv"))],
+            deletes: Vec::new(),
+            id_changes: Vec::new(),
+            unchanged: 0,
+            playlists: Vec::new(),
+            pity_fired_servers: Vec::new(),
+        };
+        patch_delta_bitrate_overrides(&mut delta2, &std::collections::HashMap::new());
+        assert_eq!(delta2.adds[0].max_bitrate_override_kbps, None);
+    }
+
+    #[test]
+    fn encoding_override_gated_on_active_transcode_profile() {
+        use crate::auto_fill::AutoFillPipeline;
+        use crate::auto_fill::pipeline::BudgetStage;
+        let mut enc = AutoFillPipeline::default_legacy(Some(8_000_000));
+        enc.budget = BudgetStage {
+            max_bytes: Some(8_000_000),
+            target_duration_secs: Some(600),
+            headroom_bytes: None,
+            encoding_from_goals: true,
+        };
+
+        // Passthrough / no profile ⇒ no override AND the flag is cleared so the estimate stays source-based.
+        assert!(!transcode_profile_active(None));
+        assert!(!transcode_profile_active(Some("passthrough")));
+        assert_eq!(encoding_override_kbps(Some(&enc), false), None, "no transcode ⇒ no override");
+        let cleared = encoding_passthrough_clear(Some(&enc), false).expect("flag cleared in passthrough");
+        assert!(!cleared.budget.encoding_from_goals);
+
+        // Active profile ⇒ derive the override (8MB/600s ⇒ 106 kbps) and keep the flag.
+        assert!(transcode_profile_active(Some("profile-aac-128")));
+        assert_eq!(encoding_override_kbps(Some(&enc), true), Some(106));
+        assert!(
+            encoding_passthrough_clear(Some(&enc), true).is_none(),
+            "flag is preserved when a transcode profile is active"
+        );
+
+        // A pipeline that didn't enable encoding-from-goals never derives an override.
+        let plain = AutoFillPipeline::default_legacy(Some(8_000_000));
+        assert_eq!(encoding_override_kbps(Some(&plain), true), None);
+        assert!(encoding_passthrough_clear(Some(&plain), false).is_none());
+    }
 
     fn make_test_state(db: Arc<crate::db::Database>) -> Arc<AppState> {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));

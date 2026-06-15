@@ -44,6 +44,9 @@ export interface BudgetStage {
     maxBytes?: number;
     targetDurationSecs?: number;
     headroomBytes?: number;
+    /** Story 13.5 #20 (encoding-from-goals): derive the transcode bitrate from the size + duration
+     * goals. Needs both `maxBytes` and a positive `targetDurationSecs`. Omitted when false. */
+    encodingFromGoals?: boolean;
 }
 
 /** Quality & version modifiers (Story 13.2). Mirrors the daemon `QualityStage` serde shape;
@@ -84,6 +87,37 @@ export interface PityStage {
     discoveryMaxPlays?: number;
 }
 
+/** A context-rule time/calendar window (Story 13.5 #3/#17/#32). Mirrors the externally-tagged daemon
+ * `ContextWindow` enum (camelCase): `timeOfDay` (hour window), `months`, or `dateRange` ((month,day)
+ * tuples serialized as `[m, d]`). */
+export type ContextWindow =
+    | { timeOfDay: { startHour: number; endHour: number } }
+    | { months: { months: number[] } }
+    | { dateRange: { start: [number, number]; end: [number, number] } };
+
+/** One context rule: a window + its effect (source activation/weighting + scheduled tag/genre filter).
+ * Mirrors the daemon `ContextRule` serde shape; `weight` is omitted when unset. */
+export interface ContextRule {
+    window: ContextWindow;
+    /** Source `ref`s this rule activates/boosts while active. */
+    sourceRefs: string[];
+    /** Optional share multiplier for the activated sources (energy-phase emphasis). */
+    weight?: number;
+    includeTags: string[];
+    excludeTags: string[];
+    includeGenres: string[];
+    excludeGenres: string[];
+}
+
+/** Clock-driven Context stage (Story 13.5 #3 time-of-day / #17 energy-curve / #32 seasonal). Mirrors
+ * the daemon `ContextStage` serde shape; default (`enabled: false`, no rules) is today's behavior. */
+export interface ContextStage {
+    /** Off ⇒ no rule is ever consulted (zero behavior change). */
+    enabled?: boolean;
+    /** Context rules, evaluated in order against the caller-supplied local civil time. */
+    rules?: ContextRule[];
+}
+
 export interface AutoFillPipeline {
     enabled: boolean;
     filter: FilterStage;
@@ -96,7 +130,11 @@ export interface AutoFillPipeline {
     quality: QualityStage;
     rarity: RarityStage;
     pity: PityStage;
+    context: ContextStage;
 }
+
+/** The context-window kinds the rule editor offers. */
+export type ContextWindowKind = 'timeOfDay' | 'months' | 'dateRange';
 
 /** The user-facing ordering keys. Story 13.3 adds the discovery keys `excavation` (deep cuts) and
  * `rediscovery` (added long ago). Story 13.4 surfaces `random` (now a functional seeded shuffle —
@@ -126,6 +164,7 @@ export function defaultLegacyPipeline(maxBytes?: number): AutoFillPipeline {
         quality: {},
         rarity: {},
         pity: {},
+        context: {},
     };
 }
 
@@ -155,6 +194,10 @@ export function normalizePipeline(raw: Partial<AutoFillPipeline> | null | undefi
         },
         rarity: { ...(raw.rarity ?? {}) },
         pity: { ...(raw.pity ?? {}) },
+        context: {
+            ...(raw.context ?? {}),
+            rules: Array.isArray(raw.context?.rules) ? raw.context.rules.map((r) => ({ ...r })) : [],
+        },
     };
 }
 
@@ -192,6 +235,8 @@ export function serializePipeline(p: AutoFillPipeline): AutoFillPipeline {
     if (typeof p.budget.headroomBytes === 'number' && p.budget.headroomBytes > 0) {
         budget.headroomBytes = p.budget.headroomBytes;
     }
+    // Story 13.5 #20 — encoding-from-goals: emit only when enabled (omit-when-default).
+    if (p.budget.encodingFromGoals) budget.encodingFromGoals = true;
     // Story 13.2 Quality stage — emit only meaningful fields (mirrors the Memory-fields pattern) so a
     // default pipeline round-trips clean and stays backward-compatible.
     const quality: QualityStage = {};
@@ -220,6 +265,26 @@ export function serializePipeline(p: AutoFillPipeline): AutoFillPipeline {
         if (typeof p.pity.guaranteedRatio === 'number') pity.guaranteedRatio = Math.max(0, Math.min(1, p.pity.guaranteedRatio));
         if (typeof p.pity.discoveryMaxPlays === 'number') pity.discoveryMaxPlays = Math.max(0, Math.floor(p.pity.discoveryMaxPlays));
     }
+    // Story 13.5 Context stage — omit-when-default (same pattern). A disabled stage emits `{}`, which the
+    // daemon reads as the default stage so routing keeps the fast path. Rules' empty arrays are emitted
+    // verbatim to match the daemon serde (which has no skip on the Vec fields); `weight` is omitted when
+    // unset. The window is passed through (the editor only ever builds well-formed windows).
+    const context: ContextStage = {};
+    if (p.context?.enabled) {
+        context.enabled = true;
+        context.rules = (Array.isArray(p.context.rules) ? p.context.rules : []).map((r) => {
+            const out: ContextRule = {
+                window: r.window,
+                sourceRefs: Array.isArray(r.sourceRefs) ? r.sourceRefs.filter((s) => !!s) : [],
+                includeTags: Array.isArray(r.includeTags) ? r.includeTags.filter((t) => !!t) : [],
+                excludeTags: Array.isArray(r.excludeTags) ? r.excludeTags.filter((t) => !!t) : [],
+                includeGenres: Array.isArray(r.includeGenres) ? r.includeGenres.filter((g) => !!g) : [],
+                excludeGenres: Array.isArray(r.excludeGenres) ? r.excludeGenres.filter((g) => !!g) : [],
+            };
+            if (typeof r.weight === 'number') out.weight = Math.max(0, r.weight);
+            return out;
+        });
+    }
     return {
         enabled: p.enabled,
         filter: {
@@ -237,5 +302,6 @@ export function serializePipeline(p: AutoFillPipeline): AutoFillPipeline {
         quality,
         rarity,
         pity,
+        context,
     };
 }

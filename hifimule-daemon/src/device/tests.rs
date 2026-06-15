@@ -2598,8 +2598,8 @@ fn set_legacy_updates_sole_pipeline_instead_of_parking_dropped_legacy() {
 /// budget/fallback) so round-trip and "untouched" assertions cover the full shape.
 fn rich_pipeline() -> AutoFillPipeline {
     use crate::auto_fill::{
-        BudgetStage, FilterStage, MemoryStage, OrderingKey, PityStage, QualityStage, RarityStage,
-        SourceEntry, SourceKind, Unit,
+        BudgetStage, ContextRule, ContextStage, ContextWindow, FilterStage, MemoryStage,
+        OrderingKey, PityStage, QualityStage, RarityStage, SourceEntry, SourceKind, Unit,
     };
     AutoFillPipeline {
         enabled: true,
@@ -2631,6 +2631,7 @@ fn rich_pipeline() -> AutoFillPipeline {
             max_bytes: Some(8_000_000_000),
             target_duration_secs: Some(3600),
             headroom_bytes: Some(100),
+            encoding_from_goals: true,
         },
         fallback: vec![SourceEntry::new(SourceKind::Library)],
         quality: QualityStage {
@@ -2649,6 +2650,22 @@ fn rich_pipeline() -> AutoFillPipeline {
             threshold_syncs: 3,
             guaranteed_ratio: 0.25,
             discovery_max_plays: 0,
+        },
+        context: ContextStage {
+            enabled: true,
+            rules: vec![
+                ContextRule {
+                    window: ContextWindow::TimeOfDay { start_hour: 6, end_hour: 11 },
+                    source_refs: vec!["pl-42".to_string()],
+                    weight: Some(2.0),
+                    ..ContextRule::default()
+                },
+                ContextRule {
+                    window: ContextWindow::Months { months: vec![12] },
+                    include_genres: vec!["Christmas".to_string()],
+                    ..ContextRule::default()
+                },
+            ],
         },
     }
 }

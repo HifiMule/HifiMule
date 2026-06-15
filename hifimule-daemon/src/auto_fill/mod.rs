@@ -78,6 +78,10 @@ pub struct AutoFillParams {
     /// Story 13.4: the pity dry-streak read from the DB by the caller (sibling of `rotation_cursor`).
     /// Threaded into [`pipeline::PipelineInput::pity_streak`]; `0` on legacy paths.
     pub pity_streak: i64,
+    /// Story 13.5: caller-supplied local civil time (minted by `rpc::now_civil()` at the engine fill
+    /// sites). Threaded into [`pipeline::HistorySnapshot::local`] to drive the Context stage. Defaults
+    /// to `CivilTime::default()` (all-zero, inert) on legacy/Jellyfin paths — mirrors the `seed` split.
+    pub local: pipeline::CivilTime,
 }
 
 /// Retry delays (ms) for transient 5xx server errors. Two entries = up to 3 total attempts.
