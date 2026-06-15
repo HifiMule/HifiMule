@@ -4,7 +4,7 @@ baseline_commit: 6b51767f93383a476f8d31f53c2853a3ac0e6e2e
 
 # Story 13.5: Context & Encoding-From-Goals
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -301,3 +301,12 @@ claude-opus-4-8 (Opus 4.8, 1M context) — bmad-dev-story workflow.
 |------|--------|
 | 2026-06-15 | Story 13.5 created via create-story. Scope: Context axis cheap proxies (#3 time-of-day, #17 energy-curve, #32 seasonal) via one clock-driven `ContextStage` + #20 encoding-from-goals (budget-derived per-slot transcode bitrate). Civil-time carried as a value (chrono at impure layer); no DB table. Deferred: BPM/energy-signal selection, device zones, holiday calendars, device-profile-editor UI, ratings/play-feedback. |
 | 2026-06-15 | Dev 13.5: implemented civil-time foundation (clock-as-value via `chrono`/`now_civil`), the `ContextStage` (one mechanism, three cheap proxies; pure window predicates + effective source/filter computation), and encoding-from-goals (pure `target_bitrate_kbps` + bitrate-aware estimate + per-slot transcode override carried via `SyncAddItem.max_bitrate_override_kbps`). Routing gate `context_default` added. Frontend mirror types + context rule editor + encoding toggle (omit-when-default serialize). i18n 96×4 → 120×4. 599 daemon tests pass, clippy clean on touched modules, i18n + tsc + build green. Status → review. |
+| 2026-06-15 | Review 13.5: code review (3 adversarial layers) — no hard AC violations, no Critical/High. Applied 2 patches in `pipeline.rs`: (1) `CivilTime::is_set()` guard so an unminted all-zero civil time keeps the Context stage inert even if `context.enabled` (hardens the `TimeOfDay{start_hour:0}` footgun); (2) `effective_sources` clamps non-positive rule `weight` to 0 and suppresses the source (fixes `weight:0.0` falling back to an equal `1/n` split). +2 regression tests; 601 daemon tests pass, clippy clean on `pipeline.rs`. Deferred: i18n all-locale parity test (pre-existing, triple-flagged). Status → done. |
+
+## Review Findings
+
+_Code review 2026-06-15 (Blind Hunter + Edge Case Hunter + Acceptance Auditor). No hard AC violations; no Critical/High defects. 1 decision-needed, 1 patch, 1 deferred, 7 dismissed as noise. Decision resolved → harden; both patches applied & verified (601 daemon tests pass incl. 2 new regression tests; clippy clean on `pipeline.rs`). Status → done._
+
+- [x] [Review][Patch] Civil-time unminted-default guard (resolved from decision 2026-06-15: harden) — Add a defensive all-zero / `is_set()` guard so an unminted `CivilTime::default()` makes the Context stage inert even if a future caller sets `context.enabled = true` without minting `now_civil()`. Without it, the all-zero default (`hour: 0`) would silently activate every `TimeOfDay { start_hour: 0 }` rule and no `Months`/`DateRange` rule. Current production code is correct (all engine sites mint `now_civil()`; AC4 accepts the hour-0 edge under `enabled`-gating); this is forward-looking hardening. [pipeline.rs `run_pipeline`/`context_rule_active`; CivilTime doc :441-442]
+- [x] [Review][Patch] `weight: Some(0.0)` inverts source emphasis — when all retained sources of an active rule carry `weight: 0.0`, the normalization `total == 0.0` branch falls back to equal `1.0/n` shares (full equal fill) instead of de-emphasizing/suppressing the source; UI permits `min="0"`, so this is reachable. Fix: clamp the weight to a positive floor in the daemon's `effective_sources` (or treat `weight <= 0` as suppression) and/or set the UI input `min` to a positive value. [hifimule-daemon/src/auto_fill/pipeline.rs `effective_sources`; hifimule-ui/src/components/AutoFillPanel.ts weight input + state/autoFill.ts serialize]
+- [x] [Review][Defer] No automated all-locale i18n key-parity test [hifimule-i18n] — deferred, pre-existing (flagged in 13.3 & 13.4 reviews; `translate` silently falls back to English then the raw key; parity verified by script this story at 120×4).

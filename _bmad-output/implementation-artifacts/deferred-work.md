@@ -3,6 +3,10 @@
 Status: open
 Last updated: 2026-06-15
 
+## Deferred from: code review of 13-5-context-and-encoding-from-goals (2026-06-15)
+
+- **No automated all-locale i18n key-parity test** (`hifimule-i18n`) — recurring gap, now flagged in the 13.3, 13.4, **and** 13.5 reviews. `hifimule-i18n` ships only 6 per-translation tests with no assertion that en/fr/es/de share the same key set; `translate` silently falls back to English then the raw key, so a dropped locale key would not fail CI. 13.5 parity (120×4) verified by script. Pre-existing, out of scope per spec Dev Notes. Now triple-flagged — strong candidate to land as a dedicated cleanup before the next i18n-touching story.
+
 ## Deferred from: code review of 13-4-delight-rarity-draws-and-pity-timer (2026-06-15)
 
 - **No automated all-locale i18n key-parity test** (`hifimule-i18n`). `hifimule-i18n` ships only 6 per-translation tests; there is no assertion that en/fr/es/de share the same key set, and `translate` silently falls back to English then the raw key, so a dropped locale key would not fail CI. 13.4 parity (96×4) verified by hand. Pre-existing gap, also flagged in the 13.3 review; out of scope per spec Dev Notes. Recommend adding a real all-locale key-set parity test so future stories can rely on the gate they already cite.

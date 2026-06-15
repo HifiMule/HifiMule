@@ -467,7 +467,8 @@ fn effective_filter_with(base: &FilterStage, active: &[&ContextRule]) -> FilterS
 /// Story 13.5 AC 5: the effective source set for this run. Context gates only the sources its rules
 /// *mention* (by `ref_id`): a source named in **no** rule always runs; a source named in **any active**
 /// rule runs (weighted by the **max** of those rules' weights — documented choice to avoid unbounded
-/// products); a source named **only in inactive** rules is suppressed. When a non-trivial weight is in
+/// products; a non-positive weight is clamped to `0` and **suppresses** the source, same as an inactive
+/// mention); a source named **only in inactive** rules is suppressed. When a non-trivial weight is in
 /// play, the retained sources' shares are recomputed as `base_share × weight`, normalized to explicit
 /// shares — so the energy-phase emphasis rides the existing [`source_caps`] machinery. With no weighting,
 /// only suppression is applied (shares untouched, so a pure seasonal/time gate is byte-identical to the
@@ -486,7 +487,11 @@ fn effective_sources(
     }
     let mut active_weight: HashMap<&str, f32> = HashMap::new();
     for r in active {
-        let w = r.weight.unwrap_or(1.0);
+        // Clamp negatives to 0; a non-positive weight means "this active rule contributes no share for
+        // this source" — i.e. suppress it (review 13.5). Without the clamp, `weight: 0.0` flowed into
+        // the share normalization where an all-zero total fell back to an equal `1/n` split — inverting
+        // the user's intent (0 = de-emphasize) into a full equal fill.
+        let w = r.weight.unwrap_or(1.0).max(0.0);
         for rid in &r.source_refs {
             active_weight
                 .entry(rid.as_str())
@@ -496,11 +501,14 @@ fn effective_sources(
     }
 
     // Retain: sources with no ref_id, or whose ref_id is in no rule, always run; a mentioned source
-    // runs only when an active rule names it.
+    // runs only when an active rule names it with a positive weight (weight 0 ⇒ suppressed, mirroring
+    // an inactive mention — see the clamp above).
     let retained: Vec<SourceEntry> = sources
         .iter()
         .filter(|s| match s.ref_id.as_deref() {
-            Some(rid) if mentioned_any.contains(rid) => active_weight.contains_key(rid),
+            Some(rid) if mentioned_any.contains(rid) => {
+                active_weight.get(rid).is_some_and(|w| *w > 0.0)
+            }
             _ => true,
         })
         .cloned()
@@ -653,8 +661,9 @@ pub struct TrackHistory {
 /// `fetch.rs` selection path. The single mint site is `rpc.rs`'s `now_civil()`, beside `now_unix_secs()`.
 ///
 /// `#[derive(Default)]` ⇒ all-zero (`hour 0`, `month 0`, `day 0`, `weekday 0`). An all-zero value
-/// matches no `Months`/`DateRange` rule and matches a `TimeOfDay` only at hour 0 — acceptable because
-/// the Context stage is gated on `ContextStage::enabled` (AC 4), so a default value is never consulted.
+/// matches no `Months`/`DateRange` rule and would match a `TimeOfDay` only at hour 0 — but the Context
+/// stage is gated on **both** `ContextStage::enabled` (AC 4) **and** [`CivilTime::is_set`], so an
+/// unminted default is never consulted even if `enabled` is true (review 13.5 hardening).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CivilTime {
     /// Hour of day, `0..=23` (local).
@@ -665,6 +674,19 @@ pub struct CivilTime {
     pub day: u8,
     /// Day of week, `0 = Monday ..= 6 = Sunday` (local). Reserved for future weekday windows.
     pub weekday: u8,
+}
+
+impl CivilTime {
+    /// True when this value was minted from a real clock (not the all-zero [`Default`]). A real local
+    /// civil time always has `month` in `1..=12`; only the unset default has `month == 0`. The Context
+    /// stage consults civil time **only** when this is true (see [`run_pipeline`]), so an unminted
+    /// default keeps the stage inert even if a caller sets `context.enabled = true` without minting
+    /// `now_civil()` — hardening against the `TimeOfDay { start_hour: 0 }` footgun the all-zero default
+    /// would otherwise trip (review 13.5). Production always mints civil time at the engine fill sites,
+    /// so this is a defensive guard, not a behavior change for any current path.
+    pub fn is_set(&self) -> bool {
+        self.month != 0
+    }
 }
 
 /// A snapshot of runtime history plus the caller's notion of "now" (Unix seconds). The engine
@@ -757,7 +779,7 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
         &[SourceEntry],
         &[SourceEntry],
         &FilterStage,
-    ) = if pipeline.context.enabled {
+    ) = if pipeline.context.enabled && input.history.local.is_set() {
         let active = active_context_rules(&pipeline.context, &input.history.local);
         ctx_filter = effective_filter_with(&pipeline.filter, &active);
         ctx_sources = effective_sources(sources, &pipeline.context.rules, &active);
@@ -4045,6 +4067,126 @@ mod tests {
         let c = run_pipeline(&ci, &composed);
         assert_eq!(count(&c, "a"), 6, "max-compose keeps weight 2 (6 tracks), not the 4.0 product (8)");
         assert_eq!(count(&c, "b"), 3);
+    }
+
+    #[test]
+    fn context_weight_zero_suppresses_not_equal_splits() {
+        // Review 13.5 regression: weight 0 must SUPPRESS the source, not fall back to an equal split.
+        let pools = || {
+            let mk = |prefix: &str| {
+                (0..10)
+                    .map(|i| cand(song_sized(&format!("{prefix}{i}"), false, 0, "2024-01-01", 1_000_000)))
+                    .collect::<Vec<_>>()
+            };
+            PipelineInput::default()
+                .with_pool(SourceKind::Playlist, Some("a"), mk("a"))
+                .with_pool(SourceKind::Playlist, Some("b"), mk("b"))
+        };
+        let count = |items: &[AutoFillItem], prefix: &str| {
+            items.iter().filter(|i| i.id.starts_with(prefix)).count()
+        };
+
+        // weight 0 on the ONLY mentioned source: it is suppressed, "b" (unmentioned) takes the budget.
+        let zero_only = AutoFillPipeline {
+            sources: vec![playlist_src("a"), playlist_src("b")],
+            budget: BudgetStage { max_bytes: Some(10_000_000), ..Default::default() },
+            context: ContextStage {
+                enabled: true,
+                rules: vec![ContextRule {
+                    window: ContextWindow::Months { months: vec![7] },
+                    source_refs: vec!["a".to_string()],
+                    weight: Some(0.0),
+                    ..Default::default()
+                }],
+            },
+            ..Default::default()
+        };
+        let mut zi = pools();
+        zi.history.local = civil(0, 7, 1);
+        let z = run_pipeline(&zi, &zero_only);
+        assert_eq!(count(&z, "a"), 0, "weight 0 suppresses 'a' (not an equal 1/n split)");
+        assert_eq!(count(&z, "b"), 10, "'b' (unmentioned) fills the whole budget");
+
+        // weight 0 on "a" in one active rule but 2.0 in another active rule ⇒ max-compose keeps it.
+        let zero_then_boost = AutoFillPipeline {
+            sources: vec![playlist_src("a"), playlist_src("b")],
+            budget: BudgetStage { max_bytes: Some(10_000_000), ..Default::default() },
+            context: ContextStage {
+                enabled: true,
+                rules: vec![
+                    ContextRule {
+                        window: ContextWindow::Months { months: vec![7] },
+                        source_refs: vec!["a".to_string()],
+                        weight: Some(0.0),
+                        ..Default::default()
+                    },
+                    ContextRule {
+                        window: ContextWindow::Months { months: vec![7] },
+                        source_refs: vec!["a".to_string()],
+                        weight: Some(2.0),
+                        ..Default::default()
+                    },
+                ],
+            },
+            ..Default::default()
+        };
+        let mut bi = pools();
+        bi.history.local = civil(0, 7, 1);
+        let b = run_pipeline(&bi, &zero_then_boost);
+        assert_eq!(count(&b, "a"), 6, "max(0, 2) = 2 ⇒ 'a' retained at weight 2 (6 tracks)");
+        assert_eq!(count(&b, "b"), 3);
+    }
+
+    #[test]
+    fn context_inert_when_civil_time_unset_even_if_enabled() {
+        // Review 13.5 hardening: an unminted CivilTime::default() (month 0) keeps the Context stage
+        // inert even with context.enabled = true — so a TimeOfDay { start_hour: 0 } rule can't fire.
+        let pools = || {
+            let mk = |prefix: &str| {
+                (0..6)
+                    .map(|i| cand(song_sized(&format!("{prefix}{i}"), false, 0, "2024-01-01", 1_000_000)))
+                    .collect::<Vec<_>>()
+            };
+            PipelineInput::default()
+                .with_pool(SourceKind::Playlist, Some("morning"), mk("morning"))
+                .with_pool(SourceKind::Playlist, Some("evening"), mk("evening"))
+        };
+        // Both sources are mentioned in time-windowed rules. With an all-zero default (hour 0), the
+        // morning rule (0..6) would fire and the evening rule (18..23) would not — suppressing "evening".
+        // The is_set() guard must prevent any rule from being consulted while civil time is unset.
+        let pipeline = AutoFillPipeline {
+            sources: vec![playlist_src("morning"), playlist_src("evening")],
+            budget: BudgetStage { max_bytes: Some(12_000_000), ..Default::default() },
+            context: ContextStage {
+                enabled: true,
+                rules: vec![
+                    ContextRule {
+                        window: ContextWindow::TimeOfDay { start_hour: 0, end_hour: 6 },
+                        source_refs: vec!["morning".to_string()],
+                        ..Default::default()
+                    },
+                    ContextRule {
+                        window: ContextWindow::TimeOfDay { start_hour: 18, end_hour: 23 },
+                        source_refs: vec!["evening".to_string()],
+                        ..Default::default()
+                    },
+                ],
+            },
+            ..Default::default()
+        };
+
+        // Unset civil time (default ⇒ month 0): context inert ⇒ both sources run (6 each).
+        let inert = run_pipeline(&pools(), &pipeline);
+        let count = |items: &[AutoFillItem], p: &str| items.iter().filter(|i| i.id.starts_with(p)).count();
+        assert_eq!(count(&inert, "morning"), 6, "unset civil time ⇒ context inert ⇒ morning runs");
+        assert_eq!(count(&inert, "evening"), 6, "unset civil time ⇒ evening NOT suppressed");
+
+        // Minted civil time at 00:00 Jan 1 (month set): the rule now fires ⇒ evening suppressed.
+        let mut active = pools();
+        active.history.local = civil(0, 1, 1);
+        let gated = run_pipeline(&active, &pipeline);
+        assert_eq!(count(&gated, "evening"), 0, "minted hour-0 civil time ⇒ evening suppressed by the rule");
+        assert_eq!(count(&gated, "morning"), 6);
     }
 
     #[test]
