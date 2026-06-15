@@ -824,6 +824,38 @@ impl MediaProvider for JellyfinProvider {
             limit: filter.limit,
         })
     }
+
+    async fn list_all_songs_page(
+        &self,
+        library_id: Option<&str>,
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<Song>, u32), ProviderError> {
+        // Unfiltered audio enumeration via the same /Items endpoint as `list_tracks`.
+        // `get_items` already sets Recursive=true; `IncludeItemTypes=Audio` scopes to songs.
+        let limit_param = (limit > 0).then_some(limit);
+        let response = self
+            .client
+            .get_items(
+                self.url(),
+                self.token(),
+                self.user_id(),
+                library_id,
+                Some("Audio"),
+                Some(offset),
+                limit_param,
+                None,
+                None,
+                None,
+                None,
+                Some("Name"),
+            )
+            .await
+            .map_err(Self::map_error)?;
+        let total = response.total_record_count;
+        let songs: Vec<Song> = response.items.into_iter().map(song_from_item).collect();
+        Ok((songs, total))
+    }
 }
 
 pub(crate) fn library_from_view(view: JellyfinView) -> Option<Library> {
@@ -1253,6 +1285,40 @@ mod tests {
         assert_eq!(result.songs[0].title, "Track");
         assert!(result.artists.is_empty());
         assert!(result.albums.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_all_songs_page_enumerates_audio() {
+        let mut server = Server::new_async().await;
+        let url = server.url();
+        let _mock = server
+            .mock("GET", "/Items")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("userId".into(), USER_ID.into()),
+                Matcher::UrlEncoded("IncludeItemTypes".into(), "Audio".into()),
+                Matcher::UrlEncoded("Recursive".into(), "true".into()),
+                Matcher::UrlEncoded("StartIndex".into(), "0".into()),
+                Matcher::UrlEncoded("Limit".into(), "200".into()),
+                Matcher::UrlEncoded("SortBy".into(), "Name".into()),
+            ]))
+            .match_header("X-Emby-Token", TOKEN)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"Items":[{"Id":"song1","Name":"Track","Type":"Audio","RunTimeTicks":100000000}],"TotalRecordCount":42,"StartIndex":0}"#)
+            .create_async()
+            .await;
+
+        let provider = JellyfinProvider::new(JellyfinClient::new(), url, TOKEN, USER_ID);
+
+        let (songs, total) = provider
+            .list_all_songs_page(None, 0, 200)
+            .await
+            .expect("list_all_songs_page");
+
+        assert_eq!(total, 42);
+        assert_eq!(songs.len(), 1);
+        assert_eq!(songs[0].id, "song1");
+        assert_eq!(songs[0].title, "Track");
     }
 
     #[tokio::test]
