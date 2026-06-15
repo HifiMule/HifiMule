@@ -1,6 +1,6 @@
 # HifiMule — Project Documentation Index
 
-**Generated:** 2026-05-23 | **Scan depth:** Exhaustive | **Version:** 0.6.1
+**Generated:** 2026-05-23 | **Last Updated:** 2026-06-15 | **Scan depth:** Exhaustive | **Version:** 0.6.1 | **Deep-Dives:** 1
 
 ---
 
@@ -65,6 +65,14 @@
 
 - [Project Parts (JSON)](./project-parts.json)
 - [Project Scan Report (JSON)](./project-scan-report.json)
+
+---
+
+## Deep-Dive Documentation
+
+Detailed analysis of specific areas:
+
+- [Auto-Fill Deep-Dive](./deep-dive-autofill.md) — Per-`(device, serverId)` pipeline model & manifest persistence, fast-path vs. configurable-engine routing, the pure `run_pipeline` engine, discovery/memory stages (rotation tiers, rarity, pity, context), quality & promotion modifiers, machine-local DB counters, and the `AutoFillPanel` builder UI — Generated 2026-06-15
 
 ---
 

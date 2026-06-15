@@ -2,9 +2,18 @@
   "workflow_version": "1.2.0",
   "timestamps": {
     "started": "2026-05-23T23:34:20+02:00",
-    "last_updated": "2026-05-23T23:34:20+02:00",
+    "last_updated": "2026-06-15T00:00:00+02:00",
     "completed": "2026-05-23T23:34:20+02:00"
   },
+  "deep_dive_targets": [
+    {
+      "target_name": "Auto-Fill Configuration",
+      "target_path": "hifimule-daemon/src/auto_fill/ + hifimule-ui/src/state/autoFill.ts",
+      "output_file": "deep-dive-autofill.md",
+      "timestamp": "2026-06-15T00:00:00+02:00",
+      "summary": "Config model (AutoFillPipeline stages), fast-path vs configurable-engine routing, per-(device,serverId) manifest persistence, and sync-time budget resolution."
+    }
+  ],
   "mode": "full_rescan",
   "scan_level": "exhaustive",
   "project_root": "C:/Workspaces/HifiMule",
@@ -136,7 +145,8 @@
     "data-models-hifimule-daemon.md",
     "component-inventory-hifimule-ui.md",
     "development-guide.md",
-    "project-parts.json"
+    "project-parts.json",
+    "deep-dive-autofill.md"
   ],
   "resume_instructions": "Workflow completed successfully (exhaustive full_rescan, 2026-05-23)"
 }
