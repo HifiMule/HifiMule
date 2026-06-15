@@ -4882,15 +4882,21 @@ mod tests {
             promotion: PromotionStage { album_track_ratio: Some(0.5), ..Default::default() },
             ..Default::default()
         };
-        let result = ids(&run_pipeline(&input, &pipeline));
-        // Complete album "fits" pulled whole by the reserve.
-        assert!(result.contains(&"f1".to_string()) && result.contains(&"f2".to_string()));
+        let mut result = ids(&run_pipeline(&input, &pipeline));
+        result.sort();
+        // Assert the EXACT selected set + total bytes, not a loose upper bound. The 4MB album reserve is
+        // filled to the byte by the complete "fits" album (atomic) — leaving no room for "big", which is
+        // a 6MB atomic unit the reserve cannot admit. The base Track pass then spends the remaining 4MB
+        // on the first two loose "big" singletons (b1, b2); b3 overflows the 8MB ceiling. (Reserve-pass
+        // atomicity itself — a unit that doesn't fit takes nothing — is the Selector's guarantee, covered
+        // by its own atomic-unit tests; here we pin the end-to-end album-ratio composition exactly.)
+        assert_eq!(
+            result,
+            vec!["b1", "b2", "f1", "f2"],
+            "complete album fills the reserve first, then loose tracks fill the remainder to the ceiling"
+        );
         let total: u64 = run_pipeline(&input, &pipeline).iter().map(|i| i.size_bytes).sum();
-        assert!(total <= 8_000_000, "selection within ceiling");
-        // "big" is selected as loose tracks by the base pass (it never partially leaked into the album
-        // reserve — the 4MB reserve held only the complete "fits" album), but only as many as fit.
-        let big_count = result.iter().filter(|id| id.starts_with('b')).count();
-        assert!(big_count <= 2, "remaining 4MB after the album reserve fits at most 2 loose tracks");
+        assert_eq!(total, 8_000_000, "fills the ceiling exactly (4MB album reserve + 4MB loose tracks)");
     }
 
     #[test]

@@ -4,7 +4,7 @@ baseline_commit: 3a46765d5c2ee307154ab00730ddbaeed9bc3eae
 
 # Story 13.6: Advanced Units & Promotion
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -143,6 +143,16 @@ This is the same discipline that landed 13.1–13.5 cleanly: **deliver the deter
 
 - [x] **Full verification** (AC: 10, 11)
   - [x] Daemon tests (no regression: 614 pass); clippy clean on touched modules; i18n green; tsc + build green. Strengthened the **Antoine** persona with a coherence/album-integrity assertion (config-driven, no `if persona` branch).
+
+### Review Findings
+
+_Code review 2026-06-15 (adversarial: Blind Hunter + Edge Case Hunter + Acceptance Auditor). All 11 ACs verified SATISFIED. 0 decision-needed, 2 patch applied, 2 deferred, ~16 dismissed (by-design/documented or false positive). tsc clean; `promotion_album_ratio` tests green._
+
+- [x] [Review][Patch][Applied] TS serialize persisted a dangling `spotlightShare` when spotlight is off — `serializePipeline` admitted the promotion block on `spotlightShare > 0` alone, emitting `{ spotlightShare }` with no `spotlight:true`. The daemon gates spotlight on `promotion.spotlight`, so the share was inert but still forced the configurable (slow) path and persisted meaningless manifest state (reachable: the spotlight toggle handler clears `spotlight` but not `spotlightShare`). Fixed: `spotlightShare` dropped from the activation condition and emitted only when `pr.spotlight`. [hifimule-ui/src/state/autoFill.ts:311-321]
+- [x] [Review][Patch][Applied] Album-ratio atomicity test asserted only a loose `big_count <= 2` upper bound — replaced with an exact selected-set assertion (`["b1","b2","f1","f2"]`) + exact total (`8_000_000`), and corrected the comment to claim only what the end-to-end output proves (reserve-pass atomicity itself is the Selector's guarantee, covered by its own atomic-unit tests). [hifimule-daemon/src/auto_fill/pipeline.rs (promotion_album_ratio_fills_complete_albums_first_then_tracks)]
+- [x] [Review][Dismissed-on-inspection] `choose_featured_artist` Song clone — flagged as "clones a whole Song, only artist_id needed." On inspection the premise is wrong: `compare_by_ordering` requires a `&Song`, and the running best must survive across source iterations where each source's `units` (owning the candidates) is dropped. The current `take`-guarded form clones at most once per *improving* source; the obvious `filter_map().reduce()` rewrite would clone once per *eligible* source (more clones). The existing code is already clone-minimal — no change. [hifimule-daemon/src/auto_fill/pipeline.rs:1062-1105]
+- [x] [Review][Defer] No test asserts the base-unit pass survives stacked spotlight+album reserves [hifimule-daemon/src/auto_fill/pipeline.rs] — deferred, by-design (each reserve capped by the global `selector.ceiling`; combined-reserve test already asserts total ≤ ceiling + no double-count; spillover is automatic)
+- [x] [Review][Defer] No test covers coherence reorder combined with an atomic-album fill or duration-target truncation [hifimule-daemon/src/auto_fill/pipeline.rs] — deferred, low value (the selection set & byte total are byte-identical to the un-clustered run by construction; coherence only permutes output order)
 
 ## Dev Notes
 

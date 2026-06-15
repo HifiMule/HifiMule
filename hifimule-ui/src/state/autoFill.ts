@@ -309,12 +309,17 @@ export function serializePipeline(p: AutoFillPipeline): AutoFillPipeline {
     const promotion: PromotionStage = {};
     const pr = p.promotion ?? {};
     if (pr.spotlight || pr.coherence
-        || (typeof pr.spotlightShare === 'number' && pr.spotlightShare > 0)
         || (typeof pr.albumTrackRatio === 'number' && pr.albumTrackRatio > 0)
         || (typeof pr.promoteAlbumMinFavorites === 'number' && pr.promoteAlbumMinFavorites > 0)) {
-        if (pr.spotlight) promotion.spotlight = true;
-        if (typeof pr.spotlightShare === 'number' && pr.spotlightShare > 0) {
-            promotion.spotlightShare = Math.max(0, Math.min(1, pr.spotlightShare));
+        // `spotlightShare` is a modifier of `spotlight`, not a self-activating field: the daemon gates
+        // the spotlight reserve on `promotion.spotlight`, so a share with spotlight off is inert. Emit
+        // it only when spotlight is on (and never let it activate the block) — otherwise a stale share
+        // would force the configurable path and persist meaningless manifest state.
+        if (pr.spotlight) {
+            promotion.spotlight = true;
+            if (typeof pr.spotlightShare === 'number' && pr.spotlightShare > 0) {
+                promotion.spotlightShare = Math.max(0, Math.min(1, pr.spotlightShare));
+            }
         }
         if (typeof pr.albumTrackRatio === 'number' && pr.albumTrackRatio > 0) {
             promotion.albumTrackRatio = Math.max(0, Math.min(1, pr.albumTrackRatio));
