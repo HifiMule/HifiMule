@@ -32,8 +32,8 @@ use std::sync::Arc;
 
 use super::pipeline::{
     AutoFillPipeline, Candidate, ContextStage, FilterStage, MemoryStage, OrderingKey,
-    PipelineInput, PityStage, QualityStage, RarityStage, SourceEntry, SourceKey, SourceKind, Unit,
-    run_pipeline,
+    PipelineInput, PityStage, PromotionStage, QualityStage, RarityStage, SourceEntry, SourceKey,
+    SourceKind, Unit, run_pipeline,
 };
 use super::{AutoFillItem, AutoFillParams};
 use crate::domain::models::Song;
@@ -174,6 +174,12 @@ pub fn needs_configurable_expansion(p: &AutoFillPipeline) -> bool {
     // must route to the engine path — the fast `run_auto_fill_provider` path can't run a clock-driven
     // source/filter gate. A default `ContextStage` is today's behavior and keeps the fast path.
     let context_default = p.context == ContextStage::default();
+    // Story 13.6: a promotion-only pipeline (default everything else but a spotlight/album-ratio/
+    // affinity-promotion/coherence modifier set) must route to the engine path — the fast
+    // `run_auto_fill_provider` path can't run a reserve pre-pass, regroup units, or reorder for
+    // coherence. A default `PromotionStage` is today's behavior and keeps the fast path. (A non-default
+    // base `unit` is already caught by `unit_default` above.)
+    let promotion_default = p.promotion == PromotionStage::default();
     // A headroom reserve or duration target can only be honored by the materialized engine path;
     // `max_bytes` alone is honored by the fast path's `max_fill_bytes` and stays default-legacy.
     // Story 13.5 #20: `encoding_from_goals` is only meaningful WITH a `target_duration_secs`, which
@@ -192,7 +198,8 @@ pub fn needs_configurable_expansion(p: &AutoFillPipeline) -> bool {
         && quality_default
         && rarity_default
         && pity_default
-        && context_default)
+        && context_default
+        && promotion_default)
 }
 
 /// Materialize a configured pipeline's source pools from the provider, then run the pure engine.
@@ -1038,6 +1045,43 @@ mod tests {
             needs_configurable_expansion(&p),
             "encoding-from-goals (with its required duration goal) routes to the engine"
         );
+    }
+
+    #[test]
+    fn discriminator_promotion_forces_configurable() {
+        use crate::auto_fill::pipeline::PromotionStage;
+
+        // Story 13.6 (AC 7): a default PromotionStage keeps the fast path; each modifier routes to engine.
+        let p = AutoFillPipeline::default_legacy(Some(1));
+        assert!(
+            !needs_configurable_expansion(&p),
+            "default promotion stage stays on the fast path"
+        );
+
+        // Spotlight only.
+        let mut p = AutoFillPipeline::default_legacy(Some(1));
+        p.promotion = PromotionStage { spotlight: true, ..Default::default() };
+        assert!(needs_configurable_expansion(&p), "spotlight forces configurable");
+
+        // Album/track ratio only.
+        let mut p = AutoFillPipeline::default_legacy(Some(1));
+        p.promotion = PromotionStage { album_track_ratio: Some(0.5), ..Default::default() };
+        assert!(needs_configurable_expansion(&p), "album_track_ratio forces configurable");
+
+        // Affinity promotion only.
+        let mut p = AutoFillPipeline::default_legacy(Some(1));
+        p.promotion = PromotionStage { promote_album_min_favorites: Some(3), ..Default::default() };
+        assert!(needs_configurable_expansion(&p), "promote_album_min_favorites forces configurable");
+
+        // Coherence only.
+        let mut p = AutoFillPipeline::default_legacy(Some(1));
+        p.promotion = PromotionStage { coherence: true, ..Default::default() };
+        assert!(needs_configurable_expansion(&p), "coherence forces configurable");
+
+        // A non-default base unit is already caught by the existing `unit_default` clause (verify).
+        let mut p = AutoFillPipeline::default_legacy(Some(1));
+        p.unit = Unit::Album;
+        assert!(needs_configurable_expansion(&p), "Album base unit still routes via unit_default");
     }
 
     #[test]

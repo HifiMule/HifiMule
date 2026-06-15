@@ -4,7 +4,7 @@ baseline_commit: 3a46765d5c2ee307154ab00730ddbaeed9bc3eae
 
 # Story 13.6: Advanced Units & Promotion
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -115,34 +115,34 @@ This is the same discipline that landed 13.1–13.5 cleanly: **deliver the deter
 
 ## Tasks / Subtasks
 
-- [ ] **`PromotionStage` config + routing** (`hifimule-daemon/src/auto_fill/pipeline.rs`, `fetch.rs`) (AC: 1, 2, 7)
-  - [ ] Add `PromotionStage { spotlight, spotlight_share, album_track_ratio, promote_album_min_favorites, coherence }` (camelCase, `#[serde(default)]`, `Default`, `PartialEq`); add `pub promotion: PromotionStage` to `AutoFillPipeline` and to `default_legacy()` ([pipeline.rs:583-607](../../hifimule-daemon/src/auto_fill/pipeline.rs#L583)).
-  - [ ] Add `promotion_default` to `needs_configurable_expansion`; discriminator test (each modifier routes; default keeps fast path; verify `Unit::Album`/`Artist` still routes via `unit_default`).
+- [x] **`PromotionStage` config + routing** (`hifimule-daemon/src/auto_fill/pipeline.rs`, `fetch.rs`) (AC: 1, 2, 7)
+  - [x] Add `PromotionStage { spotlight, spotlight_share, album_track_ratio, promote_album_min_favorites, coherence }` (camelCase, `#[serde(default)]`, `Default`, `PartialEq`); add `pub promotion: PromotionStage` to `AutoFillPipeline` and to `default_legacy()` ([pipeline.rs:583-607](../../hifimule-daemon/src/auto_fill/pipeline.rs#L583)).
+  - [x] Add `promotion_default` to `needs_configurable_expansion`; discriminator test (each modifier routes; default keeps fast path; verify `Unit::Album`/`Artist` still routes via `unit_default`).
 
-- [ ] **#9 Affinity promotion (unit grouping)** (`hifimule-daemon/src/auto_fill/pipeline.rs`) (AC: 5)
-  - [ ] Extend `unit_stage`/`build_source_units` to accept the promotion config (or a resolved promotion mode). When base `unit == Track` and `promote_album_min_favorites = Some(n>0)`: promote albums with ≥ n favorited candidates to atomic album units (reuse `group_by`), rest stay singletons. No-op for `Album`/`Artist` base unit.
-  - [ ] Tests: promotion threshold met → atomic album; below → track-level; inert for non-Track base unit; None/0 unchanged.
+- [x] **#9 Affinity promotion (unit grouping)** (`hifimule-daemon/src/auto_fill/pipeline.rs`) (AC: 5)
+  - [x] Extend `unit_stage`/`build_source_units` to accept the promotion config (or a resolved promotion mode). When base `unit == Track` and `promote_album_min_favorites = Some(n>0)`: promote albums with ≥ n favorited candidates to atomic album units (reuse `group_by`), rest stay singletons. No-op for `Album`/`Artist` base unit.
+  - [x] Tests: promotion threshold met → atomic album; below → track-level; inert for non-Track base unit; None/0 unchanged.
 
-- [ ] **#8 Album/track ratio + #33 Spotlight (reserve pre-passes)** (`hifimule-daemon/src/auto_fill/pipeline.rs`) (AC: 3, 4)
-  - [ ] Add a `unit` override parameter to `build_source_units` (album pass forces `Unit::Album`; normal pass keeps `pipeline.unit`). Update existing call sites (pass `pipeline.unit`).
-  - [ ] Album-ratio pre-pass: reserve `round(ceiling × r)` bytes, fill with `Unit::Album` across sources (`source_caps` split), restore ceiling, then the normal base-unit primary pass. Mirror the stable-core pre-pass exactly.
-  - [ ] Spotlight pre-pass: choose the featured `artist_id` (best-ranked candidate by `compare_by_ordering`, tie-break by id; seed-aware via ordering); reserve `round(ceiling × spotlight_share)` (default 0.5), fill featured-artist candidates in depth, restore ceiling. Mirror the pity reserve pre-pass.
-  - [ ] Decide & document the pre-pass order (recommend: stable-core → spotlight → album-ratio → pity → primary → fallback) and that reserves spill to later passes; ensure no double-count and the global ceiling/dedup hold.
-  - [ ] Tests: spotlight depth + determinism + seed-variation + spillover + inert; album-ratio fraction + atomicity + r=0 unchanged.
+- [x] **#8 Album/track ratio + #33 Spotlight (reserve pre-passes)** (`hifimule-daemon/src/auto_fill/pipeline.rs`) (AC: 3, 4)
+  - [x] Add a `unit` override parameter to `build_source_units` (album pass forces `Unit::Album`; normal pass keeps `pipeline.unit`). Update existing call sites (pass `pipeline.unit`).
+  - [x] Album-ratio pre-pass: reserve `round(ceiling × r)` bytes, fill with `Unit::Album` across sources (`source_caps` split), restore ceiling, then the normal base-unit primary pass. Mirror the stable-core pre-pass exactly.
+  - [x] Spotlight pre-pass: choose the featured `artist_id` (best-ranked candidate by `compare_by_ordering`, tie-break by id; seed-aware via ordering); reserve `round(ceiling × spotlight_share)` (default 0.5), fill featured-artist candidates in depth, restore ceiling. Mirror the pity reserve pre-pass.
+  - [x] Decide & document the pre-pass order (stable-core → spotlight → album-ratio → pity → primary → fallback) and that reserves spill to later passes; ensure no double-count and the global ceiling/dedup hold.
+  - [x] Tests: spotlight depth + determinism + seed-variation + spillover + inert; album-ratio fraction + atomicity + r=0 unchanged.
 
-- [ ] **#27 Coherence ordering** (`hifimule-daemon/src/auto_fill/pipeline.rs`) (AC: 6)
-  - [ ] After selection assembly, when `coherence`, stable-reorder the selected set into artist→album clusters (first-appearance order), within an album by disc→track→id. Reorder where `Song` fields are still available (see Dev Notes). Selection set & bytes unchanged.
-  - [ ] Tests: identical id-set & bytes with/without coherence; clustered order; deterministic.
+- [x] **#27 Coherence ordering** (`hifimule-daemon/src/auto_fill/pipeline.rs`) (AC: 6)
+  - [x] After selection assembly, when `coherence`, stable-reorder the selected set into artist→album clusters (first-appearance order), within an album by disc→track→id. Reorder where `Song` fields are still available (`CoherenceKey` captured in the `Selector` at staging time). Selection set & bytes unchanged.
+  - [x] Tests: identical id-set & bytes with/without coherence; clustered order; deterministic.
 
-- [ ] **Frontend: promotion stage** (`hifimule-ui/src/state/autoFill.ts`, `components/AutoFillPanel.ts`) (AC: 8)
-  - [ ] Mirror `PromotionStage` + `pipeline.promotion`; omit-when-default normalize/serialize (mirror rarity/pity/context).
-  - [ ] `renderPromotionStage` (spotlight enable+share, album/track ratio, affinity min-favorites, coherence switch) under `renderAdvanced` near the Unit selector; finer slider step; handlers invalidate the live preview.
+- [x] **Frontend: promotion stage** (`hifimule-ui/src/state/autoFill.ts`, `components/AutoFillPanel.ts`) (AC: 8)
+  - [x] Mirror `PromotionStage` + `pipeline.promotion`; omit-when-default normalize/serialize (mirror rarity/pity/context).
+  - [x] `renderPromotionStage` (spotlight enable+share, album/track ratio, affinity min-favorites, coherence switch) under `renderAdvanced` near the Unit selector; finer slider step (`step="1"`); handlers invalidate the live preview.
 
-- [ ] **i18n ×4 locales** (`hifimule-i18n/catalog.json`) (AC: 9)
-  - [ ] Add all new `basket.autofill.*` keys to en/fr/es/de; report the new `N×4` (was 120×4). Catalog tests green.
+- [x] **i18n ×4 locales** (`hifimule-i18n/catalog.json`) (AC: 9)
+  - [x] Add all new `basket.autofill.*` keys to en/fr/es/de; new parity **131×4** (was 120×4 — 11 new keys/locale). Catalog tests green.
 
-- [ ] **Full verification** (AC: 10, 11)
-  - [ ] Daemon tests (no regression); clippy clean on touched modules; i18n green; tsc + build green. Strengthen a persona (config-driven, no `if persona` branch).
+- [x] **Full verification** (AC: 10, 11)
+  - [x] Daemon tests (no regression: 614 pass); clippy clean on touched modules; i18n green; tsc + build green. Strengthened the **Antoine** persona with a coherence/album-integrity assertion (config-driven, no `if persona` branch).
 
 ## Dev Notes
 
@@ -247,14 +247,41 @@ Recent commits (`3a46765 Review 13.5`, `79a021d Dev 13.5`, `6b51767 Review 13.4`
 
 ### Agent Model Used
 
+claude-opus-4-8[1m] (Dev Story workflow)
+
 ### Debug Log References
+
+- `rtk cargo test -p hifimule-daemon` → 614 passed (was 601 at 13.5; +13 new auto_fill/device tests). `auto_fill::` subset: 134 pass.
+- `rtk cargo clippy -p hifimule-daemon --all-targets` → no new warnings in touched modules (`pipeline.rs`, `fetch.rs`); remaining warnings are all pre-existing in unrelated files (api.rs/vault.rs/db.rs/device_io.rs/mtp.rs/sync.rs/jellyfin.rs).
+- `rtk cargo test -p hifimule-i18n` → 6 passed. `basket.autofill` parity = 131×4 (verified per-locale).
+- `rtk npx tsc --noEmit` → no errors. `rtk npm run build` → built clean (only pre-existing dynamic-import advisories).
 
 ### Completion Notes List
 
+- **One additive `PromotionStage`, default-noop (AC 1/2/10).** Added `PromotionStage { spotlight, spotlight_share, album_track_ratio, promote_album_min_favorites, coherence }` (camelCase, `#[serde(default)]`, `Default`, `PartialEq`) plus `AutoFillPipeline::promotion`, wired into `default_legacy()` and the `rich_pipeline()` round-trip fixture. `Option` floats/ints `skip_serializing_if = Option::is_none`; out-of-range floats are tolerated at parse and clamped only at consumption (`.clamp(0.0,1.0)`), matching the 13.5 discipline.
+- **#33 Artist Spotlight (AC 3).** New `choose_featured_artist` picks the artist owning the best-ranked candidate under `compare_by_ordering` (composes with the user ordering; rides the existing `seed` when `Random`/`Rarity` is in the ordering — proven by the seed-variation test), tie-broken by `artist_id`. A spotlight reserve pre-pass mirrors the pity reserve exactly (temporary `selector.ceiling`, `source_caps` split, shared `Selector` ⇒ automatic dedup/spillover), filling the featured artist track-level in depth. No-op on `spotlight:false`/`share==0`/unbounded ceiling/no artist-bearing candidate.
+- **#8 album/track ratio (AC 4).** An album reserve pre-pass forces `Unit::Album` grouping via the new `build_source_units` unit-override parameter; complete albums fill atomically first (the `Selector` already stops the source on an oversized atomic unit — no partial leak), then the base unit governs the remainder. `r=0`/unbounded ⇒ no-op.
+- **Pre-pass order (documented):** stable-core → **spotlight → album-ratio** → pity → primary → fallback. Each reserve is capped by `selector.ceiling`; combined-reserve test asserts `total ≤ ceiling` and no duplicate ids.
+- **#9 affinity promotion (AC 5).** `unit_stage_promoted` (gated on base `unit == Track`) counts `is_favorite == Some(true)` candidates per `album_id` and promotes albums clearing the threshold to atomic units by reusing `group_by` (a candidate's group key is its `album_id` only when its album qualifies, else `None` ⇒ singleton). Favorites-only — ratings deferred (no rating signal on `Song`).
+- **#27 coherence (AC 6).** The `Selector` captures a `CoherenceKey` (artist/album/disc/track/id) in lockstep with each committed item (only when `coherence`), and `into_items` runs a reorder-only permutation (`coherence_reorder`) clustering by artist→album first-appearance then disc→track→id. The id-set and byte total are byte-identical to the un-clustered run (asserted directly).
+- **Routing (AC 7).** Added `promotion_default` to `needs_configurable_expansion`; a promotion-only pipeline routes to the engine, a default stage keeps the fast path; verified `Unit::Album`/`Artist` still routes via the existing `unit_default`.
+- **Frontend (AC 8).** Mirrored `PromotionStage` + `pipeline.promotion` with omit-when-default normalize/serialize; `renderPromotionStage` (spotlight enable + share slider, album/track-ratio slider at `step="1"`, affinity min-favorites input, coherence switch) sits under Advanced next to the Unit selector; handlers invalidate the debounced live preview.
+- **i18n (AC 9).** 11 new `basket.autofill.*` keys × 4 locales (en/fr/es/de) → **131×4** (was 120×4). Pre-existing gap flagged in 13.3–13.5 remains: there is still no automated all-locale key-parity test in `hifimule-i18n` (out of scope; verified by script here).
+- **Persona (AC 11).** Strengthened `persona_antoine_audiophile_quality_first` with an album-integrity assertion: with `coherence` on, his interleaved albums cluster artist→album→track; off, quality ordering governs. Behavior emerges purely from config — no `if persona` branch.
+- **Scope held (AC 10):** no DB table, no new entropy (Spotlight reuses the threaded `seed`), no clock/RNG read in the engine, no on-demand full-discography fetch, legacy fast path + every default pipeline byte-identical. Deferred: rating-based promotion and audio-analysis/BPM coherence (no signals on `Song`).
+
 ### File List
+
+- `hifimule-daemon/src/auto_fill/pipeline.rs` — `PromotionStage` struct + `AutoFillPipeline::promotion` + `default_legacy`; `run_pipeline` spotlight + album-ratio reserve pre-passes & `promote_min_favorites` resolution; `build_source_units` unit-override + promotion params (all call sites updated); `unit_stage_promoted`; `choose_featured_artist`; `CoherenceKey`/`coherence_key`/`coherence_reorder` + `Selector` coherence field/staging/`into_items`; Story 13.6 test suite + Antoine persona coherence assertion.
+- `hifimule-daemon/src/auto_fill/fetch.rs` — `promotion_default` clause in `needs_configurable_expansion` + import; `discriminator_promotion_forces_configurable` test.
+- `hifimule-daemon/src/device/tests.rs` — `rich_pipeline()` fixture now sets a non-default `promotion` (round-trip coverage).
+- `hifimule-ui/src/state/autoFill.ts` — `PromotionStage` TS type + `AutoFillPipeline.promotion`; normalize + omit-when-default serialize.
+- `hifimule-ui/src/components/AutoFillPanel.ts` — `renderPromotionStage` under `renderAdvanced` (next to Unit selector) + handlers (spotlight/share/ratio/min-favorites/coherence).
+- `hifimule-i18n/catalog.json` — 11 new `basket.autofill.*` keys × 4 locales (131×4).
 
 ## Change Log
 
 | Date | Change |
 |------|--------|
+| 2026-06-15 | Dev complete (Story 13.6). One additive default-noop `PromotionStage`: #33 Artist Spotlight (seed-aware reserve pre-pass via `choose_featured_artist` + pity-style reserve), #8 album/track ratio (album reserve pre-pass via `build_source_units` unit-override), #9 affinity promotion (`unit_stage_promoted`, favorites-only, gated on base Track), #27 coherence (`Selector` `CoherenceKey` + reorder-only `coherence_reorder`, byte-identical selection). Routing `promotion_default` added; frontend mirror + `renderPromotionStage`; i18n 120×4 → **131×4**; Antoine persona strengthened. 614 daemon tests pass, clippy clean on touched modules, i18n green, tsc + build green. Deferred: rating-based promotion & audio-analysis coherence (no signal on `Song`). Final Epic 13 story. |
 | 2026-06-15 | Story 13.6 created via create-story. Scope: the Unit axis's advanced modifiers as one additive default-noop `PromotionStage` — #33 Artist Spotlight (seed-aware spotlight reserve pre-pass), #8 album/track space ratio (album reserve pre-pass), #9 affinity-triggered album promotion (favorites-only unit-grouping promotion), #27 coherence ordering (cluster the final selection by artist→album→disc→track; reorder-only, selection byte-identical). Reuses the stable-core/pity reserve-pass pattern, the existing atomic-unit `Selector`, and the already-threaded `seed`; no new DB table, no new entropy, no clock/RNG read. Deferred: rating-based promotion (no rating signal on `Song`) and audio-analysis/BPM coherence (no signal). Final Epic 13 story. |

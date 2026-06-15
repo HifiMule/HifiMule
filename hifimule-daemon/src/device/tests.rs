@@ -2667,6 +2667,13 @@ fn rich_pipeline() -> AutoFillPipeline {
                 },
             ],
         },
+        promotion: crate::auto_fill::pipeline::PromotionStage {
+            spotlight: true,
+            spotlight_share: Some(0.5),
+            album_track_ratio: Some(0.3),
+            promote_album_min_favorites: Some(2),
+            coherence: true,
+        },
     }
 }
 

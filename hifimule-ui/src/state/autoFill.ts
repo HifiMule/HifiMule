@@ -118,6 +118,21 @@ export interface ContextStage {
     rules?: ContextRule[];
 }
 
+/** Advanced-unit & promotion modifiers (Story 13.6 #33/#8/#9/#27). Mirrors the daemon `PromotionStage`
+ * serde shape; all-default (`spotlight: false`, no ratios, `coherence: false`) is today's behavior. */
+export interface PromotionStage {
+    /** #33 Artist Spotlight: feature ONE artist in depth via a track-level reserve pre-pass. */
+    spotlight?: boolean;
+    /** Share of the byte ceiling reserved for the featured artist (0.0..=1.0). Omitted when unset. */
+    spotlightShare?: number;
+    /** #8 fraction of the ceiling filled as COMPLETE albums (atomic), the rest as the base unit. */
+    albumTrackRatio?: number;
+    /** #9 when base unit == track, an album with ≥ this many favorited candidates becomes atomic. */
+    promoteAlbumMinFavorites?: number;
+    /** #27 reorder the final selection by artist→album→disc→track for flow (reorder-only). */
+    coherence?: boolean;
+}
+
 export interface AutoFillPipeline {
     enabled: boolean;
     filter: FilterStage;
@@ -131,6 +146,7 @@ export interface AutoFillPipeline {
     rarity: RarityStage;
     pity: PityStage;
     context: ContextStage;
+    promotion: PromotionStage;
 }
 
 /** The context-window kinds the rule editor offers. */
@@ -165,6 +181,7 @@ export function defaultLegacyPipeline(maxBytes?: number): AutoFillPipeline {
         rarity: {},
         pity: {},
         context: {},
+        promotion: {},
     };
 }
 
@@ -198,6 +215,7 @@ export function normalizePipeline(raw: Partial<AutoFillPipeline> | null | undefi
             ...(raw.context ?? {}),
             rules: Array.isArray(raw.context?.rules) ? raw.context.rules.map((r) => ({ ...r })) : [],
         },
+        promotion: { ...(raw.promotion ?? {}) },
     };
 }
 
@@ -285,6 +303,27 @@ export function serializePipeline(p: AutoFillPipeline): AutoFillPipeline {
             return out;
         });
     }
+    // Story 13.6 Promotion stage — omit-when-default (same pattern as rarity/pity/context): emit the
+    // object only when a field is non-default so a default pipeline round-trips byte-identically and the
+    // daemon keeps the fast path. The Option floats/int are clamped/floored; booleans omitted when false.
+    const promotion: PromotionStage = {};
+    const pr = p.promotion ?? {};
+    if (pr.spotlight || pr.coherence
+        || (typeof pr.spotlightShare === 'number' && pr.spotlightShare > 0)
+        || (typeof pr.albumTrackRatio === 'number' && pr.albumTrackRatio > 0)
+        || (typeof pr.promoteAlbumMinFavorites === 'number' && pr.promoteAlbumMinFavorites > 0)) {
+        if (pr.spotlight) promotion.spotlight = true;
+        if (typeof pr.spotlightShare === 'number' && pr.spotlightShare > 0) {
+            promotion.spotlightShare = Math.max(0, Math.min(1, pr.spotlightShare));
+        }
+        if (typeof pr.albumTrackRatio === 'number' && pr.albumTrackRatio > 0) {
+            promotion.albumTrackRatio = Math.max(0, Math.min(1, pr.albumTrackRatio));
+        }
+        if (typeof pr.promoteAlbumMinFavorites === 'number' && pr.promoteAlbumMinFavorites > 0) {
+            promotion.promoteAlbumMinFavorites = Math.max(0, Math.floor(pr.promoteAlbumMinFavorites));
+        }
+        if (pr.coherence) promotion.coherence = true;
+    }
     return {
         enabled: p.enabled,
         filter: {
@@ -303,5 +342,6 @@ export function serializePipeline(p: AutoFillPipeline): AutoFillPipeline {
         rarity,
         pity,
         context,
+        promotion,
     };
 }

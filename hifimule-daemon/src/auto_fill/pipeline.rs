@@ -86,6 +86,11 @@ pub struct AutoFillPipeline {
     /// window + source-activation/weighting + scheduled tag filter). Evaluated purely against
     /// [`HistorySnapshot::local`]. Default (`enabled:false`, no rules) ⇒ zero behavior change.
     pub context: ContextStage,
+    /// Advanced-unit & promotion modifiers (Story 13.6 #33/#8/#9/#27) — Artist Spotlight, album/track
+    /// space ratio, affinity-triggered album promotion, and coherence ordering, as reserve pre-passes /
+    /// unit-grouping refinement / output reorder over the existing `unit` axis. All-default ⇒ zero
+    /// behavior change.
+    pub promotion: PromotionStage,
 }
 
 /// Tag/genre filter. All fields default to empty, which means "pass everything through".
@@ -314,6 +319,40 @@ pub struct PityStage {
     pub guaranteed_ratio: f32,
     /// A "discovery" candidate has `play_count <= this`. (UI default 0 = never-played.)
     pub discovery_max_plays: u32,
+}
+
+/// Advanced-unit & promotion modifiers (Story 13.6) — the brainstorm's remaining **Unit**-stage ideas
+/// expressed as one additive, default-noop stage that *augments* (never replaces) [`AutoFillPipeline::unit`]:
+/// **#33 Artist Spotlight** (a reserve pre-pass featuring one deterministically-chosen artist in depth),
+/// **#8 album/track space ratio** (a reserve pre-pass filling complete atomic albums first, the rest as
+/// loose tracks), **#9 affinity-triggered album promotion** (when base `unit == Track`, an album with
+/// `>= n` favorited candidates is grouped into a single atomic album unit), and **#27 coherence ordering**
+/// (a reorder-only pass clustering the final selection by artist→album→disc→track — the selected id-set and
+/// byte total are unchanged). All four are pure functions of the candidate set; Spotlight's per-sync
+/// variation rides the already-threaded [`PipelineInput::seed`] (no new entropy, no clock/RNG read).
+///
+/// All-default (`spotlight:false`, all `None`, `coherence:false`) ⇒ today's behavior, exactly like
+/// [`QualityStage::default()`] — so a default `PromotionStage` is omitted from the routing discriminator.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PromotionStage {
+    /// #33 Artist Spotlight: feature ONE artist in depth via a track-level reserve pre-pass.
+    pub spotlight: bool,
+    /// Share of the byte ceiling reserved for the featured artist (clamped `0.0..=1.0` at consumption).
+    /// `None` ⇒ default `0.5`. `0` (or an unbounded ceiling / no artist-bearing candidate) ⇒ no-op.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spotlight_share: Option<f32>,
+    /// #8 album/track space ratio: fraction of the ceiling filled as COMPLETE albums (atomic), the
+    /// remainder as the base unit. Clamped `0.0..=1.0` at consumption. `None`/`0` ⇒ no album reserve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_track_ratio: Option<f32>,
+    /// #9 affinity promotion: when base `unit == Track`, an album with `>= n` favorited candidate tracks
+    /// is promoted to a single atomic album unit. `None`/`0` ⇒ no promotion (today's track grouping).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promote_album_min_favorites: Option<u32>,
+    /// #27 coherence: reorder the final selection by artist→album→disc→track for flow. Reorder-only —
+    /// the selected id-set and byte total are byte-identical to the un-clustered run.
+    pub coherence: bool,
 }
 
 /// Clock-driven Context stage (Story 13.5) — one mechanism for three brainstorm ideas (#3 time-of-day,
@@ -603,6 +642,7 @@ impl AutoFillPipeline {
             rarity: RarityStage::default(),
             pity: PityStage::default(),
             context: ContextStage::default(),
+            promotion: PromotionStage::default(),
         }
     }
 }
@@ -797,7 +837,21 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
         pipeline.budget.target_duration_secs,
         target_kbps,
         exclude,
+        pipeline.promotion.coherence,
     );
+
+    // Story 13.6 #9: affinity promotion only refines the *base-unit* (Track) grouping; it's a no-op when
+    // the base unit is already atomic (Album/Artist — every album is its own unit there). Resolve once and
+    // thread into every base-unit pass (stable-core / pity / primary / fallback). The dedicated reserve
+    // pre-passes (spotlight Track-depth, album-ratio Album) pass `None` — they force their own grouping.
+    let promote_min_favorites = if pipeline.unit == Unit::Track {
+        pipeline
+            .promotion
+            .promote_album_min_favorites
+            .filter(|n| *n > 0)
+    } else {
+        None
+    };
 
     // Stable-core (#24, AC 6): when `stable_core_pct = p > 0` and the budget is bounded, fill up to
     // `round(ceiling × p)` bytes FIRST from candidates already on the device (have a `last_synced_at`
@@ -813,10 +867,96 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
             // whole core allocation (otherwise every source got the full `core_cap` cap).
             let core_caps = source_caps(sources, core_cap);
             for (source, cap) in sources.iter().zip(core_caps) {
-                let units = build_source_units(input, pipeline, source, effective_filter);
+                let units = build_source_units(
+                    input,
+                    pipeline,
+                    source,
+                    effective_filter,
+                    pipeline.unit,
+                    promote_min_favorites,
+                );
                 selector.fill(units, source, cap, &pipeline.memory, &input.history, FillMode::Core);
             }
             selector.ceiling = ceiling; // restore the full ceiling for the delta pass
+        }
+    }
+
+    // Story 13.6 #33 (Artist Spotlight): a reserve pre-pass that fills ONE deterministically-chosen
+    // featured artist in depth FIRST, mirroring the stable-core/pity pre-passes exactly (temporary
+    // ceiling, restricted candidate set, shared `Selector` ⇒ automatic dedup into the later passes).
+    // The featured artist is the one owning the single best-ranked candidate under the configured
+    // ordering (so it composes with the user's ordering and, when `Random`/`Rarity` is in the ordering,
+    // varies per `seed` — the #33 delight, with zero new entropy). An under-filled reserve spills to the
+    // primary pass for free. `spotlight:false`, `spotlight_share == 0`, an unbounded ceiling, or no
+    // artist-bearing candidate ⇒ no-op. Track-level depth (no affinity promotion in the reserve).
+    if pipeline.promotion.spotlight && ceiling != u64::MAX {
+        let share = pipeline.promotion.spotlight_share.unwrap_or(0.5).clamp(0.0, 1.0);
+        if share > 0.0
+            && let Some(featured) =
+                choose_featured_artist(input, pipeline, sources, effective_filter)
+        {
+            let reserve = ((ceiling as f64) * f64::from(share)).round() as u64;
+            if reserve > 0 {
+                selector.ceiling = selector.cum_bytes.saturating_add(reserve).min(ceiling);
+                let spot_caps = source_caps(sources, reserve);
+                for (source, cap) in sources.iter().zip(spot_caps) {
+                    let mut units = build_source_units(
+                        input,
+                        pipeline,
+                        source,
+                        effective_filter,
+                        Unit::Track,
+                        None,
+                    );
+                    // Track units are singletons — keep only the featured artist's candidates.
+                    units.retain(|u| {
+                        u.iter()
+                            .any(|c| c.song.artist_id.as_deref() == Some(featured.as_str()))
+                    });
+                    selector.fill(
+                        units,
+                        source,
+                        cap,
+                        &pipeline.memory,
+                        &input.history,
+                        FillMode::Primary,
+                    );
+                }
+                selector.ceiling = ceiling; // restore the full ceiling for the later passes
+            }
+        }
+    }
+
+    // Story 13.6 #8 (album/track space ratio): a reserve pre-pass that fills COMPLETE albums (atomic,
+    // `Unit::Album` grouping — a whole album fits or the source stops, exactly as the `Selector` already
+    // enforces) FIRST, then the remaining budget fills with the base `unit` as today. Mirrors the
+    // stable-core pre-pass (temporary ceiling, `source_caps` split, shared `Selector` ⇒ automatic dedup).
+    // `album_track_ratio` is `None`/`0` or the ceiling is unbounded ⇒ no-op (base unit governs everything).
+    let album_ratio = pipeline.promotion.album_track_ratio.unwrap_or(0.0).clamp(0.0, 1.0);
+    if album_ratio > 0.0 && ceiling != u64::MAX {
+        let reserve = ((ceiling as f64) * f64::from(album_ratio)).round() as u64;
+        if reserve > 0 {
+            selector.ceiling = selector.cum_bytes.saturating_add(reserve).min(ceiling);
+            let album_caps = source_caps(sources, reserve);
+            for (source, cap) in sources.iter().zip(album_caps) {
+                let units = build_source_units(
+                    input,
+                    pipeline,
+                    source,
+                    effective_filter,
+                    Unit::Album,
+                    None,
+                );
+                selector.fill(
+                    units,
+                    source,
+                    cap,
+                    &pipeline.memory,
+                    &input.history,
+                    FillMode::Primary,
+                );
+            }
+            selector.ceiling = ceiling; // restore the full ceiling for the base-unit primary pass
         }
     }
 
@@ -834,7 +974,14 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
         selector.ceiling = selector.cum_bytes.saturating_add(reserve_bytes).min(ceiling);
         let reserve_caps = source_caps(sources, reserve_bytes);
         for (source, cap) in sources.iter().zip(reserve_caps) {
-            let units = build_source_units(input, pipeline, source, effective_filter);
+            let units = build_source_units(
+                input,
+                pipeline,
+                source,
+                effective_filter,
+                pipeline.unit,
+                promote_min_favorites,
+            );
             selector.fill(
                 units,
                 source,
@@ -858,7 +1005,14 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
     };
     let caps = source_caps(sources, remaining);
     for (source, cap) in sources.iter().zip(caps) {
-        let units = build_source_units(input, pipeline, source, effective_filter);
+        let units = build_source_units(
+            input,
+            pipeline,
+            source,
+            effective_filter,
+            pipeline.unit,
+            promote_min_favorites,
+        );
         selector.fill(units, source, cap, &pipeline.memory, &input.history, FillMode::Primary);
     }
 
@@ -866,7 +1020,14 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
     // suppression applies here too (a fallback source named only in inactive rules is dropped); the
     // share/weight is irrelevant since fallback fills against the full ceiling.
     for source in fallback_sources {
-        let units = build_source_units(input, pipeline, source, effective_filter);
+        let units = build_source_units(
+            input,
+            pipeline,
+            source,
+            effective_filter,
+            pipeline.unit,
+            promote_min_favorites,
+        );
         selector.fill(units, source, ceiling, &pipeline.memory, &input.history, FillMode::Fallback);
     }
 
@@ -890,6 +1051,59 @@ enum FillMode {
 /// track for [`Unit::Track`]; a whole album/artist otherwise).
 type UnitGroup = Vec<Candidate>;
 
+/// Story 13.6 #33: choose the featured artist for the Spotlight reserve — purely, from the candidate
+/// set, never reading a clock/RNG. Across the primary sources' filtered candidates, pick the single
+/// `artist_id` owning the **best-ranked candidate** under the configured ordering
+/// ([`compare_by_ordering`]), so the choice composes with the user's ordering and rides the existing
+/// `seed` when `Random`/`Rarity` is in the ordering (a different spotlight each sync — the #33 delight,
+/// with zero new entropy). Ties broken by `artist_id` string for determinism; candidates with no
+/// `artist_id` are never featured. "In depth" is bounded by what the configured sources materialized —
+/// the engine does **not** fetch the artist's full discography (deferred, see Dev Notes).
+fn choose_featured_artist(
+    input: &PipelineInput,
+    pipeline: &AutoFillPipeline,
+    sources: &[SourceEntry],
+    filter: &FilterStage,
+) -> Option<String> {
+    let version_pref = &pipeline.quality.version_preference;
+    let rarity = &pipeline.rarity;
+    let seed = input.seed;
+    let mut best: Option<Song> = None;
+    for source in sources {
+        // Track units are sorted by the pipeline ordering, so the first artist-bearing candidate (in
+        // rank order) is this source's best featured-eligible candidate.
+        let units = build_source_units(input, pipeline, source, filter, Unit::Track, None);
+        let cand = units.iter().flatten().find(|c| {
+            c.song
+                .artist_id
+                .as_deref()
+                .is_some_and(|a| !a.trim().is_empty())
+        });
+        if let Some(c) = cand {
+            let take = match &best {
+                None => true,
+                Some(b) => match compare_by_ordering(
+                    &c.song,
+                    b,
+                    &pipeline.ordering,
+                    version_pref,
+                    seed,
+                    rarity,
+                ) {
+                    std::cmp::Ordering::Less => true,
+                    std::cmp::Ordering::Greater => false,
+                    // Equal rank ⇒ deterministic tie-break by the smaller artist_id string.
+                    std::cmp::Ordering::Equal => c.song.artist_id < b.artist_id,
+                },
+            };
+            if take {
+                best = Some(c.song.clone());
+            }
+        }
+    }
+    best.and_then(|s| s.artist_id)
+}
+
 /// filter → unit → ordering for a single source's materialized pool.
 /// Memory/dedup is intentionally applied later by the selector so the full pipeline order stays
 /// `filter → source-blend → unit → ordering → dedupe-vs-memory → budget`.
@@ -898,13 +1112,21 @@ fn build_source_units(
     pipeline: &AutoFillPipeline,
     source: &SourceEntry,
     filter: &FilterStage,
+    unit: Unit,
+    promote_min_favorites: Option<u32>,
 ) -> Vec<UnitGroup> {
     let pool = input.pools.get(&source.key()).cloned().unwrap_or_default();
 
     // filter (genres/tags) — the *effective* filter (static ∪ active context rules, Story 13.5 AC 6).
     let filtered = filter_stage(pool, filter);
-    // unit grouping
-    let mut units = unit_stage(filtered, pipeline.unit);
+    // unit grouping — `unit` is an explicit override (Story 13.6: the album-ratio pre-pass forces
+    // `Unit::Album`, the spotlight pre-pass forces `Unit::Track`; the normal passes pass `pipeline.unit`).
+    // Story 13.6 #9: when the override is the base `Track` grouping and affinity promotion is armed,
+    // high-favorite albums become atomic units (the rest stay track singletons).
+    let mut units = match promote_min_favorites {
+        Some(n) if unit == Unit::Track && n > 0 => unit_stage_promoted(filtered, n),
+        _ => unit_stage(filtered, unit),
+    };
     // ordering — sort within each unit (so its first track is its best), then sort units by their
     // best track. For Unit::Track this reduces to a single stable global sort.
     let version_pref = &pipeline.quality.version_preference;
@@ -1010,6 +1232,33 @@ fn unit_stage(cands: Vec<Candidate>, unit: Unit) -> Vec<UnitGroup> {
         Unit::Album => group_by(cands, |c| c.song.album_id.clone()),
         Unit::Artist => group_by(cands, |c| c.song.artist_id.clone()),
     }
+}
+
+/// Story 13.6 #9 (affinity-triggered album promotion): Track-level grouping where an album whose
+/// materialized candidate set contains `>= min_favorites` favorited tracks (`is_favorite == Some(true)`)
+/// is promoted to a single atomic album unit (synced whole-or-not, like [`Unit::Album`]); every other
+/// candidate stays a track singleton. First-seen order is preserved by reusing [`group_by`]: a candidate's
+/// group key is its `album_id` **only** when that album cleared the threshold, else `None` (⇒ singleton).
+/// The only signal read is `Song.is_favorite` (no rating field exists on `Song` — ratings deferred). The
+/// affinity is **per-pool / per-run**: counted over the favorited tracks present in the candidate set, not
+/// the album's full track list (the engine doesn't have it). Caller gates this on base `unit == Track`.
+fn unit_stage_promoted(cands: Vec<Candidate>, min_favorites: u32) -> Vec<UnitGroup> {
+    // Count favorited candidates per album_id (blank/whitespace album ids never promote).
+    let mut fav_counts: HashMap<String, u32> = HashMap::new();
+    for c in &cands {
+        if c.song.is_favorite == Some(true)
+            && let Some(album) = c.song.album_id.clone().filter(|a| !a.trim().is_empty())
+        {
+            *fav_counts.entry(album).or_insert(0) += 1;
+        }
+    }
+    group_by(cands, |c| {
+        c.song
+            .album_id
+            .clone()
+            .filter(|a| !a.trim().is_empty())
+            .filter(|a| fav_counts.get(a).copied().unwrap_or(0) >= min_favorites)
+    })
 }
 
 /// Group candidates by an optional key, preserving first-seen group order. Candidates whose key
@@ -1601,6 +1850,62 @@ fn frac_bytes(frac: f32, ceiling: u64) -> u64 {
     ((ceiling as f64) * (frac.clamp(0.0, 1.0) as f64)) as u64
 }
 
+/// Story 13.6 #27: the per-item sort key for coherence clustering. Captured from `Song` at selection
+/// time because `AutoFillItem` carries album/artist names but not `disc_number`/`track_number`.
+#[derive(Clone)]
+struct CoherenceKey {
+    artist_id: String,
+    album_id: String,
+    disc: u32,
+    track: u32,
+    id: String,
+}
+
+/// Build a [`CoherenceKey`] from a song. Missing artist/album ids fold to `""` (their own cluster);
+/// missing disc/track to `0` (sorted first within an album).
+fn coherence_key(song: &Song) -> CoherenceKey {
+    CoherenceKey {
+        artist_id: song.artist_id.clone().unwrap_or_default(),
+        album_id: song.album_id.clone().unwrap_or_default(),
+        disc: song.disc_number.unwrap_or(0),
+        track: song.track_number.unwrap_or(0),
+        id: song.id.clone(),
+    }
+}
+
+/// Story 13.6 #27 (coherence ordering): reorder a selected set into coherent clusters — artist
+/// (first-appearance order) → album (first-appearance order) → disc → track → id. **Reorder-only**:
+/// the result is a permutation of `items`, so the selected id-set and byte total are byte-identical to
+/// the input (the whole safety guarantee). `keys[i]` describes `items[i]`. First-appearance ranks keep
+/// the output deterministic and independent of any id sort. Pure, signal-free.
+fn coherence_reorder(items: Vec<AutoFillItem>, keys: Vec<CoherenceKey>) -> Vec<AutoFillItem> {
+    debug_assert_eq!(items.len(), keys.len());
+    let mut artist_rank: HashMap<String, usize> = HashMap::new();
+    let mut album_rank: HashMap<String, usize> = HashMap::new();
+    for k in &keys {
+        let n = artist_rank.len();
+        artist_rank.entry(k.artist_id.clone()).or_insert(n);
+        let m = album_rank.len();
+        album_rank.entry(k.album_id.clone()).or_insert(m);
+    }
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    order.sort_by(|&i, &j| {
+        let (a, b) = (&keys[i], &keys[j]);
+        artist_rank[&a.artist_id]
+            .cmp(&artist_rank[&b.artist_id])
+            .then(album_rank[&a.album_id].cmp(&album_rank[&b.album_id]))
+            .then(a.disc.cmp(&b.disc))
+            .then(a.track.cmp(&b.track))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    // Apply the permutation without cloning items.
+    let mut slots: Vec<Option<AutoFillItem>> = items.into_iter().map(Some).collect();
+    order
+        .into_iter()
+        .map(|i| slots[i].take().expect("each index visited once"))
+        .collect()
+}
+
 /// Accumulates the selection across sources: enforces the global ceiling, per-source caps, the
 /// optional duration target, manual-exclude ids, and within-run dedup. Mirrors the
 /// stop-on-first-oversized semantics of the legacy `ProviderFillState`/`rank_and_truncate`.
@@ -1616,6 +1921,13 @@ struct Selector {
     items: Vec<AutoFillItem>,
     cum_bytes: u64,
     cum_secs: u64,
+    /// Story 13.6 #27: when set, [`Selector::into_items`] reorders the selection into coherent
+    /// artist→album→disc→track clusters. Reorder-only — the id-set and byte total are unchanged.
+    coherence: bool,
+    /// Story 13.6 #27: per-selected-item sort keys, pushed in lockstep with `items` (only when
+    /// `coherence`). `AutoFillItem` carries album/artist but not disc/track, so the engine captures the
+    /// `Song`-level sort fields here while it still holds the candidate.
+    coherence_keys: Vec<CoherenceKey>,
 }
 
 impl Selector {
@@ -1624,6 +1936,7 @@ impl Selector {
         duration_target: Option<u64>,
         target_kbps: Option<u32>,
         exclude: HashSet<String>,
+        coherence: bool,
     ) -> Self {
         Self {
             ceiling,
@@ -1634,6 +1947,8 @@ impl Selector {
             items: Vec::new(),
             cum_bytes: 0,
             cum_secs: 0,
+            coherence,
+            coherence_keys: Vec::new(),
         }
     }
 
@@ -1663,8 +1978,9 @@ impl Selector {
             {
                 break;
             }
-            // Stage the syncable, non-excluded, not-yet-seen tracks of this unit.
-            let mut staged: Vec<(AutoFillItem, u64)> = Vec::new();
+            // Stage the syncable, non-excluded, not-yet-seen tracks of this unit. The optional third
+            // element is the Story 13.6 #27 coherence sort key, captured here while the `Song` is in hand.
+            let mut staged: Vec<(AutoFillItem, u64, Option<CoherenceKey>)> = Vec::new();
             let mut local_seen: HashSet<String> = HashSet::new();
             let mut unit_bytes: u64 = 0;
             let mut unit_secs: u64 = 0;
@@ -1693,7 +2009,8 @@ impl Selector {
                 unit_bytes = unit_bytes.saturating_add(size);
                 unit_secs = unit_secs.saturating_add(u64::from(song.duration_seconds));
                 let reason = reason_for(song, source, is_fallback);
-                staged.push((make_item(song, size, reason), size));
+                let key = self.coherence.then(|| coherence_key(song));
+                staged.push((make_item(song, size, reason), size, key));
             }
             if staged.is_empty() {
                 continue; // whole unit unsyncable/duplicate/excluded — skip, keep going
@@ -1704,18 +2021,25 @@ impl Selector {
             {
                 break; // would exceed global ceiling or this source's allocation
             }
-            for (item, size) in staged {
+            for (item, size, key) in staged {
                 self.seen.insert(item.id.clone());
                 self.cum_bytes = self.cum_bytes.saturating_add(size);
                 source_bytes = source_bytes.saturating_add(size);
                 self.items.push(item);
+                if let Some(k) = key {
+                    self.coherence_keys.push(k);
+                }
             }
             self.cum_secs = self.cum_secs.saturating_add(unit_secs);
         }
     }
 
     fn into_items(self) -> Vec<AutoFillItem> {
-        self.items
+        if self.coherence {
+            coherence_reorder(self.items, self.coherence_keys)
+        } else {
+            self.items
+        }
     }
 
     fn would_exceed_duration(&self, unit_secs: u64) -> bool {
@@ -1938,6 +2262,52 @@ mod tests {
             ids(&result),
             vec!["flac-lo", "hi", "mid", "low"],
             "lossless ranks above lossy regardless of bitrate, then bitrate breaks ties within a tier"
+        );
+
+        // Story 13.6 — Antoine also cares about ALBUM INTEGRITY: he wants each album's tracks to play
+        // contiguously and in track order, not scattered by the ranking. Coherence (#27) delivers that
+        // PURELY in config (no `if persona` branch): with it off the selection comes out in quality
+        // order; with it on the same tracks cluster artist→album→disc→track. Two albums, deliberately
+        // interleaved by quality so the un-clustered order splits them apart.
+        let mut flac_a2 = song_album("acclaim-a2", "AntoineFav", "Acclaimed", 1, 2, false, 0, 30_000_000);
+        flac_a2.suffix = Some("flac".to_string());
+        flac_a2.content_type = Some("audio/flac".to_string());
+        flac_a2.bitrate_kbps = Some(1000);
+        let album_pool = vec![
+            // mp3 from album "Live" (track 1), then two FLACs from "Acclaimed" (tracks 2 then 1).
+            cand(song_album("live-1", "AntoineFav", "Live", 1, 1, false, 0, 10_000_000)),
+            cand(flac_a2),
+            cand({
+                let mut s = song_album("acclaim-a1", "AntoineFav", "Acclaimed", 1, 1, false, 0, 30_000_000);
+                s.suffix = Some("flac".to_string());
+                s.content_type = Some("audio/flac".to_string());
+                s.bitrate_kbps = Some(1000);
+                s
+            }),
+        ];
+        let album_input = PipelineInput::default().with_pool(SourceKind::Library, None, album_pool);
+        let integrity_off = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            ordering: vec![OrderingKey::Quality],
+            budget: BudgetStage { max_bytes: Some(512u64 * 1_000 * 1_000 * 1_000), ..Default::default() },
+            ..Default::default()
+        };
+        let integrity_on = AutoFillPipeline {
+            promotion: PromotionStage { coherence: true, ..Default::default() },
+            ..integrity_off.clone()
+        };
+        // Quality order splits the "Acclaimed" album's tracks around nothing here but emits them in
+        // quality order (FLACs first, then the lossy "Live"): acclaim-a2, acclaim-a1, live-1.
+        assert_eq!(
+            ids(&run_pipeline(&album_input, &integrity_off)),
+            vec!["acclaim-a2", "acclaim-a1", "live-1"],
+            "default: quality ordering governs (album tracks not in track order)"
+        );
+        // Coherence clusters by album (Acclaimed first-seen) and orders within it by track number.
+        assert_eq!(
+            ids(&run_pipeline(&album_input, &integrity_on)),
+            vec!["acclaim-a1", "acclaim-a2", "live-1"],
+            "coherence keeps each album contiguous and in track order — album integrity, from config"
         );
     }
 
@@ -4370,5 +4740,415 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&AutoFillPipeline::default()).unwrap()).unwrap();
         assert_eq!(default_back.context, ContextStage::default());
         assert!(!default_back.budget.encoding_from_goals);
+    }
+
+    // ===================================================================
+    // Story 13.6 — Advanced units & promotion (#33 Spotlight, #8 album/track ratio,
+    // #9 affinity promotion, #27 coherence). All four are additive, default-noop modifiers
+    // over the existing Unit axis; behavior emerges purely from `PromotionStage` config.
+    // ===================================================================
+
+    /// A `Song` with explicit album/artist/disc/track + size, for unit/promotion/coherence tests.
+    fn song_album(
+        id: &str,
+        artist: &str,
+        album: &str,
+        disc: u32,
+        track: u32,
+        fav: bool,
+        play_count: u32,
+        size_bytes: u64,
+    ) -> Song {
+        Song {
+            artist_id: Some(artist.to_string()),
+            artist_name: Some(format!("Artist {artist}")),
+            album_id: Some(album.to_string()),
+            album_title: Some(format!("Album {album}")),
+            disc_number: Some(disc),
+            track_number: Some(track),
+            ..song_sized(id, fav, play_count, "2024-01-01", size_bytes)
+        }
+    }
+
+    // ---- #9 Affinity-triggered album promotion -----------------------------------------
+
+    #[test]
+    fn promotion_affinity_promotes_high_favorite_album_atomically() {
+        // Album "deep" = 3 tracks ×3MB = 9MB, 2 favorited. A loose 3MB single follows. Base unit Track,
+        // threshold 2 ⇒ "deep" becomes ONE atomic 9MB unit. Ceiling 10MB: the atomic album fits, the
+        // single can't (9+3 > 10) ⇒ result is the whole album, nothing partial.
+        let pool = vec![
+            cand(song_album("d1", "A", "deep", 1, 1, true, 0, 3_000_000)),
+            cand(song_album("d2", "A", "deep", 1, 2, true, 0, 3_000_000)),
+            cand(song_album("d3", "A", "deep", 1, 3, false, 0, 3_000_000)),
+            cand(song_album("s1", "B", "single", 1, 1, true, 0, 3_000_000)),
+        ];
+        let input = PipelineInput::default().with_pool(SourceKind::Library, None, pool);
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            ordering: vec![OrderingKey::Favorite],
+            budget: BudgetStage { max_bytes: Some(10_000_000), ..Default::default() },
+            promotion: PromotionStage { promote_album_min_favorites: Some(2), ..Default::default() },
+            ..Default::default()
+        };
+        let result = ids(&run_pipeline(&input, &pipeline));
+        assert_eq!(result.len(), 3, "the whole 3-track album is atomic; the single can't also fit");
+        for id in ["d1", "d2", "d3"] {
+            assert!(result.contains(&id.to_string()), "promoted album syncs whole: {id}");
+        }
+        assert!(!result.contains(&"s1".to_string()), "the loose single is squeezed out by the atomic album");
+    }
+
+    #[test]
+    fn promotion_affinity_below_threshold_stays_track_level() {
+        // Same album, but only 1 favorited track and threshold 2 ⇒ NOT promoted ⇒ track singletons.
+        // Ceiling 10MB fits 3 of the 4 tracks individually (favorites first), proving track-level fill.
+        let pool = vec![
+            cand(song_album("d1", "A", "deep", 1, 1, true, 0, 3_000_000)),
+            cand(song_album("d2", "A", "deep", 1, 2, false, 0, 3_000_000)),
+            cand(song_album("d3", "A", "deep", 1, 3, false, 0, 3_000_000)),
+            cand(song_album("s1", "B", "single", 1, 1, true, 0, 3_000_000)),
+        ];
+        let input = PipelineInput::default().with_pool(SourceKind::Library, None, pool);
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            ordering: vec![OrderingKey::Favorite],
+            budget: BudgetStage { max_bytes: Some(10_000_000), ..Default::default() },
+            promotion: PromotionStage { promote_album_min_favorites: Some(2), ..Default::default() },
+            ..Default::default()
+        };
+        let result = ids(&run_pipeline(&input, &pipeline));
+        assert_eq!(result.len(), 3, "track-level fill packs 3 individual tracks (not whole-or-nothing)");
+        // Favorites (d1, s1) lead; one more track fills the rest — the album was NOT taken atomically.
+        assert!(result.contains(&"d1".to_string()) && result.contains(&"s1".to_string()));
+    }
+
+    #[test]
+    fn promotion_affinity_inert_for_non_track_base_unit_and_for_none() {
+        // Promotion is gated on base unit == Track. With unit == Album it must be a pure no-op: identical
+        // to the same pipeline with no promotion. And None/0 ⇒ today's track grouping.
+        let pool = vec![
+            cand(song_album("d1", "A", "deep", 1, 1, true, 0, 3_000_000)),
+            cand(song_album("d2", "A", "deep", 1, 2, true, 0, 3_000_000)),
+            cand(song_album("s1", "B", "single", 1, 1, false, 0, 3_000_000)),
+        ];
+        let input = PipelineInput::default().with_pool(SourceKind::Library, None, pool);
+        let base = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            unit: Unit::Album,
+            ordering: vec![OrderingKey::Favorite],
+            budget: BudgetStage { max_bytes: Some(50_000_000), ..Default::default() },
+            ..Default::default()
+        };
+        let with_promo = AutoFillPipeline {
+            promotion: PromotionStage { promote_album_min_favorites: Some(2), ..Default::default() },
+            ..base.clone()
+        };
+        assert_eq!(
+            ids(&run_pipeline(&input, &base)),
+            ids(&run_pipeline(&input, &with_promo)),
+            "promotion is inert when the base unit is already atomic (Album)"
+        );
+
+        // None ⇒ track grouping equals a default pipeline.
+        let track_base = AutoFillPipeline { unit: Unit::Track, ..base };
+        let track_none = AutoFillPipeline {
+            promotion: PromotionStage::default(),
+            ..track_base.clone()
+        };
+        assert_eq!(ids(&run_pipeline(&input, &track_base)), ids(&run_pipeline(&input, &track_none)));
+    }
+
+    // ---- #8 Album/track space ratio -----------------------------------------------------
+
+    #[test]
+    fn promotion_album_ratio_fills_complete_albums_first_then_tracks() {
+        // Reserve half the ceiling for COMPLETE albums (atomic). "fits" (2 tracks ×2MB = 4MB) precedes
+        // the oversized "big" (3 tracks ×2MB = 6MB). Reserve = 4MB ⇒ the album pass takes "fits" whole;
+        // "big" (6MB) can't fit the reserve and must NOT partially leak. The base Track pass then fills
+        // the remaining 4MB with loose singletons.
+        let pool = vec![
+            cand(song_album("f1", "A", "fits", 1, 1, true, 0, 2_000_000)),
+            cand(song_album("f2", "A", "fits", 1, 2, true, 0, 2_000_000)),
+            cand(song_album("b1", "B", "big", 1, 1, true, 0, 2_000_000)),
+            cand(song_album("b2", "B", "big", 1, 2, true, 0, 2_000_000)),
+            cand(song_album("b3", "B", "big", 1, 3, true, 0, 2_000_000)),
+        ];
+        let input = PipelineInput::default().with_pool(SourceKind::Library, None, pool);
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            ordering: vec![OrderingKey::Favorite], // all favorited ⇒ pool order preserved
+            budget: BudgetStage { max_bytes: Some(8_000_000), ..Default::default() },
+            promotion: PromotionStage { album_track_ratio: Some(0.5), ..Default::default() },
+            ..Default::default()
+        };
+        let result = ids(&run_pipeline(&input, &pipeline));
+        // Complete album "fits" pulled whole by the reserve.
+        assert!(result.contains(&"f1".to_string()) && result.contains(&"f2".to_string()));
+        let total: u64 = run_pipeline(&input, &pipeline).iter().map(|i| i.size_bytes).sum();
+        assert!(total <= 8_000_000, "selection within ceiling");
+        // "big" is selected as loose tracks by the base pass (it never partially leaked into the album
+        // reserve — the 4MB reserve held only the complete "fits" album), but only as many as fit.
+        let big_count = result.iter().filter(|id| id.starts_with('b')).count();
+        assert!(big_count <= 2, "remaining 4MB after the album reserve fits at most 2 loose tracks");
+    }
+
+    #[test]
+    fn promotion_album_ratio_zero_is_unchanged() {
+        let pool = vec![
+            cand(song_album("a1", "A", "alb", 1, 1, true, 0, 2_000_000)),
+            cand(song_album("a2", "A", "alb", 1, 2, false, 0, 2_000_000)),
+            cand(song_album("s1", "B", "sng", 1, 1, true, 0, 2_000_000)),
+        ];
+        let input = PipelineInput::default().with_pool(SourceKind::Library, None, pool);
+        let base = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            ordering: vec![OrderingKey::Favorite],
+            budget: BudgetStage { max_bytes: Some(20_000_000), ..Default::default() },
+            ..Default::default()
+        };
+        let ratio_zero = AutoFillPipeline {
+            promotion: PromotionStage { album_track_ratio: Some(0.0), ..Default::default() },
+            ..base.clone()
+        };
+        assert_eq!(
+            ids(&run_pipeline(&input, &base)),
+            ids(&run_pipeline(&input, &ratio_zero)),
+            "ratio 0 ⇒ no album reserve, byte-identical to today"
+        );
+    }
+
+    // ---- #33 Artist Spotlight -----------------------------------------------------------
+
+    fn spotlight_pool() -> Vec<Candidate> {
+        // Artist X: one big hit + four barely-played tracks. Artist Y: four medium-play tracks.
+        let mut v = vec![cand(song_album("x_hit", "X", "x_alb", 1, 1, false, 100, 2_000_000))];
+        for i in 1..=4 {
+            v.push(cand(song_album(&format!("x{i}"), "X", "x_alb", 1, 1 + i, false, 1, 2_000_000)));
+        }
+        for i in 1..=4 {
+            v.push(cand(song_album(&format!("y{i}"), "Y", "y_alb", 1, i, false, 50, 2_000_000)));
+        }
+        v
+    }
+
+    #[test]
+    fn promotion_spotlight_fills_featured_artist_in_depth() {
+        // Ordering [PlayCount]: without spotlight, X gets ONLY its one hit (the rest of X is buried
+        // behind Y's mediums). With spotlight (featured = X, owner of the best-ranked candidate x_hit),
+        // a 0.6 reserve fills X in depth first ⇒ X gets ≥ 3 tracks. Behavior emerges purely from config.
+        let input = PipelineInput::default().with_pool(SourceKind::Library, None, spotlight_pool());
+        let no_spot = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            ordering: vec![OrderingKey::PlayCount],
+            budget: BudgetStage { max_bytes: Some(10_000_000), ..Default::default() }, // 5 tracks
+            ..Default::default()
+        };
+        let with_spot = AutoFillPipeline {
+            promotion: PromotionStage { spotlight: true, spotlight_share: Some(0.6), ..Default::default() },
+            ..no_spot.clone()
+        };
+        let base = ids(&run_pipeline(&input, &no_spot));
+        let spot = ids(&run_pipeline(&input, &with_spot));
+        let x_base = base.iter().filter(|id| id.starts_with('x')).count();
+        let x_spot = spot.iter().filter(|id| id.starts_with('x')).count();
+        assert_eq!(x_base, 1, "without spotlight, X is represented only by its hit");
+        assert!(x_spot >= 3, "spotlight fills the featured artist X in depth (got {x_spot})");
+        assert!(spot.contains(&"x_hit".to_string()), "the hit is still picked");
+    }
+
+    #[test]
+    fn promotion_spotlight_seed_varies_featured_artist() {
+        // Ordering [Random]: the featured artist rides the existing seed. Two single-track artists, a
+        // share of 1.0, and a ceiling fitting one track ⇒ the lone result IS the featured artist's track.
+        // Across seeds, BOTH artists must win for some seed — proving seed-driven variation, no clock/RNG.
+        let pool = vec![
+            cand(song_album("p", "P", "p_alb", 1, 1, false, 0, 2_000_000)),
+            cand(song_album("q", "Q", "q_alb", 1, 1, false, 0, 2_000_000)),
+        ];
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            ordering: vec![OrderingKey::Random],
+            budget: BudgetStage { max_bytes: Some(2_000_000), ..Default::default() }, // exactly 1 track
+            promotion: PromotionStage { spotlight: true, spotlight_share: Some(1.0), ..Default::default() },
+            ..Default::default()
+        };
+        let mut winners = std::collections::HashSet::new();
+        for seed in 0..64u64 {
+            let input = PipelineInput { seed, ..Default::default() }
+                .with_pool(SourceKind::Library, None, pool.clone());
+            let r = ids(&run_pipeline(&input, &pipeline));
+            assert_eq!(r.len(), 1);
+            winners.insert(r[0].clone());
+        }
+        assert_eq!(winners.len(), 2, "the featured artist (hence the picked track) varies by seed");
+    }
+
+    #[test]
+    fn promotion_spotlight_underfilled_reserve_spills_over() {
+        // Featured artist X has only one 2MB track — far less than the 4MB reserve. The unused reserve
+        // must spill to the primary pass (no wasted budget): the full 8MB ceiling is used and Y fills in.
+        let mut pool = vec![cand(song_album("x1", "X", "x_alb", 1, 1, true, 0, 2_000_000))];
+        for i in 1..=3 {
+            pool.push(cand(song_album(&format!("y{i}"), "Y", "y_alb", 1, i, false, 0, 2_000_000)));
+        }
+        let input = PipelineInput::default().with_pool(SourceKind::Library, None, pool);
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            ordering: vec![OrderingKey::Favorite], // X's fav track ranks first ⇒ X is featured
+            budget: BudgetStage { max_bytes: Some(8_000_000), ..Default::default() },
+            promotion: PromotionStage { spotlight: true, spotlight_share: Some(0.5), ..Default::default() },
+            ..Default::default()
+        };
+        let items = run_pipeline(&input, &pipeline);
+        let total: u64 = items.iter().map(|i| i.size_bytes).sum();
+        assert_eq!(total, 8_000_000, "the under-filled reserve spills to the primary pass; no wasted budget");
+        assert_eq!(items.len(), 4, "x1 + all three y tracks");
+    }
+
+    #[test]
+    fn promotion_spotlight_inert_and_unbounded_are_byte_identical() {
+        let input = PipelineInput::default().with_pool(SourceKind::Library, None, spotlight_pool());
+        let no_spot = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            ordering: vec![OrderingKey::PlayCount],
+            budget: BudgetStage { max_bytes: Some(10_000_000), ..Default::default() },
+            ..Default::default()
+        };
+        // spotlight:false ⇒ byte-identical to no-spotlight.
+        let off = AutoFillPipeline {
+            promotion: PromotionStage { spotlight: false, spotlight_share: Some(0.6), ..Default::default() },
+            ..no_spot.clone()
+        };
+        assert_eq!(ids(&run_pipeline(&input, &no_spot)), ids(&run_pipeline(&input, &off)));
+
+        // Unbounded ceiling (no max_bytes) ⇒ the spotlight reserve is a no-op (can't reserve a fraction
+        // of infinity) ⇒ byte-identical to the same unbounded pipeline without spotlight.
+        let unbounded = AutoFillPipeline {
+            budget: BudgetStage::default(),
+            ..no_spot.clone()
+        };
+        let unbounded_spot = AutoFillPipeline {
+            promotion: PromotionStage { spotlight: true, spotlight_share: Some(0.6), ..Default::default() },
+            ..unbounded.clone()
+        };
+        assert_eq!(
+            ids(&run_pipeline(&input, &unbounded)),
+            ids(&run_pipeline(&input, &unbounded_spot)),
+            "an unbounded ceiling makes the spotlight reserve inert"
+        );
+    }
+
+    // ---- #27 Coherence ordering ---------------------------------------------------------
+
+    #[test]
+    fn promotion_coherence_reorders_without_changing_selection() {
+        // Interleaved selection order; coherence clusters artist→album→disc→track but selects the SAME
+        // ids and the SAME total bytes. Empty ordering ⇒ pool order is the selection order.
+        let pool = vec![
+            cand(song_album("a_b", "A", "A1", 1, 2, false, 0, 2_000_000)),
+            cand(song_album("b_1", "B", "B1", 1, 1, false, 0, 2_000_000)),
+            cand(song_album("a_a", "A", "A1", 1, 1, false, 0, 2_000_000)),
+            cand(song_album("a2_1", "A", "A2", 1, 1, false, 0, 2_000_000)),
+        ];
+        let input = PipelineInput::default().with_pool(SourceKind::Library, None, pool);
+        let base = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            ordering: vec![],
+            budget: BudgetStage { max_bytes: Some(100_000_000), ..Default::default() },
+            ..Default::default()
+        };
+        let coherent = AutoFillPipeline {
+            promotion: PromotionStage { coherence: true, ..Default::default() },
+            ..base.clone()
+        };
+        let plain = run_pipeline(&input, &base);
+        let clustered = run_pipeline(&input, &coherent);
+
+        // Same selection: identical id-set and identical total bytes (the whole safety guarantee).
+        let mut plain_ids = ids(&plain);
+        let mut clustered_ids = ids(&clustered);
+        plain_ids.sort();
+        clustered_ids.sort();
+        assert_eq!(plain_ids, clustered_ids, "coherence never changes WHICH tracks are selected");
+        let plain_bytes: u64 = plain.iter().map(|i| i.size_bytes).sum();
+        let clustered_bytes: u64 = clustered.iter().map(|i| i.size_bytes).sum();
+        assert_eq!(plain_bytes, clustered_bytes, "total bytes unchanged");
+
+        // Order clusters by artist (A first-seen) → album (A1 before A2) → disc → track.
+        assert_eq!(ids(&clustered), vec!["a_a", "a_b", "a2_1", "b_1"]);
+        // Plain order is the raw selection order (un-clustered) — proving the reorder did something.
+        assert_eq!(ids(&plain), vec!["a_b", "b_1", "a_a", "a2_1"]);
+
+        // Deterministic: a second run is identical.
+        assert_eq!(ids(&run_pipeline(&input, &coherent)), ids(&clustered));
+    }
+
+    // ---- Combined reserves & serde ------------------------------------------------------
+
+    #[test]
+    fn promotion_combined_reserves_respect_ceiling_no_double_count() {
+        // Spotlight + album-ratio reserves together must never exceed the global ceiling and must never
+        // emit a duplicate id (the shared Selector dedups across all passes).
+        let pool = vec![
+            cand(song_album("x1", "X", "x_alb", 1, 1, true, 5, 2_000_000)),
+            cand(song_album("x2", "X", "x_alb", 1, 2, true, 5, 2_000_000)),
+            cand(song_album("y1", "Y", "y_alb", 1, 1, true, 3, 2_000_000)),
+            cand(song_album("y2", "Y", "y_alb", 1, 2, true, 3, 2_000_000)),
+            cand(song_album("z1", "Z", "z_alb", 1, 1, false, 0, 2_000_000)),
+        ];
+        let input = PipelineInput::default().with_pool(SourceKind::Library, None, pool);
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            ordering: vec![OrderingKey::PlayCount],
+            budget: BudgetStage { max_bytes: Some(8_000_000), ..Default::default() },
+            promotion: PromotionStage {
+                spotlight: true,
+                spotlight_share: Some(0.4),
+                album_track_ratio: Some(0.4),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let items = run_pipeline(&input, &pipeline);
+        let total: u64 = items.iter().map(|i| i.size_bytes).sum();
+        assert!(total <= 8_000_000, "combined reserves never exceed the ceiling (got {total})");
+        let unique: std::collections::HashSet<_> = items.iter().map(|i| &i.id).collect();
+        assert_eq!(unique.len(), items.len(), "no id is emitted twice across the reserve passes");
+    }
+
+    #[test]
+    fn promotion_serde_round_trips_and_default_omits() {
+        // All four fields round-trip through camelCase serde.
+        let mut p = AutoFillPipeline::default_legacy(Some(1000));
+        p.promotion = PromotionStage {
+            spotlight: true,
+            spotlight_share: Some(0.4),
+            album_track_ratio: Some(0.3),
+            promote_album_min_favorites: Some(2),
+            coherence: true,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains("\"spotlightShare\""));
+        assert!(json.contains("\"albumTrackRatio\""));
+        assert!(json.contains("\"promoteAlbumMinFavorites\""));
+        let back: AutoFillPipeline = serde_json::from_str(&json).unwrap();
+        assert_eq!(p, back, "promotion stage round-trips byte-identically");
+
+        // A default PromotionStage round-trips and the Option fields are omitted.
+        let d = PromotionStage::default();
+        let dj = serde_json::to_string(&d).unwrap();
+        assert!(!dj.contains("spotlightShare"), "None options are omitted: {dj}");
+        assert_eq!(d, serde_json::from_str::<PromotionStage>(&dj).unwrap());
+
+        // A missing promotion block degrades to default (parse tolerance).
+        let none: AutoFillPipeline = serde_json::from_str("{}").unwrap();
+        assert_eq!(none.promotion, PromotionStage::default());
+
+        // Out-of-range floats are tolerated at parse (clamped only at consumption); a malformed-but-typed
+        // block still deserializes rather than aborting.
+        let wide: AutoFillPipeline =
+            serde_json::from_str(r#"{"promotion":{"spotlight":true,"spotlightShare":2.0}}"#).unwrap();
+        assert_eq!(wide.promotion.spotlight_share, Some(2.0));
     }
 }

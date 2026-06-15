@@ -309,6 +309,7 @@ export class AutoFillPanel {
                         ${UNITS.map((u) => `<sl-option value="${u}">${t('basket.autofill.unit_' + u)}</sl-option>`).join('')}
                     </sl-select>
                 `)}
+                ${this.renderPromotionStage()}
                 ${this.renderOrderingSection()}
                 ${this.renderMemoryStage()}
                 ${this.renderQualityStage()}
@@ -317,6 +318,49 @@ export class AutoFillPanel {
                 ${this.renderContextStage()}
             </div>
         `;
+    }
+
+    /** Promotion stage (Story 13.6 #33/#8/#9/#27) — advanced unit modifiers, clustered next to the Unit
+     * selector: an Artist Spotlight enable + reserve-share slider (#33), an album/track space-ratio
+     * slider (#8), an affinity min-favorites album-promotion input (#9), and a coherence switch (#27).
+     * All default ⇒ no behavior change. Modeled on the Rarity/Pity renderers; finer slider step than
+     * the 13.5 memory sliders (review 13.5: step="5" snapped externally-authored values). */
+    private renderPromotionStage(): string {
+        const pr = this.pipeline.promotion;
+        const sharePct = typeof pr.spotlightShare === 'number' ? Math.round(pr.spotlightShare * 100) : 50;
+        const ratioPct = typeof pr.albumTrackRatio === 'number' ? Math.round(pr.albumTrackRatio * 100) : 0;
+        return this.renderStage(t('basket.autofill.promotion'), `
+            <div class="auto-fill-caption">${t('basket.autofill.promotion_hint')}</div>
+            <sl-switch id="af-spotlight-enabled" size="small" ${pr.spotlight ? 'checked' : ''}>
+                ${t('basket.autofill.spotlight_enable')}
+            </sl-switch>
+            <div class="auto-fill-caption">${t('basket.autofill.spotlight_hint')}</div>
+            ${pr.spotlight ? `
+                <div class="auto-fill-memory-dial">
+                    <label class="auto-fill-substage-label">${t('basket.autofill.spotlight_share')}</label>
+                    <div class="af-share-cell">
+                        <sl-range id="af-spotlight-share" min="0" max="100" step="1" value="${sharePct}"></sl-range>
+                        <span class="af-share-value">${sharePct}%</span>
+                    </div>
+                </div>
+            ` : ''}
+            <div class="auto-fill-memory-dial">
+                <label class="auto-fill-substage-label">${t('basket.autofill.album_track_ratio')}</label>
+                <div class="af-share-cell">
+                    <sl-range id="af-album-track-ratio" min="0" max="100" step="1" value="${ratioPct}"></sl-range>
+                    <span class="af-share-value">${ratioPct}%</span>
+                </div>
+            </div>
+            <div class="auto-fill-caption">${t('basket.autofill.album_track_ratio_hint')}</div>
+            <sl-input id="af-promote-min-favorites" type="number" min="0" step="1"
+                label="${t('basket.autofill.promote_min_favorites')}"
+                help-text="${t('basket.autofill.promote_min_favorites_hint')}"
+                value="${pr.promoteAlbumMinFavorites ?? ''}"></sl-input>
+            <sl-switch id="af-coherence" size="small" ${pr.coherence ? 'checked' : ''}>
+                ${t('basket.autofill.coherence_enable')}
+            </sl-switch>
+            <div class="auto-fill-caption">${t('basket.autofill.coherence_hint')}</div>
+        `);
     }
 
     /** Context stage (Story 13.5 #3/#17/#32): an enable switch + an ordered rule editor. Each rule has
@@ -885,6 +929,38 @@ export class AutoFillPanel {
             const pct = Number((e.target as any).value);
             this.pipeline.pity.guaranteedRatio = isNaN(pct) ? undefined : pct / 100;
             this.renderBody(); // refresh the % readout
+        });
+
+        // --- Promotion stage (Story 13.6 #33/#8/#9/#27) ---
+        d.querySelector('#af-spotlight-enabled')?.addEventListener('sl-change', (e: Event) => {
+            this.captureInputs();
+            const on = (e.target as HTMLInputElement).checked;
+            this.pipeline.promotion.spotlight = on || undefined;
+            // Seed a sensible reserve share on first enable so the slider shows a value (daemon default 0.5).
+            if (on && typeof this.pipeline.promotion.spotlightShare !== 'number') {
+                this.pipeline.promotion.spotlightShare = 0.5;
+            }
+            this.renderBody(); // reveals/hides the share slider
+        });
+        d.querySelector('#af-spotlight-share')?.addEventListener('sl-change', (e: Event) => {
+            this.captureInputs();
+            const pct = Number((e.target as any).value);
+            this.pipeline.promotion.spotlightShare = isNaN(pct) || pct <= 0 ? undefined : pct / 100;
+            this.renderBody(); // refresh the % readout
+        });
+        d.querySelector('#af-album-track-ratio')?.addEventListener('sl-change', (e: Event) => {
+            this.captureInputs();
+            const pct = Number((e.target as any).value);
+            this.pipeline.promotion.albumTrackRatio = isNaN(pct) || pct <= 0 ? undefined : pct / 100;
+            this.renderBody(); // refresh the % readout
+        });
+        bindNum('#af-promote-min-favorites', (v) => {
+            this.pipeline.promotion.promoteAlbumMinFavorites = v == null ? undefined : Math.floor(v);
+        });
+        d.querySelector('#af-coherence')?.addEventListener('sl-change', (e: Event) => {
+            this.captureInputs();
+            this.pipeline.promotion.coherence = (e.target as HTMLInputElement).checked || undefined;
+            this.invalidatePreview();
         });
 
         // --- Encoding-from-goals (Story 13.5 #20): a budget-area boolean (no field reveal). ---
