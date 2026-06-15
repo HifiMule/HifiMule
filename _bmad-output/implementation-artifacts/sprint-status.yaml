@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-06-15  # Story 13.5 → done (code review: no hard AC violations; 2 patches applied in pipeline.rs — CivilTime::is_set() guard + weight<=0 suppression; 601 daemon tests pass, clippy clean; i18n parity test deferred)
+last_updated: 2026-06-15  # Story 13.6 → ready-for-dev (advanced units & promotion: Spotlight #33, album/track ratio #8, affinity promotion #9, coherence #27 — one additive PromotionStage)
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -173,4 +173,4 @@ development_status:
   13-3-curation-and-discovery-sources: done  # code-review 2026-06-15: 2 patches applied (Rediscovery doc-comment clarified; acclaimed-classics caption gated on playlistsSupported), 3 pre-existing items deferred (ISO-8601 lexical date cmp, DateCreated/Rediscovery whitespace asymmetry, missing i18n key-parity test), 4 dismissed; daemon build + tsc green. dev complete 2026-06-15 (Excavation #14 + Rediscovery #31-cheap ordering keys + #16 recipe hint; 570 daemon tests pass, i18n 81×4, tsc+build green, no new clippy warnings); story created via create-story 2026-06-14; scope: engine-only #14 deep-cuts + #31-cheap rediscovery ordering keys; #15 community-rating + true #16 acclaimed-classics deferred (no rating signal in Song/providers)
   13-4-delight-rarity-draws-and-pity-timer: done  # code review 2026-06-15: 2 patches applied (pity reset/fire-gate parity via shared pity_reserve_bytes + SyncDelta.pity_fired_servers carrier; Rarity/Random draw-key id-tiebreak), 1 deferred (no all-locale i18n parity test, pre-existing), 9 dismissed; 586 daemon tests pass, clippy clean on touched modules. dev complete 2026-06-15: #29 weighted rarity draws + #30 deterministic pity timer; engine seed (activates Random) + autofill_pity DB counter; 585 daemon tests pass, i18n 96×4, tsc+build green; play-feedback self-adjustment deferred
   13-5-context-and-encoding-from-goals: done  # review complete 2026-06-15: 3-layer adversarial review, no hard AC violations / no Critical-High; 2 patches applied in pipeline.rs (CivilTime::is_set() inert-default guard; effective_sources weight<=0 suppression) + 2 regression tests; 601 daemon tests pass, clippy clean on pipeline.rs; deferred: i18n all-locale parity test (pre-existing)
-  13-6-advanced-units-and-promotion: backlog
+  13-6-advanced-units-and-promotion: ready-for-dev  # story created via create-story 2026-06-15; final Epic 13 story (advanced units & promotion #33/#8/#9/#27)
