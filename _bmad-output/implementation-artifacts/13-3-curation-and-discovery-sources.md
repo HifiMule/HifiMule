@@ -4,7 +4,7 @@ baseline_commit: add47c24a17ec93fd33b52e92ad49effc8f1ac6b
 
 # Story 13.3: Curation & Discovery Sources
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -201,3 +201,13 @@ None — no failures encountered; all suites passed on first run after implement
 | Date       | Version | Description                                                                                     | Author |
 | ---------- | ------- | ----------------------------------------------------------------------------------------------- | ------ |
 | 2026-06-15 | 1.0     | Implemented Story 13.3: `Excavation` (#14) + `Rediscovery` (#31-cheap) ordering keys; acclaimed-classics recipe hint (#16); frontend + i18n (81×4); routing/persona tests. All suites green. | Amelia (dev-story) |
+
+### Review Findings
+
+_Code review 2026-06-15 (Blind Hunter + Edge Case Hunter + Acceptance Auditor). 0 decision-needed, 2 patch, 3 deferred, 4 dismissed as noise. No correctness bug in the shipped engine logic — both new ordering keys are correct, stable, and tested._
+
+- [x] [Review][Patch] `Rediscovery` doc comment overstates "inverse of DateCreated" — behavior is correct per AC 3 (absent/blank sort LAST is intentional, not a bug), but the comment should clarify it inverts only for *present* dates while absent/blank deliberately sink in both orderings [hifimule-daemon/src/auto_fill/pipeline.rs ~L165] — FIXED 2026-06-15: doc comment clarified
+- [x] [Review][Patch] Acclaimed-classics hint caption renders unconditionally in `renderSourcesStage`, even on providers where `playlistsSupported` is false — the caption tells the user to add a playlist source they cannot add (`availableKinds()` filters `playlist` out). Gate the caption on `this.playlistsSupported` [hifimule-ui/src/components/AutoFillPanel.ts ~L378] — FIXED 2026-06-15: caption now gated on `this.playlistsSupported`
+- [x] [Review][Defer] Lexicographic `date_added` comparison assumes uniform zero-padded ISO-8601 — mixed formats/precision/timezones (or epoch strings) would mis-order [hifimule-daemon/src/auto_fill/pipeline.rs] — deferred, pre-existing (shared with `DateCreated`; AC 3 explicitly accepts "ISO-8601 strings sort lexicographically, same assumption DateCreated already relies on")
+- [x] [Review][Defer] `DateCreated` (raw `unwrap_or("")`) vs `Rediscovery` (`nonblank_date` trim) treat whitespace-only `date_added` asymmetrically [hifimule-daemon/src/auto_fill/pipeline.rs] — deferred, pre-existing (the new `Rediscovery` side is the more-correct one; the quirk lives in the untouched `DateCreated` arm)
+- [x] [Review][Defer] No automated i18n key-parity test exists — AC 9 / Dev Notes claim "the parity test stays green," but `hifimule-i18n` only has 6 individual translation tests, no all-locale key-set assertion. Parity verified manually (81×4, all 3 keys in en/fr/es/de) [hifimule-i18n/src/lib.rs] — deferred, pre-existing coverage gap (recommend adding a real parity test)

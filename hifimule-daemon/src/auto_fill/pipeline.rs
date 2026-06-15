@@ -167,7 +167,9 @@ pub enum OrderingKey {
     /// The exact inverse of [`OrderingKey::PlayCount`]; a never-played track (`None`/0) ranks first.
     Excavation,
     /// Story 13.3 #31 (cheap musical-memories) — oldest-added first: resurfaces music added long
-    /// ago. The inverse of [`OrderingKey::DateCreated`]; an unknown `date_added` sorts LAST.
+    /// ago. Inverts [`OrderingKey::DateCreated`] for *present* dates; an absent or blank
+    /// `date_added` deliberately sorts LAST (not a strict inverse — a missing add-date is the
+    /// *worst* rediscovery candidate, per AC 3), so unknown-date tracks sink under both keys.
     Rediscovery,
 }
 

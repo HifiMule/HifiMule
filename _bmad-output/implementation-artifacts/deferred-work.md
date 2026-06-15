@@ -1,7 +1,7 @@
 # Deferred Work
 
 Status: open
-Last updated: 2026-06-14
+Last updated: 2026-06-15
 
 ## Deferred from: code review of 13-2-quality-and-version-ordering (2026-06-14)
 
@@ -246,3 +246,9 @@ If future review findings need follow-up, add them as new story scope or reopen 
 ## Deferred from: code review of story-12.4 (2026-06-14)
 
 - **Invalid share totals can starve later sources** (`hifimule-daemon/src/auto_fill/pipeline.rs:559`). `SourceEntry.share` is documented as `0.0..=1.0`, but the 12.1 pure engine does not validate total explicit share weight. A malformed hand-written manifest with shares summing above 1.0 can let earlier sources consume the global ceiling before later sources get useful budget. Deferred as pre-existing engine/config-validation work; address with future pipeline validation or UI/RPC config hardening.
+
+## Deferred from: code review of 13-3-curation-and-discovery-sources (2026-06-15)
+
+- **Lexicographic `date_added` comparison assumes uniform ISO-8601** (`hifimule-daemon/src/auto_fill/pipeline.rs`, `OrderingKey::Rediscovery` arm). `Rediscovery` compares `date_added` strings via `str::cmp`, which equals chronological order only if every value is a fixed-width, zero-padded, same-precision/timezone ISO-8601 string. `Song.date_added` is an opaque, unvalidated provider string (Subsonic/Jellyfin formats differ); epoch strings, mixed precision, or offset variations would mis-order. Pre-existing assumption shared with `OrderingKey::DateCreated` and **explicitly accepted by AC 3** ("ISO-8601 strings sort lexicographically, same assumption DateCreated already relies on"). Revisit if a provider ever supplies a non-ISO `date_added`; the fix would be to parse/normalize to a comparable instant.
+- **`DateCreated` vs `Rediscovery` treat whitespace-only `date_added` asymmetrically** (`hifimule-daemon/src/auto_fill/pipeline.rs`). The new `Rediscovery` arm uses the `nonblank_date` helper (trims, folds `Some("   ")` into "absent → last"); the untouched `DateCreated` arm uses raw `as_deref().unwrap_or("")`, treating `"   "` as a real string. A user toggling between "Recently added" and "Rediscover" on a library with whitespace-dirty dates could see blank-date tracks ordered differently than a pure inverse. The new `Rediscovery` side is the more-correct one; the quirk lives in pre-existing `DateCreated`. Align both if `DateCreated` is ever revisited.
+- **No automated i18n key-parity test** (`hifimule-i18n/src/lib.rs`). AC 9 and the Dev Notes claim "the parity test stays green," but `hifimule-i18n` only ships 6 individual translation tests (e.g. `tray.quit` per locale) — there is no assertion that all 4 locales share the same key set, and `translate` silently falls back to English then to the raw key, so a dropped locale key would not fail CI. Parity for 13.3 was verified manually (81×4; all 3 new keys present in en/fr/es/de). Pre-existing coverage gap; recommend adding a real all-locale key-set parity test so future stories can rely on the gate they already cite.
