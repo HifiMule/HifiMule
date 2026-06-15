@@ -190,7 +190,7 @@ function renderMainLayout(_state: any = null) {
     if (root.querySelector('#server-hub-container')) return;
 
     root.innerHTML = `
-    <sl-split-panel position="68" class="split-panel">
+    <sl-split-panel primary="end" position="32" class="split-panel">
       <div slot="start" class="library-view">
         <header>
           <div class="library-header-row">

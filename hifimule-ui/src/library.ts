@@ -546,6 +546,14 @@ function renderGrid(items: BrowseDisplayItem[], onCurate?: (id: string, name: st
     const quickNav = renderQuickNav();
     if (quickNav) container.appendChild(quickNav);
 
+    // Settled, zero-item result → teach the empty state. These renderers only
+    // ever run with a final item set (the initial spinner uses showSpinner),
+    // so an empty array here means the load genuinely returned nothing.
+    if (items.length === 0) {
+        renderEmptyState(container);
+        return;
+    }
+
     const grid = document.createElement('div');
     grid.className = 'media-grid';
 
@@ -573,7 +581,9 @@ function renderGrid(items: BrowseDisplayItem[], onCurate?: (id: string, name: st
 
         const loadMoreBtn = document.createElement('sl-button') as any;
         loadMoreBtn.className = 'load-more-btn';
-        loadMoreBtn.textContent = `Load More (${state.pagination.total - state.items.length} remaining)`;
+        loadMoreBtn.textContent = t('library.load_more', {
+            count: state.pagination.total - state.items.length,
+        });
         loadMoreBtn.onclick = () => loadMore();
 
         loadMoreContainer.appendChild(loadMoreBtn);
@@ -1036,6 +1046,30 @@ function renderListRow(item: BrowseDisplayItem, index: number, onCurate?: (id: s
     return row;
 }
 
+/** Quiet, precise empty state shown when a successful load returns zero items —
+ * an empty library, a genre/album with no children, or a letter filter that
+ * matches nothing. A blank content pane reads as a broken load; this teaches
+ * what the surface is and (for letter filters) why it's empty. */
+function renderEmptyState(container: HTMLElement) {
+    let message: string;
+    if (state.activeLetter) {
+        message = t('library.empty.letter', { letter: state.activeLetter });
+    } else if (state.breadcrumbStack.length > 0) {
+        message = t('library.empty.nested');
+    } else {
+        message = t(`library.empty.${state.browseMode}`);
+    }
+    const empty = document.createElement('div');
+    empty.className = 'library-empty-state';
+    const icon = document.createElement('sl-icon');
+    icon.setAttribute('name', 'inbox');
+    const text = document.createElement('p');
+    text.textContent = message;
+    empty.appendChild(icon);
+    empty.appendChild(text);
+    container.appendChild(empty);
+}
+
 const LOAD_AHEAD = 5;
 
 function renderList(items: BrowseDisplayItem[], onCurate?: (id: string, name: string) => void) {
@@ -1047,6 +1081,10 @@ function renderList(items: BrowseDisplayItem[], onCurate?: (id: string, name: st
     if (state.breadcrumbStack.length > 0) content.appendChild(createBreadcrumbs());
     const qn = renderQuickNav();
     if (qn) content.appendChild(qn);
+    if (items.length === 0) {
+        renderEmptyState(content);
+        return;
+    }
     const expectedTotal = state.pagination.total > 0 ? state.pagination.total : items.length;
     const scroller = document.createElement('div');
     scroller.className = 'media-list';
@@ -1197,17 +1235,31 @@ function renderError(error: Error) {
     const container = document.getElementById('library-content');
     if (!container) return;
 
-    container.innerHTML = `
-        <div class="error-message">
-            <sl-icon name="exclamation-triangle" style="font-size: 2rem;"></sl-icon>
-            <p>Error: ${error.message}</p>
-            <sl-button id="retry-library-btn">Retry</sl-button>
-        </div>
-    `;
+    // Build with DOM nodes, not innerHTML: error.message can carry raw,
+    // server-derived text (the RPC layer surfaces backend detail verbatim, by
+    // design — Trust through precision). Interpolating it into innerHTML would
+    // break layout or inject markup. textContent neutralizes both.
+    container.innerHTML = '';
+    const wrapper = document.createElement('div');
+    wrapper.className = 'error-message';
 
-    container.querySelector('#retry-library-btn')?.addEventListener('click', () => {
-        initLibraryView();
-    });
+    const icon = document.createElement('sl-icon');
+    icon.setAttribute('name', 'exclamation-triangle');
+
+    const title = document.createElement('p');
+    title.className = 'error-message-title';
+    title.textContent = t('library.error.title');
+
+    const detail = document.createElement('p');
+    detail.className = 'error-message-detail';
+    detail.textContent = error.message;
+
+    const retry = document.createElement('sl-button') as any;
+    retry.textContent = t('library.error.retry');
+    retry.addEventListener('click', () => initLibraryView());
+
+    wrapper.append(icon, title, detail, retry);
+    container.appendChild(wrapper);
 }
 
 // --- Mode switching ---
