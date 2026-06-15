@@ -159,7 +159,7 @@ export class AutoFillPanel {
         this.headroomGbInput = this.initialHeadroomGbInput;
     }
 
-    public open(): void {
+    public async open(): Promise<void> {
         const dialog = document.createElement('sl-dialog') as any;
         dialog.label = t('basket.autofill.configure_title', { server: this.opts.serverLabel });
         dialog.className = 'auto-fill-panel-dialog';
@@ -173,6 +173,10 @@ export class AutoFillPanel {
             this.previewGeneration++; // discard any in-flight request resolving post-close
             dialog.remove();
         });
+        // Wait for the web component to upgrade before showing, otherwise the
+        // first show() is dropped and the dialog only appears on the second click.
+        await customElements.whenDefined('sl-dialog');
+        await dialog.updateComplete;
         dialog.show();
     }
 

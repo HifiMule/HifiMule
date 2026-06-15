@@ -457,7 +457,7 @@ export class BasketSidebar {
             ? Math.max(this.storageInfo.freeBytes - basketStore.getManualSizeBytes(), 0)
             : undefined;
 
-        new AutoFillPanel({
+        const panel = new AutoFillPanel({
             serverId,
             serverLabel,
             pipeline: initial,
@@ -467,7 +467,8 @@ export class BasketSidebar {
             excludeItemIds: basketStore.getManualItemIdsForServer(serverId),
             availableBytes,
             formatSize,
-        }).open();
+        });
+        await panel.open();
     }
 
     /** True when the selected server has an enabled auto-fill pipeline. */
