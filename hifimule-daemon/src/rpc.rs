@@ -2589,6 +2589,10 @@ async fn provider_calculate_delta(
     // When basket has items this augments them — playlists/albums stay, free space is filled.
     // Story 13.1: rotation-tier index per emitted track, patched onto delta.adds below.
     let mut af_tier_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // Story 13.4 review: portable server ids whose pity discovery reserve genuinely fired this run
+    // (shared `pity_reserve_bytes` gate, computed with the per-run budget). Set on the delta below so
+    // the sync-completion recorder resets the dry-streak only for servers that actually fired.
+    let mut af_pity_fired: Vec<String> = Vec::new();
     if auto_fill_enabled {
         // If the UI provided maxBytes, use it directly — it already represents the intended
         // auto-fill budget (UI subtracted manual-item sizes from free space). If not provided,
@@ -2672,6 +2676,18 @@ async fn provider_calculate_delta(
             let pipeline_opt = selected_portable
                 .as_deref()
                 .and_then(|id| manifest.auto_fill.pipeline_for(id));
+            // Story 13.4 review: record whether the pity reserve genuinely fired for this slot
+            // (same gate the engine uses, with this run's budget) so the recorder resets the
+            // dry-streak only on a real fire.
+            if let (Some(sid), Some(pipeline)) = (selected_portable.as_deref(), pipeline_opt)
+                && crate::auto_fill::pipeline::pity_reserve_bytes(
+                    &pipeline.pity,
+                    pity_streak,
+                    auto_fill_budget,
+                ) > 0
+            {
+                af_pity_fired.push(sid.to_string());
+            }
             let fill_items = expand_auto_fill_slot(provider, pipeline_opt, fill_params)
                 .await
                 .map_err(|e| JsonRpcError {
@@ -2717,6 +2733,7 @@ async fn provider_calculate_delta(
     );
     let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
     patch_delta_tiers(&mut delta, &af_tier_map);
+    delta.pity_fired_servers = af_pity_fired;
     delta.playlists = playlist_sync_items;
     crate::daemon_log!(
         "[Delta] Provider delta calculated: adds={} deletes={} id_changes={} unchanged={} playlists={} reasons={}",
@@ -3793,22 +3810,25 @@ fn record_autofill_history_after_sync(
             crate::daemon_log!("[AutoFill] rotation cursor advance failed (non-fatal): {}", e);
         }
 
-        // Story 13.4: pity dry-streak reset/increment, gated exactly like the rotation advance —
-        // only a pity-enabled server that actually wrote a track this run. Re-read the streak (no
-        // concurrent writer between fill and sync completion): if it had reached the threshold the
-        // discovery guarantee fired this run → reset to 0; otherwise advance it by 1. Best-effort.
+        // Story 13.4 (+ review): pity dry-streak reset/increment, gated like the rotation advance —
+        // only a pity-enabled server that actually wrote a track this run. Reset to 0 **only** when
+        // the discovery reserve *genuinely fired* this run (`delta.pity_fired_servers`, set at fill
+        // time from the shared `pity_reserve_bytes` gate — enabled + streak ≥ threshold + bounded
+        // budget + positive reserve). Otherwise advance by 1, so a streak that crossed the threshold
+        // while the budget was unbounded or the ratio rounded to zero stays armed (and keeps growing
+        // past the threshold) until a run where the reserve actually fires — rather than silently
+        // consuming the timer without delivering. Best-effort (never fails the sync).
         if servers_wrote.contains(server_id)
-            && let Some(pity) = manifest
+            && manifest
                 .auto_fill
                 .pipeline_for(server_id)
-                .map(|p| &p.pity)
-                .filter(|p| p.enabled)
+                .is_some_and(|p| p.pity.enabled)
         {
-            let streak = db.get_pity_streak(device_id, server_id).unwrap_or(0);
-            let next = if streak >= i64::from(pity.threshold_syncs) {
-                0 // the guarantee fired this run
+            let fired = delta.pity_fired_servers.iter().any(|s| s == server_id);
+            let next = if fired {
+                0 // the discovery reserve genuinely fired this run → dry spell broken
             } else {
-                streak + 1
+                db.get_pity_streak(device_id, server_id).unwrap_or(0) + 1
             };
             if let Err(e) = db.set_pity_streak(device_id, server_id, next) {
                 crate::daemon_log!("[AutoFill] pity streak update failed (non-fatal): {}", e);
@@ -3954,6 +3974,8 @@ async fn multi_provider_calculate_delta(
     let descriptors = parse_auto_fill_descriptors(params);
     // Story 13.1: rotation-tier index per emitted track across all slots, patched onto delta.adds.
     let mut af_tier_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // Story 13.4 review: portable server ids whose pity discovery reserve genuinely fired this run.
+    let mut af_pity_fired: Vec<String> = Vec::new();
     if !descriptors.is_empty() {
         // Shared budget = device free + already-synced − already-selected bytes
         // (mirrors `provider_calculate_delta`'s server-side derivation at
@@ -4042,6 +4064,14 @@ async fn multi_provider_calculate_delta(
             // Story 12.4: route this slot through the shared seam — the configurable engine
             // when this server has a non-default pipeline, else the default fast path.
             let pipeline_opt = manifest.auto_fill.pipeline_for(&af_server);
+            // Story 13.4 review: did the pity reserve genuinely fire for this slot (same gate the
+            // engine uses, with this slot's budget)? Drives the dry-streak reset at sync completion.
+            if let Some(pipeline) = pipeline_opt
+                && crate::auto_fill::pipeline::pity_reserve_bytes(&pipeline.pity, pity_streak, budget)
+                    > 0
+            {
+                af_pity_fired.push(af_server.clone());
+            }
             let fill_items = match expand_auto_fill_slot(provider, pipeline_opt, fill_params).await {
                 Ok(items) => items,
                 Err(e) => {
@@ -4070,6 +4100,7 @@ async fn multi_provider_calculate_delta(
 
     let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
     patch_delta_tiers(&mut delta, &af_tier_map);
+    delta.pity_fired_servers = af_pity_fired;
     delta.playlists = playlist_sync_items;
     if let Some((_, device_io)) = state.device_manager.get_manifest_and_io().await {
         crate::sync::augment_delta_with_existence_check(
@@ -4955,6 +4986,9 @@ async fn handle_sync_execute(
                     } else {
                         Vec::new()
                     },
+                    // Per-server pity signal lives on the outer `delta` (read at sync completion);
+                    // the per-group sub-delta only drives `execute_provider_sync`, never the recorder.
+                    pity_fired_servers: Vec::new(),
                 };
                 first = false;
                 let result = crate::sync::execute_provider_sync(

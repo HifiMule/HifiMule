@@ -3,6 +3,10 @@
 Status: open
 Last updated: 2026-06-15
 
+## Deferred from: code review of 13-4-delight-rarity-draws-and-pity-timer (2026-06-15)
+
+- **No automated all-locale i18n key-parity test** (`hifimule-i18n`). `hifimule-i18n` ships only 6 per-translation tests; there is no assertion that en/fr/es/de share the same key set, and `translate` silently falls back to English then the raw key, so a dropped locale key would not fail CI. 13.4 parity (96×4) verified by hand. Pre-existing gap, also flagged in the 13.3 review; out of scope per spec Dev Notes. Recommend adding a real all-locale key-set parity test so future stories can rely on the gate they already cite.
+
 ## Deferred from: code review of 13-2-quality-and-version-ordering (2026-06-14)
 
 - **Per-comparison recomputation of `detect_version_traits`** [`hifimule-daemon/src/auto_fill/pipeline.rs:777-786,858-881`] — `version_rank` (and `best_version_cmp`) call `detect_version_traits`, which allocates a lowercased `title+album` string and runs every `has_word` scan, on each of the O(n log n) comparisons inside `sort_by`. Pure-performance; fine at typical pool sizes, but per-song traits could be precomputed once.

@@ -304,6 +304,25 @@ pub struct PityStage {
     pub discovery_max_plays: u32,
 }
 
+/// Story 13.4: the size in bytes of the pity discovery reserve for this run — `0` when the reserve
+/// does **not** fire. The reserve fires iff the feature is enabled, the dry streak has reached the
+/// threshold, the budget is bounded (`ceiling != u64::MAX`), and the reserved fraction rounds to a
+/// positive byte count. This is the **single source of truth** for the fire condition: [`run_pipeline`]
+/// calls it to size/run the reserve, and the impure sync-completion path calls it (with the same
+/// per-run ceiling) to decide whether the dry-streak was *genuinely consumed* this run — so the
+/// fire-gate and the streak-reset gate can never drift. A streak that crosses the threshold while the
+/// budget is unbounded or the ratio rounds to zero therefore reserves nothing **and** is not reset,
+/// keeping the guarantee armed until a run where it actually fires. (Note: "fires" means the reserve
+/// pass ran with a positive budget; whether the library still holds an undiscovered gem to fill it is
+/// a content question the deterministic engine cannot answer here.)
+pub fn pity_reserve_bytes(pity: &PityStage, pity_streak: i64, ceiling: u64) -> u64 {
+    if !pity.enabled || pity_streak < i64::from(pity.threshold_syncs) || ceiling == u64::MAX {
+        return 0;
+    }
+    let ratio = f64::from(pity.guaranteed_ratio).clamp(0.0, 1.0);
+    ((ceiling as f64) * ratio).round() as u64
+}
+
 impl AutoFillPipeline {
     /// The backward-compatibility mapping for a legacy `{ enabled, maxBytes }` block.
     ///
@@ -490,28 +509,22 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
     // The reserve adds on top of whatever the core already spent, capped by the full ceiling.
     // `guaranteed_ratio = 0`, an unbounded ceiling, or `pity_streak < threshold` ⇒ no-op.
     let pity = &pipeline.pity;
-    if pity.enabled
-        && input.pity_streak >= i64::from(pity.threshold_syncs)
-        && ceiling != u64::MAX
-    {
-        let ratio = f64::from(pity.guaranteed_ratio).clamp(0.0, 1.0);
-        let reserve_bytes = ((ceiling as f64) * ratio).round() as u64;
-        if reserve_bytes > 0 {
-            selector.ceiling = selector.cum_bytes.saturating_add(reserve_bytes).min(ceiling);
-            let reserve_caps = source_caps(sources, reserve_bytes);
-            for (source, cap) in sources.iter().zip(reserve_caps) {
-                let units = build_source_units(input, pipeline, source);
-                selector.fill(
-                    units,
-                    source,
-                    cap,
-                    &pipeline.memory,
-                    &input.history,
-                    FillMode::Discovery { max_plays: pity.discovery_max_plays },
-                );
-            }
-            selector.ceiling = ceiling; // restore the full ceiling for the primary pass
+    let reserve_bytes = pity_reserve_bytes(pity, input.pity_streak, ceiling);
+    if reserve_bytes > 0 {
+        selector.ceiling = selector.cum_bytes.saturating_add(reserve_bytes).min(ceiling);
+        let reserve_caps = source_caps(sources, reserve_bytes);
+        for (source, cap) in sources.iter().zip(reserve_caps) {
+            let units = build_source_units(input, pipeline, source);
+            selector.fill(
+                units,
+                source,
+                cap,
+                &pipeline.memory,
+                &input.history,
+                FillMode::Discovery { max_plays: pity.discovery_max_plays },
+            );
         }
+        selector.ceiling = ceiling; // restore the full ceiling for the primary pass
     }
 
     // Primary sources (delta), each capped by its share of the budget *remaining* after the core
@@ -780,13 +793,20 @@ fn compare_by_ordering(
                 } else {
                     (1.0, 1.0)
                 };
-                es_draw_key(seed, &b.id, wb).total_cmp(&es_draw_key(seed, &a.id, wa))
+                // Story 13.4 review: break a draw-key tie on `song.id` so the order is canonical even
+                // when keys collide (all-zero rarity weights sink every key to 0.0, or a rare
+                // `draw_unit01` collision) — never the pool's materialization order. Distinct ids with
+                // non-zero weights never tie, so seeded fixtures are unaffected. Scoped to the
+                // randomized keys only; other keys keep their fall-through-to-next-key behavior.
+                es_draw_key(seed, &b.id, wb)
+                    .total_cmp(&es_draw_key(seed, &a.id, wa))
+                    .then_with(|| a.id.cmp(&b.id))
             }
             // Story 13.4: seeded uniform shuffle — every song draws with weight 1.0 (the special case
             // of the rarity draw), higher key first. A deterministic permutation given the seed.
-            OrderingKey::Random => {
-                es_draw_key(seed, &b.id, 1.0).total_cmp(&es_draw_key(seed, &a.id, 1.0))
-            }
+            OrderingKey::Random => es_draw_key(seed, &b.id, 1.0)
+                .total_cmp(&es_draw_key(seed, &a.id, 1.0))
+                .then_with(|| a.id.cmp(&b.id)),
         };
         if ord != Ordering::Equal {
             return ord;
@@ -3313,5 +3333,36 @@ mod tests {
         let order = ids(&run_pipeline(&input, &pipeline));
         assert!(order.contains(&"resident".to_string()), "stable-core keeps the on-device resident");
         assert!(order.contains(&"gem".to_string()), "pity reserve still surfaces the new gem");
+    }
+
+    #[test]
+    fn pity_reserve_bytes_is_the_shared_fire_gate() {
+        // Story 13.4 review: `pity_reserve_bytes` is the single source of truth shared by the engine
+        // (run the reserve) and the RPC sync-completion path (reset the dry-streak only on a real
+        // fire). Returns 0 ⇒ the reserve does NOT fire AND the streak is not consumed.
+        let pity = pity_on(); // enabled, threshold 3, ratio 0.5
+        // Fires: enabled, streak >= threshold, bounded budget, positive reserve.
+        assert_eq!(pity_reserve_bytes(&pity, 3, 6_000_000), 3_000_000, "round(6M × 0.5)");
+        assert!(pity_reserve_bytes(&pity, 4, 6_000_000) > 0, "streak above threshold also fires");
+        // Does NOT fire — these are exactly the cases the recorder must NOT reset on:
+        assert_eq!(pity_reserve_bytes(&pity, 2, 6_000_000), 0, "below threshold");
+        assert_eq!(pity_reserve_bytes(&pity, 3, u64::MAX), 0, "unbounded ceiling never fires");
+        assert_eq!(
+            pity_reserve_bytes(&PityStage { guaranteed_ratio: 0.0, ..pity_on() }, 3, 6_000_000),
+            0,
+            "zero ratio reserves nothing"
+        );
+        assert_eq!(
+            pity_reserve_bytes(&PityStage { guaranteed_ratio: 0.000_001, ..pity_on() }, 3, 100, ),
+            0,
+            "a ratio that rounds to <1 byte does not fire"
+        );
+        assert_eq!(pity_reserve_bytes(&PityStage::default(), 99, 6_000_000), 0, "disabled never fires");
+        // Ratio is clamped to [0,1]: an out-of-range manifest value cannot reserve beyond the ceiling.
+        assert_eq!(
+            pity_reserve_bytes(&PityStage { guaranteed_ratio: 9.0, ..pity_on() }, 3, 6_000_000),
+            6_000_000,
+            "ratio clamps to 1.0"
+        );
     }
 }

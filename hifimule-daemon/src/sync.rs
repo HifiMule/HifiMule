@@ -194,6 +194,14 @@ pub struct SyncDelta {
     pub unchanged: usize,
     #[serde(default)]
     pub playlists: Vec<PlaylistSyncItem>, // playlist basket items with ordered tracks
+    /// Story 13.4: portable server ids whose pity discovery reserve *genuinely fired* this run (the
+    /// shared `pity_reserve_bytes` gate was satisfied at fill time — enabled, dry streak ≥ threshold,
+    /// bounded budget, positive reserve). Carried through the delta JSON round-trip so the
+    /// sync-completion path resets the dry-streak only for servers where the guarantee actually fired
+    /// (not merely because the streak crossed the threshold). Populated by the auto-fill expansion
+    /// paths after `calculate_delta`, mirroring `patch_delta_tiers`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pity_fired_servers: Vec<String>,
 }
 
 fn change_reason(code: &str) -> String {
@@ -3428,6 +3436,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
         id_changes,
         unchanged,
         playlists: vec![],
+        pity_fired_servers: vec![],
     }
 }
 
@@ -3582,6 +3591,7 @@ mod tests {
             id_changes: vec![],
             unchanged: 0,
             playlists: vec![],
+            pity_fired_servers: vec![],
         };
 
         let (_synced, errors) = execute_sync(
@@ -3658,6 +3668,7 @@ mod tests {
             id_changes: vec![],
             unchanged: 0,
             playlists: vec![],
+            pity_fired_servers: vec![],
         };
         let operation_manager = Arc::new(SyncOperationManager::new());
         let operation_id = "op-missing-delete-progress".to_string();
@@ -4186,6 +4197,7 @@ mod tests {
             id_changes: vec![],
             unchanged: 0,
             playlists: vec![],
+            pity_fired_servers: vec![],
         };
 
         let (synced, errors) = execute_provider_sync(
@@ -4262,6 +4274,7 @@ mod tests {
             id_changes: vec![],
             unchanged: 0,
             playlists: vec![],
+            pity_fired_servers: vec![],
         };
 
         let (synced, errors) = execute_provider_sync(
@@ -4322,6 +4335,7 @@ mod tests {
             id_changes: vec![],
             unchanged: 0,
             playlists: vec![],
+            pity_fired_servers: vec![],
         };
 
         let (synced, errors) = execute_provider_sync(
@@ -4401,6 +4415,7 @@ mod tests {
             id_changes: vec![],
             unchanged: 0,
             playlists: vec![],
+            pity_fired_servers: vec![],
         };
 
         let (synced, errors) = execute_provider_sync(
@@ -5083,6 +5098,7 @@ mod tests {
             ],
             unchanged: 0,
             playlists: vec![],
+            pity_fired_servers: vec![],
         };
 
         let diagnostics = format_id_change_diagnostics(&delta, 1);
@@ -5584,6 +5600,7 @@ mod tests {
                 name: "Road".to_string(),
                 tracks: vec![],
             }],
+            pity_fired_servers: vec![],
         };
 
         assert_eq!(destructive_cleanup_count(&delta, &manifest), 1);
@@ -5644,6 +5661,7 @@ mod tests {
             )],
             unchanged: 0,
             playlists: vec![],
+            pity_fired_servers: vec![],
         };
 
         let summary = change_reason_summary(&delta);

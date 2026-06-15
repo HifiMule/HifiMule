@@ -4,7 +4,7 @@ baseline_commit: c3fdaf062cb0fffc4f983ab6e756b17bb03ced2b
 
 # Story 13.4: Delight — Rarity Draws & Pity Timer
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -288,3 +288,12 @@ claude-opus-4-8 (Claude Opus 4.8)
 | Date | Change |
 |------|--------|
 | 2026-06-15 | Story 13.4 implemented: #29 weighted rarity draws + #30 deterministic pity timer. Engine gains its first seed (activating `OrderingKey::Random`) and second machine-local DB counter (`autofill_pity`). Cross-layer wiring (engine → fetch → RPC → DB → UI → i18n). 585 daemon tests pass; i18n 96×4; tsc + build green. Status → review. |
+| 2026-06-15 | Code review patches applied: (1) pity reset/fire gate hardened — shared `pity_reserve_bytes` gate + new per-server `SyncDelta::pity_fired_servers` carrier so the dry-streak resets only on a genuine fire (no more timer-consumed-without-firing); (2) `Rarity`/`Random` draw-key ties broken canonically on `song.id`. New test `pity_reserve_bytes_is_the_shared_fire_gate`; 586 daemon tests pass; clippy clean on touched modules. Files added to scope: `sync.rs`. |
+
+## Review Findings
+
+_Code review 2026-06-15 (Blind Hunter + Edge Case Hunter + Acceptance Auditor). Acceptance Auditor: all 14 ACs verified met, hard constraints hold (no `thread_rng`/`SystemTime` in pure layers, `total_cmp` only, weight-0 guarded, storage split, fast path intact, deferred scope respected, Léo persona config-driven). 1 decision-needed (→ patched), 1 patch, 1 deferred, 9 dismissed as noise. **Both patches applied & verified 2026-06-15** — 586 daemon tests pass (+1 new), clippy clean on touched modules, daemon-only changes (no TS/i18n)._
+
+- [x] [Review][Patch — resolved from Decision] Pity reset/increment gate hardened to fire-gate parity — **Was:** the reserve fired only when `enabled && streak >= threshold && ceiling != u64::MAX && reserve_bytes > 0`, but the streak reset whenever `streak >= threshold` + any track written, so an unbounded-ceiling or tiny-ratio config consumed the timer without ever firing. **Fix (applied):** extracted a single shared gate `pity_reserve_bytes(pity, pity_streak, ceiling) -> u64` ([pipeline.rs](../../hifimule-daemon/src/auto_fill/pipeline.rs)) used by both `run_pipeline` and the two RPC fill sites; the fill sites record which servers genuinely fired into a new `SyncDelta::pity_fired_servers` (per-server, `#[serde(default)]`, rides the existing delta JSON round-trip like `tier`); `record_autofill_history_after_sync` now resets the streak **only** for servers in that set, otherwise increments — a streak that crossed the threshold without firing stays armed (and grows past threshold) until a run where the reserve actually fires. Fire-gate and reset-gate can no longer drift. New unit test `pity_reserve_bytes_is_the_shared_fire_gate`. _(Residual, by design: "fired" = the reserve pass ran with positive budget; if the library holds no undiscovered gem to fill it the streak still resets — a content limit the deterministic engine can't resolve, consistent with the deferred play-feedback scope.)_
+- [x] [Review][Patch] `Rarity`/`Random` draw-key ties now break on `song.id` [hifimule-daemon/src/auto_fill/pipeline.rs] — appended `.then_with(|| a.id.cmp(&b.id))` to the `Rarity` and `Random` comparator arms only (mirrors `best_version_cmp`). **Scoped narrowly to the two randomized keys** rather than the comparator's final fall-through: all-zero-weight / draw-collision ties become canonical while every other ordering key keeps its existing fall-through-to-next-key behavior (a broad final tiebreak regressed `rediscovery_sorts_missing_or_blank_date_last` and `genre_membership_is_paginated_beyond_first_page` by reordering equal-key items in unrelated keys — reverted in favor of the scoped fix).
+- [x] [Review][Defer] No automated all-locale i18n key-parity test [hifimule-i18n] — `hifimule-i18n` ships only 6 per-translation tests; there is no assertion that en/fr/es/de share the same key set, and `translate` silently falls back to English then the raw key, so a dropped locale key would not fail CI. 13.4 parity (96×4) verified by hand. Pre-existing gap, flagged in the 13.3 review too; out of scope per spec Dev Notes ("Adding a real key-parity test is a worthwhile but out-of-scope cleanup"). — deferred, pre-existing
