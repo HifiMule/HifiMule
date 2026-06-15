@@ -31,8 +31,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::pipeline::{
-    AutoFillPipeline, Candidate, FilterStage, MemoryStage, OrderingKey, PipelineInput, QualityStage,
-    SourceEntry, SourceKey, SourceKind, Unit, run_pipeline,
+    AutoFillPipeline, Candidate, FilterStage, MemoryStage, OrderingKey, PipelineInput, PityStage,
+    QualityStage, RarityStage, SourceEntry, SourceKey, SourceKind, Unit, run_pipeline,
 };
 use super::{AutoFillItem, AutoFillParams};
 use crate::domain::models::Song;
@@ -164,6 +164,11 @@ pub fn needs_configurable_expansion(p: &AutoFillPipeline) -> bool {
     // `ordering_default` (it makes the ordering non-legacy). `QualityStage::default()` is today's
     // behavior, so it keeps the fast path.
     let quality_default = p.quality == QualityStage::default();
+    // Story 13.4: a rarity-only or pity-only pipeline (default ordering but `rarity`/`pity` set) must
+    // route to the engine path. The `Random`/`Rarity` *ordering keys* are already caught by
+    // `ordering_default` (they make the ordering non-legacy). A default stage keeps the fast path.
+    let rarity_default = p.rarity == RarityStage::default();
+    let pity_default = p.pity == PityStage::default();
     // A headroom reserve or duration target can only be honored by the materialized engine path;
     // `max_bytes` alone is honored by the fast path's `max_fill_bytes` and stays default-legacy.
     let budget_default = !(p.budget.headroom_bytes.is_some_and(|h| h > 0)
@@ -176,7 +181,9 @@ pub fn needs_configurable_expansion(p: &AutoFillPipeline) -> bool {
         && memory_default
         && fallback_default
         && budget_default
-        && quality_default)
+        && quality_default
+        && rarity_default
+        && pity_default)
 }
 
 /// Materialize a configured pipeline's source pools from the provider, then run the pure engine.
@@ -344,6 +351,10 @@ pub async fn expand_with_pipeline(
         pools,
         history,
         exclude_item_ids: params.exclude_item_ids,
+        // Story 13.4: entropy seed + pity dry-streak are caller-supplied values; the pure engine
+        // never mints them. `seed` drives the Random/Rarity draws; `pity_streak` arms the reserve.
+        seed: params.seed,
+        pity_streak: params.pity_streak,
     };
 
     let mut items = run_pipeline(&input, &normalized);
@@ -796,6 +807,8 @@ mod tests {
             now_unix: 0,
             history: HistorySnapshot::default(),
             rotation_cursor: 0,
+            seed: 0,
+            pity_streak: 0,
         }
     }
 
@@ -814,6 +827,8 @@ mod tests {
             now_unix,
             history,
             rotation_cursor,
+            seed: 0,
+            pity_streak: 0,
         }
     }
 
@@ -948,6 +963,35 @@ mod tests {
         // The legacy default ordering still takes the fast path (no behavior change).
         let p = AutoFillPipeline::default_legacy(Some(1));
         assert!(!needs_configurable_expansion(&p), "legacy default ordering stays on the fast path");
+    }
+
+    #[test]
+    fn discriminator_rarity_pity_and_random_force_configurable() {
+        // Story 13.4 (AC 10): a rarity-only, a pity-only, a Random-ordering, or a Rarity-ordering
+        // pipeline must route to the materialized engine path; a default-legacy pipeline stays fast.
+        // (1) rarity-only (default ordering otherwise).
+        let mut p = AutoFillPipeline::default_legacy(Some(1));
+        p.rarity.enabled = true;
+        assert!(needs_configurable_expansion(&p), "rarity stage forces configurable");
+
+        // (2) pity-only.
+        let mut p = AutoFillPipeline::default_legacy(Some(1));
+        p.pity.enabled = true;
+        assert!(needs_configurable_expansion(&p), "pity stage forces configurable");
+
+        // (3) Random ordering key (caught by ordering_default — verify-only, no logic change).
+        let mut p = AutoFillPipeline::default_legacy(Some(1));
+        p.ordering = vec![OrderingKey::Random];
+        assert!(needs_configurable_expansion(&p), "random ordering key forces configurable");
+
+        // (4) Rarity ordering key.
+        let mut p = AutoFillPipeline::default_legacy(Some(1));
+        p.ordering = vec![OrderingKey::Rarity];
+        assert!(needs_configurable_expansion(&p), "rarity ordering key forces configurable");
+
+        // A default RarityStage/PityStage keeps the fast path (legacy stays default-equivalent).
+        let p = AutoFillPipeline::default_legacy(Some(1));
+        assert!(!needs_configurable_expansion(&p), "default rarity/pity stages stay on the fast path");
     }
 
     #[test]

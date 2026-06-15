@@ -74,6 +74,13 @@ pub struct AutoFillPipeline {
     /// [`OrderingKey::Quality`] arm), an ordered version-trait preference (#34), and best-version
     /// collapse (#11). All default ⇒ zero behavior change.
     pub quality: QualityStage,
+    /// Weighted rarity draw (Story 13.4 #29): loot-table common/rare/legendary classes feeding the
+    /// [`OrderingKey::Rarity`] draw. Default ⇒ zero behavior change.
+    pub rarity: RarityStage,
+    /// Pity timer (Story 13.4 #30): a deterministic discovery reserve that fires after a dry streak.
+    /// Default (`enabled:false`) ⇒ zero behavior change; the dry-streak counter is machine-local DB
+    /// state carried via [`PipelineInput::pity_streak`], never stored in the manifest.
+    pub pity: PityStage,
 }
 
 /// Tag/genre filter. All fields default to empty, which means "pass everything through".
@@ -159,7 +166,9 @@ pub enum OrderingKey {
     PlayCount,
     /// More-recently-added first.
     DateCreated,
-    /// Reserved for Epic 13 — a deterministic no-op in 12.1 (no entropy in the pure core).
+    /// Story 13.4 — a seeded uniform shuffle (every song weight 1). Deterministic given
+    /// [`PipelineInput::seed`]; a pipeline that never lists `Random` is byte-for-byte unaffected.
+    /// (Shipped as a deterministic no-op since 12.1; activated here once the engine carries a seed.)
     Random,
     /// Higher bitrate first.
     Quality,
@@ -171,6 +180,11 @@ pub enum OrderingKey {
     /// `date_added` deliberately sorts LAST (not a strict inverse — a missing add-date is the
     /// *worst* rediscovery candidate, per AC 3), so unknown-date tracks sink under both keys.
     Rediscovery,
+    /// Story 13.4 #29 — a seeded *weighted* loot-table draw. Each song draws an Efraimidis–Spirakis
+    /// key `u^(1/w)` from `(seed, id, rarity-class weight)`; a higher-weighted class tends to draw
+    /// earlier. Reads its weights from [`AutoFillPipeline::rarity`]; degrades to a uniform shuffle
+    /// when `rarity.enabled` is false. Deterministic given [`PipelineInput::seed`].
+    Rarity,
 }
 
 /// Cooldown / rotation modifiers. In 12.1 only `cooldown_weeks` and `played_exclusion` are
@@ -250,6 +264,46 @@ where
     Ok(out)
 }
 
+/// Weighted rarity draw (Story 13.4 #29) — loot-table classes. A candidate's rarity class is derived
+/// purely from `Song.play_count` (the only universal signal — there is no rating field): `None`/`0`
+/// → legendary, `1..=rare_max_plays` → rare, else → common. The [`OrderingKey::Rarity`] arm draws
+/// each song with an Efraimidis–Spirakis key `u^(1/w)` where `w` is its class weight.
+///
+/// All-default (`enabled:false`, weights `0.0`, `rare_max_plays:0`) ⇒ today's behavior, exactly like
+/// [`QualityStage::default()`] — so a default `RarityStage` is omitted from the routing discriminator.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RarityStage {
+    /// Off ⇒ zero behavior change. When off, an `OrderingKey::Rarity` degrades to a uniform shuffle.
+    pub enabled: bool,
+    /// Draw weight for the legendary class (never-/0-played — the "deepest" gems).
+    pub legendary_weight: f32,
+    /// Draw weight for the rare class (`1..=rare_max_plays`).
+    pub rare_weight: f32,
+    /// Draw weight for the common class (`> rare_max_plays` — the hits).
+    pub common_weight: f32,
+    /// Boundary play-count between rare and common. (UI default 5; struct default 0 keeps the no-op.)
+    pub rare_max_plays: u32,
+}
+
+/// Pity timer (Story 13.4 #30) — a deterministic discovery guarantee after a dry streak. The dry
+/// streak itself is machine-local DB state carried via [`PipelineInput::pity_streak`]; only this
+/// *config* lives in the manifest (storage split, architecture.md:922).
+///
+/// All-default (`enabled:false`) ⇒ today's behavior — no reserve, no counter interaction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PityStage {
+    /// Off ⇒ no reserve, no counter interaction.
+    pub enabled: bool,
+    /// Dry syncs before the guarantee fires. (UI default 3; struct default 0 keeps the no-op off.)
+    pub threshold_syncs: u32,
+    /// Fraction of the budget reserved for discovery when the guarantee fires (`0.0..=1.0`).
+    pub guaranteed_ratio: f32,
+    /// A "discovery" candidate has `play_count <= this`. (UI default 0 = never-played.)
+    pub discovery_max_plays: u32,
+}
+
 impl AutoFillPipeline {
     /// The backward-compatibility mapping for a legacy `{ enabled, maxBytes }` block.
     ///
@@ -275,6 +329,8 @@ impl AutoFillPipeline {
             },
             fallback: Vec::new(),
             quality: QualityStage::default(),
+            rarity: RarityStage::default(),
+            pity: PityStage::default(),
         }
     }
 }
@@ -342,6 +398,15 @@ pub struct PipelineInput {
     pub history: HistorySnapshot,
     /// Manually-selected item ids that auto-fill must never re-emit.
     pub exclude_item_ids: Vec<String>,
+    /// Story 13.4: caller-supplied entropy seed. Every random decision (`Random`/`Rarity` draws) is
+    /// derived from this — the pure core never reads a clock or RNG. Same `(input, seed, pipeline)`
+    /// ⇒ byte-identical output. `#[derive(Default)]` ⇒ `0` (no effect when no random key is used).
+    /// Mirrors how [`HistorySnapshot::now`] carries "now" into the otherwise clock-free engine.
+    pub seed: u64,
+    /// Story 13.4: caller-supplied pity dry-streak counter (machine-local DB state, like the rotation
+    /// cursor on `AutoFillParams`). The discovery reserve fires when `pity.enabled && pity_streak >=
+    /// threshold`. Defaults to `0` (no effect when the pity stage is off).
+    pub pity_streak: i64,
 }
 
 impl PipelineInput {
@@ -416,6 +481,39 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
         }
     }
 
+    // Pity discovery reserve (#30, AC 7): when the dry streak has reached the threshold and the
+    // budget is bounded, reserve `round(ceiling × guaranteed_ratio)` bytes and fill them FIRST from
+    // discovery-class candidates only (`play_count <= discovery_max_plays && !is_on_device`) so the
+    // guarantee surfaces genuinely *new* gems, not residents. Mirrors the stable-core pre-pass
+    // exactly (temporary ceiling, restricted candidate set, shared `Selector` ⇒ automatic dedup into
+    // the primary pass). Order: stable-core (keep) → pity reserve (force-new) → primary → fallback.
+    // The reserve adds on top of whatever the core already spent, capped by the full ceiling.
+    // `guaranteed_ratio = 0`, an unbounded ceiling, or `pity_streak < threshold` ⇒ no-op.
+    let pity = &pipeline.pity;
+    if pity.enabled
+        && input.pity_streak >= i64::from(pity.threshold_syncs)
+        && ceiling != u64::MAX
+    {
+        let ratio = f64::from(pity.guaranteed_ratio).clamp(0.0, 1.0);
+        let reserve_bytes = ((ceiling as f64) * ratio).round() as u64;
+        if reserve_bytes > 0 {
+            selector.ceiling = selector.cum_bytes.saturating_add(reserve_bytes).min(ceiling);
+            let reserve_caps = source_caps(sources, reserve_bytes);
+            for (source, cap) in sources.iter().zip(reserve_caps) {
+                let units = build_source_units(input, pipeline, source);
+                selector.fill(
+                    units,
+                    source,
+                    cap,
+                    &pipeline.memory,
+                    &input.history,
+                    FillMode::Discovery { max_plays: pity.discovery_max_plays },
+                );
+            }
+            selector.ceiling = ceiling; // restore the full ceiling for the primary pass
+        }
+    }
+
     // Primary sources (delta), each capped by its share of the budget *remaining* after the core
     // pass. Computing caps against the full ceiling would let early sources spend the bytes the core
     // already consumed and starve later sources; with no core (p = 0) `remaining == ceiling`, so
@@ -442,12 +540,15 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
 
 /// Which fill pass is running. `Core` (stable-core, AC 6) restricts to on-device candidates and
 /// exempts them from cooldown; `Primary` and `Fallback` apply the full Memory rules and differ only
-/// in how the source reason is tagged (`Fallback` items are prefixed `fallback:`).
+/// in how the source reason is tagged (`Fallback` items are prefixed `fallback:`). `Discovery`
+/// (pity reserve, Story 13.4 AC 7) restricts to discovery-class candidates that are **not** on the
+/// device (`play_count <= max_plays && !is_on_device`) so the guarantee surfaces genuinely new gems.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FillMode {
     Core,
     Primary,
     Fallback,
+    Discovery { max_plays: u32 },
 }
 
 /// A selection unit: one or more candidates that are added to the budget atomically (a single
@@ -471,11 +572,17 @@ fn build_source_units(
     // ordering — sort within each unit (so its first track is its best), then sort units by their
     // best track. For Unit::Track this reduces to a single stable global sort.
     let version_pref = &pipeline.quality.version_preference;
+    let seed = input.seed;
+    let rarity = &pipeline.rarity;
     for unit in units.iter_mut() {
-        unit.sort_by(|a, b| compare_by_ordering(&a.song, &b.song, &pipeline.ordering, version_pref));
+        unit.sort_by(|a, b| {
+            compare_by_ordering(&a.song, &b.song, &pipeline.ordering, version_pref, seed, rarity)
+        });
     }
     units.sort_by(|a, b| match (a.first(), b.first()) {
-        (Some(x), Some(y)) => compare_by_ordering(&x.song, &y.song, &pipeline.ordering, version_pref),
+        (Some(x), Some(y)) => {
+            compare_by_ordering(&x.song, &y.song, &pipeline.ordering, version_pref, seed, rarity)
+        }
         _ => std::cmp::Ordering::Equal,
     });
     units
@@ -625,6 +732,8 @@ fn compare_by_ordering(
     b: &Song,
     keys: &[OrderingKey],
     version_pref: &[VersionTrait],
+    seed: u64,
+    rarity: &RarityStage,
 ) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     for key in keys {
@@ -644,8 +753,6 @@ fn compare_by_ordering(
             // 320 kbps MP3). The format tier comes from `suffix`/`content_type`, never the title.
             OrderingKey::Quality => (format_quality_rank(b), b.bitrate_kbps.unwrap_or(0))
                 .cmp(&(format_quality_rank(a), a.bitrate_kbps.unwrap_or(0))),
-            // deterministic no-op in 12.1 — no entropy in the pure core (Epic 13 adds seeding)
-            OrderingKey::Random => Ordering::Equal,
             // Story 13.3 #14: fewer plays first — owned-but-barely-played (inverse of PlayCount).
             // `None` is treated as 0, so a never-played track is the deepest cut and ranks first.
             OrderingKey::Excavation => {
@@ -662,6 +769,24 @@ fn compare_by_ordering(
                 (None, Some(_)) => Ordering::Greater,
                 (None, None) => Ordering::Equal,
             },
+            // Story 13.4 #29: seeded loot-table draw — each song gets an Efraimidis–Spirakis key
+            // `u^(1/w)` from `(seed, id, rarity-class weight)`; higher key sorts first (descending),
+            // so a higher-weighted class tends to draw earlier. When `rarity.enabled` is false this
+            // degrades to a uniform weight-1 shuffle (never a panic). Float keys compared via
+            // `total_cmp` (never `partial_cmp().unwrap()`).
+            OrderingKey::Rarity => {
+                let (wa, wb) = if rarity.enabled {
+                    (rarity_class_weight(a, rarity), rarity_class_weight(b, rarity))
+                } else {
+                    (1.0, 1.0)
+                };
+                es_draw_key(seed, &b.id, wb).total_cmp(&es_draw_key(seed, &a.id, wa))
+            }
+            // Story 13.4: seeded uniform shuffle — every song draws with weight 1.0 (the special case
+            // of the rarity draw), higher key first. A deterministic permutation given the seed.
+            OrderingKey::Random => {
+                es_draw_key(seed, &b.id, 1.0).total_cmp(&es_draw_key(seed, &a.id, 1.0))
+            }
         };
         if ord != Ordering::Equal {
             return ord;
@@ -679,6 +804,53 @@ fn compare_by_ordering(
 
 fn fav_rank(s: &Song) -> u8 {
     u8::from(s.is_favorite == Some(true))
+}
+
+/// Story 13.4: a deterministic per-song uniform draw in `[0,1)` derived from `(seed, song id)`.
+///
+/// Uses an **explicit** mix — a stable FNV-1a hash of the id folded into a splitmix64 finalizer with
+/// the seed — so the comparison value is reproducible and unit-testable. It deliberately does **not**
+/// rely on `DefaultHasher`'s unspecified internals for the value, and reads no global entropy: all
+/// randomness comes from the caller-supplied `seed`. The top 53 bits are mapped to a uniform double.
+fn draw_unit01(seed: u64, id: &str) -> f64 {
+    // Stable FNV-1a 64-bit hash of the id (explicit constants — not DefaultHasher).
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in id.as_bytes() {
+        h ^= u64::from(*byte);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    // splitmix64 finalizer mixing the seed with the id hash.
+    let mut x = seed ^ h;
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^= x >> 31;
+    // Top 53 bits → [0,1): the standard uniform-double construction.
+    ((x >> 11) as f64) / ((1u64 << 53) as f64)
+}
+
+/// Story 13.4 #29: the Efraimidis–Spirakis weighted-draw key `key = u^(1/w)`, where `u =
+/// draw_unit01(seed, id)` and `w` is the song's rarity-class weight. Higher key sorts first
+/// (descending), so a higher weight tends to draw earlier. `w <= 0` is handled **explicitly** as
+/// key `0.0` (the class sinks to the bottom) — never `1.0/0.0` (`inf`) or a NaN.
+fn es_draw_key(seed: u64, id: &str, weight: f32) -> f64 {
+    if weight <= 0.0 {
+        return 0.0;
+    }
+    draw_unit01(seed, id).powf(1.0 / f64::from(weight))
+}
+
+/// Story 13.4 #29: the draw weight for a song's rarity class. Class boundaries from `play_count`
+/// (the only universal signal — no rating field): `None`/`0` → legendary, `1..=rare_max_plays` →
+/// rare, else → common.
+fn rarity_class_weight(song: &Song, r: &RarityStage) -> f32 {
+    let plays = song.play_count.unwrap_or(0);
+    if plays == 0 {
+        r.legendary_weight
+    } else if plays <= r.rare_max_plays {
+        r.rare_weight
+    } else {
+        r.common_weight
+    }
 }
 
 /// The song's `date_added` as a present, non-blank ISO string — or `None` if absent or
@@ -904,7 +1076,13 @@ fn fits_ceiling(song: &Song, ceiling: u64) -> bool {
 /// Decision 2) prefers a version that can fit the global byte ceiling over one that never can, so
 /// best-version degrades to a smaller copy instead of dropping the song; it is a no-op for an
 /// unbounded ceiling. Returns `Less` when `a` is the better version.
-fn best_version_cmp(a: &Song, b: &Song, pipeline: &AutoFillPipeline, ceiling: u64) -> std::cmp::Ordering {
+///
+/// Story 13.4: `seed` is threaded so the `ordering` tiebreak (3) can include a randomized key
+/// (`Random`/`Rarity`). When the pipeline lists such a key, the best-*version* choice becomes
+/// seed-dependent — still fully deterministic *given the seed*, but called out here so the behavior
+/// is intentional, not surprising. A pipeline with no randomized key is unaffected (the `song.id`
+/// tiebreak (4) still makes the winner stable).
+fn best_version_cmp(a: &Song, b: &Song, pipeline: &AutoFillPipeline, ceiling: u64, seed: u64) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     // (0) budget fit: a version that can fit the ceiling beats one that never can (Decision 2).
     match (fits_ceiling(a, ceiling), fits_ceiling(b, ceiling)) {
@@ -927,7 +1105,7 @@ fn best_version_cmp(a: &Song, b: &Song, pipeline: &AutoFillPipeline, ceiling: u6
         return ord;
     }
     // (3) the configured ordering keys (version preference already applied above → pass empty)
-    let ord = compare_by_ordering(a, b, &pipeline.ordering, &[]);
+    let ord = compare_by_ordering(a, b, &pipeline.ordering, &[], seed, &pipeline.rarity);
     if ord != Ordering::Equal {
         return ord;
     }
@@ -948,6 +1126,7 @@ fn collapse_best_version(
 ) -> PipelineInput {
     // Pick the winning Song per logical key. Iteration order over pools/candidates is irrelevant:
     // `best_version_cmp` is a total order (ties broken by id), so the minimum is deterministic.
+    let seed = input.seed;
     let mut winners: HashMap<(String, String), Song> = HashMap::new();
     for pool in input.pools.values() {
         for cand in pool {
@@ -956,7 +1135,7 @@ fn collapse_best_version(
             };
             match winners.get(&key) {
                 Some(current)
-                    if best_version_cmp(&cand.song, current, pipeline, ceiling)
+                    if best_version_cmp(&cand.song, current, pipeline, ceiling, seed)
                         != std::cmp::Ordering::Less => {}
                 _ => {
                     winners.insert(key, cand.song.clone());
@@ -1070,6 +1249,11 @@ impl Selector {
     ) {
         let core = mode == FillMode::Core;
         let is_fallback = mode == FillMode::Fallback;
+        // Discovery (pity) reserve: only never-/barely-played tracks not already on the device.
+        let discovery_max = match mode {
+            FillMode::Discovery { max_plays } => Some(max_plays),
+            _ => None,
+        };
         let mut source_bytes: u64 = 0;
         for unit in units {
             if let Some(target) = self.duration_target
@@ -1084,6 +1268,13 @@ impl Selector {
             let mut unit_secs: u64 = 0;
             for cand in &unit {
                 let song = &cand.song;
+                // The discovery (pity) reserve only draws genuinely new gems: not on the device and
+                // at/under the discovery play-count cap. (Full Memory rules still apply below.)
+                if let Some(max_plays) = discovery_max
+                    && (is_on_device(song, history) || song.play_count.unwrap_or(0) > max_plays)
+                {
+                    continue;
+                }
                 // The core pass only draws candidates already on the device; cooldown is skipped for
                 // them (they are kept on purpose) but played-exclusion still applies.
                 if (core && !is_on_device(song, history))
@@ -1401,6 +1592,69 @@ mod tests {
             result
                 .iter()
                 .all(|i| i.priority_reason == "playlist:energy")
+        );
+
+        // Story 13.4 — Léo's discovery guarantee, expressed purely in config (no `if persona`).
+        // He now orders by PlayCount (hits first, which would bury the deep cut at this tiny budget)
+        // but arms the pity timer; after a dry streak the reserve GUARANTEES a never-played gem that
+        // the ordering alone would drop. With pity OFF the gem stays buried — behavior emerges only
+        // from the config.
+        let pity_pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry {
+                kind: SourceKind::Playlist,
+                ref_id: Some("energy".to_string()),
+                share: None,
+            }],
+            ordering: vec![OrderingKey::PlayCount],
+            pity: PityStage {
+                enabled: true,
+                threshold_syncs: 3,
+                guaranteed_ratio: 0.5,
+                discovery_max_plays: 0,
+            },
+            budget: BudgetStage {
+                max_bytes: Some(7_000_000), // fits 2 of the 3 MB tracks
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let dry_input = PipelineInput {
+            pity_streak: 3, // reached the threshold ⇒ the guarantee fires
+            ..Default::default()
+        }
+        .with_pool(
+            SourceKind::Playlist,
+            Some("energy"),
+            vec![
+                cand(song_sized("e-hit", false, 90, "2024-01-01", 3_000_000)),
+                cand(song_sized("e-deep1", false, 1, "2024-01-01", 3_000_000)),
+                cand(song_sized("e-deep2", false, 0, "2024-01-01", 3_000_000)),
+            ],
+        );
+        let dry_ids = ids(&run_pipeline(&dry_input, &pity_pipeline));
+        assert!(
+            dry_ids.contains(&"e-deep2".to_string()),
+            "pity reserve guarantees the never-played gem even though PlayCount would bury it"
+        );
+
+        // Same config, streak below threshold ⇒ no reserve ⇒ PlayCount buries the never-played gem.
+        let fresh_input = PipelineInput {
+            pity_streak: 0,
+            ..Default::default()
+        }
+        .with_pool(
+            SourceKind::Playlist,
+            Some("energy"),
+            vec![
+                cand(song_sized("e-hit", false, 90, "2024-01-01", 3_000_000)),
+                cand(song_sized("e-deep1", false, 1, "2024-01-01", 3_000_000)),
+                cand(song_sized("e-deep2", false, 0, "2024-01-01", 3_000_000)),
+            ],
+        );
+        let fresh_ids = ids(&run_pipeline(&fresh_input, &pity_pipeline));
+        assert!(
+            !fresh_ids.contains(&"e-deep2".to_string()),
+            "no dry streak ⇒ no guarantee ⇒ the never-played gem stays buried under PlayCount"
         );
     }
 
@@ -2794,5 +3048,270 @@ mod tests {
         assert!(serde_json::to_string(&p).unwrap().contains("\"excavation\""));
         let back: AutoFillPipeline = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(p, back);
+    }
+
+    #[test]
+    fn rarity_pity_and_new_keys_serde_round_trip() {
+        // AC 14: a pipeline carrying rarity/pity stages and Random/Rarity ordering keys round-trips
+        // byte-stable through camelCase serde.
+        let json = r#"{
+            "ordering": ["random", "rarity"],
+            "rarity": { "enabled": true, "legendaryWeight": 8.0, "rareWeight": 3.0, "commonWeight": 1.0, "rareMaxPlays": 5 },
+            "pity": { "enabled": true, "thresholdSyncs": 3, "guaranteedRatio": 0.25, "discoveryMaxPlays": 0 }
+        }"#;
+        let p: AutoFillPipeline = serde_json::from_str(json).unwrap();
+        assert_eq!(p.ordering, vec![OrderingKey::Random, OrderingKey::Rarity]);
+        assert!(p.rarity.enabled && (p.rarity.legendary_weight - 8.0).abs() < f32::EPSILON);
+        assert!(p.pity.enabled && p.pity.threshold_syncs == 3);
+        let wire = serde_json::to_string(&p).unwrap();
+        assert!(wire.contains("\"rarity\"") && wire.contains("\"legendaryWeight\""));
+        let back: AutoFillPipeline = serde_json::from_str(&wire).unwrap();
+        assert_eq!(p, back);
+
+        // A default pipeline omits nothing surprising and round-trips identical (fast-path safe).
+        let def = AutoFillPipeline::default();
+        let back: AutoFillPipeline = serde_json::from_str(&serde_json::to_string(&def).unwrap()).unwrap();
+        assert_eq!(def, back);
+    }
+
+    // ===================================================================
+    // Story 13.4 — seeded entropy, weighted rarity draws (#29), pity timer (#30).
+    // ===================================================================
+
+    /// A pool of `n` tracks, all not-on-device, big enough to all fit a large budget.
+    fn shuffle_pool(n: usize) -> Vec<Candidate> {
+        (0..n)
+            .map(|i| cand(song_sized(&format!("t{i:02}"), false, 0, "2024-01-01", 1_000_000)))
+            .collect()
+    }
+
+    fn run_seeded(pool: Vec<Candidate>, ordering: Vec<OrderingKey>, rarity: RarityStage, seed: u64) -> Vec<String> {
+        let input = PipelineInput {
+            seed,
+            ..Default::default()
+        }
+        .with_pool(SourceKind::Library, None, pool);
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            ordering,
+            rarity,
+            budget: BudgetStage {
+                max_bytes: Some(1_000_000_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        ids(&run_pipeline(&input, &pipeline))
+    }
+
+    #[test]
+    fn random_shuffle_is_deterministic_given_seed() {
+        // AC 1/2: same (input, seed, pipeline) ⇒ byte-identical order; re-running is identical.
+        let a = run_seeded(shuffle_pool(8), vec![OrderingKey::Random], RarityStage::default(), 42);
+        let b = run_seeded(shuffle_pool(8), vec![OrderingKey::Random], RarityStage::default(), 42);
+        assert_eq!(a, b, "same seed ⇒ identical order");
+        // No track is lost or duplicated by the shuffle.
+        let mut sorted = a.clone();
+        sorted.sort();
+        assert_eq!(sorted, (0..8).map(|i| format!("t{i:02}")).collect::<Vec<_>>());
+        // A seeded shuffle does not leave the pool in its input order (would mean entropy never fired).
+        let input_order: Vec<String> = (0..8).map(|i| format!("t{i:02}")).collect();
+        assert_ne!(a, input_order, "seeded shuffle must actually reorder");
+    }
+
+    #[test]
+    fn random_shuffle_differs_across_seeds() {
+        // AC 2: a different seed (very likely) yields a different order.
+        let a = run_seeded(shuffle_pool(8), vec![OrderingKey::Random], RarityStage::default(), 1);
+        let b = run_seeded(shuffle_pool(8), vec![OrderingKey::Random], RarityStage::default(), 999);
+        assert_ne!(a, b, "different seeds should (overwhelmingly likely) differ for 8 items");
+    }
+
+    #[test]
+    fn pipeline_without_random_is_seed_independent() {
+        // AC 2: a pipeline that never lists Random/Rarity is byte-for-byte unaffected by the seed.
+        let a = run_seeded(shuffle_pool(6), vec![OrderingKey::PlayCount], RarityStage::default(), 1);
+        let b = run_seeded(shuffle_pool(6), vec![OrderingKey::PlayCount], RarityStage::default(), 12345);
+        assert_eq!(a, b, "no random key ⇒ seed has no effect");
+    }
+
+    #[test]
+    fn rarity_weighting_favors_legendary_over_common() {
+        // AC 4/14: with legendary_weight ≫ common_weight, a legendary (never-played) candidate is
+        // reliably drawn before a common (heavily-played) one. Extreme weights make `u^(1/w)` ≈ 1 for
+        // legendary and ≈ 0 for common for essentially any seed.
+        let pool = vec![
+            cand(song_sized("com", false, 50, "2024-01-01", 1_000_000)), // common (50 plays)
+            cand(song_sized("leg", false, 0, "2024-01-01", 1_000_000)),  // legendary (never played)
+        ];
+        let rarity = RarityStage {
+            enabled: true,
+            legendary_weight: 1_000_000.0,
+            rare_weight: 1.0,
+            common_weight: 0.000_001,
+            rare_max_plays: 5,
+        };
+        let order = run_seeded(pool, vec![OrderingKey::Rarity], rarity, 7);
+        assert_eq!(order, vec!["leg", "com"], "the legendary gem draws ahead of the common hit");
+    }
+
+    #[test]
+    fn rarity_weight_zero_sinks_a_class_without_panic() {
+        // AC 4/14: a 0.0 class weight forces that class's key to the bottom (no divide-by-zero/NaN).
+        let pool = vec![
+            cand(song_sized("com", false, 50, "2024-01-01", 1_000_000)), // common, weight 0 ⇒ sinks
+            cand(song_sized("leg", false, 0, "2024-01-01", 1_000_000)),  // legendary, weight 1
+        ];
+        let rarity = RarityStage {
+            enabled: true,
+            legendary_weight: 1.0,
+            rare_weight: 1.0,
+            common_weight: 0.0,
+            rare_max_plays: 5,
+        };
+        let order = run_seeded(pool, vec![OrderingKey::Rarity], rarity, 3);
+        assert_eq!(order, vec!["leg", "com"], "the 0-weight common class sinks below the legendary");
+    }
+
+    #[test]
+    fn rarity_disabled_degrades_to_uniform_shuffle() {
+        // AC 5: an `OrderingKey::Rarity` with `rarity.enabled=false` is a plain seeded shuffle (weight
+        // 1 for all) — identical to `OrderingKey::Random` at the same seed, and never panics.
+        let disabled = RarityStage::default(); // enabled:false
+        let as_rarity = run_seeded(shuffle_pool(8), vec![OrderingKey::Rarity], disabled, 77);
+        let as_random = run_seeded(shuffle_pool(8), vec![OrderingKey::Random], RarityStage::default(), 77);
+        assert_eq!(as_rarity, as_random, "disabled Rarity == uniform Random at the same seed");
+    }
+
+    #[test]
+    fn rarity_composes_behind_favorite() {
+        // AC 4/14: `[Favorite, Rarity]` keeps favorites ahead of non-favorites; the rarity draw only
+        // orders within each favorite tier (placement precedence preserved).
+        let pool = vec![
+            // Two non-favorite legendaries (huge weight) — must still rank BELOW the favorites.
+            cand(song_sized("nf1", false, 0, "2024-01-01", 1_000_000)),
+            cand(song_sized("nf2", false, 0, "2024-01-01", 1_000_000)),
+            // Two favorite commons (heavily played, tiny weight) — favorites win regardless.
+            cand(song_sized("fav1", true, 80, "2024-01-01", 1_000_000)),
+            cand(song_sized("fav2", true, 90, "2024-01-01", 1_000_000)),
+        ];
+        let rarity = RarityStage {
+            enabled: true,
+            legendary_weight: 1_000_000.0,
+            rare_weight: 1.0,
+            common_weight: 0.000_001,
+            rare_max_plays: 5,
+        };
+        let order = run_seeded(pool, vec![OrderingKey::Favorite, OrderingKey::Rarity], rarity, 5);
+        assert_eq!(&order[0..2].iter().filter(|id| id.starts_with("fav")).count(), &2,
+            "both favorites must occupy the top two slots despite non-favorites being legendary");
+    }
+
+    /// Build a 3-track Library pipeline + input for pity tests: two hits (high play_count) and one
+    /// never-played gem, all not on the device, each 3 MB. Ordering [PlayCount] buries the gem.
+    fn pity_setup(pity: PityStage, pity_streak: i64, max_bytes: Option<u64>) -> Vec<String> {
+        let pool = vec![
+            cand(song_sized("hit1", false, 100, "2024-01-01", 3_000_000)),
+            cand(song_sized("hit2", false, 90, "2024-01-01", 3_000_000)),
+            cand(song_sized("gem", false, 0, "2024-01-01", 3_000_000)),
+        ];
+        let input = PipelineInput {
+            pity_streak,
+            ..Default::default()
+        }
+        .with_pool(SourceKind::Library, None, pool);
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            ordering: vec![OrderingKey::PlayCount],
+            pity,
+            budget: BudgetStage {
+                max_bytes,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        ids(&run_pipeline(&input, &pipeline))
+    }
+
+    fn pity_on() -> PityStage {
+        PityStage {
+            enabled: true,
+            threshold_syncs: 3,
+            guaranteed_ratio: 0.5,
+            discovery_max_plays: 0,
+        }
+    }
+
+    #[test]
+    fn pity_reserve_fires_and_surfaces_a_new_gem() {
+        // AC 7: streak >= threshold reserves the discovery quota and surfaces a never-played,
+        // not-on-device track the PlayCount ordering would otherwise drop past budget.
+        // 6 MB budget fits two 3 MB tracks; reserve = round(6M × 0.5) = 3 MB ⇒ one discovery (gem).
+        let with_pity = pity_setup(pity_on(), 3, Some(6_000_000));
+        assert!(with_pity.contains(&"gem".to_string()), "pity guarantees the never-played gem");
+        assert_eq!(with_pity.first().map(String::as_str), Some("gem"), "the reserve fills first");
+        // Without pity the gem is dropped past budget (PlayCount keeps the two hits).
+        let no_pity = pity_setup(PityStage::default(), 3, Some(6_000_000));
+        assert!(!no_pity.contains(&"gem".to_string()), "no pity ⇒ gem stays buried");
+        assert_eq!(no_pity, vec!["hit1", "hit2"]);
+    }
+
+    #[test]
+    fn pity_below_threshold_is_a_noop() {
+        // AC 7: pity_streak < threshold ⇒ no reserve.
+        let order = pity_setup(pity_on(), 2, Some(6_000_000));
+        assert!(!order.contains(&"gem".to_string()), "streak below threshold ⇒ no guarantee");
+        assert_eq!(order, vec!["hit1", "hit2"]);
+    }
+
+    #[test]
+    fn pity_zero_ratio_is_a_noop() {
+        // AC 7: guaranteed_ratio = 0 ⇒ reserve bytes round to 0 ⇒ no-op.
+        let pity = PityStage { guaranteed_ratio: 0.0, ..pity_on() };
+        let order = pity_setup(pity, 3, Some(6_000_000));
+        assert!(!order.contains(&"gem".to_string()), "a 0 ratio reserves nothing");
+    }
+
+    #[test]
+    fn pity_unbounded_ceiling_is_a_noop() {
+        // AC 7: an unbounded ceiling ⇒ no reserve. Everything fits, so the gem appears via the normal
+        // PlayCount fill (ordered last), NOT pulled to the front by a reserve.
+        let order = pity_setup(pity_on(), 5, None);
+        assert_eq!(order, vec!["hit1", "hit2", "gem"], "unbounded ceiling: pure PlayCount, no reserve");
+    }
+
+    #[test]
+    fn pity_composes_with_stable_core() {
+        // AC 7: stable-core (keep on-device residents) → pity reserve (force new gem) → primary.
+        // resident is on-device (stable-core keeps it); gem is a never-played discovery; hits fill the
+        // rest. With a 9 MB budget (three 3 MB tracks), core keeps `resident`, pity reserves `gem`.
+        let resident = song_sized("resident", false, 200, "2024-01-01", 3_000_000);
+        let pool = vec![
+            cand(resident.clone()),
+            cand(song_sized("hit", false, 100, "2024-01-01", 3_000_000)),
+            cand(song_sized("gem", false, 0, "2024-01-01", 3_000_000)),
+        ];
+        let mut history = HistorySnapshot { now: 1_000_000_000, ..Default::default() };
+        history.entries.insert(
+            "resident".to_string(),
+            TrackHistory { last_synced_at: Some(1), ..Default::default() },
+        );
+        let input = PipelineInput {
+            history,
+            pity_streak: 3,
+            ..Default::default()
+        }
+        .with_pool(SourceKind::Library, None, pool);
+        let pipeline = AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            ordering: vec![OrderingKey::PlayCount],
+            memory: MemoryStage { stable_core_pct: Some(0.34), ..Default::default() },
+            pity: PityStage { guaranteed_ratio: 0.34, ..pity_on() },
+            budget: BudgetStage { max_bytes: Some(9_000_000), ..Default::default() },
+            ..Default::default()
+        };
+        let order = ids(&run_pipeline(&input, &pipeline));
+        assert!(order.contains(&"resident".to_string()), "stable-core keeps the on-device resident");
+        assert!(order.contains(&"gem".to_string()), "pity reserve still surfaces the new gem");
     }
 }

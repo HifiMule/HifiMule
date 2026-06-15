@@ -245,6 +245,22 @@ impl Database {
         )
         .map_err(|e| anyhow!("Failed to create autofill_rotation table: {}", e))?;
 
+        // Story 13.4: machine-local pity dry-streak counter. Advances by 1 on each completed sync that
+        // wrote a track for a pity-enabled server; resets to 0 the sync after the discovery guarantee
+        // fires (streak had reached the threshold). Drives the deterministic "guaranteed finds after
+        // dry spells" reserve. Keyed per device+portable server, same as `autofill_rotation`. Config
+        // (threshold/ratio) lives in the manifest, never here (storage split, architecture.md:922).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS autofill_pity (
+                device_id TEXT NOT NULL,
+                server_id TEXT NOT NULL,
+                dry_streak INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (device_id, server_id)
+            )",
+            [],
+        )
+        .map_err(|e| anyhow!("Failed to create autofill_pity table: {}", e))?;
+
         Ok(())
     }
 
@@ -879,6 +895,32 @@ impl Database {
         Ok(cursor)
     }
 
+    /// Story 13.4: the pity dry-streak for a `(device, server)` pair; `0` when none stored yet.
+    pub fn get_pity_streak(&self, device_id: &str, server_id: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let streak: Option<i64> = conn
+            .query_row(
+                "SELECT dry_streak FROM autofill_pity WHERE device_id = ?1 AND server_id = ?2",
+                params![device_id, server_id],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(streak.unwrap_or(0))
+    }
+
+    /// Story 13.4: set the pity dry-streak for a `(device, server)` pair (upsert).
+    pub fn set_pity_streak(&self, device_id: &str, server_id: &str, value: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO autofill_pity (device_id, server_id, dry_streak)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(device_id, server_id) DO UPDATE SET dry_streak = ?3",
+            params![device_id, server_id, value],
+        )
+        .map_err(|e| anyhow!("Failed to set pity streak: {}", e))?;
+        Ok(())
+    }
+
     pub fn get_scrobble_count(&self, device_id: &str) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn
@@ -1010,6 +1052,25 @@ mod tests {
         assert_eq!(db.get_rotation_cursor("dev", "srv").unwrap(), 2);
         // Independent per (device, server).
         assert_eq!(db.get_rotation_cursor("dev", "other").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_pity_streak_defaults_to_zero_and_round_trips() {
+        let db = Database::memory().unwrap();
+        // Default 0 on no row.
+        assert_eq!(db.get_pity_streak("dev", "srv").unwrap(), 0);
+        // Increment-style upsert: read 0 → write streak + 1.
+        db.set_pity_streak("dev", "srv", 1).unwrap();
+        assert_eq!(db.get_pity_streak("dev", "srv").unwrap(), 1);
+        db.set_pity_streak("dev", "srv", 2).unwrap();
+        assert_eq!(db.get_pity_streak("dev", "srv").unwrap(), 2);
+        // Reset semantics (guarantee fired) → 0.
+        db.set_pity_streak("dev", "srv", 0).unwrap();
+        assert_eq!(db.get_pity_streak("dev", "srv").unwrap(), 0);
+        // Independent per (device, server) scope.
+        db.set_pity_streak("dev", "srv", 5).unwrap();
+        assert_eq!(db.get_pity_streak("dev", "other").unwrap(), 0);
+        assert_eq!(db.get_pity_streak("dev", "srv").unwrap(), 5);
     }
 
     #[test]

@@ -4,7 +4,7 @@ baseline_commit: c3fdaf062cb0fffc4f983ab6e756b17bb03ced2b
 
 # Story 13.4: Delight — Rarity Draws & Pity Timer
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -107,47 +107,47 @@ This is the same discipline that made 13.1/13.2/13.3 land cleanly: **deliver the
 
 ## Tasks / Subtasks
 
-- [ ] **Seed foundation + activate `Random` (#29 entropy)** (`hifimule-daemon/src/auto_fill/pipeline.rs`) (AC: 1, 2)
-  - [ ] Add `pub seed: u64` to `PipelineInput` ([:336-345](../../hifimule-daemon/src/auto_fill/pipeline.rs#L336)). `#[derive(Default)]` already present ⇒ defaults to 0; confirm no other constructor needs updating.
-  - [ ] Add an explicit, unit-testable per-song uniform helper: `fn draw_unit01(seed: u64, id: &str) -> f64` using a splitmix64-style mix of `seed` and a stable hash of `id`, mapped into `[0,1)`. No `DefaultHasher`-internal reliance in the *comparison value*; no global entropy.
-  - [ ] Replace `OrderingKey::Random => Ordering::Equal` with the seeded uniform shuffle (descending by `draw_unit01`, compared via `f64::total_cmp`). Update the doc comment (drop "no-op"; now "seeded uniform shuffle — Epic 13.4").
-  - [ ] Tests: fixed seed ⇒ stable asserted order; different seed ⇒ (likely) different; pipeline without `Random` unchanged.
+- [x] **Seed foundation + activate `Random` (#29 entropy)** (`hifimule-daemon/src/auto_fill/pipeline.rs`) (AC: 1, 2)
+  - [x] Add `pub seed: u64` to `PipelineInput`. `#[derive(Default)]` already present ⇒ defaults to 0; no other constructor needed updating (`PipelineInput` is built only in `fetch.rs::expand_with_pipeline` and the tests, both updated).
+  - [x] Added explicit, unit-testable per-song uniform helper `fn draw_unit01(seed: u64, id: &str) -> f64` (stable FNV-1a hash of id + splitmix64 finalizer with seed, mapped into `[0,1)`). No `DefaultHasher`-internal reliance in the comparison value; no global entropy.
+  - [x] Replaced `OrderingKey::Random => Ordering::Equal` with the seeded uniform shuffle (descending by `es_draw_key(seed,id,1.0)`, compared via `f64::total_cmp`). Doc comments updated on the enum variant and the arm.
+  - [x] Tests: `random_shuffle_is_deterministic_given_seed`, `random_shuffle_differs_across_seeds`, `pipeline_without_random_is_seed_independent`.
 
-- [ ] **Rarity stage + `OrderingKey::Rarity` (#29)** (`hifimule-daemon/src/auto_fill/pipeline.rs`) (AC: 3, 4, 5)
-  - [ ] Add `RarityStage` struct (fields per AC 3) with `#[derive(..., Default)]` + `#[serde(rename_all="camelCase", default)]`; add `pub rarity: RarityStage` to `AutoFillPipeline` ([:54-77](../../hifimule-daemon/src/auto_fill/pipeline.rs#L54)).
-  - [ ] Add `Rarity` to `OrderingKey` (`"rarity"`); doc-comment the loot-table behavior.
-  - [ ] Add helpers: `fn rarity_class_weight(song, &RarityStage) -> f32` (legendary/rare/common by `play_count` vs `rare_max_plays`) and `fn es_draw_key(seed, id, weight) -> f64` (`u^(1/w)`, `w==0 ⇒ key 0.0`).
-  - [ ] Thread `seed: u64` + `rarity: &RarityStage` into `compare_by_ordering` ([:623-678](../../hifimule-daemon/src/auto_fill/pipeline.rs#L623)); update **all THREE** call sites: `build_source_units` ([:475,478](../../hifimule-daemon/src/auto_fill/pipeline.rs#L475)) and `best_version_cmp` ([:930](../../hifimule-daemon/src/auto_fill/pipeline.rs#L930), thread seed through its signature). `Random` arm uses weight 1.0; `Rarity` arm uses class weight (uniform fallback when `!rarity.enabled`). Compare descending via `total_cmp`.
-  - [ ] Tests per AC 14 (rarity weighting, composition, disabled-fallback, determinism).
+- [x] **Rarity stage + `OrderingKey::Rarity` (#29)** (`hifimule-daemon/src/auto_fill/pipeline.rs`) (AC: 3, 4, 5)
+  - [x] Added `RarityStage` struct (`#[derive(..., Default)]` + `#[serde(rename_all="camelCase", default)]`); added `pub rarity: RarityStage` to `AutoFillPipeline`.
+  - [x] Added `Rarity` to `OrderingKey` (`"rarity"`) with a loot-table doc comment.
+  - [x] Added helpers `rarity_class_weight(song, &RarityStage) -> f32` and `es_draw_key(seed, id, weight) -> f64` (`u^(1/w)`, `w<=0 ⇒ key 0.0`).
+  - [x] Threaded `seed: u64` + `rarity: &RarityStage` into `compare_by_ordering`; updated all THREE call sites (`build_source_units` ×2 and `best_version_cmp`, which now carries `seed` through its signature and `collapse_best_version`). `Random` arm uses weight 1.0; `Rarity` uses class weight with a uniform fallback when `!rarity.enabled`. Descending via `total_cmp`. Doc comment on `best_version_cmp` notes the intentional seed-dependence of best-version collapse when a randomized key is listed.
+  - [x] Tests: `rarity_weighting_favors_legendary_over_common`, `rarity_weight_zero_sinks_a_class_without_panic`, `rarity_disabled_degrades_to_uniform_shuffle`, `rarity_composes_behind_favorite`.
 
-- [ ] **Pity stage + discovery-reserve pre-pass (#30 engine)** (`hifimule-daemon/src/auto_fill/pipeline.rs`) (AC: 6, 7)
-  - [ ] Add `PityStage` struct (fields per AC 6) + `pub pity: PityStage` to `AutoFillPipeline`; add `pub pity_streak: i64` to `PipelineInput`.
-  - [ ] In `run_pipeline` ([:369-441](../../hifimule-daemon/src/auto_fill/pipeline.rs#L369)), after the stable-core pre-pass and before the primary fill, add the discovery reserve: gated on `pity.enabled && pity_streak >= threshold && ceiling != u64::MAX`; reserve `round(ceiling × guaranteed_ratio)`; fill from discovery-class candidates only (`play_count <= discovery_max_plays && !is_on_device`). Reuse/extend `FillMode` and the `Selector` so dedup carries into the normal pass.
-  - [ ] Tests per AC 14 (reserve fires/no-op, ratio bound, unbounded no-op, composes with stable-core, surfaces a new gem).
+- [x] **Pity stage + discovery-reserve pre-pass (#30 engine)** (`hifimule-daemon/src/auto_fill/pipeline.rs`) (AC: 6, 7)
+  - [x] Added `PityStage` struct + `pub pity: PityStage` to `AutoFillPipeline`; added `pub pity_streak: i64` to `PipelineInput`.
+  - [x] In `run_pipeline`, after the stable-core pre-pass and before the primary fill, added the discovery reserve gated on `pity.enabled && pity_streak >= threshold && ceiling != u64::MAX`; reserves `round(ceiling × guaranteed_ratio)` (on top of the core spend, capped by the full ceiling) and fills from discovery-class candidates only via the new `FillMode::Discovery { max_plays }` (`play_count <= discovery_max_plays && !is_on_device`). Shared `Selector` carries dedup into the primary pass.
+  - [x] Tests: `pity_reserve_fires_and_surfaces_a_new_gem`, `pity_below_threshold_is_a_noop`, `pity_zero_ratio_is_a_noop`, `pity_unbounded_ceiling_is_a_noop`, `pity_composes_with_stable_core`.
 
-- [ ] **DB pity counter** (`hifimule-daemon/src/db.rs`) (AC: 8)
-  - [ ] `CREATE TABLE IF NOT EXISTS autofill_pity (...)` in the migration block next to `autofill_rotation` ([:237-246](../../hifimule-daemon/src/db.rs#L237)).
-  - [ ] `get_pity_streak` (default 0) + `set_pity_streak` accessors, modeled on the rotation-cursor pair ([:850-880](../../hifimule-daemon/src/db.rs#L850)).
-  - [ ] Round-trip + reset/increment unit tests mirroring [:953-1009](../../hifimule-daemon/src/db.rs#L953).
+- [x] **DB pity counter** (`hifimule-daemon/src/db.rs`) (AC: 8)
+  - [x] `CREATE TABLE IF NOT EXISTS autofill_pity (...)` added in the migration block next to `autofill_rotation`.
+  - [x] `get_pity_streak` (default 0) + `set_pity_streak` (upsert) accessors, modeled on the rotation-cursor pair.
+  - [x] Round-trip + reset/increment unit test `test_pity_streak_defaults_to_zero_and_round_trips`.
 
-- [ ] **AutoFillParams + RPC wiring (seed + pity read/reset)** (`hifimule-daemon/src/auto_fill/mod.rs`, `hifimule-daemon/src/rpc.rs`, `hifimule-daemon/src/auto_fill/fetch.rs`) (AC: 9)
-  - [ ] Add `pub seed: u64` + `pub pity_streak: i64` to `AutoFillParams` ([mod.rs:55-75](../../hifimule-daemon/src/auto_fill/mod.rs#L55)); update the two test builders in `fetch.rs` ([:790-819](../../hifimule-daemon/src/auto_fill/fetch.rs#L790)).
-  - [ ] In `expand_with_pipeline` ([fetch.rs:343-347](../../hifimule-daemon/src/auto_fill/fetch.rs#L343)), set `PipelineInput.seed = params.seed` and `pity_streak = params.pity_streak`.
-  - [ ] `build_autofill_history` ([rpc.rs:3584-3608](../../hifimule-daemon/src/rpc.rs#L3584)) also reads `get_pity_streak`; both fill call sites ([rpc.rs:2659,4003](../../hifimule-daemon/src/rpc.rs#L2659)) set `seed = now as u64` and pass the streak.
-  - [ ] `record_autofill_history_after_sync` ([rpc.rs:3631-3790](../../hifimule-daemon/src/rpc.rs#L3631)): per touched server with `pity.enabled` that wrote a track, reset to 0 if the read streak `>= threshold` else increment (best-effort), mirroring the rotation-cursor advance block.
+- [x] **AutoFillParams + RPC wiring (seed + pity read/reset)** (`hifimule-daemon/src/auto_fill/mod.rs`, `hifimule-daemon/src/rpc.rs`, `hifimule-daemon/src/auto_fill/fetch.rs`) (AC: 9)
+  - [x] Added `pub seed: u64` + `pub pity_streak: i64` to `AutoFillParams`; updated the two test builders in `fetch.rs`.
+  - [x] In `expand_with_pipeline`, set `PipelineInput.seed = params.seed` and `pity_streak = params.pity_streak`.
+  - [x] `build_autofill_history` now also reads `get_pity_streak` (returns `(snapshot, cursor, pity_streak)`); all five `AutoFillParams` construction sites updated (two engine slots + preview-with-server set `seed = now as u64` and pass the streak; three legacy/Jellyfin paths set `seed: 0, pity_streak: 0`, plus the two legacy sites in `main.rs`).
+  - [x] `record_autofill_history_after_sync`: per touched server with `pity.enabled` that wrote a track, re-reads the streak and resets to 0 if `>= threshold` else increments (best-effort), mirroring the rotation-cursor advance block.
 
-- [ ] **Routing gate** (`hifimule-daemon/src/auto_fill/fetch.rs`) (AC: 10)
-  - [ ] Add `rarity_default`/`pity_default` to `needs_configurable_expansion` ([:145-180](../../hifimule-daemon/src/auto_fill/fetch.rs#L145)). Add a discriminator test for rarity-only / pity-only / `Random`-ordering / `Rarity`-ordering forcing configurable, and legacy default staying fast.
+- [x] **Routing gate** (`hifimule-daemon/src/auto_fill/fetch.rs`) (AC: 10)
+  - [x] Added `rarity_default`/`pity_default` to `needs_configurable_expansion`. Discriminator test `discriminator_rarity_pity_and_random_force_configurable` covers rarity-only / pity-only / `Random`-ordering / `Rarity`-ordering forcing configurable, and legacy default staying fast.
 
-- [ ] **Frontend: ordering keys + rarity/pity stages** (`hifimule-ui/src/state/autoFill.ts`, `components/AutoFillPanel.ts`) (AC: 11)
-  - [ ] `state/autoFill.ts`: add `'random' | 'rarity'` to `OrderingKey` + `ORDERING_KEYS`; add `RarityStage`/`PityStage` interfaces to `AutoFillPipeline`; add omit-when-default normalize/serialize (mirror `quality`).
-  - [ ] `AutoFillPanel.ts`: add `renderRarityStage`/`renderPityStage` under `renderAdvanced`, modeled on `renderMemoryStage`/`renderQualityStage`; wire handlers to invalidate the live preview. Verify dropdown surfaces `random`/`rarity` automatically.
+- [x] **Frontend: ordering keys + rarity/pity stages** (`hifimule-ui/src/state/autoFill.ts`, `components/AutoFillPanel.ts`) (AC: 11)
+  - [x] `state/autoFill.ts`: added `'rarity'` to `OrderingKey` (`'random'` already present) + both `'random'`/`'rarity'` to `ORDERING_KEYS`; added `RarityStage`/`PityStage` interfaces + fields to `AutoFillPipeline`; omit-when-default normalize/serialize (mirrors `quality`).
+  - [x] `AutoFillPanel.ts`: added `renderRarityStage`/`renderPityStage` under `renderAdvanced`, modeled on `renderMemoryStage`/`renderQualityStage`; handlers seed sensible defaults on enable and invalidate the live preview. The dropdown surfaces `random`/`rarity` automatically via `ORDERING_KEYS`.
 
-- [ ] **i18n ×4 locales** (`hifimule-i18n/catalog.json`) (AC: 12)
-  - [ ] Add all new `basket.autofill.*` keys (ordering_random, ordering_rarity, rarity_* , pity_*) to en/fr/es/de. Report exact new `N×4`. Catalog tests green.
+- [x] **i18n ×4 locales** (`hifimule-i18n/catalog.json`) (AC: 12)
+  - [x] Added all 15 new `basket.autofill.*` keys (ordering_random, ordering_rarity, rarity + rarity_enable/hint/3 weights/rare_max_plays, pity + pity_enable/hint/threshold/ratio/discovery_max_plays) to en/fr/es/de. New parity **96×4** (was 81×4). Catalog tests green.
 
-- [ ] **Full verification** (AC: 13, 14)
-  - [ ] `rtk cargo test -p hifimule-daemon` (targeted `auto_fill::` + `db::` if sandbox-blocked), `rtk cargo clippy -p hifimule-daemon --all-targets` (no new warnings in touched modules), `rtk cargo test -p hifimule-i18n`, frontend `rtk npx tsc --noEmit` + `rtk npm run build`. Strengthen Léo persona for a config-driven rarity/pity discovery.
+- [x] **Full verification** (AC: 13, 14)
+  - [x] `rtk cargo test -p hifimule-daemon` → 585 passed (no sandbox block this run). `rtk cargo clippy -p hifimule-daemon --all-targets` → no new warnings in touched modules. `rtk cargo test -p hifimule-i18n` → 6 passed. Frontend `rtk npx tsc --noEmit` → no errors; `rtk npm run build` → built OK. Léo persona strengthened with a config-driven pity-reserve discovery (no `if persona` branch).
 
 ## Dev Notes
 
@@ -250,10 +250,41 @@ Léo ([pipeline.rs:1321](../../hifimule-daemon/src/auto_fill/pipeline.rs#L1321))
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+claude-opus-4-8 (Claude Opus 4.8)
 
 ### Debug Log References
 
+- `rtk cargo test -p hifimule-daemon` → **585 passed** (was 570 at 13.3; +15 new tests). Full suite ran (mockito/networking not blocked this run).
+- `rtk cargo clippy -p hifimule-daemon --all-targets` → no warnings in touched modules (`pipeline.rs`, `fetch.rs`, `mod.rs`, new `db.rs`/`rpc.rs` code). Pre-existing warnings remain in untouched files (vault.rs/api.rs/sync.rs/jellyfin.rs/device_io.rs/mtp.rs).
+- `rtk cargo test -p hifimule-i18n` → 6 passed; catalog parity **96×4** (was 81×4, +15 keys/locale).
+- Frontend `rtk npx tsc --noEmit` → no errors. `rtk npm run build` → built OK.
+
 ### Completion Notes List
 
+- **Seeded entropy, engine stays pure (AC 1/2).** Entropy enters only as a caller-supplied `PipelineInput::seed` (mirroring `HistorySnapshot::now`). The pure core uses no `thread_rng`/`SystemTime`. `draw_unit01` is an explicit FNV-1a + splitmix64 mix (no `DefaultHasher` reliance in the comparison value). `OrderingKey::Random` is now a seeded uniform shuffle (the long-reserved no-op activated). All float keys compared with `f64::total_cmp`.
+- **Weighted rarity draw (#29, AC 3–5).** `RarityStage` (common/rare/legendary classes derived from `play_count` vs `rare_max_plays`); `OrderingKey::Rarity` uses the Efraimidis–Spirakis key `u^(1/w)` (descending). `w==0` handled explicitly as key `0.0` (no divide-by-zero/NaN). `Rarity` with `enabled=false` degrades to a uniform shuffle. Threaded `seed`+`rarity` through `compare_by_ordering` and all three call sites incl. `best_version_cmp`/`collapse_best_version` (seed-dependence of best-version collapse documented).
+- **Pity timer (#30, AC 6–8, deterministic version).** `PityStage` config in the manifest; the dry-streak counter is machine-local DB state (`autofill_pity`, sibling of `autofill_rotation`), carried into the engine via `PipelineInput::pity_streak`. The discovery reserve is a budget pre-pass (new `FillMode::Discovery { max_plays }`) that fires only when `pity.enabled && pity_streak >= threshold && ceiling != u64::MAX`, reserving `round(ceiling × ratio)` for never-/barely-played, not-on-device gems before the normal fill. Order: stable-core → pity reserve → primary → fallback. **No play-feedback / behavioral self-adjustment** (deferred, per scope).
+- **RPC wiring (AC 9).** `seed = now as u64` minted at the impure RPC layer (the only place a real seed enters). `build_autofill_history` now also returns the pity streak. Reset/increment at sync completion mirrors the rotation-cursor advance block, gated on `servers_wrote` + `pity.enabled`; reads `threshold_syncs` from `pipeline_for(server)`. Best-effort (never fails the sync). Per-server (not per-track) → no new field on `AutoFillItem`/`SyncDelta`.
+- **Routing (AC 10).** `needs_configurable_expansion` gained `rarity_default`/`pity_default`; `Random`/`Rarity` ordering keys are already caught by `ordering_default` (verified by test).
+- **Frontend (AC 11) + i18n (AC 12).** `random`/`rarity` surfaced in `ORDERING_KEYS` (data-driven dropdown); `RarityStage`/`PityStage` added with omit-when-default serialize (a disabled stage emits `{}` → daemon default → fast path preserved). Two new Advanced stage renderers seed sensible defaults on enable and invalidate the debounced live preview. 15 new keys × 4 locales → **96×4** parity.
+- **Persona (AC 14).** Léo strengthened: under a PlayCount ordering (which would bury the deep cut) + a dry-streak pity config, the reserve guarantees a never-played gem; the same config with `pity_streak=0` buries it. Behavior emerges purely from config — no `if persona ==` branch.
+- **Pre-existing gap (not blocking, flagged by 13.3 review):** `hifimule-i18n` still has no automated all-locale key-parity test (only 6 per-translation tests); parity for this story was verified by hand + a script (96×4). Adding a real parity test remains a worthwhile out-of-scope cleanup.
+
 ### File List
+
+- `hifimule-daemon/src/auto_fill/pipeline.rs` — `seed`/`pity_streak` on `PipelineInput`; `RarityStage`/`PityStage` structs; `OrderingKey::Rarity` + activated `Random`; `draw_unit01`/`es_draw_key`/`rarity_class_weight` helpers; `compare_by_ordering`/`best_version_cmp`/`collapse_best_version` seed threading; `FillMode::Discovery` + pity reserve pre-pass in `run_pipeline`; new tests + Léo persona extension.
+- `hifimule-daemon/src/auto_fill/fetch.rs` — `rarity_default`/`pity_default` in `needs_configurable_expansion`; `seed`/`pity_streak` into `PipelineInput`; test builders + discriminator test.
+- `hifimule-daemon/src/auto_fill/mod.rs` — `seed`/`pity_streak` fields on `AutoFillParams`.
+- `hifimule-daemon/src/db.rs` — `autofill_pity` table; `get_pity_streak`/`set_pity_streak` accessors; round-trip test.
+- `hifimule-daemon/src/rpc.rs` — `build_autofill_history` returns the pity streak; five `AutoFillParams` sites set `seed`/`pity_streak`; pity reset/increment in `record_autofill_history_after_sync`.
+- `hifimule-daemon/src/main.rs` — two legacy `AutoFillParams` sites set `seed: 0, pity_streak: 0`.
+- `hifimule-daemon/src/device/tests.rs` — `rich_pipeline` carries non-default `rarity`/`pity` for round-trip coverage.
+- `hifimule-ui/src/state/autoFill.ts` — `OrderingKey`/`ORDERING_KEYS` + `RarityStage`/`PityStage` interfaces; normalize/serialize (omit-when-default).
+- `hifimule-ui/src/components/AutoFillPanel.ts` — `renderRarityStage`/`renderPityStage` + handlers.
+- `hifimule-i18n/catalog.json` — 15 new `basket.autofill.*` keys × 4 locales (96×4).
+
+### Change Log
+
+| Date | Change |
+|------|--------|
+| 2026-06-15 | Story 13.4 implemented: #29 weighted rarity draws + #30 deterministic pity timer. Engine gains its first seed (activating `OrderingKey::Random`) and second machine-local DB counter (`autofill_pity`). Cross-layer wiring (engine → fetch → RPC → DB → UI → i18n). 585 daemon tests pass; i18n 96×4; tsc + build green. Status → review. |

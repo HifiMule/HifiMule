@@ -2646,13 +2646,14 @@ async fn provider_calculate_delta(
             // Story 13.1: supply the DB-sourced history snapshot + rotation cursor so the Memory
             // stage (cooldown/played/stable-core/tiers) is live for this slot.
             let now = now_unix_secs();
-            let (history, rotation_cursor) = match selected_portable.as_deref() {
+            let (history, rotation_cursor, pity_streak) = match selected_portable.as_deref() {
                 Some(sid) => build_autofill_history(&_state.db, &manifest.device_id, sid, now),
                 None => (
                     crate::auto_fill::HistorySnapshot {
                         now,
                         ..Default::default()
                     },
+                    0,
                     0,
                 ),
             };
@@ -2664,6 +2665,9 @@ async fn provider_calculate_delta(
                 now_unix: now,
                 history,
                 rotation_cursor,
+                // Story 13.4: mint the seed from `now` (varies per run, deterministic within it).
+                seed: now as u64,
+                pity_streak,
             };
             let pipeline_opt = selected_portable
                 .as_deref()
@@ -3586,7 +3590,7 @@ fn build_autofill_history(
     device_id: &str,
     server_id: &str,
     now: i64,
-) -> (crate::auto_fill::HistorySnapshot, i64) {
+) -> (crate::auto_fill::HistorySnapshot, i64, i64) {
     let mut entries = std::collections::HashMap::new();
     match db.get_autofill_history(device_id, server_id) {
         Ok(rows) => {
@@ -3604,7 +3608,9 @@ fn build_autofill_history(
         Err(e) => crate::daemon_log!("[AutoFill] history read failed (memory inert): {}", e),
     }
     let cursor = db.get_rotation_cursor(device_id, server_id).unwrap_or(0);
-    (crate::auto_fill::HistorySnapshot { now, entries }, cursor)
+    // Story 13.4: the pity dry-streak (best-effort, default 0) drives the discovery reserve.
+    let pity_streak = db.get_pity_streak(device_id, server_id).unwrap_or(0);
+    (crate::auto_fill::HistorySnapshot { now, entries }, cursor, pity_streak)
 }
 
 /// Story 13.1: copy the rotation-tier index from auto-fill results onto the matching `delta.adds`
@@ -3785,6 +3791,28 @@ fn record_autofill_history_after_sync(
             && let Err(e) = db.advance_rotation_cursor(device_id, server_id)
         {
             crate::daemon_log!("[AutoFill] rotation cursor advance failed (non-fatal): {}", e);
+        }
+
+        // Story 13.4: pity dry-streak reset/increment, gated exactly like the rotation advance —
+        // only a pity-enabled server that actually wrote a track this run. Re-read the streak (no
+        // concurrent writer between fill and sync completion): if it had reached the threshold the
+        // discovery guarantee fired this run → reset to 0; otherwise advance it by 1. Best-effort.
+        if servers_wrote.contains(server_id)
+            && let Some(pity) = manifest
+                .auto_fill
+                .pipeline_for(server_id)
+                .map(|p| &p.pity)
+                .filter(|p| p.enabled)
+        {
+            let streak = db.get_pity_streak(device_id, server_id).unwrap_or(0);
+            let next = if streak >= i64::from(pity.threshold_syncs) {
+                0 // the guarantee fired this run
+            } else {
+                streak + 1
+            };
+            if let Err(e) = db.set_pity_streak(device_id, server_id, next) {
+                crate::daemon_log!("[AutoFill] pity streak update failed (non-fatal): {}", e);
+            }
         }
     }
 }
@@ -3998,7 +4026,7 @@ async fn multi_provider_calculate_delta(
             exclude_ids.extend(desc.exclude_item_ids.iter().cloned());
             // Story 13.1: DB-sourced history snapshot + rotation cursor for this slot's server.
             let now = now_unix_secs();
-            let (history, rotation_cursor) =
+            let (history, rotation_cursor, pity_streak) =
                 build_autofill_history(&state.db, &manifest.device_id, &af_server, now);
             let fill_params = crate::auto_fill::AutoFillParams {
                 exclude_item_ids: exclude_ids,
@@ -4008,6 +4036,8 @@ async fn multi_provider_calculate_delta(
                 now_unix: now,
                 history,
                 rotation_cursor,
+                seed: now as u64,
+                pity_streak,
             };
             // Story 12.4: route this slot through the shared seam — the configurable engine
             // when this server has a non-default pipeline, else the default fast path.
@@ -4445,7 +4475,7 @@ async fn handle_sync_calculate_delta(
         };
         let exclude_ids: Vec<String> = desc.exclude_item_ids;
         let expanded_excludes = expand_exclude_ids(&state.jellyfin_client, exclude_ids).await;
-        // Legacy Jellyfin fast path: Memory features don't apply (Story 13.1 fields are inert).
+        // Legacy Jellyfin fast path: Memory features don't apply (Story 13.1/13.4 fields are inert).
         let fill_params = crate::auto_fill::AutoFillParams {
             exclude_item_ids: expanded_excludes,
             max_fill_bytes,
@@ -4454,6 +4484,8 @@ async fn handle_sync_calculate_delta(
             now_unix: now_unix_secs(),
             history: crate::auto_fill::HistorySnapshot::default(),
             rotation_cursor: 0,
+            seed: 0,
+            pity_streak: 0,
         };
         match crate::auto_fill::run_auto_fill(&state.jellyfin_client, fill_params).await {
             Ok(af_items) => {
@@ -6230,7 +6262,7 @@ async fn handle_basket_auto_fill(
             .await
             .map(|m| m.device_id)
             .unwrap_or_default();
-        let (history, rotation_cursor) =
+        let (history, rotation_cursor, pity_streak) =
             build_autofill_history(&state.db, &device_id, &server_id, now);
         let fill_params = crate::auto_fill::AutoFillParams {
             exclude_item_ids,
@@ -6240,6 +6272,8 @@ async fn handle_basket_auto_fill(
             now_unix: now,
             history,
             rotation_cursor,
+            seed: now as u64,
+            pity_streak,
         };
         return match expand_auto_fill_slot(provider, Some(&pipeline), fill_params).await {
             Ok(items) => serde_json::to_value(items).map_err(|e| JsonRpcError {
@@ -6277,7 +6311,7 @@ async fn handle_basket_auto_fill(
     // excluded from auto-fill results (AC-2).
     let expanded_exclude_ids = expand_exclude_ids(&state.jellyfin_client, exclude_item_ids).await;
 
-    // Legacy Jellyfin preview (no serverId): Memory features don't apply (Story 13.1 fields inert).
+    // Legacy Jellyfin preview (no serverId): Memory features don't apply (13.1/13.4 fields inert).
     let fill_params = crate::auto_fill::AutoFillParams {
         exclude_item_ids: expanded_exclude_ids,
         max_fill_bytes,
@@ -6286,6 +6320,8 @@ async fn handle_basket_auto_fill(
         now_unix: now_unix_secs(),
         history: crate::auto_fill::HistorySnapshot::default(),
         rotation_cursor: 0,
+        seed: 0,
+        pity_streak: 0,
     };
 
     match crate::auto_fill::run_auto_fill(&state.jellyfin_client, fill_params).await {

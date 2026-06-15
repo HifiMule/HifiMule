@@ -4,7 +4,7 @@
 // omitted when unset, and every enum value is lowercase camelCase.
 
 export type SourceKind = 'library' | 'favorites' | 'history' | 'playlist';
-export type OrderingKey = 'favorite' | 'playCount' | 'dateCreated' | 'random' | 'quality' | 'excavation' | 'rediscovery';
+export type OrderingKey = 'favorite' | 'playCount' | 'dateCreated' | 'random' | 'quality' | 'excavation' | 'rediscovery' | 'rarity';
 export type Unit = 'track' | 'album' | 'artist';
 /** Recording-version traits the auto-fill engine detects from title/album text (Story 13.2 #34).
  * Mirrors the daemon `VersionTrait` enum (camelCase serde). */
@@ -55,6 +55,35 @@ export interface QualityStage {
     versionPreference?: VersionTrait[];
 }
 
+/** Weighted rarity draw (Story 13.4 #29) — loot-table classes feeding the `rarity` ordering key.
+ * Mirrors the daemon `RarityStage` serde shape; default (`enabled: false`) is today's behavior. */
+export interface RarityStage {
+    /** Off ⇒ a `rarity` ordering key degrades to a uniform shuffle. */
+    enabled?: boolean;
+    /** Draw weight for the legendary class (never-/0-played gems). */
+    legendaryWeight?: number;
+    /** Draw weight for the rare class (1..=rareMaxPlays). */
+    rareWeight?: number;
+    /** Draw weight for the common class (> rareMaxPlays — the hits). */
+    commonWeight?: number;
+    /** Play-count boundary between rare and common. */
+    rareMaxPlays?: number;
+}
+
+/** Pity timer (Story 13.4 #30) — a deterministic discovery guarantee after a dry streak. Mirrors
+ * the daemon `PityStage` serde shape; default (`enabled: false`) is today's behavior. The dry-streak
+ * counter is machine-local daemon DB state, never part of this (manifest) config. */
+export interface PityStage {
+    /** Off ⇒ no reserve, no counter interaction. */
+    enabled?: boolean;
+    /** Dry syncs before the guarantee fires. */
+    thresholdSyncs?: number;
+    /** Fraction of the budget reserved for discovery when it fires (0.0..=1.0). */
+    guaranteedRatio?: number;
+    /** A "discovery" candidate has playCount <= this (0 = never-played). */
+    discoveryMaxPlays?: number;
+}
+
 export interface AutoFillPipeline {
     enabled: boolean;
     filter: FilterStage;
@@ -65,11 +94,14 @@ export interface AutoFillPipeline {
     budget: BudgetStage;
     fallback: SourceEntry[];
     quality: QualityStage;
+    rarity: RarityStage;
+    pity: PityStage;
 }
 
-/** The user-facing ordering keys (the reserved `random` no-op is not surfaced).
- * Story 13.3 adds the discovery keys `excavation` (deep cuts) and `rediscovery` (added long ago). */
-export const ORDERING_KEYS: OrderingKey[] = ['favorite', 'playCount', 'dateCreated', 'quality', 'excavation', 'rediscovery'];
+/** The user-facing ordering keys. Story 13.3 adds the discovery keys `excavation` (deep cuts) and
+ * `rediscovery` (added long ago). Story 13.4 surfaces `random` (now a functional seeded shuffle —
+ * previously a hidden no-op) and adds `rarity` (the weighted loot-table draw). */
+export const ORDERING_KEYS: OrderingKey[] = ['favorite', 'playCount', 'dateCreated', 'quality', 'excavation', 'rediscovery', 'random', 'rarity'];
 
 /** The selectable version traits, in the order the preference editor offers them. */
 export const VERSION_TRAITS: VersionTrait[] = ['studio', 'live', 'remastered', 'remix', 'acoustic', 'demo'];
@@ -92,6 +124,8 @@ export function defaultLegacyPipeline(maxBytes?: number): AutoFillPipeline {
         budget: maxBytes != null ? { maxBytes } : {},
         fallback: [],
         quality: {},
+        rarity: {},
+        pity: {},
     };
 }
 
@@ -119,6 +153,8 @@ export function normalizePipeline(raw: Partial<AutoFillPipeline> | null | undefi
                 ? [...raw.quality.versionPreference]
                 : [],
         },
+        rarity: { ...(raw.rarity ?? {}) },
+        pity: { ...(raw.pity ?? {}) },
     };
 }
 
@@ -167,6 +203,23 @@ export function serializePipeline(p: AutoFillPipeline): AutoFillPipeline {
         );
         if (prefs.length > 0) quality.versionPreference = prefs;
     }
+    // Story 13.4 Rarity/Pity stages — omit-when-default (same pattern as quality): a disabled stage
+    // emits `{}`, which the daemon deserializes to the default stage so routing keeps the fast path.
+    const rarity: RarityStage = {};
+    if (p.rarity?.enabled) {
+        rarity.enabled = true;
+        if (typeof p.rarity.legendaryWeight === 'number') rarity.legendaryWeight = Math.max(0, p.rarity.legendaryWeight);
+        if (typeof p.rarity.rareWeight === 'number') rarity.rareWeight = Math.max(0, p.rarity.rareWeight);
+        if (typeof p.rarity.commonWeight === 'number') rarity.commonWeight = Math.max(0, p.rarity.commonWeight);
+        if (typeof p.rarity.rareMaxPlays === 'number') rarity.rareMaxPlays = Math.max(0, Math.floor(p.rarity.rareMaxPlays));
+    }
+    const pity: PityStage = {};
+    if (p.pity?.enabled) {
+        pity.enabled = true;
+        if (typeof p.pity.thresholdSyncs === 'number') pity.thresholdSyncs = Math.max(0, Math.floor(p.pity.thresholdSyncs));
+        if (typeof p.pity.guaranteedRatio === 'number') pity.guaranteedRatio = Math.max(0, Math.min(1, p.pity.guaranteedRatio));
+        if (typeof p.pity.discoveryMaxPlays === 'number') pity.discoveryMaxPlays = Math.max(0, Math.floor(p.pity.discoveryMaxPlays));
+    }
     return {
         enabled: p.enabled,
         filter: {
@@ -182,5 +235,7 @@ export function serializePipeline(p: AutoFillPipeline): AutoFillPipeline {
         budget,
         fallback: cleanSources(p.fallback),
         quality,
+        rarity,
+        pity,
     };
 }

@@ -255,8 +255,64 @@ export class AutoFillPanel {
                 ${this.renderOrderingSection()}
                 ${this.renderMemoryStage()}
                 ${this.renderQualityStage()}
+                ${this.renderRarityStage()}
+                ${this.renderPityStage()}
             </div>
         `;
+    }
+
+    /** Rarity stage (Story 13.4 #29): a loot-table weighted draw. Enable + three class weights +
+     * the rare/common boundary. Off ⇒ a `rarity` ordering key degrades to a uniform shuffle. */
+    private renderRarityStage(): string {
+        const r = this.pipeline.rarity;
+        return this.renderStage(t('basket.autofill.rarity'), `
+            <sl-switch id="af-rarity-enabled" size="small" ${r.enabled ? 'checked' : ''}>
+                ${t('basket.autofill.rarity_enable')}
+            </sl-switch>
+            <div class="auto-fill-caption">${t('basket.autofill.rarity_hint')}</div>
+            ${r.enabled ? `
+                <sl-input id="af-rarity-legendary" type="number" min="0" step="0.5"
+                    label="${t('basket.autofill.rarity_legendary_weight')}"
+                    value="${r.legendaryWeight ?? ''}"></sl-input>
+                <sl-input id="af-rarity-rare" type="number" min="0" step="0.5"
+                    label="${t('basket.autofill.rarity_rare_weight')}"
+                    value="${r.rareWeight ?? ''}"></sl-input>
+                <sl-input id="af-rarity-common" type="number" min="0" step="0.5"
+                    label="${t('basket.autofill.rarity_common_weight')}"
+                    value="${r.commonWeight ?? ''}"></sl-input>
+                <sl-input id="af-rarity-rare-max" type="number" min="0" step="1"
+                    label="${t('basket.autofill.rarity_rare_max_plays')}"
+                    value="${r.rareMaxPlays ?? ''}"></sl-input>
+            ` : ''}
+        `);
+    }
+
+    /** Pity stage (Story 13.4 #30): a deterministic discovery guarantee after a dry streak. Enable +
+     * threshold (dry syncs) + reserved ratio + the discovery play-count cap. Off ⇒ no behavior. */
+    private renderPityStage(): string {
+        const p = this.pipeline.pity;
+        const ratioPct = typeof p.guaranteedRatio === 'number' ? Math.round(p.guaranteedRatio * 100) : 0;
+        return this.renderStage(t('basket.autofill.pity'), `
+            <sl-switch id="af-pity-enabled" size="small" ${p.enabled ? 'checked' : ''}>
+                ${t('basket.autofill.pity_enable')}
+            </sl-switch>
+            <div class="auto-fill-caption">${t('basket.autofill.pity_hint')}</div>
+            ${p.enabled ? `
+                <sl-input id="af-pity-threshold" type="number" min="0" step="1"
+                    label="${t('basket.autofill.pity_threshold')}"
+                    value="${p.thresholdSyncs ?? ''}"></sl-input>
+                <div class="auto-fill-memory-dial">
+                    <label class="auto-fill-substage-label">${t('basket.autofill.pity_ratio')}</label>
+                    <div class="af-share-cell">
+                        <sl-range id="af-pity-ratio" min="0" max="100" step="1" value="${ratioPct}"></sl-range>
+                        <span class="af-share-value">${ratioPct}%</span>
+                    </div>
+                </div>
+                <sl-input id="af-pity-discovery-max" type="number" min="0" step="1"
+                    label="${t('basket.autofill.pity_discovery_max_plays')}"
+                    value="${p.discoveryMaxPlays ?? ''}"></sl-input>
+            ` : ''}
+        `);
     }
 
     /** Quality & Version stage (Story 13.2): a best-version switch + an ordered version-preference
@@ -617,6 +673,64 @@ export class AutoFillPanel {
             const trait = (e.target as any).value as VersionTrait;
             if (trait && !this.versionPreference().includes(trait)) this.versionPreference().push(trait);
             this.renderBody();
+        });
+
+        // --- Rarity & Pity (Story 13.4) ---
+        // Number inputs write straight into the pipeline on every input/change (no full re-render, so
+        // no lost keystrokes) and invalidate the live preview, mirroring the other stage handlers.
+        const bindNum = (selector: string, set: (v: number | undefined) => void): void => {
+            const el = d.querySelector(selector);
+            const handler = (e: Event): void => {
+                const raw = String((e.target as any).value ?? '').trim();
+                const v = raw === '' ? NaN : Number(raw);
+                set(isNaN(v) || v < 0 ? undefined : v);
+                this.invalidatePreview();
+            };
+            el?.addEventListener('sl-input', handler);
+            el?.addEventListener('sl-change', handler);
+        };
+        d.querySelector('#af-rarity-enabled')?.addEventListener('sl-change', (e: Event) => {
+            this.captureInputs();
+            const on = (e.target as HTMLInputElement).checked;
+            this.pipeline.rarity.enabled = on || undefined;
+            if (on) {
+                const r = this.pipeline.rarity; // seed a sensible loot table on first enable
+                if (typeof r.legendaryWeight !== 'number') r.legendaryWeight = 3;
+                if (typeof r.rareWeight !== 'number') r.rareWeight = 2;
+                if (typeof r.commonWeight !== 'number') r.commonWeight = 1;
+                if (typeof r.rareMaxPlays !== 'number') r.rareMaxPlays = 5;
+            }
+            this.renderBody(); // reveals/hides the weight fields
+        });
+        bindNum('#af-rarity-legendary', (v) => { this.pipeline.rarity.legendaryWeight = v; });
+        bindNum('#af-rarity-rare', (v) => { this.pipeline.rarity.rareWeight = v; });
+        bindNum('#af-rarity-common', (v) => { this.pipeline.rarity.commonWeight = v; });
+        bindNum('#af-rarity-rare-max', (v) => {
+            this.pipeline.rarity.rareMaxPlays = v == null ? undefined : Math.floor(v);
+        });
+        d.querySelector('#af-pity-enabled')?.addEventListener('sl-change', (e: Event) => {
+            this.captureInputs();
+            const on = (e.target as HTMLInputElement).checked;
+            this.pipeline.pity.enabled = on || undefined;
+            if (on) {
+                const p = this.pipeline.pity; // seed sensible defaults on first enable
+                if (typeof p.thresholdSyncs !== 'number') p.thresholdSyncs = 3;
+                if (typeof p.guaranteedRatio !== 'number') p.guaranteedRatio = 0.25;
+                if (typeof p.discoveryMaxPlays !== 'number') p.discoveryMaxPlays = 0;
+            }
+            this.renderBody(); // reveals/hides the pity fields
+        });
+        bindNum('#af-pity-threshold', (v) => {
+            this.pipeline.pity.thresholdSyncs = v == null ? undefined : Math.floor(v);
+        });
+        bindNum('#af-pity-discovery-max', (v) => {
+            this.pipeline.pity.discoveryMaxPlays = v == null ? undefined : Math.floor(v);
+        });
+        d.querySelector('#af-pity-ratio')?.addEventListener('sl-change', (e: Event) => {
+            this.captureInputs();
+            const pct = Number((e.target as any).value);
+            this.pipeline.pity.guaranteedRatio = isNaN(pct) ? undefined : pct / 100;
+            this.renderBody(); // refresh the % readout
         });
 
         // --- Footer ---

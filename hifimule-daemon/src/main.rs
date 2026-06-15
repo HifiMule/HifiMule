@@ -602,6 +602,8 @@ async fn run_auto_sync(
                 now_unix: crate::rpc::now_unix_secs(),
                 history: crate::auto_fill::HistorySnapshot::default(),
                 rotation_cursor: 0,
+                seed: 0,
+                pity_streak: 0,
             };
             match crate::auto_fill::run_auto_fill(&jellyfin_client, fill_params).await {
                 Ok(items) if items.is_empty() => {
@@ -1172,6 +1174,8 @@ async fn run_auto_sync_via_provider(
                 now_unix: crate::rpc::now_unix_secs(),
                 history: auto_fill::HistorySnapshot::default(),
                 rotation_cursor: 0,
+                seed: 0,
+                pity_streak: 0,
             };
             match auto_fill::run_auto_fill_provider(provider.clone(), fill_params).await {
                 Ok(items) if items.is_empty() && desired_items.is_empty() => {

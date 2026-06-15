@@ -72,6 +72,12 @@ pub struct AutoFillParams {
     /// Story 13.1: the rotation cursor for Memory tiers (read from the DB by the caller). The lead
     /// tier is `cursor mod tiers.len()`; ignored when no tiers are configured.
     pub rotation_cursor: i64,
+    /// Story 13.4: the entropy seed minted by the RPC layer (`now as u64`) — deterministic within a
+    /// run, varies per run. Threaded into [`pipeline::PipelineInput::seed`]; `0` on legacy paths.
+    pub seed: u64,
+    /// Story 13.4: the pity dry-streak read from the DB by the caller (sibling of `rotation_cursor`).
+    /// Threaded into [`pipeline::PipelineInput::pity_streak`]; `0` on legacy paths.
+    pub pity_streak: i64,
 }
 
 /// Retry delays (ms) for transient 5xx server errors. Two entries = up to 3 total attempts.
