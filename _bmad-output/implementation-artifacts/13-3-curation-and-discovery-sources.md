@@ -4,7 +4,7 @@ baseline_commit: add47c24a17ec93fd33b52e92ad49effc8f1ac6b
 
 # Story 13.3: Curation & Discovery Sources
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -59,31 +59,31 @@ So the engine deliverables of this story are precisely **#14 + #31-cheap as two 
 
 ## Tasks / Subtasks
 
-- [ ] **Deep-Cuts Excavator ordering key (#14)** (`hifimule-daemon/src/auto_fill/pipeline.rs`) (AC: 1, 2)
-  - [ ] Add `Excavation` to the `OrderingKey` enum ([pipeline.rs:153-166](../../hifimule-daemon/src/auto_fill/pipeline.rs#L153-L166)), `#[serde(rename_all = "camelCase")]` → `"excavation"`. Update the doc comment ("fewer plays first — owned-but-barely-played").
-  - [ ] In `compare_by_ordering` ([pipeline.rs:622-645](../../hifimule-daemon/src/auto_fill/pipeline.rs#L622-L645)) add the arm: `a.play_count.unwrap_or(0).cmp(&b.play_count.unwrap_or(0))` (ascending → fewer-played first; inverse of the `PlayCount` arm at [:627](../../hifimule-daemon/src/auto_fill/pipeline.rs#L627)).
-  - [ ] Tests: never-played (`None`) and `0` rank before a 50-play hit; ties stable; `[Excavation]` vs `[PlayCount]` produce reversed orders; a pipeline without `Excavation` is unchanged.
+- [x] **Deep-Cuts Excavator ordering key (#14)** (`hifimule-daemon/src/auto_fill/pipeline.rs`) (AC: 1, 2)
+  - [x] Add `Excavation` to the `OrderingKey` enum ([pipeline.rs:153-166](../../hifimule-daemon/src/auto_fill/pipeline.rs#L153-L166)), `#[serde(rename_all = "camelCase")]` → `"excavation"`. Update the doc comment ("fewer plays first — owned-but-barely-played").
+  - [x] In `compare_by_ordering` ([pipeline.rs:622-645](../../hifimule-daemon/src/auto_fill/pipeline.rs#L622-L645)) add the arm: `a.play_count.unwrap_or(0).cmp(&b.play_count.unwrap_or(0))` (ascending → fewer-played first; inverse of the `PlayCount` arm at [:627](../../hifimule-daemon/src/auto_fill/pipeline.rs#L627)).
+  - [x] Tests: never-played (`None`) and `0` rank before a 50-play hit; ties stable; `[Excavation]` vs `[PlayCount]` produce reversed orders; a pipeline without `Excavation` is unchanged.
 
-- [ ] **Rediscovery / cheap Musical-Memories ordering key (#31)** (`hifimule-daemon/src/auto_fill/pipeline.rs`) (AC: 3, 4)
-  - [ ] Add `Rediscovery` to `OrderingKey` (`"rediscovery"`). Doc: "oldest-added first — resurface music added long ago (cheap musical-memories)".
-  - [ ] In `compare_by_ordering` add the arm: oldest `date_added` first with **`None` last**. Do NOT use `unwrap_or("")` ascending (that sorts unknowns first). Use an explicit None-last comparison — e.g. `match (a.date_added.as_deref(), b.date_added.as_deref()) { (Some(x), Some(y)) => x.cmp(y), (Some(_), None) => Less, (None, Some(_)) => Greater, (None, None) => Equal }`. (`Less` = sorts first = better rediscovery candidate.)
-  - [ ] Tests: oldest ISO date first; `None`/empty `date_added` sorts **last** (explicit assertion — the AC 3 guard); inverse of `DateCreated` on the same fixtures; ties stable; pipeline without it unchanged.
+- [x] **Rediscovery / cheap Musical-Memories ordering key (#31)** (`hifimule-daemon/src/auto_fill/pipeline.rs`) (AC: 3, 4)
+  - [x] Add `Rediscovery` to `OrderingKey` (`"rediscovery"`). Doc: "oldest-added first — resurface music added long ago (cheap musical-memories)".
+  - [x] In `compare_by_ordering` add the arm: oldest `date_added` first with **`None` last**. Do NOT use `unwrap_or("")` ascending (that sorts unknowns first). Used an explicit absent-last comparison via the `nonblank_date` helper (folds whitespace-only `Some("")` into "absent" too, per AC 3's "None/empty" wording): `match (nonblank_date(a), nonblank_date(b)) { (Some(x), Some(y)) => x.cmp(y), (Some(_), None) => Less, (None, Some(_)) => Greater, (None, None) => Equal }`.
+  - [x] Tests: oldest ISO date first; `None`/empty `date_added` sorts **last** (explicit assertion — the AC 3 guard, incl. whitespace-only); inverse of `DateCreated` on the same fixtures; ties stable; pipeline without it unchanged.
 
-- [ ] **Routing verification** (`hifimule-daemon/src/auto_fill/fetch.rs`) (AC: 7)
-  - [ ] Add tests proving `needs_configurable_expansion` returns `true` for an `Excavation`-only and a `Rediscovery`-only pipeline (any non-legacy ordering already trips `ordering_default` at [fetch.rs:152-158](../../hifimule-daemon/src/auto_fill/fetch.rs#L152-L158)), and `false` for the legacy default. No logic change expected — confirm and lock in.
+- [x] **Routing verification** (`hifimule-daemon/src/auto_fill/fetch.rs`) (AC: 7)
+  - [x] Added `discriminator_new_ordering_keys_force_configurable`: `needs_configurable_expansion` returns `true` for an `Excavation`-only and a `Rediscovery`-only pipeline, and `false` for the legacy default. No logic change — confirmed and locked in.
 
-- [ ] **Frontend ordering keys** (`hifimule-ui/src/state/autoFill.ts`, `components/AutoFillPanel.ts`) (AC: 8)
-  - [ ] In `state/autoFill.ts`: add `'excavation' | 'rediscovery'` to the `OrderingKey` union ([:7](../../hifimule-ui/src/state/autoFill.ts#L7)) and append both to `ORDERING_KEYS` ([:71](../../hifimule-ui/src/state/autoFill.ts#L71)). No serialize/normalize change needed (`ordering` is passed verbatim).
-  - [ ] No change to `AutoFillPanel.ts` render is required (the ordering editor is data-driven) — verify the new keys appear in the add-dropdown, reorder, and remove. Add the labels in i18n (next task).
+- [x] **Frontend ordering keys** (`hifimule-ui/src/state/autoFill.ts`, `components/AutoFillPanel.ts`) (AC: 8)
+  - [x] In `state/autoFill.ts`: added `'excavation' | 'rediscovery'` to the `OrderingKey` union and appended both to `ORDERING_KEYS`. No serialize/normalize change (`ordering` passes verbatim).
+  - [x] No change to `AutoFillPanel.ts` ordering render required (data-driven). The new keys appear in the add-dropdown / reorder / remove automatically via `ORDERING_KEYS` + `t('basket.autofill.ordering_'+key)`. Verified via tsc + build.
 
-- [ ] **Acclaimed-Classics cheap recipe — UI hint + docs (#16)** (`hifimule-ui/src/components/AutoFillPanel.ts`, Dev Notes) (AC: 6)
-  - [ ] Add a short caption/hint in the Sources or Advanced area explaining: *"Acclaimed Classics: add a curated 'classics' playlist as a source and turn on 'exclude already-played' to resurface owned, never-heard gems."* Use a new i18n key (next task). No engine code, no new `SourceKind`.
+- [x] **Acclaimed-Classics cheap recipe — UI hint + docs (#16)** (`hifimule-ui/src/components/AutoFillPanel.ts`, Dev Notes) (AC: 6)
+  - [x] Added a caption in the Sources stage (`renderSourcesStage`) keyed on `basket.autofill.acclaimed_classics_hint` explaining the recipe (curated "classics" playlist source + `playedExclusion`). No engine code, no new `SourceKind`.
 
-- [ ] **i18n keys ×4 locales** (`hifimule-i18n/catalog.json`) (AC: 9)
-  - [ ] Add `basket.autofill.ordering_excavation`, `basket.autofill.ordering_rediscovery`, and `basket.autofill.acclaimed_classics_hint` to `en`/`fr`/`es`/`de` (3 keys → 78×4 → **81×4**). Suggested EN: "Deep cuts (least played)", "Rediscover (added long ago)", plus the recipe hint. Verify parity.
+- [x] **i18n keys ×4 locales** (`hifimule-i18n/catalog.json`) (AC: 9)
+  - [x] Added `basket.autofill.ordering_excavation`, `basket.autofill.ordering_rediscovery`, and `basket.autofill.acclaimed_classics_hint` to `en`/`fr`/`es`/`de` (3 keys → **81×4**). Parity test green.
 
-- [ ] **Full verification** (AC: 10, 11)
-  - [ ] `rtk cargo test -p hifimule-daemon auto_fill::` (+ full `-p hifimule-daemon` if sandbox allows), `rtk cargo clippy -p hifimule-daemon --all-targets`, `rtk cargo test -p hifimule-i18n`, frontend `rtk npx tsc --noEmit` + `rtk npm run build`. Strengthen Léo's persona test.
+- [x] **Full verification** (AC: 10, 11)
+  - [x] `rtk cargo test -p hifimule-daemon auto_fill::` (93 pass) + full `-p hifimule-daemon` (570 pass), `rtk cargo clippy -p hifimule-daemon --all-targets` (no new warnings in touched modules), `rtk cargo test -p hifimule-i18n` (6 pass), frontend `rtk npx tsc --noEmit` (clean) + `rtk npm run build` (green). Strengthened Léo's persona test to assert excavation surfaces a barely-played deep cut over a hit (config-driven, no `if persona` branch).
 
 ## Dev Notes
 
@@ -170,8 +170,34 @@ Recent commits (`add47c2 Review 13.2`, `20cb42c Dev 13.2`, `6b9a90d Review 13.1`
 
 ### Agent Model Used
 
+claude-opus-4-8 (BMad dev-story workflow)
+
 ### Debug Log References
+
+None — no failures encountered; all suites passed on first run after implementation.
 
 ### Completion Notes List
 
+- **Engine (#14 + #31-cheap):** Added two `OrderingKey` variants — `Excavation` (fewer plays first, the exact inverse of `PlayCount`, `None`→0) and `Rediscovery` (oldest `date_added` first, the inverse of `DateCreated`). Both are pure field comparisons in `compare_by_ordering`; no clock, no RNG, no new `Song` field, no DB, no provider call. They slot into the existing multi-key sort as new match arms only — the framework, version-preference tiebreak, and all other keys are untouched.
+- **Rediscovery None-handling (the one footgun, AC 3):** Implemented an explicit absent-last comparison via a new `nonblank_date(&Song) -> Option<&str>` helper. Beyond the `None` case the task snippet covered, the helper also folds whitespace-only `Some("")` into "absent" — AC 3's wording is "None/**empty** sorts last", and a naive `Some("")` would otherwise sort lexicographically to the *front*. Unit-tested directly (`rediscovery_sorts_missing_or_blank_date_last`).
+- **Routing (AC 7):** No logic change — any non-legacy `ordering` already trips `ordering_default` in `needs_configurable_expansion`. Added `discriminator_new_ordering_keys_force_configurable` to lock in `true` for Excavation-only / Rediscovery-only and `false` for the legacy default.
+- **Frontend (AC 8):** Two union members + two `ORDERING_KEYS` entries. The data-driven ordering editor surfaces them automatically (dropdown / reorder / remove); `ordering` round-trips verbatim through normalize/serialize, so no serialize change. tsc + build green.
+- **Acclaimed-Classics cheap recipe (#16, AC 6):** No engine code. Added a caption in the Sources stage (`basket.autofill.acclaimed_classics_hint`) documenting the shipped-pieces recipe: a curated "classics" `PlaylistSource` (12.4) + `memory.playedExclusion` (13.1) = "owned, curated-as-acclaimed, never-played." No `SourceKind::Acclaimed`, no rating field.
+- **i18n (AC 9):** 3 keys × 4 locales (en/fr/es/de) → 78×4 → **81×4**. Parity test green.
+- **Persona (AC 11):** Strengthened Léo (`persona_leo_gym_energy_playlist_tiny_device`) — now uses an `Excavation` ordering so a 90-play hit is excavated past the tiny budget while the barely-played deep cuts surface. Behavior emerges from config; no `if persona ==` branch.
+- **Deferred (untouched, per Scope decision):** #15 community-rating (no rating signal on `Song`/providers), true #16 community-acclaim, 13.4–13.6. No `Song` field, DB, provider, or clock added.
+- **Verification:** auto_fill 93 pass; full `-p hifimule-daemon` 570 pass (no regression); i18n 6 pass; tsc clean; build green; clippy adds no new warnings in `pipeline.rs`/`fetch.rs` (remaining warnings are pre-existing in vault/device_io/api/jellyfin).
+
 ### File List
+
+- `hifimule-daemon/src/auto_fill/pipeline.rs` (modified — `Excavation`/`Rediscovery` enum variants, two `compare_by_ordering` arms, `nonblank_date` helper, 8 new 13.3 tests, strengthened Léo persona test)
+- `hifimule-daemon/src/auto_fill/fetch.rs` (modified — `discriminator_new_ordering_keys_force_configurable` routing test)
+- `hifimule-ui/src/state/autoFill.ts` (modified — `OrderingKey` union + `ORDERING_KEYS` array)
+- `hifimule-ui/src/components/AutoFillPanel.ts` (modified — acclaimed-classics hint caption in `renderSourcesStage`)
+- `hifimule-i18n/catalog.json` (modified — 3 keys × 4 locales)
+
+## Change Log
+
+| Date       | Version | Description                                                                                     | Author |
+| ---------- | ------- | ----------------------------------------------------------------------------------------------- | ------ |
+| 2026-06-15 | 1.0     | Implemented Story 13.3: `Excavation` (#14) + `Rediscovery` (#31-cheap) ordering keys; acclaimed-classics recipe hint (#16); frontend + i18n (81×4); routing/persona tests. All suites green. | Amelia (dev-story) |

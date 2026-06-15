@@ -377,6 +377,7 @@ export class AutoFillPanel {
         return this.renderStage(t('basket.autofill.sources'), `
             ${this.renderSourcesList(t('basket.autofill.sources'), this.pipeline.sources, 'source')}
             ${this.renderSourcesList(t('basket.autofill.fallback'), this.pipeline.fallback, 'fallback')}
+            <div class="auto-fill-caption">${t('basket.autofill.acclaimed_classics_hint')}</div>
         `);
     }
 

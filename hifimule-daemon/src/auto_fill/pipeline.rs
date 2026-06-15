@@ -163,6 +163,12 @@ pub enum OrderingKey {
     Random,
     /// Higher bitrate first.
     Quality,
+    /// Story 13.3 #14 — fewer plays first: surfaces owned-but-barely-played music (deep cuts).
+    /// The exact inverse of [`OrderingKey::PlayCount`]; a never-played track (`None`/0) ranks first.
+    Excavation,
+    /// Story 13.3 #31 (cheap musical-memories) — oldest-added first: resurfaces music added long
+    /// ago. The inverse of [`OrderingKey::DateCreated`]; an unknown `date_added` sorts LAST.
+    Rediscovery,
 }
 
 /// Cooldown / rotation modifiers. In 12.1 only `cooldown_weeks` and `played_exclusion` are
@@ -638,6 +644,22 @@ fn compare_by_ordering(
                 .cmp(&(format_quality_rank(a), a.bitrate_kbps.unwrap_or(0))),
             // deterministic no-op in 12.1 — no entropy in the pure core (Epic 13 adds seeding)
             OrderingKey::Random => Ordering::Equal,
+            // Story 13.3 #14: fewer plays first — owned-but-barely-played (inverse of PlayCount).
+            // `None` is treated as 0, so a never-played track is the deepest cut and ranks first.
+            OrderingKey::Excavation => {
+                a.play_count.unwrap_or(0).cmp(&b.play_count.unwrap_or(0))
+            }
+            // Story 13.3 #31 (cheap musical-memories): oldest `date_added` first (inverse of
+            // DateCreated). A missing OR blank add-date sorts LAST — an unknown add-date is the
+            // *worst* rediscovery candidate, NOT the best. A naive `unwrap_or("")` ascending would
+            // wrongly float empty strings to the front, so the absent-last branch is explicit
+            // (AC 3 guard; `nonblank_date` also folds whitespace-only `Some("")` into "absent").
+            OrderingKey::Rediscovery => match (nonblank_date(a), nonblank_date(b)) {
+                (Some(x), Some(y)) => x.cmp(y),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            },
         };
         if ord != Ordering::Equal {
             return ord;
@@ -655,6 +677,13 @@ fn compare_by_ordering(
 
 fn fav_rank(s: &Song) -> u8 {
     u8::from(s.is_favorite == Some(true))
+}
+
+/// The song's `date_added` as a present, non-blank ISO string — or `None` if absent or
+/// whitespace-only. Used by [`OrderingKey::Rediscovery`] so an unknown add-date sorts LAST rather
+/// than masquerading as the oldest (Story 13.3 #31, AC 3).
+fn nonblank_date(s: &Song) -> Option<&str> {
+    s.date_added.as_deref().map(str::trim).filter(|d| !d.is_empty())
 }
 
 /// Format-aware quality tier (Story 13.2 #13): lossless (2) > lossy (1) > unknown (0). Read
@@ -1319,13 +1348,16 @@ mod tests {
 
     #[test]
     fn persona_leo_gym_energy_playlist_tiny_device() {
-        // Léo: tiny device, energy-driven. A single Playlist source ("energy") and a tiny budget.
-        // Only the playlist pool's tracks are picked, truncated to the tiny budget. The library
-        // pool is present but never referenced — so it must not leak into the result.
+        // Léo: the explorer. Tiny device, energy-driven, tired of the same hits. A single Playlist
+        // source ("energy") with an Excavation ordering (Story 13.3 #14) and a tiny budget. Only the
+        // playlist pool's tracks are picked, the barely-played deep cuts surface ahead of the hit,
+        // and the result is truncated to budget. The library pool is present but never referenced —
+        // so it must not leak in. Excavation is expressed purely in config: no `if persona` branch.
         let energy = vec![
-            cand(song_sized("e1", false, 0, "2024-01-01", 3_000_000)),
-            cand(song_sized("e2", false, 0, "2024-01-01", 3_000_000)),
-            cand(song_sized("e3", false, 0, "2024-01-01", 3_000_000)),
+            // `hit` is heavily played and must be excavated to the BACK despite being listed first.
+            cand(song_sized("e-hit", false, 90, "2024-01-01", 3_000_000)),
+            cand(song_sized("e-deep1", false, 1, "2024-01-01", 3_000_000)),
+            cand(song_sized("e-deep2", false, 0, "2024-01-01", 3_000_000)),
         ];
         let library = vec![cand(song_sized("lib-x", true, 99, "2024-01-01", 1_000_000))];
 
@@ -1339,6 +1371,7 @@ mod tests {
                 ref_id: Some("energy".to_string()),
                 share: None,
             }],
+            ordering: vec![OrderingKey::Excavation],
             // 7 MB budget fits only 2 of the 3 MB playlist tracks.
             budget: BudgetStage {
                 max_bytes: Some(7_000_000),
@@ -1351,8 +1384,12 @@ mod tests {
         let result_ids = ids(&result);
         assert_eq!(
             result_ids,
-            vec!["e1", "e2"],
-            "only playlist tracks, truncated to budget"
+            vec!["e-deep2", "e-deep1"],
+            "excavation surfaces the barely-played deep cuts; the 90-play hit is dropped past budget"
+        );
+        assert!(
+            !result_ids.iter().any(|id| id == "e-hit"),
+            "the heavily-played hit must yield to the deep cuts under Excavation"
         );
         assert!(
             !result_ids.iter().any(|id| id == "lib-x"),
@@ -2553,5 +2590,207 @@ mod tests {
         assert_eq!(p.quality, QualityStage::default());
         assert!(!p.quality.best_version);
         assert!(p.quality.version_preference.is_empty());
+    }
+
+    // ===================================================================
+    // Story 13.3 — Excavation (#14) & Rediscovery (#31) ordering keys.
+    // Both are pure field comparisons over existing `Song` fields; no clock, no RNG, no new data.
+    // ===================================================================
+
+    /// Build a `Song` with an explicit `Option` play_count (the fixture helper only takes `u32`).
+    fn song_plays(id: &str, play_count: Option<u32>) -> Song {
+        Song {
+            play_count,
+            ..song_sized(id, false, 0, "2024-01-01", 1_000_000)
+        }
+    }
+
+    /// Build a `Song` with an explicit `Option` date_added.
+    fn song_dated(id: &str, date_added: Option<&str>) -> Song {
+        Song {
+            date_added: date_added.map(str::to_string),
+            ..song_sized(id, false, 0, "2024-01-01", 1_000_000)
+        }
+    }
+
+    fn lib_pipeline(ordering: Vec<OrderingKey>) -> AutoFillPipeline {
+        AutoFillPipeline {
+            sources: vec![SourceEntry::new(SourceKind::Library)],
+            ordering,
+            budget: BudgetStage {
+                max_bytes: Some(100_000_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    // ---- AC 1/2: Excavation -------------------------------------------------
+
+    #[test]
+    fn excavation_ranks_fewer_played_first() {
+        // never-played (None) and 0-play are the deepest cuts; a 50-play hit ranks last.
+        let never = song_plays("never", None);
+        let zero = song_plays("zero", Some(0));
+        let some = song_plays("some", Some(5));
+        let hit = song_plays("hit", Some(50));
+        let input = PipelineInput::default().with_pool(
+            SourceKind::Library,
+            None,
+            // Insert out of order; the sort must reorder by ascending play_count.
+            vec![cand(hit), cand(some), cand(never), cand(zero)],
+        );
+        let result = ids(&run_pipeline(&input, &lib_pipeline(vec![OrderingKey::Excavation])));
+        // never (None→0) and zero (0) tie at 0 → stable insertion order keeps `never` before `zero`.
+        assert_eq!(result, vec!["never", "zero", "some", "hit"]);
+    }
+
+    #[test]
+    fn excavation_is_the_exact_inverse_of_play_count() {
+        let a = song_plays("a", Some(1));
+        let b = song_plays("b", Some(10));
+        let c = song_plays("c", Some(100));
+        let pool = vec![cand(b.clone()), cand(c.clone()), cand(a.clone())];
+
+        let by_excavation = ids(&run_pipeline(
+            &PipelineInput::default().with_pool(SourceKind::Library, None, pool.clone()),
+            &lib_pipeline(vec![OrderingKey::Excavation]),
+        ));
+        let mut by_play_count = ids(&run_pipeline(
+            &PipelineInput::default().with_pool(SourceKind::Library, None, pool),
+            &lib_pipeline(vec![OrderingKey::PlayCount]),
+        ));
+        by_play_count.reverse();
+        assert_eq!(by_excavation, by_play_count, "excavation reverses PlayCount on distinct counts");
+        assert_eq!(by_excavation, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn excavation_ties_are_stable() {
+        // All same play_count → input order preserved (deterministic, no RNG).
+        let pool = vec![
+            cand(song_plays("p1", Some(3))),
+            cand(song_plays("p2", Some(3))),
+            cand(song_plays("p3", Some(3))),
+        ];
+        let input = PipelineInput::default().with_pool(SourceKind::Library, None, pool);
+        assert_eq!(
+            ids(&run_pipeline(&input, &lib_pipeline(vec![OrderingKey::Excavation]))),
+            vec!["p1", "p2", "p3"],
+        );
+    }
+
+    // ---- AC 3/4: Rediscovery ------------------------------------------------
+
+    #[test]
+    fn rediscovery_ranks_oldest_added_first() {
+        let old = song_dated("old", Some("2018-01-01"));
+        let mid = song_dated("mid", Some("2021-06-15"));
+        let new = song_dated("new", Some("2024-12-31"));
+        let input = PipelineInput::default().with_pool(
+            SourceKind::Library,
+            None,
+            vec![cand(new), cand(old), cand(mid)],
+        );
+        assert_eq!(
+            ids(&run_pipeline(&input, &lib_pipeline(vec![OrderingKey::Rediscovery]))),
+            vec!["old", "mid", "new"],
+        );
+    }
+
+    #[test]
+    fn rediscovery_sorts_missing_or_blank_date_last() {
+        // The AC 3 guard: an unknown/blank add-date is the WORST rediscovery candidate, not the best.
+        let oldest = song_dated("oldest", Some("2015-01-01"));
+        let none = song_dated("none", None);
+        let blank = song_dated("blank", Some("   ")); // whitespace-only → folded into "absent"
+        let newer = song_dated("newer", Some("2023-01-01"));
+        let input = PipelineInput::default().with_pool(
+            SourceKind::Library,
+            None,
+            vec![cand(none), cand(newer), cand(blank), cand(oldest)],
+        );
+        let result = ids(&run_pipeline(&input, &lib_pipeline(vec![OrderingKey::Rediscovery])));
+        // Real dates first (oldest→newer); the two absent-date tracks sink to the bottom, stable.
+        assert_eq!(result, vec!["oldest", "newer", "none", "blank"]);
+        assert!(
+            result.iter().position(|id| id == "oldest").unwrap()
+                < result.iter().position(|id| id == "none").unwrap(),
+            "a missing date must never jump ahead of a real one",
+        );
+    }
+
+    #[test]
+    fn rediscovery_is_the_inverse_of_date_created() {
+        let pool = vec![
+            cand(song_dated("a", Some("2019-01-01"))),
+            cand(song_dated("b", Some("2020-01-01"))),
+            cand(song_dated("c", Some("2021-01-01"))),
+        ];
+        let by_rediscovery = ids(&run_pipeline(
+            &PipelineInput::default().with_pool(SourceKind::Library, None, pool.clone()),
+            &lib_pipeline(vec![OrderingKey::Rediscovery]),
+        ));
+        let mut by_date_created = ids(&run_pipeline(
+            &PipelineInput::default().with_pool(SourceKind::Library, None, pool),
+            &lib_pipeline(vec![OrderingKey::DateCreated]),
+        ));
+        by_date_created.reverse();
+        assert_eq!(by_rediscovery, by_date_created, "rediscovery reverses DateCreated on distinct dates");
+        assert_eq!(by_rediscovery, vec!["a", "b", "c"]);
+    }
+
+    // ---- AC 2/10: composition & backward-compat -----------------------------
+
+    #[test]
+    fn new_keys_compose_with_precedence_preserved() {
+        // [Excavation, Favorite]: deep cuts first, favorites break ties at equal play_count.
+        let fav_low = {
+            let mut s = song_plays("fav-low", Some(2));
+            s.is_favorite = Some(true);
+            s
+        };
+        let plain_low = song_plays("plain-low", Some(2));
+        let hit = song_plays("hit", Some(80));
+        let input = PipelineInput::default().with_pool(
+            SourceKind::Library,
+            None,
+            vec![cand(hit), cand(plain_low), cand(fav_low)],
+        );
+        let result = ids(&run_pipeline(
+            &input,
+            &lib_pipeline(vec![OrderingKey::Excavation, OrderingKey::Favorite]),
+        ));
+        // play_count dominates (2 < 80); within the 2-play tie, favorite wins.
+        assert_eq!(result, vec!["fav-low", "plain-low", "hit"]);
+    }
+
+    #[test]
+    fn pipelines_without_new_keys_are_unchanged() {
+        // A legacy-default pipeline never lists the new keys → identical selection to today.
+        let a = song_plays("a", Some(99)); // many plays, would sink under Excavation
+        let b = song_dated("b", Some("2010-01-01")); // ancient, would lead under Rediscovery
+        let input = PipelineInput::default().with_pool(
+            SourceKind::Library,
+            None,
+            vec![cand(a), cand(b)],
+        );
+        let legacy = AutoFillPipeline::default_legacy(Some(100_000_000));
+        // Neither key participates; legacy keys (fav/playCount/dateCreated) decide. `a` has 99 plays
+        // vs `b`'s 0 → `a` leads on PlayCount. Confirms the new arms are fully opt-in.
+        assert_eq!(ids(&run_pipeline(&input, &legacy)), vec!["a", "b"]);
+    }
+
+    // ---- AC 11: serde round-trip -------------------------------------------
+
+    #[test]
+    fn new_ordering_keys_serde_round_trip() {
+        let json = r#"{ "ordering": ["excavation", "rediscovery"] }"#;
+        let p: AutoFillPipeline = serde_json::from_str(json).unwrap();
+        assert_eq!(p.ordering, vec![OrderingKey::Excavation, OrderingKey::Rediscovery]);
+        // camelCase wire form round-trips byte-stable.
+        assert!(serde_json::to_string(&p).unwrap().contains("\"excavation\""));
+        let back: AutoFillPipeline = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(p, back);
     }
 }

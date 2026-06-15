@@ -933,6 +933,24 @@ mod tests {
     }
 
     #[test]
+    fn discriminator_new_ordering_keys_force_configurable() {
+        // Story 13.3 (AC 7): a pipeline whose only non-default aspect is the new Excavation or
+        // Rediscovery ordering key must route to the materialized engine path. This already holds
+        // via the `ordering_default` check (any non-legacy ordering trips it); locked in here.
+        let mut p = AutoFillPipeline::default_legacy(Some(1));
+        p.ordering = vec![OrderingKey::Excavation];
+        assert!(needs_configurable_expansion(&p), "excavation ordering key forces configurable");
+
+        let mut p = AutoFillPipeline::default_legacy(Some(1));
+        p.ordering = vec![OrderingKey::Rediscovery];
+        assert!(needs_configurable_expansion(&p), "rediscovery ordering key forces configurable");
+
+        // The legacy default ordering still takes the fast path (no behavior change).
+        let p = AutoFillPipeline::default_legacy(Some(1));
+        assert!(!needs_configurable_expansion(&p), "legacy default ordering stays on the fast path");
+    }
+
+    #[test]
     fn discriminator_budget_headroom_and_duration_force_configurable() {
         // Story 12.5: a headroom reserve or duration target forces the configurable path; a bare
         // maxBytes (or all-None) budget stays on the fast path.

@@ -4,7 +4,7 @@
 // omitted when unset, and every enum value is lowercase camelCase.
 
 export type SourceKind = 'library' | 'favorites' | 'history' | 'playlist';
-export type OrderingKey = 'favorite' | 'playCount' | 'dateCreated' | 'random' | 'quality';
+export type OrderingKey = 'favorite' | 'playCount' | 'dateCreated' | 'random' | 'quality' | 'excavation' | 'rediscovery';
 export type Unit = 'track' | 'album' | 'artist';
 /** Recording-version traits the auto-fill engine detects from title/album text (Story 13.2 #34).
  * Mirrors the daemon `VersionTrait` enum (camelCase serde). */
@@ -67,8 +67,9 @@ export interface AutoFillPipeline {
     quality: QualityStage;
 }
 
-/** The user-facing ordering keys (the reserved `random` no-op is not surfaced). */
-export const ORDERING_KEYS: OrderingKey[] = ['favorite', 'playCount', 'dateCreated', 'quality'];
+/** The user-facing ordering keys (the reserved `random` no-op is not surfaced).
+ * Story 13.3 adds the discovery keys `excavation` (deep cuts) and `rediscovery` (added long ago). */
+export const ORDERING_KEYS: OrderingKey[] = ['favorite', 'playCount', 'dateCreated', 'quality', 'excavation', 'rediscovery'];
 
 /** The selectable version traits, in the order the preference editor offers them. */
 export const VERSION_TRAITS: VersionTrait[] = ['studio', 'live', 'remastered', 'remix', 'acoustic', 'demo'];
