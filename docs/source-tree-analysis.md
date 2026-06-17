@@ -1,6 +1,6 @@
 # HifiMule — Source Tree Analysis
 
-**Generated:** 2026-05-23 | **Scan depth:** Exhaustive
+**Generated:** 2026-05-23 | **Last Updated:** 2026-06-17 | **Scan depth:** Deep
 
 ---
 
@@ -8,12 +8,8 @@
 
 ```
 hifimule/
-├── Cargo.toml                        Workspace root (members: daemon, workspace deps)
+├── Cargo.toml                        Workspace root (members: i18n, daemon, UI Tauri crate)
 ├── Cargo.lock
-├── .github/
-│   └── workflows/
-│       ├── release.yml               Release CI (matrix: macOS universal, Ubuntu, Windows)
-│       └── smoke-test.yml            Smoke test CI
 ├── scripts/
 │   ├── prepare-sidecar.mjs           Build step: copies compiled daemon → ui/src-tauri/sidecars/
 │   └── smoke-tests/                  Smoke test scripts
@@ -26,9 +22,12 @@ hifimule/
 │       ├── main.rs                   Entry point, DaemonState enum, Tokio runtime spawn
 │       ├── rpc.rs                    Axum HTTP server, provider-aware RPC dispatch table, AppState
 │       ├── api.rs                    JellyfinClient (reqwest), CredentialManager
-│       ├── db.rs                     SQLite wrapper (rusqlite), devices + scrobble_history tables
+│       ├── db.rs                     SQLite wrapper, devices/scrobbles/server_config/autofill runtime tables
 │       ├── sync.rs                   Delta calculation, execute_sync, path construction, M3U gen
-│       ├── auto_fill.rs              Auto-fill algorithm (paginated Jellyfin fetch, capacity truncation)
+│       ├── auto_fill/
+│       │   ├── mod.rs                Auto-fill facade, legacy fill path, provider-routed fill wiring
+│       │   ├── fetch.rs              Async pool materialization from MediaProvider for pipeline fills
+│       │   └── pipeline.rs           Pure configurable pipeline engine and tests
 │       ├── scrobbler.rs              Rockbox .scrobbler.log parser, Jellyfin submission
 │       ├── transcoding.rs            Device profiles loader (device-profiles.json)
 │       ├── paths.rs                  get_app_data_dir() / get_device_profiles_path() (OS-aware)
@@ -46,6 +45,9 @@ hifimule/
 │       │   ├── mtp.rs                WpdHandle (Windows WPD COM), LibmtpHandle (Unix FFI)
 │       │   └── tests.rs              Device module integration tests
 │       └── tests.rs                  Top-level integration tests
+├── hifimule-i18n/                Shared localization crate
+│   ├── Cargo.toml
+│   └── src/                      Translation catalog and lookup helpers
 └── hifimule-ui/                  Tauri 2 desktop shell (project part: "desktop")
     ├── package.json                  npm/pnpm; deps: @tauri-apps/api ~2.10, shoelace ^2.19.1, vite ^6
     ├── tsconfig.json
@@ -56,11 +58,17 @@ hifimule/
     │   ├── main.ts                   Entry — splash/main routing, daemon readiness polling
     │   ├── rpc.ts                    rpcCall() via Tauri invoke (rpc_proxy); getImageUrl() via image_proxy
     │   ├── login.ts                  Provider-neutral login form → server.probe/server.connect
+    │   ├── i18n.ts                   UI translation lookup backed by shared catalog assets
+    │   ├── serverIdentity.ts         Server label/icon formatting helpers
     │   ├── library.ts                Provider-neutral browser (modes, hierarchy, pagination, favorites)
     │   ├── state/
     │   │   └── basket.ts             BasketStore singleton (EventTarget, localStorage + daemon sync)
     │   └── components/
+    │       ├── ServerHub.ts          Multi-server switch/add/edit/remove/logout control
     │       ├── BasketSidebar.ts      Main sidebar: basket, capacity bar, sync flow, device hub
+    │       ├── AutoFillPanel.ts      Configurable per-server auto-fill pipeline UI
+    │       ├── PlaylistCurationView.ts Playlist edit/rename/delete/add/reorder view
+    │       ├── TracksBrowseView.ts   Tracks-first browse mode with panels, A-Z strips, bulk actions
     │       ├── MediaCard.ts          sl-card grid item with basket toggle + image loading
     │       ├── StatusBar.ts          Bottom status bar (daemon health, last RPC, device name)
     │       ├── InitDeviceModal.ts    New device initialization wizard (sl-dialog)
@@ -114,9 +122,9 @@ hifimule/
 | `main.rs` | ~900 | Entry point, CLI flags, `DaemonState` enum, tray, auto-sync orchestration |
 | `rpc.rs` | ~6900 | Axum server setup, AppState, CORS, provider-aware RPC dispatch, all handlers and tests |
 | `api.rs` | ~1500 | `JellyfinClient`: Jellyfin API calls; `CredentialManager`: config.json + keyring secret map |
-| `db.rs` | ~450 | SQLite CRUD: `devices`, `scrobble_history`, `server_config`; runtime migrations |
-| `sync.rs` | ~4100 | `calculate_delta`, provider-aware `execute_sync`, path sanitization, M3U generation, warnings |
-| `auto_fill.rs` | 325 | Priority-sorted capacity fill; `run_auto_fill`, `rank_and_truncate` |
+| `db.rs` | ~1650 | SQLite CRUD/migrations: devices, scrobbles, server config, server identity, auto-fill history/rotation/pity |
+| `sync.rs` | ~5900 | `calculate_delta`, provider-aware `execute_sync`, path sanitization, M3U generation, cancellation, warnings |
+| `auto_fill/*` | ~5000+ | Legacy fill facade, provider fetch layer, pure configurable `AutoFillPipeline` engine |
 | `scrobbler.rs` | 577 | Rockbox log parse, Jellyfin match, `process_device_scrobbles` |
 | `transcoding.rs` | 142 | `DeviceProfileEntry`, `load_profiles`, `find_device_profile` |
 | `paths.rs` | 52 | OS-appropriate app data dir resolution |
@@ -175,8 +183,12 @@ Main thread (macOS: event loop; Windows: main)
 | `login.ts` | Media-server connection form, debounced `server.probe`, `server.connect` submission |
 | `library.ts` | Provider-neutral browser: capability-driven modes, hierarchy, paginated items, quick-nav, favorite tree |
 | `state/basket.ts` | `BasketStore` singleton: in-memory Map + localStorage + 1s debounced daemon save |
+| `components/ServerHub.ts` | Multi-server chip/menu: switch, add, edit identity, remove, logout; reconciles legacy basket server IDs |
 | `components/BasketSidebar.ts` | Main sidebar: basket list, capacity bar, sync flow, auto-fill, device hub, folder info |
-| `components/MediaCard.ts` | Grid card: cover art (via image_proxy), basket toggle, navigation click |
+| `components/MediaCard.ts` | Grid card: cover art, basket toggle, playlist context actions, navigation click |
+| `components/PlaylistCurationView.ts` | Playlist editor: rename/delete, artist/album filters, add/remove/reorder tracks |
+| `components/TracksBrowseView.ts` | Tracks mode: artist/album/track panels, paginated loading, A-Z strips, multi-select |
+| `components/AutoFillPanel.ts` | Builder UI for per-server auto-fill pipeline settings and live preview |
 | `components/StatusBar.ts` | Bottom bar: daemon connection status (3s poll), last RPC, device name |
 | `components/InitDeviceModal.ts` | New device setup wizard (name, icon, folder, transcoding profile) |
 | `components/RepairModal.ts` | Manifest repair: missing vs orphaned file comparison, prune/relink operations |
@@ -208,12 +220,7 @@ The Rust-side `src-tauri/src/lib.rs` exposes three Tauri commands:
 
 ## CI / Release Pipeline
 
-- **Trigger**: push of `v*` tags
-- **Matrix**: macOS (universal — aarch64 + x86_64), Ubuntu 22.04, Windows
-- **macOS**: builds universal binary; requires merging arm64+x86_64 libmtp dylibs via Homebrew
-- **Ubuntu**: installs `libmtp-dev`, `libwebkit2gtk-4.1-dev`, etc.
-- **Windows**: builds MSC + WPD variant
-- **Artifacts**: Tauri bundles (`.dmg`, `.deb`, `.exe`) uploaded to GitHub Release via `tauri-action`
+No `.github/workflows` files are present in this checkout. Release process documentation exists in `docs/release-guide.md`, but CI workflow files are not currently part of the scanned tree.
 
 ---
 
@@ -222,7 +229,7 @@ The Rust-side `src-tauri/src/lib.rs` exposes three Tauri commands:
 - `hifimule-daemon/src/api.rs` — Comprehensive mockito-based integration tests for Jellyfin API calls
 - `hifimule-daemon/src/providers/*.rs` — Provider adapter tests for Jellyfin/Subsonic/OpenSubsonic mapping, capabilities, changes, and error sanitization
 - `hifimule-daemon/src/db.rs` — In-memory SQLite tests for all CRUD operations and migrations
-- `hifimule-daemon/src/auto_fill.rs` — Unit tests for `rank_and_truncate` (capacity, negatives, zero-size, break semantics)
+- `hifimule-daemon/src/auto_fill/*` — Unit tests for legacy fill, fetch/routing, and pure pipeline stages
 - `hifimule-daemon/src/sync.rs` — Delta calculation tests
 - `hifimule-daemon/src/device/tests.rs` — Device module tests
 - `hifimule-daemon/src/tests.rs` — Top-level integration tests

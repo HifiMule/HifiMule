@@ -1,12 +1,12 @@
 # API Contracts — HifiMule Daemon
 
-**Generated:** 2026-05-23 | **Scan depth:** Exhaustive | **Protocol:** JSON-RPC 2.0 over HTTP POST to `localhost:19140`
+**Generated:** 2026-05-23 | **Last Updated:** 2026-06-17 | **Scan depth:** Deep | **Protocol:** JSON-RPC 2.0 over HTTP POST to `localhost:19140`
 
 All requests: `Content-Type: application/json`  
 All successful responses: `{ "jsonrpc": "2.0", "result": <value>, "id": 1 }`  
 All error responses: `{ "jsonrpc": "2.0", "error": { "code": <N>, "message": "<text>" }, "id": 1 }`
 
-**Error codes:** `-32001` invalid credentials, `-32002` invalid params, `-32003` connection/device failed, `-32004` storage error, `-32005` internal error
+**Primary error codes:** JSON-RPC standard `-32601` method not found, `-32602` invalid params, plus app codes `-1` connection failed, `-3` storage error, `-4` not found, `-5` unsupported capability, `-6` sync in progress, `-7` cross-server playlist conflict, `-8` selected server credential unauthorized.
 
 The daemon now exposes a provider-neutral media-server layer. Legacy `jellyfin_*` RPC names remain supported for compatibility, but active Subsonic/OpenSubsonic connections are routed through `MediaProvider` where possible.
 
@@ -57,6 +57,21 @@ Clears the active in-memory provider connection.
 
 **Params:** none  
 **Returns:** `{ "status": "success", "data": { "ok": true } }`
+
+---
+
+### `server.list` / `server.select` / `server.update` / `server.remove`
+
+Multi-server management. Local server row IDs are used for management calls; deterministic portable `serverId` values are returned for basket, manifest, and sync routing.
+
+| Method | Params | Returns |
+|--------|--------|---------|
+| `server.list` | none | `ServerSummary[]` |
+| `server.select` | `{ "id": string }` | `{ "ok": true }` |
+| `server.update` | `{ "id": string, "name"?: string, "icon"?: string | null }` | `{ "ok": true }` |
+| `server.remove` | `{ "id": string }` | `{ "removedServerId": string, "reselectedServerId": string | null }` |
+
+`ServerSummary = { id, serverId, url, serverType, username, name, icon, selected }`.
 
 ---
 
@@ -133,7 +148,11 @@ Returns comprehensive daemon state snapshot. Polled by UI every 2s.
   "activeOperationId": string | null,
   "connectedDevices": Array<{ "path": string, "deviceId": string, "name": string, "icon": string | null, "deviceClass": "msc" | "mtp" }>,
   "selectedDevicePath": string | null,
-  "serverType": "jellyfin" | "subsonic" | "openSubsonic" | null
+  "serverType": "jellyfin" | "subsonic" | "openSubsonic" | null,
+  "servers": ServerSummary[],
+  "selectedServerId": string | null,
+  "selectedServerPortableId": string | null,
+  "currentServer": ServerSummary | null
 }
 ```
 
@@ -312,7 +331,7 @@ type BrowseGenre = { id: string; name: string; trackCount?: number | null; cover
 Returns browse modes supported by the active provider.
 
 **Params:** none  
-**Returns:** `{ "modes": Array<"artists" | "albums" | "playlists" | "genres" | "recentlyAdded" | "frequentlyPlayed" | "recentlyPlayed" | "favorites"> }`
+**Returns:** `{ "modes": Array<"artists" | "albums" | "playlists" | "tracks" | "genres" | "recentlyAdded" | "frequentlyPlayed" | "recentlyPlayed" | "favorites"> }`
 
 ---
 
@@ -381,6 +400,22 @@ Lists genres and loads tracks for a genre.
 | `browse.listFavoriteItems` | `{ "libraryId"?: string }` | `{ "artists": BrowseArtist[], "albums": BrowseAlbum[], "tracks": BrowseTrack[] }` |
 
 Classic Subsonic returns `-32002`/unsupported capability for history modes that are not advertised by `browse.listModes`.
+
+---
+
+## Playlist Editing
+
+Playlist methods require provider playlist-write capability. Cross-server basket items are rejected for playlist creation with app error `-7`.
+
+| Method | Params | Returns |
+|--------|--------|---------|
+| `playlist.create` | `{ "name": string, "itemIds": string[], "items"?: Array<{ id: string, serverId?: string }> }` | `{ "playlistId": string, "skippedItemIds": string[] }` |
+| `playlist.addItems` | `{ "playlistId": string, "itemIds": string[] }` | `{ "ok": true }` |
+| `playlist.addTracks` | `{ "playlistId": string, "trackIds": string[] }` | `{ "ok": true }` |
+| `playlist.removeTracks` | `{ "playlistId": string, "trackIds": string[] }` | `{ "ok": true }` |
+| `playlist.delete` | `{ "playlistId": string }` | `{ "ok": true }` |
+| `playlist.rename` | `{ "playlistId": string, "name": string }` | `{ "ok": true }` |
+| `playlist.reorder` | `{ "playlistId": string, "trackIds": string[] }` | `{ "ok": true }` |
 
 ---
 
@@ -635,16 +670,27 @@ Persists auto-fill preferences to the device manifest.
 
 ---
 
+### `autoFill.setPipeline`
+
+Persists the full configurable pipeline for a portable server id on the current device manifest.
+
+**Params:** `{ "serverId": string, "pipeline": AutoFillPipeline }`  
+**Returns:** `true`
+
+---
+
 ## Auto-Fill
 
 ### `basket.autoFill`
 
-Runs the Jellyfin-backed auto-fill priority algorithm and returns ranked tracks. Subsonic/OpenSubsonic auto-fill is not available yet and returns an invalid-params error.
+Runs auto-fill and returns ranked tracks. With `serverId` and/or `pipeline`, routes through the provider-backed configurable pipeline. Without a pipeline, the legacy favorites → play count → newest path remains available for compatibility.
 
 **Params:**
 ```json
 {
   "deviceId"?: string,
+  "serverId"?: string,
+  "pipeline"?: AutoFillPipeline,
   "maxBytes"?: number,               // defaults to device free bytes
   "excludeItemIds": string[]         // IDs of manually selected items (expanded to track IDs)
 }

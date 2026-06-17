@@ -229,7 +229,7 @@ initLibraryView()
 ```json
 {
   "productName": "HifiMule",
-  "version": "0.6.1",
+  "version": "0.11.1",
   "identifier": "hifimule.github.io",
   "bundle": {
     "externalBin": ["sidecars/hifimule-daemon"],

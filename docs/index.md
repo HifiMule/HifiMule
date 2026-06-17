@@ -1,16 +1,16 @@
 # HifiMule — Project Documentation Index
 
-**Generated:** 2026-05-23 | **Last Updated:** 2026-06-15 | **Scan depth:** Exhaustive | **Version:** 0.6.1 | **Deep-Dives:** 1
+**Generated:** 2026-05-23 | **Last Updated:** 2026-06-17 | **Scan depth:** Deep | **Version:** 0.11.1 | **Deep-Dives:** 1
 
 ---
 
 ## Project Summary
 
-- **Type:** Monorepo (Rust Cargo workspace) with 2 parts
+- **Type:** Monorepo (Rust Cargo workspace) with 3 crates and 2 runtime parts
 - **Primary Languages:** Rust, TypeScript
 - **Architecture:** Two-process desktop app (daemon + Tauri 2 UI shell)
 - **Communication:** JSON-RPC 2.0 over local HTTP on `localhost:19140`
-- **Purpose:** Synchronizes Jellyfin, Navidrome, Subsonic, and OpenSubsonic music libraries to legacy portable audio players (Rockbox iPods, USB/MTP devices)
+- **Purpose:** Synchronizes Jellyfin, Navidrome, Subsonic, and OpenSubsonic music libraries to legacy portable audio players (Rockbox iPods, USB/MTP devices), with multi-server basket routing, playlist editing, auto-fill, scrobbling, and shared i18n
 
 ---
 
@@ -19,10 +19,16 @@
 ### `hifimule-daemon`
 
 - **Type:** Backend service (Rust, Tokio async)
-- **Tech Stack:** Axum 0.8, rusqlite, reqwest, tray-icon, keyring; provider abstraction for Jellyfin/Subsonic/OpenSubsonic; WPD (Windows MTP) / libmtp (Unix MTP)
+- **Tech Stack:** Axum 0.8, Tokio 1.49, rusqlite 0.38, reqwest 0.12, tray-icon, keyring, ChaCha20-Poly1305 vault; provider abstraction for Jellyfin/Subsonic/OpenSubsonic; WPD (Windows MTP) / libmtp (Unix MTP)
 - **Root:** [hifimule-daemon/](../hifimule-daemon/)
 - **Entry Point:** [src/main.rs](../hifimule-daemon/src/main.rs)
 - **RPC Port:** 19140
+
+### `hifimule-i18n`
+
+- **Type:** Shared Rust library crate
+- **Tech Stack:** Rust 2024 translation catalog consumed by daemon and UI-adjacent flows
+- **Root:** [hifimule-i18n/](../hifimule-i18n/)
 
 ### `hifimule-ui`
 
@@ -39,7 +45,7 @@
 
 - [Project Overview](./project-overview.md) — What, why, key features, persistent state, platforms
 - [Source Tree Analysis](./source-tree-analysis.md) — Full file tree, module responsibilities, test coverage
-- [Integration Architecture](./integration-architecture.md) — IPC protocol, provider abstraction, sync flow, UI state management, media-server API calls
+- [Integration Architecture](./integration-architecture.md) — IPC protocol, provider abstraction, portable server identity, sync flow, UI state management, media-server API calls
 
 ### Architecture (per part)
 
@@ -49,11 +55,11 @@
 ### API & Data
 
 - [API Contracts — Daemon](./api-contracts-hifimule-daemon.md) — RPC methods for server connection, provider-neutral browse, sync, device management, and legacy Jellyfin-compatible calls
-- [Data Models — Daemon](./data-models-hifimule-daemon.md) — DeviceManifest, provider-domain models, SyncedItem, BasketItem, SyncDelta, SyncOperation, DeviceMapping
+- [Data Models — Daemon](./data-models-hifimule-daemon.md) — DeviceManifest, per-server AutoFillPipeline, provider-domain models, SyncedItem, BasketItem, SyncDelta, SyncOperation, DeviceMapping, ServerConfig
 
 ### UI
 
-- [Component Inventory — UI](./component-inventory-hifimule-ui.md) — TypeScript components and provider-neutral browse UI: BasketSidebar, MediaCard, StatusBar, InitDeviceModal, RepairModal, library.ts, basket.ts
+- [Component Inventory — UI](./component-inventory-hifimule-ui.md) — TypeScript components and provider-neutral browse UI: ServerHub, BasketSidebar, MediaCard, PlaylistCurationView, TracksBrowseView, AutoFillPanel, InitDeviceModal, RepairModal, library.ts, basket.ts
 
 ### Development
 
@@ -123,4 +129,6 @@ For full details see [Development Guide](./development-guide.md).
 | Multi-device via HashMap (not single active) | Enables simultaneous connections; user explicitly selects focus device |
 | Auto-fill slot as virtual basket item | UI renders it like a real item; daemon expands it at sync time; never persisted |
 | Provider-domain layer | Browse, sync, cover art, changes, scrobbling, and transcoding flow through `MediaProvider`; UI remains server-neutral |
+| Portable server identity | Device manifests and basket items use deterministic `server_id` values so synced devices survive remove/re-add and multi-machine use |
+| Configurable auto-fill pipeline | Per-`(device, portable serverId)` manifest config stays portable; runtime history, rotation, and pity counters stay machine-local in SQLite |
 | Legacy `jellyfin_*` RPC names retained | Existing UI calls continue to work while active non-Jellyfin providers are routed through the provider adapter |

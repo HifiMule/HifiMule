@@ -1,6 +1,6 @@
 # Component Inventory — HifiMule UI
 
-**Generated:** 2026-05-23 | **Scan depth:** Exhaustive
+**Generated:** 2026-05-23 | **Last Updated:** 2026-06-17 | **Scan depth:** Deep
 
 ---
 
@@ -13,8 +13,9 @@ The DOMContentLoaded handler and application bootstrapper.
 **Responsibilities:**
 - Detects which window is loaded (main vs splashscreen) by checking `window.location.pathname`
 - **Splashscreen path**: polls `rpc_proxy('get_daemon_state')` every 1s until daemon responds, then shows main window and closes splash (timeout: 10s)
-- **Main path**: calls `rpcCall('get_daemon_state')` → routes to login or library view
-- `renderMainLayout()`: injects `sl-split-panel` (70/30) with library-view left and basket-view right; instantiates `BasketSidebar`
+- **Main path**: calls `rpcCall('get_daemon_state')` → routes to first-run login, no-server-selected empty state, or library view
+- `renderMainLayout()`: injects `sl-split-panel` with library-view left and basket-view right; instantiates `ServerHub` and `BasketSidebar`
+- Registers a global `hifimule:server-unauthorized` handler for scoped re-auth when browse RPCs return daemon error `-8`
 
 ---
 
@@ -46,12 +47,16 @@ interface AppState {
     items: BrowseDisplayItem[];
     pagination: { startIndex: number; limit: number; total: number };
     loading: boolean;
+    listLoading: boolean;
     scrollCache: Map<string, number>;
     pageCache: Map<string, { items: BrowseDisplayItem[]; total: number }>;
     artistViewTotal: number;
     albumViewTotal: number;
     activeLetter: string | null;
     favoriteTree: FavoriteTree | null;
+    listViewMode: 'grid' | 'list';
+    selectedIds: Set<string>;
+    selectionAnchorIdx: number | null;
 }
 ```
 
@@ -67,7 +72,9 @@ interface AppState {
 - `pageCache`: stores fetched items by `${browseMode}:${parentId ?? 'root'}`; hit path skips the network call entirely
 - `scrollCache`: stores `scrollTop` by the same mode-aware key; restored after back-navigation
 
-**Pagination:** Default 50 items per page; "Load More" button appears when `items.length < total`. Hidden during letter-filtered views.
+**Rendering:** Grid view uses `MediaCard`; list view uses virtualized rows with multi-selection, bulk add-to-basket, and bulk add-to-playlist actions. Tracks mode delegates to `TracksBrowseView`.
+
+**Pagination:** Default 50 items per page for normal modes; Tracks mode uses panel-specific pagination constants. "Load More" appears for grid/list modes when `items.length < total`.
 
 **Quick-nav bar:** Renders A-Z + `#` alphabet bar for large artist and album roots. Letter filtering is forwarded to provider-neutral RPCs. `#` = non-alpha names.
 
@@ -83,8 +90,10 @@ interface AppState {
 - `getImageUrl(id, maxHeight?, quality?)` — proxies via `invoke('image_proxy')`; returns data URL
 - Provider-neutral browse types (`BrowseMode`, `BrowseArtist`, `BrowseAlbum`, `BrowsePlaylist`, `BrowseTrack`, `BrowseGenre`)
 - Provider-neutral browse wrappers (`fetchBrowseModes`, `fetchBrowseArtists`, `fetchBrowseAlbum`, `fetchBrowseFavoriteItems`, etc.)
+- Multi-server wrappers (`serverList`, `serverSelect`, `serverUpdate`, `serverRemove`)
+- Auto-fill preview wrapper (`previewAutoFill`) for provider-routed pipeline previews
 
-**Error normalization:** `getErrorMessage()` handles plain string errors (from Tauri), `Error` objects, and object errors with `message`/`error`/`details` fields; falls back to JSON serialization.
+**Error normalization:** `getErrorMessage()` handles plain string errors (from Tauri), `Error` objects, and object errors with `message`/`error`/`details` fields; falls back to JSON serialization. Browse RPCs returning `ERR_UNAUTHORIZED = -8` dispatch `hifimule:server-unauthorized` so `main.ts` can show a re-auth dialog for the selected server.
 
 ---
 
@@ -112,6 +121,9 @@ Singleton class extending `EventTarget`.
 | `getManualItemIds()` | Returns IDs excluding the auto-fill slot |
 | `getManualSizeBytes()` | Total size excluding the auto-fill slot |
 | `getTotalSizeBytes()` | Total size including all items |
+| `setActiveServerId(serverId)` | Sets the portable active-server id used to tag basket items |
+| `reconcileServerIds(servers)` | Rewrites legacy basket tags to portable server IDs |
+| `removeItemsForServer(serverId)` | Removes basket entries for a deleted server |
 | `hydrateFromDaemon(items)` | Replaces local state from daemon (strips auto-fill slot) |
 | `clearForDevice()` | Clears basket (called on device disconnect) |
 | `flushPendingSave()` | Immediately writes debounced save (before device switch) |
@@ -164,6 +176,42 @@ The main sidebar panel. Instantiated once per session in `main.ts:renderMainLayo
 **Dirty manifest banner:** Shows when `dirtyManifest: true` from daemon state. Click opens `RepairModal`.
 
 **Initialize banner:** Shows when `hasManifest: false` from `device_list_root_folders`. Click opens `InitDeviceModal`.
+
+---
+
+### `ServerHub`
+
+Compact header component mounted in `main.ts:renderMainLayout()`.
+
+**Responsibilities:**
+- Lists configured servers via `server.list`
+- Switches the selected server via `server.select`, then updates `basketStore` with the selected portable `serverId`
+- Adds a server by opening `login.ts` in inline add mode
+- Edits server display name/icon via `server.update`
+- Removes servers via `server.remove` and prunes basket items tagged with that server's portable or legacy local ID
+- Logs out via `server.logout`, clears local-only basket state, and re-routes the app
+
+---
+
+### `PlaylistCurationView`
+
+Playlist editing view opened from playlist cards/context actions when the provider advertises playlist-write support.
+
+**Capabilities:** rename/delete playlist, remove tracks by track/album/artist, optimistic reorder, search and add tracks, and display duration/size statistics. Mutating operations call `playlist.rename`, `playlist.delete`, `playlist.removeTracks`, `playlist.reorder`, and `playlist.addTracks`.
+
+---
+
+### `TracksBrowseView`
+
+Tracks-first browser used for the `tracks` browse mode.
+
+**Layout:** artist panel, album panel, track panel; artist/album A-Z strips; infinite-scroll pagination. Track rows support checkbox, Ctrl/Cmd toggle, Shift range selection, bulk add-to-basket, and bulk add-to-playlist.
+
+---
+
+### `AutoFillPanel`
+
+Configurable auto-fill builder UI for per-server pipelines. It edits source blend, filters, ordering, memory/budget, quality, rarity, pity, context, and promotion options, and uses `previewAutoFill()` for live provider-routed previews before persistence.
 
 ---
 
@@ -261,7 +309,7 @@ Dialog opened from the selected device hub card.
 |-----------|-------|
 | `sl-split-panel` | Main layout (library/basket split) |
 | `sl-card` | Media cards, login card |
-| `sl-dialog` | InitDeviceModal, RepairModal |
+| `sl-dialog` | InitDeviceModal, RepairModal, ServerHub identity/remove dialogs, playlist curation dialogs |
 | `sl-button` | All action buttons |
 | `sl-icon-button` | Basket toggle, remove items |
 | `sl-badge` | Item count badges |
