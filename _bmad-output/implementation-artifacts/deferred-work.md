@@ -1,7 +1,12 @@
 # Deferred Work
 
 Status: open
-Last updated: 2026-06-15
+Last updated: 2026-06-20
+
+## Deferred from: code review of autofill-device-playlist (2026-06-20)
+
+- **Cross-server duplicate raw track IDs remain ambiguous** (`hifimule-daemon/src/rpc.rs`) -- multi-provider autofill still dedups by raw provider item id and playlist entries resolve by that same id. Fixing this properly needs a server-qualified sync identity/playlist resolution pass, not a local `Autofill.m3u` patch.
+- **Playlist track metadata uses unknown duration for autofill items** (`hifimule-daemon/src/rpc.rs`) -- `AutoFillItem` does not carry duration, so the synthetic M3U writes `#EXTINF:-1`. Add duration to autofill item metadata only if players need exact playlist durations.
 
 ## Deferred from: code review of 13-5-context-and-encoding-from-goals (2026-06-15)
 

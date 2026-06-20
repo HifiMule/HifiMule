@@ -2592,6 +2592,7 @@ async fn provider_calculate_delta(
     // (shared `pity_reserve_bytes` gate, computed with the per-run budget). Set on the delta below so
     // the sync-completion recorder resets the dry-streak only for servers that actually fired.
     let mut af_pity_fired: Vec<String> = Vec::new();
+    let mut autofill_playlist_tracks = Vec::new();
     if auto_fill_enabled {
         // If the UI provided maxBytes, use it directly — it already represents the intended
         // auto-fill budget (UI subtracted manual-item sizes from free space). If not provided,
@@ -2717,7 +2718,9 @@ async fn provider_calculate_delta(
                 if let Some(kbps) = af_bitrate_override {
                     af_bitrate_map.insert(item.id.clone(), kbps);
                 }
-                if seen_ids.insert(item.id.clone()) {
+                let item_id = item.id.clone();
+                if seen_ids.insert(item_id) {
+                    autofill_playlist_tracks.push(autofill_playlist_track(&item));
                     desired_items.push(crate::sync::DesiredItem {
                         jellyfin_id: item.id,
                         name: item.name,
@@ -2735,6 +2738,9 @@ async fn provider_calculate_delta(
                 }
             }
         }
+    }
+    if !autofill_playlist_tracks.is_empty() {
+        playlist_sync_items.push(autofill_playlist_item(autofill_playlist_tracks));
     }
 
     // Story 2.13: tag untagged items with the selected server's portable id.
@@ -3559,11 +3565,13 @@ fn push_fill_items_dedup(
     seen_ids: &mut HashSet<String>,
     server_id: &str,
     remaining: &mut Option<u64>,
+    autofill_playlist_tracks: &mut Vec<crate::sync::PlaylistTrackInfo>,
 ) -> u64 {
     let mut added: u64 = 0;
     for item in fill_items {
         if seen_ids.insert(item.id.clone()) {
             let size = item.size_bytes;
+            autofill_playlist_tracks.push(autofill_playlist_track(&item));
             desired_items.push(crate::sync::DesiredItem {
                 jellyfin_id: item.id,
                 name: item.name,
@@ -3585,6 +3593,24 @@ fn push_fill_items_dedup(
         }
     }
     added
+}
+
+fn autofill_playlist_track(item: &crate::auto_fill::AutoFillItem) -> crate::sync::PlaylistTrackInfo {
+    crate::sync::PlaylistTrackInfo {
+        jellyfin_id: item.id.clone(),
+        artist: item.artist.clone(),
+        run_time_seconds: -1,
+    }
+}
+
+fn autofill_playlist_item(
+    tracks: Vec<crate::sync::PlaylistTrackInfo>,
+) -> crate::sync::PlaylistSyncItem {
+    crate::sync::PlaylistSyncItem {
+        jellyfin_id: "__hifimule_autofill".to_string(),
+        name: "Autofill".to_string(),
+        tracks,
+    }
 }
 
 /// The single shared slot-expansion seam (Story 12.4): every sync-time auto-fill
@@ -4078,6 +4104,7 @@ async fn multi_provider_calculate_delta(
     let mut af_bitrate_map: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     // Story 13.4 review: portable server ids whose pity discovery reserve genuinely fired this run.
     let mut af_pity_fired: Vec<String> = Vec::new();
+    let mut autofill_playlist_tracks = Vec::new();
     if !descriptors.is_empty() {
         // Shared budget = device free + already-synced − already-selected bytes
         // (mirrors `provider_calculate_delta`'s server-side derivation at
@@ -4210,8 +4237,12 @@ async fn multi_provider_calculate_delta(
                 &mut seen_ids,
                 &af_server,
                 &mut remaining,
+                &mut autofill_playlist_tracks,
             );
         }
+    }
+    if !autofill_playlist_tracks.is_empty() {
+        playlist_sync_items.push(autofill_playlist_item(autofill_playlist_tracks));
     }
 
     let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
@@ -4606,6 +4637,7 @@ async fn handle_sync_calculate_delta(
     // (AC1). This Jellyfin fast path is reached only when routing resolved every
     // auto-fill slot to the selected server. For the legacy object this is
     // byte-for-byte identical to the old `enabled`/`maxBytes`/`excludeItemIds` reads.
+    let mut autofill_playlist_tracks = Vec::new();
     if let Some(desc) = parse_auto_fill_descriptors(&params).into_iter().next() {
         let max_fill_bytes = if let Some(mb) = desc.max_bytes {
             mb
@@ -4646,7 +4678,9 @@ async fn handle_sync_calculate_delta(
                     af_total_bytes / 1_048_576,
                 );
                 for item in af_items {
-                    if seen_ids.insert(item.id.clone()) {
+                    let item_id = item.id.clone();
+                    if seen_ids.insert(item_id) {
+                        autofill_playlist_tracks.push(autofill_playlist_track(&item));
                         desired_items.push(crate::sync::DesiredItem {
                             jellyfin_id: item.id,
                             name: item.name,
@@ -4672,6 +4706,9 @@ async fn handle_sync_calculate_delta(
                 });
             }
         }
+    }
+    if !autofill_playlist_tracks.is_empty() {
+        playlist_sync_items.push(autofill_playlist_item(autofill_playlist_tracks));
     }
 
     // Story 2.13: tag untagged items with the selected server's portable id.
@@ -5077,13 +5114,16 @@ async fn handle_sync_execute(
             };
 
             let mut all_errors: Vec<crate::sync::SyncFileError> = Vec::new();
-            let mut first = true;
-            for (sid, provider) in group_providers {
+            let group_count = group_providers.len();
+            for (index, (sid, provider)) in group_providers.into_iter().enumerate() {
                 if op_manager.is_cancelled(&op_id).await {
                     break;
                 }
                 // Each group syncs its own adds; deletes/id-changes/playlists are
-                // device-wide and run once, with the first group.
+                // device-wide. Deletes/id-changes run first; playlists run last so
+                // multi-server M3Us can resolve files copied by every group.
+                let first = index == 0;
+                let last = index + 1 == group_count;
                 let group_adds: Vec<crate::sync::SyncAddItem> = delta
                     .adds
                     .iter()
@@ -5103,7 +5143,7 @@ async fn handle_sync_execute(
                         Vec::new()
                     },
                     unchanged: 0,
-                    playlists: if first {
+                    playlists: if last {
                         delta.playlists.clone()
                     } else {
                         Vec::new()
@@ -5112,7 +5152,6 @@ async fn handle_sync_execute(
                     // the per-group sub-delta only drives `execute_provider_sync`, never the recorder.
                     pity_fired_servers: Vec::new(),
                 };
-                first = false;
                 let result = crate::sync::execute_provider_sync(
                     &sub_delta,
                     &device_path,
@@ -8885,6 +8924,7 @@ mod tests {
             .map(|i| i.jellyfin_id.clone())
             .collect();
         let mut remaining: Option<u64> = Some(1000);
+        let mut autofill_playlist_tracks = Vec::new();
 
         // Slot 1 (s1): returns the manual id (must be skipped — manual wins) plus
         // two new tracks (300 + 200).
@@ -8894,9 +8934,18 @@ mod tests {
             &mut seen_ids,
             "s1",
             &mut remaining,
+            &mut autofill_playlist_tracks,
         );
         assert_eq!(added1, 500, "only the two new tracks count");
         assert_eq!(desired_items.len(), 3, "manual + f1 + f2; m1 not duplicated");
+        assert_eq!(
+            autofill_playlist_tracks
+                .iter()
+                .map(|t| t.jellyfin_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["f1", "f2"],
+            "playlist includes deduped autofill tracks only"
+        );
         assert_eq!(
             desired_items.iter().filter(|i| i.jellyfin_id == "m1").count(),
             1,
@@ -8923,9 +8972,18 @@ mod tests {
             &mut seen_ids,
             "s2",
             &mut remaining,
+            &mut autofill_playlist_tracks,
         );
         assert_eq!(added2, 400, "f1 already seen from slot 1; only f3 added");
         assert_eq!(desired_items.len(), 4, "manual + f1 + f2 + f3");
+        assert_eq!(
+            autofill_playlist_tracks
+                .iter()
+                .map(|t| t.jellyfin_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["f1", "f2", "f3"],
+            "playlist preserves cross-slot autofill order"
+        );
         assert_eq!(
             desired_items.iter().filter(|i| i.jellyfin_id == "f1").count(),
             1,
