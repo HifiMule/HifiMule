@@ -18,13 +18,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 // JSON-RPC 2.0 Error Codes
-#[allow(dead_code)] // Reserved for future use
-const ERR_PARSE_ERROR: i32 = -32700;
-#[allow(dead_code)] // Reserved for future use
-const ERR_INVALID_REQUEST: i32 = -32600;
 const ERR_METHOD_NOT_FOUND: i32 = -32601;
 const ERR_INVALID_PARAMS: i32 = -32602;
-#[allow(dead_code)] // Reserved for future use
 const ERR_INTERNAL_ERROR: i32 = -32603;
 
 // Application-specific error codes

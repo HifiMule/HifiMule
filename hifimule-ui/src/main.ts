@@ -1,6 +1,14 @@
+import '@shoelace-style/shoelace/dist/themes/dark.css';
+import '@shoelace-style/shoelace/dist/shoelace.js';
+import { setBasePath } from '@shoelace-style/shoelace/dist/utilities/base-path.js';
 import { LogicalSize } from '@tauri-apps/api/dpi';
 import { Window, currentMonitor } from '@tauri-apps/api/window';
 import { t } from './i18n';
+
+const isDev = Boolean((import.meta as any).env?.DEV);
+setBasePath(new URL(isDev
+    ? '../node_modules/@shoelace-style/shoelace/dist'
+    : '../shoelace', import.meta.url).href);
 
 // HifiMule UI Main Entry Point
 // Coordinates splash screen and main window lifecycle.
