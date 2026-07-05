@@ -2375,17 +2375,35 @@ fn reconcile_manifest_server_ids_maps_legacy_to_portable_idempotently() {
             synced("s-portable", Some(portable)),
             synced("s-untagged", None),
         ],
-        basket_items: vec![basket("b-local", Some(local)), basket("b-portable", Some(portable))],
+        basket_items: vec![
+            basket("b-local", Some(local)),
+            basket("b-portable", Some(portable)),
+        ],
         ..Default::default()
     };
 
     assert!(reconcile_manifest_server_ids(&mut manifest, &remap));
-    assert_eq!(manifest.synced_items[0].server_id.as_deref(), Some(portable));
-    assert_eq!(manifest.synced_items[1].server_id.as_deref(), Some(portable));
-    assert_eq!(manifest.synced_items[2].server_id.as_deref(), Some(portable));
+    assert_eq!(
+        manifest.synced_items[0].server_id.as_deref(),
+        Some(portable)
+    );
+    assert_eq!(
+        manifest.synced_items[1].server_id.as_deref(),
+        Some(portable)
+    );
+    assert_eq!(
+        manifest.synced_items[2].server_id.as_deref(),
+        Some(portable)
+    );
     assert_eq!(manifest.synced_items[3].server_id, None);
-    assert_eq!(manifest.basket_items[0].server_id.as_deref(), Some(portable));
-    assert_eq!(manifest.basket_items[1].server_id.as_deref(), Some(portable));
+    assert_eq!(
+        manifest.basket_items[0].server_id.as_deref(),
+        Some(portable)
+    );
+    assert_eq!(
+        manifest.basket_items[1].server_id.as_deref(),
+        Some(portable)
+    );
 
     // Idempotent: a second pass changes nothing.
     assert!(!reconcile_manifest_server_ids(&mut manifest, &remap));
@@ -2434,7 +2452,10 @@ fn autofill_config_migrates_legacy_onto_selected_server() {
         p
     };
     assert_eq!(cfg.pipelines.get("srv-portable"), Some(&expected));
-    assert!(!cfg.pipelines["srv-portable"].enabled, "enabled carried over");
+    assert!(
+        !cfg.pipelines["srv-portable"].enabled,
+        "enabled carried over"
+    );
     assert_eq!(cfg.pipelines["srv-portable"].budget.max_bytes, Some(5000));
     assert_eq!(cfg.legacy, None);
     // Idempotent: nothing left to migrate.
@@ -2461,7 +2482,10 @@ fn autofill_config_round_trips_per_server_map() {
     let cfg: AutoFillConfig = serde_json::from_str(json).unwrap();
     let pipeline = cfg.pipelines.get("srv-abc").expect("pipeline present");
     assert!(pipeline.enabled);
-    assert_eq!(pipeline.ordering, vec![crate::auto_fill::OrderingKey::Favorite]);
+    assert_eq!(
+        pipeline.ordering,
+        vec![crate::auto_fill::OrderingKey::Favorite]
+    );
     assert_eq!(pipeline.budget.max_bytes, Some(1000));
     assert!(cfg.legacy.is_none());
     // Serialize re-emits the per-server map shape and round-trips.
@@ -2477,7 +2501,10 @@ fn autofill_config_default_serializes_as_legacy_empty_block() {
     let json = serde_json::to_string(&AutoFillConfig::default()).unwrap();
     assert_eq!(json, r#"{"enabled":false,"maxBytes":null}"#);
     // Byte-for-byte identical to the pre-12.2 AutoFillPrefs::default() output.
-    assert_eq!(json, serde_json::to_string(&AutoFillPrefs::default()).unwrap());
+    assert_eq!(
+        json,
+        serde_json::to_string(&AutoFillPrefs::default()).unwrap()
+    );
 }
 
 #[test]
@@ -2562,9 +2589,10 @@ fn autofill_config_deserializes_partial_legacy_block() {
     );
     assert!(cfg.pipelines.is_empty());
     // A whole manifest carrying the partial block also loads.
-    let manifest: DeviceManifest =
-        serde_json::from_str(r#"{ "device_id": "d", "version": "1.0", "auto_fill": { "maxBytes": 123 } }"#)
-            .unwrap();
+    let manifest: DeviceManifest = serde_json::from_str(
+        r#"{ "device_id": "d", "version": "1.0", "auto_fill": { "maxBytes": 123 } }"#,
+    )
+    .unwrap();
     assert_eq!(manifest.auto_fill.legacy_max_bytes(), Some(123));
 }
 
@@ -2577,7 +2605,10 @@ fn set_legacy_updates_sole_pipeline_instead_of_parking_dropped_legacy() {
     cfg.set_legacy(false, Some(2000));
     assert!(cfg.legacy.is_none(), "no dangling legacy block");
     assert_eq!(cfg.pipelines.len(), 1);
-    assert!(!cfg.pipelines["srv-1"].enabled, "new value applied in place");
+    assert!(
+        !cfg.pipelines["srv-1"].enabled,
+        "new value applied in place"
+    );
     assert_eq!(cfg.pipelines["srv-1"].budget.max_bytes, Some(2000));
     // The write survives a serialize → deserialize round-trip.
     let back: AutoFillConfig = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
@@ -2587,7 +2618,10 @@ fn set_legacy_updates_sole_pipeline_instead_of_parking_dropped_legacy() {
     empty.set_legacy(true, Some(50));
     assert_eq!(
         empty.legacy,
-        Some(AutoFillPrefs { enabled: true, max_bytes: Some(50) })
+        Some(AutoFillPrefs {
+            enabled: true,
+            max_bytes: Some(50)
+        })
     );
     assert!(empty.pipelines.is_empty());
 }
@@ -2655,7 +2689,10 @@ fn rich_pipeline() -> AutoFillPipeline {
             enabled: true,
             rules: vec![
                 ContextRule {
-                    window: ContextWindow::TimeOfDay { start_hour: 6, end_hour: 11 },
+                    window: ContextWindow::TimeOfDay {
+                        start_hour: 6,
+                        end_hour: 11,
+                    },
                     source_refs: vec!["pl-42".to_string()],
                     weight: Some(2.0),
                     ..ContextRule::default()
@@ -2687,7 +2724,10 @@ fn set_pipeline_upserts_and_clears_parked_legacy() {
     let pipeline = rich_pipeline();
     cfg.set_pipeline("srv-1", pipeline.clone());
     assert_eq!(cfg.pipelines.get("srv-1"), Some(&pipeline));
-    assert!(cfg.legacy.is_none(), "parked legacy cleared on set_pipeline");
+    assert!(
+        cfg.legacy.is_none(),
+        "parked legacy cleared on set_pipeline"
+    );
 
     // Upsert replaces the same server's entry.
     let mut replacement = AutoFillPipeline::default_legacy(Some(42));

@@ -1310,6 +1310,10 @@ export class BasketSidebar {
             this.isSyncing = false;
             this.currentOperationId = null;
             this.currentOperation = null;
+            if (this.isCancelling && (err as Error).message === 'Sync cancelled') {
+                this.handleSyncCancelled();
+                return;
+            }
             this.showError(t('basket.sync.failed_to_start', { message: (err as Error).message }));
         }
     }
@@ -1416,7 +1420,7 @@ export class BasketSidebar {
                 } else if (op.status === 'failed') {
                     this.stopPolling();
                     this.handleSyncFailed(op);
-                } else if (op.status === 'cancelled' || this.isCancelling) {
+                } else if (op.status === 'cancelled') {
                     this.stopPolling();
                     this.handleSyncCancelled();
                 }
@@ -1885,13 +1889,20 @@ export class BasketSidebar {
     private async handleCancelSync(): Promise<void> {
         if (this.isCancelling) return;
         this.isCancelling = true;
-        this.renderSyncProgress(); // show Cancelling... state immediately
-        if (this.currentOperationId) {
-            try {
-                await rpcCall('sync_cancel', { operationId: this.currentOperationId });
-            } catch (err) {
-                console.error('[Sync] Cancel request failed:', err);
+        this.renderSyncProgress();
+        try {
+            if (!this.currentOperationId) {
+                const state = await rpcCall('get_daemon_state') as any;
+                this.currentOperationId = state?.activeOperationId ?? null;
             }
+
+            await rpcCall('sync_cancel', this.currentOperationId
+                ? { operationId: this.currentOperationId }
+                : {});
+        } catch (err) {
+            this.isCancelling = false;
+            console.error('[Sync] Cancel request failed:', err);
+            this.renderSyncProgress();
         }
         // The polling loop will detect the terminal status and call handleSyncCancelled
     }

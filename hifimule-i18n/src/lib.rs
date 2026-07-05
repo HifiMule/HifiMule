@@ -122,7 +122,11 @@ mod tests {
     #[test]
     fn interpolates_german_values() {
         assert_eq!(
-            translate_with("de", "basket.sync.file_counter", &[("completed", "3"), ("total", "10")]),
+            translate_with(
+                "de",
+                "basket.sync.file_counter",
+                &[("completed", "3"), ("total", "10")]
+            ),
             "3 von 10 Dateien"
         );
     }

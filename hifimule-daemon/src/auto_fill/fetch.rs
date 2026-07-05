@@ -92,10 +92,15 @@ fn parse_tiers(tiers: &Option<serde_json::Value>) -> Vec<TierDef> {
             // Drop duplicate tiers (same kind+ref): they collapse to one materialized pool, so a
             // second copy would claim a budget share it can never fill (the pool is already `seen`).
             let mut seen: HashSet<SourceKey> = HashSet::new();
-            defs.into_iter().filter(|d| seen.insert(d.source_key())).collect()
+            defs.into_iter()
+                .filter(|d| seen.insert(d.source_key()))
+                .collect()
         }
         Err(e) => {
-            crate::daemon_log!("[AutoFill] malformed memory.tiers ({}) — ignoring (no rotation)", e);
+            crate::daemon_log!(
+                "[AutoFill] malformed memory.tiers ({}) — ignoring (no rotation)",
+                e
+            );
             Vec::new()
         }
     }
@@ -933,15 +938,24 @@ mod tests {
         // check; this test locks it in for stableCorePct/repeatTolerance/tiers.
         let mut p = AutoFillPipeline::default_legacy(Some(1));
         p.memory.stable_core_pct = Some(0.5);
-        assert!(needs_configurable_expansion(&p), "stableCorePct forces configurable");
+        assert!(
+            needs_configurable_expansion(&p),
+            "stableCorePct forces configurable"
+        );
 
         let mut p = AutoFillPipeline::default_legacy(Some(1));
         p.memory.repeat_tolerance = Some(0.5);
-        assert!(needs_configurable_expansion(&p), "repeatTolerance forces configurable");
+        assert!(
+            needs_configurable_expansion(&p),
+            "repeatTolerance forces configurable"
+        );
 
         let mut p = AutoFillPipeline::default_legacy(Some(1));
         p.memory.tiers = Some(serde_json::json!([{ "kind": "library" }]));
-        assert!(needs_configurable_expansion(&p), "tiers forces configurable");
+        assert!(
+            needs_configurable_expansion(&p),
+            "tiers forces configurable"
+        );
     }
 
     #[test]
@@ -952,21 +966,33 @@ mod tests {
         // (1) best_version-only (default ordering otherwise).
         let mut p = AutoFillPipeline::default_legacy(Some(1));
         p.quality.best_version = true;
-        assert!(needs_configurable_expansion(&p), "best_version forces configurable");
+        assert!(
+            needs_configurable_expansion(&p),
+            "best_version forces configurable"
+        );
 
         // (2) version_preference-only.
         let mut p = AutoFillPipeline::default_legacy(Some(1));
         p.quality.version_preference = vec![VersionTrait::Live];
-        assert!(needs_configurable_expansion(&p), "version_preference forces configurable");
+        assert!(
+            needs_configurable_expansion(&p),
+            "version_preference forces configurable"
+        );
 
         // (3) Quality-ordering-only is already caught by the ordering discriminator.
         let mut p = AutoFillPipeline::default_legacy(Some(1));
         p.ordering = vec![OrderingKey::Quality];
-        assert!(needs_configurable_expansion(&p), "quality ordering key forces configurable");
+        assert!(
+            needs_configurable_expansion(&p),
+            "quality ordering key forces configurable"
+        );
 
         // A default QualityStage keeps the fast path (legacy pipeline stays default-equivalent).
         let p = AutoFillPipeline::default_legacy(Some(1));
-        assert!(!needs_configurable_expansion(&p), "default quality stage stays on the fast path");
+        assert!(
+            !needs_configurable_expansion(&p),
+            "default quality stage stays on the fast path"
+        );
     }
 
     #[test]
@@ -976,15 +1002,24 @@ mod tests {
         // via the `ordering_default` check (any non-legacy ordering trips it); locked in here.
         let mut p = AutoFillPipeline::default_legacy(Some(1));
         p.ordering = vec![OrderingKey::Excavation];
-        assert!(needs_configurable_expansion(&p), "excavation ordering key forces configurable");
+        assert!(
+            needs_configurable_expansion(&p),
+            "excavation ordering key forces configurable"
+        );
 
         let mut p = AutoFillPipeline::default_legacy(Some(1));
         p.ordering = vec![OrderingKey::Rediscovery];
-        assert!(needs_configurable_expansion(&p), "rediscovery ordering key forces configurable");
+        assert!(
+            needs_configurable_expansion(&p),
+            "rediscovery ordering key forces configurable"
+        );
 
         // The legacy default ordering still takes the fast path (no behavior change).
         let p = AutoFillPipeline::default_legacy(Some(1));
-        assert!(!needs_configurable_expansion(&p), "legacy default ordering stays on the fast path");
+        assert!(
+            !needs_configurable_expansion(&p),
+            "legacy default ordering stays on the fast path"
+        );
     }
 
     #[test]
@@ -994,26 +1029,41 @@ mod tests {
         // (1) rarity-only (default ordering otherwise).
         let mut p = AutoFillPipeline::default_legacy(Some(1));
         p.rarity.enabled = true;
-        assert!(needs_configurable_expansion(&p), "rarity stage forces configurable");
+        assert!(
+            needs_configurable_expansion(&p),
+            "rarity stage forces configurable"
+        );
 
         // (2) pity-only.
         let mut p = AutoFillPipeline::default_legacy(Some(1));
         p.pity.enabled = true;
-        assert!(needs_configurable_expansion(&p), "pity stage forces configurable");
+        assert!(
+            needs_configurable_expansion(&p),
+            "pity stage forces configurable"
+        );
 
         // (3) Random ordering key (caught by ordering_default — verify-only, no logic change).
         let mut p = AutoFillPipeline::default_legacy(Some(1));
         p.ordering = vec![OrderingKey::Random];
-        assert!(needs_configurable_expansion(&p), "random ordering key forces configurable");
+        assert!(
+            needs_configurable_expansion(&p),
+            "random ordering key forces configurable"
+        );
 
         // (4) Rarity ordering key.
         let mut p = AutoFillPipeline::default_legacy(Some(1));
         p.ordering = vec![OrderingKey::Rarity];
-        assert!(needs_configurable_expansion(&p), "rarity ordering key forces configurable");
+        assert!(
+            needs_configurable_expansion(&p),
+            "rarity ordering key forces configurable"
+        );
 
         // A default RarityStage/PityStage keeps the fast path (legacy stays default-equivalent).
         let p = AutoFillPipeline::default_legacy(Some(1));
-        assert!(!needs_configurable_expansion(&p), "default rarity/pity stages stay on the fast path");
+        assert!(
+            !needs_configurable_expansion(&p),
+            "default rarity/pity stages stay on the fast path"
+        );
     }
 
     #[test]
@@ -1025,16 +1075,25 @@ mod tests {
         p.context = ContextStage {
             enabled: true,
             rules: vec![ContextRule {
-                window: ContextWindow::TimeOfDay { start_hour: 6, end_hour: 11 },
+                window: ContextWindow::TimeOfDay {
+                    start_hour: 6,
+                    end_hour: 11,
+                },
                 source_refs: vec!["morning".to_string()],
                 ..Default::default()
             }],
         };
-        assert!(needs_configurable_expansion(&p), "context stage forces configurable");
+        assert!(
+            needs_configurable_expansion(&p),
+            "context stage forces configurable"
+        );
 
         // A default ContextStage keeps the fast path.
         let p = AutoFillPipeline::default_legacy(Some(1));
-        assert!(!needs_configurable_expansion(&p), "default context stage stays on the fast path");
+        assert!(
+            !needs_configurable_expansion(&p),
+            "default context stage stays on the fast path"
+        );
 
         // Encoding-from-goals is only meaningful WITH a duration target, which already forces the
         // engine path via `budget_default` — verify an encoding pipeline routes (AC 10).
@@ -1060,28 +1119,55 @@ mod tests {
 
         // Spotlight only.
         let mut p = AutoFillPipeline::default_legacy(Some(1));
-        p.promotion = PromotionStage { spotlight: true, ..Default::default() };
-        assert!(needs_configurable_expansion(&p), "spotlight forces configurable");
+        p.promotion = PromotionStage {
+            spotlight: true,
+            ..Default::default()
+        };
+        assert!(
+            needs_configurable_expansion(&p),
+            "spotlight forces configurable"
+        );
 
         // Album/track ratio only.
         let mut p = AutoFillPipeline::default_legacy(Some(1));
-        p.promotion = PromotionStage { album_track_ratio: Some(0.5), ..Default::default() };
-        assert!(needs_configurable_expansion(&p), "album_track_ratio forces configurable");
+        p.promotion = PromotionStage {
+            album_track_ratio: Some(0.5),
+            ..Default::default()
+        };
+        assert!(
+            needs_configurable_expansion(&p),
+            "album_track_ratio forces configurable"
+        );
 
         // Affinity promotion only.
         let mut p = AutoFillPipeline::default_legacy(Some(1));
-        p.promotion = PromotionStage { promote_album_min_favorites: Some(3), ..Default::default() };
-        assert!(needs_configurable_expansion(&p), "promote_album_min_favorites forces configurable");
+        p.promotion = PromotionStage {
+            promote_album_min_favorites: Some(3),
+            ..Default::default()
+        };
+        assert!(
+            needs_configurable_expansion(&p),
+            "promote_album_min_favorites forces configurable"
+        );
 
         // Coherence only.
         let mut p = AutoFillPipeline::default_legacy(Some(1));
-        p.promotion = PromotionStage { coherence: true, ..Default::default() };
-        assert!(needs_configurable_expansion(&p), "coherence forces configurable");
+        p.promotion = PromotionStage {
+            coherence: true,
+            ..Default::default()
+        };
+        assert!(
+            needs_configurable_expansion(&p),
+            "coherence forces configurable"
+        );
 
         // A non-default base unit is already caught by the existing `unit_default` clause (verify).
         let mut p = AutoFillPipeline::default_legacy(Some(1));
         p.unit = Unit::Album;
-        assert!(needs_configurable_expansion(&p), "Album base unit still routes via unit_default");
+        assert!(
+            needs_configurable_expansion(&p),
+            "Album base unit still routes via unit_default"
+        );
     }
 
     #[test]
@@ -1631,7 +1717,11 @@ mod tests {
         let result = expand_with_pipeline(provider, &pipeline, params(5_000_000))
             .await
             .unwrap();
-        assert_eq!(result.len(), 5, "fallback fills the budget after the primary runs dry");
+        assert_eq!(
+            result.len(),
+            5,
+            "fallback fills the budget after the primary runs dry"
+        );
         assert!(
             result.iter().any(|i| i.id == "p0"),
             "the primary playlist track is included"
@@ -1723,9 +1813,13 @@ mod tests {
             },
             ..Default::default()
         };
-        let result = expand_with_pipeline(provider, &pipeline, params_with(100_000_000, now, history, 0))
-            .await
-            .unwrap();
+        let result = expand_with_pipeline(
+            provider,
+            &pipeline,
+            params_with(100_000_000, now, history, 0),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             ids(&result),
             vec!["old"],
@@ -1763,7 +1857,11 @@ mod tests {
         // 3 playlist tiers (A/B/C), 4 × 1 MB tracks each. Lead tier gets 50% of the 4 MB ceiling
         // (2 tracks); the other two split the rest (1 track each). Advancing the cursor shifts which
         // tier dominates. Emitted tracks carry their ORIGINAL tier index (stable across rotation).
-        let mk = |p: &str| (0..4).map(|i| song(&format!("{p}{i}"), 1_000_000)).collect::<Vec<_>>();
+        let mk = |p: &str| {
+            (0..4)
+                .map(|i| song(&format!("{p}{i}"), 1_000_000))
+                .collect::<Vec<_>>()
+        };
         let playlists = HashMap::from([
             ("A".to_string(), mk("a")),
             ("B".to_string(), mk("b")),
@@ -1791,9 +1889,13 @@ mod tests {
             playlists: playlists.clone(),
             ..Default::default()
         });
-        let r0 = expand_with_pipeline(provider, &pipeline, params_with(4_000_000, 0, HistorySnapshot::default(), 0))
-            .await
-            .unwrap();
+        let r0 = expand_with_pipeline(
+            provider,
+            &pipeline,
+            params_with(4_000_000, 0, HistorySnapshot::default(), 0),
+        )
+        .await
+        .unwrap();
         let a0 = r0.iter().filter(|i| i.id.starts_with('a')).count();
         assert_eq!(a0, 2, "cursor 0 → tier A dominates");
         // Each emitted track is tagged with its original tier index (a→0, b→1, c→2).
@@ -1811,9 +1913,13 @@ mod tests {
             playlists,
             ..Default::default()
         });
-        let r1 = expand_with_pipeline(provider, &pipeline, params_with(4_000_000, 0, HistorySnapshot::default(), 1))
-            .await
-            .unwrap();
+        let r1 = expand_with_pipeline(
+            provider,
+            &pipeline,
+            params_with(4_000_000, 0, HistorySnapshot::default(), 1),
+        )
+        .await
+        .unwrap();
         let b1 = r1.iter().filter(|i| i.id.starts_with('b')).count();
         assert_eq!(b1, 2, "cursor 1 → lead shifts to tier B");
     }
@@ -1840,8 +1946,15 @@ mod tests {
         let result = expand_with_pipeline(provider, &pipeline, params(100_000_000))
             .await
             .unwrap();
-        assert_eq!(ids(&result), vec!["l0", "l1"], "malformed tiers ignored, normal fill");
-        assert!(result.iter().all(|i| i.tier.is_none()), "no tier tags without rotation");
+        assert_eq!(
+            ids(&result),
+            vec!["l0", "l1"],
+            "malformed tiers ignored, normal fill"
+        );
+        assert!(
+            result.iter().all(|i| i.tier.is_none()),
+            "no tier tags without rotation"
+        );
     }
 
     #[tokio::test]

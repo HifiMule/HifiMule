@@ -449,7 +449,10 @@ where
 /// - `DateRange`: `(month, day)` within `[start, end]` inclusive, with year-end wrap when `start > end`.
 fn context_rule_active(rule: &ContextRule, local: &CivilTime) -> bool {
     match &rule.window {
-        ContextWindow::TimeOfDay { start_hour, end_hour } => {
+        ContextWindow::TimeOfDay {
+            start_hour,
+            end_hour,
+        } => {
             let h = local.hour;
             if start_hour == end_hour {
                 false
@@ -588,7 +591,11 @@ fn effective_sources(
         .into_iter()
         .enumerate()
         .map(|(i, mut s)| {
-            s.share = Some(if total > 0.0 { weighted[i] / total } else { 1.0 / n });
+            s.share = Some(if total > 0.0 {
+                weighted[i] / total
+            } else {
+                1.0 / n
+            });
             s
         })
         .collect()
@@ -858,7 +865,11 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
     // row), exempt from cooldown — the *stable core*. The remaining budget then fills as the *delta*
     // from all candidates honoring full memory rules. Same Filter/Ordering/Unit/dedup as the delta;
     // dedup against the core is automatic via the shared selector. `p = 0`/unbounded ceiling = no-op.
-    let core_pct = pipeline.memory.stable_core_pct.unwrap_or(0.0).clamp(0.0, 1.0);
+    let core_pct = pipeline
+        .memory
+        .stable_core_pct
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0);
     if core_pct > 0.0 && ceiling != u64::MAX {
         let core_cap = ((ceiling as f64) * f64::from(core_pct)).round() as u64;
         if core_cap > 0 {
@@ -875,7 +886,14 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
                     pipeline.unit,
                     promote_min_favorites,
                 );
-                selector.fill(units, source, cap, &pipeline.memory, &input.history, FillMode::Core);
+                selector.fill(
+                    units,
+                    source,
+                    cap,
+                    &pipeline.memory,
+                    &input.history,
+                    FillMode::Core,
+                );
             }
             selector.ceiling = ceiling; // restore the full ceiling for the delta pass
         }
@@ -890,7 +908,11 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
     // primary pass for free. `spotlight:false`, `spotlight_share == 0`, an unbounded ceiling, or no
     // artist-bearing candidate ⇒ no-op. Track-level depth (no affinity promotion in the reserve).
     if pipeline.promotion.spotlight && ceiling != u64::MAX {
-        let share = pipeline.promotion.spotlight_share.unwrap_or(0.5).clamp(0.0, 1.0);
+        let share = pipeline
+            .promotion
+            .spotlight_share
+            .unwrap_or(0.5)
+            .clamp(0.0, 1.0);
         if share > 0.0
             && let Some(featured) =
                 choose_featured_artist(input, pipeline, sources, effective_filter)
@@ -932,7 +954,11 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
     // enforces) FIRST, then the remaining budget fills with the base `unit` as today. Mirrors the
     // stable-core pre-pass (temporary ceiling, `source_caps` split, shared `Selector` ⇒ automatic dedup).
     // `album_track_ratio` is `None`/`0` or the ceiling is unbounded ⇒ no-op (base unit governs everything).
-    let album_ratio = pipeline.promotion.album_track_ratio.unwrap_or(0.0).clamp(0.0, 1.0);
+    let album_ratio = pipeline
+        .promotion
+        .album_track_ratio
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0);
     if album_ratio > 0.0 && ceiling != u64::MAX {
         let reserve = ((ceiling as f64) * f64::from(album_ratio)).round() as u64;
         if reserve > 0 {
@@ -971,7 +997,10 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
     let pity = &pipeline.pity;
     let reserve_bytes = pity_reserve_bytes(pity, input.pity_streak, ceiling);
     if reserve_bytes > 0 {
-        selector.ceiling = selector.cum_bytes.saturating_add(reserve_bytes).min(ceiling);
+        selector.ceiling = selector
+            .cum_bytes
+            .saturating_add(reserve_bytes)
+            .min(ceiling);
         let reserve_caps = source_caps(sources, reserve_bytes);
         for (source, cap) in sources.iter().zip(reserve_caps) {
             let units = build_source_units(
@@ -988,7 +1017,9 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
                 cap,
                 &pipeline.memory,
                 &input.history,
-                FillMode::Discovery { max_plays: pity.discovery_max_plays },
+                FillMode::Discovery {
+                    max_plays: pity.discovery_max_plays,
+                },
             );
         }
         selector.ceiling = ceiling; // restore the full ceiling for the primary pass
@@ -1013,7 +1044,14 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
             pipeline.unit,
             promote_min_favorites,
         );
-        selector.fill(units, source, cap, &pipeline.memory, &input.history, FillMode::Primary);
+        selector.fill(
+            units,
+            source,
+            cap,
+            &pipeline.memory,
+            &input.history,
+            FillMode::Primary,
+        );
     }
 
     // Terminal fallback chain — only reached once primary sources can't fill the budget. Context
@@ -1028,7 +1066,14 @@ pub fn run_pipeline(input: &PipelineInput, pipeline: &AutoFillPipeline) -> Vec<A
             pipeline.unit,
             promote_min_favorites,
         );
-        selector.fill(units, source, ceiling, &pipeline.memory, &input.history, FillMode::Fallback);
+        selector.fill(
+            units,
+            source,
+            ceiling,
+            &pipeline.memory,
+            &input.history,
+            FillMode::Fallback,
+        );
     }
 
     selector.into_items()
@@ -1134,13 +1179,25 @@ fn build_source_units(
     let rarity = &pipeline.rarity;
     for unit in units.iter_mut() {
         unit.sort_by(|a, b| {
-            compare_by_ordering(&a.song, &b.song, &pipeline.ordering, version_pref, seed, rarity)
+            compare_by_ordering(
+                &a.song,
+                &b.song,
+                &pipeline.ordering,
+                version_pref,
+                seed,
+                rarity,
+            )
         });
     }
     units.sort_by(|a, b| match (a.first(), b.first()) {
-        (Some(x), Some(y)) => {
-            compare_by_ordering(&x.song, &y.song, &pipeline.ordering, version_pref, seed, rarity)
-        }
+        (Some(x), Some(y)) => compare_by_ordering(
+            &x.song,
+            &y.song,
+            &pipeline.ordering,
+            version_pref,
+            seed,
+            rarity,
+        ),
         _ => std::cmp::Ordering::Equal,
     });
     units
@@ -1194,7 +1251,12 @@ fn memory_stage(
 /// Cooldown window (AC 4) is `cooldown_weeks × 7 × 86400` seconds, scaled by the repeat-tolerance
 /// dial (AC 7): `effective = window × (1 − repeat_tolerance)`. `repeat_tolerance` only modulates
 /// cooldown (no effect when `cooldown_weeks` is `None`). Deterministic — no clock/RNG.
-fn memory_allows(song: &Song, mem: &MemoryStage, hist: &HistorySnapshot, skip_cooldown: bool) -> bool {
+fn memory_allows(
+    song: &Song,
+    mem: &MemoryStage,
+    hist: &HistorySnapshot,
+    skip_cooldown: bool,
+) -> bool {
     let Some(h) = hist.entries.get(&song.id) else {
         return true; // no history → never cooled down
     };
@@ -1340,9 +1402,7 @@ fn compare_by_ordering(
                 .cmp(&(format_quality_rank(a), a.bitrate_kbps.unwrap_or(0))),
             // Story 13.3 #14: fewer plays first — owned-but-barely-played (inverse of PlayCount).
             // `None` is treated as 0, so a never-played track is the deepest cut and ranks first.
-            OrderingKey::Excavation => {
-                a.play_count.unwrap_or(0).cmp(&b.play_count.unwrap_or(0))
-            }
+            OrderingKey::Excavation => a.play_count.unwrap_or(0).cmp(&b.play_count.unwrap_or(0)),
             // Story 13.3 #31 (cheap musical-memories): oldest `date_added` first (inverse of
             // DateCreated). A missing OR blank add-date sorts LAST — an unknown add-date is the
             // *worst* rediscovery candidate, NOT the best. A naive `unwrap_or("")` ascending would
@@ -1361,7 +1421,10 @@ fn compare_by_ordering(
             // `total_cmp` (never `partial_cmp().unwrap()`).
             OrderingKey::Rarity => {
                 let (wa, wb) = if rarity.enabled {
-                    (rarity_class_weight(a, rarity), rarity_class_weight(b, rarity))
+                    (
+                        rarity_class_weight(a, rarity),
+                        rarity_class_weight(b, rarity),
+                    )
                 } else {
                     (1.0, 1.0)
                 };
@@ -1449,7 +1512,10 @@ fn rarity_class_weight(song: &Song, r: &RarityStage) -> f32 {
 /// whitespace-only. Used by [`OrderingKey::Rediscovery`] so an unknown add-date sorts LAST rather
 /// than masquerading as the oldest (Story 13.3 #31, AC 3).
 fn nonblank_date(s: &Song) -> Option<&str> {
-    s.date_added.as_deref().map(str::trim).filter(|d| !d.is_empty())
+    s.date_added
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
 }
 
 /// Format-aware quality tier (Story 13.2 #13): lossless (2) > lossy (1) > unknown (0). Read
@@ -1469,7 +1535,11 @@ fn format_quality_rank(song: &Song) -> u8 {
         .map(|s| s.trim().to_ascii_lowercase())
         .unwrap_or_default();
     if !suffix.is_empty() {
-        return if LOSSLESS.contains(&suffix.as_str()) { 2 } else { 1 };
+        return if LOSSLESS.contains(&suffix.as_str()) {
+            2
+        } else {
+            1
+        };
     }
 
     // Fall back to the mime subtype (`audio/flac` → `flac`, `audio/x-flac` → `flac`).
@@ -1480,7 +1550,11 @@ fn format_quality_rank(song: &Song) -> u8 {
         .map(|s| s.trim().trim_start_matches("x-").to_ascii_lowercase())
         .unwrap_or_default();
     if !mime_sub.is_empty() {
-        return if LOSSLESS.contains(&mime_sub.as_str()) { 2 } else { 1 };
+        return if LOSSLESS.contains(&mime_sub.as_str()) {
+            2
+        } else {
+            1
+        };
     }
 
     0 // no format metadata at all → unknown, ranked last
@@ -1674,13 +1748,22 @@ fn fits_ceiling(song: &Song, ceiling: u64, target_kbps: Option<u32>) -> bool {
 /// seed-dependent — still fully deterministic *given the seed*, but called out here so the behavior
 /// is intentional, not surprising. A pipeline with no randomized key is unaffected (the `song.id`
 /// tiebreak (4) still makes the winner stable).
-fn best_version_cmp(a: &Song, b: &Song, pipeline: &AutoFillPipeline, ceiling: u64, seed: u64) -> std::cmp::Ordering {
+fn best_version_cmp(
+    a: &Song,
+    b: &Song,
+    pipeline: &AutoFillPipeline,
+    ceiling: u64,
+    seed: u64,
+) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     // Story 13.5: budget-fit uses the same bitrate-aware estimate as selection, so a version that
     // fits *after* transcode is preferred consistently with how it will actually be packed.
     let target_kbps = target_bitrate_kbps(&pipeline.budget);
     // (0) budget fit: a version that can fit the ceiling beats one that never can (Decision 2).
-    match (fits_ceiling(a, ceiling, target_kbps), fits_ceiling(b, ceiling, target_kbps)) {
+    match (
+        fits_ceiling(a, ceiling, target_kbps),
+        fits_ceiling(b, ceiling, target_kbps),
+    ) {
         (true, false) => return Ordering::Less,
         (false, true) => return Ordering::Greater,
         _ => {}
@@ -2269,16 +2352,43 @@ mod tests {
         // PURELY in config (no `if persona` branch): with it off the selection comes out in quality
         // order; with it on the same tracks cluster artist→album→disc→track. Two albums, deliberately
         // interleaved by quality so the un-clustered order splits them apart.
-        let mut flac_a2 = song_album("acclaim-a2", "AntoineFav", "Acclaimed", 1, 2, false, 0, 30_000_000);
+        let mut flac_a2 = song_album(
+            "acclaim-a2",
+            "AntoineFav",
+            "Acclaimed",
+            1,
+            2,
+            false,
+            0,
+            30_000_000,
+        );
         flac_a2.suffix = Some("flac".to_string());
         flac_a2.content_type = Some("audio/flac".to_string());
         flac_a2.bitrate_kbps = Some(1000);
         let album_pool = vec![
             // mp3 from album "Live" (track 1), then two FLACs from "Acclaimed" (tracks 2 then 1).
-            cand(song_album("live-1", "AntoineFav", "Live", 1, 1, false, 0, 10_000_000)),
+            cand(song_album(
+                "live-1",
+                "AntoineFav",
+                "Live",
+                1,
+                1,
+                false,
+                0,
+                10_000_000,
+            )),
             cand(flac_a2),
             cand({
-                let mut s = song_album("acclaim-a1", "AntoineFav", "Acclaimed", 1, 1, false, 0, 30_000_000);
+                let mut s = song_album(
+                    "acclaim-a1",
+                    "AntoineFav",
+                    "Acclaimed",
+                    1,
+                    1,
+                    false,
+                    0,
+                    30_000_000,
+                );
                 s.suffix = Some("flac".to_string());
                 s.content_type = Some("audio/flac".to_string());
                 s.bitrate_kbps = Some(1000);
@@ -2289,11 +2399,17 @@ mod tests {
         let integrity_off = AutoFillPipeline {
             sources: vec![SourceEntry::new(SourceKind::Library)],
             ordering: vec![OrderingKey::Quality],
-            budget: BudgetStage { max_bytes: Some(512u64 * 1_000 * 1_000 * 1_000), ..Default::default() },
+            budget: BudgetStage {
+                max_bytes: Some(512u64 * 1_000 * 1_000 * 1_000),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let integrity_on = AutoFillPipeline {
-            promotion: PromotionStage { coherence: true, ..Default::default() },
+            promotion: PromotionStage {
+                coherence: true,
+                ..Default::default()
+            },
             ..integrity_off.clone()
         };
         // Quality order splits the "Acclaimed" album's tracks around nothing here but emits them in
@@ -2443,11 +2559,17 @@ mod tests {
                 share: None,
             }],
             ordering: vec![OrderingKey::Excavation],
-            budget: BudgetStage { max_bytes: Some(7_000_000), ..Default::default() },
+            budget: BudgetStage {
+                max_bytes: Some(7_000_000),
+                ..Default::default()
+            },
             context: ContextStage {
                 enabled: true,
                 rules: vec![ContextRule {
-                    window: ContextWindow::TimeOfDay { start_hour: 6, end_hour: 11 },
+                    window: ContextWindow::TimeOfDay {
+                        start_hour: 6,
+                        end_hour: 11,
+                    },
                     source_refs: vec!["energy".to_string()],
                     ..Default::default()
                 }],
@@ -2460,7 +2582,12 @@ mod tests {
                 Some("energy"),
                 energy_pool.clone(),
             );
-            i.history.local = CivilTime { hour, month: 1, day: 1, weekday: 0 };
+            i.history.local = CivilTime {
+                hour,
+                month: 1,
+                day: 1,
+                weekday: 0,
+            };
             i
         };
         assert_eq!(
@@ -2474,7 +2601,10 @@ mod tests {
         );
         // Context OFF ⇒ the gate is inert: the energy playlist fills regardless of the hour.
         let context_off = AutoFillPipeline {
-            context: ContextStage { enabled: false, ..context_pipeline.context.clone() },
+            context: ContextStage {
+                enabled: false,
+                ..context_pipeline.context.clone()
+            },
             ..context_pipeline.clone()
         };
         assert_eq!(
@@ -2575,7 +2705,10 @@ mod tests {
             repeat_tolerance: Some(0.5),
             ..Default::default()
         };
-        assert!(memory_allows(&song, &mid, &hist, false), "t=0.5 boundary allowed");
+        assert!(
+            memory_allows(&song, &mid, &hist, false),
+            "t=0.5 boundary allowed"
+        );
 
         // …but a 3-day-old sync is still inside the half-width window → excluded.
         let mut hist_recent = HistorySnapshot {
@@ -2589,7 +2722,10 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(!memory_allows(&song, &mid, &hist_recent, false), "t=0.5 inside window");
+        assert!(
+            !memory_allows(&song, &mid, &hist_recent, false),
+            "t=0.5 inside window"
+        );
 
         // repeat_tolerance only modulates cooldown — with no cooldown it is inert.
         let no_cooldown = MemoryStage {
@@ -2597,7 +2733,10 @@ mod tests {
             repeat_tolerance: Some(0.5),
             ..Default::default()
         };
-        assert!(memory_allows(&song, &no_cooldown, &hist, false), "tolerance is inert without cooldown");
+        assert!(
+            memory_allows(&song, &no_cooldown, &hist, false),
+            "tolerance is inert without cooldown"
+        );
     }
 
     #[test]
@@ -2622,7 +2761,13 @@ mod tests {
         }
         // 4 fresh tracks never synced.
         for i in 0..4 {
-            library.push(cand(song_sized(&format!("fresh{i}"), false, 0, "2024-01-01", 1_000_000)));
+            library.push(cand(song_sized(
+                &format!("fresh{i}"),
+                false,
+                0,
+                "2024-01-01",
+                1_000_000,
+            )));
         }
         let input = PipelineInput {
             history: hist,
@@ -2651,7 +2796,10 @@ mod tests {
             .filter(|i| i.id.starts_with("dev"))
             .map(|i| i.size_bytes)
             .sum();
-        assert!(core_bytes >= 4_000_000, "≈p of the budget is the on-device core");
+        assert!(
+            core_bytes >= 4_000_000,
+            "≈p of the budget is the on-device core"
+        );
         assert!(
             result.iter().any(|i| i.id.starts_with("fresh")),
             "the delta still draws fresh tracks"
@@ -2664,7 +2812,15 @@ mod tests {
     #[test]
     fn stable_core_empty_history_first_sync_is_a_normal_fill() {
         let library = (0..4)
-            .map(|i| cand(song_sized(&format!("t{i}"), false, 0, "2024-01-01", 1_000_000)))
+            .map(|i| {
+                cand(song_sized(
+                    &format!("t{i}"),
+                    false,
+                    0,
+                    "2024-01-01",
+                    1_000_000,
+                ))
+            })
             .collect();
         let input = PipelineInput::default().with_pool(SourceKind::Library, None, library);
         let pipeline = AutoFillPipeline {
@@ -3183,7 +3339,11 @@ mod tests {
         let mut unknown = song_bitrate("d", 320, 200);
         unknown.suffix = None;
         unknown.content_type = None;
-        assert_eq!(format_quality_rank(&unknown), 0, "no format metadata → unknown");
+        assert_eq!(
+            format_quality_rank(&unknown),
+            0,
+            "no format metadata → unknown"
+        );
     }
 
     #[test]
@@ -3223,11 +3383,8 @@ mod tests {
     fn quality_ordering_breaks_ties_by_bitrate_within_a_tier() {
         let hi = song_meta("hi", "S", "A", "Al", "mp3", 320);
         let lo = song_meta("lo", "S", "A", "Al", "mp3", 128);
-        let input = PipelineInput::default().with_pool(
-            SourceKind::Library,
-            None,
-            vec![cand(lo), cand(hi)],
-        );
+        let input =
+            PipelineInput::default().with_pool(SourceKind::Library, None, vec![cand(lo), cand(hi)]);
         let pipeline = AutoFillPipeline {
             sources: vec![SourceEntry::new(SourceKind::Library)],
             ordering: vec![OrderingKey::Quality],
@@ -3294,7 +3451,10 @@ mod tests {
         let t = traits_of("My Song (Live) [2011 Remaster]");
         assert!(t.contains(&VersionTrait::Live));
         assert!(t.contains(&VersionTrait::Remastered));
-        assert!(!t.contains(&VersionTrait::Studio), "studio is only the absence of markers");
+        assert!(
+            !t.contains(&VersionTrait::Studio),
+            "studio is only the absence of markers"
+        );
     }
 
     #[test]
@@ -3319,9 +3479,17 @@ mod tests {
         let live = song_meta("a", "Song (Live)", "A", "Al", "mp3", 320);
         let studio = song_meta("b", "Song", "A", "Al", "mp3", 320);
         let remix = song_meta("c", "Song (Remix)", "A", "Al", "mp3", 320);
-        assert_eq!(version_rank(&studio, &prefs), 0, "studio is first preference");
+        assert_eq!(
+            version_rank(&studio, &prefs),
+            0,
+            "studio is first preference"
+        );
         assert_eq!(version_rank(&live, &prefs), 1, "live is second preference");
-        assert_eq!(version_rank(&remix, &prefs), 2, "no listed trait → last (len)");
+        assert_eq!(
+            version_rank(&remix, &prefs),
+            2,
+            "no listed trait → last (len)"
+        );
     }
 
     #[test]
@@ -3346,7 +3514,10 @@ mod tests {
             },
             ..Default::default()
         };
-        assert_eq!(ids(&run_pipeline(&input, &pipeline)), vec!["live", "studio"]);
+        assert_eq!(
+            ids(&run_pipeline(&input, &pipeline)),
+            vec!["live", "studio"]
+        );
     }
 
     #[test]
@@ -3408,7 +3579,14 @@ mod tests {
     fn best_version_keeps_lossless_studio_over_lossy_live() {
         // Same song, same artist: a FLAC studio cut and a lossy live cut collapse to the FLAC.
         let flac = song_meta("flac-studio", "My Song", "The Band", "Album", "flac", 900);
-        let live = song_meta("mp3-live", "My Song (Live)", "The Band", "Live Album", "mp3", 320);
+        let live = song_meta(
+            "mp3-live",
+            "My Song (Live)",
+            "The Band",
+            "Live Album",
+            "mp3",
+            320,
+        );
         let input = PipelineInput::default().with_pool(
             SourceKind::Library,
             None,
@@ -3437,7 +3615,14 @@ mod tests {
     fn best_version_preference_flips_the_winner() {
         // With Live preferred, the live cut wins the collapse even though it's lossy.
         let flac = song_meta("flac-studio", "My Song", "The Band", "Album", "flac", 900);
-        let live = song_meta("mp3-live", "My Song (Live)", "The Band", "Live Album", "mp3", 320);
+        let live = song_meta(
+            "mp3-live",
+            "My Song (Live)",
+            "The Band",
+            "Live Album",
+            "mp3",
+            320,
+        );
         let input = PipelineInput::default().with_pool(
             SourceKind::Library,
             None,
@@ -3485,7 +3670,10 @@ mod tests {
         };
         let got = ids(&run_pipeline(&input, &pipeline));
         for id in ["a", "b", "c", "d"] {
-            assert!(got.contains(&id.to_string()), "{id} must survive (no over-merge)");
+            assert!(
+                got.contains(&id.to_string()),
+                "{id} must survive (no over-merge)"
+            );
         }
     }
 
@@ -3494,7 +3682,14 @@ mod tests {
         // Winner (FLAC studio) in the library, loser (lossy live) in a playlist → the playlist
         // loser is dropped; the library winner remains.
         let flac = song_meta("flac-studio", "My Song", "The Band", "Album", "flac", 900);
-        let live = song_meta("mp3-live", "My Song (Live)", "The Band", "Live Album", "mp3", 320);
+        let live = song_meta(
+            "mp3-live",
+            "My Song (Live)",
+            "The Band",
+            "Live Album",
+            "mp3",
+            320,
+        );
         let input = PipelineInput::default()
             .with_pool(SourceKind::Library, None, vec![cand(flac)])
             .with_pool(SourceKind::Playlist, Some("set"), vec![cand(live)]);
@@ -3518,13 +3713,24 @@ mod tests {
             ..Default::default()
         };
         let got = ids(&run_pipeline(&input, &pipeline));
-        assert_eq!(got, vec!["flac-studio"], "cross-pool collapse keeps the global winner only");
+        assert_eq!(
+            got,
+            vec!["flac-studio"],
+            "cross-pool collapse keeps the global winner only"
+        );
     }
 
     #[test]
     fn best_version_disabled_keeps_all_duplicates() {
         let flac = song_meta("flac-studio", "My Song", "The Band", "Album", "flac", 900);
-        let live = song_meta("mp3-live", "My Song (Live)", "The Band", "Live Album", "mp3", 320);
+        let live = song_meta(
+            "mp3-live",
+            "My Song (Live)",
+            "The Band",
+            "Live Album",
+            "mp3",
+            320,
+        );
         let input = PipelineInput::default().with_pool(
             SourceKind::Library,
             None,
@@ -3538,14 +3744,25 @@ mod tests {
             },
             ..Default::default() // best_version defaults to false
         };
-        assert_eq!(run_pipeline(&input, &pipeline).len(), 2, "no collapse when disabled");
+        assert_eq!(
+            run_pipeline(&input, &pipeline).len(),
+            2,
+            "no collapse when disabled"
+        );
     }
 
     #[test]
     fn best_version_never_emits_zero_byte_or_over_budget() {
         // Collapse only removes candidates; the surviving winner still respects the budget ceiling.
         let flac = song_meta("flac-studio", "My Song", "The Band", "Album", "flac", 900);
-        let live = song_meta("mp3-live", "My Song (Live)", "The Band", "Live Album", "mp3", 320);
+        let live = song_meta(
+            "mp3-live",
+            "My Song (Live)",
+            "The Band",
+            "Live Album",
+            "mp3",
+            320,
+        );
         let other = song_meta("other", "Another", "The Band", "Album", "mp3", 320);
         let input = PipelineInput::default().with_pool(
             SourceKind::Library,
@@ -3567,15 +3784,30 @@ mod tests {
         let result = run_pipeline(&input, &pipeline);
         let total: u64 = result.iter().map(|i| i.size_bytes).sum();
         assert!(total <= 1_500_000, "budget respected");
-        assert!(result.iter().all(|i| i.size_bytes > 0), "never a 0-byte filler");
+        assert!(
+            result.iter().all(|i| i.size_bytes > 0),
+            "never a 0-byte filler"
+        );
     }
 
     #[test]
     fn strip_version_markers_normalizes_to_a_shared_base() {
-        assert_eq!(normalize_ws(&strip_version_markers("My Song (Live)")), "my song");
-        assert_eq!(normalize_ws(&strip_version_markers("My Song - 2011 Remaster")), "my song");
-        assert_eq!(normalize_ws(&strip_version_markers("My Song [Acoustic]")), "my song");
-        assert_eq!(normalize_ws(&strip_version_markers("My Song - Live at Wembley")), "my song");
+        assert_eq!(
+            normalize_ws(&strip_version_markers("My Song (Live)")),
+            "my song"
+        );
+        assert_eq!(
+            normalize_ws(&strip_version_markers("My Song - 2011 Remaster")),
+            "my song"
+        );
+        assert_eq!(
+            normalize_ws(&strip_version_markers("My Song [Acoustic]")),
+            "my song"
+        );
+        assert_eq!(
+            normalize_ws(&strip_version_markers("My Song - Live at Wembley")),
+            "my song"
+        );
         // A non-version parenthetical is preserved (distinct songs stay distinct).
         assert_eq!(
             normalize_ws(&strip_version_markers("My Song (feat. Guest)")),
@@ -3596,8 +3828,14 @@ mod tests {
             "my song (premixed tape)",
         );
         // A real standalone marker word still strips.
-        assert_eq!(normalize_ws(&strip_version_markers("My Song (Remix)")), "my song");
-        assert_eq!(normalize_ws(&strip_version_markers("My Song (Acoustic)")), "my song");
+        assert_eq!(
+            normalize_ws(&strip_version_markers("My Song (Remix)")),
+            "my song"
+        );
+        assert_eq!(
+            normalize_ws(&strip_version_markers("My Song (Acoustic)")),
+            "my song"
+        );
     }
 
     #[test]
@@ -3621,7 +3859,14 @@ mod tests {
         // lossy cut so the song still lands rather than vanishing (Story 13.2 review — Decision 2).
         let mut flac = song_meta("flac-studio", "My Song", "The Band", "Album", "flac", 900);
         flac.size_bytes = Some(50_000_000); // 50 MB — exceeds the ceiling, can never be selected
-        let mut live = song_meta("mp3-live", "My Song (Live)", "The Band", "Live Album", "mp3", 320);
+        let mut live = song_meta(
+            "mp3-live",
+            "My Song (Live)",
+            "The Band",
+            "Live Album",
+            "mp3",
+            320,
+        );
         live.size_bytes = Some(1_000_000); // 1 MB — fits
         let input = PipelineInput::default().with_pool(
             SourceKind::Library,
@@ -3661,7 +3906,8 @@ mod tests {
             p.quality.version_preference,
             vec![VersionTrait::Live, VersionTrait::Remastered]
         );
-        let back: AutoFillPipeline = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        let back: AutoFillPipeline =
+            serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(p, back);
     }
 
@@ -3722,7 +3968,10 @@ mod tests {
             // Insert out of order; the sort must reorder by ascending play_count.
             vec![cand(hit), cand(some), cand(never), cand(zero)],
         );
-        let result = ids(&run_pipeline(&input, &lib_pipeline(vec![OrderingKey::Excavation])));
+        let result = ids(&run_pipeline(
+            &input,
+            &lib_pipeline(vec![OrderingKey::Excavation]),
+        ));
         // never (None→0) and zero (0) tie at 0 → stable insertion order keeps `never` before `zero`.
         assert_eq!(result, vec!["never", "zero", "some", "hit"]);
     }
@@ -3743,7 +3992,10 @@ mod tests {
             &lib_pipeline(vec![OrderingKey::PlayCount]),
         ));
         by_play_count.reverse();
-        assert_eq!(by_excavation, by_play_count, "excavation reverses PlayCount on distinct counts");
+        assert_eq!(
+            by_excavation, by_play_count,
+            "excavation reverses PlayCount on distinct counts"
+        );
         assert_eq!(by_excavation, vec!["a", "b", "c"]);
     }
 
@@ -3757,7 +4009,10 @@ mod tests {
         ];
         let input = PipelineInput::default().with_pool(SourceKind::Library, None, pool);
         assert_eq!(
-            ids(&run_pipeline(&input, &lib_pipeline(vec![OrderingKey::Excavation]))),
+            ids(&run_pipeline(
+                &input,
+                &lib_pipeline(vec![OrderingKey::Excavation])
+            )),
             vec!["p1", "p2", "p3"],
         );
     }
@@ -3775,7 +4030,10 @@ mod tests {
             vec![cand(new), cand(old), cand(mid)],
         );
         assert_eq!(
-            ids(&run_pipeline(&input, &lib_pipeline(vec![OrderingKey::Rediscovery]))),
+            ids(&run_pipeline(
+                &input,
+                &lib_pipeline(vec![OrderingKey::Rediscovery])
+            )),
             vec!["old", "mid", "new"],
         );
     }
@@ -3792,7 +4050,10 @@ mod tests {
             None,
             vec![cand(none), cand(newer), cand(blank), cand(oldest)],
         );
-        let result = ids(&run_pipeline(&input, &lib_pipeline(vec![OrderingKey::Rediscovery])));
+        let result = ids(&run_pipeline(
+            &input,
+            &lib_pipeline(vec![OrderingKey::Rediscovery]),
+        ));
         // Real dates first (oldest→newer); the two absent-date tracks sink to the bottom, stable.
         assert_eq!(result, vec!["oldest", "newer", "none", "blank"]);
         assert!(
@@ -3818,7 +4079,10 @@ mod tests {
             &lib_pipeline(vec![OrderingKey::DateCreated]),
         ));
         by_date_created.reverse();
-        assert_eq!(by_rediscovery, by_date_created, "rediscovery reverses DateCreated on distinct dates");
+        assert_eq!(
+            by_rediscovery, by_date_created,
+            "rediscovery reverses DateCreated on distinct dates"
+        );
         assert_eq!(by_rediscovery, vec!["a", "b", "c"]);
     }
 
@@ -3852,11 +4116,8 @@ mod tests {
         // A legacy-default pipeline never lists the new keys → identical selection to today.
         let a = song_plays("a", Some(99)); // many plays, would sink under Excavation
         let b = song_dated("b", Some("2010-01-01")); // ancient, would lead under Rediscovery
-        let input = PipelineInput::default().with_pool(
-            SourceKind::Library,
-            None,
-            vec![cand(a), cand(b)],
-        );
+        let input =
+            PipelineInput::default().with_pool(SourceKind::Library, None, vec![cand(a), cand(b)]);
         let legacy = AutoFillPipeline::default_legacy(Some(100_000_000));
         // Neither key participates; legacy keys (fav/playCount/dateCreated) decide. `a` has 99 plays
         // vs `b`'s 0 → `a` leads on PlayCount. Confirms the new arms are fully opt-in.
@@ -3869,10 +4130,18 @@ mod tests {
     fn new_ordering_keys_serde_round_trip() {
         let json = r#"{ "ordering": ["excavation", "rediscovery"] }"#;
         let p: AutoFillPipeline = serde_json::from_str(json).unwrap();
-        assert_eq!(p.ordering, vec![OrderingKey::Excavation, OrderingKey::Rediscovery]);
+        assert_eq!(
+            p.ordering,
+            vec![OrderingKey::Excavation, OrderingKey::Rediscovery]
+        );
         // camelCase wire form round-trips byte-stable.
-        assert!(serde_json::to_string(&p).unwrap().contains("\"excavation\""));
-        let back: AutoFillPipeline = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert!(
+            serde_json::to_string(&p)
+                .unwrap()
+                .contains("\"excavation\"")
+        );
+        let back: AutoFillPipeline =
+            serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(p, back);
     }
 
@@ -3896,7 +4165,8 @@ mod tests {
 
         // A default pipeline omits nothing surprising and round-trips identical (fast-path safe).
         let def = AutoFillPipeline::default();
-        let back: AutoFillPipeline = serde_json::from_str(&serde_json::to_string(&def).unwrap()).unwrap();
+        let back: AutoFillPipeline =
+            serde_json::from_str(&serde_json::to_string(&def).unwrap()).unwrap();
         assert_eq!(def, back);
     }
 
@@ -3907,11 +4177,24 @@ mod tests {
     /// A pool of `n` tracks, all not-on-device, big enough to all fit a large budget.
     fn shuffle_pool(n: usize) -> Vec<Candidate> {
         (0..n)
-            .map(|i| cand(song_sized(&format!("t{i:02}"), false, 0, "2024-01-01", 1_000_000)))
+            .map(|i| {
+                cand(song_sized(
+                    &format!("t{i:02}"),
+                    false,
+                    0,
+                    "2024-01-01",
+                    1_000_000,
+                ))
+            })
             .collect()
     }
 
-    fn run_seeded(pool: Vec<Candidate>, ordering: Vec<OrderingKey>, rarity: RarityStage, seed: u64) -> Vec<String> {
+    fn run_seeded(
+        pool: Vec<Candidate>,
+        ordering: Vec<OrderingKey>,
+        rarity: RarityStage,
+        seed: u64,
+    ) -> Vec<String> {
         let input = PipelineInput {
             seed,
             ..Default::default()
@@ -3933,13 +4216,26 @@ mod tests {
     #[test]
     fn random_shuffle_is_deterministic_given_seed() {
         // AC 1/2: same (input, seed, pipeline) ⇒ byte-identical order; re-running is identical.
-        let a = run_seeded(shuffle_pool(8), vec![OrderingKey::Random], RarityStage::default(), 42);
-        let b = run_seeded(shuffle_pool(8), vec![OrderingKey::Random], RarityStage::default(), 42);
+        let a = run_seeded(
+            shuffle_pool(8),
+            vec![OrderingKey::Random],
+            RarityStage::default(),
+            42,
+        );
+        let b = run_seeded(
+            shuffle_pool(8),
+            vec![OrderingKey::Random],
+            RarityStage::default(),
+            42,
+        );
         assert_eq!(a, b, "same seed ⇒ identical order");
         // No track is lost or duplicated by the shuffle.
         let mut sorted = a.clone();
         sorted.sort();
-        assert_eq!(sorted, (0..8).map(|i| format!("t{i:02}")).collect::<Vec<_>>());
+        assert_eq!(
+            sorted,
+            (0..8).map(|i| format!("t{i:02}")).collect::<Vec<_>>()
+        );
         // A seeded shuffle does not leave the pool in its input order (would mean entropy never fired).
         let input_order: Vec<String> = (0..8).map(|i| format!("t{i:02}")).collect();
         assert_ne!(a, input_order, "seeded shuffle must actually reorder");
@@ -3948,16 +4244,39 @@ mod tests {
     #[test]
     fn random_shuffle_differs_across_seeds() {
         // AC 2: a different seed (very likely) yields a different order.
-        let a = run_seeded(shuffle_pool(8), vec![OrderingKey::Random], RarityStage::default(), 1);
-        let b = run_seeded(shuffle_pool(8), vec![OrderingKey::Random], RarityStage::default(), 999);
-        assert_ne!(a, b, "different seeds should (overwhelmingly likely) differ for 8 items");
+        let a = run_seeded(
+            shuffle_pool(8),
+            vec![OrderingKey::Random],
+            RarityStage::default(),
+            1,
+        );
+        let b = run_seeded(
+            shuffle_pool(8),
+            vec![OrderingKey::Random],
+            RarityStage::default(),
+            999,
+        );
+        assert_ne!(
+            a, b,
+            "different seeds should (overwhelmingly likely) differ for 8 items"
+        );
     }
 
     #[test]
     fn pipeline_without_random_is_seed_independent() {
         // AC 2: a pipeline that never lists Random/Rarity is byte-for-byte unaffected by the seed.
-        let a = run_seeded(shuffle_pool(6), vec![OrderingKey::PlayCount], RarityStage::default(), 1);
-        let b = run_seeded(shuffle_pool(6), vec![OrderingKey::PlayCount], RarityStage::default(), 12345);
+        let a = run_seeded(
+            shuffle_pool(6),
+            vec![OrderingKey::PlayCount],
+            RarityStage::default(),
+            1,
+        );
+        let b = run_seeded(
+            shuffle_pool(6),
+            vec![OrderingKey::PlayCount],
+            RarityStage::default(),
+            12345,
+        );
         assert_eq!(a, b, "no random key ⇒ seed has no effect");
     }
 
@@ -3978,7 +4297,11 @@ mod tests {
             rare_max_plays: 5,
         };
         let order = run_seeded(pool, vec![OrderingKey::Rarity], rarity, 7);
-        assert_eq!(order, vec!["leg", "com"], "the legendary gem draws ahead of the common hit");
+        assert_eq!(
+            order,
+            vec!["leg", "com"],
+            "the legendary gem draws ahead of the common hit"
+        );
     }
 
     #[test]
@@ -3996,7 +4319,11 @@ mod tests {
             rare_max_plays: 5,
         };
         let order = run_seeded(pool, vec![OrderingKey::Rarity], rarity, 3);
-        assert_eq!(order, vec!["leg", "com"], "the 0-weight common class sinks below the legendary");
+        assert_eq!(
+            order,
+            vec!["leg", "com"],
+            "the 0-weight common class sinks below the legendary"
+        );
     }
 
     #[test]
@@ -4005,8 +4332,16 @@ mod tests {
         // 1 for all) — identical to `OrderingKey::Random` at the same seed, and never panics.
         let disabled = RarityStage::default(); // enabled:false
         let as_rarity = run_seeded(shuffle_pool(8), vec![OrderingKey::Rarity], disabled, 77);
-        let as_random = run_seeded(shuffle_pool(8), vec![OrderingKey::Random], RarityStage::default(), 77);
-        assert_eq!(as_rarity, as_random, "disabled Rarity == uniform Random at the same seed");
+        let as_random = run_seeded(
+            shuffle_pool(8),
+            vec![OrderingKey::Random],
+            RarityStage::default(),
+            77,
+        );
+        assert_eq!(
+            as_rarity, as_random,
+            "disabled Rarity == uniform Random at the same seed"
+        );
     }
 
     #[test]
@@ -4028,9 +4363,20 @@ mod tests {
             common_weight: 0.000_001,
             rare_max_plays: 5,
         };
-        let order = run_seeded(pool, vec![OrderingKey::Favorite, OrderingKey::Rarity], rarity, 5);
-        assert_eq!(&order[0..2].iter().filter(|id| id.starts_with("fav")).count(), &2,
-            "both favorites must occupy the top two slots despite non-favorites being legendary");
+        let order = run_seeded(
+            pool,
+            vec![OrderingKey::Favorite, OrderingKey::Rarity],
+            rarity,
+            5,
+        );
+        assert_eq!(
+            &order[0..2]
+                .iter()
+                .filter(|id| id.starts_with("fav"))
+                .count(),
+            &2,
+            "both favorites must occupy the top two slots despite non-favorites being legendary"
+        );
     }
 
     /// Build a 3-track Library pipeline + input for pity tests: two hits (high play_count) and one
@@ -4074,11 +4420,21 @@ mod tests {
         // not-on-device track the PlayCount ordering would otherwise drop past budget.
         // 6 MB budget fits two 3 MB tracks; reserve = round(6M × 0.5) = 3 MB ⇒ one discovery (gem).
         let with_pity = pity_setup(pity_on(), 3, Some(6_000_000));
-        assert!(with_pity.contains(&"gem".to_string()), "pity guarantees the never-played gem");
-        assert_eq!(with_pity.first().map(String::as_str), Some("gem"), "the reserve fills first");
+        assert!(
+            with_pity.contains(&"gem".to_string()),
+            "pity guarantees the never-played gem"
+        );
+        assert_eq!(
+            with_pity.first().map(String::as_str),
+            Some("gem"),
+            "the reserve fills first"
+        );
         // Without pity the gem is dropped past budget (PlayCount keeps the two hits).
         let no_pity = pity_setup(PityStage::default(), 3, Some(6_000_000));
-        assert!(!no_pity.contains(&"gem".to_string()), "no pity ⇒ gem stays buried");
+        assert!(
+            !no_pity.contains(&"gem".to_string()),
+            "no pity ⇒ gem stays buried"
+        );
         assert_eq!(no_pity, vec!["hit1", "hit2"]);
     }
 
@@ -4086,16 +4442,25 @@ mod tests {
     fn pity_below_threshold_is_a_noop() {
         // AC 7: pity_streak < threshold ⇒ no reserve.
         let order = pity_setup(pity_on(), 2, Some(6_000_000));
-        assert!(!order.contains(&"gem".to_string()), "streak below threshold ⇒ no guarantee");
+        assert!(
+            !order.contains(&"gem".to_string()),
+            "streak below threshold ⇒ no guarantee"
+        );
         assert_eq!(order, vec!["hit1", "hit2"]);
     }
 
     #[test]
     fn pity_zero_ratio_is_a_noop() {
         // AC 7: guaranteed_ratio = 0 ⇒ reserve bytes round to 0 ⇒ no-op.
-        let pity = PityStage { guaranteed_ratio: 0.0, ..pity_on() };
+        let pity = PityStage {
+            guaranteed_ratio: 0.0,
+            ..pity_on()
+        };
         let order = pity_setup(pity, 3, Some(6_000_000));
-        assert!(!order.contains(&"gem".to_string()), "a 0 ratio reserves nothing");
+        assert!(
+            !order.contains(&"gem".to_string()),
+            "a 0 ratio reserves nothing"
+        );
     }
 
     #[test]
@@ -4103,7 +4468,11 @@ mod tests {
         // AC 7: an unbounded ceiling ⇒ no reserve. Everything fits, so the gem appears via the normal
         // PlayCount fill (ordered last), NOT pulled to the front by a reserve.
         let order = pity_setup(pity_on(), 5, None);
-        assert_eq!(order, vec!["hit1", "hit2", "gem"], "unbounded ceiling: pure PlayCount, no reserve");
+        assert_eq!(
+            order,
+            vec!["hit1", "hit2", "gem"],
+            "unbounded ceiling: pure PlayCount, no reserve"
+        );
     }
 
     #[test]
@@ -4117,10 +4486,16 @@ mod tests {
             cand(song_sized("hit", false, 100, "2024-01-01", 3_000_000)),
             cand(song_sized("gem", false, 0, "2024-01-01", 3_000_000)),
         ];
-        let mut history = HistorySnapshot { now: 1_000_000_000, ..Default::default() };
+        let mut history = HistorySnapshot {
+            now: 1_000_000_000,
+            ..Default::default()
+        };
         history.entries.insert(
             "resident".to_string(),
-            TrackHistory { last_synced_at: Some(1), ..Default::default() },
+            TrackHistory {
+                last_synced_at: Some(1),
+                ..Default::default()
+            },
         );
         let input = PipelineInput {
             history,
@@ -4131,14 +4506,29 @@ mod tests {
         let pipeline = AutoFillPipeline {
             sources: vec![SourceEntry::new(SourceKind::Library)],
             ordering: vec![OrderingKey::PlayCount],
-            memory: MemoryStage { stable_core_pct: Some(0.34), ..Default::default() },
-            pity: PityStage { guaranteed_ratio: 0.34, ..pity_on() },
-            budget: BudgetStage { max_bytes: Some(9_000_000), ..Default::default() },
+            memory: MemoryStage {
+                stable_core_pct: Some(0.34),
+                ..Default::default()
+            },
+            pity: PityStage {
+                guaranteed_ratio: 0.34,
+                ..pity_on()
+            },
+            budget: BudgetStage {
+                max_bytes: Some(9_000_000),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let order = ids(&run_pipeline(&input, &pipeline));
-        assert!(order.contains(&"resident".to_string()), "stable-core keeps the on-device resident");
-        assert!(order.contains(&"gem".to_string()), "pity reserve still surfaces the new gem");
+        assert!(
+            order.contains(&"resident".to_string()),
+            "stable-core keeps the on-device resident"
+        );
+        assert!(
+            order.contains(&"gem".to_string()),
+            "pity reserve still surfaces the new gem"
+        );
     }
 
     #[test]
@@ -4148,25 +4538,65 @@ mod tests {
         // fire). Returns 0 ⇒ the reserve does NOT fire AND the streak is not consumed.
         let pity = pity_on(); // enabled, threshold 3, ratio 0.5
         // Fires: enabled, streak >= threshold, bounded budget, positive reserve.
-        assert_eq!(pity_reserve_bytes(&pity, 3, 6_000_000), 3_000_000, "round(6M × 0.5)");
-        assert!(pity_reserve_bytes(&pity, 4, 6_000_000) > 0, "streak above threshold also fires");
-        // Does NOT fire — these are exactly the cases the recorder must NOT reset on:
-        assert_eq!(pity_reserve_bytes(&pity, 2, 6_000_000), 0, "below threshold");
-        assert_eq!(pity_reserve_bytes(&pity, 3, u64::MAX), 0, "unbounded ceiling never fires");
         assert_eq!(
-            pity_reserve_bytes(&PityStage { guaranteed_ratio: 0.0, ..pity_on() }, 3, 6_000_000),
+            pity_reserve_bytes(&pity, 3, 6_000_000),
+            3_000_000,
+            "round(6M × 0.5)"
+        );
+        assert!(
+            pity_reserve_bytes(&pity, 4, 6_000_000) > 0,
+            "streak above threshold also fires"
+        );
+        // Does NOT fire — these are exactly the cases the recorder must NOT reset on:
+        assert_eq!(
+            pity_reserve_bytes(&pity, 2, 6_000_000),
+            0,
+            "below threshold"
+        );
+        assert_eq!(
+            pity_reserve_bytes(&pity, 3, u64::MAX),
+            0,
+            "unbounded ceiling never fires"
+        );
+        assert_eq!(
+            pity_reserve_bytes(
+                &PityStage {
+                    guaranteed_ratio: 0.0,
+                    ..pity_on()
+                },
+                3,
+                6_000_000
+            ),
             0,
             "zero ratio reserves nothing"
         );
         assert_eq!(
-            pity_reserve_bytes(&PityStage { guaranteed_ratio: 0.000_001, ..pity_on() }, 3, 100, ),
+            pity_reserve_bytes(
+                &PityStage {
+                    guaranteed_ratio: 0.000_001,
+                    ..pity_on()
+                },
+                3,
+                100,
+            ),
             0,
             "a ratio that rounds to <1 byte does not fire"
         );
-        assert_eq!(pity_reserve_bytes(&PityStage::default(), 99, 6_000_000), 0, "disabled never fires");
+        assert_eq!(
+            pity_reserve_bytes(&PityStage::default(), 99, 6_000_000),
+            0,
+            "disabled never fires"
+        );
         // Ratio is clamped to [0,1]: an out-of-range manifest value cannot reserve beyond the ceiling.
         assert_eq!(
-            pity_reserve_bytes(&PityStage { guaranteed_ratio: 9.0, ..pity_on() }, 3, 6_000_000),
+            pity_reserve_bytes(
+                &PityStage {
+                    guaranteed_ratio: 9.0,
+                    ..pity_on()
+                },
+                3,
+                6_000_000
+            ),
             6_000_000,
             "ratio clamps to 1.0"
         );
@@ -4177,7 +4607,12 @@ mod tests {
     // ===================================================================
 
     fn civil(hour: u8, month: u8, day: u8) -> CivilTime {
-        CivilTime { hour, month, day, weekday: 0 }
+        CivilTime {
+            hour,
+            month,
+            day,
+            weekday: 0,
+        }
     }
 
     fn playlist_src(ref_id: &str) -> SourceEntry {
@@ -4192,27 +4627,54 @@ mod tests {
     fn context_window_time_of_day_normal_and_midnight_wrap() {
         // Normal window 6..11 (inclusive start, exclusive end).
         let morning = ContextRule {
-            window: ContextWindow::TimeOfDay { start_hour: 6, end_hour: 11 },
+            window: ContextWindow::TimeOfDay {
+                start_hour: 6,
+                end_hour: 11,
+            },
             ..Default::default()
         };
-        assert!(context_rule_active(&morning, &civil(6, 1, 1)), "06:00 is in [6,11)");
-        assert!(context_rule_active(&morning, &civil(10, 1, 1)), "10:00 is in [6,11)");
-        assert!(!context_rule_active(&morning, &civil(11, 1, 1)), "11:00 is exclusive end");
-        assert!(!context_rule_active(&morning, &civil(5, 1, 1)), "05:00 is before start");
+        assert!(
+            context_rule_active(&morning, &civil(6, 1, 1)),
+            "06:00 is in [6,11)"
+        );
+        assert!(
+            context_rule_active(&morning, &civil(10, 1, 1)),
+            "10:00 is in [6,11)"
+        );
+        assert!(
+            !context_rule_active(&morning, &civil(11, 1, 1)),
+            "11:00 is exclusive end"
+        );
+        assert!(
+            !context_rule_active(&morning, &civil(5, 1, 1)),
+            "05:00 is before start"
+        );
 
         // Midnight wrap 22..6 ⇒ active if hour >= 22 OR hour < 6.
         let night = ContextRule {
-            window: ContextWindow::TimeOfDay { start_hour: 22, end_hour: 6 },
+            window: ContextWindow::TimeOfDay {
+                start_hour: 22,
+                end_hour: 6,
+            },
             ..Default::default()
         };
         assert!(context_rule_active(&night, &civil(23, 1, 1)), "23:00 wraps");
         assert!(context_rule_active(&night, &civil(2, 1, 1)), "02:00 wraps");
-        assert!(!context_rule_active(&night, &civil(6, 1, 1)), "06:00 is the exclusive end");
-        assert!(!context_rule_active(&night, &civil(12, 1, 1)), "12:00 is outside the wrap");
+        assert!(
+            !context_rule_active(&night, &civil(6, 1, 1)),
+            "06:00 is the exclusive end"
+        );
+        assert!(
+            !context_rule_active(&night, &civil(12, 1, 1)),
+            "12:00 is outside the wrap"
+        );
 
         // Degenerate start==end matches nothing.
         let degenerate = ContextRule {
-            window: ContextWindow::TimeOfDay { start_hour: 9, end_hour: 9 },
+            window: ContextWindow::TimeOfDay {
+                start_hour: 9,
+                end_hour: 9,
+            },
             ..Default::default()
         };
         assert!(!context_rule_active(&degenerate, &civil(9, 1, 1)));
@@ -4230,7 +4692,9 @@ mod tests {
         assert!(!context_rule_active(&december, &CivilTime::default()));
 
         let summer = ContextRule {
-            window: ContextWindow::Months { months: vec![6, 7, 8] },
+            window: ContextWindow::Months {
+                months: vec![6, 7, 8],
+            },
             ..Default::default()
         };
         assert!(context_rule_active(&summer, &civil(0, 7, 15)));
@@ -4238,7 +4702,10 @@ mod tests {
 
         // DateRange normal: Mar 1 .. May 31.
         let spring = ContextRule {
-            window: ContextWindow::DateRange { start: (3, 1), end: (5, 31) },
+            window: ContextWindow::DateRange {
+                start: (3, 1),
+                end: (5, 31),
+            },
             ..Default::default()
         };
         assert!(context_rule_active(&spring, &civil(0, 4, 10)));
@@ -4246,13 +4713,28 @@ mod tests {
 
         // DateRange year-end wrap: Dec 15 .. Jan 5.
         let holidays = ContextRule {
-            window: ContextWindow::DateRange { start: (12, 15), end: (1, 5) },
+            window: ContextWindow::DateRange {
+                start: (12, 15),
+                end: (1, 5),
+            },
             ..Default::default()
         };
-        assert!(context_rule_active(&holidays, &civil(0, 12, 25)), "Dec 25 wraps");
-        assert!(context_rule_active(&holidays, &civil(0, 1, 3)), "Jan 3 wraps");
-        assert!(!context_rule_active(&holidays, &civil(0, 1, 6)), "Jan 6 is past the end");
-        assert!(!context_rule_active(&holidays, &civil(0, 6, 1)), "June is well outside");
+        assert!(
+            context_rule_active(&holidays, &civil(0, 12, 25)),
+            "Dec 25 wraps"
+        );
+        assert!(
+            context_rule_active(&holidays, &civil(0, 1, 3)),
+            "Jan 3 wraps"
+        );
+        assert!(
+            !context_rule_active(&holidays, &civil(0, 1, 6)),
+            "Jan 6 is past the end"
+        );
+        assert!(
+            !context_rule_active(&holidays, &civil(0, 6, 1)),
+            "June is well outside"
+        );
     }
 
     #[test]
@@ -4275,12 +4757,18 @@ mod tests {
             enabled: true,
             rules: vec![
                 ContextRule {
-                    window: ContextWindow::TimeOfDay { start_hour: 6, end_hour: 11 },
+                    window: ContextWindow::TimeOfDay {
+                        start_hour: 6,
+                        end_hour: 11,
+                    },
                     source_refs: vec!["morning".to_string()],
                     ..Default::default()
                 },
                 ContextRule {
-                    window: ContextWindow::TimeOfDay { start_hour: 18, end_hour: 23 },
+                    window: ContextWindow::TimeOfDay {
+                        start_hour: 18,
+                        end_hour: 23,
+                    },
                     source_refs: vec!["evening".to_string()],
                     ..Default::default()
                 },
@@ -4288,22 +4776,38 @@ mod tests {
         };
         let base = AutoFillPipeline {
             sources: vec![playlist_src("morning"), playlist_src("evening")],
-            budget: BudgetStage { max_bytes: Some(10_000_000), ..Default::default() },
+            budget: BudgetStage {
+                max_bytes: Some(10_000_000),
+                ..Default::default()
+            },
             ..Default::default()
         };
 
         // context.enabled = false ⇒ both phase sources run (today's behavior).
-        let disabled = AutoFillPipeline { context: ContextStage { enabled: false, ..context.clone() }, ..base.clone() };
+        let disabled = AutoFillPipeline {
+            context: ContextStage {
+                enabled: false,
+                ..context.clone()
+            },
+            ..base.clone()
+        };
         let mut disabled_ids = {
             let mut input = pools();
             input.history.local = civil(8, 1, 1); // ignored because disabled
             ids(&run_pipeline(&input, &disabled))
         };
         disabled_ids.sort();
-        assert_eq!(disabled_ids, vec!["e1", "m1"], "disabled ⇒ no gating, both phases fill");
+        assert_eq!(
+            disabled_ids,
+            vec!["e1", "m1"],
+            "disabled ⇒ no gating, both phases fill"
+        );
 
         // Enabled at 08:00 ⇒ only the morning phase; the evening source is suppressed.
-        let enabled = AutoFillPipeline { context: context.clone(), ..base.clone() };
+        let enabled = AutoFillPipeline {
+            context: context.clone(),
+            ..base.clone()
+        };
         let mut morning_input = pools();
         morning_input.history.local = civil(8, 1, 1);
         assert_eq!(ids(&run_pipeline(&morning_input, &enabled)), vec!["m1"]);
@@ -4341,18 +4845,31 @@ mod tests {
         input.history.local = civil(8, 1, 1);
 
         let pipeline = AutoFillPipeline {
-            sources: vec![playlist_src("morning"), playlist_src("evening"), SourceEntry::new(SourceKind::Library)],
-            budget: BudgetStage { max_bytes: Some(10_000_000), ..Default::default() },
+            sources: vec![
+                playlist_src("morning"),
+                playlist_src("evening"),
+                SourceEntry::new(SourceKind::Library),
+            ],
+            budget: BudgetStage {
+                max_bytes: Some(10_000_000),
+                ..Default::default()
+            },
             context: ContextStage {
                 enabled: true,
                 rules: vec![
                     ContextRule {
-                        window: ContextWindow::TimeOfDay { start_hour: 6, end_hour: 11 },
+                        window: ContextWindow::TimeOfDay {
+                            start_hour: 6,
+                            end_hour: 11,
+                        },
                         source_refs: vec!["morning".to_string()],
                         ..Default::default()
                     },
                     ContextRule {
-                        window: ContextWindow::TimeOfDay { start_hour: 18, end_hour: 23 },
+                        window: ContextWindow::TimeOfDay {
+                            start_hour: 18,
+                            end_hour: 23,
+                        },
                         source_refs: vec!["evening".to_string()],
                         ..Default::default()
                     },
@@ -4375,7 +4892,15 @@ mod tests {
         let pools = || {
             let mk = |prefix: &str| {
                 (0..10)
-                    .map(|i| cand(song_sized(&format!("{prefix}{i}"), false, 0, "2024-01-01", 1_000_000)))
+                    .map(|i| {
+                        cand(song_sized(
+                            &format!("{prefix}{i}"),
+                            false,
+                            0,
+                            "2024-01-01",
+                            1_000_000,
+                        ))
+                    })
                     .collect::<Vec<_>>()
             };
             PipelineInput::default()
@@ -4384,7 +4909,10 @@ mod tests {
         };
         let base = AutoFillPipeline {
             sources: vec![playlist_src("a"), playlist_src("b")],
-            budget: BudgetStage { max_bytes: Some(10_000_000), ..Default::default() },
+            budget: BudgetStage {
+                max_bytes: Some(10_000_000),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let count = |items: &[AutoFillItem], prefix: &str| {
@@ -4407,8 +4935,16 @@ mod tests {
         let mut wi = pools();
         wi.history.local = civil(0, 7, 1); // July ⇒ rule active
         let w = run_pipeline(&wi, &weighted);
-        assert_eq!(count(&w, "a"), 7, "weight 3 ⇒ a gets the 0.75 share (7 of 1MB)");
-        assert_eq!(count(&w, "b"), 2, "b gets the residual 0.25 share (2 of 1MB)");
+        assert_eq!(
+            count(&w, "a"),
+            7,
+            "weight 3 ⇒ a gets the 0.75 share (7 of 1MB)"
+        );
+        assert_eq!(
+            count(&w, "b"),
+            2,
+            "b gets the residual 0.25 share (2 of 1MB)"
+        );
 
         // Max-compose: TWO active rules each weight 2.0 on "a" ⇒ effective weight 2.0 (NOT 4.0 product).
         // weight 2 ⇒ a share = 0.5·2/(0.5·2+0.5·1) = 0.667 (cap 6.67MB → 6), b → 0.333 (3.33MB → 3).
@@ -4435,7 +4971,11 @@ mod tests {
         let mut ci = pools();
         ci.history.local = civil(0, 7, 1);
         let c = run_pipeline(&ci, &composed);
-        assert_eq!(count(&c, "a"), 6, "max-compose keeps weight 2 (6 tracks), not the 4.0 product (8)");
+        assert_eq!(
+            count(&c, "a"),
+            6,
+            "max-compose keeps weight 2 (6 tracks), not the 4.0 product (8)"
+        );
         assert_eq!(count(&c, "b"), 3);
     }
 
@@ -4445,7 +4985,15 @@ mod tests {
         let pools = || {
             let mk = |prefix: &str| {
                 (0..10)
-                    .map(|i| cand(song_sized(&format!("{prefix}{i}"), false, 0, "2024-01-01", 1_000_000)))
+                    .map(|i| {
+                        cand(song_sized(
+                            &format!("{prefix}{i}"),
+                            false,
+                            0,
+                            "2024-01-01",
+                            1_000_000,
+                        ))
+                    })
                     .collect::<Vec<_>>()
             };
             PipelineInput::default()
@@ -4459,7 +5007,10 @@ mod tests {
         // weight 0 on the ONLY mentioned source: it is suppressed, "b" (unmentioned) takes the budget.
         let zero_only = AutoFillPipeline {
             sources: vec![playlist_src("a"), playlist_src("b")],
-            budget: BudgetStage { max_bytes: Some(10_000_000), ..Default::default() },
+            budget: BudgetStage {
+                max_bytes: Some(10_000_000),
+                ..Default::default()
+            },
             context: ContextStage {
                 enabled: true,
                 rules: vec![ContextRule {
@@ -4474,13 +5025,24 @@ mod tests {
         let mut zi = pools();
         zi.history.local = civil(0, 7, 1);
         let z = run_pipeline(&zi, &zero_only);
-        assert_eq!(count(&z, "a"), 0, "weight 0 suppresses 'a' (not an equal 1/n split)");
-        assert_eq!(count(&z, "b"), 10, "'b' (unmentioned) fills the whole budget");
+        assert_eq!(
+            count(&z, "a"),
+            0,
+            "weight 0 suppresses 'a' (not an equal 1/n split)"
+        );
+        assert_eq!(
+            count(&z, "b"),
+            10,
+            "'b' (unmentioned) fills the whole budget"
+        );
 
         // weight 0 on "a" in one active rule but 2.0 in another active rule ⇒ max-compose keeps it.
         let zero_then_boost = AutoFillPipeline {
             sources: vec![playlist_src("a"), playlist_src("b")],
-            budget: BudgetStage { max_bytes: Some(10_000_000), ..Default::default() },
+            budget: BudgetStage {
+                max_bytes: Some(10_000_000),
+                ..Default::default()
+            },
             context: ContextStage {
                 enabled: true,
                 rules: vec![
@@ -4503,7 +5065,11 @@ mod tests {
         let mut bi = pools();
         bi.history.local = civil(0, 7, 1);
         let b = run_pipeline(&bi, &zero_then_boost);
-        assert_eq!(count(&b, "a"), 6, "max(0, 2) = 2 ⇒ 'a' retained at weight 2 (6 tracks)");
+        assert_eq!(
+            count(&b, "a"),
+            6,
+            "max(0, 2) = 2 ⇒ 'a' retained at weight 2 (6 tracks)"
+        );
         assert_eq!(count(&b, "b"), 3);
     }
 
@@ -4514,7 +5080,15 @@ mod tests {
         let pools = || {
             let mk = |prefix: &str| {
                 (0..6)
-                    .map(|i| cand(song_sized(&format!("{prefix}{i}"), false, 0, "2024-01-01", 1_000_000)))
+                    .map(|i| {
+                        cand(song_sized(
+                            &format!("{prefix}{i}"),
+                            false,
+                            0,
+                            "2024-01-01",
+                            1_000_000,
+                        ))
+                    })
                     .collect::<Vec<_>>()
             };
             PipelineInput::default()
@@ -4526,17 +5100,26 @@ mod tests {
         // The is_set() guard must prevent any rule from being consulted while civil time is unset.
         let pipeline = AutoFillPipeline {
             sources: vec![playlist_src("morning"), playlist_src("evening")],
-            budget: BudgetStage { max_bytes: Some(12_000_000), ..Default::default() },
+            budget: BudgetStage {
+                max_bytes: Some(12_000_000),
+                ..Default::default()
+            },
             context: ContextStage {
                 enabled: true,
                 rules: vec![
                     ContextRule {
-                        window: ContextWindow::TimeOfDay { start_hour: 0, end_hour: 6 },
+                        window: ContextWindow::TimeOfDay {
+                            start_hour: 0,
+                            end_hour: 6,
+                        },
                         source_refs: vec!["morning".to_string()],
                         ..Default::default()
                     },
                     ContextRule {
-                        window: ContextWindow::TimeOfDay { start_hour: 18, end_hour: 23 },
+                        window: ContextWindow::TimeOfDay {
+                            start_hour: 18,
+                            end_hour: 23,
+                        },
                         source_refs: vec!["evening".to_string()],
                         ..Default::default()
                     },
@@ -4547,15 +5130,28 @@ mod tests {
 
         // Unset civil time (default ⇒ month 0): context inert ⇒ both sources run (6 each).
         let inert = run_pipeline(&pools(), &pipeline);
-        let count = |items: &[AutoFillItem], p: &str| items.iter().filter(|i| i.id.starts_with(p)).count();
-        assert_eq!(count(&inert, "morning"), 6, "unset civil time ⇒ context inert ⇒ morning runs");
-        assert_eq!(count(&inert, "evening"), 6, "unset civil time ⇒ evening NOT suppressed");
+        let count =
+            |items: &[AutoFillItem], p: &str| items.iter().filter(|i| i.id.starts_with(p)).count();
+        assert_eq!(
+            count(&inert, "morning"),
+            6,
+            "unset civil time ⇒ context inert ⇒ morning runs"
+        );
+        assert_eq!(
+            count(&inert, "evening"),
+            6,
+            "unset civil time ⇒ evening NOT suppressed"
+        );
 
         // Minted civil time at 00:00 Jan 1 (month set): the rule now fires ⇒ evening suppressed.
         let mut active = pools();
         active.history.local = civil(0, 1, 1);
         let gated = run_pipeline(&active, &pipeline);
-        assert_eq!(count(&gated, "evening"), 0, "minted hour-0 civil time ⇒ evening suppressed by the rule");
+        assert_eq!(
+            count(&gated, "evening"),
+            0,
+            "minted hour-0 civil time ⇒ evening suppressed by the rule"
+        );
         assert_eq!(count(&gated, "morning"), 6);
     }
 
@@ -4566,9 +5162,21 @@ mod tests {
             SourceKind::Library,
             None,
             vec![
-                cand_meta(song_sized("xmas", false, 0, "2024-01-01", 1_000_000), &["Christmas"], &[]),
-                cand_meta(song_sized("pop", false, 0, "2024-01-01", 1_000_000), &["Pop"], &[]),
-                cand_meta(song_sized("xmas-explicit", false, 0, "2024-01-01", 1_000_000), &["Christmas"], &["explicit"]),
+                cand_meta(
+                    song_sized("xmas", false, 0, "2024-01-01", 1_000_000),
+                    &["Christmas"],
+                    &[],
+                ),
+                cand_meta(
+                    song_sized("pop", false, 0, "2024-01-01", 1_000_000),
+                    &["Pop"],
+                    &[],
+                ),
+                cand_meta(
+                    song_sized("xmas-explicit", false, 0, "2024-01-01", 1_000_000),
+                    &["Christmas"],
+                    &["explicit"],
+                ),
             ],
         );
         let pipeline = |month: u8| {
@@ -4578,7 +5186,10 @@ mod tests {
                 i,
                 AutoFillPipeline {
                     sources: vec![SourceEntry::new(SourceKind::Library)],
-                    budget: BudgetStage { max_bytes: Some(10_000_000), ..Default::default() },
+                    budget: BudgetStage {
+                        max_bytes: Some(10_000_000),
+                        ..Default::default()
+                    },
                     context: ContextStage {
                         enabled: true,
                         rules: vec![ContextRule {
@@ -4605,7 +5216,11 @@ mod tests {
         let (jul_in, jul_pipe) = pipeline(7);
         let mut jul = ids(&run_pipeline(&jul_in, &jul_pipe));
         jul.sort();
-        assert_eq!(jul, vec!["pop", "xmas", "xmas-explicit"], "inactive rule contributes nothing");
+        assert_eq!(
+            jul,
+            vec!["pop", "xmas", "xmas-explicit"],
+            "inactive rule contributes nothing"
+        );
     }
 
     #[test]
@@ -4629,29 +5244,66 @@ mod tests {
         // Missing either goal ⇒ None.
         assert_eq!(target_bitrate_kbps(&on(None, Some(600), None)), None);
         assert_eq!(target_bitrate_kbps(&on(Some(10_000_000), None, None)), None);
-        assert_eq!(target_bitrate_kbps(&on(Some(10_000_000), Some(0), None)), None, "zero duration ⇒ None");
+        assert_eq!(
+            target_bitrate_kbps(&on(Some(10_000_000), Some(0), None)),
+            None,
+            "zero duration ⇒ None"
+        );
         // Nominal: 10MB over 600s ⇒ 10_000_000*8/600_000 = 133 kbps.
-        assert_eq!(target_bitrate_kbps(&on(Some(10_000_000), Some(600), None)), Some(133));
+        assert_eq!(
+            target_bitrate_kbps(&on(Some(10_000_000), Some(600), None)),
+            Some(133)
+        );
         // Headroom reduces the effective bytes: (10MB-2MB)*8/600_000 = 106 kbps.
-        assert_eq!(target_bitrate_kbps(&on(Some(10_000_000), Some(600), Some(2_000_000))), Some(106));
+        assert_eq!(
+            target_bitrate_kbps(&on(Some(10_000_000), Some(600), Some(2_000_000))),
+            Some(106)
+        );
         // Tiny goal clamps up to 32; huge goal clamps down to 320.
-        assert_eq!(target_bitrate_kbps(&on(Some(1_000_000), Some(3600), None)), Some(32), "clamp floor");
-        assert_eq!(target_bitrate_kbps(&on(Some(1_000_000_000), Some(60), None)), Some(320), "clamp ceiling");
+        assert_eq!(
+            target_bitrate_kbps(&on(Some(1_000_000), Some(3600), None)),
+            Some(32),
+            "clamp floor"
+        );
+        assert_eq!(
+            target_bitrate_kbps(&on(Some(1_000_000_000), Some(60), None)),
+            Some(320),
+            "clamp ceiling"
+        );
     }
 
     #[test]
     fn bitrate_aware_estimate_shrinks_but_never_enlarges() {
         // Oversize source (10MB, 180s) at 128 kbps ⇒ transcoded 128*1000/8*180 = 2_880_000.
         let big = song_sized("big", false, 0, "2024-01-01", 10_000_000);
-        assert_eq!(estimated_size(&big, None), Some(10_000_000), "None ⇒ source estimate");
-        assert_eq!(estimated_size(&big, Some(128)), Some(2_880_000), "transcode shrinks the oversize source");
+        assert_eq!(
+            estimated_size(&big, None),
+            Some(10_000_000),
+            "None ⇒ source estimate"
+        );
+        assert_eq!(
+            estimated_size(&big, Some(128)),
+            Some(2_880_000),
+            "transcode shrinks the oversize source"
+        );
 
         // A source already smaller than the target is unchanged (transcoding only shrinks).
-        let small = Song { size_bytes: Some(1_000_000), ..song_sized("small", false, 0, "2024-01-01", 0) };
-        assert_eq!(estimated_size(&small, Some(128)), Some(1_000_000), "never enlarge a smaller source");
+        let small = Song {
+            size_bytes: Some(1_000_000),
+            ..song_sized("small", false, 0, "2024-01-01", 0)
+        };
+        assert_eq!(
+            estimated_size(&small, Some(128)),
+            Some(1_000_000),
+            "never enlarge a smaller source"
+        );
 
         // Zero/unknown duration can't produce a transcoded size ⇒ keep the source estimate (no 0-byte item).
-        let no_dur = Song { duration_seconds: 0, size_bytes: Some(2_000_000), ..song_sized("nd", false, 0, "2024-01-01", 0) };
+        let no_dur = Song {
+            duration_seconds: 0,
+            size_bytes: Some(2_000_000),
+            ..song_sized("nd", false, 0, "2024-01-01", 0)
+        };
         assert_eq!(estimated_size(&no_dur, Some(128)), Some(2_000_000));
     }
 
@@ -4662,7 +5314,15 @@ mod tests {
         // and the 600s duration target is met exactly.
         let pool = || {
             (0..3)
-                .map(|i| cand(song_sized(&format!("s{i}"), false, 0, "2024-01-01", 3_000_000)))
+                .map(|i| {
+                    cand(song_sized(
+                        &format!("s{i}"),
+                        false,
+                        0,
+                        "2024-01-01",
+                        3_000_000,
+                    ))
+                })
                 .map(|mut c| {
                     c.song.duration_seconds = 300;
                     c
@@ -4675,17 +5335,31 @@ mod tests {
             ..Default::default()
         };
 
-        let plain = AutoFillPipeline { budget: base_budget.clone(), ..Default::default() };
+        let plain = AutoFillPipeline {
+            budget: base_budget.clone(),
+            ..Default::default()
+        };
         let plain_input = PipelineInput::default().with_pool(SourceKind::Library, None, pool());
-        assert_eq!(run_pipeline(&plain_input, &plain).len(), 1, "no encoding ⇒ only one 3MB song fits 4MB");
+        assert_eq!(
+            run_pipeline(&plain_input, &plain).len(),
+            1,
+            "no encoding ⇒ only one 3MB song fits 4MB"
+        );
 
         let encoded = AutoFillPipeline {
-            budget: BudgetStage { encoding_from_goals: true, ..base_budget },
+            budget: BudgetStage {
+                encoding_from_goals: true,
+                ..base_budget
+            },
             ..Default::default()
         };
         let encoded_input = PipelineInput::default().with_pool(SourceKind::Library, None, pool());
         let result = run_pipeline(&encoded_input, &encoded);
-        assert_eq!(result.len(), 2, "encoding-from-goals shrinks each song so two fit the byte ceiling");
+        assert_eq!(
+            result.len(),
+            2,
+            "encoding-from-goals shrinks each song so two fit the byte ceiling"
+        );
         assert!(
             result.iter().map(|i| i.size_bytes).sum::<u64>() <= 4_000_000,
             "the bitrate-aware fill still respects the byte ceiling"
@@ -4706,7 +5380,10 @@ mod tests {
                 enabled: true,
                 rules: vec![
                     ContextRule {
-                        window: ContextWindow::TimeOfDay { start_hour: 6, end_hour: 11 },
+                        window: ContextWindow::TimeOfDay {
+                            start_hour: 6,
+                            end_hour: 11,
+                        },
                         source_refs: vec!["morning".to_string()],
                         weight: Some(2.0),
                         ..Default::default()
@@ -4718,7 +5395,10 @@ mod tests {
                         ..Default::default()
                     },
                     ContextRule {
-                        window: ContextWindow::DateRange { start: (12, 15), end: (1, 5) },
+                        window: ContextWindow::DateRange {
+                            start: (12, 15),
+                            end: (1, 5),
+                        },
                         source_refs: vec!["holiday".to_string()],
                         ..Default::default()
                     },
@@ -4728,16 +5408,24 @@ mod tests {
         };
         let json = serde_json::to_string(&pipeline).unwrap();
         let back: AutoFillPipeline = serde_json::from_str(&json).unwrap();
-        assert_eq!(pipeline, back, "context (all 3 window kinds) + encoding_from_goals round-trip");
+        assert_eq!(
+            pipeline, back,
+            "context (all 3 window kinds) + encoding_from_goals round-trip"
+        );
 
         // A malformed rule degrades to "no effect" (parse-tolerant) without aborting the parse.
         let with_bad_rule = r#"{"context":{"enabled":true,"rules":[{"window":{"bogusWindow":{}}},{"window":{"months":{"months":[12]}}}]}}"#;
         let parsed: AutoFillPipeline = serde_json::from_str(with_bad_rule).unwrap();
-        assert_eq!(parsed.context.rules.len(), 1, "the malformed rule is dropped; the valid one survives");
+        assert_eq!(
+            parsed.context.rules.len(),
+            1,
+            "the malformed rule is dropped; the valid one survives"
+        );
 
         // A default ContextStage / encoding flag round-trips and keeps the engine's default behavior.
         let default_back: AutoFillPipeline =
-            serde_json::from_str(&serde_json::to_string(&AutoFillPipeline::default()).unwrap()).unwrap();
+            serde_json::from_str(&serde_json::to_string(&AutoFillPipeline::default()).unwrap())
+                .unwrap();
         assert_eq!(default_back.context, ContextStage::default());
         assert!(!default_back.budget.encoding_from_goals);
     }
@@ -4787,16 +5475,32 @@ mod tests {
         let pipeline = AutoFillPipeline {
             sources: vec![SourceEntry::new(SourceKind::Library)],
             ordering: vec![OrderingKey::Favorite],
-            budget: BudgetStage { max_bytes: Some(10_000_000), ..Default::default() },
-            promotion: PromotionStage { promote_album_min_favorites: Some(2), ..Default::default() },
+            budget: BudgetStage {
+                max_bytes: Some(10_000_000),
+                ..Default::default()
+            },
+            promotion: PromotionStage {
+                promote_album_min_favorites: Some(2),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let result = ids(&run_pipeline(&input, &pipeline));
-        assert_eq!(result.len(), 3, "the whole 3-track album is atomic; the single can't also fit");
+        assert_eq!(
+            result.len(),
+            3,
+            "the whole 3-track album is atomic; the single can't also fit"
+        );
         for id in ["d1", "d2", "d3"] {
-            assert!(result.contains(&id.to_string()), "promoted album syncs whole: {id}");
+            assert!(
+                result.contains(&id.to_string()),
+                "promoted album syncs whole: {id}"
+            );
         }
-        assert!(!result.contains(&"s1".to_string()), "the loose single is squeezed out by the atomic album");
+        assert!(
+            !result.contains(&"s1".to_string()),
+            "the loose single is squeezed out by the atomic album"
+        );
     }
 
     #[test]
@@ -4813,12 +5517,22 @@ mod tests {
         let pipeline = AutoFillPipeline {
             sources: vec![SourceEntry::new(SourceKind::Library)],
             ordering: vec![OrderingKey::Favorite],
-            budget: BudgetStage { max_bytes: Some(10_000_000), ..Default::default() },
-            promotion: PromotionStage { promote_album_min_favorites: Some(2), ..Default::default() },
+            budget: BudgetStage {
+                max_bytes: Some(10_000_000),
+                ..Default::default()
+            },
+            promotion: PromotionStage {
+                promote_album_min_favorites: Some(2),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let result = ids(&run_pipeline(&input, &pipeline));
-        assert_eq!(result.len(), 3, "track-level fill packs 3 individual tracks (not whole-or-nothing)");
+        assert_eq!(
+            result.len(),
+            3,
+            "track-level fill packs 3 individual tracks (not whole-or-nothing)"
+        );
         // Favorites (d1, s1) lead; one more track fills the rest — the album was NOT taken atomically.
         assert!(result.contains(&"d1".to_string()) && result.contains(&"s1".to_string()));
     }
@@ -4837,11 +5551,17 @@ mod tests {
             sources: vec![SourceEntry::new(SourceKind::Library)],
             unit: Unit::Album,
             ordering: vec![OrderingKey::Favorite],
-            budget: BudgetStage { max_bytes: Some(50_000_000), ..Default::default() },
+            budget: BudgetStage {
+                max_bytes: Some(50_000_000),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let with_promo = AutoFillPipeline {
-            promotion: PromotionStage { promote_album_min_favorites: Some(2), ..Default::default() },
+            promotion: PromotionStage {
+                promote_album_min_favorites: Some(2),
+                ..Default::default()
+            },
             ..base.clone()
         };
         assert_eq!(
@@ -4851,12 +5571,18 @@ mod tests {
         );
 
         // None ⇒ track grouping equals a default pipeline.
-        let track_base = AutoFillPipeline { unit: Unit::Track, ..base };
+        let track_base = AutoFillPipeline {
+            unit: Unit::Track,
+            ..base
+        };
         let track_none = AutoFillPipeline {
             promotion: PromotionStage::default(),
             ..track_base.clone()
         };
-        assert_eq!(ids(&run_pipeline(&input, &track_base)), ids(&run_pipeline(&input, &track_none)));
+        assert_eq!(
+            ids(&run_pipeline(&input, &track_base)),
+            ids(&run_pipeline(&input, &track_none))
+        );
     }
 
     // ---- #8 Album/track space ratio -----------------------------------------------------
@@ -4878,8 +5604,14 @@ mod tests {
         let pipeline = AutoFillPipeline {
             sources: vec![SourceEntry::new(SourceKind::Library)],
             ordering: vec![OrderingKey::Favorite], // all favorited ⇒ pool order preserved
-            budget: BudgetStage { max_bytes: Some(8_000_000), ..Default::default() },
-            promotion: PromotionStage { album_track_ratio: Some(0.5), ..Default::default() },
+            budget: BudgetStage {
+                max_bytes: Some(8_000_000),
+                ..Default::default()
+            },
+            promotion: PromotionStage {
+                album_track_ratio: Some(0.5),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let mut result = ids(&run_pipeline(&input, &pipeline));
@@ -4895,8 +5627,14 @@ mod tests {
             vec!["b1", "b2", "f1", "f2"],
             "complete album fills the reserve first, then loose tracks fill the remainder to the ceiling"
         );
-        let total: u64 = run_pipeline(&input, &pipeline).iter().map(|i| i.size_bytes).sum();
-        assert_eq!(total, 8_000_000, "fills the ceiling exactly (4MB album reserve + 4MB loose tracks)");
+        let total: u64 = run_pipeline(&input, &pipeline)
+            .iter()
+            .map(|i| i.size_bytes)
+            .sum();
+        assert_eq!(
+            total, 8_000_000,
+            "fills the ceiling exactly (4MB album reserve + 4MB loose tracks)"
+        );
     }
 
     #[test]
@@ -4910,11 +5648,17 @@ mod tests {
         let base = AutoFillPipeline {
             sources: vec![SourceEntry::new(SourceKind::Library)],
             ordering: vec![OrderingKey::Favorite],
-            budget: BudgetStage { max_bytes: Some(20_000_000), ..Default::default() },
+            budget: BudgetStage {
+                max_bytes: Some(20_000_000),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let ratio_zero = AutoFillPipeline {
-            promotion: PromotionStage { album_track_ratio: Some(0.0), ..Default::default() },
+            promotion: PromotionStage {
+                album_track_ratio: Some(0.0),
+                ..Default::default()
+            },
             ..base.clone()
         };
         assert_eq!(
@@ -4928,12 +5672,32 @@ mod tests {
 
     fn spotlight_pool() -> Vec<Candidate> {
         // Artist X: one big hit + four barely-played tracks. Artist Y: four medium-play tracks.
-        let mut v = vec![cand(song_album("x_hit", "X", "x_alb", 1, 1, false, 100, 2_000_000))];
+        let mut v = vec![cand(song_album(
+            "x_hit", "X", "x_alb", 1, 1, false, 100, 2_000_000,
+        ))];
         for i in 1..=4 {
-            v.push(cand(song_album(&format!("x{i}"), "X", "x_alb", 1, 1 + i, false, 1, 2_000_000)));
+            v.push(cand(song_album(
+                &format!("x{i}"),
+                "X",
+                "x_alb",
+                1,
+                1 + i,
+                false,
+                1,
+                2_000_000,
+            )));
         }
         for i in 1..=4 {
-            v.push(cand(song_album(&format!("y{i}"), "Y", "y_alb", 1, i, false, 50, 2_000_000)));
+            v.push(cand(song_album(
+                &format!("y{i}"),
+                "Y",
+                "y_alb",
+                1,
+                i,
+                false,
+                50,
+                2_000_000,
+            )));
         }
         v
     }
@@ -4947,20 +5711,36 @@ mod tests {
         let no_spot = AutoFillPipeline {
             sources: vec![SourceEntry::new(SourceKind::Library)],
             ordering: vec![OrderingKey::PlayCount],
-            budget: BudgetStage { max_bytes: Some(10_000_000), ..Default::default() }, // 5 tracks
+            budget: BudgetStage {
+                max_bytes: Some(10_000_000),
+                ..Default::default()
+            }, // 5 tracks
             ..Default::default()
         };
         let with_spot = AutoFillPipeline {
-            promotion: PromotionStage { spotlight: true, spotlight_share: Some(0.6), ..Default::default() },
+            promotion: PromotionStage {
+                spotlight: true,
+                spotlight_share: Some(0.6),
+                ..Default::default()
+            },
             ..no_spot.clone()
         };
         let base = ids(&run_pipeline(&input, &no_spot));
         let spot = ids(&run_pipeline(&input, &with_spot));
         let x_base = base.iter().filter(|id| id.starts_with('x')).count();
         let x_spot = spot.iter().filter(|id| id.starts_with('x')).count();
-        assert_eq!(x_base, 1, "without spotlight, X is represented only by its hit");
-        assert!(x_spot >= 3, "spotlight fills the featured artist X in depth (got {x_spot})");
-        assert!(spot.contains(&"x_hit".to_string()), "the hit is still picked");
+        assert_eq!(
+            x_base, 1,
+            "without spotlight, X is represented only by its hit"
+        );
+        assert!(
+            x_spot >= 3,
+            "spotlight fills the featured artist X in depth (got {x_spot})"
+        );
+        assert!(
+            spot.contains(&"x_hit".to_string()),
+            "the hit is still picked"
+        );
     }
 
     #[test]
@@ -4975,40 +5755,75 @@ mod tests {
         let pipeline = AutoFillPipeline {
             sources: vec![SourceEntry::new(SourceKind::Library)],
             ordering: vec![OrderingKey::Random],
-            budget: BudgetStage { max_bytes: Some(2_000_000), ..Default::default() }, // exactly 1 track
-            promotion: PromotionStage { spotlight: true, spotlight_share: Some(1.0), ..Default::default() },
+            budget: BudgetStage {
+                max_bytes: Some(2_000_000),
+                ..Default::default()
+            }, // exactly 1 track
+            promotion: PromotionStage {
+                spotlight: true,
+                spotlight_share: Some(1.0),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let mut winners = std::collections::HashSet::new();
         for seed in 0..64u64 {
-            let input = PipelineInput { seed, ..Default::default() }
-                .with_pool(SourceKind::Library, None, pool.clone());
+            let input = PipelineInput {
+                seed,
+                ..Default::default()
+            }
+            .with_pool(SourceKind::Library, None, pool.clone());
             let r = ids(&run_pipeline(&input, &pipeline));
             assert_eq!(r.len(), 1);
             winners.insert(r[0].clone());
         }
-        assert_eq!(winners.len(), 2, "the featured artist (hence the picked track) varies by seed");
+        assert_eq!(
+            winners.len(),
+            2,
+            "the featured artist (hence the picked track) varies by seed"
+        );
     }
 
     #[test]
     fn promotion_spotlight_underfilled_reserve_spills_over() {
         // Featured artist X has only one 2MB track — far less than the 4MB reserve. The unused reserve
         // must spill to the primary pass (no wasted budget): the full 8MB ceiling is used and Y fills in.
-        let mut pool = vec![cand(song_album("x1", "X", "x_alb", 1, 1, true, 0, 2_000_000))];
+        let mut pool = vec![cand(song_album(
+            "x1", "X", "x_alb", 1, 1, true, 0, 2_000_000,
+        ))];
         for i in 1..=3 {
-            pool.push(cand(song_album(&format!("y{i}"), "Y", "y_alb", 1, i, false, 0, 2_000_000)));
+            pool.push(cand(song_album(
+                &format!("y{i}"),
+                "Y",
+                "y_alb",
+                1,
+                i,
+                false,
+                0,
+                2_000_000,
+            )));
         }
         let input = PipelineInput::default().with_pool(SourceKind::Library, None, pool);
         let pipeline = AutoFillPipeline {
             sources: vec![SourceEntry::new(SourceKind::Library)],
             ordering: vec![OrderingKey::Favorite], // X's fav track ranks first ⇒ X is featured
-            budget: BudgetStage { max_bytes: Some(8_000_000), ..Default::default() },
-            promotion: PromotionStage { spotlight: true, spotlight_share: Some(0.5), ..Default::default() },
+            budget: BudgetStage {
+                max_bytes: Some(8_000_000),
+                ..Default::default()
+            },
+            promotion: PromotionStage {
+                spotlight: true,
+                spotlight_share: Some(0.5),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let items = run_pipeline(&input, &pipeline);
         let total: u64 = items.iter().map(|i| i.size_bytes).sum();
-        assert_eq!(total, 8_000_000, "the under-filled reserve spills to the primary pass; no wasted budget");
+        assert_eq!(
+            total, 8_000_000,
+            "the under-filled reserve spills to the primary pass; no wasted budget"
+        );
         assert_eq!(items.len(), 4, "x1 + all three y tracks");
     }
 
@@ -5018,15 +5833,25 @@ mod tests {
         let no_spot = AutoFillPipeline {
             sources: vec![SourceEntry::new(SourceKind::Library)],
             ordering: vec![OrderingKey::PlayCount],
-            budget: BudgetStage { max_bytes: Some(10_000_000), ..Default::default() },
+            budget: BudgetStage {
+                max_bytes: Some(10_000_000),
+                ..Default::default()
+            },
             ..Default::default()
         };
         // spotlight:false ⇒ byte-identical to no-spotlight.
         let off = AutoFillPipeline {
-            promotion: PromotionStage { spotlight: false, spotlight_share: Some(0.6), ..Default::default() },
+            promotion: PromotionStage {
+                spotlight: false,
+                spotlight_share: Some(0.6),
+                ..Default::default()
+            },
             ..no_spot.clone()
         };
-        assert_eq!(ids(&run_pipeline(&input, &no_spot)), ids(&run_pipeline(&input, &off)));
+        assert_eq!(
+            ids(&run_pipeline(&input, &no_spot)),
+            ids(&run_pipeline(&input, &off))
+        );
 
         // Unbounded ceiling (no max_bytes) ⇒ the spotlight reserve is a no-op (can't reserve a fraction
         // of infinity) ⇒ byte-identical to the same unbounded pipeline without spotlight.
@@ -5035,7 +5860,11 @@ mod tests {
             ..no_spot.clone()
         };
         let unbounded_spot = AutoFillPipeline {
-            promotion: PromotionStage { spotlight: true, spotlight_share: Some(0.6), ..Default::default() },
+            promotion: PromotionStage {
+                spotlight: true,
+                spotlight_share: Some(0.6),
+                ..Default::default()
+            },
             ..unbounded.clone()
         };
         assert_eq!(
@@ -5061,11 +5890,17 @@ mod tests {
         let base = AutoFillPipeline {
             sources: vec![SourceEntry::new(SourceKind::Library)],
             ordering: vec![],
-            budget: BudgetStage { max_bytes: Some(100_000_000), ..Default::default() },
+            budget: BudgetStage {
+                max_bytes: Some(100_000_000),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let coherent = AutoFillPipeline {
-            promotion: PromotionStage { coherence: true, ..Default::default() },
+            promotion: PromotionStage {
+                coherence: true,
+                ..Default::default()
+            },
             ..base.clone()
         };
         let plain = run_pipeline(&input, &base);
@@ -5076,7 +5911,10 @@ mod tests {
         let mut clustered_ids = ids(&clustered);
         plain_ids.sort();
         clustered_ids.sort();
-        assert_eq!(plain_ids, clustered_ids, "coherence never changes WHICH tracks are selected");
+        assert_eq!(
+            plain_ids, clustered_ids,
+            "coherence never changes WHICH tracks are selected"
+        );
         let plain_bytes: u64 = plain.iter().map(|i| i.size_bytes).sum();
         let clustered_bytes: u64 = clustered.iter().map(|i| i.size_bytes).sum();
         assert_eq!(plain_bytes, clustered_bytes, "total bytes unchanged");
@@ -5107,7 +5945,10 @@ mod tests {
         let pipeline = AutoFillPipeline {
             sources: vec![SourceEntry::new(SourceKind::Library)],
             ordering: vec![OrderingKey::PlayCount],
-            budget: BudgetStage { max_bytes: Some(8_000_000), ..Default::default() },
+            budget: BudgetStage {
+                max_bytes: Some(8_000_000),
+                ..Default::default()
+            },
             promotion: PromotionStage {
                 spotlight: true,
                 spotlight_share: Some(0.4),
@@ -5118,9 +5959,16 @@ mod tests {
         };
         let items = run_pipeline(&input, &pipeline);
         let total: u64 = items.iter().map(|i| i.size_bytes).sum();
-        assert!(total <= 8_000_000, "combined reserves never exceed the ceiling (got {total})");
+        assert!(
+            total <= 8_000_000,
+            "combined reserves never exceed the ceiling (got {total})"
+        );
         let unique: std::collections::HashSet<_> = items.iter().map(|i| &i.id).collect();
-        assert_eq!(unique.len(), items.len(), "no id is emitted twice across the reserve passes");
+        assert_eq!(
+            unique.len(),
+            items.len(),
+            "no id is emitted twice across the reserve passes"
+        );
     }
 
     #[test]
@@ -5144,7 +5992,10 @@ mod tests {
         // A default PromotionStage round-trips and the Option fields are omitted.
         let d = PromotionStage::default();
         let dj = serde_json::to_string(&d).unwrap();
-        assert!(!dj.contains("spotlightShare"), "None options are omitted: {dj}");
+        assert!(
+            !dj.contains("spotlightShare"),
+            "None options are omitted: {dj}"
+        );
         assert_eq!(d, serde_json::from_str::<PromotionStage>(&dj).unwrap());
 
         // A missing promotion block degrades to default (parse tolerance).
@@ -5154,7 +6005,8 @@ mod tests {
         // Out-of-range floats are tolerated at parse (clamped only at consumption); a malformed-but-typed
         // block still deserializes rather than aborting.
         let wide: AutoFillPipeline =
-            serde_json::from_str(r#"{"promotion":{"spotlight":true,"spotlightShare":2.0}}"#).unwrap();
+            serde_json::from_str(r#"{"promotion":{"spotlight":true,"spotlightShare":2.0}}"#)
+                .unwrap();
         assert_eq!(wide.promotion.spotlight_share, Some(2.0));
     }
 }

@@ -1596,7 +1596,10 @@ mod tests {
 
         let url = provider.download_url("song1", None).await.expect("url");
 
-        assert_eq!(url, format!("http://host/jellyfin/Items/song1/Download?api_key={TOKEN}"));
+        assert_eq!(
+            url,
+            format!("http://host/jellyfin/Items/song1/Download?api_key={TOKEN}")
+        );
     }
 
     #[tokio::test]

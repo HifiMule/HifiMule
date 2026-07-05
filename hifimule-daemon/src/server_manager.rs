@@ -243,7 +243,8 @@ mod tests {
     use super::*;
 
     fn seed(db: &Database, url: &str, kind: &str, user: &str) -> String {
-        db.upsert_server(url, kind, user, None, None, None, None).unwrap()
+        db.upsert_server(url, kind, user, None, None, None, None)
+            .unwrap()
     }
 
     // load_from_db reflects the DB's rows and the `selected = 1` row (AC12/AC14:
@@ -343,7 +344,10 @@ mod tests {
             .unwrap()
             .server_id
             .expect("portable id derived on upsert");
-        assert_ne!(portable, local_id, "portable id differs from machine-local id");
+        assert_ne!(
+            portable, local_id,
+            "portable id differs from machine-local id"
+        );
         CredentialManager::save_server_credential(
             &local_id,
             &crate::api::ServerCredentials {
@@ -370,8 +374,10 @@ mod tests {
         );
 
         // Unknown portable id errors cleanly.
-        assert!(get_provider_by_server_id(&mgr, &db, "no-such-portable")
-            .await
-            .is_err());
+        assert!(
+            get_provider_by_server_id(&mgr, &db, "no-such-portable")
+                .await
+                .is_err()
+        );
     }
 }

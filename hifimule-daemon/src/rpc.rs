@@ -36,6 +36,7 @@ const ERR_CROSS_SERVER_CONFLICT: i32 = -7;
 /// The selected server's stored credential is expired/invalid (Story 2.11 AC11).
 /// Distinct from generic connection failures so the UI can scope a re-auth prompt.
 const ERR_UNAUTHORIZED: i32 = -8;
+const ERR_SYNC_CANCELLED: i32 = -9;
 const JELLYFIN_TICKS_PER_SECOND: u64 = 10_000_000;
 const GENRE_TRACK_PAGE_SIZE: u32 = 500;
 const GENRE_TRACK_MAX_PAGES: u32 = 200;
@@ -51,6 +52,14 @@ const SERVER_ICON_IDS: &[&str] = &[
     "broadcast-pin",
     "book",
 ];
+
+fn sync_cancelled_error() -> JsonRpcError {
+    JsonRpcError {
+        code: ERR_SYNC_CANCELLED,
+        message: "Sync cancelled".to_string(),
+        data: None,
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
@@ -1976,8 +1985,10 @@ fn reconcile_basket_server_ids(
     servers: &[crate::db::ServerConfig],
 ) -> Vec<crate::device::BasketItem> {
     // Set of valid portable ids (the only tags we keep untouched).
-    let portable_known: HashSet<&str> =
-        servers.iter().filter_map(|s| s.server_id.as_deref()).collect();
+    let portable_known: HashSet<&str> = servers
+        .iter()
+        .filter_map(|s| s.server_id.as_deref())
+        .collect();
     // { legacy-composite → portable, machine-local UUID → portable }.
     let mut remap: HashMap<String, String> = HashMap::new();
     for s in servers {
@@ -1989,8 +2000,10 @@ fn reconcile_basket_server_ids(
             );
         }
     }
-    let selected_portable: Option<String> =
-        servers.iter().find(|s| s.selected).and_then(|s| s.server_id.clone());
+    let selected_portable: Option<String> = servers
+        .iter()
+        .find(|s| s.selected)
+        .and_then(|s| s.server_id.clone());
 
     items
         .into_iter()
@@ -2583,11 +2596,13 @@ async fn provider_calculate_delta(
     // When basket is empty this is a pure auto-fill (device fully managed by auto-fill).
     // When basket has items this augments them — playlists/albums stay, free space is filled.
     // Story 13.1: rotation-tier index per emitted track, patched onto delta.adds below.
-    let mut af_tier_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut af_tier_map: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     // Story 13.5 #20: encoding-from-goals derived per-slot max-bitrate (kbps) per emitted auto-fill
     // track, patched onto delta.adds below (mirrors `af_tier_map`). Only populated when a transcode
     // profile is active for the slot — passthrough tracks never get a forced re-encode.
-    let mut af_bitrate_map: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut af_bitrate_map: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
     // Story 13.4 review: portable server ids whose pity discovery reserve genuinely fired this run
     // (shared `pity_reserve_bytes` gate, computed with the per-run budget). Set on the delta below so
     // the sync-completion recorder resets the dry-streak only for servers that actually fired.
@@ -3595,7 +3610,9 @@ fn push_fill_items_dedup(
     added
 }
 
-fn autofill_playlist_track(item: &crate::auto_fill::AutoFillItem) -> crate::sync::PlaylistTrackInfo {
+fn autofill_playlist_track(
+    item: &crate::auto_fill::AutoFillItem,
+) -> crate::sync::PlaylistTrackInfo {
     crate::sync::PlaylistTrackInfo {
         jellyfin_id: item.id.clone(),
         artist: item.artist.clone(),
@@ -3820,7 +3837,9 @@ fn record_autofill_history_after_sync(
     // refreshing resident rows and when carrying history across an id change.
     let mut history: HashMap<String, HashMap<String, Option<String>>> = HashMap::new();
     for server_id in &servers {
-        let rows = db.get_autofill_history(device_id, server_id).unwrap_or_default();
+        let rows = db
+            .get_autofill_history(device_id, server_id)
+            .unwrap_or_default();
         let map = rows
             .into_iter()
             .map(|(track, _last, tier)| (track, tier))
@@ -3884,7 +3903,10 @@ fn record_autofill_history_after_sync(
             Some(now),
             tier.as_deref(),
         ) {
-            crate::daemon_log!("[AutoFill] history id-change carry failed (non-fatal): {}", e);
+            crate::daemon_log!(
+                "[AutoFill] history id-change carry failed (non-fatal): {}",
+                e
+            );
         }
     }
 
@@ -3932,7 +3954,10 @@ fn record_autofill_history_after_sync(
             && servers_wrote.contains(server_id)
             && let Err(e) = db.advance_rotation_cursor(device_id, server_id)
         {
-            crate::daemon_log!("[AutoFill] rotation cursor advance failed (non-fatal): {}", e);
+            crate::daemon_log!(
+                "[AutoFill] rotation cursor advance failed (non-fatal): {}",
+                e
+            );
         }
 
         // Story 13.4 (+ review): pity dry-streak reset/increment, gated like the rotation advance —
@@ -4098,10 +4123,12 @@ async fn multi_provider_calculate_delta(
     // capacity budget so combined fill never oversubscribes the device (AC4).
     let descriptors = parse_auto_fill_descriptors(params);
     // Story 13.1: rotation-tier index per emitted track across all slots, patched onto delta.adds.
-    let mut af_tier_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut af_tier_map: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     // Story 13.5 #20: encoding-from-goals derived per-slot max-bitrate (kbps) per emitted auto-fill
     // track across all slots, patched onto delta.adds (mirrors `af_tier_map`).
-    let mut af_bitrate_map: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut af_bitrate_map: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
     // Story 13.4 review: portable server ids whose pity discovery reserve genuinely fired this run.
     let mut af_pity_fired: Vec<String> = Vec::new();
     let mut autofill_playlist_tracks = Vec::new();
@@ -4205,12 +4232,16 @@ async fn multi_provider_calculate_delta(
             // Story 13.4 review: did the pity reserve genuinely fire for this slot (same gate the
             // engine uses, with this slot's budget)? Drives the dry-streak reset at sync completion.
             if let Some(pipeline) = pipeline_opt
-                && crate::auto_fill::pipeline::pity_reserve_bytes(&pipeline.pity, pity_streak, budget)
-                    > 0
+                && crate::auto_fill::pipeline::pity_reserve_bytes(
+                    &pipeline.pity,
+                    pity_streak,
+                    budget,
+                ) > 0
             {
                 af_pity_fired.push(af_server.clone());
             }
-            let fill_items = match expand_auto_fill_slot(provider, pipeline_opt, fill_params).await {
+            let fill_items = match expand_auto_fill_slot(provider, pipeline_opt, fill_params).await
+            {
                 Ok(items) => items,
                 Err(e) => {
                     crate::daemon_log!(
@@ -4328,11 +4359,19 @@ async fn handle_sync_calculate_delta(
     if configured_pipeline_applies
         || sync_needs_provider_routing(&item_specs, selected_id.as_deref(), &auto_fill_servers)
     {
-        return multi_provider_calculate_delta(state, &item_specs, &manifest, &params).await;
+        let result = multi_provider_calculate_delta(state, &item_specs, &manifest, &params).await;
+        if state.sync_operation_manager.is_pipeline_cancelled() {
+            return Err(sync_cancelled_error());
+        }
+        return result;
     }
 
     if let Some(provider) = active_non_jellyfin_provider(state).await {
-        return provider_calculate_delta(state, provider, &item_ids, &manifest, &params).await;
+        let result = provider_calculate_delta(state, provider, &item_ids, &manifest, &params).await;
+        if state.sync_operation_manager.is_pipeline_cancelled() {
+            return Err(sync_cancelled_error());
+        }
+        return result;
     }
 
     // Fetch item details from Jellyfin for each desired ID
@@ -4413,6 +4452,9 @@ async fn handle_sync_calculate_delta(
         .iter()
         .filter(|id| favorite_basket_by_id.contains_key(*id))
     {
+        if state.sync_operation_manager.is_pipeline_cancelled() {
+            return Err(sync_cancelled_error());
+        }
         if let Some(favorite_item) = favorite_basket_by_id.get(item_id) {
             match jellyfin_favorite_sync_items_for_basket_item(
                 &state.jellyfin_client,
@@ -4430,6 +4472,9 @@ async fn handle_sync_calculate_delta(
     }
 
     for chunk in normal_item_ids.chunks(100) {
+        if state.sync_operation_manager.is_pipeline_cancelled() {
+            return Err(sync_cancelled_error());
+        }
         let chunk_strs: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
         match state
             .jellyfin_client
@@ -4469,6 +4514,9 @@ async fn handle_sync_calculate_delta(
                         let mut total_record_count: Option<u32> = None;
 
                         for page_index in 0..GENRE_TRACK_MAX_PAGES {
+                            if state.sync_operation_manager.is_pipeline_cancelled() {
+                                return Err(sync_cancelled_error());
+                            }
                             crate::daemon_log!(
                                 "[Genre Sync] Fetching page {} for genre '{}' (offset={})",
                                 page_index,
@@ -4755,6 +4803,9 @@ async fn handle_sync_calculate_delta(
         );
     }
 
+    if state.sync_operation_manager.is_pipeline_cancelled() {
+        return Err(sync_cancelled_error());
+    }
     Ok(delta_value_with_cleanup_metadata(&delta, &manifest))
 }
 
@@ -5004,7 +5055,23 @@ async fn handle_sync_execute(
             data: None,
         })?;
 
-    // Guard: reject if a sync is already running (covers the auto-sync race window)
+    // The UI calls sync_execute immediately after sync_calculate_delta. Give the
+    // preparation-only lock a short handoff window to drop before treating it as
+    // a real concurrent sync.
+    for _ in 0..20 {
+        if state
+            .sync_operation_manager
+            .get_active_operation_id()
+            .await
+            .is_some()
+        {
+            break;
+        }
+        if !state.sync_operation_manager.is_pipeline_active() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
     if state.sync_operation_manager.has_active_operation().await {
         return Err(JsonRpcError {
             code: ERR_SYNC_IN_PROGRESS,
@@ -5198,7 +5265,13 @@ async fn handle_sync_execute(
             }
             // Story 13.1: record auto-fill history (last_synced_at + tier) for the synced tracks and
             // advance rotation cursors. Best-effort — never affects sync status.
-            record_autofill_history_after_sync(&db, &sync_manifest, &delta, &all_errors, now_unix_secs());
+            record_autofill_history_after_sync(
+                &db,
+                &sync_manifest,
+                &delta,
+                &all_errors,
+                now_unix_secs(),
+            );
             if let Some(mut operation) = op_manager.get_operation(&op_id).await {
                 operation.status = if all_errors.is_empty() {
                     crate::sync::SyncStatus::Complete
@@ -5297,7 +5370,13 @@ async fn handle_sync_execute(
                         eprintln!("Failed to clear dirty flag on final manifest: {}", e);
                     }
                     // Story 13.1: record auto-fill history + advance rotation cursors (best-effort).
-                    record_autofill_history_after_sync(&db, &sync_manifest, &delta, &errors, now_unix_secs());
+                    record_autofill_history_after_sync(
+                        &db,
+                        &sync_manifest,
+                        &delta,
+                        &errors,
+                        now_unix_secs(),
+                    );
                     if let Some(mut operation) = op_manager.get_operation(&op_id).await {
                         operation.status = if errors.is_empty() {
                             crate::sync::SyncStatus::Complete
@@ -5507,23 +5586,24 @@ async fn handle_sync_cancel(
         data: None,
     })?;
 
-    let operation_id = params["operationId"].as_str().ok_or(JsonRpcError {
-        code: ERR_INVALID_PARAMS,
-        message: "Missing operationId".to_string(),
-        data: None,
-    })?;
-
-    let found = state
-        .sync_operation_manager
-        .request_cancel(operation_id)
-        .await;
+    let operation_id = params["operationId"].as_str();
+    let found = if let Some(operation_id) = operation_id {
+        state
+            .sync_operation_manager
+            .request_cancel(operation_id)
+            .await
+    } else {
+        state.sync_operation_manager.request_pipeline_cancel()
+    };
 
     if found {
         Ok(serde_json::json!({ "cancelled": true }))
     } else {
         Err(JsonRpcError {
             code: ERR_NOT_FOUND,
-            message: format!("No operation with id '{}'", operation_id),
+            message: operation_id
+                .map(|id| format!("No operation with id '{}'", id))
+                .unwrap_or_else(|| "No active sync pipeline".to_string()),
             data: None,
         })
     }
@@ -6440,7 +6520,10 @@ async fn handle_basket_auto_fill(
             Err(e) => {
                 return Err(JsonRpcError {
                     code: ERR_CONNECTION_FAILED,
-                    message: format!("Auto-fill failed: provider for {server_id} unavailable: {}", e.message),
+                    message: format!(
+                        "Auto-fill failed: provider for {server_id} unavailable: {}",
+                        e.message
+                    ),
                     data: None,
                 });
             }
@@ -6946,9 +7029,17 @@ mod tests {
                 .unwrap()
                 .max_bitrate_override_kbps
         };
-        assert_eq!(by_id("af-1"), Some(96), "auto-fill item gets the per-slot override");
+        assert_eq!(
+            by_id("af-1"),
+            Some(96),
+            "auto-fill item gets the per-slot override"
+        );
         assert_eq!(by_id("af-2"), Some(96));
-        assert_eq!(by_id("manual-1"), None, "manual item on the same server is untouched");
+        assert_eq!(
+            by_id("manual-1"),
+            None,
+            "manual item on the same server is untouched"
+        );
 
         // An empty map is a no-op (nothing stamped).
         let mut delta2 = crate::sync::SyncDelta {
@@ -6978,8 +7069,13 @@ mod tests {
         // Passthrough / no profile ⇒ no override AND the flag is cleared so the estimate stays source-based.
         assert!(!transcode_profile_active(None));
         assert!(!transcode_profile_active(Some("passthrough")));
-        assert_eq!(encoding_override_kbps(Some(&enc), false), None, "no transcode ⇒ no override");
-        let cleared = encoding_passthrough_clear(Some(&enc), false).expect("flag cleared in passthrough");
+        assert_eq!(
+            encoding_override_kbps(Some(&enc), false),
+            None,
+            "no transcode ⇒ no override"
+        );
+        let cleared =
+            encoding_passthrough_clear(Some(&enc), false).expect("flag cleared in passthrough");
         assert!(!cleared.budget.encoding_from_goals);
 
         // Active profile ⇒ derive the override (8MB/600s ⇒ 106 kbps) and keep the flag.
@@ -7373,15 +7469,24 @@ mod tests {
             "user",
             None,
         );
-        assert_eq!(config.server_id.as_deref(), Some(expected_portable.as_str()));
+        assert_eq!(
+            config.server_id.as_deref(),
+            Some(expected_portable.as_str())
+        );
         assert_eq!(result["serverId"], json!(expected_portable));
         assert_eq!(result["localId"], json!(config.id));
 
         // get_daemon_state surfaces the portable id on each server row and as
         // selectedServerPortableId; server.list rows carry serverId too.
         let state_json = handle_get_daemon_state(&state).await.unwrap();
-        assert_eq!(state_json["selectedServerPortableId"], json!(expected_portable));
-        assert_eq!(state_json["servers"][0]["serverId"], json!(expected_portable));
+        assert_eq!(
+            state_json["selectedServerPortableId"],
+            json!(expected_portable)
+        );
+        assert_eq!(
+            state_json["servers"][0]["serverId"],
+            json!(expected_portable)
+        );
         assert_eq!(state_json["selectedServerId"], json!(config.id));
         let list = handle_server_list(&state).await.unwrap();
         assert_eq!(list[0]["serverId"], json!(expected_portable));
@@ -7438,7 +7543,12 @@ mod tests {
         // unknown-server item dropped; the rest kept and mapped to the portable id.
         assert_eq!(out.len(), 4);
         for it in &out {
-            assert_eq!(it.server_id.as_deref(), Some("portable-1"), "item {}", it.id);
+            assert_eq!(
+                it.server_id.as_deref(),
+                Some("portable-1"),
+                "item {}",
+                it.id
+            );
         }
 
         // Idempotent: a second pass over already-portable items is a no-op.
@@ -8208,12 +8318,9 @@ mod tests {
         assert_eq!(arr.len(), 2);
         let selected_count = arr.iter().filter(|s| s["selected"] == true).count();
         assert_eq!(selected_count, 1);
-        assert!(
-            arr.iter()
-                .any(|s| s["id"] == local_a.as_str()
-                    && s["serverId"] == id_a.as_str()
-                    && s["selected"] == true)
-        );
+        assert!(arr.iter().any(|s| s["id"] == local_a.as_str()
+            && s["serverId"] == id_a.as_str()
+            && s["selected"] == true));
 
         // server.select(B) switches selection (AC2) — keyed on the local id.
         handle_server_select(&state, Some(json!({ "id": local_b })))
@@ -8696,7 +8803,9 @@ mod tests {
             .match_query(mockito::Matcher::Any)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1","searchResult3":{}}}"#)
+            .with_body(
+                r#"{"subsonic-response":{"status":"ok","version":"1.16.1","searchResult3":{}}}"#,
+            )
             .create_async()
             .await;
 
@@ -8715,11 +8824,11 @@ mod tests {
         .expect("connect");
 
         // The portable serverId is the routing key the UI passes.
-        let portable_id = handle_get_daemon_state(&state).await.unwrap()
-            ["selectedServerPortableId"]
-            .as_str()
-            .expect("portable id present")
-            .to_string();
+        let portable_id =
+            handle_get_daemon_state(&state).await.unwrap()["selectedServerPortableId"]
+                .as_str()
+                .expect("portable id present")
+                .to_string();
 
         // Budget must exceed the song's estimated size (bitrate×duration ≈ 4.8 MB), not its
         // reported `size` — run_auto_fill_provider sizes by bitrate.
@@ -8795,12 +8904,18 @@ mod tests {
             "fallback": []
         });
 
-        handle_auto_fill_set_pipeline(&state, Some(json!({ "serverId": "srv-1", "pipeline": pipeline_a.clone() })))
-            .await
-            .expect("set srv-1");
-        handle_auto_fill_set_pipeline(&state, Some(json!({ "serverId": "srv-2", "pipeline": pipeline_b.clone() })))
-            .await
-            .expect("set srv-2");
+        handle_auto_fill_set_pipeline(
+            &state,
+            Some(json!({ "serverId": "srv-1", "pipeline": pipeline_a.clone() })),
+        )
+        .await
+        .expect("set srv-1");
+        handle_auto_fill_set_pipeline(
+            &state,
+            Some(json!({ "serverId": "srv-2", "pipeline": pipeline_b.clone() })),
+        )
+        .await
+        .expect("set srv-2");
 
         let device = state.device_manager.get_current_device().await.unwrap();
         // srv-1's entry is untouched by the srv-2 write — byte-for-byte equal to what we persisted.
@@ -8841,7 +8956,10 @@ mod tests {
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].server_id.as_deref(), Some("s1"));
         assert_eq!(d[0].max_bytes, Some(1000));
-        assert_eq!(d[0].exclude_item_ids, vec!["x".to_string(), "y".to_string()]);
+        assert_eq!(
+            d[0].exclude_item_ids,
+            vec!["x".to_string(), "y".to_string()]
+        );
 
         // Legacy object, disabled → no descriptors.
         let legacy_disabled = json!({ "autoFill": { "enabled": false, "maxBytes": 1000 } });
@@ -8929,7 +9047,11 @@ mod tests {
         // Slot 1 (s1): returns the manual id (must be skipped — manual wins) plus
         // two new tracks (300 + 200).
         let added1 = push_fill_items_dedup(
-            vec![fill_item("m1", 100), fill_item("f1", 300), fill_item("f2", 200)],
+            vec![
+                fill_item("m1", 100),
+                fill_item("f1", 300),
+                fill_item("f2", 200),
+            ],
             &mut desired_items,
             &mut seen_ids,
             "s1",
@@ -8937,7 +9059,11 @@ mod tests {
             &mut autofill_playlist_tracks,
         );
         assert_eq!(added1, 500, "only the two new tracks count");
-        assert_eq!(desired_items.len(), 3, "manual + f1 + f2; m1 not duplicated");
+        assert_eq!(
+            desired_items.len(),
+            3,
+            "manual + f1 + f2; m1 not duplicated"
+        );
         assert_eq!(
             autofill_playlist_tracks
                 .iter()
@@ -8947,16 +9073,21 @@ mod tests {
             "playlist includes deduped autofill tracks only"
         );
         assert_eq!(
-            desired_items.iter().filter(|i| i.jellyfin_id == "m1").count(),
+            desired_items
+                .iter()
+                .filter(|i| i.jellyfin_id == "m1")
+                .count(),
             1,
             "manual item present exactly once"
         );
         assert_eq!(remaining, Some(500), "budget decremented by 500");
         // f1/f2 tagged with the slot's server.
-        assert!(desired_items
-            .iter()
-            .filter(|i| i.jellyfin_id == "f1" || i.jellyfin_id == "f2")
-            .all(|i| i.server_id.as_deref() == Some("s1")));
+        assert!(
+            desired_items
+                .iter()
+                .filter(|i| i.jellyfin_id == "f1" || i.jellyfin_id == "f2")
+                .all(|i| i.server_id.as_deref() == Some("s1"))
+        );
 
         // Slot 2 (s2) with a large maxBytes: the shared remaining (500) truncates
         // it — this is the budget the loop passes to run_auto_fill_provider.
@@ -8985,7 +9116,10 @@ mod tests {
             "playlist preserves cross-slot autofill order"
         );
         assert_eq!(
-            desired_items.iter().filter(|i| i.jellyfin_id == "f1").count(),
+            desired_items
+                .iter()
+                .filter(|i| i.jellyfin_id == "f1")
+                .count(),
             1,
             "f1 not re-added by slot 2"
         );

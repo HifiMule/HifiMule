@@ -337,8 +337,10 @@ impl AutoFillConfig {
     pub fn set_legacy(&mut self, enabled: bool, max_bytes: Option<u64>) {
         if self.pipelines.len() == 1 {
             let key = self.pipelines.keys().next().expect("len == 1").clone();
-            self.pipelines
-                .insert(key, pipeline_from_legacy(&AutoFillPrefs { enabled, max_bytes }));
+            self.pipelines.insert(
+                key,
+                pipeline_from_legacy(&AutoFillPrefs { enabled, max_bytes }),
+            );
             self.legacy = None;
         } else {
             self.legacy = Some(AutoFillPrefs { enabled, max_bytes });

@@ -779,6 +779,11 @@ async fn run_auto_sync(
         daemon_log!("[AutoSync] Device already in sync, nothing to do");
         return Ok(());
     }
+    if sync_op_manager.is_pipeline_cancelled() {
+        daemon_log!("[AutoSync] Cancelled before sync execution");
+        let _ = state_tx.send(DaemonState::Idle);
+        return Ok(());
+    }
     let destructive_cleanup_count = sync::destructive_cleanup_count(&delta, &manifest);
     if destructive_cleanup_count > sync::DESTRUCTIVE_CLEANUP_THRESHOLD {
         daemon_log!(
@@ -863,6 +868,17 @@ async fn run_auto_sync(
 
     match result {
         Ok((_synced_items, errors)) => {
+            if sync_op_manager.is_cancelled(&operation_id).await {
+                if let Some(mut operation) = sync_op_manager.get_operation(&operation_id).await {
+                    operation.status = sync::SyncStatus::Cancelled;
+                    sync_op_manager
+                        .update_operation(&operation_id, operation)
+                        .await;
+                }
+                let _ = state_tx.send(DaemonState::Idle);
+                return Ok(());
+            }
+
             // Clear dirty flag
             if let Err(e) = device_manager
                 .update_manifest(|m| {
@@ -1235,6 +1251,11 @@ async fn run_auto_sync_via_provider(
         let _ = state_tx.send(DaemonState::Idle);
         return Ok(());
     }
+    if sync_op_manager.is_pipeline_cancelled() {
+        daemon_log!("[AutoSync] Cancelled before sync execution");
+        let _ = state_tx.send(DaemonState::Idle);
+        return Ok(());
+    }
     let destructive_cleanup_count = sync::destructive_cleanup_count(&delta, &manifest);
     if destructive_cleanup_count > sync::DESTRUCTIVE_CLEANUP_THRESHOLD {
         daemon_log!(
@@ -1316,6 +1337,17 @@ async fn run_auto_sync_via_provider(
 
     match result {
         Ok((_synced_items, errors)) => {
+            if sync_op_manager.is_cancelled(&operation_id).await {
+                if let Some(mut operation) = sync_op_manager.get_operation(&operation_id).await {
+                    operation.status = sync::SyncStatus::Cancelled;
+                    sync_op_manager
+                        .update_operation(&operation_id, operation)
+                        .await;
+                }
+                let _ = state_tx.send(DaemonState::Idle);
+                return Ok(());
+            }
+
             if let Err(e) = device_manager
                 .update_manifest(|m| {
                     m.dirty = false;

@@ -466,6 +466,7 @@ pub struct SyncOperationManager {
     /// Covers the window between pipeline start and the first `create_operation` call,
     /// where `has_active_operation` would otherwise return false.
     pipeline_active: Arc<AtomicBool>,
+    pipeline_cancelled: Arc<AtomicBool>,
     /// Per-operation cancellation flags. Set to `true` by `request_cancel`; polled by
     /// the sync loop between files via `is_cancelled`. Never removed — old entries for
     /// completed operations are harmless and naturally sized (one AtomicBool per UUID).
@@ -477,6 +478,7 @@ impl SyncOperationManager {
         Self {
             operations: Arc::new(RwLock::new(HashMap::new())),
             pipeline_active: Arc::new(AtomicBool::new(false)),
+            pipeline_cancelled: Arc::new(AtomicBool::new(false)),
             cancel_tokens: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -486,9 +488,31 @@ impl SyncOperationManager {
     /// must treat this as a concurrency conflict and abort.
     pub fn try_start_pipeline(&self) -> Option<PipelineGuard> {
         let flag = Arc::clone(&self.pipeline_active);
-        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .ok()
-            .map(|_| PipelineGuard(flag))
+        if flag
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return None;
+        }
+        self.pipeline_cancelled.store(false, Ordering::Release);
+        Some(PipelineGuard(flag))
+    }
+
+    pub fn request_pipeline_cancel(&self) -> bool {
+        if self.pipeline_active.load(Ordering::Acquire) {
+            self.pipeline_cancelled.store(true, Ordering::Release);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn is_pipeline_cancelled(&self) -> bool {
+        self.pipeline_cancelled.load(Ordering::Acquire)
+    }
+
+    pub fn is_pipeline_active(&self) -> bool {
+        self.pipeline_active.load(Ordering::Acquire)
     }
 
     pub async fn create_operation(
@@ -4744,6 +4768,21 @@ mod tests {
 
         // Non-existent operation
         assert!(manager.get_operation("non-existent").await.is_none());
+    }
+
+    #[test]
+    fn test_pipeline_cancel_resets_for_next_pipeline() {
+        let manager = SyncOperationManager::new();
+
+        assert!(!manager.request_pipeline_cancel());
+        {
+            let _guard = manager.try_start_pipeline().unwrap();
+            assert!(manager.request_pipeline_cancel());
+            assert!(manager.is_pipeline_cancelled());
+        }
+
+        let _guard = manager.try_start_pipeline().unwrap();
+        assert!(!manager.is_pipeline_cancelled());
     }
 
     #[test]

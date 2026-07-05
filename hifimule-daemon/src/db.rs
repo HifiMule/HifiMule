@@ -81,7 +81,12 @@ pub fn derive_server_id(
 /// Retained only so legacy manifest/basket tags can be reconciled to the portable
 /// id rather than silently dropped (Story 2.13 AC6).
 pub fn legacy_composite_server_id(server_type: &str, url: &str, username: &str) -> String {
-    format!("{}|{}|{}", server_type, normalized_server_url(url), username)
+    format!(
+        "{}|{}|{}",
+        server_type,
+        normalized_server_url(url),
+        username
+    )
 }
 
 pub fn server_type_label(server_type: &str) -> &'static str {
@@ -1005,7 +1010,10 @@ mod tests {
         let mut rows = db.get_autofill_history("dev", "srv").unwrap();
         rows.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0], ("t1".to_string(), Some(1000), Some("0".to_string())));
+        assert_eq!(
+            rows[0],
+            ("t1".to_string(), Some(1000), Some("0".to_string()))
+        );
         assert_eq!(rows[1], ("t2".to_string(), Some(2000), None));
     }
 
@@ -1019,7 +1027,10 @@ mod tests {
             .unwrap();
         let rows = db.get_autofill_history("dev", "srv").unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0], ("t1".to_string(), Some(5000), Some("2".to_string())));
+        assert_eq!(
+            rows[0],
+            ("t1".to_string(), Some(5000), Some("2".to_string()))
+        );
     }
 
     #[test]
@@ -1345,7 +1356,15 @@ mod tests {
     fn test_update_server_identity_clears_icon_without_reordering() {
         let db = Database::memory().unwrap();
         let id = db
-            .upsert_server("http://music.example", "jellyfin", "u", None, None, None, None)
+            .upsert_server(
+                "http://music.example",
+                "jellyfin",
+                "u",
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         let before = db.get_server(&id).unwrap().unwrap().updated_at;
 
@@ -1438,8 +1457,16 @@ mod tests {
         db.init_for_test().unwrap();
         assert_eq!(db.list_servers().unwrap().len(), 0);
         // New-schema operations work post-migration.
-        db.upsert_server("http://new.example", "jellyfin", "u", None, None, None, None)
-            .unwrap();
+        db.upsert_server(
+            "http://new.example",
+            "jellyfin",
+            "u",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(db.list_servers().unwrap().len(), 1);
     }
 
@@ -1494,7 +1521,10 @@ mod tests {
         assert_eq!(a, b);
         // Lowercase hex SHA-256 → 64 chars.
         assert_eq!(a.len(), 64);
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
         // Matches the documented basis exactly.
         let expected = {
             use sha2::{Digest, Sha256};
@@ -1510,8 +1540,14 @@ mod tests {
         let rid_basis = derive_server_id("jellyfin", "http://a.example", "u", Some("RID-123"));
         assert_ne!(url_basis, rid_basis, "rid basis must differ from url basis");
         // Empty / whitespace reported id falls back to the URL basis.
-        assert_eq!(derive_server_id("jellyfin", "http://a.example", "u", Some("")), url_basis);
-        assert_eq!(derive_server_id("jellyfin", "http://a.example", "u", Some("   ")), url_basis);
+        assert_eq!(
+            derive_server_id("jellyfin", "http://a.example", "u", Some("")),
+            url_basis
+        );
+        assert_eq!(
+            derive_server_id("jellyfin", "http://a.example", "u", Some("   ")),
+            url_basis
+        );
     }
 
     #[test]
@@ -1530,7 +1566,15 @@ mod tests {
     fn upsert_persists_portable_id_and_remove_readd_is_stable() {
         let db = Database::memory().unwrap();
         let id1 = db
-            .upsert_server("http://media.example", "jellyfin", "alexis", None, None, None, Some("RID-9"))
+            .upsert_server(
+                "http://media.example",
+                "jellyfin",
+                "alexis",
+                None,
+                None,
+                None,
+                Some("RID-9"),
+            )
             .unwrap();
         let portable1 = db.get_server(&id1).unwrap().unwrap().server_id.unwrap();
         let expected =
@@ -1540,11 +1584,22 @@ mod tests {
         // Remove and re-add the same logical server (reported id known again).
         assert!(db.remove_server(&id1).unwrap());
         let id2 = db
-            .upsert_server("http://media.example", "jellyfin", "alexis", None, None, None, Some("RID-9"))
+            .upsert_server(
+                "http://media.example",
+                "jellyfin",
+                "alexis",
+                None,
+                None,
+                None,
+                Some("RID-9"),
+            )
             .unwrap();
         assert_ne!(id1, id2, "machine-local id is freshly minted");
         let portable2 = db.get_server(&id2).unwrap().unwrap().server_id.unwrap();
-        assert_eq!(portable1, portable2, "portable id is stable across remove/re-add");
+        assert_eq!(
+            portable1, portable2,
+            "portable id is stable across remove/re-add"
+        );
     }
 
     #[test]
@@ -1556,23 +1611,42 @@ mod tests {
         // with the original basis are orphaned.
         let db = Database::memory().unwrap();
         let id = db
-            .upsert_server("http://media.example", "jellyfin", "alexis", None, None, None, None)
+            .upsert_server(
+                "http://media.example",
+                "jellyfin",
+                "alexis",
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         let portable_initial = db.get_server(&id).unwrap().unwrap().server_id.unwrap();
-        let url_basis =
-            derive_server_id("jellyfin", "http://media.example", "alexis", None);
+        let url_basis = derive_server_id("jellyfin", "http://media.example", "alexis", None);
         assert_eq!(portable_initial, url_basis);
 
         // Reconnect captures a reported id. Portable id must NOT change.
         let id2 = db
-            .upsert_server("http://media.example", "jellyfin", "alexis", None, None, None, Some("RID-9"))
+            .upsert_server(
+                "http://media.example",
+                "jellyfin",
+                "alexis",
+                None,
+                None,
+                None,
+                Some("RID-9"),
+            )
             .unwrap();
         assert_eq!(id, id2, "same logical server resolves to the same row");
         let portable_after = db.get_server(&id).unwrap().unwrap().server_id.unwrap();
         assert_eq!(portable_after, url_basis, "server_id is frozen on UPDATE");
         // But reported id is captured opportunistically for diagnostics.
         assert_eq!(
-            db.get_server(&id).unwrap().unwrap().server_reported_id.as_deref(),
+            db.get_server(&id)
+                .unwrap()
+                .unwrap()
+                .server_reported_id
+                .as_deref(),
             Some("RID-9")
         );
     }
@@ -1581,7 +1655,15 @@ mod tests {
     fn server_id_remap_maps_local_and_composite_to_portable() {
         let db = Database::memory().unwrap();
         let local = db
-            .upsert_server("http://sub.example", "subsonic", "alexis", None, None, None, None)
+            .upsert_server(
+                "http://sub.example",
+                "subsonic",
+                "alexis",
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         let portable = db.get_server(&local).unwrap().unwrap().server_id.unwrap();
         let composite = legacy_composite_server_id("subsonic", "http://sub.example", "alexis");
