@@ -53,7 +53,7 @@ async function init() {
     const { rpcCall } = await import('./rpc');
 
     try {
-        const state = await rpcCall('get_daemon_state');
+        const state = await waitForDaemonState(rpcCall);
         await routeFromDaemonState(state);
     } catch (e) {
         console.error("Failed to check daemon state", e);
@@ -61,6 +61,19 @@ async function init() {
         const { initLoginView } = await import('./login');
         initLoginView(() => { reloadFromDaemon(); });
     }
+}
+
+async function waitForDaemonState(rpcCall: (method: string, params?: any) => Promise<any>): Promise<any> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 10; attempt++) {
+        try {
+            return await rpcCall('get_daemon_state');
+        } catch (error) {
+            lastError = error;
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+    }
+    throw lastError;
 }
 
 /**
