@@ -615,22 +615,7 @@ async fn run_auto_sync(
                 }
                 Ok(items) => {
                     daemon_log!("[AutoSync] Auto-fill resolved {} items", items.len());
-                    for item in items {
-                        desired_items.push(sync::DesiredItem {
-                            jellyfin_id: item.id,
-                            name: item.name,
-                            album: item.album,
-                            artist: item.artist,
-                            size_bytes: item.size_bytes,
-                            etag: None,
-                            provider_album_id: item.provider_album_id,
-                            provider_content_type: item.provider_content_type,
-                            provider_suffix: item.provider_suffix,
-                            original_bitrate: None,
-                            track_number: None,
-                            server_id: None,
-                        });
-                    }
+                    push_auto_fill_items(items, &mut desired_items, &mut playlist_sync_items);
                 }
                 Err(e) => {
                     daemon_log!("[AutoSync] Auto-fill failed: {}", e);
@@ -763,6 +748,53 @@ async fn run_auto_sync(
         }
     } // end else (basket_items non-empty)
 
+    if !manifest.basket_items.is_empty() && manifest.auto_fill.legacy_enabled() {
+        let synced_bytes: u64 = manifest.synced_items.iter().map(|s| s.size_bytes).sum();
+        let total_budget = if let Some(mb) = manifest.auto_fill.legacy_max_bytes() {
+            mb
+        } else {
+            match device_manager.get_device_storage().await {
+                Some(info) => info.free_bytes.saturating_add(synced_bytes),
+                None => {
+                    daemon_log!("[AutoSync] Cannot determine device capacity for auto-fill");
+                    let _ = state_tx.send(DaemonState::Idle);
+                    return Ok(());
+                }
+            }
+        };
+        let basket_size: u64 = desired_items.iter().map(|i| i.size_bytes).sum();
+        let max_fill_bytes = total_budget.saturating_sub(basket_size);
+        if max_fill_bytes > 0 {
+            let exclude_item_ids: Vec<String> = desired_items
+                .iter()
+                .map(|i| i.jellyfin_id.clone())
+                .collect();
+            let fill_params = crate::auto_fill::AutoFillParams {
+                exclude_item_ids,
+                max_fill_bytes,
+                device_id: manifest.device_id.clone(),
+                server_id: String::new(),
+                now_unix: crate::rpc::now_unix_secs(),
+                history: crate::auto_fill::HistorySnapshot::default(),
+                rotation_cursor: 0,
+                seed: 0,
+                pity_streak: 0,
+                local: crate::auto_fill::CivilTime::default(),
+            };
+            match crate::auto_fill::run_auto_fill(&jellyfin_client, fill_params).await {
+                Ok(items) => {
+                    daemon_log!("[AutoSync] Auto-fill resolved {} items", items.len());
+                    push_auto_fill_items(items, &mut desired_items, &mut playlist_sync_items);
+                }
+                Err(e) => {
+                    daemon_log!("[AutoSync] Auto-fill failed: {}", e);
+                    let _ = state_tx.send(DaemonState::Error);
+                    return Ok(());
+                }
+            }
+        }
+    }
+
     let mut seen_desired_ids = std::collections::HashSet::new();
     desired_items.retain(|item| seen_desired_ids.insert(item.jellyfin_id.clone()));
 
@@ -775,7 +807,7 @@ async fn run_auto_sync(
     delta.playlists = playlist_sync_items;
     let total_files = delta.adds.len() + delta.deletes.len();
 
-    if total_files == 0 && delta.id_changes.is_empty() {
+    if !auto_sync_delta_has_work(&delta, total_files) {
         daemon_log!("[AutoSync] Device already in sync, nothing to do");
         return Ok(());
     }
@@ -959,6 +991,126 @@ async fn run_auto_sync(
     }
 
     Ok(())
+}
+
+fn push_auto_fill_items(
+    items: Vec<auto_fill::AutoFillItem>,
+    desired_items: &mut Vec<sync::DesiredItem>,
+    playlist_sync_items: &mut Vec<sync::PlaylistSyncItem>,
+) {
+    let mut seen_ids: std::collections::HashSet<String> = desired_items
+        .iter()
+        .map(|item| item.jellyfin_id.clone())
+        .collect();
+    let mut tracks = Vec::new();
+    for item in items {
+        if seen_ids.insert(item.id.clone()) {
+            tracks.push(sync::PlaylistTrackInfo {
+                jellyfin_id: item.id.clone(),
+                artist: item.artist.clone(),
+                run_time_seconds: -1,
+            });
+            desired_items.push(sync::DesiredItem {
+                jellyfin_id: item.id,
+                name: item.name,
+                album: item.album,
+                artist: item.artist,
+                size_bytes: item.size_bytes,
+                etag: None,
+                provider_album_id: item.provider_album_id,
+                provider_content_type: item.provider_content_type,
+                provider_suffix: item.provider_suffix,
+                original_bitrate: None,
+                track_number: None,
+                server_id: None,
+            });
+        }
+    }
+    if !tracks.is_empty() {
+        playlist_sync_items.push(sync::PlaylistSyncItem {
+            jellyfin_id: "__hifimule_autofill".to_string(),
+            name: "Autofill".to_string(),
+            tracks,
+        });
+    }
+}
+
+fn auto_sync_delta_has_work(delta: &sync::SyncDelta, total_files: usize) -> bool {
+    total_files > 0 || !delta.id_changes.is_empty() || !delta.playlists.is_empty()
+}
+
+#[cfg(test)]
+mod auto_sync_tests {
+    use super::*;
+
+    fn fill_item(id: &str) -> auto_fill::AutoFillItem {
+        auto_fill::AutoFillItem {
+            id: id.to_string(),
+            name: id.to_string(),
+            album: None,
+            artist: Some("artist".to_string()),
+            provider_album_id: None,
+            provider_content_type: None,
+            provider_suffix: None,
+            size_bytes: 100,
+            priority_reason: "test".to_string(),
+            tier: None,
+        }
+    }
+
+    #[test]
+    fn push_auto_fill_items_dedups_and_writes_playlist() {
+        let mut desired_items = vec![sync::DesiredItem {
+            jellyfin_id: "manual".to_string(),
+            name: "manual".to_string(),
+            album: None,
+            artist: None,
+            size_bytes: 10,
+            etag: None,
+            provider_album_id: None,
+            provider_content_type: None,
+            provider_suffix: None,
+            original_bitrate: None,
+            track_number: None,
+            server_id: None,
+        }];
+        let mut playlists = Vec::new();
+
+        push_auto_fill_items(
+            vec![fill_item("manual"), fill_item("fill")],
+            &mut desired_items,
+            &mut playlists,
+        );
+
+        assert_eq!(desired_items.len(), 2);
+        assert_eq!(desired_items[1].jellyfin_id, "fill");
+        assert_eq!(playlists.len(), 1);
+        assert_eq!(playlists[0].name, "Autofill");
+        assert_eq!(playlists[0].tracks.len(), 1);
+        assert_eq!(playlists[0].tracks[0].jellyfin_id, "fill");
+    }
+
+    #[test]
+    fn auto_sync_delta_has_work_when_only_playlist_changes() {
+        let delta = sync::SyncDelta {
+            adds: vec![],
+            deletes: vec![],
+            id_changes: vec![],
+            unchanged: 1,
+            playlists: vec![sync::PlaylistSyncItem {
+                jellyfin_id: "__hifimule_autofill".to_string(),
+                name: "Autofill".to_string(),
+                tracks: vec![sync::PlaylistTrackInfo {
+                    jellyfin_id: "fill".to_string(),
+                    artist: None,
+                    run_time_seconds: -1,
+                }],
+            }],
+            pity_fired_servers: vec![],
+        };
+
+        assert!(auto_sync_delta_has_work(&delta, 0));
+    }
 }
 
 fn to_desired_item(item: api::JellyfinItem) -> sync::DesiredItem {
@@ -1208,22 +1360,7 @@ async fn run_auto_sync_via_provider(
                         "[AutoSync] Provider auto-fill resolved {} items",
                         items.len()
                     );
-                    for item in items {
-                        desired_items.push(sync::DesiredItem {
-                            jellyfin_id: item.id,
-                            name: item.name,
-                            album: item.album,
-                            artist: item.artist,
-                            size_bytes: item.size_bytes,
-                            etag: None,
-                            provider_album_id: item.provider_album_id,
-                            provider_content_type: item.provider_content_type,
-                            provider_suffix: item.provider_suffix,
-                            original_bitrate: None,
-                            track_number: None,
-                            server_id: None,
-                        });
-                    }
+                    push_auto_fill_items(items, &mut desired_items, &mut playlist_sync_items);
                 }
                 Err(e) => {
                     daemon_log!("[AutoSync] Provider auto-fill failed: {}", e);
@@ -1246,7 +1383,7 @@ async fn run_auto_sync_via_provider(
     delta.playlists = playlist_sync_items;
     let total_files = delta.adds.len() + delta.deletes.len();
 
-    if total_files == 0 && delta.id_changes.is_empty() {
+    if !auto_sync_delta_has_work(&delta, total_files) {
         daemon_log!("[AutoSync] Device already in sync, nothing to do");
         let _ = state_tx.send(DaemonState::Idle);
         return Ok(());
