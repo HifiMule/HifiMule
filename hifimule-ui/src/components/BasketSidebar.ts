@@ -1211,13 +1211,7 @@ export class BasketSidebar {
         // Check daemon for a sync started outside this window (e.g. auto-sync on connect).
         // If one is already running, attach to it instead of starting a new one.
         try {
-            const daemonState = await rpcCall('get_daemon_state') as any;
-            const activeOpId = daemonState?.activeOperationId as string | null;
-            if (activeOpId) {
-                this.currentOperationId = activeOpId;
-                this.startPolling();
-                return;
-            }
+            if (await this.attachToRunningSync()) return;
         } catch {
             // Ignore — if daemon state can't be fetched, let the sync attempt proceed and
             // the server-side guard will reject it if a concurrent sync is truly running.
@@ -1306,6 +1300,12 @@ export class BasketSidebar {
 
             this.startPolling();
         } catch (err) {
+            if (
+                (err as Error).message === 'A sync operation is already in progress'
+                && await this.attachToRunningSync()
+            ) {
+                return;
+            }
             this.stopPolling();
             this.isSyncing = false;
             this.currentOperationId = null;
@@ -1316,6 +1316,26 @@ export class BasketSidebar {
             }
             this.showError(t('basket.sync.failed_to_start', { message: (err as Error).message }));
         }
+    }
+
+    private async attachToRunningSync(): Promise<boolean> {
+        while (!this.isDestroyed) {
+            let daemonState: any;
+            try {
+                daemonState = await rpcCall('get_daemon_state') as any;
+            } catch {
+                return false;
+            }
+            const activeOpId = daemonState?.activeOperationId as string | null;
+            if (activeOpId) {
+                this.currentOperationId = activeOpId;
+                this.startPolling();
+                return true;
+            }
+            if (daemonState?.syncPipelineActive !== true) return false;
+            await new Promise(resolve => window.setTimeout(resolve, 500));
+        }
+        return false;
     }
 
     private changeReasonSummary(delta: unknown): Array<{ reason: string; count: number }> {

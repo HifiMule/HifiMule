@@ -1967,6 +1967,7 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         "autoSyncOnConnect": auto_sync_on_connect,
         "autoFill": auto_fill,
         "activeOperationId": active_operation_id,
+        "syncPipelineActive": state.sync_operation_manager.is_pipeline_active(),
         "connectedDevices": connected_devices_json,
         "selectedDevicePath": selected_device_path,
         "supportsPlaylistWrite": supports_playlist_write,
@@ -10663,8 +10664,18 @@ mod tests {
             serde_json::Value::Null,
             "No running operation → activeOperationId must be null"
         );
+        assert_eq!(result["syncPipelineActive"], false);
         assert_eq!(result["serverType"], serde_json::Value::Null);
         assert_eq!(result["serverVersion"], serde_json::Value::Null);
+
+        let pipeline_guard = state.sync_operation_manager.try_start_pipeline().unwrap();
+        let result_preparing = handle_get_daemon_state(&state).await.unwrap();
+        assert_eq!(
+            result_preparing["activeOperationId"],
+            serde_json::Value::Null
+        );
+        assert_eq!(result_preparing["syncPipelineActive"], true);
+        drop(pipeline_guard);
 
         state
             .server_manager
