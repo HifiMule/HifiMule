@@ -1583,6 +1583,24 @@ fn is_removable_drive(_path: &Path) -> bool {
     true // macOS/Linux already filtered by mount detection
 }
 
+#[cfg(target_os = "windows")]
+fn friendly_name_drive_root(friendly_name: &str) -> Option<PathBuf> {
+    let s = friendly_name.trim();
+    let bytes = s.as_bytes();
+    if bytes.len() == 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
+    {
+        Some(PathBuf::from(format!(
+            "{}:\\",
+            (bytes[0] as char).to_ascii_uppercase()
+        )))
+    } else {
+        None
+    }
+}
+
 /// Returns true if a removable drive exists that corresponds to the same physical USB device
 /// as the MTP device identified by `wpd_device_id`. Matching uses hardware instance IDs
 /// (`SetupDiGetDeviceInstanceIdW`) to avoid false positives from two drives sharing a label.
@@ -1594,6 +1612,10 @@ fn has_msc_drive_for_device(friendly_name: &str, wpd_device_id: &str) -> bool {
         SetupDiGetClassDevsW, SetupDiGetDeviceInstanceIdW,
     };
     use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
+
+    if let Some(path) = friendly_name_drive_root(friendly_name) {
+        return is_removable_drive(&path);
+    }
 
     // Parse the USB instance-ID fragment from the WPD device path.
     // WPD ID format: "\\?\usb#vid_XXXX&pid_YYYY#SERIAL#{guid}"

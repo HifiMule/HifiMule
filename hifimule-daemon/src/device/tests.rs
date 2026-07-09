@@ -32,6 +32,20 @@ fn msc(dir: &std::path::Path) -> Arc<dyn crate::device_io::DeviceIO> {
     Arc::new(crate::device_io::MscBackend::new(dir.to_path_buf()))
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn test_friendly_name_drive_root_parses_drive_letter() {
+    assert_eq!(
+        friendly_name_drive_root("g:\\").unwrap(),
+        std::path::PathBuf::from("G:\\")
+    );
+    assert_eq!(
+        friendly_name_drive_root(" G:/ ").unwrap(),
+        std::path::PathBuf::from("G:\\")
+    );
+    assert!(friendly_name_drive_root("Garmin Watch").is_none());
+}
+
 #[derive(Debug)]
 struct StorageIdDeviceIo {
     inner: crate::device_io::MscBackend,
