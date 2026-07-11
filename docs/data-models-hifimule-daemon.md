@@ -1,6 +1,6 @@
 # Data Models — HifiMule Daemon
 
-**Generated:** 2026-05-23 | **Scan depth:** Exhaustive
+**Generated:** 2026-05-23 | **Last Updated:** 2026-06-17 | **Scan depth:** Deep
 
 ---
 
@@ -20,7 +20,7 @@ pub struct DeviceManifest {
     pub playlist_path: Option<String>,             // null = inherit first managed music path
     pub dirty: bool,                               // true if sync was interrupted mid-operation
     pub pending_item_ids: Vec<String>,             // Jellyfin IDs being processed when dirty was set
-    pub auto_fill: AutoFillPrefs,
+    pub auto_fill: AutoFillConfig,                    // legacy block or per-server pipeline map
     pub auto_sync_on_connect: bool,
     pub transcoding_profile_id: Option<String>,   // null = passthrough (no transcoding)
     pub last_synced_transcoding_profile_id: Option<String>,
@@ -80,16 +80,39 @@ pub struct BasketItem {
 
 ---
 
-## AutoFillPrefs
+## AutoFillConfig and AutoFillPipeline
 
-Auto-fill configuration embedded in `DeviceManifest`.
+Auto-fill configuration embedded in `DeviceManifest`. New manifests store a map keyed by portable `server_id`; old manifests may still contain the legacy `{ enabled, maxBytes }` block and are migrated when a selected server id is available.
 
 ```rust
 pub struct AutoFillPrefs {
     pub enabled: bool,
     pub max_bytes: Option<u64>,    // capacity budget; None = use all free space
 }
+
+pub struct AutoFillConfig {
+    pub pipelines: HashMap<String, AutoFillPipeline>,
+    pub legacy: Option<AutoFillPrefs>,
+}
+
+pub struct AutoFillPipeline {
+    pub enabled: bool,
+    pub filter: FilterStage,
+    pub sources: Vec<SourceEntry>,
+    pub unit: Unit,
+    pub ordering: Vec<OrderingKey>,
+    pub memory: MemoryStage,
+    pub budget: BudgetStage,
+    pub fallback: Vec<SourceEntry>,
+    pub quality: QualityStage,
+    pub rarity: RarityStage,
+    pub pity: PityStage,
+    pub context: ContextStage,
+    pub promotion: PromotionStage,
+}
 ```
+
+Pipeline config is portable manifest data. Runtime history for cooldowns, rotation, and pity timers is machine-local SQLite data.
 
 ---
 
@@ -121,6 +144,10 @@ pub struct DesiredItem {
     pub provider_album_id: Option<String>,
     pub provider_content_type: Option<String>,
     pub provider_suffix: Option<String>,
+    pub original_bitrate: Option<u32>,
+    pub original_container: Option<String>,
+    pub track_number: Option<u32>,
+    pub server_id: Option<String>,       // portable server id for routing
 }
 ```
 
@@ -202,6 +229,7 @@ pub enum SyncStatus {
     Running,
     Complete,
     Failed,
+    Cancelled,
 }
 
 pub struct SyncFileError {
@@ -224,7 +252,12 @@ pub struct AutoFillItem {
     pub album: Option<String>,
     pub artist: Option<String>,
     pub size_bytes: u64,
-    pub priority_reason: String,       // "favorite" | "playCount:N" | "new"
+    pub priority_reason: String,
+    pub provider_album_id: Option<String>,
+    pub provider_content_type: Option<String>,
+    pub provider_suffix: Option<String>,
+    pub tier: Option<String>,
+    pub max_bitrate_override_kbps: Option<u32>,
 }
 ```
 
@@ -319,13 +352,33 @@ Stores the active media-server connection metadata. Secrets are not stored here.
 
 ```rust
 pub struct ServerConfig {
+    pub id: String,                // machine-local UUID primary key
     pub url: String,
     pub server_type: String,       // "jellyfin" | "subsonic" | "openSubsonic"
-    pub username: Option<String>,
+    pub username: String,
     pub server_version: Option<String>,
-    pub updated_at: String,
+    pub name: Option<String>,
+    pub icon: Option<String>,
+    pub updated_at: i64,
+    pub selected: bool,
+    pub server_id: Option<String>,          // deterministic portable identity
+    pub server_reported_id: Option<String>, // Jellyfin System/Info.Id when known
 }
 ```
+
+`server_id` is derived from `server_type`, normalized URL or server-reported id, and username. It is used in device manifests and basket items so synced media can be routed back to its source provider across remove/re-add and multi-machine scenarios.
+
+---
+
+## Auto-fill Runtime Tables
+
+Machine-local SQLite tables supporting the configurable pipeline:
+
+| Table | Key | Purpose |
+|-------|-----|---------|
+| `autofill_history` | `(device_id, server_id, track_id)` | Last synced time and optional rotation tier per track |
+| `autofill_rotation` | `(device_id, server_id)` | Rotation cursor for Memory tiers |
+| `autofill_pity` | `(device_id, server_id)` | Dry-streak counter for pity discovery reserve |
 
 ---
 

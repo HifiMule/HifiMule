@@ -14,6 +14,21 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
 
+/// Configurable auto-fill pipeline: pure-function selection model + engine (Epic 12).
+/// The existing `run_auto_fill*` functions above remain the live path; `pipeline`
+/// generalizes them into a composable algebra validated without UI or network.
+pub mod pipeline;
+// Re-export so the model + engine are reachable as `crate::auto_fill::*`. Unreferenced by the
+// binary until the fetch/RPC/UI wiring lands in Stories 12.3/12.4/12.6/12.7.
+#[allow(unused_imports)]
+pub use pipeline::*;
+
+/// Async pool-materialization layer (Story 12.4): turns a configured `AutoFillPipeline` into the
+/// materialized pools the pure `pipeline::run_pipeline` engine consumes, and decides (via
+/// `needs_configurable_expansion`) whether a slot can keep the fast default path.
+pub mod fetch;
+pub use fetch::*;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoFillItem {
@@ -31,6 +46,10 @@ pub struct AutoFillItem {
     pub provider_suffix: Option<String>,
     pub size_bytes: u64,
     pub priority_reason: String,
+    /// Story 13.1: source rotation-tier index (as a string) when the pipeline used Memory tiers;
+    /// `None` otherwise. Recorded into `autofill_history.tier` at sync completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
 }
 
 #[derive(Debug)]
@@ -39,6 +58,30 @@ pub struct AutoFillParams {
     pub exclude_item_ids: Vec<String>,
     /// Maximum bytes available for auto-fill items (device free bytes minus manual selection size).
     pub max_fill_bytes: u64,
+    /// Story 13.1: the device manifest id, for history/rotation keying (`""` on legacy paths).
+    pub device_id: String,
+    /// Story 13.1: the slot's portable server id, for history/rotation keying (`""` on legacy paths).
+    pub server_id: String,
+    /// Story 13.1: caller-supplied current Unix seconds. The pure engine never reads the clock —
+    /// every time-based Memory decision derives from this value via the [`pipeline::HistorySnapshot`].
+    pub now_unix: i64,
+    /// Story 13.1: DB-sourced runtime history (per-track `last_synced_at`/`tier`) pre-built by the
+    /// RPC layer. Keeps the fetch layer DB-free; per-candidate `last_played_at` is merged in here
+    /// from the materialized provider songs. Empty on legacy/default paths (memory stays inert).
+    pub history: pipeline::HistorySnapshot,
+    /// Story 13.1: the rotation cursor for Memory tiers (read from the DB by the caller). The lead
+    /// tier is `cursor mod tiers.len()`; ignored when no tiers are configured.
+    pub rotation_cursor: i64,
+    /// Story 13.4: the entropy seed minted by the RPC layer (`now as u64`) — deterministic within a
+    /// run, varies per run. Threaded into [`pipeline::PipelineInput::seed`]; `0` on legacy paths.
+    pub seed: u64,
+    /// Story 13.4: the pity dry-streak read from the DB by the caller (sibling of `rotation_cursor`).
+    /// Threaded into [`pipeline::PipelineInput::pity_streak`]; `0` on legacy paths.
+    pub pity_streak: i64,
+    /// Story 13.5: caller-supplied local civil time (minted by `rpc::now_civil()` at the engine fill
+    /// sites). Threaded into [`pipeline::HistorySnapshot::local`] to drive the Context stage. Defaults
+    /// to `CivilTime::default()` (all-zero, inert) on legacy/Jellyfin paths — mirrors the `seed` split.
+    pub local: pipeline::CivilTime,
 }
 
 /// Retry delays (ms) for transient 5xx server errors. Two entries = up to 3 total attempts.
@@ -77,6 +120,7 @@ pub async fn run_auto_fill(
     let AutoFillParams {
         exclude_item_ids,
         max_fill_bytes,
+        ..
     } = params;
     let exclude_count = exclude_item_ids.len();
     let exclude_set: std::collections::HashSet<String> = exclude_item_ids.into_iter().collect();
@@ -274,6 +318,7 @@ pub fn rank_and_truncate(
                 .or(track.container),
             size_bytes,
             priority_reason,
+            tier: None,
         });
     }
 
@@ -326,6 +371,7 @@ impl ProviderFillState {
             provider_suffix: song.suffix,
             size_bytes,
             priority_reason,
+            tier: None,
         });
         true
     }
@@ -358,6 +404,7 @@ pub async fn run_auto_fill_provider(
     let AutoFillParams {
         exclude_item_ids,
         max_fill_bytes,
+        ..
     } = params;
     let exclude_set: HashSet<String> = exclude_item_ids.into_iter().collect();
     let mut state = ProviderFillState::new(exclude_set, max_fill_bytes);

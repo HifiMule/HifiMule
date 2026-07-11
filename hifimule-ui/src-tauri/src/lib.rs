@@ -248,10 +248,9 @@ async fn rpc_proxy(
         .await
         .map_err(|e| serde_json::json!({ "message": format!("RPC connection failed: {}", e) }))?;
 
-    let data: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| serde_json::json!({ "message": format!("RPC response parse failed: {}", e) }))?;
+    let data: serde_json::Value = response.json().await.map_err(
+        |e| serde_json::json!({ "message": format!("RPC response parse failed: {}", e) }),
+    )?;
 
     if let Some(error) = data.get("error").filter(|e| !e.is_null()) {
         // Forward the full JSON-RPC error envelope (code + message + data) so the
@@ -321,9 +320,10 @@ fn ui_log(msg: &str) {
         let _ = std::fs::create_dir_all(&log_dir);
         let log_path = log_dir.join("ui.log");
         if let Ok(meta) = std::fs::metadata(&log_path)
-            && meta.len() > LOG_MAX_BYTES {
-                let _ = std::fs::write(&log_path, "--- log truncated ---\n");
-            }
+            && meta.len() > LOG_MAX_BYTES
+        {
+            let _ = std::fs::write(&log_path, "--- log truncated ---\n");
+        }
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -506,10 +506,11 @@ pub fn run() {
             // Explicitly kill the daemon sidecar process to prevent zombie processes
             if let Some(state) = app_handle.try_state::<DaemonProcess>()
                 && let Ok(mut daemon_proc) = state.0.lock()
-                    && let Some(child) = daemon_proc.take() {
-                        ui_log("Killing hifimule-daemon sidecar before exit");
-                        let _ = child.kill();
-                    }
+                && let Some(child) = daemon_proc.take()
+            {
+                ui_log("Killing hifimule-daemon sidecar before exit");
+                let _ = child.kill();
+            }
         }
     });
 }

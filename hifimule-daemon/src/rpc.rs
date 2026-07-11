@@ -18,13 +18,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 // JSON-RPC 2.0 Error Codes
-#[allow(dead_code)] // Reserved for future use
-const ERR_PARSE_ERROR: i32 = -32700;
-#[allow(dead_code)] // Reserved for future use
-const ERR_INVALID_REQUEST: i32 = -32600;
 const ERR_METHOD_NOT_FOUND: i32 = -32601;
 const ERR_INVALID_PARAMS: i32 = -32602;
-#[allow(dead_code)] // Reserved for future use
 const ERR_INTERNAL_ERROR: i32 = -32603;
 
 // Application-specific error codes
@@ -41,6 +36,7 @@ const ERR_CROSS_SERVER_CONFLICT: i32 = -7;
 /// The selected server's stored credential is expired/invalid (Story 2.11 AC11).
 /// Distinct from generic connection failures so the UI can scope a re-auth prompt.
 const ERR_UNAUTHORIZED: i32 = -8;
+const ERR_SYNC_CANCELLED: i32 = -9;
 const JELLYFIN_TICKS_PER_SECOND: u64 = 10_000_000;
 const GENRE_TRACK_PAGE_SIZE: u32 = 500;
 const GENRE_TRACK_MAX_PAGES: u32 = 200;
@@ -56,6 +52,14 @@ const SERVER_ICON_IDS: &[&str] = &[
     "broadcast-pin",
     "book",
 ];
+
+fn sync_cancelled_error() -> JsonRpcError {
+    JsonRpcError {
+        code: ERR_SYNC_CANCELLED,
+        message: "Sync cancelled".to_string(),
+        data: None,
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
@@ -231,6 +235,7 @@ async fn handler(
             handle_device_set_auto_sync_on_connect(&state, payload.params).await
         }
         "basket.autoFill" => handle_basket_auto_fill(&state, payload.params).await,
+        "autoFill.setPipeline" => handle_auto_fill_set_pipeline(&state, payload.params).await,
         "sync.setAutoFill" => handle_sync_set_auto_fill(&state, payload.params).await,
         "device_profiles.list" => handle_device_profiles_list().await,
         "device.set_transcoding_profile" => {
@@ -1852,10 +1857,22 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         .or_else(|| mapping.as_ref().map(|m| m.auto_sync_on_connect))
         .unwrap_or(false);
 
+    // Story 12.2: auto_fill is now a per-server pipeline map. Resolve the selected server's
+    // portable id and read its slot via the server-aware accessors; the `{ enabled, maxBytes }`
+    // fields are retained unchanged for the legacy read path. Story 12.6 additionally exposes the
+    // full per-server `pipelines` map so the pipeline-builder UI can hydrate every server's config
+    // (empty `{}` for a legacy device with no per-server map).
+    let selected_portable_id = state
+        .db
+        .get_server_config()
+        .ok()
+        .flatten()
+        .and_then(|s| s.server_id);
     let auto_fill = device.as_ref().map(|d| {
         serde_json::json!({
-            "enabled": d.auto_fill.enabled,
-            "maxBytes": d.auto_fill.max_bytes,
+            "enabled": d.auto_fill.enabled_for(selected_portable_id.as_deref()),
+            "maxBytes": d.auto_fill.max_bytes_for(selected_portable_id.as_deref()),
+            "pipelines": &d.auto_fill.pipelines,
         })
     });
 
@@ -1950,6 +1967,7 @@ async fn handle_get_daemon_state(state: &AppState) -> Result<Value, JsonRpcError
         "autoSyncOnConnect": auto_sync_on_connect,
         "autoFill": auto_fill,
         "activeOperationId": active_operation_id,
+        "syncPipelineActive": state.sync_operation_manager.is_pipeline_active(),
         "connectedDevices": connected_devices_json,
         "selectedDevicePath": selected_device_path,
         "supportsPlaylistWrite": supports_playlist_write,
@@ -1968,8 +1986,10 @@ fn reconcile_basket_server_ids(
     servers: &[crate::db::ServerConfig],
 ) -> Vec<crate::device::BasketItem> {
     // Set of valid portable ids (the only tags we keep untouched).
-    let portable_known: HashSet<&str> =
-        servers.iter().filter_map(|s| s.server_id.as_deref()).collect();
+    let portable_known: HashSet<&str> = servers
+        .iter()
+        .filter_map(|s| s.server_id.as_deref())
+        .collect();
     // { legacy-composite → portable, machine-local UUID → portable }.
     let mut remap: HashMap<String, String> = HashMap::new();
     for s in servers {
@@ -1981,8 +2001,10 @@ fn reconcile_basket_server_ids(
             );
         }
     }
-    let selected_portable: Option<String> =
-        servers.iter().find(|s| s.selected).and_then(|s| s.server_id.clone());
+    let selected_portable: Option<String> = servers
+        .iter()
+        .find(|s| s.selected)
+        .and_then(|s| s.server_id.clone());
 
     items
         .into_iter()
@@ -2528,11 +2550,13 @@ async fn provider_calculate_delta(
     manifest: &crate::device::DeviceManifest,
     params: &Value,
 ) -> Result<Value, JsonRpcError> {
-    let auto_fill_enabled = params
-        .get("autoFill")
-        .and_then(|auto_fill| auto_fill.get("enabled"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    // Story 12.3: normalize both the legacy single object and the new array form
+    // (AC1). This single-server fast path is reached only when routing resolved
+    // every auto-fill slot to the selected server, so the relevant descriptor (if
+    // any) is for this server. For the legacy object this is byte-for-byte
+    // identical to the old `autoFill.enabled` / `autoFill.maxBytes` reads.
+    let auto_fill_descriptor = parse_auto_fill_descriptors(params).into_iter().next();
+    let auto_fill_enabled = auto_fill_descriptor.is_some();
 
     let mut desired_items = Vec::new();
     let mut playlist_sync_items = Vec::new();
@@ -2572,14 +2596,25 @@ async fn provider_calculate_delta(
     // Step 2: If auto-fill is enabled, fill remaining space after basket items.
     // When basket is empty this is a pure auto-fill (device fully managed by auto-fill).
     // When basket has items this augments them — playlists/albums stay, free space is filled.
+    // Story 13.1: rotation-tier index per emitted track, patched onto delta.adds below.
+    let mut af_tier_map: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    // Story 13.5 #20: encoding-from-goals derived per-slot max-bitrate (kbps) per emitted auto-fill
+    // track, patched onto delta.adds below (mirrors `af_tier_map`). Only populated when a transcode
+    // profile is active for the slot — passthrough tracks never get a forced re-encode.
+    let mut af_bitrate_map: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
+    // Story 13.4 review: portable server ids whose pity discovery reserve genuinely fired this run
+    // (shared `pity_reserve_bytes` gate, computed with the per-run budget). Set on the delta below so
+    // the sync-completion recorder resets the dry-streak only for servers that actually fired.
+    let mut af_pity_fired: Vec<String> = Vec::new();
+    let mut autofill_playlist_tracks = Vec::new();
     if auto_fill_enabled {
         // If the UI provided maxBytes, use it directly — it already represents the intended
         // auto-fill budget (UI subtracted manual-item sizes from free space). If not provided,
         // compute server-side as (free + existing synced - basket).
-        let auto_fill_budget: u64 = if let Some(mb) = params
-            .get("autoFill")
-            .and_then(|af| af.get("maxBytes"))
-            .and_then(Value::as_u64)
+        let auto_fill_budget: u64 = if let Some(mb) =
+            auto_fill_descriptor.as_ref().and_then(|d| d.max_bytes)
         {
             crate::daemon_log!(
                 "[AutoFill] budget from UI maxBytes: {} bytes ({:.1} GB)",
@@ -2625,11 +2660,61 @@ async fn provider_calculate_delta(
                 .iter()
                 .map(|i| i.jellyfin_id.clone())
                 .collect();
+            // Story 12.4: route the selected server's slot through the shared seam, reading its
+            // configured pipeline (portable serverId). Default-equivalent → fast path (AC 8).
+            let selected_portable = current_server_portable_id(_state).ok().flatten();
+            // Story 13.1: supply the DB-sourced history snapshot + rotation cursor so the Memory
+            // stage (cooldown/played/stable-core/tiers) is live for this slot.
+            let now = now_unix_secs();
+            let (history, rotation_cursor, pity_streak) = match selected_portable.as_deref() {
+                Some(sid) => build_autofill_history(&_state.db, &manifest.device_id, sid, now),
+                None => (
+                    crate::auto_fill::HistorySnapshot {
+                        now,
+                        ..Default::default()
+                    },
+                    0,
+                    0,
+                ),
+            };
             let fill_params = crate::auto_fill::AutoFillParams {
                 exclude_item_ids: exclude_ids,
                 max_fill_bytes: auto_fill_budget,
+                device_id: manifest.device_id.clone(),
+                server_id: selected_portable.clone().unwrap_or_default(),
+                now_unix: now,
+                history,
+                rotation_cursor,
+                // Story 13.4: mint the seed from `now` (varies per run, deterministic within it).
+                seed: now as u64,
+                pity_streak,
+                // Story 13.5: mint local civil time at this engine fill site (drives the Context stage).
+                local: now_civil(),
             };
-            let fill_items = crate::auto_fill::run_auto_fill_provider(provider, fill_params)
+            let pipeline_ref = selected_portable
+                .as_deref()
+                .and_then(|id| manifest.auto_fill.pipeline_for(id));
+            // Story 13.5 #20: derive the encoding-from-goals per-slot transcode bitrate (only when a
+            // transcode profile is active), and in passthrough clear the flag so the byte estimate
+            // stays source-based. The override travels onto each emitted track via `af_bitrate_map`.
+            let transcode_active =
+                transcode_profile_active(manifest.transcoding_profile_id.as_deref());
+            let af_bitrate_override = encoding_override_kbps(pipeline_ref, transcode_active);
+            let encoding_cleared = encoding_passthrough_clear(pipeline_ref, transcode_active);
+            let pipeline_opt = encoding_cleared.as_ref().or(pipeline_ref);
+            // Story 13.4 review: record whether the pity reserve genuinely fired for this slot
+            // (same gate the engine uses, with this run's budget) so the recorder resets the
+            // dry-streak only on a real fire.
+            if let (Some(sid), Some(pipeline)) = (selected_portable.as_deref(), pipeline_opt)
+                && crate::auto_fill::pipeline::pity_reserve_bytes(
+                    &pipeline.pity,
+                    pity_streak,
+                    auto_fill_budget,
+                ) > 0
+            {
+                af_pity_fired.push(sid.to_string());
+            }
+            let fill_items = expand_auto_fill_slot(provider, pipeline_opt, fill_params)
                 .await
                 .map_err(|e| JsonRpcError {
                     code: ERR_CONNECTION_FAILED,
@@ -2637,11 +2722,21 @@ async fn provider_calculate_delta(
                     data: None,
                 })?;
             crate::daemon_log!(
-                "[AutoFill] run_auto_fill_provider returned {} tracks",
+                "[AutoFill] slot expansion returned {} tracks",
                 fill_items.len()
             );
             for item in fill_items {
-                if seen_ids.insert(item.id.clone()) {
+                if let Some(tier) = item.tier.clone() {
+                    af_tier_map.insert(item.id.clone(), tier);
+                }
+                // Story 13.5 #20: stamp the slot's derived bitrate onto this auto-fill track so the
+                // sync transcode applies it to this item only (manual items carry nothing).
+                if let Some(kbps) = af_bitrate_override {
+                    af_bitrate_map.insert(item.id.clone(), kbps);
+                }
+                let item_id = item.id.clone();
+                if seen_ids.insert(item_id) {
+                    autofill_playlist_tracks.push(autofill_playlist_track(&item));
                     desired_items.push(crate::sync::DesiredItem {
                         jellyfin_id: item.id,
                         name: item.name,
@@ -2660,6 +2755,9 @@ async fn provider_calculate_delta(
             }
         }
     }
+    if !autofill_playlist_tracks.is_empty() {
+        playlist_sync_items.push(autofill_playlist_item(autofill_playlist_tracks));
+    }
 
     // Story 2.13: tag untagged items with the selected server's portable id.
     tag_untagged_with_selected_portable(_state, &mut desired_items)?;
@@ -2670,6 +2768,9 @@ async fn provider_calculate_delta(
         playlist_sync_items.len()
     );
     let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
+    patch_delta_tiers(&mut delta, &af_tier_map);
+    patch_delta_bitrate_overrides(&mut delta, &af_bitrate_map);
+    delta.pity_fired_servers = af_pity_fired;
     delta.playlists = playlist_sync_items;
     crate::daemon_log!(
         "[Delta] Provider delta calculated: adds={} deletes={} id_changes={} unchanged={} playlists={} reasons={}",
@@ -3385,18 +3486,539 @@ fn parse_item_specs(raw: &[Value]) -> Vec<(String, Option<String>)> {
         .collect()
 }
 
+/// One per-server auto-fill slot (Story 12.3). `server_id` is the PORTABLE id
+/// (Story 2.13); `None` means "fall back to the selected server" and is resolved
+/// at the call site where the selected id is known (mirrors `parse_item_specs`,
+/// which also leaves the selected fallback to the caller).
+struct AutoFillDescriptor {
+    server_id: Option<String>,
+    max_bytes: Option<u64>,
+    exclude_item_ids: Vec<String>,
+}
+
+/// Normalizes the `autoFill` sync param into a `Vec<AutoFillDescriptor>` (AC1).
+///
+/// Accepts BOTH the legacy single object `{ enabled, maxBytes?, serverId?,
+/// excludeItemIds? }` and the new array `[{ serverId, maxBytes?, enabled?,
+/// excludeItemIds? }, …]`:
+/// - object form yields a single-element vec only when `enabled == true`;
+///   disabled / absent → empty (no auto-fill).
+/// - array form maps each object element to a descriptor, keeping only those
+///   whose `enabled != false` — in array form a descriptor's *presence* means
+///   "this server has a slot", so a missing `enabled` is treated as enabled.
+/// - any other shape (`null`/absent/scalar) → empty.
+///
+/// The selected-server fallback for a `None` `server_id` is intentionally NOT
+/// applied here (resolved by callers that hold `selected_id`).
+fn parse_auto_fill_descriptors(params: &Value) -> Vec<AutoFillDescriptor> {
+    let af = match params.get("autoFill") {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+
+    let read_descriptor = |el: &Value| AutoFillDescriptor {
+        // A blank/whitespace-only serverId is treated as missing so the
+        // selected-server fallback applies at the call site — `Some("")` would
+        // otherwise bypass the fallback and fail provider resolution.
+        server_id: el
+            .get("serverId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        // `maxBytes` is an optional budget ceiling. Absent → `None` (fill up to
+        // the shared remaining budget). Present-but-not-a-valid-u64 (negative,
+        // float, overflow, or non-numeric) must NOT silently fall through to
+        // "no cap" (which would fill the device); floor non-negative numbers and
+        // clamp anything else to 0 so a malformed cap skips the slot.
+        max_bytes: el.get("maxBytes").map(|v| {
+            if let Some(n) = v.as_u64() {
+                n
+            } else if let Some(f) = v.as_f64() {
+                f.max(0.0).min(u64::MAX as f64) as u64
+            } else {
+                0
+            }
+        }),
+        exclude_item_ids: el
+            .get("excludeItemIds")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+
+    if let Some(arr) = af.as_array() {
+        arr.iter()
+            .filter(|el| el.is_object())
+            .filter(|el| el.get("enabled").and_then(Value::as_bool).unwrap_or(true))
+            .map(read_descriptor)
+            .collect()
+    } else if af.is_object() {
+        if af.get("enabled").and_then(Value::as_bool).unwrap_or(false) {
+            vec![read_descriptor(af)]
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    }
+}
+
+/// Merges one slot's auto-fill results into the running desired set (Story 12.3).
+/// Manual items and earlier slots have already populated `seen_ids`, so any id
+/// seen before is skipped — manual items win dedup and slots dedup across each
+/// other (AC3). `remaining`, when present, is decremented by each newly added
+/// item's size so the next slot sees the shrunken shared budget (AC4). Each added
+/// item is tagged with the slot's portable `server_id`. Returns the bytes this
+/// slot actually added.
+fn push_fill_items_dedup(
+    fill_items: Vec<crate::auto_fill::AutoFillItem>,
+    desired_items: &mut Vec<crate::sync::DesiredItem>,
+    seen_ids: &mut HashSet<String>,
+    server_id: &str,
+    remaining: &mut Option<u64>,
+    autofill_playlist_tracks: &mut Vec<crate::sync::PlaylistTrackInfo>,
+) -> u64 {
+    let mut added: u64 = 0;
+    for item in fill_items {
+        if seen_ids.insert(item.id.clone()) {
+            let size = item.size_bytes;
+            autofill_playlist_tracks.push(autofill_playlist_track(&item));
+            desired_items.push(crate::sync::DesiredItem {
+                jellyfin_id: item.id,
+                name: item.name,
+                album: item.album,
+                artist: item.artist,
+                size_bytes: item.size_bytes,
+                etag: None,
+                provider_album_id: item.provider_album_id,
+                provider_content_type: item.provider_content_type,
+                provider_suffix: item.provider_suffix,
+                original_bitrate: None,
+                track_number: None,
+                server_id: Some(server_id.to_string()),
+            });
+            if let Some(r) = remaining.as_mut() {
+                *r = r.saturating_sub(size);
+            }
+            added = added.saturating_add(size);
+        }
+    }
+    added
+}
+
+fn autofill_playlist_track(
+    item: &crate::auto_fill::AutoFillItem,
+) -> crate::sync::PlaylistTrackInfo {
+    crate::sync::PlaylistTrackInfo {
+        jellyfin_id: item.id.clone(),
+        artist: item.artist.clone(),
+        run_time_seconds: -1,
+    }
+}
+
+fn autofill_playlist_item(
+    tracks: Vec<crate::sync::PlaylistTrackInfo>,
+) -> crate::sync::PlaylistSyncItem {
+    crate::sync::PlaylistSyncItem {
+        jellyfin_id: "__hifimule_autofill".to_string(),
+        name: "Autofill".to_string(),
+        tracks,
+    }
+}
+
+/// The single shared slot-expansion seam (Story 12.4): every sync-time auto-fill
+/// expansion site routes through this so the configurable-vs-default decision lives in
+/// exactly one place. When `pipeline` is a configured NON-default pipeline, materialize
+/// its pools and run the pure engine (`expand_with_pipeline`); otherwise keep the smart
+/// incremental default path (`run_auto_fill_provider`) — byte-for-byte unchanged (AC 8).
+async fn expand_auto_fill_slot(
+    provider: Arc<dyn MediaProvider>,
+    pipeline: Option<&crate::auto_fill::AutoFillPipeline>,
+    params: crate::auto_fill::AutoFillParams,
+) -> anyhow::Result<Vec<crate::auto_fill::AutoFillItem>> {
+    match pipeline {
+        Some(p) if crate::auto_fill::needs_configurable_expansion(p) => {
+            crate::auto_fill::expand_with_pipeline(provider, p, params).await
+        }
+        _ => crate::auto_fill::run_auto_fill_provider(provider, params).await,
+    }
+}
+
+/// Story 13.1: current time as Unix seconds — the single clock read for auto-fill. The pure engine
+/// never reads the clock; it consumes this value via the history snapshot.
+pub(crate) fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Story 13.5: mint the caller-supplied **local civil time** for the auto-fill Context stage — the
+/// single clock-reading sibling of [`now_unix_secs`]. The pure engine never reads the clock; it
+/// consumes these fields via [`crate::auto_fill::HistorySnapshot::local`]. Uses `chrono::Local::now()`
+/// (`localtime_r` under the hood — a sound local offset; the `time` crate's `local-offset` feature is
+/// deliberately avoided as it returns `None`/errs in this multi-threaded daemon by design).
+pub(crate) fn now_civil() -> crate::auto_fill::CivilTime {
+    use chrono::{Datelike, Local, Timelike};
+    let now = Local::now();
+    crate::auto_fill::CivilTime {
+        hour: now.hour() as u8,
+        month: now.month() as u8,
+        day: now.day() as u8,
+        // chrono: Mon=0 .. Sun=6 via `num_days_from_monday` — matches our `0=Mon..=6=Sun` convention.
+        weekday: now.weekday().num_days_from_monday() as u8,
+    }
+}
+
+/// Story 13.5 #20: whether the device's selected transcoding profile implies a real (non-passthrough)
+/// transcode — i.e. there is something to re-encode and a per-slot bitrate override can take effect.
+fn transcode_profile_active(profile_id: Option<&str>) -> bool {
+    profile_id.is_some_and(|id| !id.is_empty() && id != "passthrough")
+}
+
+/// Story 13.5 #20: a cloned pipeline with `encoding_from_goals` cleared when the flag is set but no
+/// transcode profile is active (passthrough). Returns `None` (keep the original borrow) otherwise.
+/// Suppressing the flag in passthrough keeps the engine's bitrate-aware byte estimate aligned with
+/// reality — there is nothing to re-encode, so the estimate must stay source-based (AC 9 caveat).
+fn encoding_passthrough_clear(
+    pipeline: Option<&crate::auto_fill::AutoFillPipeline>,
+    transcode_active: bool,
+) -> Option<crate::auto_fill::AutoFillPipeline> {
+    match pipeline {
+        Some(p) if p.budget.encoding_from_goals && !transcode_active => {
+            let mut cleared = p.clone();
+            cleared.budget.encoding_from_goals = false;
+            Some(cleared)
+        }
+        _ => None,
+    }
+}
+
+/// Story 13.5 #20: the derived per-slot max-bitrate (kbps) to override on the transcode profile for a
+/// slot's auto-fill downloads — `None` unless the pipeline enabled encoding-from-goals (with both a
+/// byte ceiling and a positive duration goal) AND a transcode profile is active (passthrough can't
+/// re-encode). Best-effort and per-slot: it never mutates the device-wide `transcoding_profile_id`.
+fn encoding_override_kbps(
+    pipeline: Option<&crate::auto_fill::AutoFillPipeline>,
+    transcode_active: bool,
+) -> Option<u32> {
+    if !transcode_active {
+        return None;
+    }
+    pipeline.and_then(|p| crate::auto_fill::pipeline::target_bitrate_kbps(&p.budget))
+}
+
+/// Story 13.1: build the DB-sourced auto-fill history snapshot + rotation cursor for a
+/// `(device, portable server)` pair. Best-effort: a DB read error yields an empty snapshot so the
+/// Memory stage becomes inert rather than aborting the slot.
+fn build_autofill_history(
+    db: &crate::db::Database,
+    device_id: &str,
+    server_id: &str,
+    now: i64,
+) -> (crate::auto_fill::HistorySnapshot, i64, i64) {
+    let mut entries = std::collections::HashMap::new();
+    match db.get_autofill_history(device_id, server_id) {
+        Ok(rows) => {
+            for (track_id, last_synced_at, tier) in rows {
+                entries.insert(
+                    track_id,
+                    crate::auto_fill::TrackHistory {
+                        last_synced_at,
+                        last_played_at: None,
+                        tier,
+                    },
+                );
+            }
+        }
+        Err(e) => crate::daemon_log!("[AutoFill] history read failed (memory inert): {}", e),
+    }
+    let cursor = db.get_rotation_cursor(device_id, server_id).unwrap_or(0);
+    // Story 13.4: the pity dry-streak (best-effort, default 0) drives the discovery reserve.
+    let pity_streak = db.get_pity_streak(device_id, server_id).unwrap_or(0);
+    // Story 13.5: `local` is set at the engine fill site (overwritten in `expand_with_pipeline`); the
+    // DB-sourced snapshot carries the default (civil time is runtime, never persisted).
+    (
+        crate::auto_fill::HistorySnapshot {
+            now,
+            entries,
+            local: crate::auto_fill::CivilTime::default(),
+        },
+        cursor,
+        pity_streak,
+    )
+}
+
+/// Story 13.1: copy the rotation-tier index from auto-fill results onto the matching `delta.adds`
+/// entries (keyed by provider track id), so the tier survives the delta round-trip to sync-execute
+/// where it is recorded into `autofill_history.tier`.
+fn patch_delta_tiers(
+    delta: &mut crate::sync::SyncDelta,
+    tier_by_track: &std::collections::HashMap<String, String>,
+) {
+    if tier_by_track.is_empty() {
+        return;
+    }
+    for add in &mut delta.adds {
+        if let Some(tier) = tier_by_track.get(&add.jellyfin_id) {
+            add.tier = Some(tier.clone());
+        }
+    }
+}
+
+/// Story 13.5 #20: copy the encoding-from-goals derived per-slot max-bitrate (kbps) onto the matching
+/// `delta.adds` entries (keyed by provider track id), so the sync transcode applies it to those
+/// auto-fill downloads only. Mirrors [`patch_delta_tiers`]. Manual items are never in the map, so the
+/// override is naturally scoped to the slot's auto-fill items and never touches manual selections or
+/// the device-wide profile.
+fn patch_delta_bitrate_overrides(
+    delta: &mut crate::sync::SyncDelta,
+    kbps_by_track: &std::collections::HashMap<String, u32>,
+) {
+    if kbps_by_track.is_empty() {
+        return;
+    }
+    for add in &mut delta.adds {
+        if let Some(kbps) = kbps_by_track.get(&add.jellyfin_id) {
+            add.max_bitrate_override_kbps = Some(*kbps);
+        }
+    }
+}
+
+/// Story 13.1: record auto-fill runtime history at sync completion (best-effort; never fails the
+/// sync). For each add that carries a portable `server_id`, upsert `(device, server, track)` with
+/// `last_synced_at = now` and the add's tier; then advance the rotation cursor once per server whose
+/// configured pipeline uses Memory tiers, and prune rows older than the retention window.
+fn record_autofill_history_after_sync(
+    db: &crate::db::Database,
+    manifest: &crate::device::DeviceManifest,
+    delta: &crate::sync::SyncDelta,
+    errors: &[crate::sync::SyncFileError],
+    now: i64,
+) {
+    use std::collections::{HashMap, HashSet};
+    let device_id = manifest.device_id.as_str();
+
+    // Per-track transfer failures: these tracks were NOT written to the device, so they must not be
+    // recorded as synced (AC 2 — "actually written to the device").
+    let failed_ids: HashSet<&str> = errors
+        .iter()
+        .map(|e| e.jellyfin_id.as_str())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // Every portable server id this sync touches: freshly-added items, id-changed items, and the
+    // resident on-device set (needed to refresh the stable core — see step 3).
+    let mut servers: HashSet<String> = HashSet::new();
+    for add in &delta.adds {
+        if let Some(s) = add.server_id.as_deref().filter(|s| !s.is_empty()) {
+            servers.insert(s.to_string());
+        }
+    }
+    for ch in &delta.id_changes {
+        if let Some(s) = ch.source_server_id.as_deref().filter(|s| !s.is_empty()) {
+            servers.insert(s.to_string());
+        }
+    }
+    for item in &manifest.synced_items {
+        if let Some(s) = item.server_id.as_deref().filter(|s| !s.is_empty()) {
+            servers.insert(s.to_string());
+        }
+    }
+    if servers.is_empty() {
+        return; // legacy/Jellyfin items have no portable id → not tracked for cooldown
+    }
+
+    // Load existing history once per server: track_id -> tier. Reused to preserve the tier when
+    // refreshing resident rows and when carrying history across an id change.
+    let mut history: HashMap<String, HashMap<String, Option<String>>> = HashMap::new();
+    for server_id in &servers {
+        let rows = db
+            .get_autofill_history(device_id, server_id)
+            .unwrap_or_default();
+        let map = rows
+            .into_iter()
+            .map(|(track, _last, tier)| (track, tier))
+            .collect();
+        history.insert(server_id.clone(), map);
+    }
+
+    // Tracks leaving the device this sync — never refresh these.
+    let removed: HashSet<&str> = delta
+        .deletes
+        .iter()
+        .map(|d| d.jellyfin_id.as_str())
+        .chain(delta.id_changes.iter().map(|c| c.old_jellyfin_id.as_str()))
+        .collect();
+
+    // Servers that actually had a track written this run — gates the rotation-cursor advance so a
+    // fully-failed sync does not rotate the lead tier (AC 8 — "completed sync").
+    let mut servers_wrote: HashSet<String> = HashSet::new();
+
+    // 1. Freshly-added auto-fill tracks (skip ones that failed to transfer).
+    for add in &delta.adds {
+        let Some(server_id) = add.server_id.as_deref().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        if failed_ids.contains(add.jellyfin_id.as_str()) {
+            continue;
+        }
+        if let Err(e) = db.upsert_autofill_history(
+            device_id,
+            server_id,
+            &add.jellyfin_id,
+            Some(now),
+            add.tier.as_deref(),
+        ) {
+            crate::daemon_log!("[AutoFill] history record failed (non-fatal): {}", e);
+        }
+        servers_wrote.insert(server_id.to_string());
+    }
+
+    // 2. Id-changed tracks: carry history (last_synced_at + tier) from the old id to the new id, so a
+    //    server re-key does not reset cooldown / stable-core membership / tier for that track.
+    for ch in &delta.id_changes {
+        let Some(server_id) = ch.source_server_id.as_deref().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        if failed_ids.contains(ch.new_jellyfin_id.as_str()) {
+            continue;
+        }
+        // Only carry forward tracks we were already tracking (preserves their tier).
+        let Some(tier) = history
+            .get(server_id)
+            .and_then(|m| m.get(&ch.old_jellyfin_id))
+            .cloned()
+        else {
+            continue;
+        };
+        if let Err(e) = db.upsert_autofill_history(
+            device_id,
+            server_id,
+            &ch.new_jellyfin_id,
+            Some(now),
+            tier.as_deref(),
+        ) {
+            crate::daemon_log!(
+                "[AutoFill] history id-change carry failed (non-fatal): {}",
+                e
+            );
+        }
+    }
+
+    // 3. Refresh `last_synced_at` for resident on-device tracks we already track, so a long-lived
+    //    stable core is not pruned out from under itself by the retention cutoff. Preserves the
+    //    existing tier and never creates rows for manual/untracked items.
+    for item in &manifest.synced_items {
+        let Some(server_id) = item.server_id.as_deref().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        if removed.contains(item.jellyfin_id.as_str()) {
+            continue;
+        }
+        let Some(tier) = history
+            .get(server_id)
+            .and_then(|m| m.get(&item.jellyfin_id))
+            .cloned()
+        else {
+            continue;
+        };
+        if let Err(e) = db.upsert_autofill_history(
+            device_id,
+            server_id,
+            &item.jellyfin_id,
+            Some(now),
+            tier.as_deref(),
+        ) {
+            crate::daemon_log!("[AutoFill] history refresh failed (non-fatal): {}", e);
+        }
+    }
+
+    // 4. Retention prune (~1 year) + rotation-cursor advance, per touched server.
+    const RETENTION_SECS: i64 = 52 * 7 * 86_400;
+    let cutoff = now.saturating_sub(RETENTION_SECS);
+    for server_id in &servers {
+        let _ = db.prune_autofill_history(device_id, server_id, cutoff);
+        // Advance only for tier-using pipelines that actually wrote a track this run. `pipeline_uses_tiers`
+        // matches `parse_tiers`, so a malformed/empty `tiers` value (which produced no rotation) does
+        // not drift the cursor.
+        let uses_tiers = manifest
+            .auto_fill
+            .pipeline_for(server_id)
+            .is_some_and(crate::auto_fill::fetch::pipeline_uses_tiers);
+        if uses_tiers
+            && servers_wrote.contains(server_id)
+            && let Err(e) = db.advance_rotation_cursor(device_id, server_id)
+        {
+            crate::daemon_log!(
+                "[AutoFill] rotation cursor advance failed (non-fatal): {}",
+                e
+            );
+        }
+
+        // Story 13.4 (+ review): pity dry-streak reset/increment, gated like the rotation advance —
+        // only a pity-enabled server that actually wrote a track this run. Reset to 0 **only** when
+        // the discovery reserve *genuinely fired* this run (`delta.pity_fired_servers`, set at fill
+        // time from the shared `pity_reserve_bytes` gate — enabled + streak ≥ threshold + bounded
+        // budget + positive reserve). Otherwise advance by 1, so a streak that crossed the threshold
+        // while the budget was unbounded or the ratio rounded to zero stays armed (and keeps growing
+        // past the threshold) until a run where the reserve actually fires — rather than silently
+        // consuming the timer without delivering. Best-effort (never fails the sync).
+        if servers_wrote.contains(server_id)
+            && manifest
+                .auto_fill
+                .pipeline_for(server_id)
+                .is_some_and(|p| p.pity.enabled)
+        {
+            let fired = delta.pity_fired_servers.iter().any(|s| s == server_id);
+            let next = if fired {
+                0 // the discovery reserve genuinely fired this run → dry spell broken
+            } else {
+                db.get_pity_streak(device_id, server_id).unwrap_or(0) + 1
+            };
+            if let Err(e) = db.set_pity_streak(device_id, server_id, next) {
+                crate::daemon_log!("[AutoFill] pity streak update failed (non-fatal): {}", e);
+            }
+        }
+    }
+}
+
+/// Story 12.4: true when any auto-fill slot's resolved server has a configured NON-default
+/// pipeline. The Jellyfin-client fast path cannot run a configurable pipeline, so this forces the
+/// per-provider routing path. `auto_fill_servers` are the resolved portable serverIds
+/// (selected-server fallback already applied by the caller).
+fn auto_fill_needs_configurable_routing(
+    manifest: &crate::device::DeviceManifest,
+    auto_fill_servers: &[String],
+) -> bool {
+    auto_fill_servers.iter().any(|sid| {
+        manifest
+            .auto_fill
+            .pipeline_for(sid)
+            .is_some_and(crate::auto_fill::needs_configurable_expansion)
+    })
+}
+
 /// True when the basket items resolve to more than one distinct server (each
 /// item's serverId, or the selected server when unspecified).
 /// True when the sync must route items to per-server providers rather than the
 /// single-server dispatch. The single-server path always uses the *selected*
-/// provider, so it is only correct when every resolved item (and the auto-fill
+/// provider, so it is only correct when every resolved item (and EVERY auto-fill
 /// slot) belongs to the selected server. Routing is therefore needed when items
-/// span multiple servers OR the sole server is not the selected one — the latter
-/// happens with a basket holding only locked, other-server items (AC26/AC28).
+/// or auto-fill slots span multiple servers OR the sole server is not the
+/// selected one — the latter happens with a basket holding only locked,
+/// other-server items (AC26/AC28), or an auto-fill slot for a non-selected
+/// server (Story 12.3 AC5). `auto_fill_servers` holds the resolved serverIds of
+/// every enabled descriptor (selected-fallback already applied by the caller).
 fn sync_needs_provider_routing(
     item_specs: &[(String, Option<String>)],
     selected_id: Option<&str>,
-    auto_fill_server: Option<&str>,
+    auto_fill_servers: &[String],
 ) -> bool {
     let mut servers: HashSet<String> = HashSet::new();
     for (_, server) in item_specs {
@@ -3405,8 +4027,8 @@ fn sync_needs_provider_routing(
             servers.insert(s.to_string());
         }
     }
-    if let Some(af) = auto_fill_server {
-        servers.insert(af.to_string());
+    for af in auto_fill_servers {
+        servers.insert(af.clone());
     }
     match selected_id {
         Some(sel) => servers.iter().any(|s| s != sel),
@@ -3494,66 +4116,171 @@ async fn multi_provider_calculate_delta(
         }
     }
 
-    // Auto-fill is bound to a single server (AC32): its own serverId, defaulting to
-    // the selected server.
-    if params
-        .get("autoFill")
-        .and_then(|af| af.get("enabled"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        let af_server = params
-            .get("autoFill")
-            .and_then(|af| af.get("serverId"))
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| selected_id.clone());
-        if let Some(af_server) = af_server {
-            let provider = get_provider_by_server_id_for(state, &af_server).await?;
-            let auto_fill_budget = params
-                .get("autoFill")
-                .and_then(|af| af.get("maxBytes"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            if auto_fill_budget > 0 {
-                let exclude_ids: Vec<String> = desired_items
-                    .iter()
-                    .map(|i| i.jellyfin_id.clone())
-                    .collect();
-                let fill_params = crate::auto_fill::AutoFillParams {
-                    exclude_item_ids: exclude_ids,
-                    max_fill_bytes: auto_fill_budget,
-                };
-                let fill_items = crate::auto_fill::run_auto_fill_provider(provider, fill_params)
-                    .await
-                    .map_err(|e| JsonRpcError {
+    // Auto-fill: one slot per server (Story 12.3, AC2/AC3/AC4). Each descriptor
+    // expands against its OWN provider (routed by portable serverId), tagging its
+    // items with that server's id. Manual items already own their ids in
+    // `seen_ids` and win dedup; slots run in descriptor order, each excluding all
+    // already-selected ids (manual + earlier slots). Slots share one remaining
+    // capacity budget so combined fill never oversubscribes the device (AC4).
+    let descriptors = parse_auto_fill_descriptors(params);
+    // Story 13.1: rotation-tier index per emitted track across all slots, patched onto delta.adds.
+    let mut af_tier_map: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    // Story 13.5 #20: encoding-from-goals derived per-slot max-bitrate (kbps) per emitted auto-fill
+    // track across all slots, patched onto delta.adds (mirrors `af_tier_map`).
+    let mut af_bitrate_map: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
+    // Story 13.4 review: portable server ids whose pity discovery reserve genuinely fired this run.
+    let mut af_pity_fired: Vec<String> = Vec::new();
+    let mut autofill_playlist_tracks = Vec::new();
+    if !descriptors.is_empty() {
+        // Shared budget = device free + already-synced − already-selected bytes
+        // (mirrors `provider_calculate_delta`'s server-side derivation at
+        // rpc.rs:2599-2616). `None` when device storage is unavailable; that is
+        // tolerated only for slots that supply their own `maxBytes` — matching the
+        // pre-12.3 multi path, which used the UI `maxBytes` without querying storage.
+        let selected_bytes: u64 = desired_items.iter().map(|i| i.size_bytes).sum();
+        let mut remaining: Option<u64> = match state.device_manager.get_device_storage().await {
+            Some(info) => {
+                let synced: u64 = manifest.synced_items.iter().map(|s| s.size_bytes).sum();
+                Some(
+                    info.free_bytes
+                        .saturating_add(synced)
+                        .saturating_sub(selected_bytes),
+                )
+            }
+            None => None,
+        };
+
+        for desc in &descriptors {
+            let af_server = match desc.server_id.clone().or_else(|| selected_id.clone()) {
+                Some(s) => s,
+                None => {
+                    crate::daemon_log!(
+                        "[AutoFill] skipping slot: no serverId and no server selected"
+                    );
+                    continue;
+                }
+            };
+
+            // Effective slot budget: cap the descriptor's own maxBytes (if any) by
+            // the shared remaining capacity. For a single slot this is byte-for-byte
+            // identical to today (min(maxBytes, free − manual) == maxBytes).
+            let budget = match (desc.max_bytes, remaining) {
+                (Some(mb), Some(r)) => mb.min(r),
+                (Some(mb), None) => mb,
+                (None, Some(r)) => r,
+                (None, None) => {
+                    return Err(JsonRpcError {
                         code: ERR_CONNECTION_FAILED,
-                        message: format!("Auto-fill failed: {}", e),
+                        message: "Cannot determine device capacity for auto-fill".to_string(),
                         data: None,
-                    })?;
-                for item in fill_items {
-                    if seen_ids.insert(item.id.clone()) {
-                        desired_items.push(crate::sync::DesiredItem {
-                            jellyfin_id: item.id,
-                            name: item.name,
-                            album: item.album,
-                            artist: item.artist,
-                            size_bytes: item.size_bytes,
-                            etag: None,
-                            provider_album_id: item.provider_album_id,
-                            provider_content_type: item.provider_content_type,
-                            provider_suffix: item.provider_suffix,
-                            original_bitrate: None,
-                            track_number: None,
-                            server_id: Some(af_server.clone()),
-                        });
-                    }
+                    });
+                }
+            };
+            if budget == 0 {
+                continue;
+            }
+
+            // Auto-fill slots are best-effort: a single unresolvable/offline server
+            // must not abort the whole multi-server delta (manual items + healthy
+            // slots). Log and skip the failed slot instead of propagating the error.
+            let provider = match get_provider_by_server_id_for(state, &af_server).await {
+                Ok(p) => p,
+                Err(e) => {
+                    crate::daemon_log!(
+                        "[AutoFill] skipping slot for server {}: provider unavailable: {}",
+                        af_server,
+                        e.message
+                    );
+                    continue;
+                }
+            };
+            // Exclude every already-selected id (manual items + earlier slots) plus
+            // any ids the descriptor explicitly excludes.
+            let mut exclude_ids: Vec<String> = desired_items
+                .iter()
+                .map(|i| i.jellyfin_id.clone())
+                .collect();
+            exclude_ids.extend(desc.exclude_item_ids.iter().cloned());
+            // Story 13.1: DB-sourced history snapshot + rotation cursor for this slot's server.
+            let now = now_unix_secs();
+            let (history, rotation_cursor, pity_streak) =
+                build_autofill_history(&state.db, &manifest.device_id, &af_server, now);
+            let fill_params = crate::auto_fill::AutoFillParams {
+                exclude_item_ids: exclude_ids,
+                max_fill_bytes: budget,
+                device_id: manifest.device_id.clone(),
+                server_id: af_server.clone(),
+                now_unix: now,
+                history,
+                rotation_cursor,
+                seed: now as u64,
+                pity_streak,
+                // Story 13.5: engine fill site → mint local civil time for the Context stage.
+                local: now_civil(),
+            };
+            // Story 12.4: route this slot through the shared seam — the configurable engine
+            // when this server has a non-default pipeline, else the default fast path.
+            let pipeline_ref = manifest.auto_fill.pipeline_for(&af_server);
+            // Story 13.5 #20: derive this slot's encoding-from-goals transcode bitrate (only when a
+            // transcode profile is active) and gate the bitrate-aware estimate in passthrough.
+            let transcode_active =
+                transcode_profile_active(manifest.transcoding_profile_id.as_deref());
+            let af_bitrate_override = encoding_override_kbps(pipeline_ref, transcode_active);
+            let encoding_cleared = encoding_passthrough_clear(pipeline_ref, transcode_active);
+            let pipeline_opt = encoding_cleared.as_ref().or(pipeline_ref);
+            // Story 13.4 review: did the pity reserve genuinely fire for this slot (same gate the
+            // engine uses, with this slot's budget)? Drives the dry-streak reset at sync completion.
+            if let Some(pipeline) = pipeline_opt
+                && crate::auto_fill::pipeline::pity_reserve_bytes(
+                    &pipeline.pity,
+                    pity_streak,
+                    budget,
+                ) > 0
+            {
+                af_pity_fired.push(af_server.clone());
+            }
+            let fill_items = match expand_auto_fill_slot(provider, pipeline_opt, fill_params).await
+            {
+                Ok(items) => items,
+                Err(e) => {
+                    crate::daemon_log!(
+                        "[AutoFill] skipping slot for server {}: expansion failed: {}",
+                        af_server,
+                        e
+                    );
+                    continue;
+                }
+            };
+            for item in &fill_items {
+                if let Some(tier) = item.tier.clone() {
+                    af_tier_map.insert(item.id.clone(), tier);
+                }
+                // Story 13.5 #20: stamp the slot's derived bitrate onto each auto-fill track (manual
+                // items carry nothing), so the sync transcode applies it to these items only.
+                if let Some(kbps) = af_bitrate_override {
+                    af_bitrate_map.insert(item.id.clone(), kbps);
                 }
             }
+            push_fill_items_dedup(
+                fill_items,
+                &mut desired_items,
+                &mut seen_ids,
+                &af_server,
+                &mut remaining,
+                &mut autofill_playlist_tracks,
+            );
         }
+    }
+    if !autofill_playlist_tracks.is_empty() {
+        playlist_sync_items.push(autofill_playlist_item(autofill_playlist_tracks));
     }
 
     let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
+    patch_delta_tiers(&mut delta, &af_tier_map);
+    patch_delta_bitrate_overrides(&mut delta, &af_bitrate_map);
+    delta.pity_fired_servers = af_pity_fired;
     delta.playlists = playlist_sync_items;
     if let Some((_, device_io)) = state.device_manager.get_manifest_and_io().await {
         crate::sync::augment_delta_with_existence_check(
@@ -3616,30 +4343,36 @@ async fn handle_sync_calculate_delta(
     // unchanged (AC21). Item/auto-fill serverIds are portable (Story 2.13), so the
     // routing decision compares against the selected server's portable id.
     let selected_id = current_server_portable_id(state)?;
-    let auto_fill_server = if params
-        .get("autoFill")
-        .and_then(|af| af.get("enabled"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+    // Story 12.3: every auto-fill slot counts toward the routing decision. Resolve
+    // each enabled descriptor's serverId (selected-server fallback for `None`), so
+    // a single-server basket carrying auto-fill slots for other servers still routes
+    // through the per-provider path (AC5).
+    let auto_fill_servers: Vec<String> = parse_auto_fill_descriptors(&params)
+        .into_iter()
+        .filter_map(|d| d.server_id.or_else(|| selected_id.clone()))
+        .collect();
+    // Story 12.4: the Jellyfin-client fast path (`run_auto_fill`) cannot express a configurable
+    // pipeline, so when any auto-fill slot's server has a configured NON-default pipeline, force
+    // the per-provider path (which routes each slot through `expand_auto_fill_slot`). The pure
+    // default case still takes the Jellyfin-direct path unchanged (AC 6, AC 8).
+    let configured_pipeline_applies =
+        auto_fill_needs_configurable_routing(&manifest, &auto_fill_servers);
+    if configured_pipeline_applies
+        || sync_needs_provider_routing(&item_specs, selected_id.as_deref(), &auto_fill_servers)
     {
-        params
-            .get("autoFill")
-            .and_then(|af| af.get("serverId"))
-            .and_then(Value::as_str)
-            .map(str::to_string)
-    } else {
-        None
-    };
-    if sync_needs_provider_routing(
-        &item_specs,
-        selected_id.as_deref(),
-        auto_fill_server.as_deref(),
-    ) {
-        return multi_provider_calculate_delta(state, &item_specs, &manifest, &params).await;
+        let result = multi_provider_calculate_delta(state, &item_specs, &manifest, &params).await;
+        if state.sync_operation_manager.is_pipeline_cancelled() {
+            return Err(sync_cancelled_error());
+        }
+        return result;
     }
 
     if let Some(provider) = active_non_jellyfin_provider(state).await {
-        return provider_calculate_delta(state, provider, &item_ids, &manifest, &params).await;
+        let result = provider_calculate_delta(state, provider, &item_ids, &manifest, &params).await;
+        if state.sync_operation_manager.is_pipeline_cancelled() {
+            return Err(sync_cancelled_error());
+        }
+        return result;
     }
 
     // Fetch item details from Jellyfin for each desired ID
@@ -3720,6 +4453,9 @@ async fn handle_sync_calculate_delta(
         .iter()
         .filter(|id| favorite_basket_by_id.contains_key(*id))
     {
+        if state.sync_operation_manager.is_pipeline_cancelled() {
+            return Err(sync_cancelled_error());
+        }
         if let Some(favorite_item) = favorite_basket_by_id.get(item_id) {
             match jellyfin_favorite_sync_items_for_basket_item(
                 &state.jellyfin_client,
@@ -3737,6 +4473,9 @@ async fn handle_sync_calculate_delta(
     }
 
     for chunk in normal_item_ids.chunks(100) {
+        if state.sync_operation_manager.is_pipeline_cancelled() {
+            return Err(sync_cancelled_error());
+        }
         let chunk_strs: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
         match state
             .jellyfin_client
@@ -3776,6 +4515,9 @@ async fn handle_sync_calculate_delta(
                         let mut total_record_count: Option<u32> = None;
 
                         for page_index in 0..GENRE_TRACK_MAX_PAGES {
+                            if state.sync_operation_manager.is_pipeline_cancelled() {
+                                return Err(sync_cancelled_error());
+                            }
                             crate::daemon_log!(
                                 "[Genre Sync] Fetching page {} for genre '{}' (offset={})",
                                 page_index,
@@ -3940,10 +4682,13 @@ async fn handle_sync_calculate_delta(
 
     // Auto-fill expansion (Story 3.8): if the basket contained an auto-fill slot,
     // run the priority algorithm now and merge results with manual items.
-    if let Some(af) = params.get("autoFill")
-        && af["enabled"].as_bool().unwrap_or(false)
-    {
-        let max_fill_bytes = if let Some(mb) = af["maxBytes"].as_u64() {
+    // Story 12.3: normalize both the legacy single object and the array form
+    // (AC1). This Jellyfin fast path is reached only when routing resolved every
+    // auto-fill slot to the selected server. For the legacy object this is
+    // byte-for-byte identical to the old `enabled`/`maxBytes`/`excludeItemIds` reads.
+    let mut autofill_playlist_tracks = Vec::new();
+    if let Some(desc) = parse_auto_fill_descriptors(&params).into_iter().next() {
+        let max_fill_bytes = if let Some(mb) = desc.max_bytes {
             mb
         } else {
             match state.device_manager.get_device_storage().await {
@@ -3957,18 +4702,21 @@ async fn handle_sync_calculate_delta(
                 }
             }
         };
-        let exclude_ids: Vec<String> = af["excludeItemIds"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let exclude_ids: Vec<String> = desc.exclude_item_ids;
         let expanded_excludes = expand_exclude_ids(&state.jellyfin_client, exclude_ids).await;
+        // Legacy Jellyfin fast path: Memory features don't apply (Story 13.1/13.4 fields are inert).
         let fill_params = crate::auto_fill::AutoFillParams {
             exclude_item_ids: expanded_excludes,
             max_fill_bytes,
+            device_id: String::new(),
+            server_id: String::new(),
+            now_unix: now_unix_secs(),
+            history: crate::auto_fill::HistorySnapshot::default(),
+            rotation_cursor: 0,
+            seed: 0,
+            pity_streak: 0,
+            // Story 13.5: legacy Jellyfin path — civil time inert (Context stage never runs here).
+            local: crate::auto_fill::CivilTime::default(),
         };
         match crate::auto_fill::run_auto_fill(&state.jellyfin_client, fill_params).await {
             Ok(af_items) => {
@@ -3979,7 +4727,9 @@ async fn handle_sync_calculate_delta(
                     af_total_bytes / 1_048_576,
                 );
                 for item in af_items {
-                    if seen_ids.insert(item.id.clone()) {
+                    let item_id = item.id.clone();
+                    if seen_ids.insert(item_id) {
+                        autofill_playlist_tracks.push(autofill_playlist_track(&item));
                         desired_items.push(crate::sync::DesiredItem {
                             jellyfin_id: item.id,
                             name: item.name,
@@ -4005,6 +4755,9 @@ async fn handle_sync_calculate_delta(
                 });
             }
         }
+    }
+    if !autofill_playlist_tracks.is_empty() {
+        playlist_sync_items.push(autofill_playlist_item(autofill_playlist_tracks));
     }
 
     // Story 2.13: tag untagged items with the selected server's portable id.
@@ -4051,6 +4804,9 @@ async fn handle_sync_calculate_delta(
         );
     }
 
+    if state.sync_operation_manager.is_pipeline_cancelled() {
+        return Err(sync_cancelled_error());
+    }
     Ok(delta_value_with_cleanup_metadata(&delta, &manifest))
 }
 
@@ -4243,6 +4999,10 @@ async fn handle_sync_execute(
                 reason_code: Some("force-sync".to_string()),
                 reason: Some("force sync requested".to_string()),
                 server_id: item.server_id.clone(),
+                tier: None,
+                // Story 13.5 #20: force-sync re-adds an existing managed item — not an auto-fill slot
+                // expansion — so it never carries an encoding-from-goals override.
+                max_bitrate_override_kbps: None,
             });
             force_deletes.push(crate::sync::SyncDeleteItem {
                 jellyfin_id: item.jellyfin_id.clone(),
@@ -4296,7 +5056,23 @@ async fn handle_sync_execute(
             data: None,
         })?;
 
-    // Guard: reject if a sync is already running (covers the auto-sync race window)
+    // The UI calls sync_execute immediately after sync_calculate_delta. Give the
+    // preparation-only lock a short handoff window to drop before treating it as
+    // a real concurrent sync.
+    for _ in 0..20 {
+        if state
+            .sync_operation_manager
+            .get_active_operation_id()
+            .await
+            .is_some()
+        {
+            break;
+        }
+        if !state.sync_operation_manager.is_pipeline_active() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
     if state.sync_operation_manager.has_active_operation().await {
         return Err(JsonRpcError {
             code: ERR_SYNC_IN_PROGRESS,
@@ -4369,6 +5145,7 @@ async fn handle_sync_execute(
         let op_id = operation_id.clone();
         let device_manager = state.device_manager.clone();
         let state_tx = state.state_tx.clone();
+        let db = state.db.clone();
         let _ = state_tx.send(crate::DaemonState::Syncing);
 
         tokio::spawn(async move {
@@ -4405,13 +5182,16 @@ async fn handle_sync_execute(
             };
 
             let mut all_errors: Vec<crate::sync::SyncFileError> = Vec::new();
-            let mut first = true;
-            for (sid, provider) in group_providers {
+            let group_count = group_providers.len();
+            for (index, (sid, provider)) in group_providers.into_iter().enumerate() {
                 if op_manager.is_cancelled(&op_id).await {
                     break;
                 }
                 // Each group syncs its own adds; deletes/id-changes/playlists are
-                // device-wide and run once, with the first group.
+                // device-wide. Deletes/id-changes run first; playlists run last so
+                // multi-server M3Us can resolve files copied by every group.
+                let first = index == 0;
+                let last = index + 1 == group_count;
                 let group_adds: Vec<crate::sync::SyncAddItem> = delta
                     .adds
                     .iter()
@@ -4431,13 +5211,15 @@ async fn handle_sync_execute(
                         Vec::new()
                     },
                     unchanged: 0,
-                    playlists: if first {
+                    playlists: if last {
                         delta.playlists.clone()
                     } else {
                         Vec::new()
                     },
+                    // Per-server pity signal lives on the outer `delta` (read at sync completion);
+                    // the per-group sub-delta only drives `execute_provider_sync`, never the recorder.
+                    pity_fired_servers: Vec::new(),
                 };
-                first = false;
                 let result = crate::sync::execute_provider_sync(
                     &sub_delta,
                     &device_path,
@@ -4482,6 +5264,15 @@ async fn handle_sync_execute(
             {
                 eprintln!("Failed to clear dirty flag on final manifest: {}", e);
             }
+            // Story 13.1: record auto-fill history (last_synced_at + tier) for the synced tracks and
+            // advance rotation cursors. Best-effort — never affects sync status.
+            record_autofill_history_after_sync(
+                &db,
+                &sync_manifest,
+                &delta,
+                &all_errors,
+                now_unix_secs(),
+            );
             if let Some(mut operation) = op_manager.get_operation(&op_id).await {
                 operation.status = if all_errors.is_empty() {
                     crate::sync::SyncStatus::Complete
@@ -4505,6 +5296,7 @@ async fn handle_sync_execute(
         let op_id = operation_id.clone();
         let device_manager = state.device_manager.clone();
         let state_tx = state.state_tx.clone();
+        let db = state.db.clone();
         let _ = state_tx.send(crate::DaemonState::Syncing);
 
         tokio::spawn(async move {
@@ -4578,6 +5370,14 @@ async fn handle_sync_execute(
                     {
                         eprintln!("Failed to clear dirty flag on final manifest: {}", e);
                     }
+                    // Story 13.1: record auto-fill history + advance rotation cursors (best-effort).
+                    record_autofill_history_after_sync(
+                        &db,
+                        &sync_manifest,
+                        &delta,
+                        &errors,
+                        now_unix_secs(),
+                    );
                     if let Some(mut operation) = op_manager.get_operation(&op_id).await {
                         operation.status = if errors.is_empty() {
                             crate::sync::SyncStatus::Complete
@@ -4787,23 +5587,24 @@ async fn handle_sync_cancel(
         data: None,
     })?;
 
-    let operation_id = params["operationId"].as_str().ok_or(JsonRpcError {
-        code: ERR_INVALID_PARAMS,
-        message: "Missing operationId".to_string(),
-        data: None,
-    })?;
-
-    let found = state
-        .sync_operation_manager
-        .request_cancel(operation_id)
-        .await;
+    let operation_id = params["operationId"].as_str();
+    let found = if let Some(operation_id) = operation_id {
+        state
+            .sync_operation_manager
+            .request_cancel(operation_id)
+            .await
+    } else {
+        state.sync_operation_manager.request_pipeline_cancel()
+    };
 
     if found {
         Ok(serde_json::json!({ "cancelled": true }))
     } else {
         Err(JsonRpcError {
             code: ERR_NOT_FOUND,
-            message: format!("No operation with id '{}'", operation_id),
+            message: operation_id
+                .map(|id| format!("No operation with id '{}'", id))
+                .unwrap_or_else(|| "No active sync pipeline".to_string()),
             data: None,
         })
     }
@@ -5640,7 +6441,16 @@ async fn handle_device_set_auto_sync_on_connect(
 }
 
 /// basket.autoFill — runs the priority ranking algorithm and returns ranked items.
-/// Params: { deviceId: string, maxBytes?: number, excludeItemIds: string[] }
+///
+/// Params: `{ deviceId?: string, maxBytes?: number, excludeItemIds?: string[], serverId?: string,
+/// pipeline?: AutoFillPipeline }`.
+///
+/// Story 12.6: when `serverId` (a portable id) is supplied, the preview is computed for that
+/// server's provider (resolved via `get_provider_by_server_id_for`) through the shared sync-time
+/// seam [`expand_auto_fill_slot`] — using the supplied inline `pipeline` if given, else the
+/// persisted `pipelines[serverId]`, else the default-legacy pipeline. When `serverId` is absent the
+/// behavior is unchanged: the legacy Jellyfin `run_auto_fill` path (with container-id exclude
+/// expansion). An unknown/unroutable `serverId` returns `ERR_CONNECTION_FAILED`, never a panic.
 async fn handle_basket_auto_fill(
     state: &AppState,
     params: Option<Value>,
@@ -5658,7 +6468,109 @@ async fn handle_basket_auto_fill(
         })
         .unwrap_or_default();
 
-    // Determine available capacity for auto-fill
+    // Story 12.6: per-server routing. A non-blank serverId routes the preview through the
+    // resolved provider + shared expansion seam, so non-Jellyfin servers and configured pipelines
+    // are previewed exactly as they'll fill at sync time.
+    let server_id = params
+        .get("serverId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    if let Some(server_id) = server_id {
+        // Pipeline precedence: inline (supplied by the UI for a live, unsaved preview) →
+        // persisted per-server pipeline → default-legacy. The default-legacy pipeline keeps the
+        // fast `run_auto_fill_provider` path inside the seam (a bare budget needs no materialization).
+        let inline_pipeline: Option<crate::auto_fill::AutoFillPipeline> =
+            match params.get("pipeline") {
+                Some(v) if !v.is_null() => {
+                    Some(serde_json::from_value(v.clone()).map_err(|e| JsonRpcError {
+                        code: ERR_INVALID_PARAMS,
+                        message: format!("Invalid pipeline: {}", e),
+                        data: None,
+                    })?)
+                }
+                _ => None,
+            };
+        let persisted_pipeline = state
+            .device_manager
+            .get_current_device()
+            .await
+            .and_then(|m| m.auto_fill.pipeline_for(&server_id).cloned());
+        let pipeline = inline_pipeline
+            .or(persisted_pipeline)
+            .unwrap_or_else(|| crate::auto_fill::AutoFillPipeline::default_legacy(None));
+        let max_fill_bytes = if let Some(mb) = max_bytes_param.or(pipeline.budget.max_bytes) {
+            mb
+        } else {
+            match state.device_manager.get_device_storage().await {
+                Some(info) => info.free_bytes,
+                None => {
+                    return Err(JsonRpcError {
+                        code: ERR_INVALID_PARAMS,
+                        message: "No device connected and no maxBytes specified".to_string(),
+                        data: None,
+                    });
+                }
+            }
+        };
+
+        let provider = match get_provider_by_server_id_for(state, &server_id).await {
+            Ok(p) => p,
+            Err(e) => {
+                return Err(JsonRpcError {
+                    code: ERR_CONNECTION_FAILED,
+                    message: format!(
+                        "Auto-fill failed: provider for {server_id} unavailable: {}",
+                        e.message
+                    ),
+                    data: None,
+                });
+            }
+        };
+
+        // Exclude ids are passed through verbatim (the per-provider seam dedups by id, mirroring
+        // the sync-time path). Container-id expansion is a Jellyfin-only concern of the legacy path.
+        // Story 13.1: build the same DB-sourced history + rotation cursor as sync-time so the
+        // preview reflects cooldown/played/stable-core/tiers exactly as the fill will.
+        let now = now_unix_secs();
+        let device_id = state
+            .device_manager
+            .get_current_device()
+            .await
+            .map(|m| m.device_id)
+            .unwrap_or_default();
+        let (history, rotation_cursor, pity_streak) =
+            build_autofill_history(&state.db, &device_id, &server_id, now);
+        let fill_params = crate::auto_fill::AutoFillParams {
+            exclude_item_ids,
+            max_fill_bytes,
+            device_id,
+            server_id: server_id.clone(),
+            now_unix: now,
+            history,
+            rotation_cursor,
+            seed: now as u64,
+            pity_streak,
+            // Story 13.5: engine preview path → mint local civil time so the preview matches the fill.
+            local: now_civil(),
+        };
+        return match expand_auto_fill_slot(provider, Some(&pipeline), fill_params).await {
+            Ok(items) => serde_json::to_value(items).map_err(|e| JsonRpcError {
+                code: ERR_INTERNAL_ERROR,
+                message: format!("Failed to serialize auto-fill results: {}", e),
+                data: None,
+            }),
+            Err(e) => Err(JsonRpcError {
+                code: ERR_CONNECTION_FAILED,
+                message: format!("Auto-fill failed: {}", e),
+                data: None,
+            }),
+        };
+    }
+
+    // Determine available capacity for the legacy no-serverId Jellyfin preview path.
     let max_fill_bytes = if let Some(mb) = max_bytes_param {
         mb
     } else {
@@ -5680,9 +6592,19 @@ async fn handle_basket_auto_fill(
     // excluded from auto-fill results (AC-2).
     let expanded_exclude_ids = expand_exclude_ids(&state.jellyfin_client, exclude_item_ids).await;
 
+    // Legacy Jellyfin preview (no serverId): Memory features don't apply (13.1/13.4 fields inert).
     let fill_params = crate::auto_fill::AutoFillParams {
         exclude_item_ids: expanded_exclude_ids,
         max_fill_bytes,
+        device_id: String::new(),
+        server_id: String::new(),
+        now_unix: now_unix_secs(),
+        history: crate::auto_fill::HistorySnapshot::default(),
+        rotation_cursor: 0,
+        seed: 0,
+        pity_streak: 0,
+        // Story 13.5: legacy Jellyfin preview — civil time inert (Context stage never runs here).
+        local: crate::auto_fill::CivilTime::default(),
     };
 
     match crate::auto_fill::run_auto_fill(&state.jellyfin_client, fill_params).await {
@@ -5776,6 +6698,65 @@ async fn get_items_by_ids_chunked(
     Ok(all_items)
 }
 
+/// autoFill.setPipeline — persists a full per-server auto-fill pipeline to the device manifest
+/// (Story 12.6). Params: `{ serverId: <portable id>, pipeline: <AutoFillPipeline JSON> }`.
+///
+/// Writes only the given server's slot via [`AutoFillConfig::set_pipeline`], which inserts/replaces
+/// that key, clears any parked legacy block, and leaves every other server's pipeline untouched.
+/// The manifest is persisted in a single atomic `update_manifest` write. This RPC deliberately does
+/// NOT read or write `auto_sync_on_connect` — that stays server-independent and is configured via
+/// `device_set_auto_sync_on_connect`. A blank/whitespace `serverId` or a malformed `pipeline`
+/// returns `ERR_INVALID_PARAMS`.
+async fn handle_auto_fill_set_pipeline(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = params.ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing params".to_string(),
+        data: None,
+    })?;
+
+    let server_id = params
+        .get("serverId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Missing or blank serverId".to_string(),
+            data: None,
+        })?
+        .to_string();
+
+    let pipeline_value = params.get("pipeline").cloned().ok_or(JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Missing pipeline".to_string(),
+        data: None,
+    })?;
+    let pipeline: crate::auto_fill::AutoFillPipeline = serde_json::from_value(pipeline_value)
+        .map_err(|e| JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: format!("Invalid pipeline: {}", e),
+            data: None,
+        })?;
+
+    state
+        .device_manager
+        .update_manifest(|m| m.auto_fill.set_pipeline(&server_id, pipeline.clone()))
+        .await
+        .map_err(|e| JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: format!("Failed to save pipeline: {}", e),
+            data: None,
+        })?;
+
+    Ok(serde_json::json!({
+        "status": "success",
+        "serverId": server_id,
+    }))
+}
+
 /// sync.setAutoFill — persists auto-fill preferences to the device manifest.
 /// Params: { deviceId: string, autoFillEnabled: boolean, maxFillBytes?: number, autoSyncOnConnect: boolean }
 async fn handle_sync_set_auto_fill(
@@ -5802,13 +6783,24 @@ async fn handle_sync_set_auto_fill(
         data: None,
     })?;
 
+    // Story 12.2: write into the selected server's portable pipeline slot when a server is
+    // selected; otherwise fall back to the legacy block (no portable id available yet).
+    let selected_portable_id = state
+        .db
+        .get_server_config()
+        .ok()
+        .flatten()
+        .and_then(|s| s.server_id);
+
     // Persist both auto_fill prefs and auto_sync_on_connect in a single atomic
     // write-temp-rename operation to prevent inconsistent manifest state on crash.
     state
         .device_manager
         .update_manifest(|m| {
-            m.auto_fill.enabled = auto_fill_enabled;
-            m.auto_fill.max_bytes = max_fill_bytes;
+            match selected_portable_id.as_deref() {
+                Some(id) => m.auto_fill.set_for(id, auto_fill_enabled, max_fill_bytes),
+                None => m.auto_fill.set_legacy(auto_fill_enabled, max_fill_bytes),
+            }
             m.auto_sync_on_connect = auto_sync_on_connect;
         })
         .await
@@ -5987,6 +6979,120 @@ mod tests {
     use serde_json::json;
     use std::sync::Mutex;
 
+    // ---- Story 13.5 #20: encoding-from-goals per-slot transcode override (RPC-level). ----
+
+    fn add_item(id: &str, server_id: Option<&str>) -> crate::sync::SyncAddItem {
+        crate::sync::SyncAddItem {
+            jellyfin_id: id.to_string(),
+            name: id.to_string(),
+            album: None,
+            artist: None,
+            size_bytes: 1_000,
+            etag: None,
+            provider_album_id: None,
+            provider_content_type: None,
+            provider_suffix: None,
+            original_bitrate: None,
+            track_number: None,
+            reason_code: None,
+            reason: None,
+            server_id: server_id.map(str::to_string),
+            tier: None,
+            max_bitrate_override_kbps: None,
+        }
+    }
+
+    #[test]
+    fn patch_delta_bitrate_overrides_scopes_to_autofill_items_only() {
+        // A manual item (not in the map) and two auto-fill items (in the map) on the same server.
+        let mut delta = crate::sync::SyncDelta {
+            adds: vec![
+                add_item("manual-1", Some("srv")),
+                add_item("af-1", Some("srv")),
+                add_item("af-2", Some("srv")),
+            ],
+            deletes: Vec::new(),
+            id_changes: Vec::new(),
+            unchanged: 0,
+            playlists: Vec::new(),
+            pity_fired_servers: Vec::new(),
+        };
+        let mut map = std::collections::HashMap::new();
+        map.insert("af-1".to_string(), 96u32);
+        map.insert("af-2".to_string(), 96u32);
+        patch_delta_bitrate_overrides(&mut delta, &map);
+
+        let by_id = |id: &str| {
+            delta
+                .adds
+                .iter()
+                .find(|a| a.jellyfin_id == id)
+                .unwrap()
+                .max_bitrate_override_kbps
+        };
+        assert_eq!(
+            by_id("af-1"),
+            Some(96),
+            "auto-fill item gets the per-slot override"
+        );
+        assert_eq!(by_id("af-2"), Some(96));
+        assert_eq!(
+            by_id("manual-1"),
+            None,
+            "manual item on the same server is untouched"
+        );
+
+        // An empty map is a no-op (nothing stamped).
+        let mut delta2 = crate::sync::SyncDelta {
+            adds: vec![add_item("x", Some("srv"))],
+            deletes: Vec::new(),
+            id_changes: Vec::new(),
+            unchanged: 0,
+            playlists: Vec::new(),
+            pity_fired_servers: Vec::new(),
+        };
+        patch_delta_bitrate_overrides(&mut delta2, &std::collections::HashMap::new());
+        assert_eq!(delta2.adds[0].max_bitrate_override_kbps, None);
+    }
+
+    #[test]
+    fn encoding_override_gated_on_active_transcode_profile() {
+        use crate::auto_fill::AutoFillPipeline;
+        use crate::auto_fill::pipeline::BudgetStage;
+        let mut enc = AutoFillPipeline::default_legacy(Some(8_000_000));
+        enc.budget = BudgetStage {
+            max_bytes: Some(8_000_000),
+            target_duration_secs: Some(600),
+            headroom_bytes: None,
+            encoding_from_goals: true,
+        };
+
+        // Passthrough / no profile ⇒ no override AND the flag is cleared so the estimate stays source-based.
+        assert!(!transcode_profile_active(None));
+        assert!(!transcode_profile_active(Some("passthrough")));
+        assert_eq!(
+            encoding_override_kbps(Some(&enc), false),
+            None,
+            "no transcode ⇒ no override"
+        );
+        let cleared =
+            encoding_passthrough_clear(Some(&enc), false).expect("flag cleared in passthrough");
+        assert!(!cleared.budget.encoding_from_goals);
+
+        // Active profile ⇒ derive the override (8MB/600s ⇒ 106 kbps) and keep the flag.
+        assert!(transcode_profile_active(Some("profile-aac-128")));
+        assert_eq!(encoding_override_kbps(Some(&enc), true), Some(106));
+        assert!(
+            encoding_passthrough_clear(Some(&enc), true).is_none(),
+            "flag is preserved when a transcode profile is active"
+        );
+
+        // A pipeline that didn't enable encoding-from-goals never derives an override.
+        let plain = AutoFillPipeline::default_legacy(Some(8_000_000));
+        assert_eq!(encoding_override_kbps(Some(&plain), true), None);
+        assert!(encoding_passthrough_clear(Some(&plain), false).is_none());
+    }
+
     fn make_test_state(db: Arc<crate::db::Database>) -> Arc<AppState> {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         Arc::new(AppState {
@@ -6034,7 +7140,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: Some("legacy-profile".to_string()),
             last_synced_transcoding_profile_id: Some("legacy-profile".to_string()),
             transcoding_profile_dirty: false,
@@ -6364,15 +7470,24 @@ mod tests {
             "user",
             None,
         );
-        assert_eq!(config.server_id.as_deref(), Some(expected_portable.as_str()));
+        assert_eq!(
+            config.server_id.as_deref(),
+            Some(expected_portable.as_str())
+        );
         assert_eq!(result["serverId"], json!(expected_portable));
         assert_eq!(result["localId"], json!(config.id));
 
         // get_daemon_state surfaces the portable id on each server row and as
         // selectedServerPortableId; server.list rows carry serverId too.
         let state_json = handle_get_daemon_state(&state).await.unwrap();
-        assert_eq!(state_json["selectedServerPortableId"], json!(expected_portable));
-        assert_eq!(state_json["servers"][0]["serverId"], json!(expected_portable));
+        assert_eq!(
+            state_json["selectedServerPortableId"],
+            json!(expected_portable)
+        );
+        assert_eq!(
+            state_json["servers"][0]["serverId"],
+            json!(expected_portable)
+        );
         assert_eq!(state_json["selectedServerId"], json!(config.id));
         let list = handle_server_list(&state).await.unwrap();
         assert_eq!(list[0]["serverId"], json!(expected_portable));
@@ -6429,7 +7544,12 @@ mod tests {
         // unknown-server item dropped; the rest kept and mapped to the portable id.
         assert_eq!(out.len(), 4);
         for it in &out {
-            assert_eq!(it.server_id.as_deref(), Some("portable-1"), "item {}", it.id);
+            assert_eq!(
+                it.server_id.as_deref(),
+                Some("portable-1"),
+                "item {}",
+                it.id
+            );
         }
 
         // Idempotent: a second pass over already-portable items is a no-op.
@@ -6816,7 +7936,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -6997,7 +8117,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -7199,12 +8319,9 @@ mod tests {
         assert_eq!(arr.len(), 2);
         let selected_count = arr.iter().filter(|s| s["selected"] == true).count();
         assert_eq!(selected_count, 1);
-        assert!(
-            arr.iter()
-                .any(|s| s["id"] == local_a.as_str()
-                    && s["serverId"] == id_a.as_str()
-                    && s["selected"] == true)
-        );
+        assert!(arr.iter().any(|s| s["id"] == local_a.as_str()
+            && s["serverId"] == id_a.as_str()
+            && s["selected"] == true));
 
         // server.select(B) switches selection (AC2) — keyed on the local id.
         handle_server_select(&state, Some(json!({ "id": local_b })))
@@ -7364,21 +8481,25 @@ mod tests {
             ("a".into(), Some("s1".into())),
             ("b".into(), Some("s1".into())),
         ];
-        assert!(!sync_needs_provider_routing(&single, Some("s1"), None));
+        assert!(!sync_needs_provider_routing(&single, Some("s1"), &[]));
 
         let mixed = vec![
             ("a".into(), Some("s1".into())),
             ("b".into(), Some("s2".into())),
         ];
-        assert!(sync_needs_provider_routing(&mixed, Some("s1"), None));
+        assert!(sync_needs_provider_routing(&mixed, Some("s1"), &[]));
 
         // Legacy items (no serverId) resolve to the selected server → single.
         let legacy = vec![("a".into(), None), ("b".into(), None)];
-        assert!(!sync_needs_provider_routing(&legacy, Some("s1"), None));
+        assert!(!sync_needs_provider_routing(&legacy, Some("s1"), &[]));
 
         // An auto-fill slot bound to another server forces routing.
         let af = vec![("a".into(), Some("s1".into()))];
-        assert!(sync_needs_provider_routing(&af, Some("s1"), Some("s2")));
+        assert!(sync_needs_provider_routing(
+            &af,
+            Some("s1"),
+            &["s2".to_string()]
+        ));
 
         // A basket holding only another server's (locked) items while s1 is
         // selected: a single distinct server, but NOT the selected one — must
@@ -7387,10 +8508,631 @@ mod tests {
             ("a".into(), Some("s2".into())),
             ("b".into(), Some("s2".into())),
         ];
-        assert!(sync_needs_provider_routing(&single_other, Some("s1"), None));
+        assert!(sync_needs_provider_routing(&single_other, Some("s1"), &[]));
 
         // Nothing selected but a concrete server present → route.
-        assert!(sync_needs_provider_routing(&single_other, None, None));
+        assert!(sync_needs_provider_routing(&single_other, None, &[]));
+    }
+
+    // Story 12.3 AC5: every auto-fill slot counts toward the routing decision.
+    #[test]
+    fn test_sync_needs_provider_routing_multi_auto_fill() {
+        // Single-server manual items + 2 auto-fill servers → route (one slot is
+        // for a non-selected server).
+        let manual = vec![("a".into(), Some("s1".into()))];
+        assert!(sync_needs_provider_routing(
+            &manual,
+            Some("s1"),
+            &["s1".to_string(), "s2".to_string()]
+        ));
+
+        // A single auto-fill slot on a non-selected server, with all manual items
+        // on the selected server → route.
+        assert!(sync_needs_provider_routing(
+            &manual,
+            Some("s1"),
+            &["s2".to_string()]
+        ));
+
+        // All on the selected server (1 descriptor for s1) → no routing.
+        assert!(!sync_needs_provider_routing(
+            &manual,
+            Some("s1"),
+            &["s1".to_string()]
+        ));
+
+        // No manual items, single auto-fill slot on the selected server → single.
+        assert!(!sync_needs_provider_routing(
+            &[],
+            Some("s1"),
+            &["s1".to_string()]
+        ));
+    }
+
+    // Story 12.4: a configured non-default pipeline for an auto-fill slot's server forces the
+    // per-provider path (off the Jellyfin-client fast path); a default pipeline does not.
+    #[test]
+    fn test_auto_fill_needs_configurable_routing() {
+        use crate::auto_fill::{AutoFillPipeline, SourceEntry, SourceKind};
+
+        let mut manifest = manifest_for_update();
+
+        // Default-legacy pipeline for s1 → fast path stays (no forced routing).
+        manifest.auto_fill.pipelines.insert(
+            "s1".to_string(),
+            AutoFillPipeline::default_legacy(Some(8_000_000_000)),
+        );
+        assert!(
+            !auto_fill_needs_configurable_routing(&manifest, &["s1".to_string()]),
+            "default-legacy pipeline must NOT force the provider path"
+        );
+
+        // A slot whose server has no configured pipeline → no forced routing.
+        assert!(!auto_fill_needs_configurable_routing(
+            &manifest,
+            &["unknown-server".to_string()]
+        ));
+
+        // Configure a NON-default pipeline (playlist source) for s2 → forces routing.
+        let mut configured = AutoFillPipeline::default();
+        configured.sources = vec![SourceEntry {
+            kind: SourceKind::Playlist,
+            ref_id: Some("energy".to_string()),
+            share: None,
+        }];
+        manifest
+            .auto_fill
+            .pipelines
+            .insert("s2".to_string(), configured);
+        assert!(
+            auto_fill_needs_configurable_routing(&manifest, &["s2".to_string()]),
+            "a configured non-default pipeline must force the provider path"
+        );
+
+        // Mixed: s1 default + s2 configured → still forced (any non-default slot).
+        assert!(auto_fill_needs_configurable_routing(
+            &manifest,
+            &["s1".to_string(), "s2".to_string()]
+        ));
+
+        // No auto-fill slots at all → never forced.
+        assert!(!auto_fill_needs_configurable_routing(&manifest, &[]));
+    }
+
+    // Story 12.5: a headroom/duration budget on a slot's pipeline propagates through the
+    // discriminator and forces the per-provider path; a bare maxBytes budget does not.
+    #[test]
+    fn test_auto_fill_budget_headroom_forces_routing() {
+        use crate::auto_fill::AutoFillPipeline;
+
+        let mut manifest = manifest_for_update();
+
+        // Default-legacy + bare maxBytes for s1 → fast path stays.
+        manifest.auto_fill.pipelines.insert(
+            "s1".to_string(),
+            AutoFillPipeline::default_legacy(Some(8_000_000_000)),
+        );
+        assert!(
+            !auto_fill_needs_configurable_routing(&manifest, &["s1".to_string()]),
+            "a bare maxBytes budget must NOT force the provider path"
+        );
+
+        // Headroom reserve on s2 → forces routing.
+        let mut headroom = AutoFillPipeline::default();
+        headroom.budget.headroom_bytes = Some(1_000_000_000);
+        manifest
+            .auto_fill
+            .pipelines
+            .insert("s2".to_string(), headroom);
+        assert!(
+            auto_fill_needs_configurable_routing(&manifest, &["s2".to_string()]),
+            "a headroom reserve must force the provider path"
+        );
+
+        // Duration target on s3 → forces routing.
+        let mut duration = AutoFillPipeline::default();
+        duration.budget.target_duration_secs = Some(3600);
+        manifest
+            .auto_fill
+            .pipelines
+            .insert("s3".to_string(), duration);
+        assert!(
+            auto_fill_needs_configurable_routing(&manifest, &["s3".to_string()]),
+            "a duration target must force the provider path"
+        );
+    }
+
+    // --- Story 12.6: autoFill.setPipeline + get_daemon_state.pipelines + basket.autoFill routing ---
+
+    /// Detects a device from a freshly-written manifest so handlers that read/write the manifest
+    /// have a connected device to operate on.
+    async fn connect_device_with_manifest(
+        state: &AppState,
+        dir: &std::path::Path,
+        manifest: crate::device::DeviceManifest,
+    ) {
+        crate::device::write_manifest(
+            Arc::new(crate::device_io::MscBackend::new(dir.to_path_buf())),
+            &manifest,
+        )
+        .await
+        .unwrap();
+        state
+            .device_manager
+            .handle_device_detected(
+                dir.to_path_buf(),
+                manifest,
+                Arc::new(crate::device_io::MscBackend::new(dir.to_path_buf())),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn autofill_set_pipeline_rpc_round_trips_via_get_daemon_state() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let dir = tempfile::tempdir().unwrap();
+        connect_device_with_manifest(&state, dir.path(), manifest_for_update()).await;
+
+        let pipeline_json = json!({
+            "enabled": true,
+            "filter": { "includeGenres": ["Jazz"], "excludeGenres": [], "includeTags": [], "excludeTags": [] },
+            "sources": [ { "kind": "playlist", "ref": "pl-7", "share": 0.6 },
+                         { "kind": "favorites", "share": 0.4 } ],
+            "unit": "album",
+            "ordering": ["favorite", "playCount", "quality"],
+            "memory": { "cooldownWeeks": 3, "playedExclusion": true },
+            "budget": { "maxBytes": 8_000_000_000_u64, "targetDurationSecs": 3600 },
+            "fallback": [ { "kind": "library" } ]
+        });
+
+        let result = handle_auto_fill_set_pipeline(
+            &state,
+            Some(json!({ "serverId": "srv-1", "pipeline": pipeline_json.clone() })),
+        )
+        .await
+        .expect("setPipeline succeeds");
+        assert_eq!(result["status"], "success");
+        assert_eq!(result["serverId"], "srv-1");
+
+        // get_daemon_state exposes the full pipeline under the per-server map and it round-trips.
+        let daemon_state = handle_get_daemon_state(&state).await.unwrap();
+        let returned = &daemon_state["autoFill"]["pipelines"]["srv-1"];
+        let expected: crate::auto_fill::AutoFillPipeline =
+            serde_json::from_value(pipeline_json).unwrap();
+        let actual: crate::auto_fill::AutoFillPipeline =
+            serde_json::from_value(returned.clone()).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn autofill_set_pipeline_rpc_rejects_bad_params() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let dir = tempfile::tempdir().unwrap();
+        connect_device_with_manifest(&state, dir.path(), manifest_for_update()).await;
+
+        // Blank/whitespace serverId → ERR_INVALID_PARAMS.
+        let err = handle_auto_fill_set_pipeline(
+            &state,
+            Some(json!({ "serverId": "   ", "pipeline": { "enabled": true } })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, ERR_INVALID_PARAMS);
+
+        // Missing pipeline → ERR_INVALID_PARAMS.
+        let err = handle_auto_fill_set_pipeline(&state, Some(json!({ "serverId": "srv-1" })))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ERR_INVALID_PARAMS);
+
+        // Malformed pipeline (wrong type for a known field) → ERR_INVALID_PARAMS.
+        let err = handle_auto_fill_set_pipeline(
+            &state,
+            Some(json!({ "serverId": "srv-1", "pipeline": { "ordering": "not-an-array" } })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, ERR_INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn get_daemon_state_legacy_device_has_empty_pipelines_map() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let dir = tempfile::tempdir().unwrap();
+        // Legacy device: AutoFillConfig::default() (no per-server map).
+        connect_device_with_manifest(&state, dir.path(), manifest_for_update()).await;
+
+        let daemon_state = handle_get_daemon_state(&state).await.unwrap();
+        let pipelines = &daemon_state["autoFill"]["pipelines"];
+        assert!(pipelines.is_object(), "pipelines is an object");
+        assert!(
+            pipelines.as_object().unwrap().is_empty(),
+            "legacy device → empty pipelines map"
+        );
+        // Legacy enabled/maxBytes fields retained.
+        assert!(daemon_state["autoFill"]["enabled"].is_boolean());
+    }
+
+    #[tokio::test]
+    async fn basket_auto_fill_unknown_server_errors_cleanly() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+
+        // No provider configured for this serverId → clean ERR_CONNECTION_FAILED, no panic.
+        let err = handle_basket_auto_fill(
+            &state,
+            Some(json!({ "serverId": "no-such-server", "maxBytes": 1_000_000 })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, ERR_CONNECTION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn basket_auto_fill_routes_to_subsonic_provider() {
+        let _lock = credential_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
+
+        let mut server = mockito::Server::new_async().await;
+        let _ping = server
+            .mock("GET", "/rest/ping.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#)
+            .create_async()
+            .await;
+        // Favorites yields one song; this is the only source that must succeed.
+        let _starred = server
+            .mock("GET", "/rest/getStarred2.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"subsonic-response":{"status":"ok","version":"1.16.1","starred2":{"song":[{"id":"fav1","title":"Fav Track","album":"A","artist":"Artist","size":100,"duration":120,"bitRate":320}]}}}"#,
+            )
+            .create_async()
+            .await;
+        // Library bulk fill returns nothing (empty search3) so the result is just the favorite.
+        let _search = server
+            .mock("GET", "/rest/search3.view")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"subsonic-response":{"status":"ok","version":"1.16.1","searchResult3":{}}}"#,
+            )
+            .create_async()
+            .await;
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        handle_server_connect(
+            &state,
+            Some(json!({
+                "url": server.url(),
+                "serverType": "subsonic",
+                "username": "subsonic-user",
+                "password": "subsonic-password"
+            })),
+        )
+        .await
+        .expect("connect");
+
+        // The portable serverId is the routing key the UI passes.
+        let portable_id =
+            handle_get_daemon_state(&state).await.unwrap()["selectedServerPortableId"]
+                .as_str()
+                .expect("portable id present")
+                .to_string();
+
+        // Budget must exceed the song's estimated size (bitrate×duration ≈ 4.8 MB), not its
+        // reported `size` — run_auto_fill_provider sizes by bitrate.
+        let result = handle_basket_auto_fill(
+            &state,
+            Some(json!({ "serverId": portable_id, "maxBytes": 100_000_000 })),
+        )
+        .await
+        .expect("routed auto-fill succeeds");
+
+        let items = result.as_array().expect("array of items");
+        assert!(
+            items.iter().any(|i| i["id"] == "fav1"),
+            "favorite from the routed subsonic provider is returned: {result}"
+        );
+    }
+
+    // --- Story 12.7: contract regression locks (AC9–AC12) ---
+
+    /// AC11: a malformed inline `pipeline` on `basket.autoFill`+serverId surfaces as
+    /// `ERR_INVALID_PARAMS` (the preview must show a user-visible error, not a silent failure).
+    /// The inline parse runs before provider resolution, so this holds even without a provider.
+    #[tokio::test]
+    async fn basket_auto_fill_rejects_malformed_inline_pipeline() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+
+        let err = handle_basket_auto_fill(
+            &state,
+            Some(json!({
+                "serverId": "srv-1",
+                "maxBytes": 1_000_000,
+                "pipeline": { "ordering": "not-an-array" }
+            })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, ERR_INVALID_PARAMS);
+    }
+
+    /// AC10 + AC12: `autoFill.setPipeline` inserts/replaces only the targeted server's entry —
+    /// every other server's pipeline is left byte-for-byte unchanged — and it never reads or writes
+    /// `auto_sync_on_connect` (which stays server-independent, set only via its own RPC).
+    #[tokio::test]
+    async fn autofill_set_pipeline_isolates_servers_and_leaves_auto_sync_untouched() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        let dir = tempfile::tempdir().unwrap();
+        // Connect a device whose auto_sync_on_connect is already ON, so we can prove setPipeline
+        // doesn't disturb it.
+        let mut manifest = manifest_for_update();
+        manifest.auto_sync_on_connect = true;
+        connect_device_with_manifest(&state, dir.path(), manifest).await;
+
+        let pipeline_a = json!({
+            "enabled": true,
+            "filter": { "includeGenres": [], "excludeGenres": ["Spoken"], "includeTags": [], "excludeTags": [] },
+            "sources": [ { "kind": "library" } ],
+            "unit": "track",
+            "ordering": ["favorite", "playCount"],
+            "memory": { "playedExclusion": true },
+            "budget": { "maxBytes": 4_000_000_000_u64 },
+            "fallback": []
+        });
+        let pipeline_b = json!({
+            "enabled": true,
+            "filter": { "includeGenres": [], "excludeGenres": [], "includeTags": [], "excludeTags": [] },
+            "sources": [ { "kind": "favorites" } ],
+            "unit": "album",
+            "ordering": ["dateCreated"],
+            "memory": {},
+            "budget": { "maxBytes": 2_000_000_000_u64 },
+            "fallback": []
+        });
+
+        handle_auto_fill_set_pipeline(
+            &state,
+            Some(json!({ "serverId": "srv-1", "pipeline": pipeline_a.clone() })),
+        )
+        .await
+        .expect("set srv-1");
+        handle_auto_fill_set_pipeline(
+            &state,
+            Some(json!({ "serverId": "srv-2", "pipeline": pipeline_b.clone() })),
+        )
+        .await
+        .expect("set srv-2");
+
+        let device = state.device_manager.get_current_device().await.unwrap();
+        // srv-1's entry is untouched by the srv-2 write — byte-for-byte equal to what we persisted.
+        let expected_a: crate::auto_fill::AutoFillPipeline =
+            serde_json::from_value(pipeline_a).unwrap();
+        assert_eq!(device.auto_fill.pipeline_for("srv-1"), Some(&expected_a));
+        assert!(device.auto_fill.pipeline_for("srv-2").is_some());
+        // auto_sync_on_connect remains ON — setPipeline neither reads nor writes it.
+        assert!(
+            device.auto_sync_on_connect,
+            "autoFill.setPipeline must not touch auto_sync_on_connect"
+        );
+    }
+
+    /// AC9: a daemon with no connected device exposes `autoFill: null` (never a pipelines map).
+    #[tokio::test]
+    async fn get_daemon_state_no_device_has_null_auto_fill() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+
+        let daemon_state = handle_get_daemon_state(&state).await.unwrap();
+        assert!(
+            daemon_state["autoFill"].is_null(),
+            "no device → autoFill is null, got: {}",
+            daemon_state["autoFill"]
+        );
+    }
+
+    // Story 12.3 AC1: normalize the dual-shape `autoFill` param into descriptors.
+    #[test]
+    fn test_parse_auto_fill_descriptors_shapes() {
+        // Legacy object, enabled → exactly one descriptor carrying its fields.
+        let legacy_enabled = json!({
+            "autoFill": { "enabled": true, "maxBytes": 1000, "serverId": "s1",
+                          "excludeItemIds": ["x", "y"] }
+        });
+        let d = parse_auto_fill_descriptors(&legacy_enabled);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].server_id.as_deref(), Some("s1"));
+        assert_eq!(d[0].max_bytes, Some(1000));
+        assert_eq!(
+            d[0].exclude_item_ids,
+            vec!["x".to_string(), "y".to_string()]
+        );
+
+        // Legacy object, disabled → no descriptors.
+        let legacy_disabled = json!({ "autoFill": { "enabled": false, "maxBytes": 1000 } });
+        assert!(parse_auto_fill_descriptors(&legacy_disabled).is_empty());
+
+        // Absent / null → no descriptors.
+        assert!(parse_auto_fill_descriptors(&json!({})).is_empty());
+        assert!(parse_auto_fill_descriptors(&json!({ "autoFill": null })).is_empty());
+
+        // Array of two → two descriptors; missing serverId left None (selected
+        // fallback applied at the call site, not here).
+        let array = json!({
+            "autoFill": [
+                { "serverId": "s1", "maxBytes": 500 },
+                { "maxBytes": 700 }
+            ]
+        });
+        let d = parse_auto_fill_descriptors(&array);
+        assert_eq!(d.len(), 2);
+        assert_eq!(d[0].server_id.as_deref(), Some("s1"));
+        assert_eq!(d[0].max_bytes, Some(500));
+        assert_eq!(d[1].server_id, None);
+        assert_eq!(d[1].max_bytes, Some(700));
+
+        // Array form: `enabled: false` element is filtered out; missing `enabled`
+        // is treated as enabled (presence = slot).
+        let array_mixed = json!({
+            "autoFill": [
+                { "serverId": "s1" },
+                { "serverId": "s2", "enabled": false },
+                { "serverId": "s3", "enabled": true }
+            ]
+        });
+        let d = parse_auto_fill_descriptors(&array_mixed);
+        assert_eq!(d.len(), 2);
+        assert_eq!(d[0].server_id.as_deref(), Some("s1"));
+        assert_eq!(d[1].server_id.as_deref(), Some("s3"));
+
+        // Empty array → no descriptors.
+        assert!(parse_auto_fill_descriptors(&json!({ "autoFill": [] })).is_empty());
+    }
+
+    // Story 12.3 AC3/AC4: manual-wins dedup, cross-slot dedup, and a shared
+    // remaining budget that shrinks across slots (so a small budget truncates
+    // later slots). Exercises the pure dedup/budget helper used by the loop.
+    #[test]
+    fn test_multi_slot_dedup_and_shared_budget() {
+        fn fill_item(id: &str, size: u64) -> crate::auto_fill::AutoFillItem {
+            crate::auto_fill::AutoFillItem {
+                id: id.to_string(),
+                name: format!("name-{id}"),
+                album: None,
+                artist: None,
+                provider_album_id: None,
+                provider_content_type: None,
+                provider_suffix: None,
+                size_bytes: size,
+                priority_reason: "test".to_string(),
+                tier: None,
+            }
+        }
+
+        // Manual item "m1" (100 bytes) already resolved on server s1.
+        let mut desired_items: Vec<crate::sync::DesiredItem> = vec![crate::sync::DesiredItem {
+            jellyfin_id: "m1".to_string(),
+            name: "manual".to_string(),
+            album: None,
+            artist: None,
+            size_bytes: 100,
+            etag: None,
+            provider_album_id: None,
+            provider_content_type: None,
+            provider_suffix: None,
+            original_bitrate: None,
+            track_number: None,
+            server_id: Some("s1".to_string()),
+        }];
+        let mut seen_ids: HashSet<String> = desired_items
+            .iter()
+            .map(|i| i.jellyfin_id.clone())
+            .collect();
+        let mut remaining: Option<u64> = Some(1000);
+        let mut autofill_playlist_tracks = Vec::new();
+
+        // Slot 1 (s1): returns the manual id (must be skipped — manual wins) plus
+        // two new tracks (300 + 200).
+        let added1 = push_fill_items_dedup(
+            vec![
+                fill_item("m1", 100),
+                fill_item("f1", 300),
+                fill_item("f2", 200),
+            ],
+            &mut desired_items,
+            &mut seen_ids,
+            "s1",
+            &mut remaining,
+            &mut autofill_playlist_tracks,
+        );
+        assert_eq!(added1, 500, "only the two new tracks count");
+        assert_eq!(
+            desired_items.len(),
+            3,
+            "manual + f1 + f2; m1 not duplicated"
+        );
+        assert_eq!(
+            autofill_playlist_tracks
+                .iter()
+                .map(|t| t.jellyfin_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["f1", "f2"],
+            "playlist includes deduped autofill tracks only"
+        );
+        assert_eq!(
+            desired_items
+                .iter()
+                .filter(|i| i.jellyfin_id == "m1")
+                .count(),
+            1,
+            "manual item present exactly once"
+        );
+        assert_eq!(remaining, Some(500), "budget decremented by 500");
+        // f1/f2 tagged with the slot's server.
+        assert!(
+            desired_items
+                .iter()
+                .filter(|i| i.jellyfin_id == "f1" || i.jellyfin_id == "f2")
+                .all(|i| i.server_id.as_deref() == Some("s1"))
+        );
+
+        // Slot 2 (s2) with a large maxBytes: the shared remaining (500) truncates
+        // it — this is the budget the loop passes to run_auto_fill_provider.
+        let slot2_max: Option<u64> = Some(10_000);
+        let r = remaining.expect("budget present");
+        let slot2_budget = slot2_max.map_or(r, |mb| mb.min(r));
+        assert_eq!(slot2_budget, 500, "tiny shared budget caps the second slot");
+
+        // Slot 2 returns f1 (cross-slot dup → skipped) and a new f3 (400 bytes).
+        let added2 = push_fill_items_dedup(
+            vec![fill_item("f1", 300), fill_item("f3", 400)],
+            &mut desired_items,
+            &mut seen_ids,
+            "s2",
+            &mut remaining,
+            &mut autofill_playlist_tracks,
+        );
+        assert_eq!(added2, 400, "f1 already seen from slot 1; only f3 added");
+        assert_eq!(desired_items.len(), 4, "manual + f1 + f2 + f3");
+        assert_eq!(
+            autofill_playlist_tracks
+                .iter()
+                .map(|t| t.jellyfin_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["f1", "f2", "f3"],
+            "playlist preserves cross-slot autofill order"
+        );
+        assert_eq!(
+            desired_items
+                .iter()
+                .filter(|i| i.jellyfin_id == "f1")
+                .count(),
+            1,
+            "f1 not re-added by slot 2"
+        );
+        assert_eq!(
+            desired_items
+                .iter()
+                .find(|i| i.jellyfin_id == "f3")
+                .and_then(|i| i.server_id.as_deref()),
+            Some("s2"),
+            "f3 tagged with slot 2's server"
+        );
+        assert_eq!(remaining, Some(100), "500 − 400 = 100 remaining");
     }
 
     // AC11: provider auth errors map to ERR_UNAUTHORIZED with an `unauthorized`
@@ -7938,7 +9680,7 @@ mod tests {
                 size_bytes: 4000,
             }],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -8047,7 +9789,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -8128,7 +9870,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -8184,7 +9926,7 @@ mod tests {
             pending_item_ids: vec!["id-1".to_string()],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -8257,7 +9999,7 @@ mod tests {
             pending_item_ids: vec!["id-1".to_string()],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -8399,7 +10141,7 @@ mod tests {
                     pending_item_ids: vec![],
                     basket_items: vec![],
                     auto_sync_on_connect: false,
-                    auto_fill: crate::device::AutoFillPrefs::default(),
+                    auto_fill: crate::device::AutoFillConfig::default(),
                     transcoding_profile_id: None,
                     playlists: vec![],
                     storage_id: None,
@@ -8501,7 +10243,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -8763,7 +10505,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -8859,7 +10601,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: true,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -8922,8 +10664,18 @@ mod tests {
             serde_json::Value::Null,
             "No running operation → activeOperationId must be null"
         );
+        assert_eq!(result["syncPipelineActive"], false);
         assert_eq!(result["serverType"], serde_json::Value::Null);
         assert_eq!(result["serverVersion"], serde_json::Value::Null);
+
+        let pipeline_guard = state.sync_operation_manager.try_start_pipeline().unwrap();
+        let result_preparing = handle_get_daemon_state(&state).await.unwrap();
+        assert_eq!(
+            result_preparing["activeOperationId"],
+            serde_json::Value::Null
+        );
+        assert_eq!(result_preparing["syncPipelineActive"], true);
+        drop(pipeline_guard);
 
         state
             .server_manager
@@ -9011,7 +10763,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -9028,7 +10780,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -9091,7 +10843,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,

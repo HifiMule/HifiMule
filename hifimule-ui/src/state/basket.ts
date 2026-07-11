@@ -3,7 +3,24 @@ import { rpcCall } from '../rpc';
 // Basket State Management
 // Manages the collection of items selected for synchronization.
 
-export const AUTO_FILL_SLOT_ID = '__auto_fill_slot__';
+// Story 12.6: the auto-fill slot model is generalized from a single global singleton to one slot
+// per server. `AUTO_FILL_SLOT_PREFIX` is the shared id namespace; a per-server slot id is
+// `__auto_fill_slot__:<serverId>`. The legacy bare id `__auto_fill_slot__` (pre-12.6 persisted
+// state) is still recognized by `isAutoFillSlotId` so old state strips cleanly.
+export const AUTO_FILL_SLOT_PREFIX = '__auto_fill_slot__';
+
+/** Legacy single-slot id (pre-12.6). Retained for backward-compatible stripping. */
+export const AUTO_FILL_SLOT_ID = AUTO_FILL_SLOT_PREFIX;
+
+/** The per-server auto-fill slot id for a given portable serverId. */
+export function autoFillSlotId(serverId: string): string {
+    return `${AUTO_FILL_SLOT_PREFIX}:${serverId}`;
+}
+
+/** True for any auto-fill slot id — the legacy bare id OR a per-server `prefix:serverId`. */
+export function isAutoFillSlotId(id: string): boolean {
+    return id === AUTO_FILL_SLOT_PREFIX || id.startsWith(`${AUTO_FILL_SLOT_PREFIX}:`);
+}
 
 export interface BasketItem {
     id: string;
@@ -73,7 +90,7 @@ class BasketStore extends EventTarget {
     public hasMultipleServers(): boolean {
         const servers = new Set<string>();
         for (const item of this.items.values()) {
-            if (item.id !== AUTO_FILL_SLOT_ID && item.serverId) servers.add(item.serverId);
+            if (!isAutoFillSlotId(item.id) && item.serverId) servers.add(item.serverId);
         }
         return servers.size > 1;
     }
@@ -82,7 +99,7 @@ class BasketStore extends EventTarget {
     public serverIdsInBasket(): string[] {
         const out: string[] = [];
         for (const item of this.items.values()) {
-            if (item.id !== AUTO_FILL_SLOT_ID && item.serverId && !out.includes(item.serverId)) {
+            if (!isAutoFillSlotId(item.id) && item.serverId && !out.includes(item.serverId)) {
                 out.push(item.serverId);
             }
         }
@@ -165,7 +182,9 @@ class BasketStore extends EventTarget {
         for (const item of items) {
             // Retain items from ALL servers (AC3); the daemon already reconciled
             // serverIds. Read-only rendering for non-selected servers is the view's job.
-            if (item.id !== AUTO_FILL_SLOT_ID) {
+            // Strip every auto-fill slot (legacy bare id or per-server prefix) — slots are
+            // runtime-only UI markers, never restored from persisted state.
+            if (!isAutoFillSlotId(item.id)) {
                 this.items.set(item.id, item);
             }
         }
@@ -173,6 +192,21 @@ class BasketStore extends EventTarget {
         this.saveToLocalStorage();
         this.notify();
         this._syncingFromDaemon = false;
+    }
+
+    /** Inserts/updates a per-server auto-fill slot card (Story 12.6). Slots are runtime-only UI
+     * markers: this mutates in-memory state but does NOT persist to the daemon nor fire the basket
+     * `update` event — the pipeline persists via `autoFill.setPipeline` (no basket save, AC12), and
+     * the owning component re-renders itself. Firing `update` here would re-enter refreshAndRender
+     * (which re-derives slots), causing an infinite loop and a stale-state race against the
+     * in-flight setPipeline write. Slots are stripped on hydrate. */
+    public setAutoFillSlot(item: BasketItem): void {
+        this.items.set(item.id, item);
+    }
+
+    /** Removes an auto-fill slot without persisting or notifying (mirror of {@link setAutoFillSlot}). */
+    public removeAutoFillSlot(id: string): void {
+        this.items.delete(id);
     }
 
     public clearForDevice() {
@@ -230,9 +264,10 @@ class BasketStore extends EventTarget {
             const saved = localStorage.getItem('hifimule-basket');
             if (saved) {
                 const parsed = JSON.parse(saved);
-                // Strip the virtual auto-fill slot on load — it is runtime-only.
+                // Strip every auto-fill slot on load (legacy bare id or per-server prefix) —
+                // slots are runtime-only.
                 this.items = new Map(
-                    Object.entries(parsed).filter(([id]) => id !== AUTO_FILL_SLOT_ID) as [string, BasketItem][]
+                    Object.entries(parsed).filter(([id]) => !isAutoFillSlotId(id)) as [string, BasketItem][]
                 );
             }
 
@@ -308,17 +343,25 @@ class BasketStore extends EventTarget {
     /** Returns only the IDs of manually added items (for exclude list in auto-fill). */
     public getManualItemIds(): string[] {
         return Array.from(this.items.values())
-            .filter(i => i.id !== AUTO_FILL_SLOT_ID)
+            .filter(i => !isAutoFillSlotId(i.id))
             .map(i => i.id);
     }
 
-    /** Returns total size of manually added items only (excludes the virtual auto-fill slot). */
+    /** Returns total size of manually added items only (excludes auto-fill slots). */
     public getManualSizeBytes(): number {
         let total = 0;
         for (const item of this.items.values()) {
-            if (item.id !== AUTO_FILL_SLOT_ID) total += item.sizeBytes ?? 0;
+            if (!isAutoFillSlotId(item.id)) total += item.sizeBytes ?? 0;
         }
         return total;
+    }
+
+    /** Manual (non-slot) item ids for a specific server — the per-server exclude list for
+     * multi-slot sync descriptors (Story 12.6, AC14). */
+    public getManualItemIdsForServer(serverId: string): string[] {
+        return Array.from(this.items.values())
+            .filter(i => !isAutoFillSlotId(i.id) && i.serverId === serverId)
+            .map(i => i.id);
     }
 
     public getTotalSizeBytes(): number {

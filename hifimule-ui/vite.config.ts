@@ -1,11 +1,19 @@
 import { defineConfig } from "vite";
+import { cpSync } from "fs";
 import { resolve } from "path";
 
 const host = process.env.TAURI_DEV_HOST;
+const shoelaceAssets = resolve(__dirname, 'node_modules/@shoelace-style/shoelace/dist/assets');
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   root: __dirname,
+  plugins: [{
+    name: 'copy-shoelace-assets',
+    closeBundle() {
+      cpSync(shoelaceAssets, resolve(__dirname, 'dist/shoelace/assets'), { recursive: true });
+    },
+  }],
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

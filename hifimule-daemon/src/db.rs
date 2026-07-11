@@ -81,7 +81,12 @@ pub fn derive_server_id(
 /// Retained only so legacy manifest/basket tags can be reconciled to the portable
 /// id rather than silently dropped (Story 2.13 AC6).
 pub fn legacy_composite_server_id(server_type: &str, url: &str, username: &str) -> String {
-    format!("{}|{}|{}", server_type, normalized_server_url(url), username)
+    format!(
+        "{}|{}|{}",
+        server_type,
+        normalized_server_url(url),
+        username
+    )
 }
 
 pub fn server_type_label(server_type: &str) -> &'static str {
@@ -212,6 +217,55 @@ impl Database {
         .map_err(|e| anyhow!("Failed to create server_config table: {}", e))?;
 
         Self::migrate_server_config_to_multi(&conn)?;
+
+        // Story 12.2 scaffolding: machine-local auto-fill runtime history, consumed by Epic 13
+        // (cooldown windows, stable-core, pity-timer). `server_id` is the **portable** id (matches
+        // the manifest's per-server pipeline keys), keyed per device+server. Config lives in the
+        // manifest, never here (storage split, architecture.md line 922). No reads/writes in 12.2.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS autofill_history (
+                device_id TEXT NOT NULL,
+                server_id TEXT NOT NULL,
+                track_id TEXT NOT NULL,
+                last_synced_at INTEGER,
+                tier TEXT,
+                PRIMARY KEY (device_id, server_id, track_id)
+            )",
+            [],
+        )
+        .map_err(|e| anyhow!("Failed to create autofill_history table: {}", e))?;
+
+        // Story 13.1: machine-local rotation cursor for playlist-backed Memory tiers. Advances by 1
+        // on each completed sync that used tiers; `cursor mod tiers.len()` selects the lead tier so
+        // the device cycles through tiers over successive syncs. Keyed per device+portable server,
+        // same as `autofill_history`. Config lives in the manifest, never here (storage split).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS autofill_rotation (
+                device_id TEXT NOT NULL,
+                server_id TEXT NOT NULL,
+                cursor INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (device_id, server_id)
+            )",
+            [],
+        )
+        .map_err(|e| anyhow!("Failed to create autofill_rotation table: {}", e))?;
+
+        // Story 13.4: machine-local pity dry-streak counter. Advances by 1 on each completed sync that
+        // wrote a track for a pity-enabled server; resets to 0 the sync after the discovery guarantee
+        // fires (streak had reached the threshold). Drives the deterministic "guaranteed finds after
+        // dry spells" reserve. Keyed per device+portable server, same as `autofill_rotation`. Config
+        // (threshold/ratio) lives in the manifest, never here (storage split, architecture.md:922).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS autofill_pity (
+                device_id TEXT NOT NULL,
+                server_id TEXT NOT NULL,
+                dry_streak INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (device_id, server_id)
+            )",
+            [],
+        )
+        .map_err(|e| anyhow!("Failed to create autofill_pity table: {}", e))?;
+
         Ok(())
     }
 
@@ -742,6 +796,136 @@ impl Database {
         conn.execute("DROP TABLE scrobble_history", []).unwrap();
     }
 
+    // -----------------------------------------------------------------------
+    // Story 13.1: auto-fill runtime history + rotation cursor (machine-local).
+    // All time values are Unix seconds (i64). No method reads the system clock —
+    // callers pass `now`/`last_synced_at`/cutoffs. `server_id` is the portable id.
+    // -----------------------------------------------------------------------
+
+    /// Upsert one `autofill_history` row, overwriting `last_synced_at`/`tier` on conflict.
+    /// `last_synced_at = None` records a row with no sync timestamp; `tier = None` = untiered.
+    pub fn upsert_autofill_history(
+        &self,
+        device_id: &str,
+        server_id: &str,
+        track_id: &str,
+        last_synced_at: Option<i64>,
+        tier: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO autofill_history (device_id, server_id, track_id, last_synced_at, tier)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(device_id, server_id, track_id) DO UPDATE SET
+                last_synced_at = excluded.last_synced_at,
+                tier = excluded.tier",
+            params![device_id, server_id, track_id, last_synced_at, tier],
+        )
+        .map_err(|e| anyhow!("Failed to upsert autofill_history: {}", e))?;
+        Ok(())
+    }
+
+    /// All `autofill_history` rows for a `(device, server)` pair as
+    /// `(track_id, last_synced_at, tier)` tuples. Powers the fill-time snapshot.
+    pub fn get_autofill_history(
+        &self,
+        device_id: &str,
+        server_id: &str,
+    ) -> Result<Vec<(String, Option<i64>, Option<String>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT track_id, last_synced_at, tier FROM autofill_history
+             WHERE device_id = ?1 AND server_id = ?2",
+        )?;
+        let rows = stmt.query_map(params![device_id, server_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Delete `autofill_history` rows older than `older_than_unix` (by `last_synced_at`) for a
+    /// `(device, server)` pair. Rows with `NULL last_synced_at` are kept. Returns rows removed.
+    pub fn prune_autofill_history(
+        &self,
+        device_id: &str,
+        server_id: &str,
+        older_than_unix: i64,
+    ) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let removed = conn
+            .execute(
+                "DELETE FROM autofill_history
+                 WHERE device_id = ?1 AND server_id = ?2
+                   AND last_synced_at IS NOT NULL AND last_synced_at < ?3",
+                params![device_id, server_id, older_than_unix],
+            )
+            .map_err(|e| anyhow!("Failed to prune autofill_history: {}", e))?;
+        Ok(removed)
+    }
+
+    /// The rotation cursor for a `(device, server)` pair; `0` when none stored yet.
+    pub fn get_rotation_cursor(&self, device_id: &str, server_id: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let cursor: Option<i64> = conn
+            .query_row(
+                "SELECT cursor FROM autofill_rotation WHERE device_id = ?1 AND server_id = ?2",
+                params![device_id, server_id],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(cursor.unwrap_or(0))
+    }
+
+    /// Advance the rotation cursor by 1 (creating the row at 1 when absent) and return the new value.
+    pub fn advance_rotation_cursor(&self, device_id: &str, server_id: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO autofill_rotation (device_id, server_id, cursor)
+             VALUES (?1, ?2, 1)
+             ON CONFLICT(device_id, server_id) DO UPDATE SET cursor = cursor + 1",
+            params![device_id, server_id],
+        )
+        .map_err(|e| anyhow!("Failed to advance rotation cursor: {}", e))?;
+        let cursor: i64 = conn
+            .query_row(
+                "SELECT cursor FROM autofill_rotation WHERE device_id = ?1 AND server_id = ?2",
+                params![device_id, server_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| anyhow!("Failed to read advanced rotation cursor: {}", e))?;
+        Ok(cursor)
+    }
+
+    /// Story 13.4: the pity dry-streak for a `(device, server)` pair; `0` when none stored yet.
+    pub fn get_pity_streak(&self, device_id: &str, server_id: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let streak: Option<i64> = conn
+            .query_row(
+                "SELECT dry_streak FROM autofill_pity WHERE device_id = ?1 AND server_id = ?2",
+                params![device_id, server_id],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(streak.unwrap_or(0))
+    }
+
+    /// Story 13.4: set the pity dry-streak for a `(device, server)` pair (upsert).
+    pub fn set_pity_streak(&self, device_id: &str, server_id: &str, value: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO autofill_pity (device_id, server_id, dry_streak)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(device_id, server_id) DO UPDATE SET dry_streak = ?3",
+            params![device_id, server_id, value],
+        )
+        .map_err(|e| anyhow!("Failed to set pity streak: {}", e))?;
+        Ok(())
+    }
+
     pub fn get_scrobble_count(&self, device_id: &str) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn
@@ -810,6 +994,94 @@ mod tests {
         let db = Database::memory().unwrap();
         // Just checking it doesn't crash and table exists
         db.get_device_mapping("test").unwrap();
+    }
+
+    #[test]
+    fn test_autofill_history_upsert_read_round_trip() {
+        let db = Database::memory().unwrap();
+        db.upsert_autofill_history("dev", "srv", "t1", Some(1000), Some("0"))
+            .unwrap();
+        db.upsert_autofill_history("dev", "srv", "t2", Some(2000), None)
+            .unwrap();
+        // Different (device, server) scope must not bleed in.
+        db.upsert_autofill_history("dev", "other", "t3", Some(3000), None)
+            .unwrap();
+
+        let mut rows = db.get_autofill_history("dev", "srv").unwrap();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0],
+            ("t1".to_string(), Some(1000), Some("0".to_string()))
+        );
+        assert_eq!(rows[1], ("t2".to_string(), Some(2000), None));
+    }
+
+    #[test]
+    fn test_autofill_history_conflict_updates_last_synced_and_tier() {
+        let db = Database::memory().unwrap();
+        db.upsert_autofill_history("dev", "srv", "t1", Some(1000), Some("0"))
+            .unwrap();
+        // Re-sync the same track → row is updated in place, not duplicated.
+        db.upsert_autofill_history("dev", "srv", "t1", Some(5000), Some("2"))
+            .unwrap();
+        let rows = db.get_autofill_history("dev", "srv").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0],
+            ("t1".to_string(), Some(5000), Some("2".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_autofill_history_prune_removes_only_old_rows() {
+        let db = Database::memory().unwrap();
+        db.upsert_autofill_history("dev", "srv", "old", Some(1000), None)
+            .unwrap();
+        db.upsert_autofill_history("dev", "srv", "new", Some(9000), None)
+            .unwrap();
+        db.upsert_autofill_history("dev", "srv", "null", None, None)
+            .unwrap();
+        let removed = db.prune_autofill_history("dev", "srv", 5000).unwrap();
+        assert_eq!(removed, 1, "only the pre-cutoff row is pruned");
+        let mut ids: Vec<String> = db
+            .get_autofill_history("dev", "srv")
+            .unwrap()
+            .into_iter()
+            .map(|r| r.0)
+            .collect();
+        ids.sort();
+        assert_eq!(ids, vec!["new".to_string(), "null".to_string()]);
+    }
+
+    #[test]
+    fn test_rotation_cursor_defaults_to_zero_and_advances() {
+        let db = Database::memory().unwrap();
+        assert_eq!(db.get_rotation_cursor("dev", "srv").unwrap(), 0);
+        assert_eq!(db.advance_rotation_cursor("dev", "srv").unwrap(), 1);
+        assert_eq!(db.advance_rotation_cursor("dev", "srv").unwrap(), 2);
+        assert_eq!(db.get_rotation_cursor("dev", "srv").unwrap(), 2);
+        // Independent per (device, server).
+        assert_eq!(db.get_rotation_cursor("dev", "other").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_pity_streak_defaults_to_zero_and_round_trips() {
+        let db = Database::memory().unwrap();
+        // Default 0 on no row.
+        assert_eq!(db.get_pity_streak("dev", "srv").unwrap(), 0);
+        // Increment-style upsert: read 0 → write streak + 1.
+        db.set_pity_streak("dev", "srv", 1).unwrap();
+        assert_eq!(db.get_pity_streak("dev", "srv").unwrap(), 1);
+        db.set_pity_streak("dev", "srv", 2).unwrap();
+        assert_eq!(db.get_pity_streak("dev", "srv").unwrap(), 2);
+        // Reset semantics (guarantee fired) → 0.
+        db.set_pity_streak("dev", "srv", 0).unwrap();
+        assert_eq!(db.get_pity_streak("dev", "srv").unwrap(), 0);
+        // Independent per (device, server) scope.
+        db.set_pity_streak("dev", "srv", 5).unwrap();
+        assert_eq!(db.get_pity_streak("dev", "other").unwrap(), 0);
+        assert_eq!(db.get_pity_streak("dev", "srv").unwrap(), 5);
     }
 
     #[test]
@@ -1084,7 +1356,15 @@ mod tests {
     fn test_update_server_identity_clears_icon_without_reordering() {
         let db = Database::memory().unwrap();
         let id = db
-            .upsert_server("http://music.example", "jellyfin", "u", None, None, None, None)
+            .upsert_server(
+                "http://music.example",
+                "jellyfin",
+                "u",
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         let before = db.get_server(&id).unwrap().unwrap().updated_at;
 
@@ -1177,8 +1457,16 @@ mod tests {
         db.init_for_test().unwrap();
         assert_eq!(db.list_servers().unwrap().len(), 0);
         // New-schema operations work post-migration.
-        db.upsert_server("http://new.example", "jellyfin", "u", None, None, None, None)
-            .unwrap();
+        db.upsert_server(
+            "http://new.example",
+            "jellyfin",
+            "u",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(db.list_servers().unwrap().len(), 1);
     }
 
@@ -1233,7 +1521,10 @@ mod tests {
         assert_eq!(a, b);
         // Lowercase hex SHA-256 → 64 chars.
         assert_eq!(a.len(), 64);
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
         // Matches the documented basis exactly.
         let expected = {
             use sha2::{Digest, Sha256};
@@ -1249,8 +1540,14 @@ mod tests {
         let rid_basis = derive_server_id("jellyfin", "http://a.example", "u", Some("RID-123"));
         assert_ne!(url_basis, rid_basis, "rid basis must differ from url basis");
         // Empty / whitespace reported id falls back to the URL basis.
-        assert_eq!(derive_server_id("jellyfin", "http://a.example", "u", Some("")), url_basis);
-        assert_eq!(derive_server_id("jellyfin", "http://a.example", "u", Some("   ")), url_basis);
+        assert_eq!(
+            derive_server_id("jellyfin", "http://a.example", "u", Some("")),
+            url_basis
+        );
+        assert_eq!(
+            derive_server_id("jellyfin", "http://a.example", "u", Some("   ")),
+            url_basis
+        );
     }
 
     #[test]
@@ -1269,7 +1566,15 @@ mod tests {
     fn upsert_persists_portable_id_and_remove_readd_is_stable() {
         let db = Database::memory().unwrap();
         let id1 = db
-            .upsert_server("http://media.example", "jellyfin", "alexis", None, None, None, Some("RID-9"))
+            .upsert_server(
+                "http://media.example",
+                "jellyfin",
+                "alexis",
+                None,
+                None,
+                None,
+                Some("RID-9"),
+            )
             .unwrap();
         let portable1 = db.get_server(&id1).unwrap().unwrap().server_id.unwrap();
         let expected =
@@ -1279,11 +1584,22 @@ mod tests {
         // Remove and re-add the same logical server (reported id known again).
         assert!(db.remove_server(&id1).unwrap());
         let id2 = db
-            .upsert_server("http://media.example", "jellyfin", "alexis", None, None, None, Some("RID-9"))
+            .upsert_server(
+                "http://media.example",
+                "jellyfin",
+                "alexis",
+                None,
+                None,
+                None,
+                Some("RID-9"),
+            )
             .unwrap();
         assert_ne!(id1, id2, "machine-local id is freshly minted");
         let portable2 = db.get_server(&id2).unwrap().unwrap().server_id.unwrap();
-        assert_eq!(portable1, portable2, "portable id is stable across remove/re-add");
+        assert_eq!(
+            portable1, portable2,
+            "portable id is stable across remove/re-add"
+        );
     }
 
     #[test]
@@ -1295,23 +1611,42 @@ mod tests {
         // with the original basis are orphaned.
         let db = Database::memory().unwrap();
         let id = db
-            .upsert_server("http://media.example", "jellyfin", "alexis", None, None, None, None)
+            .upsert_server(
+                "http://media.example",
+                "jellyfin",
+                "alexis",
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         let portable_initial = db.get_server(&id).unwrap().unwrap().server_id.unwrap();
-        let url_basis =
-            derive_server_id("jellyfin", "http://media.example", "alexis", None);
+        let url_basis = derive_server_id("jellyfin", "http://media.example", "alexis", None);
         assert_eq!(portable_initial, url_basis);
 
         // Reconnect captures a reported id. Portable id must NOT change.
         let id2 = db
-            .upsert_server("http://media.example", "jellyfin", "alexis", None, None, None, Some("RID-9"))
+            .upsert_server(
+                "http://media.example",
+                "jellyfin",
+                "alexis",
+                None,
+                None,
+                None,
+                Some("RID-9"),
+            )
             .unwrap();
         assert_eq!(id, id2, "same logical server resolves to the same row");
         let portable_after = db.get_server(&id).unwrap().unwrap().server_id.unwrap();
         assert_eq!(portable_after, url_basis, "server_id is frozen on UPDATE");
         // But reported id is captured opportunistically for diagnostics.
         assert_eq!(
-            db.get_server(&id).unwrap().unwrap().server_reported_id.as_deref(),
+            db.get_server(&id)
+                .unwrap()
+                .unwrap()
+                .server_reported_id
+                .as_deref(),
             Some("RID-9")
         );
     }
@@ -1320,7 +1655,15 @@ mod tests {
     fn server_id_remap_maps_local_and_composite_to_portable() {
         let db = Database::memory().unwrap();
         let local = db
-            .upsert_server("http://sub.example", "subsonic", "alexis", None, None, None, None)
+            .upsert_server(
+                "http://sub.example",
+                "subsonic",
+                "alexis",
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         let portable = db.get_server(&local).unwrap().unwrap().server_id.unwrap();
         let composite = legacy_composite_server_id("subsonic", "http://sub.example", "alexis");
@@ -1373,5 +1716,25 @@ mod tests {
         let before = server.server_id.clone();
         db.init_for_test().unwrap();
         assert_eq!(db.get_server("srv-1").unwrap().unwrap().server_id, before);
+    }
+
+    #[test]
+    fn test_autofill_history_table_exists_and_init_idempotent() {
+        // Story 12.2 scaffolding: the table is created by init() and selectable; init() twice
+        // (CREATE TABLE IF NOT EXISTS) must not error.
+        let db = Database::memory().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.prepare(
+                "SELECT device_id, server_id, track_id, last_synced_at, tier \
+                 FROM autofill_history LIMIT 0",
+            )
+            .expect("autofill_history table should exist with the scaffolded columns");
+        }
+        // Idempotent re-init.
+        db.init_for_test().unwrap();
+        let conn = db.conn.lock().unwrap();
+        conn.prepare("SELECT * FROM autofill_history LIMIT 0")
+            .expect("autofill_history still present after re-init");
     }
 }

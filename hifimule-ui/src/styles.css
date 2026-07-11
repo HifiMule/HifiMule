@@ -63,6 +63,13 @@ body {
   width: 100%;
   --divider-width: 4px;
   --divider-hit-area: 12px;
+  /* The basket is the `primary` (end) panel: it holds a stable, comfortable
+     width while the library grid absorbs window resizing. --min/--max bound the
+     primary, so the curation panel stays in a readable band instead of being
+     crushed by a percentage track (its min-width fighting the divider) or
+     ballooning on wide displays. Floor matches .basket-view min-width. */
+  --min: 330px;
+  --max: 440px;
 }
 
 .library-view {
@@ -656,11 +663,68 @@ h2 {
   --indicator-color: white;
 }
 
-/* Error and loading states */
+/* Empty state — a successful load with zero items. Quiet and centered, not an
+   error: muted ink, a low-key inbox glyph, no Signal Cyan (nothing is
+   actionable or live here). Fills the content height so it reads as a
+   deliberate state, not a layout that failed to paint. */
+.library-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-sm);
+  min-height: 50vh;
+  padding: 2rem;
+  text-align: center;
+  color: var(--ink-dim);
+}
+
+.library-empty-state sl-icon {
+  font-size: 2.5rem;
+  opacity: 0.55;
+}
+
+.library-empty-state p {
+  margin: 0;
+  max-width: 32ch;
+  font-size: var(--sl-font-size-medium);
+  text-wrap: balance;
+}
+
+/* Error and loading states. Shares the empty state's full-pane layout (centered,
+   50vh, same gap and icon size) so a failed load and an empty one read as
+   siblings — the only difference is the danger color and the wording. */
 .error-message {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-sm);
+  min-height: 50vh;
   text-align: center;
   padding: 2rem;
   color: var(--sl-color-danger-600);
+}
+
+.error-message sl-icon {
+  font-size: 2.5rem;
+}
+
+.error-message-title {
+  margin: 0;
+  font-size: var(--sl-font-size-medium);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* Server-derived detail: muted, width-capped, and allowed to wrap so a long
+   backend message (paths, URLs, unbroken tokens) never overflows the pane. */
+.error-message-detail {
+  margin: 0;
+  max-width: 60ch;
+  font-size: var(--sl-font-size-small);
+  color: var(--ink-dim);
+  overflow-wrap: break-word;
 }
 
 .pagination-info {
@@ -1199,6 +1263,145 @@ h2 {
   background: color-mix(in srgb, var(--sl-color-primary-100) 20%, transparent);
 }
 
+/* Story 12.6: per-server slot badge + fallback hint */
+.basket-item-server-badge {
+  font-size: 0.85rem;
+  color: var(--ink-dim);
+  vertical-align: -2px;
+  margin-right: 0.25rem;
+}
+
+.auto-fill-fallback-hint {
+  display: inline-block;
+  margin-left: var(--space-2xs);
+  font-size: 0.7rem;
+  font-style: italic;
+  color: var(--ink-dim);
+}
+
+/* Story 12.6: pipeline-builder panel */
+.auto-fill-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.auto-fill-advanced {
+  border-top: 1px solid var(--surface-border-soft);
+  padding-top: var(--space-xs);
+}
+
+/* Live preview readout (Story 12.7) — empty (no preview run) collapses to nothing. */
+.auto-fill-preview:empty {
+  display: none;
+}
+
+.auto-fill-preview {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding-top: var(--space-xs);
+  border-top: 1px solid var(--surface-border-soft);
+  font-size: 0.9em;
+}
+
+.auto-fill-preview-result {
+  font-weight: 600;
+}
+
+.auto-fill-preview-empty {
+  color: var(--text-muted, #888);
+}
+
+.auto-fill-preview-error {
+  color: var(--sl-color-danger-600, #c0392b);
+}
+
+.af-advanced-chevron {
+  transition: transform 0.15s ease;
+}
+
+.af-advanced-chevron--open {
+  transform: rotate(90deg);
+}
+
+.auto-fill-advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  padding-top: var(--space-sm);
+}
+
+.auto-fill-stage {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.auto-fill-stage[open] {
+  gap: var(--space-xs);
+}
+
+.auto-fill-stage-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--ink);
+  cursor: pointer;
+  list-style: none;
+}
+
+.auto-fill-stage-label::-webkit-details-marker {
+  display: none;
+}
+
+.auto-fill-stage-body,
+.auto-fill-source-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.auto-fill-substage-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--ink-dim);
+}
+
+.auto-fill-source-row,
+.auto-fill-ordering-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.auto-fill-source-row .af-source-kind {
+  flex: 1;
+  min-width: 7rem;
+}
+
+.af-share-cell {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  flex: 1;
+}
+
+.af-share-cell sl-range {
+  flex: 1;
+}
+
+.af-share-value {
+  font-size: 0.7rem;
+  color: var(--ink-dim);
+  min-width: 2.5rem;
+  text-align: right;
+}
+
+.af-ordering-label {
+  flex: 1;
+  font-size: 0.85rem;
+}
+
 .basket-item-artist,
 .basket-item-genre {
   border: 1.5px solid var(--sl-color-neutral-600);
@@ -1712,6 +1915,20 @@ h2 {
 }
 
 @media (max-width: 980px) {
+  /* Narrow window: pull the curation band tighter so the library grid keeps at
+     least a couple of columns. The basket stays readable (its 48px thumbs +
+     metadata still fit) but yields its upper range to the grid. */
+  .split-panel {
+    --min: 300px;
+    --max: 360px;
+  }
+
+  /* Keep the element's own floor in lockstep with the split band, otherwise
+     min-width re-introduces the overflow it's meant to prevent. */
+  .basket-view {
+    min-width: 300px;
+  }
+
   .library-header-row {
     align-items: flex-start;
     flex-direction: column;

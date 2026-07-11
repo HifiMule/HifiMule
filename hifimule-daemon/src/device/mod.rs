@@ -1,9 +1,10 @@
 pub mod mtp;
 
+use crate::auto_fill::AutoFillPipeline;
 use crate::providers::{ProviderChangeContext, ProviderSyncedSong};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use tokio::time::{Duration, sleep};
 
@@ -97,9 +98,11 @@ pub struct DeviceManifest {
     pub basket_items: Vec<BasketItem>,
     #[serde(default)]
     pub auto_sync_on_connect: bool,
-    /// Auto-fill preferences persisted per device.
+    /// Auto-fill config persisted per device, keyed by portable `server_id` (Story 12.2).
+    /// Custom serde reads either the legacy `{ enabled, maxBytes }` block or the new
+    /// per-server `{ "<serverId>": { …pipeline… } }` map; see [`AutoFillConfig`].
     #[serde(default)]
-    pub auto_fill: AutoFillPrefs,
+    pub auto_fill: AutoFillConfig,
     /// ID referencing an entry in device-profiles.json. None = no transcoding (passthrough).
     #[serde(default)]
     pub transcoding_profile_id: Option<String>,
@@ -160,11 +163,207 @@ impl DeviceManifest {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-#[serde(rename_all = "camelCase")]
+/// Legacy single-block auto-fill shape (`{ "enabled", "maxBytes" }`). Retained as both the
+/// pre-12.2 on-disk shape and the transient migration carrier inside [`AutoFillConfig`].
+///
+/// `default` tolerates a partial legacy block (e.g. a hand-edited `{ "maxBytes": 123 }` missing
+/// `enabled`): without it the missing scalar fails *both* untagged `AutoFillConfig` variants and
+/// the entire manifest fails to load. Missing fields fall back to the `Default` (`false`/`None`).
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
 pub struct AutoFillPrefs {
     pub enabled: bool,
     pub max_bytes: Option<u64>,
+}
+
+/// Per-device auto-fill configuration (Story 12.2).
+///
+/// The on-disk shape is one of:
+///   - the new per-server map `{ "<serverId>": { …AutoFillPipeline… }, … }` (keys are the
+///     portable `server_id` shared with `SyncedItem.server_id` / `BasketItem.server_id`), or
+///   - the legacy block `{ "enabled": <bool>, "maxBytes": <u64|null> }` from pre-12.2 manifests.
+///
+/// Deserialization reads either shape (see the custom `Deserialize`); a meaningful legacy block
+/// is parked in `legacy` until [`AutoFillConfig::migrate_legacy_to`] maps it onto the selected
+/// server's portable id at device-detect time. An empty/default legacy block deserializes to
+/// `legacy: None` so it is never mistaken for real config.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AutoFillConfig {
+    /// Per-portable-serverId pipeline configs (the new model). Empty = none configured.
+    pub pipelines: HashMap<String, AutoFillPipeline>,
+    /// Legacy single-block read from an old manifest, pending migration onto the selected
+    /// server's portable id (see [`AutoFillConfig::migrate_legacy_to`]). `None` once migrated,
+    /// or when the legacy block was the empty default.
+    pub legacy: Option<AutoFillPrefs>,
+}
+
+/// Builds a behavior-preserving [`AutoFillPipeline`] from a legacy `{ enabled, maxBytes }` block:
+/// today's favorites→playCount→dateCreated single-Ordering pipeline, with `enabled` carried over.
+fn pipeline_from_legacy(prefs: &AutoFillPrefs) -> AutoFillPipeline {
+    let mut pipeline = AutoFillPipeline::default_legacy(prefs.max_bytes);
+    pipeline.enabled = prefs.enabled;
+    pipeline
+}
+
+impl Serialize for AutoFillConfig {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Non-empty map → emit the per-server map verbatim. Otherwise emit the legacy block
+        // (or, with nothing configured, the empty default `{ "enabled": false, "maxBytes": null }`
+        // — byte-for-byte identical to the pre-12.2 `AutoFillPrefs::default()` output so
+        // get_daemon_state and freshly-written manifests are unchanged).
+        if !self.pipelines.is_empty() {
+            self.pipelines.serialize(serializer)
+        } else if let Some(legacy) = &self.legacy {
+            legacy.serialize(serializer)
+        } else {
+            AutoFillPrefs::default().serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AutoFillConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Both shapes are JSON objects, so we discriminate by value type. The per-server map's
+        // values are pipeline *objects*; the legacy block's `enabled`/`maxBytes` values are
+        // scalars/null, so a `HashMap<String, AutoFillPipeline>` deserialize fails on them and
+        // falls through to the legacy variant. `PerServer` is tried first; an empty `{}` parses
+        // as an empty map (no config).
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            PerServer(HashMap<String, AutoFillPipeline>),
+            Legacy(AutoFillPrefs),
+        }
+
+        Ok(match Raw::deserialize(deserializer)? {
+            Raw::PerServer(pipelines) => AutoFillConfig {
+                pipelines,
+                legacy: None,
+            },
+            Raw::Legacy(prefs) => {
+                // A fresh/default `{ enabled: false, maxBytes: null }` is "no config" — never a
+                // migration trigger. Anything meaningful is parked for migration.
+                let legacy = if !prefs.enabled && prefs.max_bytes.is_none() {
+                    None
+                } else {
+                    Some(prefs)
+                };
+                AutoFillConfig {
+                    pipelines: HashMap::new(),
+                    legacy,
+                }
+            }
+        })
+    }
+}
+
+impl AutoFillConfig {
+    /// Maps a parked legacy block onto `server_id`'s portable pipeline slot. Returns `true` when
+    /// it changed the config (so the caller persists). Idempotent: returns `false` when there is
+    /// no legacy block, or when a pipeline already exists for `server_id` (never overwritten).
+    pub fn migrate_legacy_to(&mut self, server_id: &str) -> bool {
+        if self.legacy.is_some() && !self.pipelines.contains_key(server_id) {
+            let prefs = self.legacy.take().expect("legacy is Some");
+            self.pipelines
+                .insert(server_id.to_string(), pipeline_from_legacy(&prefs));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Resolves the effective pipeline for a (possibly absent) server id: the keyed pipeline when
+    /// present, else the sole pipeline of a single-server install, else `None` (legacy fallback).
+    fn resolve_pipeline(&self, server_id: Option<&str>) -> Option<&AutoFillPipeline> {
+        if let Some(id) = server_id
+            && let Some(pipeline) = self.pipelines.get(id)
+        {
+            return Some(pipeline);
+        }
+        if self.pipelines.len() == 1 {
+            return self.pipelines.values().next();
+        }
+        None
+    }
+
+    /// Whether auto-fill is enabled for `server_id` (single-entry/legacy fallback when unkeyed).
+    pub fn enabled_for(&self, server_id: Option<&str>) -> bool {
+        match self.resolve_pipeline(server_id) {
+            Some(pipeline) => pipeline.enabled,
+            None => self.legacy.as_ref().is_some_and(|l| l.enabled),
+        }
+    }
+
+    /// The byte budget for `server_id` (single-entry/legacy fallback when unkeyed).
+    pub fn max_bytes_for(&self, server_id: Option<&str>) -> Option<u64> {
+        match self.resolve_pipeline(server_id) {
+            Some(pipeline) => pipeline.budget.max_bytes,
+            None => self.legacy.as_ref().and_then(|l| l.max_bytes),
+        }
+    }
+
+    /// Server-agnostic enabled read for callers without server context (resolves the single
+    /// migrated pipeline of a single-server install, else the legacy block).
+    pub fn legacy_enabled(&self) -> bool {
+        self.enabled_for(None)
+    }
+
+    /// Server-agnostic max-bytes read for callers without server context.
+    pub fn legacy_max_bytes(&self) -> Option<u64> {
+        self.max_bytes_for(None)
+    }
+
+    /// Upserts the pipeline for `server_id` from a legacy-equivalent `{ enabled, maxBytes }` and
+    /// clears any parked legacy block. Used by `setAutoFill` (which can resolve the selected id).
+    pub fn set_for(&mut self, server_id: &str, enabled: bool, max_bytes: Option<u64>) {
+        self.pipelines.insert(
+            server_id.to_string(),
+            pipeline_from_legacy(&AutoFillPrefs { enabled, max_bytes }),
+        );
+        self.legacy = None;
+    }
+
+    /// Write path when no selected portable id is available (e.g. the server is momentarily
+    /// unselected). When a single pipeline already exists (single-server install), update it in
+    /// place — parking a `legacy` block here would be silently dropped by `serialize`, which emits
+    /// the non-empty `pipelines` map (mirrors `resolve_pipeline`'s single-entry fallback). Only an
+    /// empty (or genuinely multi-server, Story 12.3) config falls back to parking the legacy block.
+    pub fn set_legacy(&mut self, enabled: bool, max_bytes: Option<u64>) {
+        if self.pipelines.len() == 1 {
+            let key = self.pipelines.keys().next().expect("len == 1").clone();
+            self.pipelines.insert(
+                key,
+                pipeline_from_legacy(&AutoFillPrefs { enabled, max_bytes }),
+            );
+            self.legacy = None;
+        } else {
+            self.legacy = Some(AutoFillPrefs { enabled, max_bytes });
+        }
+    }
+
+    /// The pipeline for `server_id`, if one is configured. Read at each sync-time auto-fill
+    /// expansion site (Story 12.4) to route the slot through the configurable engine when a
+    /// non-default pipeline is configured for that portable serverId.
+    pub fn pipeline_for(&self, server_id: &str) -> Option<&AutoFillPipeline> {
+        self.pipelines.get(server_id)
+    }
+
+    /// Upserts a full [`AutoFillPipeline`] for `server_id` and clears any parked legacy block
+    /// (Story 12.6). This is the write path behind `autoFill.setPipeline`: it inserts or replaces
+    /// **only** that server's entry — every other server's pipeline is left byte-for-byte
+    /// unchanged — so reconfiguring one server can never disturb another's slot. Unlike
+    /// [`AutoFillConfig::set_for`] (legacy `{ enabled, maxBytes }` upsert), this persists the
+    /// caller-supplied pipeline verbatim, including reserved Epic 13 fields.
+    pub fn set_pipeline(&mut self, server_id: &str, pipeline: AutoFillPipeline) {
+        self.pipelines.insert(server_id.to_string(), pipeline);
+        self.legacy = None;
+    }
 }
 
 /// Rewrites a single optional `server_id` tag from a legacy machine-local UUID or
@@ -352,6 +551,21 @@ impl DeviceManager {
         {
             daemon_log!(
                 "[Device] Manifest server_id reconciliation persist failed (continuing): {}",
+                e
+            );
+        }
+
+        // Story 12.2: actively migrate a legacy `{ enabled, maxBytes }` auto-fill block onto the
+        // currently selected server's portable id (the only faithful target — the legacy block
+        // carried no serverId). Best-effort persistence, mirroring the reconcile path above; if
+        // no server is selected yet the legacy block stays parked and migrates on a later detect.
+        if let Ok(Some(sel)) = self.db.get_server_config()
+            && let Some(portable) = sel.server_id
+            && manifest.auto_fill.migrate_legacy_to(&portable)
+            && let Err(e) = write_manifest(std::sync::Arc::clone(&device_io), &manifest).await
+        {
+            daemon_log!(
+                "[Device] Auto-fill legacy migration persist failed (continuing): {}",
                 e
             );
         }
@@ -812,7 +1026,7 @@ impl DeviceManager {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: AutoFillPrefs::default(),
+            auto_fill: AutoFillConfig::default(),
             transcoding_profile_id, // stored in .hifimule.json; read back on sync to apply transcoding
             last_synced_transcoding_profile_id: None,
             transcoding_profile_dirty: false,
@@ -1369,6 +1583,24 @@ fn is_removable_drive(_path: &Path) -> bool {
     true // macOS/Linux already filtered by mount detection
 }
 
+#[cfg(target_os = "windows")]
+fn friendly_name_drive_root(friendly_name: &str) -> Option<PathBuf> {
+    let s = friendly_name.trim();
+    let bytes = s.as_bytes();
+    if bytes.len() == 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
+    {
+        Some(PathBuf::from(format!(
+            "{}:\\",
+            (bytes[0] as char).to_ascii_uppercase()
+        )))
+    } else {
+        None
+    }
+}
+
 /// Returns true if a removable drive exists that corresponds to the same physical USB device
 /// as the MTP device identified by `wpd_device_id`. Matching uses hardware instance IDs
 /// (`SetupDiGetDeviceInstanceIdW`) to avoid false positives from two drives sharing a label.
@@ -1380,6 +1612,10 @@ fn has_msc_drive_for_device(friendly_name: &str, wpd_device_id: &str) -> bool {
         SetupDiGetClassDevsW, SetupDiGetDeviceInstanceIdW,
     };
     use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
+
+    if let Some(path) = friendly_name_drive_root(friendly_name) {
+        return is_removable_drive(&path);
+    }
 
     // Parse the USB instance-ID fragment from the WPD device path.
     // WPD ID format: "\\?\usb#vid_XXXX&pid_YYYY#SERIAL#{guid}"

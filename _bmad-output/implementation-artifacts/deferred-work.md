@@ -1,7 +1,33 @@
 # Deferred Work
 
 Status: open
-Last updated: 2026-06-12
+Last updated: 2026-06-20
+
+## Deferred from: code review of autofill-device-playlist (2026-06-20)
+
+- **Cross-server duplicate raw track IDs remain ambiguous** (`hifimule-daemon/src/rpc.rs`) -- multi-provider autofill still dedups by raw provider item id and playlist entries resolve by that same id. Fixing this properly needs a server-qualified sync identity/playlist resolution pass, not a local `Autofill.m3u` patch.
+- **Playlist track metadata uses unknown duration for autofill items** (`hifimule-daemon/src/rpc.rs`) -- `AutoFillItem` does not carry duration, so the synthetic M3U writes `#EXTINF:-1`. Add duration to autofill item metadata only if players need exact playlist durations.
+
+## Deferred from: code review of 13-5-context-and-encoding-from-goals (2026-06-15)
+
+- **No automated all-locale i18n key-parity test** (`hifimule-i18n`) — recurring gap, now flagged in the 13.3, 13.4, **and** 13.5 reviews. `hifimule-i18n` ships only 6 per-translation tests with no assertion that en/fr/es/de share the same key set; `translate` silently falls back to English then the raw key, so a dropped locale key would not fail CI. 13.5 parity (120×4) verified by script. Pre-existing, out of scope per spec Dev Notes. Now triple-flagged — strong candidate to land as a dedicated cleanup before the next i18n-touching story.
+
+## Deferred from: code review of 13-4-delight-rarity-draws-and-pity-timer (2026-06-15)
+
+- **No automated all-locale i18n key-parity test** (`hifimule-i18n`). `hifimule-i18n` ships only 6 per-translation tests; there is no assertion that en/fr/es/de share the same key set, and `translate` silently falls back to English then the raw key, so a dropped locale key would not fail CI. 13.4 parity (96×4) verified by hand. Pre-existing gap, also flagged in the 13.3 review; out of scope per spec Dev Notes. Recommend adding a real all-locale key-set parity test so future stories can rely on the gate they already cite.
+
+## Deferred from: code review of 13-2-quality-and-version-ordering (2026-06-14)
+
+- **Per-comparison recomputation of `detect_version_traits`** [`hifimule-daemon/src/auto_fill/pipeline.rs:777-786,858-881`] — `version_rank` (and `best_version_cmp`) call `detect_version_traits`, which allocates a lowercased `title+album` string and runs every `has_word` scan, on each of the O(n log n) comparisons inside `sort_by`. Pure-performance; fine at typical pool sizes, but per-song traits could be precomputed once.
+- **`collapse_best_version` clones the full `PipelineInput` even when nothing collapses** [`hifimule-daemon/src/auto_fill/pipeline.rs:909`] — the enabled-but-no-duplicates path unconditionally deep-clones all pools, contrary to the "zero clone" framing in the surrounding comments. Performance-only.
+- **Plural/gerund remaster forms not detected** [`hifimule-daemon/src/auto_fill/pipeline.rs:754`] — `"Remasters"`/`"remastering"` fail `has_word("remaster")` (trailing alnum breaks the word boundary), so they classify as `Studio`. Inconsistent with `remix`'s substring tolerance. Missed-detection only — never causes over-merge.
+- **Non-ASCII case folding not handled** [`hifimule-daemon/src/auto_fill/pipeline.rs:742,793`] — `to_ascii_lowercase`/`normalize_ws` leave non-ASCII letters un-folded, so accented duplicates ("CAFÉ" vs "café") never collapse and accented markers go undetected. No spec requirement for unicode.
+- **Nested/unbalanced bracket groups leave a stray bracket char** [`hifimule-daemon/src/auto_fill/pipeline.rs:802-821`] — `strip_bracketed_markers` matches the first close after an open, so `"(feat. X (Live))"` strips to a residual `")"` in the base title, weakening the logical key. Rare; proper nested matching is non-trivial.
+
+## Deferred from: code review of 12-5-budget-headroom-duration-fallback-chain (2026-06-14)
+
+- **Headroom ≥ capacity produces a silent 0-byte ceiling and empty fill** [`hifimule-daemon/src/auto_fill/fetch.rs:132-141`] — when configured `headroom_bytes ≥ params.max_fill_bytes`, `cap_after_reserve` saturates to 0, the ceiling becomes 0, and the fill is empty. Arithmetically correct per FR52 ("never exceed capacity − reserve") and overflow-safe, but indistinguishable from a genuine zero-capacity slot and emitted with no log. Observability nicety (e.g. `daemon_log!` when `cap_after_reserve == 0` while `headroom > 0`), not a correctness defect.
+- **Fast-vs-configurable selection equivalence is asserted, not tested** [`hifimule-daemon/src/auto_fill/fetch.rs:84-93`] — routing a default-but-headroom/duration pipeline through `expand_with_pipeline` instead of `run_auto_fill_provider` switches selection engines. The story claims selection is "equivalent," but the new tests assert only result *length*, never that the selected set/order matches the fast path at the reduced ceiling. Design decision already resolved (story Open Question 2); a stronger set-equivalence test would close the regression-surface gap.
 
 ## Deferred from: code review of 9-11-list-view-multi-selection-and-bulk-actions (2026-06-12)
 
@@ -220,3 +246,27 @@ If future review findings need follow-up, add them as new story scope or reopen 
 
 - **9.11 list-view bulk bar keyboard bypass of the device-locked gate** [hifimule-ui/src/library.ts:753-761] — same `pointer-events`-only gating the 9.12 Tracks-view bar replicated (the 9.12 instance is being patched in-story). Already on record from the 9.11 review above ("device-locked gate does not block keyboard activation"); re-confirmed here. Fix the 9.11 bulk bar and per-row gating with the `disabled` property in one pass.
 - **Existing-playlist add path never invalidates the playlists cache** [hifimule-ui/src/components/MediaCard.ts:497-516] — `playlist.addItems` success runs hide → toast → `onSuccess` without `invalidatePlaylistsCache()`; only the create-new flow invalidates, leaving stale `playlists:*` pages in `state.pageCache`. Violates the letter of 9.12 AC 8 for the bulk path, but it is pre-existing 9.11 dialog behavior and the 9.12 story forbids touching MediaCard.ts ("consume as-is"). Deferred per review decision (2026-06-12): fix is one line in the existing-playlist success path whenever MediaCard.ts is next open for changes.
+
+## Deferred from: code review of story-12.2 (2026-06-14)
+
+- **Multi-server accessor seam — `resolve_pipeline` single-entry fallback + unkeyed `main.rs` reads.** `resolve_pipeline` (`device/mod.rs:279-289`) returns the sole pipeline even when the caller passed a *non-matching* `Some(server_id)` (cross-server config bleed), and returns `None` for an unkeyed `None` caller once 2+ pipelines exist — so the `main.rs` auto-sync paths reading via `legacy_enabled()`/`legacy_max_bytes()` (`:578,581,1119,1141,1143`) would report auto-fill **disabled** on a multi-server install whose connected server's pipeline is enabled. Not triggerable in Story 12.2 (only one pipeline is ever created — migration/`set_for` target the single selected server), so behavior is correct today. Becomes a real regression when Story 12.3 introduces multi-slot/multi-pipeline expansion: 12.3 must give the `main.rs` consumers server context (resolve the selected/connected portable id, as `rpc.rs` already does) and add test coverage for the mismatched-id and multi-pipeline-unkeyed cases.
+- **`autofill_history` timestamp unit & NULL semantics undefined (Epic 13).** `last_synced_at INTEGER` and `tier TEXT` are nullable with no documented meaning for NULL, and the timestamp unit (seconds vs millis) is unspecified. Pure scaffolding in 12.2 (no reads/writes), but the column set becomes a contract Epic 13 inherits — pin the unit and NULL semantics (ideally in a comment) when Epic 13 first writes rows.
+
+## Deferred from: code review of story-12.3 (2026-06-14)
+
+- **Duplicate `serverId` across two enabled auto-fill descriptors → redundant full provider pagination** (`hifimule-daemon/src/rpc.rs:~3640`, `multi_provider_calculate_delta` loop). When the array carries two enabled descriptors for the same server, `run_auto_fill_provider` paginates that server's entire library twice; the second pass excludes everything the first already selected via `seen_ids`, so the result is correct but the network/server cost is doubled. Deferred: low priority — the Story 12.6 UI owns descriptor generation and will not emit duplicate per-server slots, and no current caller triggers it. Revisit if manual/array payloads can ever carry duplicate serverIds.
+
+## Deferred from: code review of story-12.4 (2026-06-14)
+
+- **Invalid share totals can starve later sources** (`hifimule-daemon/src/auto_fill/pipeline.rs:559`). `SourceEntry.share` is documented as `0.0..=1.0`, but the 12.1 pure engine does not validate total explicit share weight. A malformed hand-written manifest with shares summing above 1.0 can let earlier sources consume the global ceiling before later sources get useful budget. Deferred as pre-existing engine/config-validation work; address with future pipeline validation or UI/RPC config hardening.
+
+## Deferred from: code review of 13-3-curation-and-discovery-sources (2026-06-15)
+
+- **Lexicographic `date_added` comparison assumes uniform ISO-8601** (`hifimule-daemon/src/auto_fill/pipeline.rs`, `OrderingKey::Rediscovery` arm). `Rediscovery` compares `date_added` strings via `str::cmp`, which equals chronological order only if every value is a fixed-width, zero-padded, same-precision/timezone ISO-8601 string. `Song.date_added` is an opaque, unvalidated provider string (Subsonic/Jellyfin formats differ); epoch strings, mixed precision, or offset variations would mis-order. Pre-existing assumption shared with `OrderingKey::DateCreated` and **explicitly accepted by AC 3** ("ISO-8601 strings sort lexicographically, same assumption DateCreated already relies on"). Revisit if a provider ever supplies a non-ISO `date_added`; the fix would be to parse/normalize to a comparable instant.
+- **`DateCreated` vs `Rediscovery` treat whitespace-only `date_added` asymmetrically** (`hifimule-daemon/src/auto_fill/pipeline.rs`). The new `Rediscovery` arm uses the `nonblank_date` helper (trims, folds `Some("   ")` into "absent → last"); the untouched `DateCreated` arm uses raw `as_deref().unwrap_or("")`, treating `"   "` as a real string. A user toggling between "Recently added" and "Rediscover" on a library with whitespace-dirty dates could see blank-date tracks ordered differently than a pure inverse. The new `Rediscovery` side is the more-correct one; the quirk lives in pre-existing `DateCreated`. Align both if `DateCreated` is ever revisited.
+- **No automated i18n key-parity test** (`hifimule-i18n/src/lib.rs`). AC 9 and the Dev Notes claim "the parity test stays green," but `hifimule-i18n` only ships 6 individual translation tests (e.g. `tray.quit` per locale) — there is no assertion that all 4 locales share the same key set, and `translate` silently falls back to English then to the raw key, so a dropped locale key would not fail CI. Parity for 13.3 was verified manually (81×4; all 3 new keys present in en/fr/es/de). Pre-existing coverage gap; recommend adding a real all-locale key-set parity test so future stories can rely on the gate they already cite.
+
+## Deferred from: code review of 13-6-advanced-units-and-promotion (2026-06-15)
+
+- No test asserts the base-unit pass survives stacked spotlight+album reserves (pipeline.rs). By-design: each reserve is capped by the global `selector.ceiling`, the combined-reserve test already asserts total ≤ ceiling + no double-count, and spillover to later passes is automatic. A dedicated "base pass still reachable under two large reserves" assertion would harden against a future regression.
+- No test covers coherence reorder combined with an atomic-album fill or duration-target truncation (pipeline.rs). Low value: the selected id-set and byte total are byte-identical to the un-clustered run by construction (coherence only permutes output order), but an explicit coherence×atomic-album / coherence×duration case would document the invariant.

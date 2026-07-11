@@ -1,6 +1,6 @@
 # HifiMule — Project Overview
 
-**Version:** 0.6.1 | **Generated:** 2026-05-23 | **Scan depth:** Exhaustive
+**Version:** 0.11.1 | **Generated:** 2026-05-23 | **Last Updated:** 2026-06-17 | **Scan depth:** Deep
 
 ---
 
@@ -23,12 +23,13 @@ The core problem it solves: modern servers such as Jellyfin, Navidrome, Subsonic
 
 ## Architecture Overview
 
-HifiMule is a **monorepo** containing two cooperating processes:
+HifiMule is a **monorepo** containing two cooperating runtime parts plus a shared i18n crate:
 
 ```
 hifimule/
 ├── hifimule-daemon/     Rust backend — Axum JSON-RPC server, device I/O, sync engine
-└── hifimule-ui/         Tauri 2 desktop shell — TypeScript + Vite + Shoelace
+├── hifimule-ui/         Tauri 2 desktop shell — TypeScript + Vite + Shoelace
+└── hifimule-i18n/       Shared translation catalog crate
 ```
 
 The UI is a thin shell. All business logic lives in the daemon. The UI communicates exclusively with the daemon via **JSON-RPC 2.0 over HTTP on `localhost:19140`**.
@@ -59,6 +60,7 @@ The Tauri shell is responsible for:
 | Frontend language | TypeScript 5.6 |
 | Build tool | Vite 6 |
 | UI component library | Shoelace 2.19.1 |
+| Shared localization | `hifimule-i18n` crate (English, French, Spanish, German) |
 | Packaging | Tauri bundler (DMG, .deb, .exe WiX/NSIS) |
 
 ---
@@ -78,10 +80,15 @@ The Tauri shell is responsible for:
 - Each device has its own `DeviceManifest` (`.hifimule.json` at device root), basket, and sync settings
 
 ### Auto-fill
-- Jellyfin-backed auto-fill fills remaining device capacity with highest-priority tracks: favorites → most-played → newest
-- Server-side sort and pagination stops as soon as capacity budget is exhausted
-- Exclude list prevents manually-selected items from being double-counted
-- Subsonic/OpenSubsonic auto-fill is explicitly rejected until a provider-neutral ranking path exists
+- Auto-fill config is stored per `(device, portable serverId)` in the device manifest, with legacy `{ enabled, maxBytes }` blocks migrated when possible
+- The configurable `AutoFillPipeline` supports filter, source blend, unit, ordering, memory, budget, fallback, quality, rarity, pity, context, and promotion stages
+- Runtime auto-fill history is machine-local in SQLite (`autofill_history`, `autofill_rotation`, `autofill_pity`), not stored on the device
+- Provider-routed preview and sync-time fill use the active `MediaProvider`; legacy Jellyfin priority fill remains as a compatibility path
+
+### Multi-server and playlist editing
+- Users can configure several servers, switch the active server in `ServerHub`, and keep basket items tagged by portable server identity
+- The daemon lazily connects provider instances on first use and caches them by machine-local server UUID
+- Playlist creation, rename, delete, add/remove tracks, and reorder are routed through provider capabilities for Jellyfin and Subsonic-compatible servers
 
 ### Provider-Neutral Browse
 - Server probing detects Jellyfin, Subsonic, and OpenSubsonic-compatible servers before login
@@ -109,10 +116,10 @@ The Tauri shell is responsible for:
 
 | Store | Location | Contents |
 |-------|----------|----------|
-| `DeviceManifest` | `<device-root>/.hifimule.json` | Sync state, basket, auto-fill settings, dirty flag |
+| `DeviceManifest` | `<device-root>/.hifimule.json` | Sync state, basket, per-server auto-fill pipeline settings, dirty flag, MTP cache fields |
 | `config.json` | `%APPDATA%/HifiMule/` (Win) / `~/Library/Application Support/HifiMule/` (macOS) / `~/.local/share/HifiMule/` (Linux) | Legacy Jellyfin URL and user ID |
 | OS keyring | System credential store | Access token or password-derived provider secret |
-| SQLite DB | Same app data dir as `config.json` | `devices`, `scrobble_history`, and `server_config` tables |
+| SQLite DB | Same app data dir as `config.json` | `devices`, `scrobble_history`, `server_config`, `autofill_history`, `autofill_rotation`, and `autofill_pity` tables |
 | `device-profiles.json` | Same app data dir | Available transcoding profiles (seeded from embedded asset) |
 | Browser `localStorage` | Tauri WebView | Basket state (session persistence) |
 
@@ -130,4 +137,4 @@ The Tauri shell is responsible for:
 
 ## Project Status
 
-Active development (v0.6.1). Core sync, multi-device, auto-fill, scrobbling, manifest repair, MTP hardening, provider-neutral browse, and Jellyfin/Subsonic/OpenSubsonic media-server support are implemented.
+Active development (v0.11.1). Core sync, multi-device, multi-server routing, playlist editing, configurable auto-fill, scrobbling, manifest repair, MTP hardening, provider-neutral browse, shared localization, and Jellyfin/Subsonic/OpenSubsonic media-server support are implemented.

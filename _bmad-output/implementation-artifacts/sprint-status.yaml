@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-06-12  # Epic 9 reopened with Story 9.11 (list view multi-selection) via sprint-change-proposal-2026-06-12
+last_updated: 2026-06-15  # Story 13.6 → done (advanced units & promotion: Spotlight #33, album/track ratio #8, affinity promotion #9, coherence #27 — one additive PromotionStage; code review passed)
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -155,3 +155,22 @@ development_status:
   11-8-playlist-rename-and-delete: done
   11-9-playlist-reorder-provider-and-rpc: done
   11-10-curation-view-complete-list-order-numbers-and-reorder: done
+
+  # Epic 12 — Configurable Auto-Fill Pipeline & Multi-Server Auto-Fill (sprint-change-proposal-2026-06-14-configurable-auto-fill)
+  epic-12: done  # first story 12.1 created via create-story 2026-06-14
+  12-1-autofill-pipeline-domain-model-and-engine: done  # code review patches applied 2026-06-14; 21 pipeline tests pass
+  12-2-autofill-manifest-schema-and-db-history-scaffolding: done  # story created via create-story 2026-06-14; dev complete 2026-06-14 (483 daemon tests pass); code review 2026-06-14 (2 patches applied, 2 deferred to 12.3/Epic 13)
+  12-3-multi-slot-sync-time-expansion: done  # story created via create-story 2026-06-14; dev complete 2026-06-14 (488 daemon tests pass); review complete 2026-06-14 (4 patches applied)
+  12-4-playlist-source-tag-filter-and-shares: done  # story created via create-story 2026-06-14; dev complete 2026-06-14; review complete 2026-06-14 (5 patches applied; 505 daemon tests pass)
+  12-5-budget-headroom-duration-fallback-chain: done  # story created via create-story 2026-06-14; dev complete 2026-06-14; review complete 2026-06-14 (1 patch applied: Some(0) duration empty-fill; 2 deferred; 54 auto_fill tests pass)
+  12-6-autofill-configuration-ui-and-multi-server-slots: done  # story created via create-story 2026-06-14; dev complete 2026-06-14; review complete 2026-06-14 (8 patches applied; frontend tsc+build green; targeted auto_fill/device tests pass; full daemon suite blocked by sandbox)
+  12-7-autofill-rpc-state-contract-and-i18n: done  # code review 2026-06-14: 5 patches applied (preview enabled/error-i18n/no-space + stale-result + timer-cleanup). Epic 12 closeout; dev complete 2026-06-14 (live preview affordance + i18n parity lock 57×4 + 3 daemon contract tests; 522 daemon tests pass, frontend tsc+build green)
+
+  # Epic 13 — Advanced Auto-Fill Strategies (sprint-change-proposal-2026-06-14-configurable-auto-fill)
+  epic-13: done  # first story 13.1 created via create-story 2026-06-14
+  13-1-memory-and-rotation-strategies: done  # code review 2026-06-14: 9 patches applied (D1 stable-core prune erosion, D2 id_changes history carry, D3 lead-tier spillover, P4 success-gated recording/cursor, P5 tier dedup, P6 uses_tiers gate, P7 post-core budget caps, P8 slider step, P9 tier-ref captureInputs); 4 dismissed; auto_fill/db/sync tests green, clippy clean, tsc+build green
+  13-2-quality-and-version-ordering: done  # code-review 2026-06-14: 3 patches applied (word-anchored strip, budget-aware collapse, stacked dash-suffix); 83 auto_fill tests green, clippy clean (engine+UI only: quality #13, version preference #34, best-version #11)
+  13-3-curation-and-discovery-sources: done  # code-review 2026-06-15: 2 patches applied (Rediscovery doc-comment clarified; acclaimed-classics caption gated on playlistsSupported), 3 pre-existing items deferred (ISO-8601 lexical date cmp, DateCreated/Rediscovery whitespace asymmetry, missing i18n key-parity test), 4 dismissed; daemon build + tsc green. dev complete 2026-06-15 (Excavation #14 + Rediscovery #31-cheap ordering keys + #16 recipe hint; 570 daemon tests pass, i18n 81×4, tsc+build green, no new clippy warnings); story created via create-story 2026-06-14; scope: engine-only #14 deep-cuts + #31-cheap rediscovery ordering keys; #15 community-rating + true #16 acclaimed-classics deferred (no rating signal in Song/providers)
+  13-4-delight-rarity-draws-and-pity-timer: done  # code review 2026-06-15: 2 patches applied (pity reset/fire-gate parity via shared pity_reserve_bytes + SyncDelta.pity_fired_servers carrier; Rarity/Random draw-key id-tiebreak), 1 deferred (no all-locale i18n parity test, pre-existing), 9 dismissed; 586 daemon tests pass, clippy clean on touched modules. dev complete 2026-06-15: #29 weighted rarity draws + #30 deterministic pity timer; engine seed (activates Random) + autofill_pity DB counter; 585 daemon tests pass, i18n 96×4, tsc+build green; play-feedback self-adjustment deferred
+  13-5-context-and-encoding-from-goals: done  # review complete 2026-06-15: 3-layer adversarial review, no hard AC violations / no Critical-High; 2 patches applied in pipeline.rs (CivilTime::is_set() inert-default guard; effective_sources weight<=0 suppression) + 2 regression tests; 601 daemon tests pass, clippy clean on pipeline.rs; deferred: i18n all-locale parity test (pre-existing)
+  13-6-advanced-units-and-promotion: done  # final Epic 13 story (advanced units & promotion #33/#8/#9/#27); code review passed 2026-06-15 (all 11 ACs SATISFIED; 2 patches applied — TS dangling spotlightShare + tightened album-ratio test assertion; 1 finding dismissed-on-inspection; 2 deferred test-coverage items; tsc clean, promotion tests green)

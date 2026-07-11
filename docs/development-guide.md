@@ -1,6 +1,6 @@
 # HifiMule — Development Guide
 
-**Generated:** 2026-05-23 | **Scan depth:** Exhaustive
+**Generated:** 2026-05-23 | **Last Updated:** 2026-06-17 | **Scan depth:** Deep
 
 ---
 
@@ -8,7 +8,7 @@
 
 ### All Platforms
 - **Rust** (stable, MSRV 1.93.0) — install via [rustup](https://rustup.rs/)
-- **Node.js** (LTS) + **pnpm** — for the UI
+- **Node.js** (LTS) + **npm** — current project scripts use npm; pnpm can work if you manage the lockfile consistently
 - **Tauri CLI v2** — `pnpm add -D @tauri-apps/cli` (installed via `package.json`)
 
 ### macOS
@@ -36,10 +36,11 @@ sudo apt-get install -y \
 hifimule/
 ├── Cargo.toml                 Cargo workspace root
 ├── hifimule-daemon/       Rust backend
+├── hifimule-i18n/         Shared localization crate
 └── hifimule-ui/           Tauri 2 + TypeScript frontend
 ```
 
-All `cargo` commands should be run from the repo root (workspace). All `pnpm`/`npm` commands from `hifimule-ui/`.
+All `cargo` commands should be run from the repo root (workspace). UI npm commands normally run from `hifimule-ui/`; root `package.json` also exposes aggregate build scripts.
 
 ---
 
@@ -82,15 +83,15 @@ hifimule-daemon.exe --service
 cd hifimule-ui
 
 # Install dependencies
-rtk pnpm install
+rtk npm install
 
 # Development mode (Vite dev server + Tauri hot reload)
-rtk pnpm tauri dev
+rtk npm run tauri dev
 
 # Production build
-rtk pnpm run build                       # tsc + vite -> dist/
+rtk npm run build                        # tsc + vite -> dist/
 rtk node ../scripts/prepare-sidecar.mjs  # copies daemon binary to src-tauri/sidecars/
-rtk pnpm tauri build                     # bundles: .dmg / .deb / .exe
+rtk npm run tauri build                  # bundles: .dmg / .deb / .exe
 ```
 
 ### Important: Sidecar Preparation
@@ -107,7 +108,7 @@ rtk cargo test -p hifimule-daemon
 
 # Specific test module
 rtk cargo test -p hifimule-daemon --lib db::tests
-rtk cargo test -p hifimule-daemon --lib auto_fill::tests
+rtk cargo test -p hifimule-daemon auto_fill
 rtk cargo test -p hifimule-daemon providers::subsonic
 
 # With output (for debugging)
@@ -139,7 +140,7 @@ curl -X POST http://localhost:19140 \
 
 ```bash
 cd hifimule-ui
-rtk pnpm tauri dev
+rtk npm run tauri dev
 ```
 
 This starts:
@@ -154,7 +155,7 @@ For faster UI iteration, you can run the daemon separately and start just Vite:
 
 # Terminal 2: start Vite + Tauri
 cd hifimule-ui
-rtk pnpm tauri dev
+rtk npm run tauri dev
 ```
 
 ---
@@ -214,6 +215,15 @@ The daemon supports Jellyfin, Subsonic, Navidrome, and OpenSubsonic through `Med
 - Browse modes must come from `provider.capabilities().browse.list_modes`
 - Prefer hiding unsupported modes over synthesizing inaccurate data
 - Sanitize all URL and credential-bearing error messages before surfacing them
+- Preserve portable server identity semantics: management APIs use local `id`, manifests/baskets/sync routing use deterministic `server_id`
+
+## Auto-fill Pipeline Development Notes
+
+- Config lives in `DeviceManifest.auto_fill` as a per-portable-server map.
+- Runtime state lives in SQLite tables, never in the manifest.
+- Keep `auto_fill/pipeline.rs` pure: no provider calls, no async, no clock/RNG reads.
+- Fetching/materialization belongs in `auto_fill/fetch.rs` and should route through `MediaProvider`.
+- UI preview uses `previewAutoFill()` and daemon `basket.autoFill` with explicit `serverId`.
 
 Useful targeted tests:
 
@@ -294,12 +304,7 @@ git tag v0.3.0
 git push origin v0.3.0
 ```
 
-The GitHub Actions `release.yml` workflow:
-1. Builds daemon + UI on macOS, Ubuntu, Windows
-2. Packages Tauri bundles (`.dmg`, `.deb`, `.exe`)
-3. Creates a GitHub Release with all artifacts
-
-See `.github/workflows/release.yml` for the full pipeline.
+No `.github/workflows` files are present in this checkout. See `docs/release-guide.md` for the documented manual release workflow and artifact checklist.
 
 ---
 

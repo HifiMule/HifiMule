@@ -1,10 +1,12 @@
 // Basket Sidebar Component
 // Displays the list of items selected for synchronization.
 
-import { basketStore, BasketItem, AUTO_FILL_SLOT_ID } from '../state/basket';
-import { rpcCall, getImageUrl } from '../rpc';
+import { basketStore, BasketItem, autoFillSlotId, isAutoFillSlotId } from '../state/basket';
+import { rpcCall, getImageUrl, fetchBrowseModes, fetchBrowsePlaylists } from '../rpc';
 import { RepairModal } from './RepairModal';
 import { InitDeviceModal } from './InitDeviceModal';
+import { AutoFillPanel } from './AutoFillPanel';
+import { AutoFillPipeline, defaultLegacyPipeline, normalizePipeline } from '../state/autoFill';
 import { t } from '../i18n';
 import { setPlaylistWriteCapability, invalidatePlaylistsCache } from '../library';
 import { formatServerIdentity } from '../serverIdentity';
@@ -177,9 +179,10 @@ export class BasketSidebar {
     // Server metadata for read-only basket group labels (Story 2.11 AC35).
     private serversById: Map<string, ServerSummary> = new Map();
     private syncSnapshotIds: string[] = [];
-    // Auto-fill state
-    private autoFillEnabled: boolean = false;
-    private autoFillMaxBytes: number | null = null;
+    // Auto-fill state (Story 12.6): one pipeline config per portable serverId, hydrated from
+    // get_daemon_state.autoFill.pipelines. The legacy single enabled/maxBytes pair is gone — each
+    // server's enable state and budget live in its pipeline.
+    private autoFillPipelines: Map<string, AutoFillPipeline> = new Map();
     private autoSyncOnConnect: boolean = false;
     private etaText: string = t('basket.sync.calculating');
     // Multi-device hub state
@@ -280,11 +283,8 @@ export class BasketSidebar {
             const currentDeviceId = this.getCurrentDeviceId(currentDevice);
             if (currentDeviceId && currentDeviceId !== this.lastHydratedDeviceId) {
                 this.lastHydratedDeviceId = currentDeviceId;
-                // Load saved auto-fill preferences from manifest
-                this.autoFillEnabled = state.autoFill?.enabled ?? false;
-                this.autoFillMaxBytes = state.autoFill?.maxBytes ?? null;
                 this.autoSyncOnConnect = this.getAutoSyncOnConnect(state);
-                // Await basket hydration before triggering auto-fill so that
+                // Await basket hydration before deriving auto-fill slots so that
                 // getManualItemIds() and getManualSizeBytes() see the correct state (P1).
                 try {
                     const res = await rpcCall('manifest_get_basket') as any;
@@ -294,20 +294,17 @@ export class BasketSidebar {
                 } catch (err) {
                     console.error("Failed to fetch basket", err);
                 }
-                if (this.autoFillEnabled && !basketStore.has(AUTO_FILL_SLOT_ID)) {
-                    this.insertAutoFillSlot();
-                }
+                // Story 12.6: hydrate every server's pipeline and (re)derive per-server slot cards.
+                this.hydrateAutoFillPipelines(state.autoFill);
             } else if (currentDeviceId) {
-                this.autoFillEnabled = state.autoFill?.enabled ?? false;
-                this.autoFillMaxBytes = state.autoFill?.maxBytes ?? null;
                 this.autoSyncOnConnect = this.getAutoSyncOnConnect(state);
+                this.hydrateAutoFillPipelines(state.autoFill);
             } else if (!currentDevice) {
                 if (this.lastHydratedDeviceId !== null) {
                     basketStore.clearForDevice();
                 }
                 this.lastHydratedDeviceId = null;
-                this.autoFillEnabled = false;
-                this.autoFillMaxBytes = null;
+                this.autoFillPipelines.clear();
                 this.autoSyncOnConnect = false;
             }
             const newSupportsPlaylist = (state.supportsPlaylistWrite === true);
@@ -345,64 +342,162 @@ export class BasketSidebar {
         basketStore.removeEventListener('update', this.updateListener);
     }
 
-    private insertAutoFillSlot(): void {
+    /** Loads every server's pipeline from `get_daemon_state.autoFill.pipelines` and (re)derives the
+     * per-server slot cards. Safe to call on every refresh — the map fully replaces prior state. */
+    private hydrateAutoFillPipelines(autoFill: any): void {
+        this.autoFillPipelines.clear();
+        const map = autoFill?.pipelines;
+        let hydrated = false;
+        if (map && typeof map === 'object') {
+            for (const [serverId, raw] of Object.entries(map)) {
+                this.autoFillPipelines.set(serverId, normalizePipeline(raw as any));
+                hydrated = true;
+            }
+        }
+        if (!hydrated && this.currentServerId) {
+            const enabled = autoFill?.enabled === true;
+            const maxBytes = typeof autoFill?.maxBytes === 'number' ? autoFill.maxBytes : undefined;
+            if (enabled || maxBytes != null) {
+                const legacyPipeline = defaultLegacyPipeline(maxBytes);
+                legacyPipeline.enabled = enabled;
+                this.autoFillPipelines.set(this.currentServerId, legacyPipeline);
+            }
+        }
+        this.syncSlotsFromPipelines();
+    }
+
+    /** Reconciles the basket's auto-fill slot cards with the pipeline map: one slot per server with
+     * an enabled pipeline, none otherwise. Other servers' slots are never touched by a change to
+     * one server (AC11). */
+    private syncSlotsFromPipelines(): void {
+        // Drop slots whose server lost its enabled pipeline.
+        for (const item of basketStore.getItems()) {
+            if (!isAutoFillSlotId(item.id)) continue;
+            const sid = item.serverId;
+            const pipeline = sid ? this.autoFillPipelines.get(sid) : undefined;
+            if (!sid || !pipeline || !pipeline.enabled) {
+                basketStore.removeAutoFillSlot(item.id);
+            }
+        }
+        // Ensure an up-to-date slot for every enabled pipeline.
+        for (const [serverId, pipeline] of this.autoFillPipelines) {
+            if (pipeline.enabled) this.upsertAutoFillSlot(serverId, pipeline);
+        }
+    }
+
+    /** The local budget readout for a slot: the pipeline's byte ceiling capped by available device
+     * capacity, else all available capacity (AC12 — derived locally, no RPC). */
+    private slotSizeBytes(pipeline: AutoFillPipeline): number {
         const manualSize = basketStore.getManualSizeBytes();
         const available = this.storageInfo
             ? Math.max(this.storageInfo.freeBytes - manualSize, 0)
             : 0;
-        const targetBytes = this.autoFillMaxBytes !== null
-            ? Math.min(this.autoFillMaxBytes, this.storageInfo ? available : this.autoFillMaxBytes)
-            : available;
-        basketStore.add({
-            id: AUTO_FILL_SLOT_ID,
+        const max = pipeline.budget.maxBytes;
+        if (typeof max === 'number') {
+            return this.storageInfo ? Math.min(max, available) : max;
+        }
+        return available;
+    }
+
+    private upsertAutoFillSlot(serverId: string, pipeline: AutoFillPipeline): void {
+        basketStore.setAutoFillSlot({
+            id: autoFillSlotId(serverId),
             name: t('basket.autofill.name'),
             type: 'AutoFillSlot',
+            serverId,
             childCount: 0,
-            sizeTicks: 0,
-            sizeBytes: targetBytes,
+            sizeTicks: pipeline.budget.targetDurationSecs
+                ? pipeline.budget.targetDurationSecs * 10_000_000
+                : 0,
+            sizeBytes: this.slotSizeBytes(pipeline),
         });
     }
 
-    private async persistAutoFillPrefs() {
-        const device = this.folderInfo;
-        if (!device) return;
+    /** Persists one server's pipeline (AC1). Updates local state + slot card only after save. */
+    private async persistPipeline(serverId: string, pipeline: AutoFillPipeline): Promise<void> {
         try {
-            await rpcCall('sync.setAutoFill', {
-                autoFillEnabled: this.autoFillEnabled,
-                maxFillBytes: this.autoFillMaxBytes ?? undefined,
-                autoSyncOnConnect: this.autoSyncOnConnect,
-            });
+            await rpcCall('autoFill.setPipeline', { serverId, pipeline });
+            this.autoFillPipelines.set(serverId, normalizePipeline(pipeline));
+            this.syncSlotsFromPipelines();
+            this.render();
         } catch (err) {
-            console.error('[AutoFill] Failed to persist preferences:', err);
+            console.error('[AutoFill] Failed to persist pipeline:', err);
+            window.dispatchEvent(new CustomEvent('toast', { detail: { type: 'error', message: t('basket.autofill.save_failed') } }));
         }
     }
 
-    private bindAutoFillEvents() {
-        const autoFillToggle = this.container.querySelector('#auto-fill-toggle');
-        if (autoFillToggle) {
-            (autoFillToggle as any).checked = this.autoFillEnabled;
-            autoFillToggle.addEventListener('sl-change', (e: Event) => {
-                this.autoFillEnabled = (e.target as HTMLInputElement).checked;
-                this.persistAutoFillPrefs();
-                if (this.autoFillEnabled) {
-                    this.insertAutoFillSlot();
-                } else {
-                    basketStore.remove(AUTO_FILL_SLOT_ID);
-                }
-                this.render();
-            });
+    /** Opens the pipeline-builder panel for the selected server (AC6). */
+    private async openAutoFillPanel(): Promise<void> {
+        const serverId = this.currentServerId;
+        if (!serverId) return;
+        const serverLabel = this.serverDisplayLabel(serverId);
+        const existing = this.autoFillPipelines.get(serverId);
+        // A brand-new server starts from a disabled default-legacy pipeline (one-click → enable).
+        const initial: AutoFillPipeline = existing ?? { ...defaultLegacyPipeline(), enabled: false };
+
+        let modes: any[] = [];
+        try {
+            modes = await fetchBrowseModes();
+        } catch (err) {
+            console.error('[AutoFill] Failed to fetch browse modes:', err);
+        }
+        let playlists: any[] = [];
+        if (modes.includes('playlists')) {
+            try {
+                playlists = (await fetchBrowsePlaylists()).playlists ?? [];
+            } catch (err) {
+                console.error('[AutoFill] Failed to fetch playlists:', err);
+            }
         }
 
-        const slider = this.container.querySelector('#auto-fill-slider');
-        if (slider) {
-            slider.addEventListener('sl-change', (e: Event) => {
-                const gb = (e.target as any).value as number;
-                // Guard against NaN (non-numeric input) and negative values (P10).
-                if (isNaN(gb) || gb < 0) return;
-                this.autoFillMaxBytes = gb * 1024 * 1024 * 1024;
-                this.persistAutoFillPrefs();
-                this.insertAutoFillSlot();
-            });
+        // Capacity available for this fill (free − manual), derived identically to slotSizeBytes so
+        // the preview's capped maxBytes matches the slot-card readout. Undefined when no device is
+        // connected → the daemon falls back to device free bytes.
+        const availableBytes = this.storageInfo
+            ? Math.max(this.storageInfo.freeBytes - basketStore.getManualSizeBytes(), 0)
+            : undefined;
+
+        const panel = new AutoFillPanel({
+            serverId,
+            serverLabel,
+            pipeline: initial,
+            modes,
+            playlists,
+            onSave: (pipeline) => { void this.persistPipeline(serverId, pipeline); },
+            excludeItemIds: basketStore.getManualItemIdsForServer(serverId),
+            availableBytes,
+            formatSize,
+        });
+        await panel.open();
+    }
+
+    /** True when the selected server has an enabled auto-fill pipeline. */
+    private selectedServerAutoFillEnabled(): boolean {
+        const sid = this.currentServerId;
+        return !!sid && (this.autoFillPipelines.get(sid)?.enabled ?? false);
+    }
+
+    /** A stable, order-independent signature of a per-server pipelines map, used by the 2s poll to
+     * detect when a manifest write elsewhere changed the auto-fill config. Both sides are normalized
+     * so the daemon's omit-when-unset shape compares equal to the UI's fully-populated form. */
+    private pipelinesSignature(map: any): string {
+        if (!map || typeof map !== 'object') return '{}';
+        const keys = Object.keys(map).sort();
+        return JSON.stringify(keys.map((k) => [k, normalizePipeline(map[k])]));
+    }
+
+    /** True when any server has an enabled auto-fill pipeline (gates the empty-basket sync button). */
+    private anyAutoFillEnabled(): boolean {
+        for (const pipeline of this.autoFillPipelines.values()) {
+            if (pipeline.enabled) return true;
+        }
+        return false;
+    }
+
+    private bindAutoFillEvents() {
+        const configureBtn = this.container.querySelector('#configure-auto-fill-btn');
+        if (configureBtn) {
+            configureBtn.addEventListener('click', () => { void this.openAutoFillPanel(); });
         }
 
         const autoSyncToggle = this.container.querySelector('#auto-sync-toggle');
@@ -410,8 +505,20 @@ export class BasketSidebar {
             (autoSyncToggle as any).checked = this.autoSyncOnConnect;
             autoSyncToggle.addEventListener('sl-change', (e: Event) => {
                 this.autoSyncOnConnect = (e.target as HTMLInputElement).checked;
-                this.persistAutoFillPrefs();
+                // auto-sync-on-connect is server-independent (decoupled from per-server pipelines):
+                // persist via the device-scoped RPC, never through autoFill.setPipeline.
+                void this.persistAutoSyncOnConnect();
             });
+        }
+    }
+
+    private async persistAutoSyncOnConnect(): Promise<void> {
+        const deviceId = this.getCurrentDeviceId(this.currentDevice);
+        if (!deviceId) return;
+        try {
+            await rpcCall('device_set_auto_sync_on_connect', { deviceId, enabled: this.autoSyncOnConnect });
+        } catch (err) {
+            console.error('[AutoFill] Failed to persist auto-sync-on-connect:', err);
         }
     }
 
@@ -591,46 +698,24 @@ export class BasketSidebar {
         const hasDevice = this.folderInfo?.hasManifest ?? false;
         if (!hasDevice) return '';
 
-        const sliderMax = this.storageInfo
-            ? Math.ceil(this.storageInfo.freeBytes / (1024 * 1024 * 1024))
-            : 64;
-        const sliderValue = this.autoFillMaxBytes !== null
-            ? Math.round(this.autoFillMaxBytes / (1024 * 1024 * 1024))
-            : sliderMax;
-
-        // Device is completely full — show feedback instead of a useless zero-width slider (P11).
-        const deviceFull = this.storageInfo !== null && this.storageInfo.freeBytes === 0;
-
-        // AC31: the toggle reads ON only when the auto-fill slot belongs to the
-        // selected server. A slot bound to another server shows OFF (and renders
-        // locked); enabling under the selected server silently rebinds the slot.
-        const slot = basketStore.getItems().find(i => i.id === AUTO_FILL_SLOT_ID);
-        const autoFillOn = slot
-            ? slot.serverId === this.currentServerId
-            : this.autoFillEnabled;
+        // Story 12.6: the single toggle+slider is replaced by a "Configure" affordance that opens
+        // the pipeline-builder panel, scoped to the selected server. Disabled when no server is
+        // selected (AC6). A short caption reflects the selected server's enable state.
+        const noServer = !this.currentServerId;
+        const enabled = this.selectedServerAutoFillEnabled();
+        const caption = noServer
+            ? t('basket.autofill.select_server')
+            : enabled ? t('basket.autofill.enabled_summary') : t('basket.autofill.hint');
 
         return `
             <div class="auto-fill-controls">
                 <div class="auto-fill-toggle-row">
-                    <sl-switch id="auto-fill-toggle" size="small" ${autoFillOn ? 'checked' : ''}>
-                        ${t('basket.autofill.name')}
-                    </sl-switch>
-                    <span class="auto-fill-caption">${t('basket.autofill.hint')}</span>
+                    <sl-button id="configure-auto-fill-btn" size="small" ${noServer ? 'disabled' : ''}>
+                        <sl-icon slot="prefix" name="stars"></sl-icon>
+                        ${t('basket.autofill.configure')}
+                    </sl-button>
+                    <span class="auto-fill-caption">${caption}</span>
                 </div>
-                ${autoFillOn && deviceFull ? `
-                    <div class="auto-fill-caption">${t('basket.autofill.full')}</div>
-                ` : ''}
-                ${autoFillOn && !deviceFull ? `
-                    <div class="auto-fill-slider-row">
-                        <label class="auto-fill-caption" style="display:block; margin-bottom:var(--space-2xs);">
-                            ${t('basket.autofill.max_fill_size', { size: `${sliderValue} GB` })}
-                        </label>
-                        <sl-range id="auto-fill-slider"
-                            min="0" max="${sliderMax}" step="1" value="${sliderValue}"
-                            style="width:100%;">
-                        </sl-range>
-                    </div>
-                ` : ''}
                 <div class="auto-fill-toggle-row">
                     <sl-switch id="auto-sync-toggle" size="small" ${this.autoSyncOnConnect ? 'checked' : ''}>
                         ${t('basket.autofill.auto_sync_on_connect')}
@@ -686,8 +771,8 @@ export class BasketSidebar {
                 }
                 const autoPrefsChanged = currentDevice
                     && (
-                        (daemonStateResult?.autoFill?.enabled ?? false) !== this.autoFillEnabled
-                        || (daemonStateResult?.autoFill?.maxBytes ?? null) !== this.autoFillMaxBytes
+                        this.pipelinesSignature(daemonStateResult?.autoFill?.pipelines)
+                            !== this.pipelinesSignature(Object.fromEntries(this.autoFillPipelines))
                         || this.getAutoSyncOnConnect(daemonStateResult) !== this.autoSyncOnConnect
                     );
                 this.connectedDevices = newConnectedDevices;
@@ -948,7 +1033,7 @@ export class BasketSidebar {
                     ${this.renderDeviceFolders()}
                 </div>
                 <div class="basket-actions">
-                    <sl-button id="start-sync-btn" variant="primary" style="width: 100%;" ${(!basketStore.isDirty() && !this.autoFillEnabled && !(this.currentDevice?.synced_items?.length > 0)) || !this.selectedDevicePath ? 'disabled' : ''}>
+                    <sl-button id="start-sync-btn" variant="primary" style="width: 100%;" ${(!basketStore.isDirty() && !this.anyAutoFillEnabled() && !(this.currentDevice?.synced_items?.length > 0)) || !this.selectedDevicePath ? 'disabled' : ''}>
                         <sl-icon slot="prefix" name="box-arrow-in-down"></sl-icon>
                         ${t('basket.actions.start_sync')}
                     </sl-button>
@@ -1047,13 +1132,23 @@ export class BasketSidebar {
         this.container.querySelectorAll('.remove-item-btn').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 const id = (e.currentTarget as HTMLElement).getAttribute('data-id');
-                if (id) {
-                    if (id === AUTO_FILL_SLOT_ID) {
-                        this.autoFillEnabled = false;
-                        this.persistAutoFillPrefs();
+                if (!id) return;
+                if (isAutoFillSlotId(id)) {
+                    // Removing a slot card disables auto-fill for THAT server only. The remove
+                    // control is hidden for non-selected (locked) slots, so this is always the
+                    // selected server's pipeline. Persist disabled state via setPipeline.
+                    const item = basketStore.getItems().find(i => i.id === id);
+                    const serverId = item?.serverId;
+                    if (serverId) {
+                        const pipeline = this.autoFillPipelines.get(serverId) ?? defaultLegacyPipeline();
+                        void this.persistPipeline(serverId, { ...pipeline, enabled: false });
+                    } else {
+                        basketStore.removeAutoFillSlot(id);
+                        this.render();
                     }
-                    basketStore.remove(id);
+                    return;
                 }
+                basketStore.remove(id);
             });
         });
 
@@ -1116,13 +1211,7 @@ export class BasketSidebar {
         // Check daemon for a sync started outside this window (e.g. auto-sync on connect).
         // If one is already running, attach to it instead of starting a new one.
         try {
-            const daemonState = await rpcCall('get_daemon_state') as any;
-            const activeOpId = daemonState?.activeOperationId as string | null;
-            if (activeOpId) {
-                this.currentOperationId = activeOpId;
-                this.startPolling();
-                return;
-            }
+            if (await this.attachToRunningSync()) return;
         } catch {
             // Ignore — if daemon state can't be fetched, let the sync attempt proceed and
             // the server-side guard will reject it if a concurrent sync is truly running.
@@ -1130,18 +1219,18 @@ export class BasketSidebar {
 
         const currentItems = basketStore.getItems();
 
-        // Detect and extract the auto-fill slot
-        const autoFillSlot = currentItems.find(i => i.id === AUTO_FILL_SLOT_ID);
-        const manualIds = currentItems.filter(i => i.id !== AUTO_FILL_SLOT_ID).map(i => i.id);
+        // Detect and extract the auto-fill slots (one per server — Story 12.6).
+        const autoFillSlots = currentItems.filter(i => isAutoFillSlotId(i.id));
+        const manualIds = currentItems.filter(i => !isAutoFillSlotId(i.id)).map(i => i.id);
 
-        // Take snapshot for race-safe dirty reset (exclude virtual slot — it won't appear in manifest)
+        // Take snapshot for race-safe dirty reset (exclude virtual slots — they won't appear in manifest)
         this.syncSnapshotIds = [...manualIds].sort();
 
         // Build delta request params. Each item carries its originating serverId so
         // the daemon can route the download to the correct provider (AC27).
         const serverIdById = new Map<string, string | undefined>();
         for (const it of currentItems) {
-            if (it.id !== AUTO_FILL_SLOT_ID) serverIdById.set(it.id, it.serverId);
+            if (!isAutoFillSlotId(it.id)) serverIdById.set(it.id, it.serverId);
         }
         // Incremental change detection is best-effort: if the sync token is stale
         // or the server doesn't support it, fall back to syncing all basket items.
@@ -1158,22 +1247,28 @@ export class BasketSidebar {
         }));
         const deltaParams: Record<string, unknown> = {
             itemIds: syncItems,
-            basketItems: currentItems.filter(i => i.id !== AUTO_FILL_SLOT_ID),
+            basketItems: currentItems.filter(i => !isAutoFillSlotId(i.id)),
         };
-        if (autoFillSlot) {
-            // Recompute fill budget fresh from current storage state — the slot's
-            // sizeBytes may be stale (e.g. set to 0 when storageInfo was null).
+        if (autoFillSlots.length > 0) {
+            // Story 12.6 (AC14): emit an array of per-server auto-fill descriptors targeting the
+            // shipped Story 12.3 `parse_auto_fill_descriptors` contract. Budget is fresh from
+            // current storage state (each slot's recorded sizeBytes may be stale).
             const manualSize = basketStore.getManualSizeBytes();
-            const maxFillBytes = this.storageInfo
+            const availableBytes = this.storageInfo
                 ? Math.max(this.storageInfo.freeBytes - manualSize, 0)
-                : autoFillSlot.sizeBytes || 0;
-            deltaParams.autoFill = {
-                enabled: true,
-                maxBytes: maxFillBytes > 0 ? maxFillBytes : undefined,
-                excludeItemIds: syncItemIds,
-                // Auto-fill is bound to a single server (AC32).
-                serverId: autoFillSlot.serverId ?? this.currentServerId ?? undefined,
-            };
+                : 0;
+            deltaParams.autoFill = autoFillSlots.map(slot => {
+                const serverId = slot.serverId ?? this.currentServerId ?? undefined;
+                const pipeline = slot.serverId ? this.autoFillPipelines.get(slot.serverId) : undefined;
+                const fallbackBytes = availableBytes > 0 ? availableBytes : (slot.sizeBytes || 0);
+                const maxBytes = pipeline?.budget.maxBytes ?? (fallbackBytes > 0 ? fallbackBytes : undefined);
+                // This server's manual ids being synced — the per-server exclude set (the daemon's
+                // manual-wins dedup is the safety net).
+                const excludeItemIds = serverId
+                    ? basketStore.getManualItemIdsForServer(serverId)
+                    : manualIds;
+                return { serverId, maxBytes, enabled: true, excludeItemIds };
+            });
         }
 
         try {
@@ -1205,12 +1300,42 @@ export class BasketSidebar {
 
             this.startPolling();
         } catch (err) {
+            if (
+                (err as Error).message === 'A sync operation is already in progress'
+                && await this.attachToRunningSync()
+            ) {
+                return;
+            }
             this.stopPolling();
             this.isSyncing = false;
             this.currentOperationId = null;
             this.currentOperation = null;
+            if (this.isCancelling && (err as Error).message === 'Sync cancelled') {
+                this.handleSyncCancelled();
+                return;
+            }
             this.showError(t('basket.sync.failed_to_start', { message: (err as Error).message }));
         }
+    }
+
+    private async attachToRunningSync(): Promise<boolean> {
+        while (!this.isDestroyed) {
+            let daemonState: any;
+            try {
+                daemonState = await rpcCall('get_daemon_state') as any;
+            } catch {
+                return false;
+            }
+            const activeOpId = daemonState?.activeOperationId as string | null;
+            if (activeOpId) {
+                this.currentOperationId = activeOpId;
+                this.startPolling();
+                return true;
+            }
+            if (daemonState?.syncPipelineActive !== true) return false;
+            await new Promise(resolve => window.setTimeout(resolve, 500));
+        }
+        return false;
     }
 
     private changeReasonSummary(delta: unknown): Array<{ reason: string; count: number }> {
@@ -1315,7 +1440,7 @@ export class BasketSidebar {
                 } else if (op.status === 'failed') {
                     this.stopPolling();
                     this.handleSyncFailed(op);
-                } else if (op.status === 'cancelled' || this.isCancelling) {
+                } else if (op.status === 'cancelled') {
                     this.stopPolling();
                     this.handleSyncCancelled();
                 }
@@ -1533,7 +1658,7 @@ export class BasketSidebar {
         }
 
         // Reset dirty if current items match snapshot (no mid-sync changes)
-        const currentIds = basketStore.getItems().filter(i => i.id !== AUTO_FILL_SLOT_ID).map(i => i.id).sort();
+        const currentIds = basketStore.getItems().filter(i => !isAutoFillSlotId(i.id)).map(i => i.id).sort();
         if (JSON.stringify(currentIds) === JSON.stringify(this.syncSnapshotIds)) {
             console.log("Sync complete, basket unchanged during sync. Resetting dirty flag.");
             basketStore.resetDirty();
@@ -1576,16 +1701,6 @@ export class BasketSidebar {
         if (type === 'Playlist') return t('basket.item.type.playlist');
         if (type === 'FavoriteArtist') return t('basket.item.type.favorites');
         return type;
-    }
-
-    private renderPriorityLabel(reason: string): string {
-        if (reason === 'favorite') return t('basket.priority.favorite');
-        if (reason.startsWith('playCount:')) {
-            const count = reason.split(':')[1];
-            return t('basket.priority.plays', { count });
-        }
-        if (reason === 'new' || reason === '') return t('basket.priority.new');
-        return t('basket.priority.auto');
     }
 
     private updateServersById(servers: any): void {
@@ -1632,18 +1747,38 @@ export class BasketSidebar {
     }
 
     private renderAutoFillSlotCard(item: BasketItem): string {
+        // Story 12.6: per-server slot card. Carries the server's icon+name badge and a readout
+        // derived locally from the pipeline budget + capacity; non-selected-server slots render
+        // read-locked (no remove control via removeButtonFor). Duration is shown only when the
+        // pipeline sets a target; the fallback hint appears when a fallback chain is configured.
+        const identity = this.serverDisplayIdentity(item.serverId);
+        const pipeline = item.serverId ? this.autoFillPipelines.get(item.serverId) : undefined;
+        const durationSecs = pipeline?.budget.targetDurationSecs ?? 0;
+        const hours = durationSecs > 0 ? durationSecs / 3600 : 0;
+        const showFallbackHint = !!pipeline && pipeline.fallback.length > 0;
+        const readout = hours > 0
+            ? t('basket.autofill.slot_readout_duration', {
+                server: identity.label,
+                size: formatSize(item.sizeBytes),
+                hours: hours.toFixed(hours < 10 ? 1 : 0),
+            })
+            : t('basket.autofill.slot_readout', { server: identity.label, size: formatSize(item.sizeBytes) });
         return `
-            <div class="basket-item-card basket-item-auto-fill-slot${this.lockedCardClass(item)}" data-id="${AUTO_FILL_SLOT_ID}">
+            <div class="basket-item-card basket-item-auto-fill-slot${this.lockedCardClass(item)}" data-id="${this.escapeHtml(item.id)}">
                 <div class="basket-item-auto-fill-icon">
                     <sl-icon name="stars"></sl-icon>
                 </div>
                 <div class="basket-item-info">
-                    <div class="basket-item-name">${t('basket.autofill.slot')}</div>
+                    <div class="basket-item-name">
+                        <sl-icon name="${this.escapeHtml(identity.icon)}" class="basket-item-server-badge" title="${this.escapeHtml(identity.tooltip)}"></sl-icon>
+                        ${t('basket.autofill.slot')}
+                    </div>
                     <div class="basket-item-meta">
-                        ${t('basket.autofill.slot_meta', { size: formatSize(item.sizeBytes) })}
+                        ${this.escapeHtml(readout)}
+                        ${showFallbackHint ? `<span class="auto-fill-fallback-hint">${t('basket.autofill.fallback_hint')}</span>` : ''}
                     </div>
                 </div>
-                ${this.removeButtonFor(item, AUTO_FILL_SLOT_ID)}
+                ${this.removeButtonFor(item, item.id)}
             </div>
         `;
     }
@@ -1720,7 +1855,7 @@ export class BasketSidebar {
     }
 
     private renderItem(item: BasketItem): string {
-        if (item.id === AUTO_FILL_SLOT_ID) {
+        if (isAutoFillSlotId(item.id)) {
             return this.renderAutoFillSlotCard(item);
         }
         if (item.type === 'MusicGenre') {
@@ -1729,26 +1864,18 @@ export class BasketSidebar {
         if (item.type === 'MusicArtist') {
             return this.renderArtistCard(item);
         }
-        const autoBadge = item.autoFilled
-            ? `<span class="basket-item-auto-badge" title="${t('basket.autofill.added_by')}">${t('basket.priority.auto')}</span>`
-            : '';
-        // Always show priority label for auto-filled items; fall back to empty string
-        // so renderPriorityLabel returns 'Auto' for items hydrated from older manifests (P13).
-        const priorityLabel = item.autoFilled
-            ? `<span class="basket-item-priority-reason">${this.escapeHtml(this.renderPriorityLabel(item.priorityReason ?? ''))}</span>`
-            : '';
-
+        // Story 12.6 (AC13): individual auto-filled tracks are no longer shown in the basket before
+        // sync — the per-server slot card represents the whole fill, so no per-track "Auto" badge or
+        // priority-reason tag is rendered.
         return `
-            <div class="basket-item-card ${item.autoFilled ? 'basket-item-auto' : ''}${this.lockedCardClass(item)}" data-id="${item.id}">
+            <div class="basket-item-card${this.lockedCardClass(item)}" data-id="${item.id}">
                 ${this.basketItemImage(item)}
                 <div class="basket-item-info">
                     <div class="basket-item-name">
-                        ${autoBadge}
                         ${this.escapeHtml(item.name)}
                     </div>
                     <div class="basket-item-meta">
                         ${t('basket.item.meta', { label: this.itemTypeLabel(item.type), count: item.childCount ?? 0, size: formatSize(item.sizeBytes ?? 0) })}
-                        ${priorityLabel}
                     </div>
                 </div>
                 ${this.removeButtonFor(item, item.id)}
@@ -1782,13 +1909,20 @@ export class BasketSidebar {
     private async handleCancelSync(): Promise<void> {
         if (this.isCancelling) return;
         this.isCancelling = true;
-        this.renderSyncProgress(); // show Cancelling... state immediately
-        if (this.currentOperationId) {
-            try {
-                await rpcCall('sync_cancel', { operationId: this.currentOperationId });
-            } catch (err) {
-                console.error('[Sync] Cancel request failed:', err);
+        this.renderSyncProgress();
+        try {
+            if (!this.currentOperationId) {
+                const state = await rpcCall('get_daemon_state') as any;
+                this.currentOperationId = state?.activeOperationId ?? null;
             }
+
+            await rpcCall('sync_cancel', this.currentOperationId
+                ? { operationId: this.currentOperationId }
+                : {});
+        } catch (err) {
+            this.isCancelling = false;
+            console.error('[Sync] Cancel request failed:', err);
+            this.renderSyncProgress();
         }
         // The polling loop will detect the terminal status and call handleSyncCancelled
     }
@@ -1829,15 +1963,15 @@ export class BasketSidebar {
 
     private handleSaveAsPlaylist(): void {
         const allItems = basketStore.getItems();
-        const hasAutoFill = allItems.some(i => i.id === AUTO_FILL_SLOT_ID);
+        const hasAutoFill = allItems.some(i => isAutoFillSlotId(i.id));
         // Pre-filter to the selected server (AC34): playlists are server-scoped, so
         // items from other servers are excluded before building the request. This
         // keeps the daemon's cross-server guard (AC33) from ever firing in normal use.
         const selectedItems = allItems.filter(
-            i => i.id !== AUTO_FILL_SLOT_ID && (!i.serverId || i.serverId === this.currentServerId)
+            i => !isAutoFillSlotId(i.id) && (!i.serverId || i.serverId === this.currentServerId)
         );
         const excludedCount = allItems.filter(
-            i => i.id !== AUTO_FILL_SLOT_ID && i.serverId && i.serverId !== this.currentServerId
+            i => !isAutoFillSlotId(i.id) && i.serverId && i.serverId !== this.currentServerId
         ).length;
         const manualIds = selectedItems.map(i => i.id);
 

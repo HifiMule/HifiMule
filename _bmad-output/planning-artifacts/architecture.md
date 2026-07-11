@@ -74,7 +74,7 @@ npx create-tauri-app@latest hifimule-ui --template vanilla-ts
 
 ### Daemon Responsibilities
 - **Media Provider Layer:** All server communication is mediated through a `MediaProvider` trait (`providers/jellyfin.rs` + `providers/subsonic.rs`). The daemon never calls server APIs directly — it holds an `Arc<dyn MediaProvider>` resolved at connect time based on server type detection.
-- **Auto-Fill Algorithm:** Priority-based music selection engine (favorites → play count → creation date) querying the active `MediaProvider` via `get_favorites()`, `get_most_played()`, `get_recently_added()`.
+- **Auto-Fill Pipeline:** Configurable selection engine implemented as pure functions over a provider's library: `Filter → Sources → Unit → Ordering → Memory → Budget`, with a terminal fallback chain. A pipeline config is an ordered list of `(Source, Picker, share)` entries + global modifiers + budget. The legacy favorites → play count → creation date behaviour is expressed as the **default single-Ordering-stage pipeline**. Stages query the `MediaProvider` via existing browse-mode/capability methods (`get_favorites()`, `get_most_played()`, `get_recently_added()`, playlist/genre enumeration); strategies requiring history (cooldown, stable-core) read/write the daemon DB. The engine is provider-agnostic and routed per server via `get_provider_by_server_id`. See "Auto-Fill Pipeline Model" for the data model. (Epic 12/13)
 - **Auto-Sync Controller:** Monitors device detection events and triggers sync automatically for configured devices without UI interaction.
 - **Transcoding Negotiator:** Provider-specific. Jellyfin: `POST /Items/{id}/PlaybackInfo` with `DeviceProfile` payload. Subsonic: `stream?format=mp3&maxBitRate=192` — delegated to provider's `download_url()`.
 - **Multi-Device Tracker:** Maintains a map of all currently connected managed devices; exposes selection API so the UI can switch the active device context at any time. `selectedDevicePath` may be null; when null, the UI enters a locked state (basket empty, add buttons disabled). The device hub is always visible when at least one device is connected.
@@ -785,6 +785,46 @@ The daemon groups `itemIds` by `serverId`, calls `ServerManager.get_provider(ser
 
 `autoFill` param gains `serverId: string`; `run_auto_fill()` routes to `ServerManager.get_provider(serverId)` instead of the single global provider.
 
+### Auto-Fill Pipeline Model (Epic 12/13)
+
+Generalizes the single-slot, single-algorithm auto-fill (Stories 3.6/3.8) into a configurable pipeline definable **per `(device, portable serverId)` pair**. Lifting the one-slot-per-basket limit and storing a per-slot pipeline config are the same change.
+
+**Config (manifest, portable, per `(device, portable serverId)`):**
+```
+manifest.autoFill : Map<serverId, AutoFillPipeline>     // replaces the single autoFill block
+AutoFillPipeline {
+  enabled: bool,
+  filter:   { includeTags: [], excludeTags: [], includeGenres: [], excludeGenres: [] },
+  sources:  [ { kind: "playlist"|"library"|"favorites"|"history"|..., ref?: id, share?: f32 } ],
+  unit:     "track" | "album" | "artist",
+  ordering: [ "favorite", "playCount", "dateCreated", "random", "quality", ... ],   // ordered keys
+  memory:   { cooldownWeeks?: u32, playedExclusion?: bool, stableCorePct?: f32, repeatTolerance?: f32, tiers?: [...] },
+  budget:   { maxBytes?: u64, targetDurationSecs?: u64, headroomBytes?: u64 },
+  fallback: [ ... ]   // ordered terminal sources guaranteeing full fill
+}
+// Backward compat: a legacy { enabled, maxBytes } block is read as
+// { ordering: ["favorite","playCount","dateCreated"], budget: { maxBytes } }.
+```
+
+**Runtime state (daemon DB, machine-local, keyed by device+serverId):**
+```
+autofill_history(device_id, server_id, track_id, last_synced_at, tier, ...)   // cooldown, stable-core, pity-timer
+```
+
+**Expansion (sync time):**
+```
+for each AutoFillSlot in basket (one per server):
+    provider = get_provider_by_server_id(slot.serverId)
+    tracks   = run_pipeline(provider, pipeline, db_history, manual_exclude_ids)
+    merge into desired_items  (manual items still win dedup)
+```
+
+**Contract amendments (additive; legacy params still accepted):**
+- `AutoFillSlot` is **one per server**: toggling auto-fill for the selected server inserts/updates *that server's* slot without removing other servers' slots. Slots for non-selected servers render read-locked.
+- `sync.start` carries an **array** of per-server auto-fill descriptors `{ serverId, pipeline-or-default, excludeItemIds }`; the daemon runs `run_pipeline` per descriptor, routed via `get_provider_by_server_id`.
+- `sync.setAutoFill` is **superseded by** `autoFill.setPipeline { deviceId, serverId, pipeline }`. `autoSyncOnConnect` stays on the device (server-independent). Legacy `sync.setAutoFill` params are still accepted and mapped to the default pipeline.
+- `basket.autoFill` preview endpoint gains `serverId` + optional inline `pipeline`; returns ranked items for that server.
+
 ### Server Identity Model — Portable vs Machine-Local (Story 2.13)
 
 **Problem:** Stories 2.11/2.12 used a single random `Uuid::new_v4()` (`server_config.id`) for
@@ -877,4 +917,7 @@ pub async fn get_provider_by_server_id(state: &AppState, server_id: &str)
 - Always pass `serverId` when adding items to the basket RPC.
 - Group `sync.start` `itemIds` by `serverId` and route each group to its correct provider — never assume all items belong to the active provider.
 - Never re-encrypt the vault with the legacy `Secrets` struct format — always use `HashMap<String, ServerCredentials>`.
+- Treat auto-fill as **one slot per server**, never a global singleton; never remove another server's slot when toggling auto-fill for the selected server.
+- Route every auto-fill pipeline expansion through `get_provider_by_server_id(slot.serverId)`; never assume the active provider.
+- Store auto-fill pipeline **config** in the manifest (portable `server_id`-keyed); store cooldown/rotation **history** in the daemon DB. Never put runtime history in the manifest, never put user config in the DB.
 - Evict provider cache entry on `server.remove` before returning `{ ok: true }`.

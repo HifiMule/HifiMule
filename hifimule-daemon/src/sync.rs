@@ -13,40 +13,8 @@ use crate::providers::{MediaProvider, TranscodeProfile};
 
 pub const DESTRUCTIVE_CLEANUP_THRESHOLD: usize = 25;
 
-/// Returns the current UTC time as an ISO 8601 / RFC 3339 string.
-///
-/// Format: `YYYY-MM-DDTHH:MM:SSZ`
-///
-/// Uses pure `std` arithmetic — no `chrono` dependency required.
 fn now_iso8601() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    // Days since epoch
-    let days = secs / 86400;
-    let day_secs = secs % 86400;
-    let hours = day_secs / 3600;
-    let minutes = (day_secs % 3600) / 60;
-    let seconds = day_secs % 60;
-
-    // Civil date from days since 1970-01-01 (algorithm from Howard Hinnant)
-    let z = days as i64 + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        y, m, d, hours, minutes, seconds
-    )
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -116,6 +84,17 @@ pub struct SyncAddItem {
     /// routing in execute; `None` for single-server / legacy items.
     #[serde(default)]
     pub server_id: Option<String>,
+    /// Story 13.1: auto-fill rotation-tier index (string) when this add came from a Memory-tiered
+    /// slot. Survives the delta round-trip to sync-execute, where it is recorded into
+    /// `autofill_history.tier`. `None` for manual items and non-tiered fills.
+    #[serde(default)]
+    pub tier: Option<String>,
+    /// Story 13.5 #20: encoding-from-goals derived per-slot max-bitrate (kbps) override. Set only on
+    /// auto-fill tracks of a slot whose pipeline enabled encoding-from-goals AND for which a transcode
+    /// profile is active. At sync-execute it overrides `TranscodeProfile.max_bitrate_kbps` for this
+    /// item only — never for manual items, never mutating the device-wide profile. `None` otherwise.
+    #[serde(default)]
+    pub max_bitrate_override_kbps: Option<u32>,
 }
 
 /// An item to be deleted from the device.
@@ -189,6 +168,14 @@ pub struct SyncDelta {
     pub unchanged: usize,
     #[serde(default)]
     pub playlists: Vec<PlaylistSyncItem>, // playlist basket items with ordered tracks
+    /// Story 13.4: portable server ids whose pity discovery reserve *genuinely fired* this run (the
+    /// shared `pity_reserve_bytes` gate was satisfied at fill time — enabled, dry streak ≥ threshold,
+    /// bounded budget, positive reserve). Carried through the delta JSON round-trip so the
+    /// sync-completion path resets the dry-streak only for servers where the guarantee actually fired
+    /// (not merely because the streak crossed the threshold). Populated by the auto-fill expansion
+    /// paths after `calculate_delta`, mirroring `patch_delta_tiers`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pity_fired_servers: Vec<String>,
 }
 
 fn change_reason(code: &str) -> String {
@@ -479,6 +466,7 @@ pub struct SyncOperationManager {
     /// Covers the window between pipeline start and the first `create_operation` call,
     /// where `has_active_operation` would otherwise return false.
     pipeline_active: Arc<AtomicBool>,
+    pipeline_cancelled: Arc<AtomicBool>,
     /// Per-operation cancellation flags. Set to `true` by `request_cancel`; polled by
     /// the sync loop between files via `is_cancelled`. Never removed — old entries for
     /// completed operations are harmless and naturally sized (one AtomicBool per UUID).
@@ -490,6 +478,7 @@ impl SyncOperationManager {
         Self {
             operations: Arc::new(RwLock::new(HashMap::new())),
             pipeline_active: Arc::new(AtomicBool::new(false)),
+            pipeline_cancelled: Arc::new(AtomicBool::new(false)),
             cancel_tokens: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -499,9 +488,31 @@ impl SyncOperationManager {
     /// must treat this as a concurrency conflict and abort.
     pub fn try_start_pipeline(&self) -> Option<PipelineGuard> {
         let flag = Arc::clone(&self.pipeline_active);
-        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .ok()
-            .map(|_| PipelineGuard(flag))
+        if flag
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return None;
+        }
+        self.pipeline_cancelled.store(false, Ordering::Release);
+        Some(PipelineGuard(flag))
+    }
+
+    pub fn request_pipeline_cancel(&self) -> bool {
+        if self.pipeline_active.load(Ordering::Acquire) {
+            self.pipeline_cancelled.store(true, Ordering::Release);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn is_pipeline_cancelled(&self) -> bool {
+        self.pipeline_cancelled.load(Ordering::Acquire)
+    }
+
+    pub fn is_pipeline_active(&self) -> bool {
+        self.pipeline_active.load(Ordering::Acquire)
     }
 
     pub async fn create_operation(
@@ -2370,7 +2381,15 @@ pub async fn execute_provider_sync(
         let source_direct_compatible = compatibility.source_is_direct_compatible(&source_format);
         let profile = if compatibility.is_constrained() && !source_direct_compatible {
             match compatibility.transcode_profile.clone() {
-                Some(profile) => Some(profile),
+                Some(mut profile) => {
+                    // Story 13.5 #20: an auto-fill track from an encoding-from-goals slot carries a
+                    // per-slot derived bitrate — override the profile's max bitrate for THIS download
+                    // only (manual items carry `None`; the device-wide profile is never mutated).
+                    if let Some(kbps) = add_item.max_bitrate_override_kbps {
+                        profile.max_bitrate_kbps = Some(kbps);
+                    }
+                    Some(profile)
+                }
                 None => {
                     sync_warnings.push(format!(
                         "[Sync] Skipped '{}' ({}) because the source format is incompatible and no compatible transcode profile is available",
@@ -2929,6 +2948,8 @@ pub async fn augment_delta_with_existence_check(
                     reason_code: None,
                     reason: None,
                     server_id: desired.server_id.clone(),
+                    tier: None,
+                    max_bitrate_override_kbps: None,
                 },
                 "device-file-missing",
             ));
@@ -3254,6 +3275,12 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
                     reason_code: None,
                     reason: None,
                     server_id: i.server_id.clone(),
+                    // Story 13.1: tier is patched onto delta.adds post-calculation (patch_delta_tiers)
+                    // from the auto-fill results, since DesiredItem does not carry it.
+                    tier: None,
+                    // Story 13.5 #20: patched post-calculation (patch_delta_bitrate_overrides) from the
+                    // auto-fill results, since DesiredItem does not carry it.
+                    max_bitrate_override_kbps: None,
                 },
                 reason_code,
             )
@@ -3419,6 +3446,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
         id_changes,
         unchanged,
         playlists: vec![],
+        pity_fired_servers: vec![],
     }
 }
 
@@ -3439,7 +3467,7 @@ mod tests {
             pending_item_ids: vec![],
             basket_items: vec![],
             auto_sync_on_connect: false,
-            auto_fill: crate::device::AutoFillPrefs::default(),
+            auto_fill: crate::device::AutoFillConfig::default(),
             transcoding_profile_id: None,
             playlists: vec![],
             storage_id: None,
@@ -3573,6 +3601,7 @@ mod tests {
             id_changes: vec![],
             unchanged: 0,
             playlists: vec![],
+            pity_fired_servers: vec![],
         };
 
         let (_synced, errors) = execute_sync(
@@ -3649,6 +3678,7 @@ mod tests {
             id_changes: vec![],
             unchanged: 0,
             playlists: vec![],
+            pity_fired_servers: vec![],
         };
         let operation_manager = Arc::new(SyncOperationManager::new());
         let operation_id = "op-missing-delete-progress".to_string();
@@ -4113,6 +4143,8 @@ mod tests {
             reason_code: Some("new-selection".to_string()),
             reason: Some("new selection".to_string()),
             server_id: None,
+            tier: None,
+            max_bitrate_override_kbps: None,
         }
     }
 
@@ -4176,6 +4208,7 @@ mod tests {
             id_changes: vec![],
             unchanged: 0,
             playlists: vec![],
+            pity_fired_servers: vec![],
         };
 
         let (synced, errors) = execute_provider_sync(
@@ -4252,6 +4285,7 @@ mod tests {
             id_changes: vec![],
             unchanged: 0,
             playlists: vec![],
+            pity_fired_servers: vec![],
         };
 
         let (synced, errors) = execute_provider_sync(
@@ -4312,6 +4346,7 @@ mod tests {
             id_changes: vec![],
             unchanged: 0,
             playlists: vec![],
+            pity_fired_servers: vec![],
         };
 
         let (synced, errors) = execute_provider_sync(
@@ -4391,6 +4426,7 @@ mod tests {
             id_changes: vec![],
             unchanged: 0,
             playlists: vec![],
+            pity_fired_servers: vec![],
         };
 
         let (synced, errors) = execute_provider_sync(
@@ -4735,6 +4771,21 @@ mod tests {
     }
 
     #[test]
+    fn test_pipeline_cancel_resets_for_next_pipeline() {
+        let manager = SyncOperationManager::new();
+
+        assert!(!manager.request_pipeline_cancel());
+        {
+            let _guard = manager.try_start_pipeline().unwrap();
+            assert!(manager.request_pipeline_cancel());
+            assert!(manager.is_pipeline_cancelled());
+        }
+
+        let _guard = manager.try_start_pipeline().unwrap();
+        assert!(!manager.is_pipeline_cancelled());
+    }
+
+    #[test]
     fn test_delta_id_change_case_insensitive() {
         let mut manifest = empty_manifest();
         manifest.synced_items = vec![make_synced_item(
@@ -5073,6 +5124,7 @@ mod tests {
             ],
             unchanged: 0,
             playlists: vec![],
+            pity_fired_servers: vec![],
         };
 
         let diagnostics = format_id_change_diagnostics(&delta, 1);
@@ -5574,6 +5626,7 @@ mod tests {
                 name: "Road".to_string(),
                 tracks: vec![],
             }],
+            pity_fired_servers: vec![],
         };
 
         assert_eq!(destructive_cleanup_count(&delta, &manifest), 1);
@@ -5598,6 +5651,8 @@ mod tests {
                     reason_code: None,
                     reason: None,
                     server_id: None,
+                    tier: None,
+                    max_bitrate_override_kbps: None,
                 },
                 "bitrate-increase",
             )],
@@ -5633,6 +5688,7 @@ mod tests {
             )],
             unchanged: 0,
             playlists: vec![],
+            pity_fired_servers: vec![],
         };
 
         let summary = change_reason_summary(&delta);

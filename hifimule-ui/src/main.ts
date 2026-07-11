@@ -1,6 +1,14 @@
+import '@shoelace-style/shoelace/dist/themes/dark.css';
+import '@shoelace-style/shoelace/dist/shoelace.js';
+import { setBasePath } from '@shoelace-style/shoelace/dist/utilities/base-path.js';
 import { LogicalSize } from '@tauri-apps/api/dpi';
 import { Window, currentMonitor } from '@tauri-apps/api/window';
 import { t } from './i18n';
+
+const isDev = Boolean((import.meta as any).env?.DEV);
+setBasePath(new URL(isDev
+    ? '../node_modules/@shoelace-style/shoelace/dist'
+    : '../shoelace', import.meta.url).href);
 
 // HifiMule UI Main Entry Point
 // Coordinates splash screen and main window lifecycle.
@@ -45,7 +53,7 @@ async function init() {
     const { rpcCall } = await import('./rpc');
 
     try {
-        const state = await rpcCall('get_daemon_state');
+        const state = await waitForDaemonState(rpcCall);
         await routeFromDaemonState(state);
     } catch (e) {
         console.error("Failed to check daemon state", e);
@@ -53,6 +61,19 @@ async function init() {
         const { initLoginView } = await import('./login');
         initLoginView(() => { reloadFromDaemon(); });
     }
+}
+
+async function waitForDaemonState(rpcCall: (method: string, params?: any) => Promise<any>): Promise<any> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 10; attempt++) {
+        try {
+            return await rpcCall('get_daemon_state');
+        } catch (error) {
+            lastError = error;
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+    }
+    throw lastError;
 }
 
 /**
@@ -190,7 +211,7 @@ function renderMainLayout(_state: any = null) {
     if (root.querySelector('#server-hub-container')) return;
 
     root.innerHTML = `
-    <sl-split-panel position="68" class="split-panel">
+    <sl-split-panel primary="end" position="32" class="split-panel">
       <div slot="start" class="library-view">
         <header>
           <div class="library-header-row">
