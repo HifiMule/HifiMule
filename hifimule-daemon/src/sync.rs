@@ -578,6 +578,16 @@ impl SyncOperationManager {
         ops.insert(operation_id.to_string(), operation);
     }
 
+    pub async fn modify_operation(
+        &self,
+        operation_id: &str,
+        modify: impl FnOnce(&mut SyncOperation),
+    ) {
+        if let Some(operation) = self.operations.write().await.get_mut(operation_id) {
+            modify(operation);
+        }
+    }
+
     pub async fn get_operation(&self, operation_id: &str) -> Option<SyncOperation> {
         let ops = self.operations.read().await;
         ops.get(operation_id).cloned()
@@ -1213,14 +1223,13 @@ async fn mark_operation_item_handled(
     operation_id: &str,
     skipped_bytes: u64,
 ) {
-    if let Some(mut operation) = operation_manager.get_operation(operation_id).await {
-        operation.files_completed += 1;
-        let adjusted_total = operation.total_bytes.saturating_sub(skipped_bytes);
-        operation.total_bytes = adjusted_total.max(operation.bytes_transferred);
-        operation_manager
-            .update_operation(operation_id, operation)
-            .await;
-    }
+    operation_manager
+        .modify_operation(operation_id, |operation| {
+            operation.files_completed += 1;
+            let adjusted_total = operation.total_bytes.saturating_sub(skipped_bytes);
+            operation.total_bytes = adjusted_total.max(operation.bytes_transferred);
+        })
+        .await;
 }
 
 async fn mark_operation_preparing_file(
@@ -1229,13 +1238,21 @@ async fn mark_operation_preparing_file(
     file_name: &str,
     bytes_total: u64,
 ) {
-    if let Some(mut operation) = operation_manager.get_operation(operation_id).await {
-        operation.current_file = Some(file_name.to_string());
-        operation.bytes_current = 0;
-        operation.bytes_total = bytes_total;
-        operation_manager
-            .update_operation(operation_id, operation)
-            .await;
+    operation_manager
+        .modify_operation(operation_id, |operation| {
+            operation.current_file = Some(file_name.to_string());
+            operation.bytes_current = 0;
+            operation.bytes_total = bytes_total;
+        })
+        .await;
+}
+
+async fn wait_for_operation_cancellation(
+    operation_manager: &SyncOperationManager,
+    operation_id: &str,
+) {
+    while !operation_manager.is_cancelled(operation_id).await {
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -2295,6 +2312,22 @@ impl StagedByteLimiter {
         operation_manager: &SyncOperationManager,
         operation_id: &str,
     ) -> Result<(StagedBytePermit, Duration)> {
+        let blocked = self.reserve(bytes, operation_manager, operation_id).await?;
+        Ok((
+            StagedBytePermit {
+                limiter: Arc::clone(self),
+                bytes,
+            },
+            blocked,
+        ))
+    }
+
+    async fn reserve(
+        self: &Arc<Self>,
+        bytes: u64,
+        operation_manager: &SyncOperationManager,
+        operation_id: &str,
+    ) -> Result<Duration> {
         if bytes > self.max {
             return Err(anyhow::anyhow!(
                 "File too large to reserve for staging ({} bytes > {} byte queue limit)",
@@ -2319,13 +2352,7 @@ impl StagedByteLimiter {
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 if self.max.saturating_sub(*used) >= bytes {
                     *used += bytes;
-                    return Ok((
-                        StagedBytePermit {
-                            limiter: Arc::clone(self),
-                            bytes,
-                        },
-                        started.elapsed(),
-                    ));
+                    return Ok(started.elapsed());
                 }
             }
 
@@ -2356,6 +2383,34 @@ struct StagedBytePermit {
 }
 
 impl StagedBytePermit {
+    async fn reserve_to(
+        &mut self,
+        bytes: u64,
+        operation_manager: &SyncOperationManager,
+        operation_id: &str,
+    ) -> Result<Duration> {
+        self.reserve_additional(
+            bytes.saturating_sub(self.bytes),
+            operation_manager,
+            operation_id,
+        )
+        .await
+    }
+
+    async fn reserve_additional(
+        &mut self,
+        bytes: u64,
+        operation_manager: &SyncOperationManager,
+        operation_id: &str,
+    ) -> Result<Duration> {
+        let blocked = self
+            .limiter
+            .reserve(bytes, operation_manager, operation_id)
+            .await?;
+        self.bytes += bytes;
+        Ok(blocked)
+    }
+
     fn shrink_to(&mut self, bytes: u64) {
         if bytes < self.bytes {
             let released = self.bytes - bytes;
@@ -2515,14 +2570,6 @@ pub async fn execute_provider_sync(
                 add_item.jellyfin_id,
                 add_item.size_bytes
             );
-            mark_operation_preparing_file(
-                &producer_operation_manager,
-                &producer_operation_id,
-                &add_item.name,
-                add_item.size_bytes,
-            )
-            .await;
-
             let source_format = provider_audio_format(
                 add_item.provider_suffix.as_deref(),
                 add_item.provider_content_type.as_deref(),
@@ -2564,10 +2611,11 @@ pub async fn execute_provider_sync(
                 preferred_audio_container,
                 device_preferred_audio_container
             );
-            let url = match producer_provider
-                .download_url(&add_item.jellyfin_id, profile.as_ref())
-                .await
-            {
+            let url_result = tokio::select! {
+                result = producer_provider.download_url(&add_item.jellyfin_id, profile.as_ref()) => result,
+                _ = wait_for_operation_cancellation(&producer_operation_manager, &producer_operation_id) => break,
+            };
+            let url = match url_result {
                 Ok(url) => url,
                 Err(e) => {
                     if profile.is_some() {
@@ -2592,7 +2640,11 @@ pub async fn execute_provider_sync(
                 }
             };
             crate::daemon_log!("[Sync] Preparing '{}': opening HTTP stream", add_item.name);
-            let response = match reqwest::Client::new().get(url).send().await {
+            let response_result = tokio::select! {
+                result = reqwest::Client::new().get(url).send() => result,
+                _ = wait_for_operation_cancellation(&producer_operation_manager, &producer_operation_id) => break,
+            };
+            let response = match response_result {
                 Ok(response) => response,
                 Err(e) => {
                     errors.push(SyncFileError {
@@ -2783,32 +2835,8 @@ pub async fn execute_provider_sync(
                 );
             }
 
-            let file_name = add_item.name.clone();
             let total_size = add_item.size_bytes;
-            let op_manager = Arc::clone(&producer_operation_manager);
-            let op_id = producer_operation_id.clone();
-            let last_reported = Arc::new(std::sync::atomic::AtomicU64::new(0));
-            let progress_callback = Arc::new(move |bytes_written: u64, total: u64| {
-                let last = last_reported.load(std::sync::atomic::Ordering::Relaxed);
-                if bytes_written.saturating_sub(last) < 256 * 1024 && bytes_written < total {
-                    return;
-                }
-                last_reported.store(bytes_written, std::sync::atomic::Ordering::Relaxed);
-                let op_manager_inner = Arc::clone(&op_manager);
-                let op_id_inner = op_id.clone();
-                let file_name_inner = file_name.clone();
-                tokio::spawn(async move {
-                    if let Some(mut operation) = op_manager_inner.get_operation(&op_id_inner).await
-                    {
-                        operation.current_file = Some(file_name_inner);
-                        operation.bytes_current = bytes_written;
-                        operation.bytes_total = total;
-                        op_manager_inner
-                            .update_operation(&op_id_inner, operation)
-                            .await;
-                    }
-                });
-            }) as ProgressCallback;
+            let progress_callback = Arc::new(|_, _| {}) as ProgressCallback;
 
             crate::daemon_log!("[Sync] Staging '{}'", add_item.name);
             let t_staging = std::time::Instant::now();
@@ -2850,6 +2878,7 @@ pub async fn execute_provider_sync(
                 &staged_path,
                 &producer_operation_manager,
                 &producer_operation_id,
+                &mut byte_permit,
             )
             .await
             {
@@ -2953,9 +2982,12 @@ pub async fn execute_provider_sync(
 
     let mut writer_idle = Duration::ZERO;
     let mut writer_failed = false;
-    while let Some(staged) = {
+    loop {
         let wait_started = std::time::Instant::now();
-        let next = staged_rx.recv().await;
+        let next = tokio::select! {
+            next = staged_rx.recv() => next,
+            _ = wait_for_operation_cancellation(&operation_manager, &operation_id) => None,
+        };
         let waited = wait_started.elapsed();
         writer_idle += waited;
         if let Some(staged) = next.as_ref() {
@@ -2967,8 +2999,9 @@ pub async fn execute_provider_sync(
                 byte_limiter.used()
             );
         }
-        next
-    } {
+        let Some(staged) = next else {
+            break;
+        };
         if writer_failed || operation_manager.is_cancelled(&operation_id).await {
             let cleanup = match tokio::fs::remove_file(&staged.staged_path).await {
                 Ok(()) => "ok".to_string(),
@@ -2982,6 +3015,13 @@ pub async fn execute_provider_sync(
             continue;
         }
 
+        mark_operation_preparing_file(
+            &operation_manager,
+            &operation_id,
+            &staged.add_item.name,
+            staged.add_item.size_bytes,
+        )
+        .await;
         crate::daemon_log!("[Sync] Writing '{}'", staged.add_item.name);
         let t_write = std::time::Instant::now();
         if staged.staged_size > MAX_FILE_BUFFER_BYTES {
@@ -3055,13 +3095,12 @@ pub async fn execute_provider_sync(
                     std::sync::atomic::Ordering::Relaxed,
                 );
                 let cumulative = completed_bytes_arc.load(std::sync::atomic::Ordering::Relaxed);
-                if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
-                    operation.files_completed += 1;
-                    operation.bytes_transferred = cumulative;
-                    operation_manager
-                        .update_operation(&operation_id, operation)
-                        .await;
-                }
+                operation_manager
+                    .modify_operation(&operation_id, |operation| {
+                        operation.files_completed += 1;
+                        operation.bytes_transferred = cumulative;
+                    })
+                    .await;
                 let synced_item = synced_items.last().unwrap().clone();
                 if let Some(delete_item) =
                     readd_delete_by_id.get(staged.add_item.jellyfin_id.as_str())
@@ -3365,6 +3404,7 @@ async fn stream_to_staging_file<S>(
     path: &Path,
     operation_manager: &SyncOperationManager,
     operation_id: &str,
+    byte_permit: &mut StagedBytePermit,
 ) -> Result<u64>
 where
     S: futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Unpin,
@@ -3380,10 +3420,12 @@ where
         .await
         .with_context(|| format!("Failed to create staging file {}", path.display()))?;
     let mut bytes_written = 0u64;
-    while let Some(chunk_result) = stream.next().await {
-        if operation_manager.is_cancelled(operation_id).await {
+    while let Some(chunk_result) = tokio::select! {
+        chunk = stream.next() => chunk,
+        _ = wait_for_operation_cancellation(operation_manager, operation_id) => {
             return Err(anyhow::anyhow!("Cancelled while staging stream"));
         }
+    } {
         let chunk = chunk_result.context("Failed to read chunk from stream")?;
         let chunk_len = chunk.len() as u64;
         if bytes_written.saturating_add(chunk_len) > MAX_FILE_BUFFER_BYTES {
@@ -3392,6 +3434,13 @@ where
                 MAX_FILE_BUFFER_BYTES
             ));
         }
+        byte_permit
+            .reserve_to(
+                bytes_written.saturating_add(chunk_len),
+                operation_manager,
+                operation_id,
+            )
+            .await?;
         file.write_all(&chunk)
             .await
             .with_context(|| format!("Failed to write staging file {}", path.display()))?;
@@ -4007,6 +4056,26 @@ mod tests {
 
         assert_eq!(timing.elapsed_ms, 0.0);
         assert_eq!(timing.speed_mb_s, 0.0);
+    }
+
+    #[tokio::test]
+    async fn staged_byte_permit_expands_to_actual_staged_size() {
+        let limiter = Arc::new(StagedByteLimiter::new(4));
+        let operation_manager = SyncOperationManager::new();
+        operation_manager
+            .create_operation("byte-permit".to_string(), 1)
+            .await;
+
+        let (mut permit, _) = limiter
+            .acquire(1, &operation_manager, "byte-permit")
+            .await
+            .unwrap();
+        permit
+            .reserve_to(4, &operation_manager, "byte-permit")
+            .await
+            .unwrap();
+
+        assert_eq!(limiter.used(), 4);
     }
 
     fn make_synced_item(
@@ -4804,7 +4873,7 @@ mod tests {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                 == 0
             {
-                self.first_write_started.notify_waiters();
+                self.first_write_started.notify_one();
                 self.release_first_write.notified().await;
             }
             self.inner.write_with_verify(path, data).await

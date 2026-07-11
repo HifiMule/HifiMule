@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-07-11  # Story 14.2 ready for review
+last_updated: 2026-07-11  # Story 14.2 reviewed and patched
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -178,5 +178,5 @@ development_status:
   # Epic 14 — Sync Throughput Pipeline (sprint-change-proposal-2026-07-11-sync-throughput-pipeline)
   epic-14: in-progress
   14-1-temp-only-disk-staging-for-provider-sync: done
-  14-2-bounded-producer-writer-pipeline: review
+  14-2-bounded-producer-writer-pipeline: done  # review complete: 4 patches applied
   14-3-per-server-producer-fairness-and-priority-buckets: backlog

@@ -4,7 +4,7 @@ baseline_commit: 4210c2245336b6fbf6c6776ebd4581dd89f3271d
 
 # Story 14.2: Bounded Producer/Writer Pipeline
 
-Status: review
+Status: done
 
 ## Story
 
@@ -136,3 +136,10 @@ GPT-5 Codex
 
 - 2026-07-11: Implemented bounded provider producer/writer pipeline and added provider-sync regression coverage.
 - 2026-07-11: Story created from approved Epic 14 change proposal and Story 14.1 implementation/review context.
+
+### Review Findings
+
+- [x] [Review][Patch] Staged-byte cap trusts provider metadata and can exceed its hard ceiling [hifimule-daemon/src/sync.rs:2752] — fixed by reserving each received chunk before staging it.
+- [x] [Review][Patch] Cancellation can leave the pipeline blocked waiting for a producer [hifimule-daemon/src/sync.rs:2956] — fixed with cancellation-aware producer, staging, and writer waits.
+- [x] [Review][Patch] Overlapping producer progress updates can overwrite writer completion state [hifimule-daemon/src/sync.rs:2800] — fixed by keeping user progress in the serial writer and atomically modifying operation state.
+- [x] [Review][Patch] Pipeline tests can miss the first-write notification [hifimule-daemon/src/sync.rs:4776] — fixed by retaining one first-write notification.
