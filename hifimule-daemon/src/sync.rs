@@ -3,11 +3,11 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, OwnedSemaphorePermit, RwLock, Semaphore, mpsc};
 
 use crate::device::{DeviceManifest, SyncedItem};
 use crate::providers::{MediaProvider, TranscodeProfile};
@@ -15,6 +15,8 @@ use crate::providers::{MediaProvider, TranscodeProfile};
 pub const DESTRUCTIVE_CLEANUP_THRESHOLD: usize = 25;
 const MAX_FILE_BUFFER_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GB hard cap
 const MAX_PROVIDER_STAGING_COMPONENT_CHARS: usize = 80;
+const PROVIDER_READY_QUEUE_MAX_TRACKS: usize = 2;
+const PROVIDER_READY_QUEUE_MAX_BYTES: u64 = MAX_FILE_BUFFER_BYTES;
 
 fn now_iso8601() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
@@ -2265,6 +2267,129 @@ pub struct ProviderSyncSource {
     pub transcoding_profile: Option<serde_json::Value>,
 }
 
+struct StagedByteLimiter {
+    max: u64,
+    used: Mutex<u64>,
+    notify: Notify,
+}
+
+impl StagedByteLimiter {
+    fn new(max: u64) -> Self {
+        Self {
+            max,
+            used: Mutex::new(0),
+            notify: Notify::new(),
+        }
+    }
+
+    fn used(&self) -> u64 {
+        *self
+            .used
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    async fn acquire(
+        self: &Arc<Self>,
+        bytes: u64,
+        operation_manager: &SyncOperationManager,
+        operation_id: &str,
+    ) -> Result<(StagedBytePermit, Duration)> {
+        if bytes > self.max {
+            return Err(anyhow::anyhow!(
+                "File too large to reserve for staging ({} bytes > {} byte queue limit)",
+                bytes,
+                self.max
+            ));
+        }
+
+        let started = std::time::Instant::now();
+        loop {
+            if operation_manager.is_cancelled(operation_id).await {
+                return Err(anyhow::anyhow!(
+                    "Cancelled while waiting for staging byte capacity"
+                ));
+            }
+
+            let notified = self.notify.notified();
+            {
+                let mut used = self
+                    .used
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if self.max.saturating_sub(*used) >= bytes {
+                    *used += bytes;
+                    return Ok((
+                        StagedBytePermit {
+                            limiter: Arc::clone(self),
+                            bytes,
+                        },
+                        started.elapsed(),
+                    ));
+                }
+            }
+
+            tokio::select! {
+                _ = notified => {}
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
+        }
+    }
+
+    fn release(&self, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        let mut used = self
+            .used
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *used = used.saturating_sub(bytes);
+        drop(used);
+        self.notify.notify_waiters();
+    }
+}
+
+struct StagedBytePermit {
+    limiter: Arc<StagedByteLimiter>,
+    bytes: u64,
+}
+
+impl StagedBytePermit {
+    fn shrink_to(&mut self, bytes: u64) {
+        if bytes < self.bytes {
+            let released = self.bytes - bytes;
+            self.bytes = bytes;
+            self.limiter.release(released);
+        }
+    }
+}
+
+impl Drop for StagedBytePermit {
+    fn drop(&mut self) {
+        self.limiter.release(self.bytes);
+    }
+}
+
+struct StagedTrack {
+    add_item: SyncAddItem,
+    staged_path: std::path::PathBuf,
+    rel_path: String,
+    staged_size: u64,
+    staging_timing: TransferTiming,
+    original_name: Option<String>,
+    add_index: usize,
+    _count_permit: OwnedSemaphorePermit,
+    _byte_permit: StagedBytePermit,
+}
+
+struct ProviderProducerOutcome {
+    errors: Vec<SyncFileError>,
+    warnings: Vec<String>,
+    staging_dir: Option<tempfile::TempDir>,
+    blocked: Duration,
+}
+
 pub async fn execute_provider_sync(
     delta: &SyncDelta,
     device_path: &Path,
@@ -2296,8 +2421,6 @@ pub async fn execute_provider_sync(
         delta.id_changes.len(),
         delta.playlists.len()
     );
-    let mut staging_dir: Option<tempfile::TempDir> = None;
-
     let total_job_bytes: u64 = delta.adds.iter().map(|a| a.size_bytes).sum::<u64>()
         + delta.id_changes.iter().map(|c| c.size_bytes).sum::<u64>();
     if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
@@ -2358,83 +2481,139 @@ pub async fn execute_provider_sync(
         .map(|delete| (delete.jellyfin_id.as_str(), delete))
         .collect();
 
-    for (index, add_item) in delta.adds.iter().enumerate() {
-        if operation_manager.is_cancelled(&operation_id).await {
-            break;
-        }
-        crate::daemon_log!(
-            "[Sync] Preparing file {}/{}: '{}' ({}, {} bytes)",
-            index + 1,
-            delta.adds.len(),
-            add_item.name,
-            add_item.jellyfin_id,
-            add_item.size_bytes
-        );
-        mark_operation_preparing_file(
-            &operation_manager,
-            &operation_id,
-            &add_item.name,
-            add_item.size_bytes,
-        )
-        .await;
+    let byte_limiter = Arc::new(StagedByteLimiter::new(PROVIDER_READY_QUEUE_MAX_BYTES));
+    let count_limiter = Arc::new(Semaphore::new(PROVIDER_READY_QUEUE_MAX_TRACKS));
+    let (staged_tx, mut staged_rx) = mpsc::channel(PROVIDER_READY_QUEUE_MAX_TRACKS);
+    let producer_adds = delta.adds.clone();
+    let producer_add_count = producer_adds.len();
+    let producer_provider = Arc::clone(&provider);
+    let producer_operation_manager = Arc::clone(&operation_manager);
+    let producer_operation_id = operation_id.clone();
+    let producer_managed_path = managed_path.clone();
+    let producer_device_path = device_path.to_path_buf();
+    let producer_compatibility = compatibility.clone();
+    let producer_byte_limiter = Arc::clone(&byte_limiter);
+    let producer_count_limiter = Arc::clone(&count_limiter);
+    let producer = tokio::spawn(async move {
+        let mut errors = Vec::new();
+        let mut warnings = Vec::new();
+        let mut staging_dir: Option<tempfile::TempDir> = None;
+        let mut blocked = Duration::ZERO;
 
-        let source_format = provider_audio_format(
-            add_item.provider_suffix.as_deref(),
-            add_item.provider_content_type.as_deref(),
-        );
-        let source_direct_compatible = compatibility.source_is_direct_compatible(&source_format);
-        let profile = if compatibility.is_constrained() && !source_direct_compatible {
-            match compatibility.transcode_profile.clone() {
-                Some(mut profile) => {
-                    // Story 13.5 #20: an auto-fill track from an encoding-from-goals slot carries a
-                    // per-slot derived bitrate — override the profile's max bitrate for THIS download
-                    // only (manual items carry `None`; the device-wide profile is never mutated).
-                    if let Some(kbps) = add_item.max_bitrate_override_kbps {
-                        profile.max_bitrate_kbps = Some(kbps);
+        for (index, add_item) in producer_adds.into_iter().enumerate() {
+            if producer_operation_manager
+                .is_cancelled(&producer_operation_id)
+                .await
+            {
+                break;
+            }
+            crate::daemon_log!(
+                "[Sync] Preparing file {}/{}: '{}' ({}, {} bytes)",
+                index + 1,
+                producer_add_count,
+                add_item.name,
+                add_item.jellyfin_id,
+                add_item.size_bytes
+            );
+            mark_operation_preparing_file(
+                &producer_operation_manager,
+                &producer_operation_id,
+                &add_item.name,
+                add_item.size_bytes,
+            )
+            .await;
+
+            let source_format = provider_audio_format(
+                add_item.provider_suffix.as_deref(),
+                add_item.provider_content_type.as_deref(),
+            );
+            let source_direct_compatible =
+                producer_compatibility.source_is_direct_compatible(&source_format);
+            let profile = if producer_compatibility.is_constrained() && !source_direct_compatible {
+                match producer_compatibility.transcode_profile.clone() {
+                    Some(mut profile) => {
+                        if let Some(kbps) = add_item.max_bitrate_override_kbps {
+                            profile.max_bitrate_kbps = Some(kbps);
+                        }
+                        Some(profile)
                     }
-                    Some(profile)
+                    None => {
+                        warnings.push(format!(
+                            "[Sync] Skipped '{}' ({}) because the source format is incompatible and no compatible transcode profile is available",
+                            add_item.name, add_item.jellyfin_id
+                        ));
+                        mark_operation_item_handled(
+                            &producer_operation_manager,
+                            &producer_operation_id,
+                            add_item.size_bytes,
+                        )
+                        .await;
+                        continue;
+                    }
                 }
-                None => {
-                    sync_warnings.push(format!(
-                        "[Sync] Skipped '{}' ({}) because the source format is incompatible and no compatible transcode profile is available",
-                        add_item.name, add_item.jellyfin_id
-                    ));
-                    mark_operation_item_handled(
-                        &operation_manager,
-                        &operation_id,
-                        add_item.size_bytes,
-                    )
-                    .await;
+            } else {
+                None
+            };
+            crate::daemon_log!(
+                "[Sync] Preparing '{}': resolving provider download URL (transcode={}, source_suffix={:?}, source_content_type={:?}, direct_compatible={}, preferred_audio_container={:?}, device_preferred_audio_container={:?})",
+                add_item.name,
+                profile.is_some(),
+                add_item.provider_suffix,
+                add_item.provider_content_type,
+                source_direct_compatible,
+                preferred_audio_container,
+                device_preferred_audio_container
+            );
+            let url = match producer_provider
+                .download_url(&add_item.jellyfin_id, profile.as_ref())
+                .await
+            {
+                Ok(url) => url,
+                Err(e) => {
+                    if profile.is_some() {
+                        warnings.push(format!(
+                            "[Sync] Skipped '{}' ({}) because required transcoding could not be negotiated: {}",
+                            add_item.name, add_item.jellyfin_id, e
+                        ));
+                        mark_operation_item_handled(
+                            &producer_operation_manager,
+                            &producer_operation_id,
+                            add_item.size_bytes,
+                        )
+                        .await;
+                    } else {
+                        errors.push(SyncFileError {
+                            jellyfin_id: add_item.jellyfin_id.clone(),
+                            filename: add_item.name.clone(),
+                            error_message: format!("Failed to get stream: {}", e),
+                        });
+                    }
                     continue;
                 }
-            }
-        } else {
-            None
-        };
-        crate::daemon_log!(
-            "[Sync] Preparing '{}': resolving provider download URL (transcode={}, source_suffix={:?}, source_content_type={:?}, direct_compatible={}, preferred_audio_container={:?}, device_preferred_audio_container={:?})",
-            add_item.name,
-            profile.is_some(),
-            add_item.provider_suffix,
-            add_item.provider_content_type,
-            source_direct_compatible,
-            preferred_audio_container,
-            device_preferred_audio_container
-        );
-        let url = match provider
-            .download_url(&add_item.jellyfin_id, profile.as_ref())
-            .await
-        {
-            Ok(url) => url,
-            Err(e) => {
+            };
+            crate::daemon_log!("[Sync] Preparing '{}': opening HTTP stream", add_item.name);
+            let response = match reqwest::Client::new().get(url).send().await {
+                Ok(response) => response,
+                Err(e) => {
+                    errors.push(SyncFileError {
+                        jellyfin_id: add_item.jellyfin_id.clone(),
+                        filename: add_item.name.clone(),
+                        error_message: format!("Failed to open stream: {}", e),
+                    });
+                    continue;
+                }
+            };
+            if !response.status().is_success() {
                 if profile.is_some() {
-                    sync_warnings.push(format!(
-                        "[Sync] Skipped '{}' ({}) because required transcoding could not be negotiated: {}",
-                        add_item.name, add_item.jellyfin_id, e
+                    warnings.push(format!(
+                        "[Sync] Skipped '{}' ({}) because required transcoding returned status {}",
+                        add_item.name,
+                        add_item.jellyfin_id,
+                        response.status()
                     ));
                     mark_operation_item_handled(
-                        &operation_manager,
-                        &operation_id,
+                        &producer_operation_manager,
+                        &producer_operation_id,
                         add_item.size_bytes,
                     )
                     .await;
@@ -2442,169 +2621,150 @@ pub async fn execute_provider_sync(
                     errors.push(SyncFileError {
                         jellyfin_id: add_item.jellyfin_id.clone(),
                         filename: add_item.name.clone(),
-                        error_message: format!("Failed to get stream: {}", e),
+                        error_message: format!("Stream returned status {}", response.status()),
                     });
                 }
                 continue;
             }
-        };
-        crate::daemon_log!("[Sync] Preparing '{}': opening HTTP stream", add_item.name);
-        let response = match reqwest::Client::new().get(url).send().await {
-            Ok(response) => response,
-            Err(e) => {
-                errors.push(SyncFileError {
-                    jellyfin_id: add_item.jellyfin_id.clone(),
-                    filename: add_item.name.clone(),
-                    error_message: format!("Failed to open stream: {}", e),
-                });
-                continue;
-            }
-        };
-        if !response.status().is_success() {
-            if profile.is_some() {
-                sync_warnings.push(format!(
-                    "[Sync] Skipped '{}' ({}) because required transcoding returned status {}",
-                    add_item.name,
-                    add_item.jellyfin_id,
-                    response.status()
-                ));
-                mark_operation_item_handled(&operation_manager, &operation_id, add_item.size_bytes)
-                    .await;
-            } else {
-                errors.push(SyncFileError {
-                    jellyfin_id: add_item.jellyfin_id.clone(),
-                    filename: add_item.name.clone(),
-                    error_message: format!("Stream returned status {}", response.status()),
-                });
-            }
-            continue;
-        }
 
-        let response_content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok());
-        let response_format = provider_audio_format(None, response_content_type);
-        let extension_override = if !compatibility.is_constrained() {
-            source_format
-                .extension
-                .clone()
-                .or_else(|| response_format.extension.clone())
-        } else if profile.is_some() {
-            if !response_format.is_empty() && compatibility.output_is_compatible(&response_format) {
-                response_format.extension.clone().or_else(|| {
-                    profile
-                        .as_ref()
-                        .and_then(|profile| profile.container.as_deref())
-                        .and_then(clean_audio_extension)
-                })
-            } else {
-                let reason = if response_format.is_empty() {
-                    format!(
-                        "transcoding to {} was requested but the provider output was unconfirmed",
-                        compatibility.transcode_target_label()
-                    )
+            let response_content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok());
+            let response_format = provider_audio_format(None, response_content_type);
+            let extension_override = if !producer_compatibility.is_constrained() {
+                source_format
+                    .extension
+                    .clone()
+                    .or_else(|| response_format.extension.clone())
+            } else if profile.is_some() {
+                if !response_format.is_empty()
+                    && producer_compatibility.output_is_compatible(&response_format)
+                {
+                    response_format.extension.clone().or_else(|| {
+                        profile
+                            .as_ref()
+                            .and_then(|profile| profile.container.as_deref())
+                            .and_then(clean_audio_extension)
+                    })
                 } else {
-                    format!(
-                        "the provider returned incompatible content type {:?}",
-                        response_content_type.unwrap_or("unknown")
+                    let reason = if response_format.is_empty() {
+                        format!(
+                            "transcoding to {} was requested but the provider output was unconfirmed",
+                            producer_compatibility.transcode_target_label()
+                        )
+                    } else {
+                        format!(
+                            "the provider returned incompatible content type {:?}",
+                            response_content_type.unwrap_or("unknown")
+                        )
+                    };
+                    warnings.push(format!(
+                        "[Sync] Skipped '{}' ({}) because {}",
+                        add_item.name, add_item.jellyfin_id, reason
+                    ));
+                    mark_operation_item_handled(
+                        &producer_operation_manager,
+                        &producer_operation_id,
+                        add_item.size_bytes,
                     )
-                };
-                sync_warnings.push(format!(
-                    "[Sync] Skipped '{}' ({}) because {}",
-                    add_item.name, add_item.jellyfin_id, reason
-                ));
-                mark_operation_item_handled(&operation_manager, &operation_id, add_item.size_bytes)
                     .await;
-                continue;
-            }
-        } else {
-            let has_unrecognized_specific_content_type =
-                response_content_type.is_some_and(|content_type| {
-                    response_format.is_empty() && !is_generic_binary_content_type(content_type)
-                });
-            if (!response_format.is_empty()
-                && !compatibility.output_is_compatible(&response_format))
-                || has_unrecognized_specific_content_type
-            {
-                sync_warnings.push(format!(
-                    "[Sync] Skipped '{}' ({}) because the provider returned incompatible content type {:?}",
-                    add_item.name,
-                    add_item.jellyfin_id,
-                    response_content_type.unwrap_or("unknown")
-                ));
-                mark_operation_item_handled(&operation_manager, &operation_id, add_item.size_bytes)
+                    continue;
+                }
+            } else {
+                let has_unrecognized_specific_content_type =
+                    response_content_type.is_some_and(|content_type| {
+                        response_format.is_empty() && !is_generic_binary_content_type(content_type)
+                    });
+                if (!response_format.is_empty()
+                    && !producer_compatibility.output_is_compatible(&response_format))
+                    || has_unrecognized_specific_content_type
+                {
+                    warnings.push(format!(
+                        "[Sync] Skipped '{}' ({}) because the provider returned incompatible content type {:?}",
+                        add_item.name,
+                        add_item.jellyfin_id,
+                        response_content_type.unwrap_or("unknown")
+                    ));
+                    mark_operation_item_handled(
+                        &producer_operation_manager,
+                        &producer_operation_id,
+                        add_item.size_bytes,
+                    )
                     .await;
-                continue;
-            }
-            source_format
-                .extension
-                .clone()
-                .or_else(|| response_format.extension.clone())
-        };
-
-        crate::daemon_log!(
-            "[Sync] Preparing '{}': constructing target path",
-            add_item.name
-        );
-        let construction = match construct_desired_file_path(
-            &managed_path,
-            add_item,
-            extension_override.as_deref(),
-        ) {
-            Ok(result) => result,
-            Err(e) => {
-                errors.push(SyncFileError {
-                    jellyfin_id: add_item.jellyfin_id.clone(),
-                    filename: add_item.name.clone(),
-                    error_message: format!("Failed to construct file path: {}", e),
-                });
-                continue;
-            }
-        };
-
-        let file_name = add_item.name.clone();
-        let total_size = add_item.size_bytes;
-        let op_manager = operation_manager.clone();
-        let op_id = operation_id.clone();
-        let last_reported = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let progress_callback = Arc::new(move |bytes_written: u64, total: u64| {
-            let last = last_reported.load(std::sync::atomic::Ordering::Relaxed);
-            if bytes_written.saturating_sub(last) < 256 * 1024 && bytes_written < total {
-                return;
-            }
-            last_reported.store(bytes_written, std::sync::atomic::Ordering::Relaxed);
-            let op_manager_inner = op_manager.clone();
-            let op_id_inner = op_id.clone();
-            let file_name_inner = file_name.clone();
-            tokio::spawn(async move {
-                if let Some(mut operation) = op_manager_inner.get_operation(&op_id_inner).await {
-                    operation.current_file = Some(file_name_inner);
-                    operation.bytes_current = bytes_written;
-                    operation.bytes_total = total;
-                    op_manager_inner
-                        .update_operation(&op_id_inner, operation)
-                        .await;
+                    continue;
                 }
-            });
-        }) as ProgressCallback;
+                source_format
+                    .extension
+                    .clone()
+                    .or_else(|| response_format.extension.clone())
+            };
 
-        crate::daemon_log!("[Sync] Staging '{}'", add_item.name);
-        let t_staging = std::time::Instant::now();
-        if staging_dir.is_none() {
-            match tempfile::Builder::new()
-                .prefix(&provider_sync_staging_prefix(&operation_id))
-                .tempdir()
-                .context("Failed to create provider sync staging directory")
-            {
-                Ok(dir) => {
-                    crate::daemon_log!(
-                        "[Sync] Provider sync staging directory: {}",
-                        dir.path().display()
-                    );
-                    staging_dir = Some(dir);
-                }
+            crate::daemon_log!(
+                "[Sync] Preparing '{}': constructing target path",
+                add_item.name
+            );
+            let construction = match construct_desired_file_path(
+                &producer_managed_path,
+                &add_item,
+                extension_override.as_deref(),
+            ) {
+                Ok(result) => result,
                 Err(e) => {
+                    errors.push(SyncFileError {
+                        jellyfin_id: add_item.jellyfin_id.clone(),
+                        filename: add_item.name.clone(),
+                        error_message: format!("Failed to construct file path: {}", e),
+                    });
+                    continue;
+                }
+            };
+
+            let count_started = std::time::Instant::now();
+            let count_permit = loop {
+                if producer_operation_manager
+                    .is_cancelled(&producer_operation_id)
+                    .await
+                {
+                    break None;
+                }
+                match Arc::clone(&producer_count_limiter).try_acquire_owned() {
+                    Ok(permit) => break Some(permit),
+                    Err(tokio::sync::TryAcquireError::NoPermits) => {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    Err(tokio::sync::TryAcquireError::Closed) => break None,
+                }
+            };
+            let Some(count_permit) = count_permit else {
+                break;
+            };
+            let count_wait = count_started.elapsed();
+            blocked += count_wait;
+            if count_wait > Duration::ZERO {
+                crate::daemon_log!(
+                    "[Sync] Producer count-capacity wait for '{}' blocked_ms={:.2}",
+                    add_item.name,
+                    count_wait.as_secs_f64() * 1000.0
+                );
+            }
+
+            let (mut byte_permit, byte_wait) = match producer_byte_limiter
+                .acquire(
+                    add_item.size_bytes,
+                    &producer_operation_manager,
+                    &producer_operation_id,
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    if producer_operation_manager
+                        .is_cancelled(&producer_operation_id)
+                        .await
+                    {
+                        break;
+                    }
                     errors.push(SyncFileError {
                         jellyfin_id: add_item.jellyfin_id.clone(),
                         filename: add_item.name.clone(),
@@ -2612,114 +2772,288 @@ pub async fn execute_provider_sync(
                     });
                     continue;
                 }
+            };
+            blocked += byte_wait;
+            if byte_wait > Duration::ZERO {
+                crate::daemon_log!(
+                    "[Sync] Producer byte-capacity wait for '{}' blocked_ms={:.2} staged_bytes={}",
+                    add_item.name,
+                    byte_wait.as_secs_f64() * 1000.0,
+                    producer_byte_limiter.used()
+                );
             }
-        }
-        let staging_dir_path = staging_dir
-            .as_ref()
-            .expect("provider sync staging directory should exist")
-            .path();
-        let staged_path = staging_dir_path.join(format!(
-            "{index:06}-{}",
-            provider_sync_staging_path_component(&add_item.jellyfin_id)
-        ));
-        let staged_size = match stream_to_staging_file(
-            response.bytes_stream(),
-            total_size,
-            progress_callback,
-            &staged_path,
-        )
-        .await
-        {
-            Ok(staged_size) => staged_size,
-            Err(e) => {
-                errors.push(SyncFileError {
-                    jellyfin_id: add_item.jellyfin_id.clone(),
-                    filename: add_item.name.clone(),
-                    error_message: format!("Failed to stage stream: {}", e),
-                });
-                continue;
-            }
-        };
-        let staging_timing = transfer_timing(staged_size, t_staging.elapsed());
-        crate::daemon_log!(
-            "[Sync] '{}' staged_size={}B staging={:.2}ms({:.1}MB/s)",
-            add_item.name,
-            staged_size,
-            staging_timing.elapsed_ms,
-            staging_timing.speed_mb_s
-        );
-        if operation_manager.is_cancelled(&operation_id).await {
-            break;
-        }
-        let rel_path = construction
-            .path
-            .strip_prefix(device_path)
-            .unwrap_or(&construction.path)
-            .to_string_lossy()
-            .replace('\\', "/");
 
-        crate::daemon_log!("[Sync] Writing '{}'", add_item.name);
-        let t_write = std::time::Instant::now();
-        if staged_size > MAX_FILE_BUFFER_BYTES {
-            errors.push(SyncFileError {
-                jellyfin_id: add_item.jellyfin_id.clone(),
-                filename: add_item.name.clone(),
-                error_message: format!(
-                    "Staged file too large to read ({} bytes > {} byte limit)",
-                    staged_size, MAX_FILE_BUFFER_BYTES
-                ),
-            });
+            let file_name = add_item.name.clone();
+            let total_size = add_item.size_bytes;
+            let op_manager = Arc::clone(&producer_operation_manager);
+            let op_id = producer_operation_id.clone();
+            let last_reported = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let progress_callback = Arc::new(move |bytes_written: u64, total: u64| {
+                let last = last_reported.load(std::sync::atomic::Ordering::Relaxed);
+                if bytes_written.saturating_sub(last) < 256 * 1024 && bytes_written < total {
+                    return;
+                }
+                last_reported.store(bytes_written, std::sync::atomic::Ordering::Relaxed);
+                let op_manager_inner = Arc::clone(&op_manager);
+                let op_id_inner = op_id.clone();
+                let file_name_inner = file_name.clone();
+                tokio::spawn(async move {
+                    if let Some(mut operation) = op_manager_inner.get_operation(&op_id_inner).await
+                    {
+                        operation.current_file = Some(file_name_inner);
+                        operation.bytes_current = bytes_written;
+                        operation.bytes_total = total;
+                        op_manager_inner
+                            .update_operation(&op_id_inner, operation)
+                            .await;
+                    }
+                });
+            }) as ProgressCallback;
+
+            crate::daemon_log!("[Sync] Staging '{}'", add_item.name);
+            let t_staging = std::time::Instant::now();
+            if staging_dir.is_none() {
+                match tempfile::Builder::new()
+                    .prefix(&provider_sync_staging_prefix(&producer_operation_id))
+                    .tempdir()
+                    .context("Failed to create provider sync staging directory")
+                {
+                    Ok(dir) => {
+                        crate::daemon_log!(
+                            "[Sync] Provider sync staging directory: {}",
+                            dir.path().display()
+                        );
+                        staging_dir = Some(dir);
+                    }
+                    Err(e) => {
+                        errors.push(SyncFileError {
+                            jellyfin_id: add_item.jellyfin_id.clone(),
+                            filename: add_item.name.clone(),
+                            error_message: e.to_string(),
+                        });
+                        continue;
+                    }
+                }
+            }
+            let staging_dir_path = staging_dir
+                .as_ref()
+                .expect("provider sync staging directory should exist")
+                .path();
+            let staged_path = staging_dir_path.join(format!(
+                "{index:06}-{}",
+                provider_sync_staging_path_component(&add_item.jellyfin_id)
+            ));
+            let staged_size = match stream_to_staging_file(
+                response.bytes_stream(),
+                total_size,
+                progress_callback,
+                &staged_path,
+                &producer_operation_manager,
+                &producer_operation_id,
+            )
+            .await
+            {
+                Ok(staged_size) => staged_size,
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&staged_path).await;
+                    if producer_operation_manager
+                        .is_cancelled(&producer_operation_id)
+                        .await
+                    {
+                        break;
+                    }
+                    errors.push(SyncFileError {
+                        jellyfin_id: add_item.jellyfin_id.clone(),
+                        filename: add_item.name.clone(),
+                        error_message: format!("Failed to stage stream: {}", e),
+                    });
+                    continue;
+                }
+            };
+            byte_permit.shrink_to(staged_size);
+            let staging_timing = transfer_timing(staged_size, t_staging.elapsed());
+            crate::daemon_log!(
+                "[Sync] '{}' staged_size={}B staging={:.2}ms({:.1}MB/s)",
+                add_item.name,
+                staged_size,
+                staging_timing.elapsed_ms,
+                staging_timing.speed_mb_s
+            );
+            if producer_operation_manager
+                .is_cancelled(&producer_operation_id)
+                .await
+            {
+                let _ = tokio::fs::remove_file(&staged_path).await;
+                break;
+            }
+            let rel_path = construction
+                .path
+                .strip_prefix(&producer_device_path)
+                .unwrap_or(&construction.path)
+                .to_string_lossy()
+                .replace('\\', "/");
+
+            let mut staged = StagedTrack {
+                add_item,
+                staged_path,
+                rel_path,
+                staged_size,
+                staging_timing,
+                original_name: construction.original_name,
+                add_index: index,
+                _count_permit: count_permit,
+                _byte_permit: byte_permit,
+            };
+            let send_started = std::time::Instant::now();
+            loop {
+                if producer_operation_manager
+                    .is_cancelled(&producer_operation_id)
+                    .await
+                {
+                    let _ = tokio::fs::remove_file(&staged.staged_path).await;
+                    break;
+                }
+                match staged_tx.try_send(staged) {
+                    Ok(()) => {
+                        let send_wait = send_started.elapsed();
+                        blocked += send_wait;
+                        crate::daemon_log!(
+                            "[Sync] Provider queue enqueue index={} blocked_ms={:.2} queue_depth={} staged_bytes={}",
+                            index,
+                            send_wait.as_secs_f64() * 1000.0,
+                            PROVIDER_READY_QUEUE_MAX_TRACKS.saturating_sub(staged_tx.capacity()),
+                            producer_byte_limiter.used()
+                        );
+                        break;
+                    }
+                    Err(mpsc::error::TrySendError::Full(returned)) => {
+                        staged = returned;
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    Err(mpsc::error::TrySendError::Closed(returned)) => {
+                        let _ = tokio::fs::remove_file(&returned.staged_path).await;
+                        return ProviderProducerOutcome {
+                            errors,
+                            warnings,
+                            staging_dir,
+                            blocked,
+                        };
+                    }
+                }
+            }
+        }
+
+        ProviderProducerOutcome {
+            errors,
+            warnings,
+            staging_dir,
+            blocked,
+        }
+    });
+
+    let mut writer_idle = Duration::ZERO;
+    let mut writer_failed = false;
+    while let Some(staged) = {
+        let wait_started = std::time::Instant::now();
+        let next = staged_rx.recv().await;
+        let waited = wait_started.elapsed();
+        writer_idle += waited;
+        if let Some(staged) = next.as_ref() {
+            crate::daemon_log!(
+                "[Sync] Provider queue dequeue index={} writer_idle_ms={:.2} queue_depth={} staged_bytes={}",
+                staged.add_index,
+                waited.as_secs_f64() * 1000.0,
+                staged_rx.len(),
+                byte_limiter.used()
+            );
+        }
+        next
+    } {
+        if writer_failed || operation_manager.is_cancelled(&operation_id).await {
+            let cleanup = match tokio::fs::remove_file(&staged.staged_path).await {
+                Ok(()) => "ok".to_string(),
+                Err(e) => format!("error: {e}"),
+            };
+            crate::daemon_log!(
+                "[Sync] Provider queue cleanup skipped '{}' staged_cleanup={}",
+                staged.add_item.name,
+                cleanup
+            );
             continue;
         }
-        let buffer = match tokio::fs::read(&staged_path).await {
+
+        crate::daemon_log!("[Sync] Writing '{}'", staged.add_item.name);
+        let t_write = std::time::Instant::now();
+        if staged.staged_size > MAX_FILE_BUFFER_BYTES {
+            errors.push(SyncFileError {
+                jellyfin_id: staged.add_item.jellyfin_id.clone(),
+                filename: staged.add_item.name.clone(),
+                error_message: format!(
+                    "Staged file too large to read ({} bytes > {} byte limit)",
+                    staged.staged_size, MAX_FILE_BUFFER_BYTES
+                ),
+            });
+            let _ = operation_manager.request_cancel(&operation_id).await;
+            let _ = tokio::fs::remove_file(&staged.staged_path).await;
+            writer_failed = true;
+            continue;
+        }
+        let buffer = match tokio::fs::read(&staged.staged_path).await {
             Ok(buffer) => buffer,
             Err(e) => {
                 errors.push(SyncFileError {
-                    jellyfin_id: add_item.jellyfin_id.clone(),
-                    filename: add_item.name.clone(),
+                    jellyfin_id: staged.add_item.jellyfin_id.clone(),
+                    filename: staged.add_item.name.clone(),
                     error_message: format!("Failed to read staged file: {}", e),
                 });
+                let _ = operation_manager.request_cancel(&operation_id).await;
+                let _ = tokio::fs::remove_file(&staged.staged_path).await;
+                writer_failed = true;
                 continue;
             }
         };
-        match device_io.write_with_verify(&rel_path, &buffer).await {
+        match device_io.write_with_verify(&staged.rel_path, &buffer).await {
             Ok(_) => {
-                let write_timing = transfer_timing(staged_size, t_write.elapsed());
-                let staged_cleanup = match tokio::fs::remove_file(&staged_path).await {
+                let write_timing = transfer_timing(staged.staged_size, t_write.elapsed());
+                let staged_cleanup = match tokio::fs::remove_file(&staged.staged_path).await {
                     Ok(()) => "ok".to_string(),
                     Err(e) => format!("error: {e}"),
                 };
                 crate::daemon_log!(
-                    "[Sync] '{}' staged_size={}B staging={:.2}ms({:.1}MB/s) write={:.2}ms({:.1}MB/s) staged_cleanup={}",
-                    add_item.name,
-                    staged_size,
-                    staging_timing.elapsed_ms,
-                    staging_timing.speed_mb_s,
+                    "[Sync] '{}' staged_size={}B staging={:.2}ms({:.1}MB/s) write={:.2}ms({:.1}MB/s) staged_cleanup={} queue_depth={} staged_bytes={}",
+                    staged.add_item.name,
+                    staged.staged_size,
+                    staged.staging_timing.elapsed_ms,
+                    staged.staging_timing.speed_mb_s,
                     write_timing.elapsed_ms,
                     write_timing.speed_mb_s,
-                    staged_cleanup
+                    staged_cleanup,
+                    staged_rx.len(),
+                    byte_limiter.used()
                 );
                 let synced_at = now_iso8601();
                 synced_items.push(crate::device::SyncedItem {
-                    jellyfin_id: add_item.jellyfin_id.clone(),
-                    name: add_item.name.clone(),
-                    album: add_item.album.clone(),
-                    artist: add_item.artist.clone(),
-                    local_path: rel_path.clone(),
-                    size_bytes: add_item.size_bytes,
+                    jellyfin_id: staged.add_item.jellyfin_id.clone(),
+                    name: staged.add_item.name.clone(),
+                    album: staged.add_item.album.clone(),
+                    artist: staged.add_item.artist.clone(),
+                    local_path: staged.rel_path.clone(),
+                    size_bytes: staged.add_item.size_bytes,
                     synced_at,
-                    original_name: construction.original_name,
-                    etag: add_item.etag.clone(),
-                    provider_album_id: add_item.provider_album_id.clone(),
-                    provider_content_type: add_item.provider_content_type.clone(),
-                    provider_suffix: add_item.provider_suffix.clone(),
-                    original_bitrate: add_item.original_bitrate,
-                    original_container: add_item.provider_suffix.clone(),
-                    track_number: add_item.track_number,
-                    server_id: add_item.server_id.clone(),
+                    original_name: staged.original_name.clone(),
+                    etag: staged.add_item.etag.clone(),
+                    provider_album_id: staged.add_item.provider_album_id.clone(),
+                    provider_content_type: staged.add_item.provider_content_type.clone(),
+                    provider_suffix: staged.add_item.provider_suffix.clone(),
+                    original_bitrate: staged.add_item.original_bitrate,
+                    original_container: staged.add_item.provider_suffix.clone(),
+                    track_number: staged.add_item.track_number,
+                    server_id: staged.add_item.server_id.clone(),
                 });
-                completed_bytes_arc
-                    .fetch_add(add_item.size_bytes, std::sync::atomic::Ordering::Relaxed);
+                completed_bytes_arc.fetch_add(
+                    staged.add_item.size_bytes,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 let cumulative = completed_bytes_arc.load(std::sync::atomic::Ordering::Relaxed);
                 if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
                     operation.files_completed += 1;
@@ -2729,10 +3063,11 @@ pub async fn execute_provider_sync(
                         .await;
                 }
                 let synced_item = synced_items.last().unwrap().clone();
-                if let Some(delete_item) = readd_delete_by_id.get(add_item.jellyfin_id.as_str())
+                if let Some(delete_item) =
+                    readd_delete_by_id.get(staged.add_item.jellyfin_id.as_str())
                     && let Some(error) = cleanup_replaced_file_after_write(
                         delete_item,
-                        &rel_path,
+                        &staged.rel_path,
                         device_path,
                         &managed_path,
                         managed_subfolder_for_delete.as_deref(),
@@ -2746,7 +3081,7 @@ pub async fn execute_provider_sync(
                 {
                     errors.push(error);
                 }
-                let id_to_replace = add_item.jellyfin_id.clone();
+                let id_to_replace = staged.add_item.jellyfin_id.clone();
                 if let Err(e) = device_manager
                     .update_manifest(|m| {
                         m.synced_items
@@ -2760,14 +3095,30 @@ pub async fn execute_provider_sync(
             }
             Err(e) => {
                 errors.push(SyncFileError {
-                    jellyfin_id: add_item.jellyfin_id.clone(),
-                    filename: add_item.name.clone(),
+                    jellyfin_id: staged.add_item.jellyfin_id.clone(),
+                    filename: staged.add_item.name.clone(),
                     error_message: format!("Failed to write file: {}", e),
                 });
+                let _ = operation_manager.request_cancel(&operation_id).await;
+                let _ = tokio::fs::remove_file(&staged.staged_path).await;
+                writer_failed = true;
             }
         }
     }
-    if let Some(staging_dir) = staging_dir {
+
+    let producer_outcome = producer
+        .await
+        .context("provider sync producer task failed")?;
+    errors.extend(producer_outcome.errors);
+    sync_warnings.extend(producer_outcome.warnings);
+    crate::daemon_log!(
+        "[Sync] Provider pipeline summary writer_idle_ms={:.2} producer_blocked_ms={:.2} queue_depth={} staged_bytes={}",
+        writer_idle.as_secs_f64() * 1000.0,
+        producer_outcome.blocked.as_secs_f64() * 1000.0,
+        staged_rx.len(),
+        byte_limiter.used()
+    );
+    if let Some(staging_dir) = producer_outcome.staging_dir {
         let staging_path = staging_dir.path().to_path_buf();
         let staging_cleanup = match staging_dir.close() {
             Ok(()) => "ok".to_string(),
@@ -3012,6 +3363,8 @@ async fn stream_to_staging_file<S>(
     total_size: u64,
     on_progress: ProgressCallback,
     path: &Path,
+    operation_manager: &SyncOperationManager,
+    operation_id: &str,
 ) -> Result<u64>
 where
     S: futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Unpin,
@@ -3028,6 +3381,9 @@ where
         .with_context(|| format!("Failed to create staging file {}", path.display()))?;
     let mut bytes_written = 0u64;
     while let Some(chunk_result) = stream.next().await {
+        if operation_manager.is_cancelled(operation_id).await {
+            return Err(anyhow::anyhow!("Cancelled while staging stream"));
+        }
         let chunk = chunk_result.context("Failed to read chunk from stream")?;
         let chunk_len = chunk.len() as u64;
         if bytes_written.saturating_add(chunk_len) > MAX_FILE_BUFFER_BYTES {
@@ -4369,6 +4725,124 @@ mod tests {
             .collect()
     }
 
+    fn provider_staged_files_for_operation(operation_id: &str) -> Vec<std::path::PathBuf> {
+        provider_staging_dirs_for_operation(operation_id)
+            .into_iter()
+            .flat_map(|dir| {
+                std::fs::read_dir(dir)
+                    .into_iter()
+                    .flat_map(|entries| entries.filter_map(|entry| entry.ok().map(|e| e.path())))
+            })
+            .collect()
+    }
+
+    async fn wait_for_provider_staged_files(
+        operation_id: &str,
+        min_count: usize,
+    ) -> Vec<std::path::PathBuf> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let files = provider_staged_files_for_operation(operation_id);
+            if files.len() >= min_count || std::time::Instant::now() >= deadline {
+                return files;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    struct BlockingFirstWriteDeviceIo {
+        inner: Arc<dyn crate::device_io::DeviceIO>,
+        writes: std::sync::atomic::AtomicUsize,
+        first_write_started: Notify,
+        release_first_write: Notify,
+    }
+
+    impl std::fmt::Debug for BlockingFirstWriteDeviceIo {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("BlockingFirstWriteDeviceIo").finish()
+        }
+    }
+
+    impl BlockingFirstWriteDeviceIo {
+        fn new(inner: Arc<dyn crate::device_io::DeviceIO>) -> Arc<Self> {
+            Arc::new(Self {
+                inner,
+                writes: std::sync::atomic::AtomicUsize::new(0),
+                first_write_started: Notify::new(),
+                release_first_write: Notify::new(),
+            })
+        }
+
+        async fn wait_for_first_write(&self) -> bool {
+            tokio::time::timeout(Duration::from_secs(2), self.first_write_started.notified())
+                .await
+                .is_ok()
+        }
+
+        fn release_first_write(&self) {
+            self.release_first_write.notify_waiters();
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::device_io::DeviceIO for BlockingFirstWriteDeviceIo {
+        async fn begin_sync_job(&self) -> anyhow::Result<()> {
+            self.inner.begin_sync_job().await
+        }
+
+        async fn read_file(&self, path: &str) -> anyhow::Result<Vec<u8>> {
+            self.inner.read_file(path).await
+        }
+
+        async fn write_file(&self, path: &str, data: &[u8]) -> anyhow::Result<()> {
+            self.inner.write_file(path, data).await
+        }
+
+        async fn write_with_verify(&self, path: &str, data: &[u8]) -> anyhow::Result<()> {
+            if self
+                .writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 0
+            {
+                self.first_write_started.notify_waiters();
+                self.release_first_write.notified().await;
+            }
+            self.inner.write_with_verify(path, data).await
+        }
+
+        async fn delete_file(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.delete_file(path).await
+        }
+
+        async fn list_files(&self, path: &str) -> anyhow::Result<Vec<crate::device_io::FileEntry>> {
+            self.inner.list_files(path).await
+        }
+
+        async fn free_space(&self) -> anyhow::Result<u64> {
+            self.inner.free_space().await
+        }
+
+        async fn ensure_dir(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.ensure_dir(path).await
+        }
+
+        async fn cleanup_empty_subdirs(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.cleanup_empty_subdirs(path).await
+        }
+
+        async fn take_warnings(&self) -> Vec<String> {
+            self.inner.take_warnings().await
+        }
+
+        async fn end_sync_job(&self) -> anyhow::Result<()> {
+            self.inner.end_sync_job().await
+        }
+
+        fn preferred_audio_container(&self) -> Option<&'static str> {
+            self.inner.preferred_audio_container()
+        }
+    }
+
     #[tokio::test]
     async fn test_execute_provider_sync_transcodes_subsonic_flac_to_mp3_with_kbps() {
         let mut server = mockito::Server::new_async().await;
@@ -4774,6 +5248,268 @@ mod tests {
             operation.warnings[0].contains("unconfirmed"),
             "warning should explain unconfirmed output: {:?}",
             operation.warnings
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_provider_sync_stages_next_item_while_first_write_blocked() {
+        let mut server = mockito::Server::new_async().await;
+        let _download_a = server
+            .mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::AllOf(vec![mockito::Matcher::UrlEncoded(
+                "id".into(),
+                "song-a".into(),
+            )]))
+            .with_status(200)
+            .with_header("content-type", "application/octet-stream")
+            .with_body(vec![1_u8, 2, 3, 4])
+            .expect(1)
+            .create_async()
+            .await;
+        let _download_b = server
+            .mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::AllOf(vec![mockito::Matcher::UrlEncoded(
+                "id".into(),
+                "song-b".into(),
+            )]))
+            .with_status(200)
+            .with_header("content-type", "application/octet-stream")
+            .with_body(vec![5_u8, 6, 7, 8])
+            .expect(1)
+            .create_async()
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, device_io) = setup_provider_sync_device(dir.path()).await;
+        let blocking_io = BlockingFirstWriteDeviceIo::new(device_io);
+        let sync_io: Arc<dyn crate::device_io::DeviceIO> = blocking_io.clone();
+        let operation_manager = Arc::new(SyncOperationManager::new());
+        let operation_id = unique_operation_id("op-pipeline-overlap");
+        operation_manager
+            .create_operation(operation_id.clone(), 2)
+            .await;
+        let delta = SyncDelta {
+            adds: vec![
+                add_item_with_provider_format("song-a", "flac", "audio/flac", 4),
+                add_item_with_provider_format("song-b", "flac", "audio/flac", 4),
+            ],
+            deletes: vec![],
+            id_changes: vec![],
+            unchanged: 0,
+            playlists: vec![],
+            pity_fired_servers: vec![],
+        };
+
+        let dir_path = dir.path().to_path_buf();
+        let manager_for_sync = Arc::clone(&manager);
+        let operation_manager_for_sync = Arc::clone(&operation_manager);
+        let operation_id_for_sync = operation_id.clone();
+        let provider = subsonic_provider(server.url());
+        let handle = tokio::spawn(async move {
+            execute_provider_sync(
+                &delta,
+                &dir_path,
+                ProviderSyncSource {
+                    provider,
+                    transcoding_profile: Some(rockbox_direct_profile()),
+                },
+                operation_manager_for_sync,
+                operation_id_for_sync,
+                manager_for_sync,
+                sync_io,
+            )
+            .await
+        });
+
+        assert!(
+            blocking_io.wait_for_first_write().await,
+            "first device write should start"
+        );
+        let staged = wait_for_provider_staged_files(&operation_id, 2).await;
+        assert!(
+            staged.len() >= 2,
+            "second item should be staged while first write is blocked: {staged:?}"
+        );
+        blocking_io.release_first_write();
+
+        let (synced, errors) = handle.await.unwrap().unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(synced.len(), 2);
+        assert!(provider_staging_dirs_for_operation(&operation_id).is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_execute_provider_sync_count_backpressure_limits_staged_files() {
+        let mut server = mockito::Server::new_async().await;
+        let mut downloads = Vec::new();
+        for id in ["song-a", "song-b", "song-c"] {
+            downloads.push(
+                server
+                    .mock("GET", "/rest/download.view")
+                    .match_query(mockito::Matcher::AllOf(vec![mockito::Matcher::UrlEncoded(
+                        "id".into(),
+                        id.into(),
+                    )]))
+                    .with_status(200)
+                    .with_header("content-type", "application/octet-stream")
+                    .with_body(vec![1_u8, 2, 3, 4])
+                    .expect(1)
+                    .create_async()
+                    .await,
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, device_io) = setup_provider_sync_device(dir.path()).await;
+        let blocking_io = BlockingFirstWriteDeviceIo::new(device_io);
+        let sync_io: Arc<dyn crate::device_io::DeviceIO> = blocking_io.clone();
+        let operation_manager = Arc::new(SyncOperationManager::new());
+        let operation_id = unique_operation_id("op-pipeline-backpressure");
+        operation_manager
+            .create_operation(operation_id.clone(), 3)
+            .await;
+        let delta = SyncDelta {
+            adds: vec![
+                add_item_with_provider_format("song-a", "flac", "audio/flac", 4),
+                add_item_with_provider_format("song-b", "flac", "audio/flac", 4),
+                add_item_with_provider_format("song-c", "flac", "audio/flac", 4),
+            ],
+            deletes: vec![],
+            id_changes: vec![],
+            unchanged: 0,
+            playlists: vec![],
+            pity_fired_servers: vec![],
+        };
+
+        let dir_path = dir.path().to_path_buf();
+        let manager_for_sync = Arc::clone(&manager);
+        let operation_manager_for_sync = Arc::clone(&operation_manager);
+        let operation_id_for_sync = operation_id.clone();
+        let provider = subsonic_provider(server.url());
+        let handle = tokio::spawn(async move {
+            execute_provider_sync(
+                &delta,
+                &dir_path,
+                ProviderSyncSource {
+                    provider,
+                    transcoding_profile: Some(rockbox_direct_profile()),
+                },
+                operation_manager_for_sync,
+                operation_id_for_sync,
+                manager_for_sync,
+                sync_io,
+            )
+            .await
+        });
+
+        assert!(
+            blocking_io.wait_for_first_write().await,
+            "first device write should start"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let staged = provider_staged_files_for_operation(&operation_id);
+        assert!(
+            staged.len() <= PROVIDER_READY_QUEUE_MAX_TRACKS,
+            "count backpressure should cap staged files: {staged:?}"
+        );
+        blocking_io.release_first_write();
+
+        let (synced, errors) = handle.await.unwrap().unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(synced.len(), 3);
+        assert!(provider_staging_dirs_for_operation(&operation_id).is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_execute_provider_sync_cancellation_cleans_queued_staged_files() {
+        let mut server = mockito::Server::new_async().await;
+        let _download_a = server
+            .mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::AllOf(vec![mockito::Matcher::UrlEncoded(
+                "id".into(),
+                "song-a".into(),
+            )]))
+            .with_status(200)
+            .with_header("content-type", "application/octet-stream")
+            .with_body(vec![1_u8, 2, 3, 4])
+            .expect(1)
+            .create_async()
+            .await;
+        let _download_b = server
+            .mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::AllOf(vec![mockito::Matcher::UrlEncoded(
+                "id".into(),
+                "song-b".into(),
+            )]))
+            .with_status(200)
+            .with_header("content-type", "application/octet-stream")
+            .with_body(vec![5_u8, 6, 7, 8])
+            .expect(1)
+            .create_async()
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, device_io) = setup_provider_sync_device(dir.path()).await;
+        let blocking_io = BlockingFirstWriteDeviceIo::new(device_io);
+        let sync_io: Arc<dyn crate::device_io::DeviceIO> = blocking_io.clone();
+        let operation_manager = Arc::new(SyncOperationManager::new());
+        let operation_id = unique_operation_id("op-pipeline-cancel");
+        operation_manager
+            .create_operation(operation_id.clone(), 2)
+            .await;
+        let delta = SyncDelta {
+            adds: vec![
+                add_item_with_provider_format("song-a", "flac", "audio/flac", 4),
+                add_item_with_provider_format("song-b", "flac", "audio/flac", 4),
+            ],
+            deletes: vec![],
+            id_changes: vec![],
+            unchanged: 0,
+            playlists: vec![],
+            pity_fired_servers: vec![],
+        };
+
+        let dir_path = dir.path().to_path_buf();
+        let manager_for_sync = Arc::clone(&manager);
+        let operation_manager_for_sync = Arc::clone(&operation_manager);
+        let operation_id_for_sync = operation_id.clone();
+        let provider = subsonic_provider(server.url());
+        let handle = tokio::spawn(async move {
+            execute_provider_sync(
+                &delta,
+                &dir_path,
+                ProviderSyncSource {
+                    provider,
+                    transcoding_profile: Some(rockbox_direct_profile()),
+                },
+                operation_manager_for_sync,
+                operation_id_for_sync,
+                manager_for_sync,
+                sync_io,
+            )
+            .await
+        });
+
+        assert!(
+            blocking_io.wait_for_first_write().await,
+            "first device write should start"
+        );
+        let staged = wait_for_provider_staged_files(&operation_id, 2).await;
+        assert_eq!(staged.len(), 2, "expected current plus queued staged files");
+        assert!(operation_manager.request_cancel(&operation_id).await);
+        blocking_io.release_first_write();
+
+        let (_synced, errors) = handle.await.unwrap().unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(provider_staging_dirs_for_operation(&operation_id).is_empty());
+        let manifest = manager.get_current_device().await.unwrap();
+        assert!(
+            manifest
+                .synced_items
+                .iter()
+                .all(|item| item.jellyfin_id != "song-b"),
+            "queued unwritten item must stay out of manifest: {:?}",
+            manifest.synced_items
         );
     }
 

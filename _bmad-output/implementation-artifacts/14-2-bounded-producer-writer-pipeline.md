@@ -4,7 +4,7 @@ baseline_commit: 4210c2245336b6fbf6c6776ebd4581dd89f3271d
 
 # Story 14.2: Bounded Producer/Writer Pipeline
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -23,34 +23,34 @@ so that the writer spends less time idle between files.
 
 ## Tasks / Subtasks
 
-- [ ] Refactor provider add handling into producer and writer phases inside `execute_provider_sync` (AC: 1, 4)
-  - [ ] Keep URL resolution, response status handling, content-type validation, extension override, path construction, and skip/warning behavior equivalent to Story 14.1.
-  - [ ] Add a small internal `StagedTrack` struct carrying the cloned `SyncAddItem`, staged path, relative device path, staged size, staging timing, original filename metadata, and add index.
-  - [ ] Keep deletes, id-changes, playlist writes, and final warning propagation in their existing serial flow after add processing.
-- [ ] Add bounded queue/backpressure (AC: 2, 3)
-  - [ ] Use existing Tokio primitives; do not add a dependency.
-  - [ ] Cap ready items by count and by bytes for all staged files not yet cleaned up, including the file currently being written.
-  - [ ] Release byte capacity only after the writer removes the staged file or after cleanup handles an abandoned staged file.
-  - [ ] Keep staging directory creation lazy: no add item that is skipped before staging should create the temp directory.
-- [ ] Implement serial writer consumption (AC: 4)
-  - [ ] Only the writer task calls `device_io.write_with_verify`.
-  - [ ] Read the staged file into memory immediately before write; keep the `MAX_FILE_BUFFER_BYTES` guard.
-  - [ ] Push `SyncedItem`, cleanup replaced files, update per-file manifest, and update operation progress only after `write_with_verify` succeeds.
-- [ ] Handle cancellation, errors, and cleanup (AC: 5)
-  - [ ] Poll cancellation before preparing each add, while staging chunks, before queue send, before read/write, and while waiting for queued items.
-  - [ ] Remove partial staged files when staging fails or is cancelled.
-  - [ ] Drain and delete queued staged files if either task exits early.
-  - [ ] Preserve current behavior for recoverable provider errors: direct-download errors are returned in `errors`; required-transcode skips remain warnings and mark the item handled.
-- [ ] Add diagnostics (AC: 6)
-  - [ ] Log writer idle time as time spent waiting for the next queued `StagedTrack`.
-  - [ ] Log producer blocked time as time spent waiting for queue count or byte capacity.
-  - [ ] Log queue depth and staged bytes when enqueueing/dequeueing and in the final provider sync summary.
-  - [ ] Keep user progress device-centric; staging/queue metrics are logs only.
-- [ ] Extend provider sync tests (AC: 1-6)
-  - [ ] Preserve the existing provider transcode/direct/skip and staging cleanup tests.
-  - [ ] Add a regression proving the second item can be staged while the first item is blocked in `write_with_verify`.
-  - [ ] Add a regression proving count or byte backpressure prevents unbounded staged files.
-  - [ ] Add a regression proving cancellation cleans queued/current/partial staged files and leaves no manifest entry for unwritten items.
+- [x] Refactor provider add handling into producer and writer phases inside `execute_provider_sync` (AC: 1, 4)
+  - [x] Keep URL resolution, response status handling, content-type validation, extension override, path construction, and skip/warning behavior equivalent to Story 14.1.
+  - [x] Add a small internal `StagedTrack` struct carrying the cloned `SyncAddItem`, staged path, relative device path, staged size, staging timing, original filename metadata, and add index.
+  - [x] Keep deletes, id-changes, playlist writes, and final warning propagation in their existing serial flow after add processing.
+- [x] Add bounded queue/backpressure (AC: 2, 3)
+  - [x] Use existing Tokio primitives; do not add a dependency.
+  - [x] Cap ready items by count and by bytes for all staged files not yet cleaned up, including the file currently being written.
+  - [x] Release byte capacity only after the writer removes the staged file or after cleanup handles an abandoned staged file.
+  - [x] Keep staging directory creation lazy: no add item that is skipped before staging should create the temp directory.
+- [x] Implement serial writer consumption (AC: 4)
+  - [x] Only the writer task calls `device_io.write_with_verify`.
+  - [x] Read the staged file into memory immediately before write; keep the `MAX_FILE_BUFFER_BYTES` guard.
+  - [x] Push `SyncedItem`, cleanup replaced files, update per-file manifest, and update operation progress only after `write_with_verify` succeeds.
+- [x] Handle cancellation, errors, and cleanup (AC: 5)
+  - [x] Poll cancellation before preparing each add, while staging chunks, before queue send, before read/write, and while waiting for queued items.
+  - [x] Remove partial staged files when staging fails or is cancelled.
+  - [x] Drain and delete queued staged files if either task exits early.
+  - [x] Preserve current behavior for recoverable provider errors: direct-download errors are returned in `errors`; required-transcode skips remain warnings and mark the item handled.
+- [x] Add diagnostics (AC: 6)
+  - [x] Log writer idle time as time spent waiting for the next queued `StagedTrack`.
+  - [x] Log producer blocked time as time spent waiting for queue count or byte capacity.
+  - [x] Log queue depth and staged bytes when enqueueing/dequeueing and in the final provider sync summary.
+  - [x] Keep user progress device-centric; staging/queue metrics are logs only.
+- [x] Extend provider sync tests (AC: 1-6)
+  - [x] Preserve the existing provider transcode/direct/skip and staging cleanup tests.
+  - [x] Add a regression proving the second item can be staged while the first item is blocked in `write_with_verify`.
+  - [x] Add a regression proving count or byte backpressure prevents unbounded staged files.
+  - [x] Add a regression proving cancellation cleans queued/current/partial staged files and leaves no manifest entry for unwritten items.
 
 ## Dev Notes
 
@@ -110,14 +110,29 @@ Implement the one-producer, one-writer version only. Do not add per-server produ
 
 ### Agent Model Used
 
-{{agent_model_name_version}}
+GPT-5 Codex
 
 ### Debug Log References
 
+- `rtk cargo test -p hifimule-daemon test_execute_provider_sync` - 9 provider-sync tests passed.
+- `rtk cargo test -p hifimule-daemon` - 624 daemon tests passed.
+- `rtk cargo check -p hifimule-daemon` - passed with one pre-existing `api.rs::rename_item` dead-code warning.
+
 ### Completion Notes List
+
+- Implemented the provider add pipeline as a producer task plus serial writer consumer inside `execute_provider_sync`.
+- Added bounded count and byte permits held by each `StagedTrack` until staged cleanup, with lazy staging directory creation preserved.
+- Added cancellation checks during preparation, staging, enqueue waits, dequeue/write waits, and staged-file cleanup for failed or abandoned tracks.
+- Added queue diagnostics for writer idle time, producer blocked time, queue depth, staged bytes, and final provider pipeline summary.
+- Added provider-sync regressions for staging overlap, count backpressure, and queued staged cleanup on cancellation.
 
 ### File List
 
+- `hifimule-daemon/src/sync.rs`
+- `_bmad-output/implementation-artifacts/14-2-bounded-producer-writer-pipeline.md`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
+
 ### Change Log
 
+- 2026-07-11: Implemented bounded provider producer/writer pipeline and added provider-sync regression coverage.
 - 2026-07-11: Story created from approved Epic 14 change proposal and Story 14.1 implementation/review context.
