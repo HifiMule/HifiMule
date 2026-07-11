@@ -176,7 +176,7 @@ development_status:
   13-6-advanced-units-and-promotion: done  # final Epic 13 story (advanced units & promotion #33/#8/#9/#27); code review passed 2026-06-15 (all 11 ACs SATISFIED; 2 patches applied — TS dangling spotlightShare + tightened album-ratio test assertion; 1 finding dismissed-on-inspection; 2 deferred test-coverage items; tsc clean, promotion tests green)
 
   # Epic 14 — Sync Throughput Pipeline (sprint-change-proposal-2026-07-11-sync-throughput-pipeline)
-  epic-14: backlog
-  14-1-temp-only-disk-staging-for-provider-sync: backlog
+  epic-14: in-progress
+  14-1-temp-only-disk-staging-for-provider-sync: ready-for-dev
   14-2-bounded-producer-writer-pipeline: backlog
   14-3-per-server-producer-fairness-and-priority-buckets: backlog
