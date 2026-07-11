@@ -72,19 +72,19 @@ jobs:
           LIBMTP_PC_DIR="$LIBMTP_PREFIX/lib/pkgconfig"
 
           # The runner only installs its native bottle; the universal build also needs the other arch.
-          case "$(sw_vers -productVersion | cut -d. -f1)" in
-            26) MACOS_BOTTLE_TAG=tahoe ;;
-            15) MACOS_BOTTLE_TAG=sequoia ;;
-            14) MACOS_BOTTLE_TAG=sonoma ;;
-            13) MACOS_BOTTLE_TAG=ventura ;;
-            *) echo "Unsupported macOS version: $(sw_vers -productVersion)"; exit 1 ;;
-          esac
           if [ "$(uname -m)" = "arm64" ]; then
-            OTHER_BOTTLE_TAG="$MACOS_BOTTLE_TAG"
+            OTHER_BOTTLE_TAGS="sonoma ventura"
           else
-            OTHER_BOTTLE_TAG="arm64_$MACOS_BOTTLE_TAG"
+            OTHER_BOTTLE_TAGS="arm64_sonoma arm64_ventura arm64_tahoe arm64_sequoia"
           fi
-          brew fetch --force --bottle-tag="$OTHER_BOTTLE_TAG" libmtp
+          OTHER_BOTTLE_TAG=""
+          for tag in $OTHER_BOTTLE_TAGS; do
+            if brew fetch --force --bottle-tag="$tag" libmtp; then
+              OTHER_BOTTLE_TAG="$tag"
+              break
+            fi
+          done
+          test -n "$OTHER_BOTTLE_TAG" || { echo "No libmtp bottle found for: $OTHER_BOTTLE_TAGS"; exit 1; }
           OTHER_BOTTLE="$(find "$(brew --cache)/downloads" -name "*libmtp*.$OTHER_BOTTLE_TAG.bottle.tar.gz" | tail -1)"
           test -n "$OTHER_BOTTLE" || { echo "libmtp bottle not found for $OTHER_BOTTLE_TAG"; exit 1; }
           OTHER_DIR="$(mktemp -d)"
