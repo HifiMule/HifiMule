@@ -75,18 +75,20 @@ jobs:
           if [ "$(uname -m)" = "arm64" ]; then
             OTHER_BOTTLE_TAGS="sonoma ventura"
           else
-            OTHER_BOTTLE_TAGS="arm64_sonoma arm64_ventura arm64_tahoe arm64_sequoia"
+            OTHER_BOTTLE_TAGS="arm64_tahoe arm64_sonoma arm64_ventura arm64_sequoia"
           fi
           OTHER_BOTTLE_TAG=""
+          OTHER_BOTTLE=""
           for tag in $OTHER_BOTTLE_TAGS; do
-            if brew fetch --force --bottle-tag="$tag" libmtp; then
+            brew fetch --force --bottle-tag="$tag" libmtp || true
+            bottle="$(find "$(brew --cache)/downloads" -name "*libmtp*.$tag.bottle.tar.gz" | tail -1)"
+            if [ -n "$bottle" ]; then
               OTHER_BOTTLE_TAG="$tag"
+              OTHER_BOTTLE="$bottle"
               break
             fi
           done
           test -n "$OTHER_BOTTLE_TAG" || { echo "No libmtp bottle found for: $OTHER_BOTTLE_TAGS"; exit 1; }
-          OTHER_BOTTLE="$(find "$(brew --cache)/downloads" -name "*libmtp*.$OTHER_BOTTLE_TAG.bottle.tar.gz" | tail -1)"
-          test -n "$OTHER_BOTTLE" || { echo "libmtp bottle not found for $OTHER_BOTTLE_TAG"; exit 1; }
           OTHER_DIR="$(mktemp -d)"
           tar -xzf "$OTHER_BOTTLE" -C "$OTHER_DIR"
           NATIVE_DYLIB="$(find "$LIBMTP_PREFIX/lib" -name 'libmtp.*.dylib' ! -type l | head -1)"
