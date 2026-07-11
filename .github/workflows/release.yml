@@ -18,8 +18,11 @@ jobs:
       matrix:
         include:
           - platform: macos-15-intel
-            args: --target universal-apple-darwin
-            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+            args: --target x86_64-apple-darwin
+            rust-targets: x86_64-apple-darwin
+          - platform: macos-15
+            args: --target aarch64-apple-darwin
+            rust-targets: aarch64-apple-darwin
           - platform: ubuntu-22.04
             args: ''
             rust-targets: ''
@@ -65,40 +68,11 @@ jobs:
           test -e /usr/lib/x86_64-linux-gnu/libmtp.so.9
 
       - name: Install macOS dependencies
-        if: matrix.platform == 'macos-15-intel'
+        if: startsWith(matrix.platform, 'macos')
         run: |
           brew install pkg-config libmtp
           LIBMTP_PREFIX="$(brew --prefix libmtp)"
           LIBMTP_PC_DIR="$LIBMTP_PREFIX/lib/pkgconfig"
-
-          # The runner only installs its native bottle; the universal build also needs the other arch.
-          if [ "$(uname -m)" = "arm64" ]; then
-            OTHER_BOTTLE_TAGS="sonoma ventura"
-          else
-            OTHER_BOTTLE_TAGS="arm64_tahoe arm64_sonoma arm64_ventura arm64_sequoia"
-          fi
-          OTHER_BOTTLE_TAG=""
-          OTHER_BOTTLE=""
-          for tag in $OTHER_BOTTLE_TAGS; do
-            brew fetch --force --bottle-tag="$tag" libmtp || true
-            bottle="$(find "$(brew --cache)/downloads" -name "*libmtp*.$tag.bottle.tar.gz" | tail -1)"
-            if [ -n "$bottle" ]; then
-              OTHER_BOTTLE_TAG="$tag"
-              OTHER_BOTTLE="$bottle"
-              break
-            fi
-          done
-          test -n "$OTHER_BOTTLE_TAG" || { echo "No libmtp bottle found for: $OTHER_BOTTLE_TAGS"; exit 1; }
-          OTHER_DIR="$(mktemp -d)"
-          tar -xzf "$OTHER_BOTTLE" -C "$OTHER_DIR"
-          NATIVE_DYLIB="$(find "$LIBMTP_PREFIX/lib" -name 'libmtp.*.dylib' ! -type l | head -1)"
-          OTHER_DYLIB="$(find "$OTHER_DIR" -name 'libmtp.*.dylib' ! -type l | head -1)"
-          test -n "$NATIVE_DYLIB" || { echo "native libmtp dylib not found"; exit 1; }
-          test -n "$OTHER_DYLIB" || { echo "libmtp dylib not found in $OTHER_BOTTLE_TAG bottle"; exit 1; }
-          MERGED_DYLIB="$(mktemp)"
-          lipo -create -output "$MERGED_DYLIB" "$NATIVE_DYLIB" "$OTHER_DYLIB"
-          chmod u+w "$NATIVE_DYLIB"
-          cp "$MERGED_DYLIB" "$NATIVE_DYLIB"
 
           echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_PATH_aarch64_apple_darwin=$LIBMTP_PC_DIR" >> "$GITHUB_ENV"
@@ -106,42 +80,17 @@ jobs:
           pkg-config --libs libmtp
           LIBMTP_DYLIB="$(find "$LIBMTP_PREFIX/lib" -name 'libmtp*.dylib' -print -quit)"
           test -n "$LIBMTP_DYLIB"
-          lipo "$LIBMTP_DYLIB" -verify_arch arm64
-          lipo "$LIBMTP_DYLIB" -verify_arch x86_64
+          lipo "$LIBMTP_DYLIB" -verify_arch "$(uname -m)"
 
       - name: Install frontend dependencies
         working-directory: hifimule-ui
         run: pnpm install
 
-      # macOS universal build: cross-compile daemon for both architectures and stage both sidecars.
-      # prepare-sidecar.mjs only handles the host target, so we do this explicitly here.
-      # Tauri's universal build checks arch-specific sidecars during each compilation slice,
-      # then expects the universal-merged binary during bundling — all three must be present.
-      - name: Stage daemon sidecars (macOS universal)
-        if: matrix.platform == 'macos-15-intel'
-        run: |
-          cargo build --release -p hifimule-daemon --target aarch64-apple-darwin
-          cargo build --release -p hifimule-daemon --target x86_64-apple-darwin
-          mkdir -p hifimule-ui/src-tauri/sidecars
-          cp target/aarch64-apple-darwin/release/hifimule-daemon \
-             hifimule-ui/src-tauri/sidecars/hifimule-daemon-aarch64-apple-darwin
-          cp target/x86_64-apple-darwin/release/hifimule-daemon \
-             hifimule-ui/src-tauri/sidecars/hifimule-daemon-x86_64-apple-darwin
-          lipo -create -output \
-            hifimule-ui/src-tauri/sidecars/hifimule-daemon-universal-apple-darwin \
-            target/aarch64-apple-darwin/release/hifimule-daemon \
-            target/x86_64-apple-darwin/release/hifimule-daemon
-
       - name: Stage daemon sidecar
-        if: matrix.platform != 'macos-15-intel'
         run: node scripts/prepare-sidecar.mjs
 
-      - name: Bundle macOS libmtp dylibs
-        if: matrix.platform == 'macos-15-intel'
-        run: node scripts/bundle-macos-libs.mjs
-
       - name: Check macOS minimum system version reminder
-        if: matrix.platform == 'macos-15-intel'
+        if: startsWith(matrix.platform, 'macos')
         run: node scripts/check-macos-minimum-system-version.mjs
 
       - name: Build and release
@@ -185,7 +134,7 @@ jobs:
           rm -rf squashfs-root
 
       - name: Verify macOS bundle uses bundled libmtp
-        if: matrix.platform == 'macos-15-intel'
+        if: startsWith(matrix.platform, 'macos')
         run: |
           set -euo pipefail
           TARGET_DIRS=()

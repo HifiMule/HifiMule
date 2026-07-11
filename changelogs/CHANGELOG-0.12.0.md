@@ -54,6 +54,7 @@ Release date: 2026-07-11
 - Auto-Fill settings are scoped by portable server id, so the same device can keep separate fill rules for different servers.
 - The app design was polished: the status bar was folded away, basket/config interactions were tightened, and the UI styling was cleaned up.
 - Frontend build settings were optimized.
+- macOS release builds now produce separate Intel and Apple Silicon packages instead of one universal package, avoiding cross-architecture Homebrew `libmtp` bottle failures in CI.
 - Documentation was expanded with an Auto-Fill deep dive and refreshed architecture/API/data-model references.
 
 ---

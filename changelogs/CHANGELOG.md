@@ -6,7 +6,7 @@ Auto-Fill is now much more flexible. Instead of just topping up free space, Hifi
 
 Syncs behave better too: Auto-Fill now creates an `Autofill` playlist on the device, works when auto-sync starts from an existing playlist or basket, and no longer skips playlist-only work. Jellyfin Auto-Fill can finally draw from the full library, the sync stop button is fixed, existing syncs are shown instead of erroring, and the app no longer asks you to log in when it already has usable credentials.
 
-Windows device detection now prefers WPD over MTP where available, and the interface got a small polish pass around the basket, Auto-Fill configuration, and status area.
+Windows device detection now prefers WPD over MTP where available, and the interface got a small polish pass around the basket, Auto-Fill configuration, and status area. macOS releases are now packaged separately for Intel and Apple Silicon Macs so bundled `libmtp` dependencies match the runner architecture reliably.
 
 ## v0.11.1 - 2026-06-12
 
