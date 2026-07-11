@@ -17,7 +17,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest
+          - platform: macos-15-intel
             args: --target universal-apple-darwin
             rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
           - platform: ubuntu-22.04
@@ -65,7 +65,7 @@ jobs:
           test -e /usr/lib/x86_64-linux-gnu/libmtp.so.9
 
       - name: Install macOS dependencies
-        if: matrix.platform == 'macos-latest'
+        if: matrix.platform == 'macos-15-intel'
         run: |
           brew install pkg-config libmtp
           LIBMTP_PREFIX="$(brew --prefix libmtp)"
@@ -116,7 +116,7 @@ jobs:
       # Tauri's universal build checks arch-specific sidecars during each compilation slice,
       # then expects the universal-merged binary during bundling — all three must be present.
       - name: Stage daemon sidecars (macOS universal)
-        if: matrix.platform == 'macos-latest'
+        if: matrix.platform == 'macos-15-intel'
         run: |
           cargo build --release -p hifimule-daemon --target aarch64-apple-darwin
           cargo build --release -p hifimule-daemon --target x86_64-apple-darwin
@@ -131,15 +131,15 @@ jobs:
             target/x86_64-apple-darwin/release/hifimule-daemon
 
       - name: Stage daemon sidecar
-        if: matrix.platform != 'macos-latest'
+        if: matrix.platform != 'macos-15-intel'
         run: node scripts/prepare-sidecar.mjs
 
       - name: Bundle macOS libmtp dylibs
-        if: matrix.platform == 'macos-latest'
+        if: matrix.platform == 'macos-15-intel'
         run: node scripts/bundle-macos-libs.mjs
 
       - name: Check macOS minimum system version reminder
-        if: matrix.platform == 'macos-latest'
+        if: matrix.platform == 'macos-15-intel'
         run: node scripts/check-macos-minimum-system-version.mjs
 
       - name: Build and release
@@ -183,7 +183,7 @@ jobs:
           rm -rf squashfs-root
 
       - name: Verify macOS bundle uses bundled libmtp
-        if: matrix.platform == 'macos-latest'
+        if: matrix.platform == 'macos-15-intel'
         run: |
           set -euo pipefail
           TARGET_DIRS=()
