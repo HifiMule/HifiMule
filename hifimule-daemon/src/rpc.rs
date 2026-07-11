@@ -2599,6 +2599,7 @@ async fn provider_calculate_delta(
     // Story 13.1: rotation-tier index per emitted track, patched onto delta.adds below.
     let mut af_tier_map: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
+    let mut af_item_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Story 13.5 #20: encoding-from-goals derived per-slot max-bitrate (kbps) per emitted auto-fill
     // track, patched onto delta.adds below (mirrors `af_tier_map`). Only populated when a transcode
     // profile is active for the slot — passthrough tracks never get a forced re-encode.
@@ -2736,6 +2737,7 @@ async fn provider_calculate_delta(
                 }
                 let item_id = item.id.clone();
                 if seen_ids.insert(item_id) {
+                    af_item_ids.insert(item.id.clone());
                     autofill_playlist_tracks.push(autofill_playlist_track(&item));
                     desired_items.push(crate::sync::DesiredItem {
                         jellyfin_id: item.id,
@@ -2769,6 +2771,7 @@ async fn provider_calculate_delta(
     );
     let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
     patch_delta_tiers(&mut delta, &af_tier_map);
+    patch_delta_auto_fill(&mut delta, &af_item_ids);
     patch_delta_bitrate_overrides(&mut delta, &af_bitrate_map);
     delta.pity_fired_servers = af_pity_fired;
     delta.playlists = playlist_sync_items;
@@ -3771,6 +3774,16 @@ fn patch_delta_tiers(
     }
 }
 
+/// Mark every item actually added by Auto-Fill, including non-tiered fills.
+fn patch_delta_auto_fill(
+    delta: &mut crate::sync::SyncDelta,
+    auto_fill_ids: &std::collections::HashSet<String>,
+) {
+    for add in &mut delta.adds {
+        add.is_auto_fill = auto_fill_ids.contains(&add.jellyfin_id);
+    }
+}
+
 /// Story 13.5 #20: copy the encoding-from-goals derived per-slot max-bitrate (kbps) onto the matching
 /// `delta.adds` entries (keyed by provider track id), so the sync transcode applies it to those
 /// auto-fill downloads only. Mirrors [`patch_delta_tiers`]. Manual items are never in the map, so the
@@ -4126,6 +4139,7 @@ async fn multi_provider_calculate_delta(
     // Story 13.1: rotation-tier index per emitted track across all slots, patched onto delta.adds.
     let mut af_tier_map: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
+    let mut af_item_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Story 13.5 #20: encoding-from-goals derived per-slot max-bitrate (kbps) per emitted auto-fill
     // track across all slots, patched onto delta.adds (mirrors `af_tier_map`).
     let mut af_bitrate_map: std::collections::HashMap<String, u32> =
@@ -4263,6 +4277,7 @@ async fn multi_provider_calculate_delta(
                     af_bitrate_map.insert(item.id.clone(), kbps);
                 }
             }
+            let first_added = desired_items.len();
             push_fill_items_dedup(
                 fill_items,
                 &mut desired_items,
@@ -4270,6 +4285,11 @@ async fn multi_provider_calculate_delta(
                 &af_server,
                 &mut remaining,
                 &mut autofill_playlist_tracks,
+            );
+            af_item_ids.extend(
+                desired_items[first_added..]
+                    .iter()
+                    .map(|item| item.jellyfin_id.clone()),
             );
         }
     }
@@ -4279,6 +4299,7 @@ async fn multi_provider_calculate_delta(
 
     let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
     patch_delta_tiers(&mut delta, &af_tier_map);
+    patch_delta_auto_fill(&mut delta, &af_item_ids);
     patch_delta_bitrate_overrides(&mut delta, &af_bitrate_map);
     delta.pity_fired_servers = af_pity_fired;
     delta.playlists = playlist_sync_items;
@@ -4290,6 +4311,7 @@ async fn multi_provider_calculate_delta(
             device_io.as_ref(),
         )
         .await;
+        patch_delta_auto_fill(&mut delta, &af_item_ids);
     }
     Ok(delta_value_with_cleanup_metadata(&delta, manifest))
 }
@@ -5000,6 +5022,7 @@ async fn handle_sync_execute(
                 reason: Some("force sync requested".to_string()),
                 server_id: item.server_id.clone(),
                 tier: None,
+                is_auto_fill: false,
                 // Story 13.5 #20: force-sync re-adds an existing managed item — not an auto-fill slot
                 // expansion — so it never carries an encoding-from-goals override.
                 max_bitrate_override_kbps: None,
@@ -5181,67 +5204,40 @@ async fn handle_sync_execute(
                 }
             };
 
-            let mut all_errors: Vec<crate::sync::SyncFileError> = Vec::new();
-            let group_count = group_providers.len();
-            for (index, (sid, provider)) in group_providers.into_iter().enumerate() {
-                if op_manager.is_cancelled(&op_id).await {
-                    break;
+            let (default_provider, providers_by_server) = {
+                let mut groups = group_providers.into_iter();
+                let (default_server, default_provider) = groups
+                    .next()
+                    .expect("provider routing requires at least one resolved server");
+                let mut providers = std::collections::HashMap::new();
+                providers.insert(default_server, Arc::clone(&default_provider));
+                for (server_id, provider) in groups {
+                    providers.insert(server_id, provider);
                 }
-                // Each group syncs its own adds; deletes/id-changes/playlists are
-                // device-wide. Deletes/id-changes run first; playlists run last so
-                // multi-server M3Us can resolve files copied by every group.
-                let first = index == 0;
-                let last = index + 1 == group_count;
-                let group_adds: Vec<crate::sync::SyncAddItem> = delta
-                    .adds
-                    .iter()
-                    .filter(|a| a.server_id.as_deref() == Some(sid.as_str()))
-                    .cloned()
-                    .collect();
-                let sub_delta = crate::sync::SyncDelta {
-                    adds: group_adds,
-                    deletes: if first {
-                        delta.deletes.clone()
-                    } else {
-                        Vec::new()
-                    },
-                    id_changes: if first {
-                        delta.id_changes.clone()
-                    } else {
-                        Vec::new()
-                    },
-                    unchanged: 0,
-                    playlists: if last {
-                        delta.playlists.clone()
-                    } else {
-                        Vec::new()
-                    },
-                    // Per-server pity signal lives on the outer `delta` (read at sync completion);
-                    // the per-group sub-delta only drives `execute_provider_sync`, never the recorder.
-                    pity_fired_servers: Vec::new(),
-                };
-                let result = crate::sync::execute_provider_sync(
-                    &sub_delta,
-                    &device_path,
-                    crate::sync::ProviderSyncSource {
-                        provider,
-                        transcoding_profile: transcoding_profile.clone(),
-                    },
-                    op_manager.clone(),
-                    op_id.clone(),
-                    device_manager.clone(),
-                    device_io.clone(),
-                )
-                .await;
-                match result {
-                    Ok((_synced, errors)) => all_errors.extend(errors),
-                    Err(e) => all_errors.push(crate::sync::SyncFileError {
-                        jellyfin_id: String::new(),
-                        filename: format!("sync_execute[{sid}]"),
-                        error_message: e.to_string(),
-                    }),
-                }
-            }
+                (default_provider, providers)
+            };
+            let result = crate::sync::execute_provider_sync(
+                &delta,
+                &device_path,
+                crate::sync::ProviderSyncSource {
+                    provider: default_provider,
+                    transcoding_profile,
+                    providers_by_server,
+                },
+                op_manager.clone(),
+                op_id.clone(),
+                device_manager.clone(),
+                device_io.clone(),
+            )
+            .await;
+            let all_errors = match result {
+                Ok((_synced, errors)) => errors,
+                Err(e) => vec![crate::sync::SyncFileError {
+                    jellyfin_id: String::new(),
+                    filename: "sync_execute[multi-server]".to_string(),
+                    error_message: e.to_string(),
+                }],
+            };
 
             if op_manager.is_cancelled(&op_id).await {
                 if let Some(mut operation) = op_manager.get_operation(&op_id).await {
@@ -5337,6 +5333,7 @@ async fn handle_sync_execute(
                 crate::sync::ProviderSyncSource {
                     provider,
                     transcoding_profile,
+                    providers_by_server: std::collections::HashMap::new(),
                 },
                 op_manager.clone(),
                 op_id.clone(),
@@ -6998,6 +6995,7 @@ mod tests {
             reason: None,
             server_id: server_id.map(str::to_string),
             tier: None,
+            is_auto_fill: false,
             max_bitrate_override_kbps: None,
         }
     }
@@ -7053,6 +7051,28 @@ mod tests {
         };
         patch_delta_bitrate_overrides(&mut delta2, &std::collections::HashMap::new());
         assert_eq!(delta2.adds[0].max_bitrate_override_kbps, None);
+    }
+
+    #[test]
+    fn patch_delta_auto_fill_marks_non_tiered_items_only() {
+        let mut delta = crate::sync::SyncDelta {
+            adds: vec![
+                add_item("manual", Some("srv")),
+                add_item("auto", Some("srv")),
+            ],
+            deletes: Vec::new(),
+            id_changes: Vec::new(),
+            unchanged: 0,
+            playlists: Vec::new(),
+            pity_fired_servers: Vec::new(),
+        };
+        patch_delta_auto_fill(
+            &mut delta,
+            &std::collections::HashSet::from(["auto".to_string()]),
+        );
+
+        assert!(!delta.adds[0].is_auto_fill);
+        assert!(delta.adds[1].is_auto_fill);
     }
 
     #[test]

@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-07-11  # Story 14.3 created
+last_updated: 2026-07-11  # Story 14.3 implementation complete
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -179,4 +179,4 @@ development_status:
   epic-14: in-progress
   14-1-temp-only-disk-staging-for-provider-sync: done
   14-2-bounded-producer-writer-pipeline: done  # review complete: 4 patches applied
-  14-3-per-server-producer-fairness-and-priority-buckets: ready-for-dev
+  14-3-per-server-producer-fairness-and-priority-buckets: review

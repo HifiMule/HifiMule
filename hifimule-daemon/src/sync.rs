@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -94,6 +94,10 @@ pub struct SyncAddItem {
     /// `autofill_history.tier`. `None` for manual items and non-tiered fills.
     #[serde(default)]
     pub tier: Option<String>,
+    /// True only for items selected by the per-sync Auto-Fill expansion. This
+    /// is deliberately independent from optional rotation tiers.
+    #[serde(default)]
+    pub is_auto_fill: bool,
     /// Story 13.5 #20: encoding-from-goals derived per-slot max-bitrate (kbps) override. Set only on
     /// auto-fill tracks of a slot whose pipeline enabled encoding-from-goals AND for which a transcode
     /// profile is active. At sync-execute it overrides `TranscodeProfile.max_bitrate_kbps` for this
@@ -2282,6 +2286,7 @@ pub async fn execute_sync(
 pub struct ProviderSyncSource {
     pub provider: Arc<dyn MediaProvider>,
     pub transcoding_profile: Option<serde_json::Value>,
+    pub providers_by_server: std::collections::HashMap<String, Arc<dyn MediaProvider>>,
 }
 
 struct StagedByteLimiter {
@@ -2457,6 +2462,7 @@ pub async fn execute_provider_sync(
     let ProviderSyncSource {
         provider,
         transcoding_profile,
+        providers_by_server,
     } = source;
     let mut synced_items = Vec::new();
     let mut errors = Vec::new();
@@ -2539,23 +2545,36 @@ pub async fn execute_provider_sync(
     let byte_limiter = Arc::new(StagedByteLimiter::new(PROVIDER_READY_QUEUE_MAX_BYTES));
     let count_limiter = Arc::new(Semaphore::new(PROVIDER_READY_QUEUE_MAX_TRACKS));
     let (staged_tx, mut staged_rx) = mpsc::channel(PROVIDER_READY_QUEUE_MAX_TRACKS);
-    let producer_adds = delta.adds.clone();
-    let producer_add_count = producer_adds.len();
-    let producer_provider = Arc::clone(&provider);
-    let producer_operation_manager = Arc::clone(&operation_manager);
-    let producer_operation_id = operation_id.clone();
-    let producer_managed_path = managed_path.clone();
-    let producer_device_path = device_path.to_path_buf();
-    let producer_compatibility = compatibility.clone();
-    let producer_byte_limiter = Arc::clone(&byte_limiter);
-    let producer_count_limiter = Arc::clone(&count_limiter);
-    let producer = tokio::spawn(async move {
+    macro_rules! spawn_provider {
+        ($producer_adds:expr, $producer_provider:expr) => {{
+        let producer_adds = $producer_adds;
+        let producer_add_count = producer_adds.len();
+        let producer_provider = $producer_provider;
+        let producer_providers_by_server: std::collections::HashMap<
+            String,
+            Arc<dyn MediaProvider>,
+        > = std::collections::HashMap::new();
+        let producer_operation_manager = Arc::clone(&operation_manager);
+        let producer_operation_id = operation_id.clone();
+        let producer_managed_path = managed_path.clone();
+        let producer_device_path = device_path.to_path_buf();
+        let producer_compatibility = compatibility.clone();
+        let producer_byte_limiter = Arc::clone(&byte_limiter);
+        let producer_count_limiter = Arc::clone(&count_limiter);
+        let staged_tx = staged_tx.clone();
+        tokio::spawn(async move {
         let mut errors = Vec::new();
         let mut warnings = Vec::new();
         let mut staging_dir: Option<tempfile::TempDir> = None;
         let mut blocked = Duration::ZERO;
 
         for (index, add_item) in producer_adds.into_iter().enumerate() {
+            let producer_provider = add_item
+                .server_id
+                .as_ref()
+                .and_then(|server_id| producer_providers_by_server.get(server_id))
+                .cloned()
+                .unwrap_or_else(|| Arc::clone(&producer_provider));
             if producer_operation_manager
                 .is_cancelled(&producer_operation_id)
                 .await
@@ -2612,7 +2631,15 @@ pub async fn execute_provider_sync(
                 device_preferred_audio_container
             );
             let url_result = tokio::select! {
-                result = producer_provider.download_url(&add_item.jellyfin_id, profile.as_ref()) => result,
+                result = async {
+                    match producer_provider.download_url(&add_item.jellyfin_id, profile.as_ref()).await {
+                        Ok(url) => Ok(url),
+                        Err(first_error) => {
+                            crate::daemon_log!("[Sync] Retrying source for '{}': {}", add_item.name, first_error);
+                            producer_provider.download_url(&add_item.jellyfin_id, profile.as_ref()).await
+                        }
+                    }
+                } => result,
                 _ = wait_for_operation_cancellation(&producer_operation_manager, &producer_operation_id) => break,
             };
             let url = match url_result {
@@ -2629,30 +2656,60 @@ pub async fn execute_provider_sync(
                             add_item.size_bytes,
                         )
                         .await;
+                    } else if add_item.is_auto_fill {
+                        warnings.push(format!(
+                            "[Sync] Auto-Fill source failed for '{}' ({}): {}",
+                            add_item.name, add_item.jellyfin_id, e
+                        ));
+                        mark_operation_item_handled(
+                            &producer_operation_manager,
+                            &producer_operation_id,
+                            add_item.size_bytes,
+                        )
+                        .await;
                     } else {
                         errors.push(SyncFileError {
                             jellyfin_id: add_item.jellyfin_id.clone(),
                             filename: add_item.name.clone(),
                             error_message: format!("Failed to get stream: {}", e),
                         });
+                        let _ = producer_operation_manager
+                            .request_cancel(&producer_operation_id)
+                            .await;
+                        break;
                     }
                     continue;
                 }
             };
             crate::daemon_log!("[Sync] Preparing '{}': opening HTTP stream", add_item.name);
             let response_result = tokio::select! {
-                result = reqwest::Client::new().get(url).send() => result,
+                result = async {
+                    let client = reqwest::Client::new();
+                    match client.get(&url).send().await {
+                        Ok(response) => Ok(response),
+                        Err(first_error) => {
+                            crate::daemon_log!("[Sync] Retrying HTTP source for '{}': {}", add_item.name, first_error);
+                            client.get(&url).send().await
+                        }
+                    }
+                } => result,
                 _ = wait_for_operation_cancellation(&producer_operation_manager, &producer_operation_id) => break,
             };
             let response = match response_result {
                 Ok(response) => response,
                 Err(e) => {
+                    if add_item.is_auto_fill {
+                        warnings.push(format!("[Sync] Auto-Fill source failed for '{}': {}", add_item.name, e));
+                        mark_operation_item_handled(&producer_operation_manager, &producer_operation_id, add_item.size_bytes).await;
+                        continue;
+                    }
                     errors.push(SyncFileError {
                         jellyfin_id: add_item.jellyfin_id.clone(),
                         filename: add_item.name.clone(),
                         error_message: format!("Failed to open stream: {}", e),
                     });
-                    continue;
+                    let _ = producer_operation_manager.request_cancel(&producer_operation_id).await;
+                    break;
                 }
             };
             if !response.status().is_success() {
@@ -2670,11 +2727,19 @@ pub async fn execute_provider_sync(
                     )
                     .await;
                 } else {
-                    errors.push(SyncFileError {
-                        jellyfin_id: add_item.jellyfin_id.clone(),
-                        filename: add_item.name.clone(),
-                        error_message: format!("Stream returned status {}", response.status()),
-                    });
+                    let error_message = format!("Stream returned status {}", response.status());
+                    if add_item.is_auto_fill {
+                        warnings.push(format!("[Sync] Auto-Fill source failed for '{}': {}", add_item.name, error_message));
+                        mark_operation_item_handled(&producer_operation_manager, &producer_operation_id, add_item.size_bytes).await;
+                    } else {
+                        errors.push(SyncFileError {
+                            jellyfin_id: add_item.jellyfin_id.clone(),
+                            filename: add_item.name.clone(),
+                            error_message,
+                        });
+                        let _ = producer_operation_manager.request_cancel(&producer_operation_id).await;
+                        break;
+                    }
                 }
                 continue;
             }
@@ -2763,12 +2828,19 @@ pub async fn execute_provider_sync(
             ) {
                 Ok(result) => result,
                 Err(e) => {
+                    let error_message = format!("Failed to construct file path: {}", e);
+                    if add_item.is_auto_fill {
+                        warnings.push(format!("[Sync] Auto-Fill source failed for '{}': {}", add_item.name, error_message));
+                        mark_operation_item_handled(&producer_operation_manager, &producer_operation_id, add_item.size_bytes).await;
+                        continue;
+                    }
                     errors.push(SyncFileError {
                         jellyfin_id: add_item.jellyfin_id.clone(),
                         filename: add_item.name.clone(),
-                        error_message: format!("Failed to construct file path: {}", e),
+                        error_message,
                     });
-                    continue;
+                    let _ = producer_operation_manager.request_cancel(&producer_operation_id).await;
+                    break;
                 }
             };
 
@@ -2854,12 +2926,19 @@ pub async fn execute_provider_sync(
                         staging_dir = Some(dir);
                     }
                     Err(e) => {
+                        let error_message = e.to_string();
+                        if add_item.is_auto_fill {
+                            warnings.push(format!("[Sync] Auto-Fill source failed for '{}': {}", add_item.name, error_message));
+                            mark_operation_item_handled(&producer_operation_manager, &producer_operation_id, add_item.size_bytes).await;
+                            continue;
+                        }
                         errors.push(SyncFileError {
                             jellyfin_id: add_item.jellyfin_id.clone(),
                             filename: add_item.name.clone(),
-                            error_message: e.to_string(),
+                            error_message,
                         });
-                        continue;
+                        let _ = producer_operation_manager.request_cancel(&producer_operation_id).await;
+                        break;
                     }
                 }
             }
@@ -2891,12 +2970,19 @@ pub async fn execute_provider_sync(
                     {
                         break;
                     }
+                    let error_message = format!("Failed to stage stream: {}", e);
+                    if add_item.is_auto_fill {
+                        warnings.push(format!("[Sync] Auto-Fill source failed for '{}': {}", add_item.name, error_message));
+                        mark_operation_item_handled(&producer_operation_manager, &producer_operation_id, add_item.size_bytes).await;
+                        continue;
+                    }
                     errors.push(SyncFileError {
                         jellyfin_id: add_item.jellyfin_id.clone(),
                         filename: add_item.name.clone(),
-                        error_message: format!("Failed to stage stream: {}", e),
+                        error_message,
                     });
-                    continue;
+                    let _ = producer_operation_manager.request_cancel(&producer_operation_id).await;
+                    break;
                 }
             };
             byte_permit.shrink_to(staged_size);
@@ -2978,15 +3064,52 @@ pub async fn execute_provider_sync(
             staging_dir,
             blocked,
         }
-    });
+        })
+    }};
+    }
+
+    let mut producer_groups: std::collections::HashMap<Option<String>, Vec<SyncAddItem>> =
+        std::collections::HashMap::new();
+    for add in delta.adds.clone() {
+        producer_groups
+            .entry(add.server_id.clone())
+            .or_default()
+            .push(add);
+    }
+    let mut producers = Vec::new();
+    for (server_id, mut adds) in producer_groups {
+        adds.sort_by_key(|add| add.is_auto_fill);
+        let group_provider = server_id
+            .as_ref()
+            .and_then(|id| providers_by_server.get(id))
+            .cloned()
+            .unwrap_or_else(|| Arc::clone(&provider));
+        producers.push(spawn_provider!(adds, group_provider));
+    }
+    drop(staged_tx);
 
     let mut writer_idle = Duration::ZERO;
     let mut writer_failed = false;
+    let mut explicit_ready = VecDeque::new();
+    let mut autofill_ready = VecDeque::new();
+    let mut producers_finished = false;
     loop {
         let wait_started = std::time::Instant::now();
-        let next = tokio::select! {
-            next = staged_rx.recv() => next,
-            _ = wait_for_operation_cancellation(&operation_manager, &operation_id) => None,
+        let next = loop {
+            if let Some(staged) = explicit_ready.pop_front() {
+                break Some(staged);
+            }
+            if producers_finished {
+                break autofill_ready.pop_front();
+            }
+            match tokio::select! {
+                next = staged_rx.recv() => next,
+                _ = wait_for_operation_cancellation(&operation_manager, &operation_id) => None,
+            } {
+                Some(staged) if staged.add_item.is_auto_fill => autofill_ready.push_back(staged),
+                Some(staged) => break Some(staged),
+                None => producers_finished = true,
+            }
         };
         let waited = wait_started.elapsed();
         writer_idle += waited;
@@ -3052,7 +3175,18 @@ pub async fn execute_provider_sync(
                 continue;
             }
         };
-        match device_io.write_with_verify(&staged.rel_path, &buffer).await {
+        let write_result = match device_io.write_with_verify(&staged.rel_path, &buffer).await {
+            Ok(result) => Ok(result),
+            Err(first_error) => {
+                crate::daemon_log!(
+                    "[Sync] Retrying device write for '{}': {}",
+                    staged.add_item.name,
+                    first_error
+                );
+                device_io.write_with_verify(&staged.rel_path, &buffer).await
+            }
+        };
+        match write_result {
             Ok(_) => {
                 let write_timing = transfer_timing(staged.staged_size, t_write.elapsed());
                 let staged_cleanup = match tokio::fs::remove_file(&staged.staged_path).await {
@@ -3145,19 +3279,27 @@ pub async fn execute_provider_sync(
         }
     }
 
-    let producer_outcome = producer
-        .await
-        .context("provider sync producer task failed")?;
-    errors.extend(producer_outcome.errors);
-    sync_warnings.extend(producer_outcome.warnings);
+    let mut producer_blocked = Duration::ZERO;
+    let mut staging_dirs = Vec::new();
+    for producer in producers {
+        let producer_outcome = producer
+            .await
+            .context("provider sync producer task failed")?;
+        errors.extend(producer_outcome.errors);
+        sync_warnings.extend(producer_outcome.warnings);
+        producer_blocked += producer_outcome.blocked;
+        if let Some(staging_dir) = producer_outcome.staging_dir {
+            staging_dirs.push(staging_dir);
+        }
+    }
     crate::daemon_log!(
         "[Sync] Provider pipeline summary writer_idle_ms={:.2} producer_blocked_ms={:.2} queue_depth={} staged_bytes={}",
         writer_idle.as_secs_f64() * 1000.0,
-        producer_outcome.blocked.as_secs_f64() * 1000.0,
+        producer_blocked.as_secs_f64() * 1000.0,
         staged_rx.len(),
         byte_limiter.used()
     );
-    if let Some(staging_dir) = producer_outcome.staging_dir {
+    for staging_dir in staging_dirs {
         let staging_path = staging_dir.path().to_path_buf();
         let staging_cleanup = match staging_dir.close() {
             Ok(()) => "ok".to_string(),
@@ -3168,7 +3310,8 @@ pub async fn execute_provider_sync(
             staging_path.display(),
             staging_cleanup
         );
-    } else {
+    }
+    if producer_blocked.is_zero() && delta.adds.is_empty() {
         crate::daemon_log!(
             "[Sync] Provider sync staging cleanup path=<not-created> result=skipped"
         );
@@ -3516,6 +3659,7 @@ pub async fn augment_delta_with_existence_check(
                     reason: None,
                     server_id: desired.server_id.clone(),
                     tier: None,
+                    is_auto_fill: false,
                     max_bitrate_override_kbps: None,
                 },
                 "device-file-missing",
@@ -3845,6 +3989,7 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
                     // Story 13.1: tier is patched onto delta.adds post-calculation (patch_delta_tiers)
                     // from the auto-fill results, since DesiredItem does not carry it.
                     tier: None,
+                    is_auto_fill: false,
                     // Story 13.5 #20: patched post-calculation (patch_delta_bitrate_overrides) from the
                     // auto-fill results, since DesiredItem does not carry it.
                     max_bitrate_override_kbps: None,
@@ -4731,6 +4876,7 @@ mod tests {
             reason: Some("new selection".to_string()),
             server_id: None,
             tier: None,
+            is_auto_fill: false,
             max_bitrate_override_kbps: None,
         }
     }
@@ -4956,6 +5102,7 @@ mod tests {
             ProviderSyncSource {
                 provider: subsonic_provider(server.url()),
                 transcoding_profile: Some(generic_mp3_profile()),
+                providers_by_server: std::collections::HashMap::new(),
             },
             Arc::clone(&operation_manager),
             operation_id.clone(),
@@ -5028,6 +5175,7 @@ mod tests {
             ProviderSyncSource {
                 provider: subsonic_provider(server.url()),
                 transcoding_profile: Some(rockbox_direct_profile()),
+                providers_by_server: std::collections::HashMap::new(),
             },
             Arc::clone(&operation_manager),
             operation_id.clone(),
@@ -5082,6 +5230,7 @@ mod tests {
             ProviderSyncSource {
                 provider: subsonic_provider(server.url()),
                 transcoding_profile: Some(rockbox_direct_profile()),
+                providers_by_server: std::collections::HashMap::new(),
             },
             Arc::clone(&operation_manager),
             operation_id.clone(),
@@ -5147,6 +5296,7 @@ mod tests {
             ProviderSyncSource {
                 provider: subsonic_provider(server.url()),
                 transcoding_profile: Some(rockbox_direct_profile()),
+                providers_by_server: std::collections::HashMap::new(),
             },
             Arc::clone(&operation_manager),
             operation_id.clone(),
@@ -5208,6 +5358,7 @@ mod tests {
             ProviderSyncSource {
                 provider: subsonic_provider(server.url()),
                 transcoding_profile: Some(generic_mp3_profile()),
+                providers_by_server: std::collections::HashMap::new(),
             },
             Arc::clone(&operation_manager),
             operation_id.clone(),
@@ -5288,6 +5439,7 @@ mod tests {
             ProviderSyncSource {
                 provider: subsonic_provider(server.url()),
                 transcoding_profile: Some(generic_mp3_profile()),
+                providers_by_server: std::collections::HashMap::new(),
             },
             Arc::clone(&operation_manager),
             operation_id.clone(),
@@ -5381,6 +5533,7 @@ mod tests {
                 ProviderSyncSource {
                     provider,
                     transcoding_profile: Some(rockbox_direct_profile()),
+                    providers_by_server: std::collections::HashMap::new(),
                 },
                 operation_manager_for_sync,
                 operation_id_for_sync,
@@ -5462,6 +5615,7 @@ mod tests {
                 ProviderSyncSource {
                     provider,
                     transcoding_profile: Some(rockbox_direct_profile()),
+                    providers_by_server: std::collections::HashMap::new(),
                 },
                 operation_manager_for_sync,
                 operation_id_for_sync,
@@ -5550,6 +5704,7 @@ mod tests {
                 ProviderSyncSource {
                     provider,
                     transcoding_profile: Some(rockbox_direct_profile()),
+                    providers_by_server: std::collections::HashMap::new(),
                 },
                 operation_manager_for_sync,
                 operation_id_for_sync,
@@ -6767,6 +6922,7 @@ mod tests {
                     reason: None,
                     server_id: None,
                     tier: None,
+                    is_auto_fill: false,
                     max_bitrate_override_kbps: None,
                 },
                 "bitrate-increase",

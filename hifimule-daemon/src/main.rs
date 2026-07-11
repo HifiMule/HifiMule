@@ -1464,6 +1464,7 @@ async fn run_auto_sync_via_provider(
         sync::ProviderSyncSource {
             provider,
             transcoding_profile,
+            providers_by_server: std::collections::HashMap::new(),
         },
         sync_op_manager.clone(),
         operation_id.clone(),
