@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.12.0 - 2026-07-11
+
+Auto-Fill is now much more flexible. Instead of just topping up free space, HifiMule can build a fill plan from your library, favorites, history, or playlists, with controls for size or listening-time goals, headroom, genre exclusions, track/album/artist fills, quality preferences, discovery, rotation, and seasonal or time-based rules. You can keep a stable core on the device while still making room for deeper cuts and less-played music.
+
+Syncs behave better too: Auto-Fill now creates an `Autofill` playlist on the device, works when auto-sync starts from an existing playlist or basket, and no longer skips playlist-only work. Jellyfin Auto-Fill can finally draw from the full library, the sync stop button is fixed, existing syncs are shown instead of erroring, and the app no longer asks you to log in when it already has usable credentials.
+
+Windows device detection now prefers WPD over MTP where available, and the interface got a small polish pass around the basket, Auto-Fill configuration, and status area.
+
 ## v0.11.1 - 2026-06-12
 
 Building your basket and playlists is much faster now: you can **select many items at once** and act on them together. Hover over any row in the list view and a checkbox appears — tick a few, Ctrl/Cmd-click to toggle, or Shift-click to grab a whole range. A bar then lets you **add everything you picked to your basket or a playlist in one click**, instead of clicking every row.
