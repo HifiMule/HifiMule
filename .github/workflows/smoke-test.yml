@@ -83,14 +83,24 @@ jobs:
           if-no-files-found: ignore
 
   smoke-macos:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-15-intel
+            pattern: '*x64*.dmg'
+            log-suffix: macos-intel
+          - platform: macos-15
+            pattern: '*aarch64*.dmg'
+            log-suffix: macos-arm
+    runs-on: ${{ matrix.platform }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
       - name: Download DMG artifact
         shell: pwsh
-        run: ./scripts/download-release-asset.ps1 -Tag '${{ inputs.release_tag }}' -Pattern '*.dmg' -Directory './installers'
+        run: ./scripts/download-release-asset.ps1 -Tag '${{ inputs.release_tag }}' -Pattern '${{ matrix.pattern }}' -Directory './installers'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -105,6 +115,6 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: smoke-log-macos
+          name: smoke-log-${{ matrix.log-suffix }}
           path: ./installers/smoke.log
           if-no-files-found: ignore
