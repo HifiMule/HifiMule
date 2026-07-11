@@ -1,6 +1,10 @@
+---
+baseline_commit: cb01a65eee051da0c0ebbf4cf1a67ddf03239d01
+---
+
 # Story 14.1: Temp-Only Disk Staging for Provider Sync
 
-Status: ready-for-dev
+Status: done
 
 ## Story
 
@@ -19,21 +23,27 @@ so that HifiMule reduces memory pressure and prepares the sync path for later pi
 
 ## Tasks / Subtasks
 
-- [ ] Replace provider-response buffering with temp-file staging in `execute_provider_sync` (AC: 1, 2, 6)
-  - [ ] Keep URL resolution, response status handling, content-type validation, extension override, and target path construction in their current order.
-  - [ ] Stream `response.bytes_stream()` chunks into a per-run temp staging file and keep the existing progress callback behavior during staging.
-  - [ ] Read the completed staged file into `Vec<u8>` immediately before calling `device_io.write_with_verify`.
-- [ ] Add cleanup and cancellation handling (AC: 3, 4)
-  - [ ] Create one run-scoped staging directory for provider sync adds.
-  - [ ] Remove each staged file after successful device write.
-  - [ ] Remove the run staging directory on errors, warnings that skip staged work, cancellation, and normal completion.
-- [ ] Add targeted diagnostics (AC: 5)
-  - [ ] Log staging duration, write duration, staged byte size, and cleanup result.
-  - [ ] Keep user progress device-centric; do not report staged bytes as device-written bytes.
-- [ ] Extend the existing provider sync tests (AC: 1-6)
-  - [ ] Preserve existing transcode/direct/skip tests.
-  - [ ] Add one regression test proving staging files are cleaned after success.
-  - [ ] Add one regression test proving the run staging directory is cleaned after an error or cancellation.
+- [x] Replace provider-response buffering with temp-file staging in `execute_provider_sync` (AC: 1, 2, 6)
+  - [x] Keep URL resolution, response status handling, content-type validation, extension override, and target path construction in their current order.
+  - [x] Stream `response.bytes_stream()` chunks into a per-run temp staging file and keep the existing progress callback behavior during staging.
+  - [x] Read the completed staged file into `Vec<u8>` immediately before calling `device_io.write_with_verify`.
+- [x] Add cleanup and cancellation handling (AC: 3, 4)
+  - [x] Create one run-scoped staging directory for provider sync adds.
+  - [x] Remove each staged file after successful device write.
+  - [x] Remove the run staging directory on errors, warnings that skip staged work, cancellation, and normal completion.
+- [x] Add targeted diagnostics (AC: 5)
+  - [x] Log staging duration, write duration, staged byte size, and cleanup result.
+  - [x] Keep user progress device-centric; do not report staged bytes as device-written bytes.
+- [x] Extend the existing provider sync tests (AC: 1-6)
+  - [x] Preserve existing transcode/direct/skip tests.
+  - [x] Add one regression test proving staging files are cleaned after success.
+  - [x] Add one regression test proving the run staging directory is cleaned after an error or cancellation.
+
+### Review Findings
+
+- [x] [Review][Patch] Restore a maximum staged/read size guard before whole-file read [hifimule-daemon/src/sync.rs:2964]
+- [x] [Review][Patch] Avoid unconditional staging-dir creation after `begin_sync_job` [hifimule-daemon/src/sync.rs:2297]
+- [x] [Review][Patch] Bound staged filename components derived from provider IDs [hifimule-daemon/src/sync.rs:2599]
 
 ## Dev Notes
 
@@ -78,10 +88,32 @@ Implement the first throughput slice only. Do not add a producer/writer queue, p
 
 ### Agent Model Used
 
-TBD
+GPT-5 Codex
 
 ### Debug Log References
 
+- `rtk cargo test -p hifimule-daemon execute_provider_sync` - 6 passed
+- `rtk cargo test -p hifimule-daemon provider_sync_staging_path_component_bounds_long_values` - 1 passed
+- `rtk cargo test -p hifimule-daemon` - 620 passed
+- `rtk cargo check -p hifimule-daemon` - 0 errors, 1 pre-existing dead-code warning
+- `rtk cargo clippy -p hifimule-daemon --all-targets -- -D warnings` - blocked by pre-existing clippy/dead-code warnings outside this story; also surfaced the story dependency placement issue, now fixed
+
 ### Completion Notes List
 
+- Provider sync now streams each accepted provider response to a run-scoped temp staging file, then reads the staged bytes immediately before the unchanged `DeviceIO::write_with_verify` call.
+- Successful writes remove their staged file; the run staging directory is explicitly closed and logged on normal completion, skip/error paths, and cancellation.
+- Diagnostics now include staged byte size, staging timing, write timing, staged-file cleanup, and run-directory cleanup while preserving device-centric progress counters.
+- Existing provider transcode/direct/skip behavior stayed covered; added success cleanup and cancellation cleanup regressions.
+- Code review patches restored the 2 GB staged/read guard, made staging directory creation lazy, and bounded provider-derived staging filename components.
+
 ### File List
+
+- `hifimule-daemon/Cargo.toml`
+- `hifimule-daemon/src/sync.rs`
+- `_bmad-output/implementation-artifacts/14-1-temp-only-disk-staging-for-provider-sync.md`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
+
+### Change Log
+
+- 2026-07-11: Implemented temp-only provider sync staging, cleanup diagnostics, and provider sync cleanup regression tests.
+- 2026-07-11: Applied code review patches for staged size bounds, lazy staging directory creation, and bounded staging filenames.

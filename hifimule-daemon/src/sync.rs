@@ -6,12 +6,15 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 
 use crate::device::{DeviceManifest, SyncedItem};
 use crate::providers::{MediaProvider, TranscodeProfile};
 
 pub const DESTRUCTIVE_CLEANUP_THRESHOLD: usize = 25;
+const MAX_FILE_BUFFER_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GB hard cap
+const MAX_PROVIDER_STAGING_COMPONENT_CHARS: usize = 80;
 
 fn now_iso8601() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
@@ -2293,6 +2296,7 @@ pub async fn execute_provider_sync(
         delta.id_changes.len(),
         delta.playlists.len()
     );
+    let mut staging_dir: Option<tempfile::TempDir> = None;
 
     let total_job_bytes: u64 = delta.adds.iter().map(|a| a.size_bytes).sum::<u64>()
         + delta.id_changes.iter().map(|c| c.size_bytes).sum::<u64>();
@@ -2585,21 +2589,68 @@ pub async fn execute_provider_sync(
             });
         }) as ProgressCallback;
 
-        crate::daemon_log!("[Sync] Downloading '{}'", add_item.name);
-        let t_download = std::time::Instant::now();
-        let buffer =
-            match buffer_stream(response.bytes_stream(), total_size, progress_callback).await {
-                Ok(buffer) => buffer,
+        crate::daemon_log!("[Sync] Staging '{}'", add_item.name);
+        let t_staging = std::time::Instant::now();
+        if staging_dir.is_none() {
+            match tempfile::Builder::new()
+                .prefix(&provider_sync_staging_prefix(&operation_id))
+                .tempdir()
+                .context("Failed to create provider sync staging directory")
+            {
+                Ok(dir) => {
+                    crate::daemon_log!(
+                        "[Sync] Provider sync staging directory: {}",
+                        dir.path().display()
+                    );
+                    staging_dir = Some(dir);
+                }
                 Err(e) => {
                     errors.push(SyncFileError {
                         jellyfin_id: add_item.jellyfin_id.clone(),
                         filename: add_item.name.clone(),
-                        error_message: format!("Failed to buffer stream: {}", e),
+                        error_message: e.to_string(),
                     });
                     continue;
                 }
-            };
-        let download_timing = transfer_timing(add_item.size_bytes, t_download.elapsed());
+            }
+        }
+        let staging_dir_path = staging_dir
+            .as_ref()
+            .expect("provider sync staging directory should exist")
+            .path();
+        let staged_path = staging_dir_path.join(format!(
+            "{index:06}-{}",
+            provider_sync_staging_path_component(&add_item.jellyfin_id)
+        ));
+        let staged_size = match stream_to_staging_file(
+            response.bytes_stream(),
+            total_size,
+            progress_callback,
+            &staged_path,
+        )
+        .await
+        {
+            Ok(staged_size) => staged_size,
+            Err(e) => {
+                errors.push(SyncFileError {
+                    jellyfin_id: add_item.jellyfin_id.clone(),
+                    filename: add_item.name.clone(),
+                    error_message: format!("Failed to stage stream: {}", e),
+                });
+                continue;
+            }
+        };
+        let staging_timing = transfer_timing(staged_size, t_staging.elapsed());
+        crate::daemon_log!(
+            "[Sync] '{}' staged_size={}B staging={:.2}ms({:.1}MB/s)",
+            add_item.name,
+            staged_size,
+            staging_timing.elapsed_ms,
+            staging_timing.speed_mb_s
+        );
+        if operation_manager.is_cancelled(&operation_id).await {
+            break;
+        }
         let rel_path = construction
             .path
             .strip_prefix(device_path)
@@ -2609,17 +2660,44 @@ pub async fn execute_provider_sync(
 
         crate::daemon_log!("[Sync] Writing '{}'", add_item.name);
         let t_write = std::time::Instant::now();
+        if staged_size > MAX_FILE_BUFFER_BYTES {
+            errors.push(SyncFileError {
+                jellyfin_id: add_item.jellyfin_id.clone(),
+                filename: add_item.name.clone(),
+                error_message: format!(
+                    "Staged file too large to read ({} bytes > {} byte limit)",
+                    staged_size, MAX_FILE_BUFFER_BYTES
+                ),
+            });
+            continue;
+        }
+        let buffer = match tokio::fs::read(&staged_path).await {
+            Ok(buffer) => buffer,
+            Err(e) => {
+                errors.push(SyncFileError {
+                    jellyfin_id: add_item.jellyfin_id.clone(),
+                    filename: add_item.name.clone(),
+                    error_message: format!("Failed to read staged file: {}", e),
+                });
+                continue;
+            }
+        };
         match device_io.write_with_verify(&rel_path, &buffer).await {
             Ok(_) => {
-                let write_timing = transfer_timing(add_item.size_bytes, t_write.elapsed());
+                let write_timing = transfer_timing(staged_size, t_write.elapsed());
+                let staged_cleanup = match tokio::fs::remove_file(&staged_path).await {
+                    Ok(()) => "ok".to_string(),
+                    Err(e) => format!("error: {e}"),
+                };
                 crate::daemon_log!(
-                    "[Sync] '{}' size={}B download={:.2}ms({:.1}MB/s) write={:.2}ms({:.1}MB/s)",
+                    "[Sync] '{}' staged_size={}B staging={:.2}ms({:.1}MB/s) write={:.2}ms({:.1}MB/s) staged_cleanup={}",
                     add_item.name,
-                    add_item.size_bytes,
-                    download_timing.elapsed_ms,
-                    download_timing.speed_mb_s,
+                    staged_size,
+                    staging_timing.elapsed_ms,
+                    staging_timing.speed_mb_s,
                     write_timing.elapsed_ms,
-                    write_timing.speed_mb_s
+                    write_timing.speed_mb_s,
+                    staged_cleanup
                 );
                 let synced_at = now_iso8601();
                 synced_items.push(crate::device::SyncedItem {
@@ -2688,6 +2766,22 @@ pub async fn execute_provider_sync(
                 });
             }
         }
+    }
+    if let Some(staging_dir) = staging_dir {
+        let staging_path = staging_dir.path().to_path_buf();
+        let staging_cleanup = match staging_dir.close() {
+            Ok(()) => "ok".to_string(),
+            Err(e) => format!("error: {e}"),
+        };
+        crate::daemon_log!(
+            "[Sync] Provider sync staging cleanup path={} result={}",
+            staging_path.display(),
+            staging_cleanup
+        );
+    } else {
+        crate::daemon_log!(
+            "[Sync] Provider sync staging cleanup path=<not-created> result=skipped"
+        );
     }
 
     for delete_item in delta
@@ -2860,7 +2954,6 @@ async fn buffer_stream<S>(
 where
     S: futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Unpin,
 {
-    const MAX_FILE_BUFFER_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GB hard cap
     if total_size > MAX_FILE_BUFFER_BYTES {
         return Err(anyhow::anyhow!(
             "File too large to buffer ({} bytes > {} byte limit)",
@@ -2884,6 +2977,75 @@ where
         on_progress(bytes_written, total_size);
     }
     Ok(buffer)
+}
+
+fn provider_sync_staging_prefix(operation_id: &str) -> String {
+    format!(
+        "hifimule-provider-sync-{}-",
+        provider_sync_staging_path_component(operation_id)
+    )
+}
+
+fn provider_sync_staging_path_component(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.chars().count() <= MAX_PROVIDER_STAGING_COMPONENT_CHARS {
+        return sanitized;
+    }
+
+    let hash = blake3::hash(value.as_bytes()).to_hex().to_string();
+    let keep = MAX_PROVIDER_STAGING_COMPONENT_CHARS - 17;
+    let prefix: String = sanitized.chars().take(keep).collect();
+    format!("{prefix}-{}", &hash[..16])
+}
+
+async fn stream_to_staging_file<S>(
+    mut stream: S,
+    total_size: u64,
+    on_progress: ProgressCallback,
+    path: &Path,
+) -> Result<u64>
+where
+    S: futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Unpin,
+{
+    if total_size > MAX_FILE_BUFFER_BYTES {
+        return Err(anyhow::anyhow!(
+            "File too large to stage ({} bytes > {} byte limit)",
+            total_size,
+            MAX_FILE_BUFFER_BYTES
+        ));
+    }
+    let mut file = tokio::fs::File::create(path)
+        .await
+        .with_context(|| format!("Failed to create staging file {}", path.display()))?;
+    let mut bytes_written = 0u64;
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result.context("Failed to read chunk from stream")?;
+        let chunk_len = chunk.len() as u64;
+        if bytes_written.saturating_add(chunk_len) > MAX_FILE_BUFFER_BYTES {
+            return Err(anyhow::anyhow!(
+                "File stream exceeded {} byte staging limit",
+                MAX_FILE_BUFFER_BYTES
+            ));
+        }
+        file.write_all(&chunk)
+            .await
+            .with_context(|| format!("Failed to write staging file {}", path.display()))?;
+        bytes_written += chunk_len;
+        on_progress(bytes_written, total_size);
+    }
+    file.flush()
+        .await
+        .with_context(|| format!("Failed to flush staging file {}", path.display()))?;
+    Ok(bytes_written)
 }
 
 /// Extracts the filename stem from a relative path for use as an EXTINF display label.
@@ -4173,6 +4335,40 @@ mod tests {
         (manager, device_io)
     }
 
+    fn unique_operation_id(prefix: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("{prefix}-{nanos}")
+    }
+
+    #[test]
+    fn provider_sync_staging_path_component_bounds_long_values() {
+        let component = provider_sync_staging_path_component(&"x".repeat(512));
+
+        assert_eq!(component.len(), MAX_PROVIDER_STAGING_COMPONENT_CHARS);
+        assert!(
+            component
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+        );
+    }
+
+    fn provider_staging_dirs_for_operation(operation_id: &str) -> Vec<std::path::PathBuf> {
+        let prefix = provider_sync_staging_prefix(operation_id);
+        std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&prefix))
+            })
+            .collect()
+    }
+
     #[tokio::test]
     async fn test_execute_provider_sync_transcodes_subsonic_flac_to_mp3_with_kbps() {
         let mut server = mockito::Server::new_async().await;
@@ -4244,6 +4440,120 @@ mod tests {
             .await
             .unwrap();
         assert!(operation.warnings.is_empty(), "{:?}", operation.warnings);
+    }
+
+    #[tokio::test]
+    async fn test_execute_provider_sync_cleans_staging_files_after_success() {
+        let mut server = mockito::Server::new_async().await;
+        let _download = server
+            .mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::AllOf(vec![mockito::Matcher::UrlEncoded(
+                "id".into(),
+                "song-flac".into(),
+            )]))
+            .with_status(200)
+            .with_header("content-type", "application/octet-stream")
+            .with_body(vec![1_u8, 2, 3, 4])
+            .expect(1)
+            .create_async()
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, device_io) = setup_provider_sync_device(dir.path()).await;
+        let operation_manager = Arc::new(SyncOperationManager::new());
+        let operation_id = unique_operation_id("op-stage-success");
+        operation_manager
+            .create_operation(operation_id.clone(), 1)
+            .await;
+        let delta = SyncDelta {
+            adds: vec![add_item_with_provider_format(
+                "song-flac",
+                "flac",
+                "audio/flac",
+                4,
+            )],
+            deletes: vec![],
+            id_changes: vec![],
+            unchanged: 0,
+            playlists: vec![],
+            pity_fired_servers: vec![],
+        };
+
+        let (synced, errors) = execute_provider_sync(
+            &delta,
+            dir.path(),
+            ProviderSyncSource {
+                provider: subsonic_provider(server.url()),
+                transcoding_profile: Some(rockbox_direct_profile()),
+            },
+            Arc::clone(&operation_manager),
+            operation_id.clone(),
+            Arc::clone(&manager),
+            device_io,
+        )
+        .await
+        .unwrap();
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(synced.len(), 1);
+        assert!(
+            provider_staging_dirs_for_operation(&operation_id).is_empty(),
+            "provider staging directory should be removed after success"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_provider_sync_cleans_staging_directory_after_cancellation() {
+        let mut server = mockito::Server::new_async().await;
+        let _download = server
+            .mock("GET", "/rest/download.view")
+            .expect(0)
+            .create_async()
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, device_io) = setup_provider_sync_device(dir.path()).await;
+        let operation_manager = Arc::new(SyncOperationManager::new());
+        let operation_id = unique_operation_id("op-stage-cancel");
+        operation_manager
+            .create_operation(operation_id.clone(), 1)
+            .await;
+        assert!(operation_manager.request_cancel(&operation_id).await);
+        let delta = SyncDelta {
+            adds: vec![add_item_with_provider_format(
+                "song-flac",
+                "flac",
+                "audio/flac",
+                4,
+            )],
+            deletes: vec![],
+            id_changes: vec![],
+            unchanged: 0,
+            playlists: vec![],
+            pity_fired_servers: vec![],
+        };
+
+        let (synced, errors) = execute_provider_sync(
+            &delta,
+            dir.path(),
+            ProviderSyncSource {
+                provider: subsonic_provider(server.url()),
+                transcoding_profile: Some(rockbox_direct_profile()),
+            },
+            Arc::clone(&operation_manager),
+            operation_id.clone(),
+            Arc::clone(&manager),
+            device_io,
+        )
+        .await
+        .unwrap();
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(synced.is_empty());
+        assert!(
+            provider_staging_dirs_for_operation(&operation_id).is_empty(),
+            "provider staging directory should be removed after cancellation"
+        );
     }
 
     #[tokio::test]
