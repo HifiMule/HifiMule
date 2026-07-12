@@ -467,6 +467,10 @@ pub struct SyncOperation {
     pub bytes_total: u64,
     pub bytes_transferred: u64,
     pub total_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub average_reading_speed_mb_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub average_writing_speed_mb_s: Option<f64>,
     pub files_completed: usize,
     pub files_total: usize,
     pub errors: Vec<SyncFileError>,
@@ -561,6 +565,8 @@ impl SyncOperationManager {
             bytes_total: 0,
             bytes_transferred: 0,
             total_bytes: 0,
+            average_reading_speed_mb_s: None,
+            average_writing_speed_mb_s: None,
             files_completed: 0,
             files_total,
             errors: vec![],
@@ -1892,6 +1898,8 @@ pub async fn execute_provider_sync(
     let byte_limiter = Arc::new(StagedByteLimiter::new(PROVIDER_READY_QUEUE_MAX_BYTES));
     let count_limiter = Arc::new(Semaphore::new(PROVIDER_READY_QUEUE_MAX_TRACKS));
     let (staged_tx, mut staged_rx) = mpsc::channel(PROVIDER_READY_QUEUE_MAX_TRACKS);
+    let reader_started = Arc::new(std::time::Instant::now());
+    let reader_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let mut producer_groups: std::collections::HashMap<Option<String>, Vec<SyncAddItem>> =
         std::collections::HashMap::new();
     for add in delta.adds.clone() {
@@ -1921,6 +1929,8 @@ pub async fn execute_provider_sync(
         let producer_byte_limiter = Arc::clone(&byte_limiter);
         let producer_count_limiter = Arc::clone(&count_limiter);
         let producer_priority_barrier = Arc::clone(&priority_barrier);
+        let producer_reader_started = Arc::clone(&reader_started);
+        let producer_reader_bytes = Arc::clone(&reader_bytes);
         let staged_tx = staged_tx.clone();
         tokio::spawn(async move {
         let mut errors = Vec::new();
@@ -2413,6 +2423,18 @@ pub async fn execute_provider_sync(
             let staging_elapsed = t_staging.elapsed();
             let staging_timing = transfer_timing(staged_size, staging_elapsed);
             staging.record(staged_size, staging_elapsed);
+            let reader_bytes = producer_reader_bytes.fetch_add(
+                staged_size,
+                std::sync::atomic::Ordering::Relaxed,
+            ) + staged_size;
+            let average_staging_timing =
+                transfer_timing(reader_bytes, producer_reader_started.elapsed());
+            producer_operation_manager
+                .modify_operation(&producer_operation_id, |operation| {
+                    operation.average_reading_speed_mb_s =
+                        Some(average_staging_timing.speed_mb_s);
+                })
+                .await;
             crate::daemon_log!(
                 "[Sync] '{}' staged_size={}B staging={:.2}ms({:.1}MB/s)",
                 add_item.name,
@@ -2619,6 +2641,7 @@ pub async fn execute_provider_sync(
                 let write_elapsed = t_write.elapsed();
                 let write_timing = transfer_timing(staged.staged_size, write_elapsed);
                 writer_timing.record(staged.staged_size, write_elapsed);
+                let average_write_timing = writer_timing.timing();
                 let staged_cleanup = match tokio::fs::remove_file(&staged.staged_path).await {
                     Ok(()) => "ok".to_string(),
                     Err(e) => format!("error: {e}"),
@@ -2663,6 +2686,8 @@ pub async fn execute_provider_sync(
                     .modify_operation(&operation_id, |operation| {
                         operation.files_completed += 1;
                         operation.bytes_transferred = cumulative;
+                        operation.average_writing_speed_mb_s =
+                            Some(average_write_timing.speed_mb_s);
                     })
                     .await;
                 let synced_item = synced_items.last().unwrap().clone();

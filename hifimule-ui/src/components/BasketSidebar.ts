@@ -63,6 +63,8 @@ interface SyncOperation {
     bytesTotal: number;
     bytesTransferred: number;
     totalBytes: number;
+    averageReadingSpeedMbS?: number | null;
+    averageWritingSpeedMbS?: number | null;
     filesCompleted: number;
     filesTotal: number;
     errors: Array<{ jellyfinId: string; filename: string; errorMessage: string }>;
@@ -1485,6 +1487,16 @@ export class BasketSidebar {
         return t('basket.sync.minutes_left', { count: Math.round(etaSeconds / 60) });
     }
 
+    private formatSyncSpeeds(op: SyncOperation): string {
+        const read = op.averageReadingSpeedMbS;
+        const write = op.averageWritingSpeedMbS;
+        if (read == null || write == null || read <= 0 || write <= 0) return '';
+        return t('basket.sync.average_speeds', {
+            read: read.toFixed(1),
+            write: write.toFixed(1),
+        });
+    }
+
     private renderSyncProgress() {
         if (!this.currentOperation || this.isDestroyed) return;
 
@@ -1497,6 +1509,7 @@ export class BasketSidebar {
             : t('basket.sync.preparing');
 
         this.etaText = this.computeEta(op);
+        const speedText = this.formatSyncSpeeds(op);
 
         // --- Shell: render once, then patch in-place to avoid Shoelace flash ---
         // Guard on #sync-progress-bar (present only in the real progress shell),
@@ -1518,6 +1531,7 @@ export class BasketSidebar {
                     </div>
                     <div id="sync-file-counter" class="sync-file-counter">${t('basket.sync.file_counter', { completed: op.filesCompleted, total: op.filesTotal })}</div>
                     <div id="sync-eta" class="sync-eta">${this.escapeHtml(this.etaText)}</div>
+                    <div id="sync-speeds" class="sync-speeds">${this.escapeHtml(speedText)}</div>
                 </div>
                 <div class="basket-footer">
                     <sl-button id="cancel-sync-btn" variant="default" style="width: 100%;">
@@ -1552,6 +1566,9 @@ export class BasketSidebar {
 
         const eta = this.container.querySelector('#sync-eta');
         if (eta) eta.textContent = this.etaText;
+
+        const speeds = this.container.querySelector('#sync-speeds') as HTMLElement | null;
+        if (speeds) speeds.textContent = speedText;
 
         // Reflect cancelling state on the button without replacing it.
         const cancelBtn = this.container.querySelector('#cancel-sync-btn') as any;

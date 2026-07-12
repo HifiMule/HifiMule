@@ -973,6 +973,13 @@ h2 {
   text-align: right;
 }
 
+.sync-speeds {
+  min-height: 1rem;
+  font-size: 0.75rem;
+  opacity: 0.6;
+  text-align: right;
+}
+
 .sync-success-panel,
 .sync-error-panel {
   flex: 1;
