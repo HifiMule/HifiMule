@@ -3237,7 +3237,9 @@ async fn generate_m3u_files(
             None => (true, None),
             Some(e) => {
                 let old_rel_m3u = playlist_manifest_rel_path(&e.filename, &playlist_subfolder);
-                let changed = old_rel_m3u != rel_m3u || e.track_ids != resolved_track_ids;
+                let changed = manifest.transcoding_profile_dirty
+                    || old_rel_m3u != rel_m3u
+                    || e.track_ids != resolved_track_ids;
                 (changed, Some(e.filename.clone()))
             }
         };
@@ -6687,6 +6689,59 @@ mod tests {
             mtime1, mtime2,
             "File must not be rewritten if track list unchanged"
         );
+    }
+
+    #[tokio::test]
+    async fn test_generate_m3u_rewrites_when_profile_dirty_changes_extension() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let device_path = tmp_dir.path();
+        let managed_path = device_path.join("Music");
+        tokio::fs::create_dir_all(&managed_path).await.unwrap();
+
+        let playlist_items = vec![PlaylistSyncItem {
+            jellyfin_id: "pl1".to_string(),
+            name: "Stable Playlist".to_string(),
+            tracks: vec![PlaylistTrackInfo {
+                jellyfin_id: "t1".to_string(),
+                artist: None,
+                run_time_seconds: 120,
+            }],
+        }];
+
+        let mut manifest = empty_manifest();
+        manifest.transcoding_profile_dirty = true;
+        manifest
+            .playlists
+            .push(crate::device::PlaylistManifestEntry {
+                jellyfin_id: "pl1".to_string(),
+                filename: "Stable Playlist.m3u".to_string(),
+                track_count: 1,
+                track_ids: vec!["t1".to_string()],
+                last_modified: "2026-01-01T00:00:00Z".to_string(),
+            });
+        let m3u_path = managed_path.join("Stable Playlist.m3u");
+        tokio::fs::write(&m3u_path, "#EXTM3U\nA/B/01 - Song.flac\n")
+            .await
+            .unwrap();
+
+        let all_synced = vec![make_playlist_synced_item("t1", "Music/A/B/01 - Song.mp3")];
+        let device_io =
+            std::sync::Arc::new(crate::device_io::MscBackend::new(device_path.to_path_buf()));
+
+        let warnings = generate_m3u_files(
+            &playlist_items,
+            device_path,
+            &managed_path,
+            &all_synced,
+            &mut manifest,
+            device_io,
+        )
+        .await;
+
+        assert!(warnings.is_empty(), "No warnings expected: {:?}", warnings);
+        let content = tokio::fs::read_to_string(&m3u_path).await.unwrap();
+        assert!(content.contains("A/B/01 - Song.mp3"));
+        assert!(!content.contains("A/B/01 - Song.flac"));
     }
 
     #[tokio::test]
