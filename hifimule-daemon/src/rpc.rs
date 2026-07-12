@@ -963,7 +963,7 @@ async fn handle_playlist_create(
     let item_ids: Vec<String> = raw_ids
         .iter()
         .filter_map(|v| v.as_str().map(|s| s.to_string()))
-        .filter(|id| id != "__auto_fill_slot__")
+        .filter(|id| !crate::device::is_auto_fill_slot_id(id))
         .collect();
 
     // Cross-server scope check (AC33): when the caller supplies per-item serverIds
@@ -12136,10 +12136,13 @@ mod tests {
             .await
             .set_test_provider(provider.clone() as Arc<dyn MediaProvider>);
 
-        // Only item is the auto-fill slot — should be filtered; create_playlist called with empty list.
+        // Both legacy and scoped auto-fill slots are virtual and must be filtered.
         let result = handle_playlist_create(
             &state,
-            Some(serde_json::json!({ "name": "Auto", "itemIds": ["__auto_fill_slot__"] })),
+            Some(serde_json::json!({
+                "name": "Auto",
+                "itemIds": ["__auto_fill_slot__", "__auto_fill_slot__:server-id"]
+            })),
         )
         .await
         .expect("playlist.create with only auto-fill slot");

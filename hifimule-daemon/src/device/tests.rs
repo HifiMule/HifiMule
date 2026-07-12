@@ -1,4 +1,12 @@
 use super::*;
+
+#[test]
+fn auto_fill_slot_id_recognizes_legacy_and_scoped_markers_only() {
+    assert!(is_auto_fill_slot_id("__auto_fill_slot__"));
+    assert!(is_auto_fill_slot_id("__auto_fill_slot__:server-id"));
+    assert!(is_auto_fill_slot_id("__auto_fill_slot__:"));
+    assert!(!is_auto_fill_slot_id("__auto_fill_slot__other"));
+}
 use serde_json;
 
 #[cfg(target_os = "windows")]

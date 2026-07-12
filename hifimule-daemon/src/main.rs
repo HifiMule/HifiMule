@@ -985,14 +985,10 @@ async fn resolve_provider_basket_items(
     let mut playlist_sync_items: Vec<sync::PlaylistSyncItem> = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
 
-    let favorite_items: Vec<&device::BasketItem> = basket_items
+    let (favorite_items, normal_items): (Vec<_>, Vec<_>) = basket_items
         .iter()
-        .filter(|b| matches!(b.item_type.as_str(), "FavoriteArtist" | "FavoriteAlbum"))
-        .collect();
-    let normal_items: Vec<&device::BasketItem> = basket_items
-        .iter()
-        .filter(|b| !matches!(b.item_type.as_str(), "FavoriteArtist" | "FavoriteAlbum"))
-        .collect();
+        .filter(|b| !device::is_auto_fill_slot_id(&b.id))
+        .partition(|b| matches!(b.item_type.as_str(), "FavoriteArtist" | "FavoriteAlbum"));
 
     for basket_item in favorite_items {
         match resolve_provider_favorite_item(provider.clone(), basket_item).await {

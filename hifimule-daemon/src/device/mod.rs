@@ -61,6 +61,10 @@ pub struct BasketItem {
     pub size_bytes: u64,
 }
 
+pub fn is_auto_fill_slot_id(id: &str) -> bool {
+    id == "__auto_fill_slot__" || id.starts_with("__auto_fill_slot__:")
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaylistManifestEntry {
