@@ -569,7 +569,7 @@ fn push_auto_fill_items(
                 provider_content_type: item.provider_content_type,
                 provider_suffix: item.provider_suffix,
                 original_bitrate: None,
-                track_number: None,
+                track_number: item.track_number,
                 server_id: None,
             });
         }
@@ -591,7 +591,7 @@ fn auto_sync_delta_has_work(delta: &sync::SyncDelta, total_files: usize) -> bool
 mod auto_sync_tests {
     use super::*;
 
-    fn fill_item(id: &str) -> auto_fill::AutoFillItem {
+    fn fill_item(id: &str, track_number: Option<u32>) -> auto_fill::AutoFillItem {
         auto_fill::AutoFillItem {
             id: id.to_string(),
             name: id.to_string(),
@@ -600,6 +600,7 @@ mod auto_sync_tests {
             provider_album_id: None,
             provider_content_type: None,
             provider_suffix: None,
+            track_number,
             size_bytes: 100,
             priority_reason: "test".to_string(),
             tier: None,
@@ -625,13 +626,14 @@ mod auto_sync_tests {
         let mut playlists = Vec::new();
 
         push_auto_fill_items(
-            vec![fill_item("manual"), fill_item("fill")],
+            vec![fill_item("manual", Some(1)), fill_item("fill", Some(9))],
             &mut desired_items,
             &mut playlists,
         );
 
         assert_eq!(desired_items.len(), 2);
         assert_eq!(desired_items[1].jellyfin_id, "fill");
+        assert_eq!(desired_items[1].track_number, Some(9));
         assert_eq!(playlists.len(), 1);
         assert_eq!(playlists[0].name, "Autofill");
         assert_eq!(playlists[0].tracks.len(), 1);

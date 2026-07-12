@@ -2144,6 +2144,7 @@ fn make_item(song: &Song, size_bytes: u64, reason: String) -> AutoFillItem {
         provider_album_id: song.album_id.clone(),
         provider_content_type: song.content_type.clone(),
         provider_suffix: song.suffix.clone(),
+        track_number: song.track_number,
         size_bytes,
         priority_reason: reason,
         // Tier is assigned by the fetch layer (which owns the rotated tier→pool mapping); the pure

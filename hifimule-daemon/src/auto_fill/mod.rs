@@ -44,6 +44,8 @@ pub struct AutoFillItem {
     pub provider_content_type: Option<String>,
     #[serde(default)]
     pub provider_suffix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_number: Option<u32>,
     pub size_bytes: u64,
     pub priority_reason: String,
     /// Story 13.1: source rotation-tier index (as a string) when the pipeline used Memory tiers;
@@ -316,6 +318,7 @@ pub fn rank_and_truncate(
                 .and_then(|sources| sources.first())
                 .and_then(|source| source.container.clone())
                 .or(track.container),
+            track_number: track.index_number,
             size_bytes,
             priority_reason,
             tier: None,
@@ -369,6 +372,7 @@ impl ProviderFillState {
             provider_album_id: song.album_id,
             provider_content_type: song.content_type,
             provider_suffix: song.suffix,
+            track_number: song.track_number,
             size_bytes,
             priority_reason,
             tier: None,

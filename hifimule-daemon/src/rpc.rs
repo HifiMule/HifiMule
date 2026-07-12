@@ -2750,7 +2750,7 @@ async fn provider_calculate_delta(
                         provider_content_type: item.provider_content_type,
                         provider_suffix: item.provider_suffix,
                         original_bitrate: None,
-                        track_number: None,
+                        track_number: item.track_number,
                         server_id: None,
                     });
                 }
@@ -3602,7 +3602,7 @@ fn push_fill_items_dedup(
                 provider_content_type: item.provider_content_type,
                 provider_suffix: item.provider_suffix,
                 original_bitrate: None,
-                track_number: None,
+                track_number: item.track_number,
                 server_id: Some(server_id.to_string()),
             });
             if let Some(r) = remaining.as_mut() {
@@ -4764,7 +4764,7 @@ async fn handle_sync_calculate_delta(
                             provider_content_type: item.provider_content_type,
                             provider_suffix: item.provider_suffix,
                             original_bitrate: None,
-                            track_number: None,
+                            track_number: item.track_number,
                             server_id: None,
                         });
                     }
@@ -8986,7 +8986,11 @@ mod tests {
     // later slots). Exercises the pure dedup/budget helper used by the loop.
     #[test]
     fn test_multi_slot_dedup_and_shared_budget() {
-        fn fill_item(id: &str, size: u64) -> crate::auto_fill::AutoFillItem {
+        fn fill_item(
+            id: &str,
+            size: u64,
+            track_number: Option<u32>,
+        ) -> crate::auto_fill::AutoFillItem {
             crate::auto_fill::AutoFillItem {
                 id: id.to_string(),
                 name: format!("name-{id}"),
@@ -8995,6 +8999,7 @@ mod tests {
                 provider_album_id: None,
                 provider_content_type: None,
                 provider_suffix: None,
+                track_number,
                 size_bytes: size,
                 priority_reason: "test".to_string(),
                 tier: None,
@@ -9027,9 +9032,9 @@ mod tests {
         // two new tracks (300 + 200).
         let added1 = push_fill_items_dedup(
             vec![
-                fill_item("m1", 100),
-                fill_item("f1", 300),
-                fill_item("f2", 200),
+                fill_item("m1", 100, Some(1)),
+                fill_item("f1", 300, Some(7)),
+                fill_item("f2", 200, Some(8)),
             ],
             &mut desired_items,
             &mut seen_ids,
@@ -9060,6 +9065,14 @@ mod tests {
             "manual item present exactly once"
         );
         assert_eq!(remaining, Some(500), "budget decremented by 500");
+        assert_eq!(
+            desired_items
+                .iter()
+                .find(|i| i.jellyfin_id == "f1")
+                .and_then(|i| i.track_number),
+            Some(7),
+            "autofill desired items keep provider track numbers"
+        );
         // f1/f2 tagged with the slot's server.
         assert!(
             desired_items
@@ -9077,7 +9090,7 @@ mod tests {
 
         // Slot 2 returns f1 (cross-slot dup → skipped) and a new f3 (400 bytes).
         let added2 = push_fill_items_dedup(
-            vec![fill_item("f1", 300), fill_item("f3", 400)],
+            vec![fill_item("f1", 300, None), fill_item("f3", 400, None)],
             &mut desired_items,
             &mut seen_ids,
             "s2",
