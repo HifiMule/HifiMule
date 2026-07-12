@@ -20,6 +20,10 @@ mod service;
 const LOG_MAX_BYTES: u64 = 1_048_576; // 1 MB
 const MAX_TOKIO_WORKER_THREADS: usize = 4; // Limit worker threads to prevent resource contention on low-end systems
 
+fn log_timestamp() -> String {
+    chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
 /// Simple file-based logger for release mode where stdout/stderr are unavailable.
 /// Writes to `%APPDATA%/HifiMule/daemon.log`. Truncates at 1 MB.
 pub fn log_to_file(msg: &str) {
@@ -37,12 +41,25 @@ pub fn log_to_file(msg: &str) {
             .append(true)
             .open(&log_path)
         {
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
+            let timestamp = log_timestamp();
             let _ = writeln!(f, "[{}] {}", timestamp, msg);
         }
+    }
+}
+
+#[cfg(test)]
+mod log_timestamp_tests {
+    use super::log_timestamp;
+
+    #[test]
+    fn log_timestamp_is_readable_and_sortable() {
+        let timestamp = log_timestamp();
+        assert_eq!(timestamp.len(), 19);
+        assert_eq!(&timestamp[4..5], "-");
+        assert_eq!(&timestamp[7..8], "-");
+        assert_eq!(&timestamp[10..11], " ");
+        assert_eq!(&timestamp[13..14], ":");
+        assert_eq!(&timestamp[16..17], ":");
     }
 }
 

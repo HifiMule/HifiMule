@@ -283,16 +283,17 @@ async fn settings_set_launch_on_startup(enabled: bool) -> Result<(), String> {
 
 const LOG_MAX_BYTES: u64 = 1_048_576; // 1 MB
 
+fn log_timestamp() -> String {
+    chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
 /// Simple file-based log for release mode where stdout/stderr are unavailable.
 /// Truncates at 1 MB.
 fn ui_log(msg: &str) {
     // Always try println (works in debug mode)
     println!("{}", msg);
 
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let timestamp = log_timestamp();
 
     #[cfg(target_os = "windows")]
     if let Ok(appdata) = std::env::var("APPDATA") {
@@ -332,6 +333,22 @@ fn ui_log(msg: &str) {
             use std::io::Write;
             let _ = writeln!(f, "[{}] {}", timestamp, msg);
         }
+    }
+}
+
+#[cfg(test)]
+mod log_timestamp_tests {
+    use super::log_timestamp;
+
+    #[test]
+    fn log_timestamp_is_readable_and_sortable() {
+        let timestamp = log_timestamp();
+        assert_eq!(timestamp.len(), 19);
+        assert_eq!(&timestamp[4..5], "-");
+        assert_eq!(&timestamp[7..8], "-");
+        assert_eq!(&timestamp[10..11], " ");
+        assert_eq!(&timestamp[13..14], ":");
+        assert_eq!(&timestamp[16..17], ":");
     }
 }
 
