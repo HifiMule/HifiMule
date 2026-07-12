@@ -189,6 +189,7 @@ export class BasketSidebar {
     private connectedDevices: ConnectedDeviceSummary[] = [];
     private selectedDevicePath: string | null = null;
     private deviceSwitchInFlight: boolean = false;
+    private pendingDevicePath: string | null = null;
     private pendingDeviceFriendlyName: string | undefined = undefined;
     private currentDevice: any = null;
     private syncPreviewCleanupDevicePath: string | null = null;
@@ -271,6 +272,7 @@ export class BasketSidebar {
             // Sync multi-device state so the hub renders correctly on every refreshAndRender,
             // not just during the 2s polling cycle.
             this.connectedDevices = state.connectedDevices ?? this.connectedDevices;
+            this.pendingDevicePath = state.pendingDevicePath ?? null;
             this.pendingDeviceFriendlyName = state.pendingDeviceFriendlyName ?? undefined;
             // Use explicit field-presence check: if field present in response, use it (including null);
             // otherwise keep current. Fixes the null-coalescing bug where selectedDevicePath: null
@@ -736,9 +738,7 @@ export class BasketSidebar {
                 const daemonStateResult = await rpcCall('get_daemon_state') as any;
                 const newDirty = daemonStateResult?.dirtyManifest === true;
                 const newPendingPath = daemonStateResult?.pendingDevicePath ?? null;
-                const currentHasManifest = this.folderInfo?.hasManifest ?? true;
-                const hadPendingDevice = !currentHasManifest && this.folderInfo !== null;
-                const hasPendingDevice = newPendingPath !== null;
+                const pendingDeviceChanged = newPendingPath !== this.pendingDevicePath;
 
                 const currentDevice = daemonStateResult?.currentDevice;
                 this.currentDevice = currentDevice ?? null;
@@ -777,11 +777,12 @@ export class BasketSidebar {
                     );
                 this.connectedDevices = newConnectedDevices;
                 this.selectedDevicePath = newSelectedDevicePath;
+                this.pendingDevicePath = newPendingPath;
                 this.pendingDeviceFriendlyName = daemonStateResult?.pendingDeviceFriendlyName ?? undefined;
 
-                if (newDirty !== this.isDirtyManifest || hasPendingDevice !== hadPendingDevice || isNewDevice || deviceDisconnected || activeOperationId || deviceCountChanged || selectedDeviceChanged || autoPrefsChanged) {
+                if (newDirty !== this.isDirtyManifest || pendingDeviceChanged || isNewDevice || deviceDisconnected || activeOperationId || deviceCountChanged || selectedDeviceChanged || autoPrefsChanged) {
                     this.isDirtyManifest = newDirty;
-                    if (isNewDevice || deviceDisconnected || activeOperationId || deviceCountChanged || selectedDeviceChanged || autoPrefsChanged) {
+                    if (pendingDeviceChanged || isNewDevice || deviceDisconnected || activeOperationId || deviceCountChanged || selectedDeviceChanged || autoPrefsChanged) {
                         // Let refreshAndRender handle the hydration/attach logic reliably on state change (F5)
                         await this.refreshAndRender();
                     } else {
