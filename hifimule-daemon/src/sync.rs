@@ -42,6 +42,27 @@ fn transfer_timing(size_bytes: u64, elapsed: Duration) -> TransferTiming {
     }
 }
 
+#[derive(Debug, Default)]
+struct TransferTotals {
+    bytes: u64,
+    elapsed: Duration,
+}
+
+impl TransferTotals {
+    fn record(&mut self, bytes: u64, elapsed: Duration) {
+        self.bytes += bytes;
+        self.elapsed += elapsed;
+    }
+
+    fn timing(&self) -> TransferTiming {
+        transfer_timing(self.bytes, self.elapsed)
+    }
+}
+
+fn provider_source_label(server_id: Option<String>) -> String {
+    server_id.unwrap_or_else(|| "<default>".to_string())
+}
+
 /// An item desired for sync (from the UI basket / Jellyfin API).
 #[derive(Debug, Clone)]
 pub struct DesiredItem {
@@ -1772,6 +1793,8 @@ struct ProviderProducerOutcome {
     warnings: Vec<String>,
     staging_dir: Option<tempfile::TempDir>,
     blocked: Duration,
+    server_id: Option<String>,
+    staging: TransferTotals,
 }
 
 pub async fn execute_provider_sync(
@@ -1880,7 +1903,8 @@ pub async fn execute_provider_sync(
     let priority_barrier = Arc::new(tokio::sync::Barrier::new(producer_groups.len().max(1)));
 
     macro_rules! spawn_provider {
-        ($producer_adds:expr, $producer_provider:expr) => {{
+        ($server_id:expr, $producer_adds:expr, $producer_provider:expr) => {{
+        let server_id = $server_id;
         let producer_adds = $producer_adds;
         let producer_add_count = producer_adds.len();
         let first_auto_fill = producer_adds.partition_point(|add| !add.is_auto_fill);
@@ -1903,6 +1927,7 @@ pub async fn execute_provider_sync(
         let mut warnings = Vec::new();
         let mut staging_dir: Option<tempfile::TempDir> = None;
         let mut blocked = Duration::ZERO;
+        let mut staging = TransferTotals::default();
 
           let mut priority_barrier_passed = false;
           for (index, add_item) in producer_adds.into_iter().enumerate() {
@@ -2385,7 +2410,9 @@ pub async fn execute_provider_sync(
                 }
             };
             byte_permit.shrink_to(staged_size);
-            let staging_timing = transfer_timing(staged_size, t_staging.elapsed());
+            let staging_elapsed = t_staging.elapsed();
+            let staging_timing = transfer_timing(staged_size, staging_elapsed);
+            staging.record(staged_size, staging_elapsed);
             crate::daemon_log!(
                 "[Sync] '{}' staged_size={}B staging={:.2}ms({:.1}MB/s)",
                 add_item.name,
@@ -2451,6 +2478,8 @@ pub async fn execute_provider_sync(
                             warnings,
                             staging_dir,
                             blocked,
+                            server_id,
+                            staging,
                         };
                     }
                 }
@@ -2469,6 +2498,8 @@ pub async fn execute_provider_sync(
             warnings,
             staging_dir,
             blocked,
+            server_id,
+            staging,
         }
         })
     }};
@@ -2482,11 +2513,12 @@ pub async fn execute_provider_sync(
             .and_then(|id| providers_by_server.get(id))
             .cloned()
             .unwrap_or_else(|| Arc::clone(&provider));
-        producers.push(spawn_provider!(adds, group_provider));
+        producers.push(spawn_provider!(server_id, adds, group_provider));
     }
     drop(staged_tx);
 
     let mut writer_idle = Duration::ZERO;
+    let mut writer_timing = TransferTotals::default();
     let mut writer_failed = false;
     loop {
         let wait_started = std::time::Instant::now();
@@ -2584,7 +2616,9 @@ pub async fn execute_provider_sync(
                     let _ = tokio::fs::remove_file(&staged.staged_path).await;
                     continue;
                 }
-                let write_timing = transfer_timing(staged.staged_size, t_write.elapsed());
+                let write_elapsed = t_write.elapsed();
+                let write_timing = transfer_timing(staged.staged_size, write_elapsed);
+                writer_timing.record(staged.staged_size, write_elapsed);
                 let staged_cleanup = match tokio::fs::remove_file(&staged.staged_path).await {
                     Ok(()) => "ok".to_string(),
                     Err(e) => format!("error: {e}"),
@@ -2677,6 +2711,7 @@ pub async fn execute_provider_sync(
 
     let mut producer_blocked = Duration::ZERO;
     let mut staging_dirs = Vec::new();
+    let mut source_timings = Vec::new();
     for producer in producers {
         let producer_outcome = producer
             .await
@@ -2684,10 +2719,29 @@ pub async fn execute_provider_sync(
         errors.extend(producer_outcome.errors);
         sync_warnings.extend(producer_outcome.warnings);
         producer_blocked += producer_outcome.blocked;
+        source_timings.push((
+            provider_source_label(producer_outcome.server_id),
+            producer_outcome.staging.timing(),
+        ));
         if let Some(staging_dir) = producer_outcome.staging_dir {
             staging_dirs.push(staging_dir);
         }
     }
+    source_timings.sort_by(|left, right| left.0.cmp(&right.0));
+    for (server, timing) in source_timings {
+        crate::daemon_log!(
+            "[Sync] Provider source summary server={} staging={:.2}ms({:.1}MB/s)",
+            server,
+            timing.elapsed_ms,
+            timing.speed_mb_s
+        );
+    }
+    let writer_timing = writer_timing.timing();
+    crate::daemon_log!(
+        "[Sync] Provider writer summary write={:.2}ms({:.1}MB/s)",
+        writer_timing.elapsed_ms,
+        writer_timing.speed_mb_s
+    );
     crate::daemon_log!(
         "[Sync] Provider pipeline summary writer_idle_ms={:.2} producer_blocked_ms={:.2} queue_depth={} staged_bytes={}",
         writer_idle.as_secs_f64() * 1000.0,
@@ -3562,6 +3616,39 @@ mod tests {
 
         assert_eq!(timing.elapsed_ms, 0.0);
         assert_eq!(timing.speed_mb_s, 0.0);
+    }
+
+    #[test]
+    fn transfer_timing_provider_stage_totals_are_weighted_zero_safe_and_separate() {
+        let mut alpha = TransferTotals::default();
+        alpha.record(1_000_000, Duration::from_secs(1));
+        alpha.record(9_000_000, Duration::from_secs(3));
+        let mut beta = TransferTotals::default();
+        beta.record(1_000_000, Duration::from_secs(2));
+
+        let mut sources = vec![
+            (
+                provider_source_label(Some("beta".to_string())),
+                beta.timing(),
+            ),
+            (
+                provider_source_label(None),
+                TransferTotals::default().timing(),
+            ),
+            (
+                provider_source_label(Some("alpha".to_string())),
+                alpha.timing(),
+            ),
+        ];
+        sources.sort_by(|left, right| left.0.cmp(&right.0));
+
+        assert_eq!(sources[0].0, "<default>");
+        assert_eq!(sources[0].1.elapsed_ms, 0.0);
+        assert_eq!(sources[0].1.speed_mb_s, 0.0);
+        assert_eq!(sources[1].0, "alpha");
+        assert_eq!(sources[1].1.speed_mb_s, 2.5);
+        assert_eq!(sources[2].0, "beta");
+        assert_eq!(sources[2].1.speed_mb_s, 0.5);
     }
 
     #[tokio::test]
