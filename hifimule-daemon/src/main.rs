@@ -1475,7 +1475,7 @@ async fn run_auto_sync_via_provider(
 
     match result {
         Ok((_synced_items, errors)) => {
-            if sync_op_manager.is_cancelled(&operation_id).await {
+            if errors.is_empty() && sync_op_manager.is_cancelled(&operation_id).await {
                 if let Some(mut operation) = sync_op_manager.get_operation(&operation_id).await {
                     operation.status = sync::SyncStatus::Cancelled;
                     sync_op_manager

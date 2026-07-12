@@ -2771,7 +2771,6 @@ async fn provider_calculate_delta(
     );
     let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
     patch_delta_tiers(&mut delta, &af_tier_map);
-    patch_delta_auto_fill(&mut delta, &af_item_ids);
     patch_delta_bitrate_overrides(&mut delta, &af_bitrate_map);
     delta.pity_fired_servers = af_pity_fired;
     delta.playlists = playlist_sync_items;
@@ -2818,6 +2817,7 @@ async fn provider_calculate_delta(
             );
         }
     }
+    patch_delta_auto_fill(&mut delta, &af_item_ids);
 
     Ok(delta_value_with_cleanup_metadata(&delta, manifest))
 }
@@ -4299,7 +4299,6 @@ async fn multi_provider_calculate_delta(
 
     let mut delta = crate::sync::calculate_delta(&desired_items, manifest);
     patch_delta_tiers(&mut delta, &af_tier_map);
-    patch_delta_auto_fill(&mut delta, &af_item_ids);
     patch_delta_bitrate_overrides(&mut delta, &af_bitrate_map);
     delta.pity_fired_servers = af_pity_fired;
     delta.playlists = playlist_sync_items;
@@ -4311,8 +4310,8 @@ async fn multi_provider_calculate_delta(
             device_io.as_ref(),
         )
         .await;
-        patch_delta_auto_fill(&mut delta, &af_item_ids);
     }
+    patch_delta_auto_fill(&mut delta, &af_item_ids);
     Ok(delta_value_with_cleanup_metadata(&delta, manifest))
 }
 
@@ -4709,6 +4708,7 @@ async fn handle_sync_calculate_delta(
     // auto-fill slot to the selected server. For the legacy object this is
     // byte-for-byte identical to the old `enabled`/`maxBytes`/`excludeItemIds` reads.
     let mut autofill_playlist_tracks = Vec::new();
+    let mut af_item_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Some(desc) = parse_auto_fill_descriptors(&params).into_iter().next() {
         let max_fill_bytes = if let Some(mb) = desc.max_bytes {
             mb
@@ -4751,6 +4751,7 @@ async fn handle_sync_calculate_delta(
                 for item in af_items {
                     let item_id = item.id.clone();
                     if seen_ids.insert(item_id) {
+                        af_item_ids.insert(item.id.clone());
                         autofill_playlist_tracks.push(autofill_playlist_track(&item));
                         desired_items.push(crate::sync::DesiredItem {
                             jellyfin_id: item.id,
@@ -4825,6 +4826,7 @@ async fn handle_sync_calculate_delta(
             crate::sync::format_change_reason_summary(&delta)
         );
     }
+    patch_delta_auto_fill(&mut delta, &af_item_ids);
 
     if state.sync_operation_manager.is_pipeline_cancelled() {
         return Err(sync_cancelled_error());
@@ -5239,7 +5241,7 @@ async fn handle_sync_execute(
                 }],
             };
 
-            if op_manager.is_cancelled(&op_id).await {
+            if all_errors.is_empty() && op_manager.is_cancelled(&op_id).await {
                 if let Some(mut operation) = op_manager.get_operation(&op_id).await {
                     operation.status = crate::sync::SyncStatus::Cancelled;
                     op_manager.update_operation(&op_id, operation).await;
@@ -5344,7 +5346,7 @@ async fn handle_sync_execute(
 
             match result {
                 Ok((_synced_items, errors)) => {
-                    if op_manager.is_cancelled(&op_id).await {
+                    if errors.is_empty() && op_manager.is_cancelled(&op_id).await {
                         if let Some(mut operation) = op_manager.get_operation(&op_id).await {
                             operation.status = crate::sync::SyncStatus::Cancelled;
                             op_manager.update_operation(&op_id, operation).await;

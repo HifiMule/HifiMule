@@ -4,7 +4,7 @@ baseline_commit: 2730d9ea113da3c54fb5b958de224ecb5ecd81f5
 
 # Story 14.3: Per-Server Producer Fairness and Priority Buckets
 
-Status: review
+Status: done
 
 ## Story
 
@@ -47,6 +47,15 @@ so that multi-server and Auto-Fill syncs stay responsive while respecting my exp
 - [x] Extend existing daemon regressions (AC: 1-6)
   - [x] Retain and pass the Story 14.2 pipeline, backpressure, cancellation, transcode, and cleanup coverage.
   - [x] Add Auto-Fill priority metadata coverage.
+
+### Review Findings
+
+- [x] [Review][Patch] Auto-Fill ready buffering can deadlock the bounded pipeline [hifimule-daemon/src/sync.rs:3090]
+- [x] [Review][Patch] Internal failure cancellation is reported as user cancellation and discards errors [hifimule-daemon/src/rpc.rs:5241]
+- [x] [Review][Patch] URL resolution, HTTP status, and response-body source failures do not receive the required retry [hifimule-daemon/src/sync.rs:2633]
+- [x] [Review][Patch] Legacy Jellyfin Auto-Fill additions are never marked as Auto-Fill [hifimule-daemon/src/rpc.rs:4742]
+- [x] [Review][Patch] Existence-recovered Auto-Fill additions lose their priority marker [hifimule-daemon/src/sync.rs:3637]
+- [x] [Review][Patch] Polling `try_acquire_owned` bypasses semaphore fairness between server producers [hifimule-daemon/src/sync.rs:2847]
 
 ## Dev Notes
 
@@ -121,6 +130,8 @@ GPT-5 Codex
 - Ultimate context engine analysis completed - comprehensive developer guide created.
 - Implemented shared multi-server producer staging with one serial writer, explicit/Auto-Fill priority buckets, provider routing, source retry policies, and device-write retry.
 - Validated with `rtk cargo test -p hifimule-daemon` (626 passed), `rtk cargo check -p hifimule-daemon`, and `rtk cargo fmt --check`.
+- Review patches replaced permit-retaining Auto-Fill buckets with an explicit-phase barrier, completed source retries and priority propagation, preserved failure status, and added deadlock/HTTP retry regressions.
+- Review validation: `rtk cargo test -p hifimule-daemon` (627 passed), `rtk cargo check -p hifimule-daemon`, `rtk cargo fmt --check`, and `rtk git diff --check`.
 
 ### File List
 
@@ -133,3 +144,4 @@ GPT-5 Codex
 
 - 2026-07-11: Story created and marked ready for development.
 - 2026-07-11: Implemented multi-server producer/writer scheduler and retry policies; daemon suite passes.
+- 2026-07-12: Code review completed; six patches applied and verified.

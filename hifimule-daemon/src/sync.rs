@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -2545,10 +2545,21 @@ pub async fn execute_provider_sync(
     let byte_limiter = Arc::new(StagedByteLimiter::new(PROVIDER_READY_QUEUE_MAX_BYTES));
     let count_limiter = Arc::new(Semaphore::new(PROVIDER_READY_QUEUE_MAX_TRACKS));
     let (staged_tx, mut staged_rx) = mpsc::channel(PROVIDER_READY_QUEUE_MAX_TRACKS);
+    let mut producer_groups: std::collections::HashMap<Option<String>, Vec<SyncAddItem>> =
+        std::collections::HashMap::new();
+    for add in delta.adds.clone() {
+        producer_groups
+            .entry(add.server_id.clone())
+            .or_default()
+            .push(add);
+    }
+    let priority_barrier = Arc::new(tokio::sync::Barrier::new(producer_groups.len().max(1)));
+
     macro_rules! spawn_provider {
         ($producer_adds:expr, $producer_provider:expr) => {{
         let producer_adds = $producer_adds;
         let producer_add_count = producer_adds.len();
+        let first_auto_fill = producer_adds.partition_point(|add| !add.is_auto_fill);
         let producer_provider = $producer_provider;
         let producer_providers_by_server: std::collections::HashMap<
             String,
@@ -2561,6 +2572,7 @@ pub async fn execute_provider_sync(
         let producer_compatibility = compatibility.clone();
         let producer_byte_limiter = Arc::clone(&byte_limiter);
         let producer_count_limiter = Arc::clone(&count_limiter);
+        let producer_priority_barrier = Arc::clone(&priority_barrier);
         let staged_tx = staged_tx.clone();
         tokio::spawn(async move {
         let mut errors = Vec::new();
@@ -2568,7 +2580,18 @@ pub async fn execute_provider_sync(
         let mut staging_dir: Option<tempfile::TempDir> = None;
         let mut blocked = Duration::ZERO;
 
-        for (index, add_item) in producer_adds.into_iter().enumerate() {
+          let mut priority_barrier_passed = false;
+          for (index, add_item) in producer_adds.into_iter().enumerate() {
+            if index == first_auto_fill {
+                let passed = tokio::select! {
+                    _ = producer_priority_barrier.wait() => true,
+                    _ = wait_for_operation_cancellation(&producer_operation_manager, &producer_operation_id) => false,
+                };
+                if !passed {
+                    break;
+                }
+                priority_barrier_passed = true;
+            }
             let producer_provider = add_item
                 .server_id
                 .as_ref()
@@ -2635,7 +2658,11 @@ pub async fn execute_provider_sync(
                     match producer_provider.download_url(&add_item.jellyfin_id, profile.as_ref()).await {
                         Ok(url) => Ok(url),
                         Err(first_error) => {
-                            crate::daemon_log!("[Sync] Retrying source for '{}': {}", add_item.name, first_error);
+                            crate::daemon_log!(
+                                "[Sync] Retrying source URL for '{}': {}",
+                                add_item.name,
+                                first_error
+                            );
                             producer_provider.download_url(&add_item.jellyfin_id, profile.as_ref()).await
                         }
                     }
@@ -2686,7 +2713,17 @@ pub async fn execute_provider_sync(
                 result = async {
                     let client = reqwest::Client::new();
                     match client.get(&url).send().await {
-                        Ok(response) => Ok(response),
+                        Ok(response)
+                            if response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS
+                                && !response.status().is_server_error() => Ok(response),
+                        Ok(response) => {
+                            crate::daemon_log!(
+                                "[Sync] Retrying HTTP source for '{}' after status {}",
+                                add_item.name,
+                                response.status()
+                            );
+                            client.get(&url).send().await
+                        }
                         Err(first_error) => {
                             crate::daemon_log!("[Sync] Retrying HTTP source for '{}': {}", add_item.name, first_error);
                             client.get(&url).send().await
@@ -2845,20 +2882,9 @@ pub async fn execute_provider_sync(
             };
 
             let count_started = std::time::Instant::now();
-            let count_permit = loop {
-                if producer_operation_manager
-                    .is_cancelled(&producer_operation_id)
-                    .await
-                {
-                    break None;
-                }
-                match Arc::clone(&producer_count_limiter).try_acquire_owned() {
-                    Ok(permit) => break Some(permit),
-                    Err(tokio::sync::TryAcquireError::NoPermits) => {
-                        tokio::time::sleep(Duration::from_millis(20)).await;
-                    }
-                    Err(tokio::sync::TryAcquireError::Closed) => break None,
-                }
+            let count_permit = tokio::select! {
+                permit = Arc::clone(&producer_count_limiter).acquire_owned() => permit.ok(),
+                _ = wait_for_operation_cancellation(&producer_operation_manager, &producer_operation_id) => None,
             };
             let Some(count_permit) = count_permit else {
                 break;
@@ -2950,17 +2976,66 @@ pub async fn execute_provider_sync(
                 "{index:06}-{}",
                 provider_sync_staging_path_component(&add_item.jellyfin_id)
             ));
-            let staged_size = match stream_to_staging_file(
-                response.bytes_stream(),
-                total_size,
-                progress_callback,
-                &staged_path,
-                &producer_operation_manager,
-                &producer_operation_id,
-                &mut byte_permit,
-            )
-            .await
-            {
+            let mut response = response;
+            let staged_size_result = loop {
+                let result = stream_to_staging_file(
+                    response.bytes_stream(),
+                    total_size,
+                    Arc::clone(&progress_callback),
+                    &staged_path,
+                    &producer_operation_manager,
+                    &producer_operation_id,
+                    &mut byte_permit,
+                )
+                .await;
+                if result.is_ok()
+                    || producer_operation_manager
+                        .is_cancelled(&producer_operation_id)
+                        .await
+                {
+                    break result;
+                }
+
+                let first_error = result.unwrap_err();
+                crate::daemon_log!(
+                    "[Sync] Retrying staged source for '{}': {}",
+                    add_item.name,
+                    first_error
+                );
+                let _ = tokio::fs::remove_file(&staged_path).await;
+                let retry_response = tokio::select! {
+                    result = reqwest::Client::new().get(&url).send() => result,
+                    _ = wait_for_operation_cancellation(&producer_operation_manager, &producer_operation_id) => {
+                        break Err(anyhow::anyhow!("Cancelled while retrying staged source"));
+                    },
+                };
+                match retry_response {
+                    Ok(retry) if retry.status().is_success() => {
+                        response = retry;
+                        break stream_to_staging_file(
+                            response.bytes_stream(),
+                            total_size,
+                            progress_callback,
+                            &staged_path,
+                            &producer_operation_manager,
+                            &producer_operation_id,
+                            &mut byte_permit,
+                        )
+                        .await;
+                    }
+                    Ok(retry) => break Err(anyhow::anyhow!(
+                        "Source retry returned status {} after: {}",
+                        retry.status(),
+                        first_error
+                    )),
+                    Err(retry_error) => break Err(anyhow::anyhow!(
+                        "Source retry failed after {}: {}",
+                        first_error,
+                        retry_error
+                    )),
+                }
+            };
+            let staged_size = match staged_size_result {
                 Ok(staged_size) => staged_size,
                 Err(e) => {
                     let _ = tokio::fs::remove_file(&staged_path).await;
@@ -3058,6 +3133,13 @@ pub async fn execute_provider_sync(
             }
         }
 
+        if !priority_barrier_passed {
+            tokio::select! {
+                _ = producer_priority_barrier.wait() => {},
+                _ = wait_for_operation_cancellation(&producer_operation_manager, &producer_operation_id) => {},
+            }
+        }
+
         ProviderProducerOutcome {
             errors,
             warnings,
@@ -3068,14 +3150,6 @@ pub async fn execute_provider_sync(
     }};
     }
 
-    let mut producer_groups: std::collections::HashMap<Option<String>, Vec<SyncAddItem>> =
-        std::collections::HashMap::new();
-    for add in delta.adds.clone() {
-        producer_groups
-            .entry(add.server_id.clone())
-            .or_default()
-            .push(add);
-    }
     let mut producers = Vec::new();
     for (server_id, mut adds) in producer_groups {
         adds.sort_by_key(|add| add.is_auto_fill);
@@ -3090,26 +3164,11 @@ pub async fn execute_provider_sync(
 
     let mut writer_idle = Duration::ZERO;
     let mut writer_failed = false;
-    let mut explicit_ready = VecDeque::new();
-    let mut autofill_ready = VecDeque::new();
-    let mut producers_finished = false;
     loop {
         let wait_started = std::time::Instant::now();
-        let next = loop {
-            if let Some(staged) = explicit_ready.pop_front() {
-                break Some(staged);
-            }
-            if producers_finished {
-                break autofill_ready.pop_front();
-            }
-            match tokio::select! {
-                next = staged_rx.recv() => next,
-                _ = wait_for_operation_cancellation(&operation_manager, &operation_id) => None,
-            } {
-                Some(staged) if staged.add_item.is_auto_fill => autofill_ready.push_back(staged),
-                Some(staged) => break Some(staged),
-                None => producers_finished = true,
-            }
+        let next = tokio::select! {
+            next = staged_rx.recv() => next,
+            _ = wait_for_operation_cancellation(&operation_manager, &operation_id) => None,
         };
         let waited = wait_started.elapsed();
         writer_idle += waited;
@@ -5561,7 +5620,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_provider_sync_count_backpressure_limits_staged_files() {
+    async fn test_execute_provider_sync_autofill_backpressure_does_not_deadlock() {
         let mut server = mockito::Server::new_async().await;
         let mut downloads = Vec::new();
         for id in ["song-a", "song-b", "song-c"] {
@@ -5590,12 +5649,16 @@ mod tests {
         operation_manager
             .create_operation(operation_id.clone(), 3)
             .await;
+        let mut adds = vec![
+            add_item_with_provider_format("song-a", "flac", "audio/flac", 4),
+            add_item_with_provider_format("song-b", "flac", "audio/flac", 4),
+            add_item_with_provider_format("song-c", "flac", "audio/flac", 4),
+        ];
+        for add in &mut adds {
+            add.is_auto_fill = true;
+        }
         let delta = SyncDelta {
-            adds: vec![
-                add_item_with_provider_format("song-a", "flac", "audio/flac", 4),
-                add_item_with_provider_format("song-b", "flac", "audio/flac", 4),
-                add_item_with_provider_format("song-c", "flac", "audio/flac", 4),
-            ],
+            adds,
             deletes: vec![],
             id_changes: vec![],
             unchanged: 0,
@@ -5641,6 +5704,63 @@ mod tests {
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(synced.len(), 3);
         assert!(provider_staging_dirs_for_operation(&operation_id).is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_execute_provider_sync_retries_transient_http_status_once() {
+        let mut server = mockito::Server::new_async().await;
+        let download = server
+            .mock("GET", "/rest/download.view")
+            .match_query(mockito::Matcher::AllOf(vec![mockito::Matcher::UrlEncoded(
+                "id".into(),
+                "song-retry".into(),
+            )]))
+            .with_status(500)
+            .expect(2)
+            .create_async()
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, device_io) = setup_provider_sync_device(dir.path()).await;
+        let operation_manager = Arc::new(SyncOperationManager::new());
+        let operation_id = unique_operation_id("op-source-retry");
+        operation_manager
+            .create_operation(operation_id.clone(), 1)
+            .await;
+        let delta = SyncDelta {
+            adds: vec![add_item_with_provider_format(
+                "song-retry",
+                "flac",
+                "audio/flac",
+                4,
+            )],
+            deletes: vec![],
+            id_changes: vec![],
+            unchanged: 0,
+            playlists: vec![],
+            pity_fired_servers: vec![],
+        };
+
+        let (synced, errors) = execute_provider_sync(
+            &delta,
+            dir.path(),
+            ProviderSyncSource {
+                provider: subsonic_provider(server.url()),
+                transcoding_profile: Some(rockbox_direct_profile()),
+                providers_by_server: std::collections::HashMap::new(),
+            },
+            operation_manager,
+            operation_id,
+            manager,
+            device_io,
+        )
+        .await
+        .unwrap();
+
+        download.assert_async().await;
+        assert!(synced.is_empty());
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].error_message.contains("500"));
     }
 
     #[tokio::test]
