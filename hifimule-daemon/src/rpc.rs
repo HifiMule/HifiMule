@@ -5106,33 +5106,6 @@ async fn handle_sync_execute(
         });
     }
 
-    // Generate unique operation ID
-    let operation_id = uuid::Uuid::new_v4().to_string();
-
-    // Create operation in manager
-    let total_files = delta.adds.len() + delta.deletes.len();
-    state
-        .sync_operation_manager
-        .create_operation(operation_id.clone(), total_files)
-        .await;
-
-    // Mark manifest dirty before sync starts — enables interrupted-sync detection (Story 4.4)
-    // Failing to mark dirty MUST abort the sync to prevent undetectable interruptions.
-    if let Err(e) = state
-        .device_manager
-        .update_manifest(|m| {
-            m.dirty = true;
-            m.pending_item_ids = pending_item_ids.clone();
-        })
-        .await
-    {
-        return Err(JsonRpcError {
-            code: ERR_STORAGE_ERROR,
-            message: format!("Failed to mark manifest dirty, aborting sync: {}", e),
-            data: None,
-        });
-    }
-
     // Multi-server execute (AC28/AC29): when the delta's adds belong to a server
     // other than the selected one — whether they span multiple servers or sit on a
     // single non-selected server — route each server's items to its own provider.
@@ -5158,6 +5131,37 @@ async fn handle_sync_execute(
         Some(sel) => add_servers.iter().any(|s| s != sel),
         None => true,
     };
+    let selected_provider = if needs_provider_routing {
+        None
+    } else {
+        Some(require_provider(state).await?)
+    };
+
+    // Create the operation only after single-server provider resolution succeeds.
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let total_files = delta.adds.len() + delta.deletes.len();
+    state
+        .sync_operation_manager
+        .create_operation(operation_id.clone(), total_files)
+        .await;
+
+    // Mark manifest dirty before sync starts — enables interrupted-sync detection (Story 4.4)
+    // Failing to mark dirty MUST abort the sync to prevent undetectable interruptions.
+    if let Err(e) = state
+        .device_manager
+        .update_manifest(|m| {
+            m.dirty = true;
+            m.pending_item_ids = pending_item_ids.clone();
+        })
+        .await
+    {
+        return Err(JsonRpcError {
+            code: ERR_STORAGE_ERROR,
+            message: format!("Failed to mark manifest dirty, aborting sync: {}", e),
+            data: None,
+        });
+    }
+
     if needs_provider_routing {
         // Resolve every group's provider up front so connection errors surface here.
         let mut group_providers: Vec<(String, Arc<dyn MediaProvider>)> = Vec::new();
@@ -5289,7 +5293,8 @@ async fn handle_sync_execute(
         return Ok(serde_json::json!({ "operationId": operation_id }));
     }
 
-    if let Some(provider) = active_non_jellyfin_provider(state).await {
+    let provider = selected_provider.expect("single-server provider resolved before operation");
+    {
         let op_manager = state.sync_operation_manager.clone();
         let op_id = operation_id.clone();
         let device_manager = state.device_manager.clone();
@@ -5410,140 +5415,6 @@ async fn handle_sync_execute(
             "operationId": operation_id
         }));
     }
-
-    // Get credentials
-    let (url, token, user_id) = CredentialManager::get_credentials().map_err(|e| JsonRpcError {
-        code: ERR_STORAGE_ERROR,
-        message: format!("Failed to get credentials: {}", e),
-        data: None,
-    })?;
-    let user_id = user_id.unwrap_or_else(|| "Me".to_string());
-
-    // Spawn background task to execute sync
-    let jellyfin_client = state.jellyfin_client.clone();
-    let op_manager = state.sync_operation_manager.clone();
-    let op_id = operation_id.clone();
-    let device_manager = state.device_manager.clone();
-    let state_tx = state.state_tx.clone();
-    let _ = state_tx.send(crate::DaemonState::Syncing);
-
-    tokio::spawn(async move {
-        // Atomically fetch manifest + IO backend to avoid TOCTOU if device disconnects
-        // between reading the manifest (for transcoding profile) and getting the IO handle.
-        let (sync_manifest, device_io) = match device_manager.get_manifest_and_io().await {
-            Some(pair) => pair,
-            None => {
-                eprintln!("[Sync] No device available — cannot execute sync");
-                if let Some(mut operation) = op_manager.get_operation(&op_id).await {
-                    operation.status = crate::sync::SyncStatus::Failed;
-                    op_manager.update_operation(&op_id, operation).await;
-                }
-                let _ = state_tx.send(crate::DaemonState::Error);
-                return;
-            }
-        };
-
-        // Load transcoding profile from the atomically fetched manifest
-        let transcoding_profile = match load_selected_transcoding_profile(
-            sync_manifest.transcoding_profile_id.as_deref(),
-        ) {
-            Ok(profile) => profile,
-            Err(e) => {
-                eprintln!("[Sync] Failed to load transcoding profile: {}", e);
-                fail_sync_operation(
-                    &op_manager,
-                    &op_id,
-                    "sync_execute",
-                    format!("Failed to load transcoding profile: {}", e),
-                )
-                .await;
-                let _ = state_tx.send(crate::DaemonState::Error);
-                return;
-            }
-        };
-
-        let result = crate::sync::execute_sync(
-            &delta,
-            &device_path,
-            &jellyfin_client,
-            &url,
-            &token,
-            &user_id,
-            op_manager.clone(),
-            op_id.clone(),
-            device_manager.clone(),
-            transcoding_profile,
-            device_io,
-        )
-        .await;
-
-        match result {
-            Ok((_synced_items, errors)) => {
-                if op_manager.is_cancelled(&op_id).await {
-                    if let Some(mut operation) = op_manager.get_operation(&op_id).await {
-                        operation.status = crate::sync::SyncStatus::Cancelled;
-                        op_manager.update_operation(&op_id, operation).await;
-                    }
-                    let _ = state_tx.send(crate::DaemonState::Idle);
-                    return;
-                }
-
-                // Clear dirty flag after sync completes — per-file updates already wrote all items (Story 4.4)
-                if let Err(e) = device_manager
-                    .update_manifest(|m| {
-                        m.dirty = false;
-                        m.pending_item_ids = vec![];
-                        if errors.is_empty() {
-                            m.last_synced_transcoding_profile_id = m.transcoding_profile_id.clone();
-                            m.transcoding_profile_dirty = false;
-                        }
-                    })
-                    .await
-                {
-                    eprintln!("Failed to clear dirty flag on final manifest: {}", e);
-                }
-
-                // Update operation status
-                if let Some(mut operation) = op_manager.get_operation(&op_id).await {
-                    operation.status = if errors.is_empty() {
-                        crate::sync::SyncStatus::Complete
-                    } else {
-                        crate::sync::SyncStatus::Failed
-                    };
-                    operation.errors = errors.clone();
-                    op_manager.update_operation(&op_id, operation).await;
-                }
-
-                // Notify OS and return tray to Idle — Story 5.3
-                if errors.is_empty() {
-                    // JoinHandle intentionally dropped: fire-and-forget per AC #4.
-                    // Err(e) path inside the function logs the failure; panics are silently
-                    // absorbed, which is acceptable for a best-effort OS notification.
-                    drop(tokio::task::spawn_blocking(send_sync_complete_notification));
-                }
-                let _ = state_tx.send(crate::DaemonState::Idle);
-            }
-            Err(e) => {
-                // Mark operation as failed
-                if let Some(mut operation) = op_manager.get_operation(&op_id).await {
-                    operation.status = crate::sync::SyncStatus::Failed;
-                    operation.errors.push(crate::sync::SyncFileError {
-                        jellyfin_id: String::new(),
-                        filename: String::from("sync_execute"),
-                        error_message: e.to_string(),
-                    });
-                    op_manager.update_operation(&op_id, operation).await;
-                }
-
-                let _ = state_tx.send(crate::DaemonState::Error);
-            }
-        }
-    });
-
-    // Return operation ID immediately
-    Ok(serde_json::json!({
-        "operationId": operation_id
-    }))
 }
 
 async fn handle_sync_get_operation_status(
@@ -8182,6 +8053,91 @@ mod tests {
             let operation = state
                 .sync_operation_manager
                 .get_operation(result["operationId"].as_str().unwrap())
+                .await
+                .expect("operation");
+            if operation.status != crate::sync::SyncStatus::Running {
+                assert_eq!(operation.status, crate::sync::SyncStatus::Complete);
+                assert!(operation.errors.is_empty(), "{:?}", operation.errors);
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("sync operation did not complete");
+    }
+
+    #[tokio::test]
+    async fn test_sync_execute_uses_active_jellyfin_provider_pipeline() {
+        let mut server = mockito::Server::new_async().await;
+        let _download = server
+            .mock("GET", "/Items/song1/Download")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "api_key".into(),
+                "jellyfin-token".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "audio/flac")
+            .with_body(vec![1_u8, 2, 3, 4])
+            .expect(1)
+            .create_async()
+            .await;
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db);
+        state
+            .server_manager
+            .write()
+            .await
+            .set_test_provider(Arc::new(crate::providers::jellyfin::JellyfinProvider::new(
+                JellyfinClient::new(),
+                server.url(),
+                "jellyfin-token",
+                "user1",
+            )));
+
+        let dir = tempfile::tempdir().unwrap();
+        state
+            .device_manager
+            .handle_device_detected(
+                dir.path().to_path_buf(),
+                crate::device::DeviceManifest {
+                    device_id: "jellyfin-exec-dev".to_string(),
+                    name: Some("Exec Dev".to_string()),
+                    version: "1.1".to_string(),
+                    managed_paths: vec!["Music".to_string()],
+                    ..Default::default()
+                },
+                Arc::new(crate::device_io::MscBackend::new(dir.path().to_path_buf())),
+            )
+            .await
+            .unwrap();
+
+        let delta = json!({
+            "adds": [{
+                "jellyfinId": "song1",
+                "name": "Track One",
+                "album": "Album One",
+                "artist": "Artist One",
+                "sizeBytes": 4,
+                "etag": null,
+                "providerAlbumId": "album1",
+                "providerContentType": "audio/flac",
+                "providerSuffix": "flac"
+            }],
+            "deletes": [],
+            "idChanges": [],
+            "unchanged": 0,
+            "playlists": []
+        });
+
+        let result = handle_sync_execute(&state, Some(json!({ "delta": delta })))
+            .await
+            .expect("Jellyfin execute should use active provider pipeline");
+        let operation_id = result["operationId"].as_str().unwrap();
+
+        for _ in 0..20 {
+            let operation = state
+                .sync_operation_manager
+                .get_operation(operation_id)
                 .await
                 .expect("operation");
             if operation.status != crate::sync::SyncStatus::Running {

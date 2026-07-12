@@ -958,59 +958,6 @@ impl JellyfinClient {
         Ok(())
     }
 
-    /// Unified item stream resolver. If `transcoding_profile` is Some, calls
-    /// POST /Items/{id}/PlaybackInfo to negotiate the stream URL. Falls back to
-    /// /Items/{id}/Download if direct play is supported or PlaybackInfo returns no
-    /// transcoding URL. If `transcoding_profile` is None, uses /Download directly.
-    ///
-    /// Both code paths call `response.bytes_stream()` on a `reqwest::Response`,
-    /// so the return type is a single concrete impl Stream (no type erasure needed).
-    /// Returns the byte stream and whether the server is actually transcoding the content.
-    /// `is_transcoded = false` means the original file bytes are served (direct play/download).
-    pub async fn get_item_stream(
-        &self,
-        base_url: &str,
-        token: &str,
-        user_id: &str,
-        item_id: &str,
-        transcoding_profile: Option<&serde_json::Value>,
-    ) -> Result<(
-        impl futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>>,
-        bool,
-    )> {
-        CredentialManager::validate_url(base_url)?;
-        CredentialManager::validate_token(token)?;
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
-
-        // Resolve the URL to stream from
-        let (stream_url, is_transcoded) = if let Some(profile) = transcoding_profile {
-            self.resolve_stream_url(base_url, token, user_id, item_id, profile)
-                .await?
-        } else {
-            (
-                format!(
-                    "{}/Items/{}/Download",
-                    base_url.trim_end_matches('/'),
-                    item_id
-                ),
-                false,
-            )
-        };
-
-        let response = self.client.get(&stream_url).headers(headers).send().await?;
-
-        if !response.status().is_success() {
-            return Err(anyhow!("Stream returned status: {}", response.status()));
-        }
-
-        Ok((response.bytes_stream(), is_transcoded))
-    }
-
     /// Calls POST /Items/{itemId}/PlaybackInfo with the given DeviceProfile.
     /// Returns `(url, is_transcoded)` where `is_transcoded` is true when the server will
     /// transcode the content (TranscodingUrl or forced audio stream endpoint), and false

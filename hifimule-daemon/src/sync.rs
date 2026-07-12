@@ -807,32 +807,6 @@ fn source_container(item: &crate::api::JellyfinItem) -> Option<&str> {
         .or(item.container.as_deref())
 }
 
-fn forced_audio_profile(container: &str) -> serde_json::Value {
-    let bitrate = if container.eq_ignore_ascii_case("mp3") {
-        320000
-    } else {
-        256000
-    };
-
-    serde_json::json!({
-        "Name": format!("HifiMule-Forced-{}", container),
-        "MaxStreamingBitrate": bitrate,
-        "MusicStreamingTranscodingBitrate": bitrate,
-        "DirectPlayProfiles": [],
-        "TranscodingProfiles": [
-            {
-                "Container": container,
-                "Type": "Audio",
-                "AudioCodec": container,
-                "Protocol": "http",
-                "EstimateContentLength": true,
-                "EnableMpegtsM2TsMode": false
-            }
-        ],
-        "CodecProfiles": []
-    })
-}
-
 #[derive(Debug, Clone, Default)]
 struct AudioCompatibilityProfile {
     direct_formats: Vec<AudioFormatRequirement>,
@@ -1631,656 +1605,6 @@ pub fn destructive_cleanup_count(delta: &SyncDelta, manifest: &DeviceManifest) -
         .filter(|d| !readd_ids.contains(d.jellyfin_id.as_str()))
         .count();
     net_deletes + playlist_cleanup_paths.len()
-}
-
-/// Executes a sync operation by downloading adds and deleting removals.
-///
-/// This function handles individual file failures gracefully - if one file fails,
-/// it continues with the remaining files and collects errors for reporting.
-///
-/// Returns a tuple of (successfully_synced_items, errors).
-pub async fn execute_sync(
-    delta: &SyncDelta,
-    device_path: &Path,
-    jellyfin_client: &crate::api::JellyfinClient,
-    jellyfin_url: &str,
-    jellyfin_token: &str,
-    jellyfin_user_id: &str,
-    operation_manager: Arc<SyncOperationManager>,
-    operation_id: String,
-    device_manager: Arc<crate::device::DeviceManager>,
-    transcoding_profile: Option<serde_json::Value>,
-    device_io: Arc<dyn crate::device_io::DeviceIO>,
-) -> Result<(Vec<crate::device::SyncedItem>, Vec<SyncFileError>)> {
-    let mut synced_items = Vec::new();
-    let mut errors = Vec::new();
-    if let Err(e) = device_io.begin_sync_job().await {
-        errors.push(SyncFileError {
-            jellyfin_id: String::new(),
-            filename: String::new(),
-            error_message: format!("Failed to begin device sync job: {}", e),
-        });
-    }
-
-    if delta.adds.is_empty() && delta.deletes.is_empty() && delta.id_changes.is_empty() {
-        println!("[Sync] Executing empty sync to clear device managed paths");
-    }
-
-    crate::daemon_log!(
-        "[Sync] execute_sync preparing: adds={} deletes={} id_changes={} playlists={}",
-        delta.adds.len(),
-        delta.deletes.len(),
-        delta.id_changes.len(),
-        delta.playlists.len()
-    );
-
-    // Compute total bytes for ETA (adds + id_changes both contribute bytes)
-    let total_job_bytes: u64 = delta.adds.iter().map(|a| a.size_bytes).sum::<u64>()
-        + delta.id_changes.iter().map(|c| c.size_bytes).sum::<u64>();
-    if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
-        operation.total_bytes = total_job_bytes;
-        operation_manager
-            .update_operation(&operation_id, operation)
-            .await;
-    }
-
-    // Shared counter for cumulative bytes written across all files (for ETA)
-    let completed_bytes_arc = Arc::new(std::sync::atomic::AtomicU64::new(0));
-
-    let manifest_snapshot = device_manager.get_current_device().await;
-    let owned_manifest_paths: HashSet<String> = manifest_snapshot
-        .as_ref()
-        .map(|manifest| {
-            manifest
-                .synced_items
-                .iter()
-                .map(|item| normalized_device_folder(&item.local_path))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // Determine managed path from the device manifest's first managed_paths entry.
-    let managed_path = {
-        let subfolder = manifest_snapshot
-            .as_ref()
-            .and_then(|m| m.managed_paths.first())
-            .map(|s| s.as_str())
-            .unwrap_or("Music");
-        device_path.join(subfolder)
-    };
-    let is_mtp = device_path.to_string_lossy().starts_with("mtp://");
-    let managed_subfolder_for_delete: Option<String> =
-        managed_path.strip_prefix(device_path).ok().map(|p| {
-            p.to_string_lossy()
-                .replace('\\', "/")
-                .trim_end_matches('/')
-                .to_string()
-        });
-    let readd_ids: HashSet<&str> = delta
-        .adds
-        .iter()
-        .map(|add| add.jellyfin_id.as_str())
-        .collect();
-    let readd_delete_by_id: HashMap<&str, &SyncDeleteItem> = delta
-        .deletes
-        .iter()
-        .filter(|delete| readd_ids.contains(delete.jellyfin_id.as_str()))
-        .map(|delete| (delete.jellyfin_id.as_str(), delete))
-        .collect();
-
-    // Pre-fetch all item details for adds to avoid N+1 queries
-    let mut fetched_items = std::collections::HashMap::new();
-    let add_ids: Vec<&str> = delta.adds.iter().map(|a| a.jellyfin_id.as_str()).collect();
-    let total_chunks = add_ids.len().div_ceil(100);
-    for (chunk_index, chunk) in add_ids.chunks(100).enumerate() {
-        crate::daemon_log!(
-            "[Sync] Preparing: fetching Jellyfin metadata chunk {}/{} ({} item(s))",
-            chunk_index + 1,
-            total_chunks,
-            chunk.len()
-        );
-        match jellyfin_client
-            .get_items_by_ids(jellyfin_url, jellyfin_token, jellyfin_user_id, chunk)
-            .await
-        {
-            Ok(items) => {
-                for item in items {
-                    fetched_items.insert(item.id.clone(), item);
-                }
-            }
-            Err(e) => {
-                for id in chunk {
-                    let filename = delta
-                        .adds
-                        .iter()
-                        .find(|a| a.jellyfin_id == **id)
-                        .map(|a| a.name.clone())
-                        .unwrap_or_else(|| "Unknown".to_string());
-                    errors.push(SyncFileError {
-                        jellyfin_id: id.to_string(),
-                        filename,
-                        error_message: format!("Failed to fetch chunk involving item: {}", e),
-                    });
-                }
-            }
-        }
-    }
-
-    // Process adds (downloads)
-    for (index, add_item) in delta.adds.iter().enumerate() {
-        if operation_manager.is_cancelled(&operation_id).await {
-            break;
-        }
-        crate::daemon_log!(
-            "[Sync] Preparing file {}/{}: '{}' ({}, {} bytes)",
-            index + 1,
-            delta.adds.len(),
-            add_item.name,
-            add_item.jellyfin_id,
-            add_item.size_bytes
-        );
-        mark_operation_preparing_file(
-            &operation_manager,
-            &operation_id,
-            &add_item.name,
-            add_item.size_bytes,
-        )
-        .await;
-
-        // Find prefetched item
-        let item = match fetched_items.get(&add_item.jellyfin_id) {
-            Some(i) => i,
-            None => {
-                // Not found (either didn't exist or fell into a failed chunk)
-                // If it wasn't a chunk failure, it might just be missing
-                if !errors.iter().any(|e| e.jellyfin_id == add_item.jellyfin_id) {
-                    errors.push(SyncFileError {
-                        jellyfin_id: add_item.jellyfin_id.clone(),
-                        filename: add_item.name.clone(),
-                        error_message: "Failed to fetch item details: Not found or API error."
-                            .to_string(),
-                    });
-                }
-                continue;
-            }
-        };
-
-        let device_preferred_audio_container = device_io.preferred_audio_container();
-        let preferred_audio_container = if transcoding_profile.is_some() {
-            None
-        } else {
-            device_preferred_audio_container
-        };
-        let effective_transcoding_profile;
-        let compatibility =
-            audio_compatibility_profile(transcoding_profile.as_ref(), preferred_audio_container);
-        let source_format = provider_audio_format(source_container(item), None);
-        let source_direct_compatible = compatibility.source_is_direct_compatible(&source_format);
-        let stream_profile = if let Some(container) = preferred_audio_container {
-            effective_transcoding_profile = forced_audio_profile(container);
-            Some(&effective_transcoding_profile)
-        } else if compatibility.is_constrained() && source_direct_compatible {
-            None
-        } else {
-            transcoding_profile.as_ref()
-        };
-
-        // Resolve stream via PlaybackInfo if a profile is set, else direct /Download.
-        // is_transcoded tells us whether the server actually transcodes the content,
-        // which determines whether the profile's target container applies as the file extension.
-        crate::daemon_log!(
-            "[Sync] Preparing '{}': resolving stream (profile={})",
-            add_item.name,
-            stream_profile.is_some()
-        );
-        let stream_result = jellyfin_client
-            .get_item_stream(
-                jellyfin_url,
-                jellyfin_token,
-                jellyfin_user_id,
-                &add_item.jellyfin_id,
-                stream_profile,
-            )
-            .await;
-
-        let (stream, is_transcoded) = match stream_result {
-            Ok(result) => result,
-            Err(e) => {
-                errors.push(SyncFileError {
-                    jellyfin_id: add_item.jellyfin_id.clone(),
-                    filename: add_item.name.clone(),
-                    error_message: format!("Failed to get stream: {}", e),
-                });
-                continue;
-            }
-        };
-
-        // Determine the output extension. The transcoding profile's target container only
-        // applies when the server is actually transcoding — for direct-play downloads the
-        // original file format is served unchanged, so the source extension must be used.
-        let profile_container = if is_transcoded {
-            stream_profile.and_then(|p| {
-                p["TranscodingProfiles"]
-                    .as_array()
-                    .and_then(|a| a.first())
-                    .and_then(|tp| tp["Container"].as_str())
-            })
-        } else {
-            None
-        };
-        let extension_override = preferred_audio_container.or(profile_container);
-        eprintln!(
-            "[Sync] item={} extension_override={:?} (preferred_audio_container={:?}, device_preferred_audio_container={:?}, profile_container={:?}, is_transcoded={})",
-            add_item.jellyfin_id,
-            extension_override,
-            preferred_audio_container,
-            device_preferred_audio_container,
-            profile_container,
-            is_transcoded
-        );
-
-        // Construct target path (includes legacy hardware path length validation)
-        crate::daemon_log!(
-            "[Sync] Preparing '{}': constructing target path",
-            add_item.name
-        );
-        let construction =
-            match construct_file_path_with_extension(&managed_path, item, extension_override) {
-                Ok(result) => result,
-                Err(e) => {
-                    errors.push(SyncFileError {
-                        jellyfin_id: add_item.jellyfin_id.clone(),
-                        filename: add_item.name.clone(),
-                        error_message: format!("Failed to construct file path: {}", e),
-                    });
-                    continue;
-                }
-            };
-        let target_path = construction.path;
-
-        // Create progress callback for this file
-        let op_manager = operation_manager.clone();
-        let op_id = operation_id.clone();
-        let file_name = add_item.name.clone();
-        let total_size = add_item.size_bytes;
-
-        // Throttle progress updates to avoid spawning a task per chunk.
-        // Only updates every 256KB or on the final chunk.
-        // Note: bytes_transferred is only updated at file completion (not mid-file) to avoid
-        // a race where a stale spawned task could overwrite a higher post-completion value.
-        let last_reported = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let progress_callback = Arc::new(move |bytes_written: u64, total: u64| {
-            let last = last_reported.load(std::sync::atomic::Ordering::Relaxed);
-            if bytes_written.saturating_sub(last) < 256 * 1024 && bytes_written < total {
-                return;
-            }
-            last_reported.store(bytes_written, std::sync::atomic::Ordering::Relaxed);
-
-            let op_manager_inner = op_manager.clone();
-            let op_id_inner = op_id.clone();
-            let file_name_inner = file_name.clone();
-
-            tokio::spawn(async move {
-                if let Some(mut operation) = op_manager_inner.get_operation(&op_id_inner).await {
-                    operation.current_file = Some(file_name_inner);
-                    operation.bytes_current = bytes_written;
-                    operation.bytes_total = total;
-                    op_manager_inner
-                        .update_operation(&op_id_inner, operation)
-                        .await;
-                }
-            });
-        }) as ProgressCallback;
-
-        // Compute relative path for DeviceIO (relative to device root)
-        let rel_path = target_path
-            .strip_prefix(device_path)
-            .unwrap_or(&target_path)
-            .to_string_lossy()
-            .replace('\\', "/");
-
-        // Buffer the stream into memory, reporting progress during download
-        crate::daemon_log!("[Sync] Downloading '{}'", add_item.name);
-        let t_download = std::time::Instant::now();
-        let buffer_result = buffer_stream(stream, total_size, progress_callback).await;
-        let download_timing = transfer_timing(add_item.size_bytes, t_download.elapsed());
-        let buffer = match buffer_result {
-            Ok(b) => b,
-            Err(e) => {
-                errors.push(SyncFileError {
-                    jellyfin_id: add_item.jellyfin_id.clone(),
-                    filename: add_item.name.clone(),
-                    error_message: format!("Failed to buffer stream: {}", e),
-                });
-                continue;
-            }
-        };
-
-        // Write file via device IO abstraction
-        crate::daemon_log!("[Sync] Writing '{}'", add_item.name);
-        let t_write = std::time::Instant::now();
-        let write_result = device_io.write_with_verify(&rel_path, &buffer).await;
-        let write_timing = transfer_timing(add_item.size_bytes, t_write.elapsed());
-
-        match write_result {
-            Ok(_) => {
-                crate::daemon_log!(
-                    "[Sync] '{}' size={}B download={:.2}ms({:.1}MB/s) write={:.2}ms({:.1}MB/s)",
-                    add_item.name,
-                    add_item.size_bytes,
-                    download_timing.elapsed_ms,
-                    download_timing.speed_mb_s,
-                    write_timing.elapsed_ms,
-                    write_timing.speed_mb_s
-                );
-                // For backends that do not verify internally (MSC), confirm the file
-                // actually landed before marking it synced. Backends like MTP already
-                // verify via LIBMTP_Get_Filemetadata (direct object-ID lookup) inside
-                // write_with_verify, so the list_files enumeration check is skipped —
-                // some devices (e.g. Garmin) hide files from enumeration even after a
-                // successful write.
-                if !device_io.write_verifies_internally()
-                    && !device_file_exists(device_io.as_ref(), &rel_path).await
-                {
-                    errors.push(SyncFileError {
-                        jellyfin_id: add_item.jellyfin_id.clone(),
-                        filename: add_item.name.clone(),
-                        error_message:
-                            "File reported as written but not found on device after transfer"
-                                .to_string(),
-                    });
-                    continue;
-                }
-
-                // Successfully synced - add to synced items
-                let synced_at = now_iso8601();
-
-                synced_items.push(crate::device::SyncedItem {
-                    jellyfin_id: add_item.jellyfin_id.clone(),
-                    name: add_item.name.clone(),
-                    album: add_item.album.clone(),
-                    artist: add_item.artist.clone(),
-                    local_path: rel_path.clone(),
-                    size_bytes: add_item.size_bytes,
-                    synced_at,
-                    original_name: construction.original_name,
-                    etag: add_item.etag.clone(),
-                    provider_album_id: add_item.provider_album_id.clone(),
-                    provider_content_type: add_item.provider_content_type.clone(),
-                    provider_suffix: add_item.provider_suffix.clone(),
-                    original_bitrate: add_item.original_bitrate,
-                    original_container: add_item.provider_suffix.clone(),
-                    track_number: add_item.track_number,
-                    server_id: add_item.server_id.clone(),
-                });
-
-                // Update operation progress and cumulative bytes
-                completed_bytes_arc
-                    .fetch_add(add_item.size_bytes, std::sync::atomic::Ordering::Relaxed);
-                let cumulative = completed_bytes_arc.load(std::sync::atomic::Ordering::Relaxed);
-                if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
-                    operation.files_completed += 1;
-                    operation.bytes_transferred = cumulative;
-                    operation_manager
-                        .update_operation(&operation_id, operation)
-                        .await;
-                }
-
-                // Per-file manifest update for dirty-resume support (Story 4.4)
-                // Per-file writes ensure manifest always reflects completed work for true delta resume.
-                if let Some(delete_item) = readd_delete_by_id.get(add_item.jellyfin_id.as_str())
-                    && let Some(error) = cleanup_replaced_file_after_write(
-                        delete_item,
-                        &rel_path,
-                        device_path,
-                        &managed_path,
-                        managed_subfolder_for_delete.as_deref(),
-                        is_mtp,
-                        &owned_manifest_paths,
-                        &device_io,
-                        &operation_manager,
-                        &operation_id,
-                    )
-                    .await
-                {
-                    errors.push(error);
-                }
-                let synced_item = synced_items.last().unwrap().clone();
-                let id_to_replace = add_item.jellyfin_id.clone();
-                if let Err(e) = device_manager
-                    .update_manifest(|m| {
-                        m.synced_items
-                            .retain(|item| item.jellyfin_id != id_to_replace);
-                        m.synced_items.push(synced_item);
-                    })
-                    .await
-                {
-                    eprintln!("[Sync] Warning: per-file manifest write failed: {}", e);
-                    // Non-fatal: sync continues even if per-file write fails
-                }
-            }
-            Err(e) => {
-                errors.push(SyncFileError {
-                    jellyfin_id: add_item.jellyfin_id.clone(),
-                    filename: add_item.name.clone(),
-                    error_message: format!("Failed to write file: {}", e),
-                });
-            }
-        }
-    }
-
-    // Process deletes
-    //
-    // Managed zone check strategy:
-    // - MSC: canonicalize() both paths to real absolute filesystem paths, then prefix-check.
-    // - MTP: device_path is a synthetic "mtp://…" URI that doesn't exist on the local
-    //   filesystem — canonicalize() always fails and would silently skip every delete.
-    //   Use a string-prefix check on the relative local_path instead.
-    let _is_mtp_after_add_unused = device_path.to_string_lossy().starts_with("mtp://");
-    // Option<String>: None = strip_prefix failed (malformed managed_path) → fail-safe reject all.
-    // Some("") = whole device root is managed → all paths are valid.
-    // Some("Music") = only paths under "Music/" are valid.
-    let _managed_subfolder_after_add_unused: Option<String> =
-        managed_path.strip_prefix(device_path).ok().map(|p| {
-            p.to_string_lossy()
-                .replace('\\', "/")
-                .trim_end_matches('/')
-                .to_string()
-        });
-
-    for delete_item in delta
-        .deletes
-        .iter()
-        .filter(|delete| !readd_ids.contains(delete.jellyfin_id.as_str()))
-    {
-        if operation_manager.is_cancelled(&operation_id).await {
-            break;
-        }
-        // Verify file is in managed zone (security check)
-        if let Err(error_message) = validate_delete_path_for_managed_zone(
-            device_path,
-            &managed_path,
-            managed_subfolder_for_delete.as_deref(),
-            &delete_item.local_path,
-            is_mtp,
-            &owned_manifest_paths,
-        ) {
-            errors.push(SyncFileError {
-                jellyfin_id: delete_item.jellyfin_id.clone(),
-                filename: delete_item.name.clone(),
-                error_message,
-            });
-            continue;
-        }
-
-        // Delete file via device IO abstraction (relative path, backend handles resolution)
-        let delete_result = device_io.delete_file(&delete_item.local_path).await;
-        // Treat "not found" as idempotent success: the file is already absent, which is
-        // the goal of deletion. This handles duplicate manifest entries (e.g. same path
-        // added via basket and playlist) and re-runs after a failed manifest update.
-        let already_absent = matches!(&delete_result, Err(e) if is_missing_delete_error(e));
-        match delete_result {
-            Ok(_) => {
-                // Successfully deleted
-                if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
-                    operation.files_completed += 1;
-                    operation_manager
-                        .update_operation(&operation_id, operation)
-                        .await;
-                }
-
-                // Per-delete manifest update for dirty-resume support (Story 4.4)
-                let id_to_remove = delete_item.jellyfin_id.clone();
-                if let Err(e) = device_manager
-                    .update_manifest(|m| {
-                        m.synced_items.retain(|i| i.jellyfin_id != id_to_remove);
-                    })
-                    .await
-                {
-                    eprintln!("[Sync] Warning: per-delete manifest write failed: {}", e);
-                }
-            }
-            Err(_) if already_absent => {
-                // File was not on device (already deleted or never written).
-                // Remove the manifest entry so this item is not retried on the next sync.
-                if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
-                    operation.files_completed += 1;
-                    operation_manager
-                        .update_operation(&operation_id, operation)
-                        .await;
-                }
-
-                let id_to_remove = delete_item.jellyfin_id.clone();
-                if let Err(e) = device_manager
-                    .update_manifest(|m| {
-                        m.synced_items.retain(|i| i.jellyfin_id != id_to_remove);
-                    })
-                    .await
-                {
-                    eprintln!("[Sync] Warning: per-delete manifest write failed: {}", e);
-                }
-            }
-            Err(e) => {
-                errors.push(SyncFileError {
-                    jellyfin_id: delete_item.jellyfin_id.clone(),
-                    filename: delete_item.name.clone(),
-                    error_message: format!("Failed to delete file: {}", e),
-                });
-            }
-        }
-    }
-
-    // After all deletions (files), prune any resulting empty directories via DeviceIO
-    let managed_subfolder = managed_path
-        .strip_prefix(device_path)
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_default();
-    if let Err(e) = device_io.cleanup_empty_subdirs(&managed_subfolder).await {
-        eprintln!("[Sync] Warning: directory cleanup failed: {}", e);
-    }
-
-    // Process ID changes (virtual adds: we don't download, just update manifest records)
-    for id_change in &delta.id_changes {
-        if operation_manager.is_cancelled(&operation_id).await {
-            break;
-        }
-        let synced_at = now_iso8601(); // Or we could try to preserve original synced_at if we wanted
-
-        synced_items.push(crate::device::SyncedItem {
-            jellyfin_id: id_change.new_jellyfin_id.clone(),
-            name: id_change.name.clone(),
-            album: id_change.album.clone(),
-            artist: id_change.artist.clone(),
-            local_path: id_change.old_local_path.clone(), // Keep existing path!
-            size_bytes: id_change.size_bytes,
-            synced_at,
-            original_name: id_change.original_name.clone(), // Preserved from old manifest (AC #4)
-            etag: id_change.etag.clone(),
-            provider_album_id: id_change.provider_album_id.clone(),
-            provider_content_type: id_change.provider_content_type.clone(),
-            provider_suffix: id_change.provider_suffix.clone(),
-            original_bitrate: None,
-            original_container: None,
-            track_number: None,
-            server_id: id_change.source_server_id.clone(),
-        });
-
-        // Update operation progress and cumulative bytes (an ID change is instantly completed)
-        completed_bytes_arc.fetch_add(id_change.size_bytes, std::sync::atomic::Ordering::Relaxed);
-        let cumulative = completed_bytes_arc.load(std::sync::atomic::Ordering::Relaxed);
-        if let Some(mut operation) = operation_manager.get_operation(&operation_id).await {
-            operation.files_completed += 1;
-            operation.bytes_transferred = cumulative;
-            operation_manager
-                .update_operation(&operation_id, operation)
-                .await;
-        }
-
-        // Per-ID-change manifest update for dirty-resume support (Story 4.4)
-        // Remove old ID entry, add new ID entry atomically.
-        let synced_item = synced_items.last().unwrap().clone();
-        let id_to_remove = id_change.old_jellyfin_id.clone();
-        if let Err(e) = device_manager
-            .update_manifest(|m| {
-                m.synced_items.retain(|i| i.jellyfin_id != id_to_remove);
-                m.synced_items.push(synced_item);
-            })
-            .await
-        {
-            eprintln!("[Sync] Warning: per-ID-change manifest write failed: {}", e);
-        }
-    }
-
-    // --- M3U Playlist Generation ---
-    // Runs when there are playlist basket items OR manifest entries that need cleanup.
-    // The auto-sync path calls execute_sync with delta.playlists = []; the inner guard
-    // skips work when both sides are empty, avoiding unnecessary manifest reads.
-    if let Some(mut manifest_snapshot) = device_manager.get_current_device().await
-        && (!delta.playlists.is_empty() || !manifest_snapshot.playlists.is_empty())
-    {
-        let warnings = generate_m3u_files(
-            &delta.playlists,
-            device_path,
-            &managed_path,
-            &manifest_snapshot.synced_items.clone(),
-            &mut manifest_snapshot,
-            Arc::clone(&device_io),
-        )
-        .await;
-
-        for w in &warnings {
-            eprintln!("{}", w);
-        }
-
-        // Persist the updated playlists array back through the device manager.
-        let updated_playlists = manifest_snapshot.playlists;
-        if let Err(e) = device_manager
-            .update_manifest(|m| {
-                m.playlists = updated_playlists;
-            })
-            .await
-        {
-            eprintln!("[M3U] Failed to persist manifest after M3U update: {}", e);
-        }
-    }
-
-    let mut device_warnings = device_io.take_warnings().await;
-    if let Err(e) = device_io.end_sync_job().await {
-        device_warnings.push(format!(
-            "[DeviceIO] Failed to end device sync job cleanly: {}",
-            e
-        ));
-    }
-    if !device_warnings.is_empty()
-        && let Some(mut operation) = operation_manager.get_operation(&operation_id).await
-    {
-        operation.warnings.append(&mut device_warnings);
-        operation_manager
-            .update_operation(&operation_id, operation)
-            .await;
-    }
-
-    Ok((synced_items, errors))
 }
 
 pub struct ProviderSyncSource {
@@ -3247,6 +2571,19 @@ pub async fn execute_provider_sync(
         };
         match write_result {
             Ok(_) => {
+                if !device_io.write_verifies_internally()
+                    && !device_file_exists(device_io.as_ref(), &staged.rel_path).await
+                {
+                    errors.push(SyncFileError {
+                        jellyfin_id: staged.add_item.jellyfin_id.clone(),
+                        filename: staged.add_item.name.clone(),
+                        error_message:
+                            "File reported as written but not found on device after transfer"
+                                .to_string(),
+                    });
+                    let _ = tokio::fs::remove_file(&staged.staged_path).await;
+                    continue;
+                }
                 let write_timing = transfer_timing(staged.staged_size, t_write.elapsed());
                 let staged_cleanup = match tokio::fs::remove_file(&staged.staged_path).await {
                     Ok(()) => "ok".to_string(),
@@ -3534,41 +2871,6 @@ pub async fn execute_provider_sync(
     }
 
     Ok((synced_items, errors))
-}
-
-/// Buffers a byte stream into memory while reporting progress.
-/// Used by `execute_sync` to download a file before writing via `DeviceIO`.
-async fn buffer_stream<S>(
-    mut stream: S,
-    total_size: u64,
-    on_progress: ProgressCallback,
-) -> Result<Vec<u8>>
-where
-    S: futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Unpin,
-{
-    if total_size > MAX_FILE_BUFFER_BYTES {
-        return Err(anyhow::anyhow!(
-            "File too large to buffer ({} bytes > {} byte limit)",
-            total_size,
-            MAX_FILE_BUFFER_BYTES
-        ));
-    }
-    let capacity = total_size.min(MAX_FILE_BUFFER_BYTES) as usize;
-    let mut buffer = Vec::with_capacity(capacity);
-    let mut bytes_written = 0u64;
-    while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result.context("Failed to read chunk from stream")?;
-        buffer.extend_from_slice(&chunk);
-        bytes_written += chunk.len() as u64;
-        if buffer.len() as u64 > MAX_FILE_BUFFER_BYTES {
-            return Err(anyhow::anyhow!(
-                "File stream exceeded {} byte buffer limit",
-                MAX_FILE_BUFFER_BYTES
-            ));
-        }
-        on_progress(bytes_written, total_size);
-    }
-    Ok(buffer)
 }
 
 fn provider_sync_staging_prefix(operation_id: &str) -> String {
@@ -4350,7 +3652,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_sync_removes_manifest_entry_when_managed_file_missing() {
+    async fn test_execute_provider_sync_removes_manifest_entry_when_managed_file_missing() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         tokio::fs::create_dir_all(root.join("Music/Artist"))
@@ -4395,17 +3697,17 @@ mod tests {
             pity_fired_servers: vec![],
         };
 
-        let (_synced, errors) = execute_sync(
+        let (_synced, errors) = execute_provider_sync(
             &delta,
             &root,
-            &crate::api::JellyfinClient::new(),
-            "",
-            "",
-            "",
+            ProviderSyncSource {
+                provider: subsonic_provider("http://localhost".to_string()),
+                transcoding_profile: None,
+                providers_by_server: std::collections::HashMap::new(),
+            },
             Arc::new(SyncOperationManager::new()),
             "op-missing-delete".to_string(),
             Arc::clone(&manager),
-            None,
             device_io,
         )
         .await
@@ -4430,7 +3732,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_sync_counts_already_absent_delete_as_completed() {
+    async fn test_execute_provider_sync_counts_already_absent_delete_as_completed() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
 
@@ -4477,17 +3779,17 @@ mod tests {
             .create_operation(operation_id.clone(), 1)
             .await;
 
-        let (_synced, errors) = execute_sync(
+        let (_synced, errors) = execute_provider_sync(
             &delta,
             &root,
-            &crate::api::JellyfinClient::new(),
-            "",
-            "",
-            "",
+            ProviderSyncSource {
+                provider: subsonic_provider("http://localhost".to_string()),
+                transcoding_profile: None,
+                providers_by_server: std::collections::HashMap::new(),
+            },
             Arc::clone(&operation_manager),
             operation_id.clone(),
             Arc::clone(&manager),
-            None,
             Arc::new(MissingDeleteDeviceIo),
         )
         .await
@@ -5115,6 +4417,139 @@ mod tests {
         fn preferred_audio_container(&self) -> Option<&'static str> {
             self.inner.preferred_audio_container()
         }
+    }
+
+    #[tokio::test]
+    async fn test_execute_provider_sync_downloads_jellyfin_track() {
+        let mut server = mockito::Server::new_async().await;
+        let _stream = server
+            .mock("GET", "/Items/song-jellyfin/Download")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "api_key".into(),
+                "token".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "audio/flac")
+            .with_body(vec![1_u8, 2, 3, 4])
+            .expect(1)
+            .create_async()
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, device_io) = setup_provider_sync_device(dir.path()).await;
+        let operation_manager = Arc::new(SyncOperationManager::new());
+        let operation_id = "op-jellyfin-provider".to_string();
+        operation_manager
+            .create_operation(operation_id.clone(), 1)
+            .await;
+        let delta = SyncDelta {
+            adds: vec![add_item_with_provider_format(
+                "song-jellyfin",
+                "flac",
+                "audio/flac",
+                4,
+            )],
+            deletes: vec![],
+            id_changes: vec![],
+            unchanged: 0,
+            playlists: vec![],
+            pity_fired_servers: vec![],
+        };
+
+        let (synced, errors) = execute_provider_sync(
+            &delta,
+            dir.path(),
+            ProviderSyncSource {
+                provider: Arc::new(crate::providers::jellyfin::JellyfinProvider::new(
+                    crate::api::JellyfinClient::new(),
+                    server.url(),
+                    "token",
+                    "user",
+                )),
+                transcoding_profile: None,
+                providers_by_server: std::collections::HashMap::new(),
+            },
+            operation_manager,
+            operation_id,
+            Arc::clone(&manager),
+            device_io,
+        )
+        .await
+        .unwrap();
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(synced.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_execute_provider_sync_rejects_unverified_missing_write() {
+        let mut server = mockito::Server::new_async().await;
+        let _stream = server
+            .mock("GET", "/Items/song-missing/Download")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "api_key".into(),
+                "token".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "audio/flac")
+            .with_body(vec![1_u8, 2, 3, 4])
+            .expect(1)
+            .create_async()
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (manager, _) = setup_provider_sync_device(dir.path()).await;
+        let operation_manager = Arc::new(SyncOperationManager::new());
+        let operation_id = "op-missing-write".to_string();
+        operation_manager
+            .create_operation(operation_id.clone(), 1)
+            .await;
+        let delta = SyncDelta {
+            adds: vec![add_item_with_provider_format(
+                "song-missing",
+                "flac",
+                "audio/flac",
+                4,
+            )],
+            deletes: vec![],
+            id_changes: vec![],
+            unchanged: 0,
+            playlists: vec![],
+            pity_fired_servers: vec![],
+        };
+
+        let (synced, errors) = execute_provider_sync(
+            &delta,
+            dir.path(),
+            ProviderSyncSource {
+                provider: Arc::new(crate::providers::jellyfin::JellyfinProvider::new(
+                    crate::api::JellyfinClient::new(),
+                    server.url(),
+                    "token",
+                    "user",
+                )),
+                transcoding_profile: None,
+                providers_by_server: std::collections::HashMap::new(),
+            },
+            operation_manager,
+            operation_id,
+            Arc::clone(&manager),
+            Arc::new(MissingDeleteDeviceIo),
+        )
+        .await
+        .unwrap();
+
+        assert!(synced.is_empty());
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].error_message.contains("not found on device"));
+        assert!(
+            manager
+                .get_current_device()
+                .await
+                .unwrap()
+                .synced_items
+                .is_empty()
+        );
     }
 
     #[tokio::test]

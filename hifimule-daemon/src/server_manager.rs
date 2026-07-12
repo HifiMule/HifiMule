@@ -113,7 +113,7 @@ impl ServerManager {
 
 /// Builds a provider from a server's stored credentials. Construction only — no
 /// network round-trip — so it is safe to call lazily on first selection/use.
-async fn connect_provider_for(
+pub(crate) async fn connect_provider_for(
     record: &ServerRecord,
 ) -> Result<Arc<dyn MediaProvider>, ProviderError> {
     let creds = CredentialManager::get_server_credential(&record.id)
