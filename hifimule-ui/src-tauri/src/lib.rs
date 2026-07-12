@@ -35,6 +35,14 @@ fn resolve_daemon_binary_path() -> Option<std::path::PathBuf> {
 }
 
 /// Check if the daemon is already running by sending a health-check RPC call.
+fn daemon_health_response_ok(data: &serde_json::Value) -> bool {
+    data.get("error").map_or(true, serde_json::Value::is_null)
+        && data
+            .pointer("/result/data/status")
+            .and_then(serde_json::Value::as_str)
+            == Some("ok")
+}
+
 fn check_daemon_health() -> bool {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
@@ -45,7 +53,7 @@ fn check_daemon_health() -> bool {
     };
     let body = serde_json::json!({
         "jsonrpc": "2.0",
-        "method": "get_daemon_state",
+        "method": "daemon.health",
         "params": {},
         "id": 1
     });
@@ -54,7 +62,10 @@ fn check_daemon_health() -> bool {
         .json(&body)
         .send()
     {
-        Ok(resp) => resp.status().is_success(),
+        Ok(resp) if resp.status().is_success() => resp
+            .json::<serde_json::Value>()
+            .is_ok_and(|data| daemon_health_response_ok(&data)),
+        Ok(_) => false,
         Err(_) => false,
     }
 }
@@ -338,7 +349,29 @@ fn ui_log(msg: &str) {
 
 #[cfg(test)]
 mod log_timestamp_tests {
-    use super::log_timestamp;
+    use super::{daemon_health_response_ok, log_timestamp};
+
+    #[test]
+    fn daemon_health_response_requires_ok_result() {
+        assert!(daemon_health_response_ok(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": { "data": { "status": "ok" } },
+            "error": null,
+            "id": 1
+        })));
+        assert!(!daemon_health_response_ok(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": null,
+            "error": { "code": -32601, "message": "Method not found" },
+            "id": 1
+        })));
+        assert!(!daemon_health_response_ok(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": { "data": { "status": "starting" } },
+            "error": null,
+            "id": 1
+        })));
+    }
 
     #[test]
     fn log_timestamp_is_readable_and_sortable() {
