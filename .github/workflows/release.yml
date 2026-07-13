@@ -165,6 +165,29 @@ jobs:
             fi
           done
 
+      - name: Verify macOS bundle is validly ad-hoc signed
+        if: startsWith(matrix.platform, 'macos')
+        run: |
+          set -euo pipefail
+          TARGET_DIRS=()
+          for dir in target hifimule-ui/src-tauri/target; do
+            if [[ -d "$dir" ]]; then
+              TARGET_DIRS+=("$dir")
+            fi
+          done
+          test "${#TARGET_DIRS[@]}" -gt 0 || { echo "No Tauri target directory found"; exit 1; }
+          APP_DIR="$(find "${TARGET_DIRS[@]}" -path '*.app' -type d -print -quit)"
+          test -n "$APP_DIR" || { echo ".app bundle not found"; exit 1; }
+          # A broken/linker-only signature makes Gatekeeper report the app as
+          # "damaged" once it has been quarantined (i.e. downloaded). Fail the
+          # release before that ever ships.
+          codesign --verify --deep --strict --verbose=2 "$APP_DIR"
+          codesign -dv --verbose=2 "$APP_DIR" 2>&1 | grep -q 'Sealed Resources' || {
+            echo "Bundle signature is missing sealed resources"
+            codesign -dv --verbose=2 "$APP_DIR" 2>&1
+            exit 1
+          }
+
   smoke-test:
     needs: release
     permissions:
