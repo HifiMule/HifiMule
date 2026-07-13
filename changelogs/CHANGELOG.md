@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.13.0 - 2026-07-13
+
+Syncs are faster. HifiMule now prepares the next tracks from your servers while the current one is still being written to your device, instead of downloading and writing strictly one track at a time. On multi-server and Auto-Fill syncs a slow server no longer holds everything up, and the tracks you explicitly chose in a playlist or basket are written before any Auto-Fill filler. **Jellyfin** now runs through the same sync engine as your other servers, so every provider gets the same behavior.
+
+You can also see how sync is performing. The basket now shows the average **read and write speeds** while a sync runs, and the log files are much easier to read, with entries stamped in plain local date and time instead of raw numbers.
+
+This release also fixes a handful of rough edges: Auto-Fill tracks now keep their track numbers so filenames are numbered correctly, playlists are rewritten when you change your transcoding profile so their paths stay valid, the app reliably attaches to an already-running background service instead of starting a second one, and the basket no longer flickers as it updates.
+
 ## v0.12.0 - 2026-07-11
 
 Auto-Fill is now much more flexible. Instead of just topping up free space, HifiMule can build a fill plan from your library, favorites, history, or playlists, with controls for size or listening-time goals, headroom, genre exclusions, track/album/artist fills, quality preferences, discovery, rotation, and seasonal or time-based rules. You can keep a stable core on the device while still making room for deeper cuts and less-played music.

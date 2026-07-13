@@ -35,8 +35,16 @@ hifimule-ui/src-tauri/bundled-libs/*.dylib
 # Bmad
 _bmad/
 .agent/
-.agents/
-.claude/
+# Ignore locally-installed agent skills, EXCEPT the committed release skill.
+# (Each level must exclude contents but not the dir itself, so the negation can re-include.)
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/release/
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/release/
 .codex/
 .opencode/
 .roo/
