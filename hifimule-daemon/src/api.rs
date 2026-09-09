@@ -10,6 +10,19 @@ use std::sync::Mutex;
 
 const CONTAINER_TYPES: &[&str] = &["MusicAlbum", "Playlist", "MusicArtist"];
 
+pub(crate) fn jellyfin_token_headers(token: &str) -> Result<HeaderMap> {
+    CredentialManager::validate_token(token)?;
+    // Validate before encoding so control characters cannot become valid input.
+    HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?;
+    // Jellyfin URL-decodes quoted parameter values, including in 10.8–10.11.
+    let mut value = HeaderValue::from_str(&format!("MediaBrowser Token=\"{}\"", url_encode(token)))
+        .map_err(|_| anyhow!("Invalid token format"))?;
+    value.set_sensitive(true);
+    let mut headers = HeaderMap::new();
+    headers.insert(reqwest::header::AUTHORIZATION, value);
+    Ok(headers)
+}
+
 pub(crate) fn url_encode(s: &str) -> String {
     let mut encoded = String::new();
     for c in s.chars() {
@@ -237,11 +250,7 @@ impl JellyfinClient {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
 
         let endpoint = format!("{}/System/Info", url.trim_end_matches('/'));
 
@@ -266,11 +275,7 @@ impl JellyfinClient {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
 
         let endpoint = format!("{}/UserViews?userId={}", url.trim_end_matches('/'), user_id);
 
@@ -304,11 +309,7 @@ impl JellyfinClient {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
 
         let mut query_params = vec![format!("userId={}", user_id)];
         if let Some(parent) = parent_id {
@@ -362,11 +363,7 @@ impl JellyfinClient {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
 
         let mut query_params = vec!["Recursive=true".to_string()];
         if let Some(parent) = parent_id {
@@ -427,11 +424,7 @@ impl JellyfinClient {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
 
         let endpoint = format!(
             "{}/Items/{}?userId={}&Fields=RecursiveItemCount,CumulativeRunTimeTicks",
@@ -466,11 +459,7 @@ impl JellyfinClient {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
 
         let ids_str = item_ids.join(",");
         let endpoint = format!(
@@ -502,11 +491,7 @@ impl JellyfinClient {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
 
         let endpoint = format!(
             "{}/Items/{}?userId={}&Fields=MediaSources",
@@ -537,11 +522,7 @@ impl JellyfinClient {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
 
         let endpoint = format!(
             "{}/Items?userId={}&ParentId={}&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true",
@@ -572,11 +553,7 @@ impl JellyfinClient {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
 
         let mut query_params = vec![
             format!("userId={}", user_id),
@@ -615,11 +592,7 @@ impl JellyfinClient {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
 
         let endpoint = format!(
             "{}/Items?userId={}&AlbumArtistIds={}&IncludeItemTypes=MusicAlbum&Recursive=true",
@@ -739,11 +712,7 @@ impl JellyfinClient {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
 
         // Fetch primary image
         let endpoint = format!(
@@ -815,11 +784,7 @@ impl JellyfinClient {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
 
         let encoded_title = url_encode(title);
         let endpoint = format!(
@@ -863,11 +828,7 @@ impl JellyfinClient {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
 
         let mut query_params = vec![format!("userId={}", user_id)];
         if let Some(date_played) = date_played {
@@ -901,11 +862,7 @@ impl JellyfinClient {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
 
         let play_session_id = uuid::Uuid::new_v4().to_string();
         let start_endpoint = format!("{}/Sessions/Playing", url.trim_end_matches('/'));
@@ -977,11 +934,7 @@ impl JellyfinClient {
             user_id
         );
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
 
         let body = serde_json::json!({
             "DeviceProfile": device_profile,
@@ -1007,17 +960,14 @@ impl JellyfinClient {
 
         let json: serde_json::Value = response.json().await?;
 
-        eprintln!(
-            "[StreamUrl] item={} PlaybackInfo response: {}",
-            item_id, json
-        );
-
         if let Some(source) = json["MediaSources"].as_array().and_then(|a| a.first()) {
             let supports_direct_play = source["SupportsDirectPlay"].as_bool().unwrap_or(false);
             let transcode_url = source["TranscodingUrl"].as_str();
             eprintln!(
-                "[StreamUrl] item={} SupportsDirectPlay={} TranscodingUrl={:?}",
-                item_id, supports_direct_play, transcode_url
+                "[StreamUrl] item={} SupportsDirectPlay={} has_transcoding_url={}",
+                item_id,
+                supports_direct_play,
+                transcode_url.is_some()
             );
 
             // Always prefer TranscodingUrl when present. Jellyfin can return
@@ -1026,8 +976,8 @@ impl JellyfinClient {
             if let Some(transcode_path) = transcode_url {
                 let full_url = format!("{}{}", base_url.trim_end_matches('/'), transcode_path);
                 eprintln!(
-                    "[StreamUrl] item={} → case 1: using TranscodingUrl: {}",
-                    item_id, full_url
+                    "[StreamUrl] item={} → case 1: using TranscodingUrl",
+                    item_id
                 );
                 return Ok((full_url, true));
             }
@@ -1132,11 +1082,7 @@ impl JellyfinClient {
         offset: u32,
         limit: u32,
     ) -> Result<JellyfinItemsResponse> {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
         let mut query_params = vec![
             format!("userId={}", user_id),
             "Recursive=true".to_string(),
@@ -1197,11 +1143,7 @@ impl JellyfinClient {
         offset: u32,
         limit: u32,
     ) -> Result<JellyfinItemsResponse> {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
         let mut query_params = vec![
             format!("userId={}", user_id),
             "IncludeItemTypes=MusicAlbum".to_string(),
@@ -1370,11 +1312,7 @@ impl JellyfinClient {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
 
         let endpoint = jellyfin_endpoint(url, &["Playlists"])?;
         let body = serde_json::json!({
@@ -1416,11 +1354,7 @@ impl JellyfinClient {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
 
         let ids_param = comma_joined_query_value("track ID", track_ids)?;
         let mut endpoint = jellyfin_endpoint(url, &["Playlists", playlist_id, "Items"])?;
@@ -1448,11 +1382,7 @@ impl JellyfinClient {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
 
         let endpoint = jellyfin_endpoint(url, &["Playlists", playlist_id])?;
         let body = serde_json::json!({ "Name": new_name });
@@ -1483,11 +1413,7 @@ impl JellyfinClient {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
 
         let mut endpoint = jellyfin_endpoint(url, &["Playlists", playlist_id, "Items"])?;
         endpoint.query_pairs_mut().append_pair("userId", user_id);
@@ -1513,11 +1439,7 @@ impl JellyfinClient {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
 
         let mut endpoint = jellyfin_endpoint(url, &["Users", user_id, "Items"])?;
         endpoint
@@ -1549,11 +1471,7 @@ impl JellyfinClient {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
 
         let entry_ids_param = comma_joined_query_value("playlist entry ID", entry_ids)?;
         let mut endpoint = jellyfin_endpoint(url, &["Playlists", playlist_id, "Items"])?;
@@ -1581,11 +1499,7 @@ impl JellyfinClient {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
 
         let index_str = new_index.to_string();
         let endpoint = jellyfin_endpoint(
@@ -1613,11 +1527,7 @@ impl JellyfinClient {
         CredentialManager::validate_url(url)?;
         CredentialManager::validate_token(token)?;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
 
         let endpoint = jellyfin_endpoint(url, &["Items", item_id])?;
 
@@ -1649,11 +1559,7 @@ impl JellyfinClient {
         item.name = new_name.to_string();
         item.user_data = None;
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
 
         let endpoint = jellyfin_endpoint(url, &["Items", item_id])?;
 
@@ -1687,11 +1593,7 @@ impl JellyfinClient {
         start_index: u32,
         limit: u32,
     ) -> Result<JellyfinItemsResponse> {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Emby-Token",
-            HeaderValue::from_str(token).map_err(|_| anyhow!("Invalid token format"))?,
-        );
+        let headers = jellyfin_token_headers(token)?;
         let mut query_params = vec![
             format!("userId={}", user_id),
             format!("IncludeItemTypes={}", include_item_types),
@@ -2148,6 +2050,68 @@ impl CredentialManager {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn token_authorization_roundtrips_jellyfin_parameter_decoding() {
+        let token = "token+percent%20value";
+        let headers = super::jellyfin_token_headers(token).unwrap();
+        let value = headers[reqwest::header::AUTHORIZATION].to_str().unwrap();
+        assert_eq!(value, "MediaBrowser Token=\"token%2Bpercent%2520value\"");
+        let encoded = value
+            .strip_prefix("MediaBrowser Token=\"")
+            .unwrap()
+            .strip_suffix('"')
+            .unwrap();
+        // Match the form-style URL decoding used by Jellyfin's GetParts parser.
+        let decoded = reqwest::Url::parse(&format!("http://localhost/?Token={encoded}")).unwrap();
+        assert_eq!(decoded.query_pairs().next().unwrap().1, token);
+        assert!(headers[reqwest::header::AUTHORIZATION].is_sensitive());
+    }
+    #[tokio::test]
+    async fn token_authorization_rejects_invalid_input_without_requests() {
+        let mut server = mockito::Server::new_async().await;
+        let request = server
+            .mock("GET", "/System/Info")
+            .expect(0)
+            .create_async()
+            .await;
+        for token in [
+            "",
+            "tiny",
+            "secret-token\r\nInjected: yes",
+            "secret-token\0",
+        ] {
+            let error = super::JellyfinClient::new()
+                .test_connection(&server.url(), token)
+                .await
+                .unwrap_err()
+                .to_string();
+            if !token.is_empty() {
+                assert!(!error.contains(token));
+            }
+        }
+        request.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn stored_token_rejection_does_not_connect() {
+        let mut server = mockito::Server::new_async().await;
+        let request = server
+            .mock("GET", "/System/Info")
+            .match_header(
+                "Authorization",
+                "MediaBrowser Token=\"invalid-stored-token\"",
+            )
+            .with_status(401)
+            .create_async()
+            .await;
+        let error = super::JellyfinClient::new()
+            .test_connection(&server.url(), "invalid-stored-token")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("401"));
+        assert!(!error.to_string().contains("invalid-stored-token"));
+        request.assert_async().await;
+    }
     use super::*;
     use mockito::Server;
 
@@ -2159,7 +2123,7 @@ mod tests {
 
         let _mock = server
             .mock("GET", "/System/Info")
-            .match_header("X-Emby-Token", token)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", token).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"ServerName": "TestServer", "Version": "10.8.10", "Id": "8d5613157d2547e9b35fd762fe1f253e"}"#)
@@ -2243,7 +2207,7 @@ mod tests {
 
         let _mock = server
             .mock("GET", "/UserViews?userId=user1")
-            .match_header("X-Emby-Token", token)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", token).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Items": [{"Id": "lib1", "Name": "Music", "Type": "CollectionFolder"}], "TotalRecordCount": 1}"#)
@@ -2270,7 +2234,7 @@ mod tests {
 
         let _mock = server
             .mock("GET", "/Items?userId=user1&Recursive=true&ParentId=lib1&IncludeItemTypes=MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo&Limit=50")
-            .match_header("X-Emby-Token", token)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", token).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Items": [{"Id": "album1", "Name": "Test Album", "Type": "MusicAlbum", "AlbumArtist": "Test Artist", "ProductionYear": 2023}], "TotalRecordCount": 1, "StartIndex": 0}"#)
@@ -2316,7 +2280,7 @@ mod tests {
 
         let _mock = server
             .mock("GET", "/Items/album1?userId=user1&Fields=RecursiveItemCount,CumulativeRunTimeTicks")
-            .match_header("X-Emby-Token", token)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", token).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Id": "album1", "Name": "Test Album", "Type": "MusicAlbum", "AlbumArtist": "Test Artist"}"#)
@@ -2342,7 +2306,10 @@ mod tests {
 
         let _mock = server
             .mock("POST", "/UserPlayedItems/track1")
-            .match_header("X-Emby-Token", token)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", token).as_str(),
+            )
             .match_query(mockito::Matcher::AllOf(vec![
                 mockito::Matcher::UrlEncoded("userId".to_string(), "user1".to_string()),
                 mockito::Matcher::UrlEncoded(
@@ -2392,7 +2359,7 @@ mod tests {
                     "RecursiveItemCount,CumulativeRunTimeTicks".to_string(),
                 ),
             ]))
-            .match_header("X-Emby-Token", token)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", token).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
@@ -2403,7 +2370,10 @@ mod tests {
 
         let update = server
             .mock("POST", "/Items/playlist1")
-            .match_header("X-Emby-Token", token)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", token).as_str(),
+            )
             .match_body(mockito::Matcher::Json(serde_json::json!({
                 "Id": "playlist1",
                 "Name": "New Name",
@@ -2504,7 +2474,7 @@ mod tests {
         // Mock: fetch individual Audio item with MediaSources
         let _mock = server
             .mock("GET", "/Items/track1?userId=user1&Fields=MediaSources")
-            .match_header("X-Emby-Token", token)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", token).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Id": "track1", "Name": "Track 1", "Type": "Audio", "MediaSources": [{"Size": 5242880}]}"#)
@@ -2530,7 +2500,10 @@ mod tests {
         // Mock: fetch album item (container type)
         let _mock_album = server
             .mock("GET", "/Items/album1?userId=user1&Fields=MediaSources")
-            .match_header("X-Emby-Token", token)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", token).as_str(),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Id": "album1", "Name": "Test Album", "Type": "MusicAlbum"}"#)
@@ -2540,7 +2513,7 @@ mod tests {
         // Mock: fetch child items of album
         let _mock_children = server
             .mock("GET", "/Items?userId=user1&ParentId=album1&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true")
-            .match_header("X-Emby-Token", token)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", token).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Items": [
@@ -2569,7 +2542,10 @@ mod tests {
         // Mock: fetch artist item (container type; no MediaSources on container is deliberate)
         let _mock_artist = server
             .mock("GET", "/Items/artist1?userId=user1&Fields=MediaSources")
-            .match_header("X-Emby-Token", token)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", token).as_str(),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Id": "artist1", "Name": "Test Artist", "Type": "MusicArtist"}"#)
@@ -2580,7 +2556,7 @@ mod tests {
         // Mock: fetch all tracks under artist (Recursive=true flattens Artist → Albums → Tracks)
         let _mock_children = server
             .mock("GET", "/Items?userId=user1&ParentId=artist1&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true")
-            .match_header("X-Emby-Token", token)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", token).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Items": [
@@ -2609,7 +2585,10 @@ mod tests {
 
         let _mock_artist = server
             .mock("GET", "/Items/artist2?userId=user1&Fields=MediaSources")
-            .match_header("X-Emby-Token", token)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", token).as_str(),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Id": "artist2", "Name": "Empty Artist", "Type": "MusicArtist"}"#)
@@ -2619,7 +2598,7 @@ mod tests {
 
         let _mock_children = server
             .mock("GET", "/Items?userId=user1&ParentId=artist2&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true")
-            .match_header("X-Emby-Token", token)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", token).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Items": [], "TotalRecordCount": 0, "StartIndex": 0}"#)
@@ -2645,7 +2624,10 @@ mod tests {
 
         let _mock_artist = server
             .mock("GET", "/Items/artist3?userId=user1&Fields=MediaSources")
-            .match_header("X-Emby-Token", token)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", token).as_str(),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Id": "artist3", "Name": "Restricted Artist", "Type": "MusicArtist"}"#)
@@ -2656,7 +2638,7 @@ mod tests {
         // Server error on the children endpoint — production code logs and drops the error
         let _mock_children = server
             .mock("GET", "/Items?userId=user1&ParentId=artist3&IncludeItemTypes=Audio,MusicVideo&Fields=MediaSources&Recursive=true")
-            .match_header("X-Emby-Token", token)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", token).as_str())
             .with_status(500)
             .expect(1)
             .create_async()
@@ -2680,7 +2662,10 @@ mod tests {
         // Mock: item with no MediaSources
         let _mock = server
             .mock("GET", "/Items/track1?userId=user1&Fields=MediaSources")
-            .match_header("X-Emby-Token", token)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", token).as_str(),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Id": "track1", "Name": "Track 1", "Type": "Audio"}"#)

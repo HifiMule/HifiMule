@@ -752,7 +752,10 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
         let item_id = "6aff97688560276ce460ff2187ff8a6f";
         let _playing = server
             .mock("POST", "/Sessions/Playing")
-            .match_header("X-Emby-Token", "test-token-1234567890")
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", "test-token-1234567890").as_str(),
+            )
             .match_body(mockito::Matcher::PartialJson(serde_json::json!({
                 "ItemId": item_id,
                 "PositionTicks": 0,
@@ -764,7 +767,10 @@ bad_duration\tbad_ts\ttitle\t1\tNOT_A_NUM\tL\tNOT_TS\t
             .await;
         let _stopped = server
             .mock("POST", "/Sessions/Playing/Stopped")
-            .match_header("X-Emby-Token", "test-token-1234567890")
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", "test-token-1234567890").as_str(),
+            )
             .match_body(mockito::Matcher::PartialJson(serde_json::json!({
                 "ItemId": item_id,
                 "PositionTicks": 2_195_080_000u64,

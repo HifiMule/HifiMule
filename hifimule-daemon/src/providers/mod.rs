@@ -555,7 +555,9 @@ async fn connect_jellyfin(
 
 fn sanitize_secret_message(message: &str) -> String {
     let mut sanitized = message.to_string();
-    for key in ["password", "pw", "token", "api_key", "u", "p", "t", "s"] {
+    for key in [
+        "password", "pw", "token", "api_key", "ApiKey", "u", "p", "t", "s",
+    ] {
         let needle = format!("{key}=");
         let mut rebuilt = String::with_capacity(sanitized.len());
         let mut cursor = 0;
@@ -598,6 +600,75 @@ mod tests {
                 username: "alexis".to_string(),
                 password: "secret-password".to_string(),
             },
+        }
+    }
+
+    // The common wire contract is documented by Jellyfin PRs 7080 (ApiKey,
+    // shipped in 10.8) and 13306 (MediaBrowser Authorization + ApiKey remain
+    // accepted with legacy auth disabled in 10.11). These are protocol mocks,
+    // not executions of the historical servers. No version branching is needed.
+    #[tokio::test]
+    async fn jellyfin_common_auth_contract_10_8_through_12() {
+        let _guard = crate::api::credential_test_lock();
+        for version in ["10.8.13", "10.9.11", "10.10.7", "10.11.0", "12.0.0"] {
+            let mut server = Server::new_async().await;
+            let token = "jellyfin-token-12345";
+            let authorization = format!("MediaBrowser Token=\"{token}\"");
+            let login = server.mock("POST", "/Users/AuthenticateByName")
+                .match_header("Authorization", Matcher::Regex(r#"^MediaBrowser Client="HifiMule", Device=".*", DeviceId=".*", Version=".*"$"#.into()))
+                .with_status(200).with_body(r#"{"AccessToken":"jellyfin-token-12345","User":{"Id":"user1","Name":"Alexis"}}"#)
+                .expect(1).create_async().await;
+            let info = server.mock("GET", "/System/Info")
+                .match_header("Authorization", authorization.as_str())
+                .match_header("X-Emby-Token", Matcher::Missing)
+                .with_status(200).with_body(serde_json::json!({"ServerName":"Jellyfin", "Version":version,"Id":"stable-id"}).to_string())
+                .expect(2).create_async().await;
+            let browse = server.mock("GET", "/UserViews")
+                .match_query(Matcher::UrlEncoded("userId".into(), "user1".into()))
+                .match_header("Authorization", authorization.as_str())
+                .with_status(200).with_body(r#"{"Items":[{"Id":"music","Name":"Music","Type":"CollectionFolder","CollectionType":"music"}],"TotalRecordCount":1}"#)
+                .expect(2).create_async().await;
+            let download = server
+                .mock("GET", "/Items/song1/Download")
+                .match_query(Matcher::UrlEncoded("ApiKey".into(), token.into()))
+                .with_status(200)
+                .with_body("audio bytes")
+                .expect(2)
+                .create_async()
+                .await;
+            let fresh = connect(
+                &server.url(),
+                &password_credentials(server.url()),
+                ServerTypeHint::Jellyfin,
+            )
+            .await
+            .expect("fresh login");
+            assert_eq!(fresh.server_version(), Some(version));
+            assert_eq!(fresh.server_reported_id(), Some("stable-id"));
+            assert_eq!(fresh.server_type(), ServerType::Jellyfin);
+            // Stored sessions reconstruct a provider directly; the password-only
+            // connection factory is intentionally not used for reconnect.
+            let client = crate::api::JellyfinClient::new();
+            let metadata = client
+                .test_connection(&server.url(), token)
+                .await
+                .expect("stored token");
+            assert_eq!(metadata.version, version);
+            let stored = jellyfin::JellyfinProvider::new(client, server.url(), token, "user1");
+            for provider in [fresh.as_ref(), &stored as &dyn MediaProvider] {
+                assert_eq!(provider.list_libraries().await.expect("browse").len(), 1);
+                let url = provider
+                    .download_url("song1", None)
+                    .await
+                    .expect("download URL");
+                let response = reqwest::get(url).await.expect("download");
+                assert_eq!(response.status(), 200);
+                assert_eq!(response.text().await.unwrap(), "audio bytes");
+            }
+            login.assert_async().await;
+            info.assert_async().await;
+            browse.assert_async().await;
+            download.assert_async().await;
         }
     }
 
@@ -659,7 +730,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn factory_auto_falls_back_to_jellyfin_after_subsonic_failure() {
+    async fn factory_auto_falls_back_to_jellyfin_12_after_successful_login() {
         let mut server = Server::new_async().await;
         let _ping = server
             .mock("GET", "/rest/ping.view")
@@ -680,10 +751,14 @@ mod tests {
             .await;
         let _info = server
             .mock("GET", "/System/Info")
-            .match_header("X-Emby-Token", "jellyfin-token-12345")
+            .match_header(
+                "Authorization",
+                "MediaBrowser Token=\"jellyfin-token-12345\"",
+            )
+            .match_header("X-Emby-Token", Matcher::Missing)
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"ServerName":"Jellyfin","Version":"10.9.0","Id":"server1"}"#)
+            .with_body(r#"{"ServerName":"Jellyfin","Version":"12.0.0","Id":"server1"}"#)
             .expect(1)
             .create_async()
             .await;
@@ -697,7 +772,11 @@ mod tests {
         .expect("provider");
 
         assert_eq!(provider.server_type(), ServerType::Jellyfin);
-        assert_eq!(provider.server_version(), Some("10.9.0"));
+        assert_eq!(provider.server_version(), Some("12.0.0"));
+        assert_eq!(provider.server_reported_id(), Some("server1"));
+        _ping.assert_async().await;
+        _auth.assert_async().await;
+        _info.assert_async().await;
     }
 
     #[tokio::test]
@@ -720,7 +799,10 @@ mod tests {
             .await;
         let _info = jellyfin
             .mock("GET", "/System/Info")
-            .match_header("X-Emby-Token", "jellyfin-token-12345")
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", "jellyfin-token-12345").as_str(),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"ServerName":"Jellyfin","Version":"10.9.0","Id":"server1"}"#)
@@ -830,6 +912,10 @@ mod tests {
 
     #[test]
     fn sanitize_secret_message_redacts_query_params_only() {
+        assert_eq!(
+            sanitize_secret_message("error ?ApiKey=secret&api_key=old&format=mp3"),
+            "error ?ApiKey=[redacted]&api_key=[redacted]&format=mp3"
+        );
         assert_eq!(
             sanitize_secret_message("status=ok type=json"),
             "status=ok type=json",

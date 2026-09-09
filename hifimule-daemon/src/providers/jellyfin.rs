@@ -510,7 +510,7 @@ impl MediaProvider for JellyfinProvider {
     ) -> Result<String, ProviderError> {
         // All returned URLs must be fetchable without auth headers because
         // `execute_provider_sync` uses a plain `reqwest::get(url)`.  Jellyfin
-        // supports URL-based auth via `?api_key=<token>`, which we always append
+        // supports URL-based auth via `?ApiKey=<token>`, which we always append
         // so that direct-play downloads and transcoding fallbacks both work in the
         // multi-server provider sync path.
         let url = if let Some(profile) = profile {
@@ -527,15 +527,33 @@ impl MediaProvider for JellyfinProvider {
                 song_id
             )
         };
-        // Append api_key only when not already present (TranscodingUrl from
-        // PlaybackInfo already carries Jellyfin session auth).
-        Ok(if url.contains("api_key=") || url.contains("ApiKey=") {
-            url
-        } else if url.contains('?') {
-            format!("{}&api_key={}", url, self.token())
-        } else {
-            format!("{}?api_key={}", url, self.token())
-        })
+        // Prefer existing supported authorization, then normalize legacy server
+        // URLs. Structured queries avoid interpreting substrings or fragments as
+        // credentials, and encode tokens without changing their value.
+        let mut url = reqwest::Url::parse(&url)
+            .map_err(|_| ProviderError::Other(anyhow::anyhow!("Invalid Jellyfin download URL")))?;
+        let pairs: Vec<(String, String)> = url.query_pairs().into_owned().collect();
+        let token = pairs
+            .iter()
+            .find(|(key, value)| key == "ApiKey" && !value.is_empty())
+            .or_else(|| {
+                pairs
+                    .iter()
+                    .find(|(key, value)| key == "api_key" && !value.is_empty())
+            })
+            .map(|(_, value)| value.as_str())
+            .unwrap_or(self.token());
+        {
+            let mut query = url.query_pairs_mut();
+            query.clear();
+            for (key, value) in &pairs {
+                if key != "ApiKey" && key != "api_key" {
+                    query.append_pair(key, value);
+                }
+            }
+            query.append_pair("ApiKey", token);
+        }
+        Ok(url.into())
     }
 
     async fn cover_art_url(&self, cover_art_id: &str) -> Result<String, ProviderError> {
@@ -1200,7 +1218,7 @@ mod tests {
         let _mock = server
             .mock("GET", "/UserViews")
             .match_query(Matcher::UrlEncoded("userId".into(), USER_ID.into()))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Items":[{"Id":"lib1","Name":"Music","Type":"CollectionFolder","CollectionType":"music"},{"Id":"tv1","Name":"TV","Type":"CollectionFolder","CollectionType":"tvshows"}],"TotalRecordCount":2}"#)
@@ -1225,7 +1243,7 @@ mod tests {
                 Matcher::UrlEncoded("userId".into(), USER_ID.into()),
                 Matcher::UrlEncoded("Fields".into(), "RecursiveItemCount,CumulativeRunTimeTicks".into()),
             ]))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Id":"album1","Name":"Album","Type":"MusicAlbum","AlbumArtist":"Artist","ProductionYear":2024,"RecursiveItemCount":1,"CumulativeRunTimeTicks":100000000}"#)
@@ -1240,7 +1258,7 @@ mod tests {
                 Matcher::UrlEncoded("Fields".into(), "MediaSources".into()),
                 Matcher::UrlEncoded("Recursive".into(), "true".into()),
             ]))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Items":[{"Id":"song1","Name":"Track","Type":"Audio","RunTimeTicks":100000000,"MediaSources":[{"Size":1000,"Bitrate":320000}]}],"TotalRecordCount":1,"StartIndex":0}"#)
@@ -1270,7 +1288,7 @@ mod tests {
                 Matcher::UrlEncoded("Limit".into(), "25".into()),
                 Matcher::UrlEncoded("Fields".into(), "Id,Name,Album,AlbumArtist,Artists,AlbumId".into()),
             ]))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Items":[{"Id":"song1","Name":"Track","Type":"Audio","Album":"Album","AlbumArtist":"Artist","RunTimeTicks":100000000}],"TotalRecordCount":1,"StartIndex":0}"#)
@@ -1301,7 +1319,7 @@ mod tests {
                 Matcher::UrlEncoded("Limit".into(), "200".into()),
                 Matcher::UrlEncoded("SortBy".into(), "Name".into()),
             ]))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Items":[{"Id":"song1","Name":"Track","Type":"Audio","RunTimeTicks":100000000}],"TotalRecordCount":42,"StartIndex":0}"#)
@@ -1331,7 +1349,7 @@ mod tests {
                 Matcher::UrlEncoded("userId".into(), USER_ID.into()),
                 Matcher::UrlEncoded("IncludeItemTypes".into(), "Playlist".into()),
             ]))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Items":[{"Id":"playlist1","Name":"Road Trip","Type":"Playlist","RecursiveItemCount":1,"CumulativeRunTimeTicks":100000000}],"TotalRecordCount":1,"StartIndex":0}"#)
@@ -1340,7 +1358,7 @@ mod tests {
         let _playlist = server
             .mock("GET", "/Items/playlist1")
             .match_query(Matcher::UrlEncoded("userId".into(), USER_ID.into()))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Id":"playlist1","Name":"Road Trip","Type":"Playlist","RecursiveItemCount":1,"CumulativeRunTimeTicks":100000000}"#)
@@ -1354,7 +1372,7 @@ mod tests {
                 Matcher::UrlEncoded("Fields".into(), "MediaSources".into()),
                 Matcher::UrlEncoded("Recursive".into(), "true".into()),
             ]))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Items":[{"Id":"song1","Name":"Track","Type":"Audio","RunTimeTicks":100000000}],"TotalRecordCount":1,"StartIndex":0}"#)
@@ -1377,7 +1395,10 @@ mod tests {
         let url = server.url();
         let _mock = server
             .mock("POST", "/Playlists")
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", TOKEN).as_str(),
+            )
             .match_body(Matcher::PartialJson(serde_json::json!({
                 "Name": "Road Trip",
                 "MediaType": "Audio",
@@ -1405,7 +1426,10 @@ mod tests {
         let url = server.url();
         let _mock = server
             .mock("POST", "/Playlists/playlist99")
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", TOKEN).as_str(),
+            )
             .match_body(Matcher::Json(serde_json::json!({
                 "Name": "Renamed Road Trip",
             })))
@@ -1431,7 +1455,10 @@ mod tests {
                 Matcher::UrlEncoded("Ids".into(), "song1,song2".into()),
                 Matcher::UrlEncoded("userId".into(), USER_ID.into()),
             ]))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", TOKEN).as_str(),
+            )
             .with_status(204)
             .create_async()
             .await;
@@ -1450,7 +1477,10 @@ mod tests {
         let _get = server
             .mock("GET", "/Playlists/playlist99/Items")
             .match_query(Matcher::UrlEncoded("userId".into(), USER_ID.into()))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", TOKEN).as_str(),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
@@ -1468,7 +1498,10 @@ mod tests {
                 "EntryIds".into(),
                 "entry-a,entry-b".into(),
             ))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", TOKEN).as_str(),
+            )
             .with_status(204)
             .create_async()
             .await;
@@ -1487,7 +1520,10 @@ mod tests {
         let _get = server
             .mock("GET", "/Playlists/playlist99/Items")
             .match_query(Matcher::UrlEncoded("userId".into(), USER_ID.into()))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", TOKEN).as_str(),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
@@ -1502,7 +1538,10 @@ mod tests {
         let _delete = server
             .mock("DELETE", "/Playlists/playlist99/Items")
             .match_query(Matcher::UrlEncoded("EntryIds".into(), "entry-a".into()))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", TOKEN).as_str(),
+            )
             .with_status(204)
             .create_async()
             .await;
@@ -1521,7 +1560,10 @@ mod tests {
         let _get = server
             .mock("GET", "/Playlists/playlist99/Items")
             .match_query(Matcher::UrlEncoded("userId".into(), USER_ID.into()))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", TOKEN).as_str(),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
@@ -1551,7 +1593,7 @@ mod tests {
         let _get = server
             .mock("GET", "/Playlists/playlist99/Items")
             .match_query(Matcher::UrlEncoded("userId".into(), USER_ID.into()))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Items":[{"Id":"song3","Name":"Track 3","Type":"Audio","PlaylistItemId":"entry-c"}],"TotalRecordCount":1,"StartIndex":0}"#)
@@ -1573,7 +1615,10 @@ mod tests {
         let url = server.url();
         let _mock = server
             .mock("DELETE", "/Items/playlist99")
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", TOKEN).as_str(),
+            )
             .with_status(204)
             .create_async()
             .await;
@@ -1598,7 +1643,81 @@ mod tests {
 
         assert_eq!(
             url,
-            format!("http://host/jellyfin/Items/song1/Download?api_key={TOKEN}")
+            format!("http://host/jellyfin/Items/song1/Download?ApiKey={TOKEN}")
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_download_url_normalizes_auth_query() {
+        for (query, expected_token) in [
+            ("format=mp3", TOKEN),
+            ("ApiKey=existing&format=mp3", "existing"),
+            ("api_key=legacy&format=mp3", "legacy"),
+            ("ApiKey=&api_key=legacy&format=mp3", "legacy"),
+            ("ApiKey=&api_key=&format=mp3", TOKEN),
+            ("ApiKey=&ApiKey=valid&format=mp3", "valid"),
+            (
+                "api_key=old&ApiKey=preferred&ApiKey=duplicate&format=mp3",
+                "preferred",
+            ),
+            ("note=api_key%3Dfake&format=mp3", TOKEN),
+            ("ApiKey=encoded%2B%26%3D%23&format=mp3", "encoded+&=#"),
+        ] {
+            let mut server = Server::new_async().await;
+            let playback = server.mock("POST", "/Items/song1/PlaybackInfo")
+                .match_query(Matcher::Any)
+                .with_status(200)
+                .with_body(serde_json::json!({"MediaSources":[{"SupportsDirectPlay":false,"TranscodingUrl":format!("/stream?{query}#part")}]}).to_string())
+                .create_async().await;
+            let provider =
+                JellyfinProvider::new(JellyfinClient::new(), server.url(), TOKEN, USER_ID);
+            let result = provider
+                .download_url(
+                    "song1",
+                    Some(&TranscodeProfile {
+                        container: Some("mp3".into()),
+                        audio_codec: None,
+                        max_bitrate_kbps: None,
+                    }),
+                )
+                .await
+                .unwrap();
+            let parsed = reqwest::Url::parse(&result).unwrap();
+            assert_eq!(parsed.path(), "/stream");
+            assert_eq!(parsed.fragment(), Some("part"));
+            let pairs: Vec<_> = parsed.query_pairs().collect();
+            assert_eq!(pairs.iter().filter(|(key, _)| key == "ApiKey").count(), 1);
+            assert!(!pairs.iter().any(|(key, _)| key == "api_key"));
+            assert!(
+                pairs
+                    .iter()
+                    .any(|(key, value)| key == "ApiKey" && value == expected_token)
+            );
+            assert!(
+                pairs
+                    .iter()
+                    .any(|(key, value)| key == "format" && value == "mp3")
+            );
+            if query.starts_with("note=") {
+                assert!(
+                    pairs
+                        .iter()
+                        .any(|(key, value)| key == "note" && value == "api_key=fake")
+                );
+            }
+            playback.assert_async().await;
+        }
+        let provider = JellyfinProvider::new(
+            JellyfinClient::new(),
+            "http://host/jellyfin",
+            "special+&=#token",
+            USER_ID,
+        );
+        let url = provider.download_url("song1", None).await.unwrap();
+        let parsed = reqwest::Url::parse(&url).unwrap();
+        assert_eq!(
+            parsed.query_pairs().collect::<Vec<_>>(),
+            vec![("ApiKey".into(), "special+&=#token".into())]
         );
     }
 
@@ -1609,7 +1728,7 @@ mod tests {
         let _mock = server
             .mock("POST", "/Items/song1/PlaybackInfo")
             .match_query(Matcher::UrlEncoded("userId".into(), USER_ID.into()))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
@@ -1634,7 +1753,7 @@ mod tests {
 
         assert_eq!(
             resolved,
-            format!("{url}/Videos/song1/stream.mp3?api_key=redacted")
+            format!("{url}/Videos/song1/stream.mp3?ApiKey=redacted")
         );
     }
 
@@ -1659,7 +1778,10 @@ mod tests {
         let _mock = server
             .mock("POST", "/UserPlayedItems/song1")
             .match_query(Matcher::UrlEncoded("userId".into(), USER_ID.into()))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", TOKEN).as_str(),
+            )
             .with_status(204)
             .create_async()
             .await;
@@ -1688,7 +1810,7 @@ mod tests {
                 Matcher::UrlEncoded("minDateLastSaved".into(), "2026-05-09T10:00:00Z".into()),
                 Matcher::UrlEncoded("Fields".into(), "MediaSources".into()),
             ]))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Items":[{"Id":"song1","Name":"Track","Type":"Audio","Etag":"v1"},{"Id":"album1","Name":"Album","Type":"MusicAlbum"}],"TotalRecordCount":2,"StartIndex":0}"#)
@@ -1719,7 +1841,10 @@ mod tests {
                 Matcher::UrlEncoded("userId".into(), USER_ID.into()),
                 Matcher::UrlEncoded("Fields".into(), "MediaSources".into()),
             ]))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", TOKEN).as_str(),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Items":[],"TotalRecordCount":0,"StartIndex":0}"#)
@@ -1740,7 +1865,10 @@ mod tests {
         let _mock = server
             .mock("GET", "/Items")
             .match_query(Matcher::Any)
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", TOKEN).as_str(),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body("not valid json{{{")
@@ -1770,7 +1898,7 @@ mod tests {
                 Matcher::UrlEncoded("userId".into(), USER_ID.into()),
                 Matcher::UrlEncoded("SortBy".into(), "SortName".into()),
             ]))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Items":[{"Id":"artist1","Name":"The Beatles","Type":"MusicArtist","RecursiveItemCount":13}],"TotalRecordCount":1,"StartIndex":0}"#)
@@ -1798,7 +1926,7 @@ mod tests {
         let _artist = server
             .mock("GET", "/Items/artist1")
             .match_query(Matcher::UrlEncoded("userId".into(), USER_ID.into()))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Id":"artist1","Name":"The Beatles","Type":"MusicArtist","RecursiveItemCount":13}"#)
@@ -1812,7 +1940,7 @@ mod tests {
                 Matcher::UrlEncoded("IncludeItemTypes".into(), "MusicAlbum".into()),
                 Matcher::UrlEncoded("Recursive".into(), "true".into()),
             ]))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Items":[{"Id":"album1","Name":"Abbey Road","Type":"MusicAlbum","ProductionYear":1969}],"TotalRecordCount":1,"StartIndex":0}"#)
@@ -1835,7 +1963,10 @@ mod tests {
         let _mock = server
             .mock("GET", "/UserViews")
             .match_query(Matcher::Any)
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", TOKEN).as_str(),
+            )
             .with_status(401)
             .with_body("Unauthorized")
             .create_async()
@@ -1859,7 +1990,10 @@ mod tests {
         let _mock = server
             .mock("GET", "/Items/missing-id")
             .match_query(Matcher::Any)
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", TOKEN).as_str(),
+            )
             .with_status(404)
             .with_body("Not Found")
             .create_async()
@@ -1883,7 +2017,10 @@ mod tests {
         let _mock = server
             .mock("GET", "/UserViews")
             .match_query(Matcher::Any)
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", TOKEN).as_str(),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body("{not valid json}")
@@ -1935,7 +2072,7 @@ mod tests {
                 Matcher::UrlEncoded("Limit".into(), "50".into()),
                 Matcher::UrlEncoded("Fields".into(), "RecursiveItemCount".into()),
             ]))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Items":[{"Id":"genre1","Name":"Rock","Type":"MusicGenre","RecursiveItemCount":42,"ImageTags":{"Primary":"abc123"}}],"TotalRecordCount":1,"StartIndex":0}"#)
@@ -1964,7 +2101,7 @@ mod tests {
                 Matcher::UrlEncoded("GenreIds".into(), "genre1".into()),
                 Matcher::UrlEncoded("Fields".into(), "MediaSources,UserData,DateCreated".into()),
             ]))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Items":[{"Id":"song1","Name":"Rock Track","Type":"Audio","RunTimeTicks":200000000}],"TotalRecordCount":1,"StartIndex":0}"#)
@@ -1994,7 +2131,7 @@ mod tests {
                 Matcher::UrlEncoded("SortBy".into(), "DateCreated".into()),
                 Matcher::UrlEncoded("SortOrder".into(), "Descending".into()),
             ]))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Items":[{"Id":"album1","Name":"New Album","Type":"MusicAlbum","AlbumArtist":"The Artist","ProductionYear":2024}],"TotalRecordCount":1,"StartIndex":0}"#)
@@ -2026,7 +2163,7 @@ mod tests {
                 Matcher::UrlEncoded("SortOrder".into(), "Descending".into()),
                 Matcher::UrlEncoded("Fields".into(), "MediaSources,UserData,DateCreated".into()),
             ]))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Items":[{"Id":"song1","Name":"Played Track","Type":"Audio","UserData":{"PlayCount":15,"IsFavorite":false}}],"TotalRecordCount":1,"StartIndex":0}"#)
@@ -2057,7 +2194,7 @@ mod tests {
                 Matcher::UrlEncoded("SortOrder".into(), "Descending".into()),
                 Matcher::UrlEncoded("Fields".into(), "MediaSources,UserData,DateCreated".into()),
             ]))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Items":[{"Id":"song1","Name":"Played Track","Type":"Audio","UserData":{"PlayCount":3,"IsFavorite":false,"LastPlayedDate":"2024-04-01T10:00:00Z"}}],"TotalRecordCount":1,"StartIndex":0}"#)
@@ -2090,7 +2227,7 @@ mod tests {
                 Matcher::UrlEncoded("IsFavorite".into(), "true".into()),
                 Matcher::UrlEncoded("Fields".into(), "MediaSources,UserData,DateCreated".into()),
             ]))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Items":[{"Id":"fav1","Name":"Favorite Track","Type":"Audio","UserData":{"PlayCount":0,"IsFavorite":true}}],"TotalRecordCount":1,"StartIndex":0}"#)
@@ -2119,7 +2256,7 @@ mod tests {
                 Matcher::UrlEncoded("SortBy".into(), "SortName".into()),
                 Matcher::UrlEncoded("SortOrder".into(), "Ascending".into()),
             ]))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
@@ -2157,7 +2294,10 @@ mod tests {
         let _get = server
             .mock("GET", "/Playlists/playlist99/Items")
             .match_query(Matcher::UrlEncoded("userId".into(), USER_ID.into()))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", TOKEN).as_str(),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
@@ -2171,7 +2311,10 @@ mod tests {
         // Want order: song2, song1 → selection sort moves entry-b to index 0
         let _move = server
             .mock("POST", "/Playlists/playlist99/Items/entry-b/Move/0")
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", TOKEN).as_str(),
+            )
             .with_status(204)
             .create_async()
             .await;
@@ -2190,7 +2333,10 @@ mod tests {
         let _get = server
             .mock("GET", "/Playlists/playlist99/Items")
             .match_query(Matcher::UrlEncoded("userId".into(), USER_ID.into()))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", TOKEN).as_str(),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
@@ -2219,7 +2365,10 @@ mod tests {
         let _get = server
             .mock("GET", "/Playlists/playlist99/Items")
             .match_query(Matcher::UrlEncoded("userId".into(), USER_ID.into()))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", TOKEN).as_str(),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
@@ -2235,14 +2384,20 @@ mod tests {
         //   move entry-c to index 0, then (mirror updated) move entry-b to index 1.
         let move_c = server
             .mock("POST", "/Playlists/playlist99/Items/entry-c/Move/0")
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", TOKEN).as_str(),
+            )
             .with_status(204)
             .expect(1)
             .create_async()
             .await;
         let move_b = server
             .mock("POST", "/Playlists/playlist99/Items/entry-b/Move/1")
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header(
+                "Authorization",
+                format!("MediaBrowser Token=\"{}\"", TOKEN).as_str(),
+            )
             .with_status(204)
             .expect(1)
             .create_async()
@@ -2277,7 +2432,7 @@ mod tests {
                 Matcher::UrlEncoded("IncludeItemTypes".into(), "Audio".into()),
                 Matcher::UrlEncoded("Recursive".into(), "true".into()),
             ]))
-            .match_header("X-Emby-Token", TOKEN)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", TOKEN).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Items":[{"Id":"track1","Name":"Highway to Hell","Type":"Audio","Artists":["AC/DC"],"AlbumArtist":"AC/DC","Album":"Highway to Hell","Duration":208}],"TotalRecordCount":1,"StartIndex":0}"#)

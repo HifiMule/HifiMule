@@ -110,12 +110,7 @@ pub async fn run_auto_fill(
     CredentialManager::validate_url(&url)?;
     CredentialManager::validate_token(&token)?;
 
-    let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert(
-        "X-Emby-Token",
-        reqwest::header::HeaderValue::from_str(&token)
-            .map_err(|_| anyhow::anyhow!("Invalid token format"))?,
-    );
+    let headers = crate::api::jellyfin_token_headers(&token)?;
 
     // Build a HashSet for O(1) client-side exclusion. Sending ExcludeItemIds in the URL
     // explodes to tens of kilobytes on large baskets, causing Cloudflare/nginx 520/414 errors.
@@ -531,6 +526,47 @@ pub async fn run_auto_fill_provider(
 mod tests {
     use super::*;
     use crate::api::{JellyfinItem, JellyfinUserData, MediaSource};
+
+    #[tokio::test]
+    async fn legacy_auto_fill_uses_supported_jellyfin_authorization() {
+        let _guard = crate::api::credential_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp.path().join("config.json"));
+        let mut server = mockito::Server::new_async().await;
+        CredentialManager::save_credentials(&server.url(), "test-token-1234567890", Some("user1"))
+            .unwrap();
+        let request = server
+            .mock("GET", "/Items")
+            .match_query(mockito::Matcher::Any)
+            .match_header(
+                "Authorization",
+                "MediaBrowser Token=\"test-token-1234567890\"",
+            )
+            .match_header("X-Emby-Token", mockito::Matcher::Missing)
+            .with_status(200)
+            .with_body(r#"{"Items":[],"TotalRecordCount":0,"StartIndex":0}"#)
+            .create_async()
+            .await;
+        let result = run_auto_fill(
+            &JellyfinClient::new(),
+            AutoFillParams {
+                exclude_item_ids: vec![],
+                max_fill_bytes: 1000,
+                device_id: String::new(),
+                server_id: String::new(),
+                now_unix: 0,
+                history: Default::default(),
+                rotation_cursor: 0,
+                seed: 0,
+                pity_streak: 0,
+                local: Default::default(),
+            },
+        )
+        .await
+        .expect("auto-fill");
+        assert!(result.is_empty());
+        request.assert_async().await;
+    }
 
     fn make_track(
         id: &str,

@@ -7580,7 +7580,7 @@ mod tests {
                 "GET",
                 "/Items?userId=user1&Recursive=true&ParentId=music-folder&IncludeItemTypes=MusicAlbum,Playlist,MusicArtist,Audio,MusicVideo&StartIndex=0&Limit=50",
             )
-            .match_header("X-Emby-Token", token)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", token).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
@@ -8071,7 +8071,7 @@ mod tests {
         let _download = server
             .mock("GET", "/Items/song1/Download")
             .match_query(mockito::Matcher::UrlEncoded(
-                "api_key".into(),
+                "ApiKey".into(),
                 "jellyfin-token".into(),
             ))
             .with_status(200)
@@ -10085,7 +10085,7 @@ mod tests {
 
         let _mock_playlist = server
             .mock("GET", "/Items")
-            .match_header("X-Emby-Token", token)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", token).as_str())
             .match_query(Matcher::AllOf(vec![
                 Matcher::UrlEncoded("userId".into(), "Me".into()),
                 Matcher::UrlEncoded("Ids".into(), "playlist-1".into()),
@@ -10098,7 +10098,7 @@ mod tests {
 
         let _mock_playlist_children = server
             .mock("GET", "/Items")
-            .match_header("X-Emby-Token", token)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", token).as_str())
             .match_query(Matcher::AllOf(vec![
                 Matcher::UrlEncoded("userId".into(), "Me".into()),
                 Matcher::UrlEncoded("ParentId".into(), "playlist-1".into()),
@@ -10202,7 +10202,7 @@ mod tests {
         // Mock bulk item fetch: returns only item-1; item-2 is absent → partial failure
         let _mock_items = server
             .mock("GET", "/Items")
-            .match_header("X-Emby-Token", token)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", token).as_str())
             .match_query(mockito::Matcher::AllOf(vec![
                 mockito::Matcher::UrlEncoded("userId".into(), "Me".into()),
                 mockito::Matcher::UrlEncoded("Fields".into(), "MediaSources".into()),
@@ -11132,7 +11132,7 @@ mod tests {
         let _views = server
             .mock("GET", "/UserViews")
             .match_query(mockito::Matcher::UrlEncoded("userId".into(), "user1".into()))
-            .match_header("X-Emby-Token", token)
+            .match_header("Authorization", format!("MediaBrowser Token=\"{}\"", token).as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(

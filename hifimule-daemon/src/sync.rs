@@ -4539,7 +4539,7 @@ mod tests {
         let _stream = server
             .mock("GET", "/Items/song-jellyfin/Download")
             .match_query(mockito::Matcher::UrlEncoded(
-                "api_key".into(),
+                "ApiKey".into(),
                 "token".into(),
             ))
             .with_status(200)
@@ -4601,7 +4601,7 @@ mod tests {
         let _stream = server
             .mock("GET", "/Items/song-missing/Download")
             .match_query(mockito::Matcher::UrlEncoded(
-                "api_key".into(),
+                "ApiKey".into(),
                 "token".into(),
             ))
             .with_status(200)
