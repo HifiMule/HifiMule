@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.14.0 - 2026-09-09
+
+HifiMule now works with **Jellyfin 12** when legacy authentication is disabled. You can log in normally or reconnect with saved credentials, then browse your library, build Auto-Fill selections, manage playlists, sync music, and report plays without changing compatibility settings on your server.
+
+Direct and transcoded downloads now use Jellyfin's supported authentication format while preserving the rest of the download URL. The same approach remains compatible with Jellyfin 10.8 through 12.0, so upgrading HifiMule does not require upgrading your server at the same time.
+
 ## v0.13.0 - 2026-07-13
 
 Syncs are faster. HifiMule now prepares the next tracks from your servers while the current one is still being written to your device, instead of downloading and writing strictly one track at a time. On multi-server and Auto-Fill syncs a slow server no longer holds everything up, and the tracks you explicitly chose in a playlist or basket are written before any Auto-Fill filler. **Jellyfin** now runs through the same sync engine as your other servers, so every provider gets the same behavior.
