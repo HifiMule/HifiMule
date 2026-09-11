@@ -121,3 +121,52 @@ The optional native backend has been cross-built for `aarch64-pc-windows-gnullvm
 Ubuntu 26.04.1 compiled the unchanged native probe and passed all 14 Rust tests. Five decoded formats passed; AAC failed continuity with the distribution's FFmpeg 8.0.1 libraries. Silent AAC/Opus output through the enumerated `pipewire` endpoint completed without reported underruns, with active desktop routing confirmed by PipeWire snapshots. AAC's callback success includes its extra decoded frames and does not count as a continuity pass. See the [Linux VM validation report](../../_bmad-output/implementation-artifacts/playback-linux-vm-results.md) for the exact environment, failure measurements and repeatable commands. Do not assume the wrapper version pins the linked FFmpeg runtime or that every Linux desktop exposes an endpoint named `pipewire`.
 
 A subsequent isolated FFmpeg 9 build passed all six formats, all 14 Rust tests, and complete silent AAC/Opus PipeWire runs. The report includes the private-library build recipe and runtime identity checks that caught an initial accidental link to system FFmpeg 8. The FFmpeg 8 failure remains recorded separately; production builds need deliberate library selection and runtime verification.
+
+## Optional bounded session and disposable controller
+
+Build with `cargo build --locked --features native-ffmpeg,session-controls`.
+This adds pinned souvlaki 0.8.3 native transport and winit 0.28.7 platform event
+loops only to the experiment. Linux needs the ALSA/FFmpeg development dependencies,
+`libdbus-1-dev`, a graphical desktop session and its session D-Bus. The owner keeps
+a hidden native window (including a real HWND on Windows), audio and media
+registration in the same process. The controller is a separate process.
+
+```sh
+./target/debug/playback-probe session --info /tmp/hifimule-session.json --seconds 120 --decoder native-ffmpeg fixtures/track-1.aac.m4a fixtures/track-2.aac.m4a fixtures/track-3.aac.m4a
+# In a different terminal, after the ready log:
+./target/debug/playback-probe session-ui --info /tmp/hifimule-session.json
+./target/debug/playback-probe session-control --info /tmp/hifimule-session.json status
+./target/debug/playback-probe session-control --info /tmp/hifimule-session.json pause
+./target/debug/playback-probe session-control --info /tmp/hifimule-session.json resume
+./target/debug/playback-probe session-control --info /tmp/hifimule-session.json quit
+```
+
+Use actual fixture paths from the generated manifest. An optional exact `--device`
+name selects the endpoint without fallback. Sessions always use volume zero and
+repeat the supplied finite fixture sequence. `--seconds` accepts 1–170 (default
+120); a separate 180-second process deadline also bounds blocked file reads.
+Start the owner independently with redirected standard handles when testing daemon
+lifetime; launching it as a child owned by a GUI does not establish detachment.
+
+The controller title shows status and consumed frames. Space toggles playback,
+Escape or window close disconnects the controller, and Q explicitly quits the
+owner. `--close-after 2` closes only the controller after two seconds for automated
+lifecycle checks. The owner accepts native Play, Pause, Toggle, Stop and Quit;
+Stop ends this finite proof. Other native commands are logged as unsupported.
+Native and controller events have separate `source` fields. An OS transport action
+is not evidence that a physical keyboard delivered the action.
+
+The new `--info` file must not already exist. It is exclusively created (mode 0600
+on Unix; inherited directory ACL on Windows), then populated only after the audio
+callback consumes frames. Use a private user directory on Windows. Its JSON has
+loopback port, random bearer token, session identity, PID and full MPRIS bus name.
+Treat it as a capability, keep it private, and wait/retry while initially empty.
+Commands are newline JSON, limited to 4096 bytes and a total 500 ms read deadline;
+wrong identity/token and unsupported commands are rejected. No production port or
+persistent service is used. Normal exit and the process deadline remove the
+endpoint. Forced external termination may leave a stale file; remove that specific
+file after confirming its owner has exited before starting another session.
+
+Counters measure callback consumption, not physical output or keyboard routing.
+This prototype does not change production sidecar lifetime or implement seeking,
+real library playback, resampling, radio queues or device recovery.

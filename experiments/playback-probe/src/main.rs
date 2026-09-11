@@ -20,6 +20,8 @@ use symphonia::core::{
 
 #[cfg(feature = "native-ffmpeg")]
 mod ffmpeg_backend;
+#[cfg(feature = "session-controls")]
+mod session;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Backend {
@@ -255,6 +257,15 @@ fn play(
     if !volume.is_finite() || !(0.0..=1.0).contains(&volume) {
         bail!("volume must be finite and in 0..=1");
     }
+    play_controlled(files, volume, device_name, backend, None)
+}
+fn play_controlled(
+    files: Vec<String>,
+    volume: f32,
+    device_name: Option<String>,
+    backend: Backend,
+    external: Option<Arc<State>>,
+) -> Result<()> {
     // Preflight validates the complete finite sequence before opening a native stream.
     let mut format = None;
     let mut total = 0;
@@ -291,7 +302,8 @@ fn play(
         .config();
     // Fixed-size frames avoid allocation and deallocation inside the audio callback.
     let queue = Arc::new(ArrayQueue::new(32768));
-    let state = Arc::new(State::default());
+    let has_external = external.is_some();
+    let state = external.unwrap_or_else(|| Arc::new(State::default()));
     state.total_frames.store(total, Ordering::Relaxed);
     let q = queue.clone();
     let s = state.clone();
@@ -355,21 +367,23 @@ fn play(
             "{}",
             json!({"decoder":backend.name(),"backend_info":backend.info(),"device":device.name()?,"sample_rate":f.rate,"channels":f.channels,"buffer_capacity_frames":32768,"volume":volume})
         );
-        let controls = state.clone();
-        thread::spawn(move || {
-            for line in std::io::stdin().lock().lines() {
-                match line.as_deref().map(str::trim) {
-                    Ok("pause") => controls.paused.store(true, Ordering::Release),
-                    Ok("resume") => controls.paused.store(false, Ordering::Release),
-                    Ok("stop") => {
-                        controls.stop_requested.store(true, Ordering::Release);
-                        break;
+        if !has_external {
+            let controls = state.clone();
+            thread::spawn(move || {
+                for line in std::io::stdin().lock().lines() {
+                    match line.as_deref().map(str::trim) {
+                        Ok("pause") => controls.paused.store(true, Ordering::Release),
+                        Ok("resume") => controls.paused.store(false, Ordering::Release),
+                        Ok("stop") => {
+                            controls.stop_requested.store(true, Ordering::Release);
+                            break;
+                        }
+                        Err(_) => break,
+                        _ => eprintln!("controls: pause, resume, stop (one per line)"),
                     }
-                    Err(_) => break,
-                    _ => eprintln!("controls: pause, resume, stop (one per line)"),
                 }
-            }
-        });
+            });
+        }
         stream.play()?;
         let mut progress = Instant::now();
         let mut last = 0;
@@ -414,7 +428,7 @@ fn play(
     }
     println!(
         "{}",
-        json!({"decoder":backend.name(),"consumed_frames":state.consumed.load(Ordering::Relaxed),"underrun_frames":state.underrun_frames.load(Ordering::Relaxed),"stopped":state.stop_requested.load(Ordering::Relaxed),"media_controls":"stdin pause/resume/stop only; OS keys not implemented","physical_output_verified":false})
+        json!({"decoder":backend.name(),"consumed_frames":state.consumed.load(Ordering::Relaxed),"underrun_frames":state.underrun_frames.load(Ordering::Relaxed),"stopped":state.stop_requested.load(Ordering::Relaxed),"media_controls":if has_external { "native session and external controller" } else { "stdin pause/resume/stop only; OS keys not implemented" },"physical_output_verified":false})
     );
     Ok(())
 }
@@ -424,6 +438,13 @@ fn run() -> Result<()> {
         bail!("usage: playback-probe devices | decode --output PATH FILE... | play [--volume 0.02] [--device NAME] FILE...");
     }
     let command = args.remove(0);
+    #[cfg(feature = "session-controls")]
+    if matches!(
+        command.as_str(),
+        "session" | "session-control" | "session-ui"
+    ) {
+        return session::run(&command, args);
+    }
     let mut backend = Backend::Symphonia;
     if let Some(index) = args.iter().position(|s| s == "--decoder") {
         if !matches!(command.as_str(), "decode" | "play" | "backend-info") {
@@ -485,9 +506,22 @@ fn main() {
     // This finite-fixture experiment has a whole-process deadline, including preflight
     // and storage reads. A blocked regular file cannot defeat a thread join timeout.
     let (finished, receiver) = std::sync::mpsc::channel();
+    let deadline = if std::env::args()
+        .nth(1)
+        .is_some_and(|s| s.starts_with("session"))
+    {
+        180
+    } else {
+        60
+    };
     thread::spawn(move || {
-        if receiver.recv_timeout(Duration::from_secs(60)).is_err() {
-            eprintln!("probe exceeded its 60-second experiment deadline");
+        if receiver
+            .recv_timeout(Duration::from_secs(deadline))
+            .is_err()
+        {
+            #[cfg(feature = "session-controls")]
+            session::deadline_cleanup();
+            eprintln!("probe exceeded its experiment deadline");
             std::process::exit(124);
         }
     });

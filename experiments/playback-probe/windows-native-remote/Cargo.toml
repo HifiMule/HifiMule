@@ -1,0 +1,8 @@
+[package]
+name="hifimule-native-remote-proof"
+version="0.1.0"
+edition="2021"
+publish=false
+[workspace]
+[dependencies]
+windows={version="=0.44.0",features=["Foundation","Foundation_Collections","Media_Control","Win32_System_WinRT"]}
