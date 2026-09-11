@@ -451,3 +451,7 @@ Lifecycle inspection found UI-owned sidecars are killed on UI exit, especially r
 ### Decoder comparison follow-up
 
 The approved isolated FFmpeg comparison passed WAV, FLAC, ALAC, MP3, AAC, and Opus on macOS with exact per-track lengths under the existing verifier. This resolves the synthetic AAC padding and Opus support obstacles for the CLI backend; it does not yet establish native Rust integration or Windows/Linux behavior. See `../implementation-artifacts/playback-feasibility-results.md` for measurements and the next integration decision.
+
+### Native Rust decoder follow-up
+
+The approved native FFmpeg/Rust probe passes the same six-format continuity matrix. Silent AAC and Opus sequences each consumed all frames through CoreAudio with zero reported underruns. This supports Rust feasibility on the tested Mac; Windows/Linux runtime, packaging, physical gapless output and daemon/media-key lifecycle remain pending. The isolated default build still uses Symphonia without FFmpeg linkage. See the feasibility report for review corrections and measurement limits.

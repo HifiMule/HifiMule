@@ -106,3 +106,36 @@ The [build documentation](https://github.com/zmwangx/rust-ffmpeg/wiki/Notes-on-b
 The local Homebrew binary has `--enable-gpl --enable-version3`; it is an experiment tool, not a selected distribution build. FFmpeg's [licensing documentation](https://ffmpeg.org/legal.html) explains how enabled components affect distribution obligations. Choose and document an intentional audio build if FFmpeg is adopted.
 
 This removes the observed AAC/Opus decoder obstacle for these files. Native FFmpeg playback, physical gapless transitions, Windows/Linux runtime, media keys, durable daemon lifetime, USB disconnects, live sync contention, and server quality adaptation remain pending.
+
+## Native Rust FFmpeg proof
+
+Executed on macOS 26.6.2 (25G83), arm64, using optional `native-ffmpeg` feature in the standalone probe. Pinned `ffmpeg-next` and `ffmpeg-sys-next` are 9.0.0. Runtime identity and `otool -L` confirm direct linkage to libavcodec 63.1.101, libavformat 63.1.101, and libavutil 61.1.101 from the installed Homebrew FFmpeg build. The playback process launches no CLI decoder or Python process.
+
+### Decoding and audio callback
+
+All six generated formats pass the same verifier with exactly 288,041 total frames and exact individual track lengths. WAV/FLAC/ALAC match PCM exactly; MP3, AAC and Opus have the same RMS and boundary results as the CLI table above. FFmpeg's decoder applies available codec/container skip metadata itself; this implementation adds no duration clamp, fixture-length trimming, resampling, or silence. It drains the decoder, converts native sample representation to interleaved f32, then forwards PCM into the existing bounded queue.
+
+The first run rejected untagged stereo WAV layout. The corrected backend accepts an unspecified layout only when it has exactly two channels, interpreted as conventional stereo, while rejecting explicitly different channel layouts such as stereo-downmix. It also restricts demuxer protocols to local files. The corrected full six-format matrix passes.
+
+| Silent native sequence | Consumed frames | Underrun frames | Wall / user / system seconds | Maximum RSS |
+|---|---:|---:|---|---:|
+| AAC, three tracks | 288,041 | 0 | 6.81 / 0.30 / 0.04 | 29,605,888 bytes (28.2 MiB) |
+| Opus, three tracks | 288,041 | 0 | 6.78 / 0.36 / 0.05 | 30,277,632 bytes (28.9 MiB) |
+
+Both runs explicitly selected `Haut-parleurs MacBook Pro` at volume zero, 48 kHz stereo. These timings and memory figures are the standalone debug process, including preflight; they are not production overhead, startup latency, or release performance guarantees. They exercise CoreAudio callbacks but do not measure audible/physical gaplessness, shared mixing with another application, output unplug, or concurrent real sync. The existing 250 ms final drain remains experimental.
+
+Reports are generated locally under `experiments/playback-probe/results/native-ffmpeg.json`, `native-ffmpeg-aac-play.json`, and `native-ffmpeg-opus-play.json`. They preserve commands, backend/library identity, counters and resource output. The README provides repeatable build and run commands.
+
+### Isolation and remaining work
+
+The default build was rebuilt and inspected: no libavcodec/libavformat/libavutil linkage, explicit failure when requesting the disabled native backend, and the same Symphonia codec outcomes as before. Production manifests and sources remain unchanged. Native tests cover malformed/truncated input, conversion/interleaving, untagged stereo, explicit unsupported layout, nonfinite samples and the existing callback behavior.
+
+The released wrapper still contains the `Rc`/unsafe Send concern identified in its [context source](https://docs.rs/ffmpeg-next/9.0.0/src/ffmpeg_next/codec/context.rs.html). All FFmpeg contexts are created, used and destroyed within one invocation on the creating thread; preflight and playback create separate contexts. Only PCM crosses into the queue. This bounds the experiment's exposure but does not certify the wrapper for production threading.
+
+Rust plus FFmpeg plus native output is therefore a viable candidate on this Mac for the tested files. Windows WASAPI and Linux desktop audio runtime, clean-machine packaging on every target, physical gapless capture, media keys, durable user-session daemon lifecycle, and real server buffering/adaptation remain untested. Vorbis remains not run because the fixture encoder is absent. The next proof should focus on user-session lifecycle/media controls and repeat native output on Windows/Linux, while evaluating a pinned wrapper/build suitable for distribution.
+
+### Native proof review and regression checks
+
+Independent general, edge-case and acceptance reviews found three corrections: restrict nested protocols, select the first audio stream consistently with the CLI adapter, and reject RIFF/WAVE truncation even when FFmpeg reaches a clean packet boundary. The packet-boundary defect was reproduced with a 32,768-byte declared payload containing only 16,384 bytes; FFmpeg otherwise returned success. The backend now validates RIFF and chunk bounds before decoding. RF64 and other containers still rely on FFmpeg's own detection; this is not exhaustive corruption validation.
+
+After correction, 14 native Rust tests, 9 default Rust tests and both nine-test Python suites pass; native Clippy is clean. The six-format matrix was repeated successfully. An additional two-stream container with its second stream marked default still selected the first stream and matched reference PCM exactly. A generated HLS manifest referencing HTTP failed with the explicit file-only protocol whitelist error. Follow-up edge review found no remaining actionable defects.

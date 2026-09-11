@@ -4,6 +4,7 @@ import argparse
 import array
 import json
 import math
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -41,6 +42,27 @@ def decoder_command(name, probe, root):
     return [str(probe.resolve())]
 
 
+def linked_backend_info(probe):
+    try:
+        result = subprocess.run([str(probe.resolve()), "backend-info", "--decoder", "native-ffmpeg"],
+                                capture_output=True, text=True, timeout=5)
+        if result.returncode:
+            return {"error": result.stderr.strip(), "exit_code": result.returncode}
+        value = json.loads(result.stdout)
+        if not isinstance(value, dict) or value.get("decoder") != "native-ffmpeg":
+            return {"error": "invalid native backend identity"}
+        return value
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        return {"error": str(error)}
+
+
+def decode_command(name, prefix, output):
+    command = [*prefix, "decode"]
+    if name == "native-ffmpeg":
+        command.extend(["--decoder", name])
+    return [*command, "--output", str(output)]
+
+
 def tool_version(name):
     try:
         result = subprocess.run([name, "-version"], capture_output=True, text=True, timeout=5)
@@ -57,8 +79,8 @@ def main():
     root = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixtures", type=Path, default=root / "fixtures")
-    parser.add_argument("--probe", type=Path, default=root / "target/debug/playback-probe")
-    parser.add_argument("--decoder", choices=("symphonia", "ffmpeg"), default="symphonia")
+    parser.add_argument("--probe", type=Path, default=root / ("target/debug/playback-probe.exe" if os.name == "nt" else "target/debug/playback-probe"))
+    parser.add_argument("--decoder", choices=("symphonia", "ffmpeg", "native-ffmpeg"), default="symphonia")
     parser.add_argument("--output", type=Path, default=root / "results/decode.json")
     parser.add_argument("--require", default="wav,flac",
                         help="comma-separated variants required to pass; others are exploratory")
@@ -75,10 +97,12 @@ def main():
     report["decoder_command"] = prefix
     if args.decoder == "ffmpeg":
         report["tool_versions"] = {name: tool_version(name) for name in ("ffmpeg", "ffprobe")}
+    if args.decoder == "native-ffmpeg":
+        report["linked_backend"] = linked_backend_info(args.probe)
     with tempfile.TemporaryDirectory(prefix="hifimule-decode-") as temporary:
         for name, variant in manifest["variants"].items():
             output = Path(temporary) / f"{name}.f32le"
-            command = [*prefix, "decode", "--output", str(output)]
+            command = decode_command(args.decoder, prefix, output)
             command.extend(str((args.fixtures / filename).resolve()) for filename in variant["files"])
             try:
                 result = subprocess.run(command, capture_output=True, text=True, timeout=60)
@@ -130,7 +154,7 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     print(json.dumps(report, indent=2, allow_nan=False))
-    return 1 if failed else 0
+    return 1 if failed or "error" in report.get("linked_backend", {}) else 0
 
 
 if __name__ == "__main__":

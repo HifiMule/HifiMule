@@ -18,6 +18,69 @@ use symphonia::core::{
     io::MediaSourceStream, meta::MetadataOptions, probe::Hint,
 };
 
+#[cfg(feature = "native-ffmpeg")]
+mod ffmpeg_backend;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Backend {
+    Symphonia,
+    NativeFfmpeg,
+}
+impl Backend {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "symphonia" => Ok(Self::Symphonia),
+            "native-ffmpeg" => {
+                if !cfg!(feature = "native-ffmpeg") {
+                    bail!("native-ffmpeg requires a build with --features native-ffmpeg");
+                }
+                Ok(Self::NativeFfmpeg)
+            }
+            _ => bail!("unknown decoder {value}"),
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Self::Symphonia => "symphonia",
+            Self::NativeFfmpeg => "native-ffmpeg",
+        }
+    }
+    fn info(self) -> serde_json::Value {
+        match self {
+            Self::Symphonia => json!({"decoder":"symphonia","binding_version":"0.5.5"}),
+            Self::NativeFfmpeg => {
+                #[cfg(feature = "native-ffmpeg")]
+                {
+                    ffmpeg_backend::info()
+                }
+                #[cfg(not(feature = "native-ffmpeg"))]
+                {
+                    unreachable!("unavailable backend rejected by parser")
+                }
+            }
+        }
+    }
+    fn decode(
+        self,
+        path: &str,
+        sink: impl FnMut(Format, &[f32]) -> Result<()>,
+    ) -> Result<(Format, u64)> {
+        match self {
+            Self::Symphonia => decode(path, sink),
+            Self::NativeFfmpeg => {
+                #[cfg(feature = "native-ffmpeg")]
+                {
+                    ffmpeg_backend::decode(path, sink)
+                }
+                #[cfg(not(feature = "native-ffmpeg"))]
+                {
+                    bail!("native-ffmpeg requires a build with --features native-ffmpeg")
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Format {
     rate: u32,
@@ -104,7 +167,11 @@ fn ensure_format(expected: &mut Option<Format>, current: Format) -> Result<()> {
     }
     Ok(())
 }
+#[cfg(test)]
 fn decode_files(output: &str, files: &[String]) -> Result<()> {
+    decode_files_with_backend(output, files, Backend::Symphonia)
+}
+fn decode_files_with_backend(output: &str, files: &[String], backend: Backend) -> Result<()> {
     if let Ok(out) = std::fs::canonicalize(output) {
         for file in files {
             if std::fs::canonicalize(file)? == out {
@@ -122,7 +189,7 @@ fn decode_files(output: &str, files: &[String]) -> Result<()> {
     let mut format = None;
     let mut total = 0;
     for path in files {
-        let (f, frames) = decode(path, |f, samples| {
+        let (f, frames) = backend.decode(path, |f, samples| {
             ensure_format(&mut format, f)?;
             for sample in samples {
                 writer.write_all(&sample.to_le_bytes())?;
@@ -132,14 +199,14 @@ fn decode_files(output: &str, files: &[String]) -> Result<()> {
         total += frames;
         println!(
             "{}",
-            json!({"file":path,"frames":frames,"channels":f.channels,"sample_rate":f.rate})
+            json!({"decoder":backend.name(),"file":path,"frames":frames,"channels":f.channels,"sample_rate":f.rate})
         );
     }
     writer.flush()?;
     let f = format.context("no files")?;
     println!(
         "{}",
-        json!({"total_frames":total,"channels":f.channels,"sample_rate":f.rate})
+        json!({"decoder":backend.name(),"total_frames":total,"channels":f.channels,"sample_rate":f.rate})
     );
     Ok(())
 }
@@ -179,7 +246,12 @@ fn render(
         }
     }
 }
-fn play(files: Vec<String>, volume: f32, device_name: Option<String>) -> Result<()> {
+fn play(
+    files: Vec<String>,
+    volume: f32,
+    device_name: Option<String>,
+    backend: Backend,
+) -> Result<()> {
     if !volume.is_finite() || !(0.0..=1.0).contains(&volume) {
         bail!("volume must be finite and in 0..=1");
     }
@@ -187,7 +259,9 @@ fn play(files: Vec<String>, volume: f32, device_name: Option<String>) -> Result<
     let mut format = None;
     let mut total = 0;
     for path in &files {
-        total += decode(path, |f, _| ensure_format(&mut format, f))?.1;
+        total += backend
+            .decode(path, |f, _| ensure_format(&mut format, f))?
+            .1;
     }
     let f = format.context("no files")?;
     if f.channels != 2 {
@@ -224,7 +298,7 @@ fn play(files: Vec<String>, volume: f32, device_name: Option<String>) -> Result<
     let worker = thread::spawn(move || -> Result<()> {
         let result = (|| {
             for path in files {
-                decode(&path, |actual, samples| {
+                backend.decode(&path, |actual, samples| {
                     if actual != f {
                         bail!("input format changed since preflight");
                     }
@@ -279,7 +353,7 @@ fn play(files: Vec<String>, volume: f32, device_name: Option<String>) -> Result<
         )?;
         println!(
             "{}",
-            json!({"device":device.name()?,"sample_rate":f.rate,"channels":f.channels,"buffer_capacity_frames":32768,"volume":volume})
+            json!({"decoder":backend.name(),"backend_info":backend.info(),"device":device.name()?,"sample_rate":f.rate,"channels":f.channels,"buffer_capacity_frames":32768,"volume":volume})
         );
         let controls = state.clone();
         thread::spawn(move || {
@@ -340,7 +414,7 @@ fn play(files: Vec<String>, volume: f32, device_name: Option<String>) -> Result<
     }
     println!(
         "{}",
-        json!({"consumed_frames":state.consumed.load(Ordering::Relaxed),"underrun_frames":state.underrun_frames.load(Ordering::Relaxed),"stopped":state.stop_requested.load(Ordering::Relaxed),"media_controls":"stdin pause/resume/stop only; OS keys not implemented","physical_output_verified":false})
+        json!({"decoder":backend.name(),"consumed_frames":state.consumed.load(Ordering::Relaxed),"underrun_frames":state.underrun_frames.load(Ordering::Relaxed),"stopped":state.stop_requested.load(Ordering::Relaxed),"media_controls":"stdin pause/resume/stop only; OS keys not implemented","physical_output_verified":false})
     );
     Ok(())
 }
@@ -350,7 +424,25 @@ fn run() -> Result<()> {
         bail!("usage: playback-probe devices | decode --output PATH FILE... | play [--volume 0.02] [--device NAME] FILE...");
     }
     let command = args.remove(0);
+    let mut backend = Backend::Symphonia;
+    if let Some(index) = args.iter().position(|s| s == "--decoder") {
+        if !matches!(command.as_str(), "decode" | "play" | "backend-info") {
+            bail!("--decoder is not supported by {command}");
+        }
+        if index + 1 >= args.len() {
+            bail!("missing value for --decoder");
+        }
+        backend = Backend::parse(&args.remove(index + 1))?;
+        args.remove(index);
+    }
     match command.as_str() {
+        "backend-info" => {
+            if !args.is_empty() {
+                bail!("backend-info takes only --decoder NAME");
+            }
+            println!("{}", backend.info());
+            Ok(())
+        }
         "devices" => {
             if !args.is_empty() {
                 bail!("devices takes no arguments");
@@ -364,7 +456,7 @@ fn run() -> Result<()> {
             if args.len() < 3 || args[0] != "--output" {
                 bail!("decode --output PATH FILE...");
             }
-            decode_files(&args[1], &args[2..])
+            decode_files_with_backend(&args[1], &args[2..], backend)
         }
         "play" => {
             let mut volume = 0.02;
@@ -384,7 +476,7 @@ fn run() -> Result<()> {
             if args.is_empty() {
                 bail!("play requires files");
             }
-            play(args, volume, device)
+            play(args, volume, device, backend)
         }
         _ => bail!("unknown command {command}"),
     }
@@ -415,6 +507,10 @@ mod tests {
             std::env::temp_dir().join(format!("playback-probe-invalid-{}.wav", std::process::id()));
         std::fs::write(&path, b"not an audio file").unwrap();
         let result = decode(path.to_str().unwrap(), |_, _| Ok(()));
+        #[cfg(feature = "native-ffmpeg")]
+        assert!(Backend::NativeFfmpeg
+            .decode(path.to_str().unwrap(), |_, _| Ok(()))
+            .is_err());
         std::fs::remove_file(path).unwrap();
         assert!(result.is_err());
     }
@@ -463,8 +559,44 @@ mod tests {
         wav.extend_from_slice(&[0; 12]); // Declares four stereo frames, supplies only three.
         std::fs::write(&path, wav).unwrap();
         let result = decode(path.to_str().unwrap(), |_, _| Ok(()));
+        #[cfg(feature = "native-ffmpeg")]
+        assert!(Backend::NativeFfmpeg
+            .decode(path.to_str().unwrap(), |_, _| Ok(()))
+            .is_err());
         std::fs::remove_file(path).unwrap();
         assert!(result.is_err());
+    }
+    #[test]
+    #[cfg(feature = "native-ffmpeg")]
+    fn native_rejects_wav_truncated_at_complete_packet_boundary() {
+        let path = std::env::temp_dir().join(format!("probe-boundary-{}.wav", std::process::id()));
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36u32 + 32768).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&48000u32.to_le_bytes());
+        wav.extend_from_slice(&192000u32.to_le_bytes());
+        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&32768u32.to_le_bytes());
+        wav.resize(44 + 16384, 0); // Whole packets exist; the advertised second half is absent.
+        std::fs::write(&path, &wav).unwrap();
+        let result = Backend::NativeFfmpeg.decode(path.to_str().unwrap(), |_, _| Ok(()));
+        assert!(result.is_err());
+        // Also catch a lying data chunk when the outer RIFF length fits the file.
+        wav[4..8].copy_from_slice(&(36u32 + 16384).to_le_bytes());
+        std::fs::write(&path, &wav).unwrap();
+        let result = Backend::NativeFfmpeg.decode(path.to_str().unwrap(), |_, _| Ok(()));
+        assert!(result.is_err());
+        wav[40..44].copy_from_slice(&16384u32.to_le_bytes());
+        std::fs::write(&path, &wav).unwrap();
+        let valid = Backend::NativeFfmpeg.decode(path.to_str().unwrap(), |_, _| Ok(()));
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(valid.unwrap().1, 4096);
     }
     #[test]
     fn mismatched_format_is_rejected() {

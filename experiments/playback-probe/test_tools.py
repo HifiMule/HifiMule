@@ -30,6 +30,23 @@ class FailureReporting(unittest.TestCase):
         self.assertEqual(verifier.decoder_command("symphonia", Path("probe path"), root),
                          [str(Path("probe path").resolve())])
 
+    def test_native_selector_is_forwarded_after_subcommand(self):
+        prefix = ["probe with spaces"]
+        self.assertEqual(verifier.decode_command("native-ffmpeg", prefix, Path("output pcm")),
+                         ["probe with spaces", "decode", "--decoder", "native-ffmpeg", "--output", "output pcm"])
+        self.assertEqual(verifier.decode_command("symphonia", prefix, Path("output")),
+                         ["probe with spaces", "decode", "--output", "output"])
+
+    def test_native_identity_rejects_missing_feature_or_malformed_json(self):
+        for result in (subprocess.CompletedProcess([], 1, "", "feature disabled"),
+                       subprocess.CompletedProcess([], 0, "[]", ""),
+                       subprocess.CompletedProcess([], 0, '{"decoder":"symphonia"}', ""),
+                       subprocess.CompletedProcess([], 0, "not json", "")):
+            with patch.object(verifier.subprocess, "run", return_value=result):
+                self.assertIn("error", verifier.linked_backend_info(Path("probe")))
+        with patch.object(verifier.subprocess, "run", side_effect=FileNotFoundError("missing")):
+            self.assertIn("error", verifier.linked_backend_info(Path("probe")))
+
     def test_missing_version_is_an_explicit_error(self):
         with patch.object(verifier.subprocess, "run", side_effect=FileNotFoundError("not found")):
             self.assertIn("error", verifier.tool_version("ffmpeg"))
@@ -54,6 +71,31 @@ class FailureReporting(unittest.TestCase):
             self.assertEqual(report["required_failed"], ["aac"])
             self.assertEqual(report["decoder_backend"], "ffmpeg")
             self.assertEqual(report["variants"]["aac"]["error"], "decoder failed")
+
+    def test_missing_native_identity_cannot_report_overall_success(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "reference").write_bytes(b"\0" * 8)
+            (root / "manifest.json").write_text(json.dumps({
+                "sample_rate": 48000, "channels": 2, "track_frames": [1],
+                "total_frames": 1, "reference": "reference",
+                "variants": {"wav": {"files": ["input.wav"], "lossless": True}}}))
+            output = root / "report.json"
+            argv = ["verify.py", "--decoder", "native-ffmpeg", "--fixtures", str(root),
+                    "--require", "wav", "--output", str(output)]
+            def successful_decode(command, **kwargs):
+                Path(command[command.index("--output") + 1]).write_bytes(b"\0" * 8)
+                metrics = [{"frames": 1, "channels": 2, "sample_rate": 48000},
+                           {"total_frames": 1, "channels": 2, "sample_rate": 48000}]
+                return subprocess.CompletedProcess(command, 0, "\n".join(map(json.dumps, metrics)), "")
+            with patch("sys.argv", argv), \
+                 patch.object(verifier, "linked_backend_info", return_value={"error": "identity unavailable"}), \
+                 patch.object(verifier.subprocess, "run", side_effect=successful_decode), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(verifier.main(), 1)
+            report = json.loads(output.read_text())
+            self.assertTrue(report["variants"]["wav"]["pass"])
+            self.assertIn("error", report["linked_backend"])
 
     def test_encoder_timeout_is_recorded_for_each_variant(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -40,9 +40,30 @@ rtk proxy python3 experiments/playback-probe/verify.py --decoder ffmpeg --requir
 rtk proxy python3 experiments/playback-probe/test_ffmpeg_decode.py
 ```
 
-Both backends use identical frame, sample-error, and boundary checks. The FFmpeg adapter does not read the fixture manifest or trim samples to its expected lengths. Reports retain the FFmpeg/ffprobe version and build configuration; a pass with one version is not evidence for another. Native output still uses the original Rust/Symphonia path; this comparison is decoded PCM only.
+Both backends use identical frame, sample-error, and boundary checks. The FFmpeg adapter does not read the fixture manifest or trim samples to its expected lengths. Reports retain the FFmpeg/ffprobe version and build configuration; a pass with one version is not evidence for another. This CLI comparison is decoded PCM only. The optional Rust backend below tests native library integration separately.
 
 The adapter selects the first audio stream, requires finite local standard-stereo inputs with matching sample rates, and rejects existing output paths. It uses temporary files and bounded copying instead of capturing decoded audio in memory. Nonzero subprocess exits, malformed metadata, incomplete frames, and timeouts are errors. Partial output on failure is not a successful decode.
+
+## Native FFmpeg libraries in Rust
+
+The optional `native-ffmpeg` feature links FFmpeg libraries directly; it does not launch `ffmpeg`, `ffprobe`, or Python during playback. Default builds retain Symphonia without requiring FFmpeg development libraries.
+
+```sh
+rtk cargo build --manifest-path experiments/playback-probe/Cargo.toml --features native-ffmpeg
+rtk cargo test --manifest-path experiments/playback-probe/Cargo.toml --features native-ffmpeg
+rtk cargo run --manifest-path experiments/playback-probe/Cargo.toml --features native-ffmpeg -- backend-info --decoder native-ffmpeg
+rtk proxy python3 experiments/playback-probe/verify.py --decoder native-ffmpeg --require wav,flac,alac,mp3,aac,opus --output experiments/playback-probe/results/native-ffmpeg.json
+```
+
+Build prerequisites include compatible FFmpeg development libraries and Clang for binding generation. Unix builds use pkg-config; Windows needs matching headers, import libraries and runtime DLLs (see [wrapper build notes](https://github.com/zmwangx/rust-ffmpeg/wiki/Notes-on-building)). This experiment uses the installed library build; it does not provide distributable FFmpeg packages. Its results identify linked library versions/configuration, separately from the CLI executable version.
+
+Select the decoder for native output explicitly:
+
+```sh
+rtk cargo run --manifest-path experiments/playback-probe/Cargo.toml --features native-ffmpeg -- play --decoder native-ffmpeg --volume 0 --device "YOUR EXACT DEVICE NAME" experiments/playback-probe/fixtures/track-1.m4a experiments/playback-probe/fixtures/track-2.m4a experiments/playback-probe/fixtures/track-3.m4a
+```
+
+The native backend selects the first audio stream and restricts nested input protocols to local files. It validates RIFF/WAVE chunk bounds to catch clean-packet truncation; RF64 and other containers rely on FFmpeg error/corruption detection. FFmpeg contexts remain local to each decoding invocation. Preflight and the playback worker create their own contexts; only PCM reaches the existing queue. The pinned wrapper's thread-sharing limitations still need resolution before production adoption. Native sample conversion changes representation to interleaved float32 at the same source rate; it does not add endpoint-rate conversion or multichannel mapping.
 
 ## Native output
 
@@ -57,7 +78,7 @@ The native path deliberately uses a bounded queue and rejects incompatible sourc
 
 While `play` runs, type `pause`, `resume`, or `stop` followed by Enter for basic transport control. These are stdin commands; OS keyboard media controls are not implemented. Assess their event-loop and user-session requirements separately before production integration.
 
-Every probe command has a hard 60-second process deadline, including preflight and reads; this is a short-fixture experiment, not a long-running player. Decode requires a new output path and never overwrites an existing file. On failure the output may contain partial PCM, so always check exit status. Premature EOF is rejected when decoded frames fall below the declared count; this is not exhaustive corruption detection for containers with missing/unreliable length metadata.
+Every probe command has a hard 60-second process deadline, including preflight and reads; this is a short-fixture experiment, not a long-running player. Decode requires a new output path and never overwrites an existing file. On failure the output may contain partial PCM, so always check exit status. The Symphonia backend rejects premature EOF when decoded frames fall below the declared count; this is not exhaustive corruption detection for containers with missing/unreliable length metadata.
 
 ## Platform and integration validation
 
