@@ -2,7 +2,7 @@
 title: Playback session lifetime and native media controls proof
 type: chore
 created: 2026-09-11
-status: in-progress
+status: done
 baseline_commit: a4b49d1
 context: []
 ---
@@ -54,7 +54,7 @@ context: []
 - [x] `src/session.rs` tests — verify command validation, pause preservation, controller disconnect semantics, bounded shutdown and unsupported event handling where deterministic.
 - [x] `test_session.py` — start the session independently with redirected process handles, close/reopen controller, measure status/counters and clean up; report native OS events independently.
 - [x] `README.md` — document exact feature/build/launch commands, controller limitations and explicit Quit versus close behavior.
-- [ ] `playback-session-results.md` — record native build/runtime observations on available platforms, media registration and actual command delivery, identity/lifecycle evidence, limitations, and required production integration changes.
+- [x] `playback-session-results.md` — record native build/runtime observations on available platforms, media registration and actual command delivery, identity/lifecycle evidence, limitations, and required production integration changes.
 
 **Acceptance Criteria:**
 - Given the existing probe, when built without the new feature, then old tests and six-format FFmpeg verification retain their established behavior and no media-control dependency is required by the default build.
@@ -76,9 +76,11 @@ The user has authorized this bounded proof, not a production lifecycle migration
 - Native OS transport commands and observed metadata while the controller is closed; record keyboard input limitations accurately.
 - Inspect process exit, endpoint cleanup, captured counters and failure paths; run focused review before completion.
 
-## Current evidence and open checks
+## Completed evidence and limits
 
-Mac independent-owner lifecycle and Windows interactive-session lifecycle/native SMTC checks passed with zero underruns and explicitly recorded owner exit code 0. Default tests (9), feature-enabled tests (23), Clippy and the six-format native decoder regression passed. Three independent review passes found harness and controller issues; patches and focused re-review completed. Ubuntu runtime/MPRIS and macOS native-control delivery remain pending because macOS was locked when UI automation attempted desktop access. The spec remains in progress.
+Independent-owner lifecycle passed on macOS, Windows and Ubuntu with zero underruns and recorded owner exit code 0. Windows SMTC and Linux MPRIS Pause/Play stopped and resumed frame consumption. User-operated macOS media keys delivered native Toggle events with observed pause retention and resume; that separate run also exercised deadline cleanup. Default tests (9), feature-enabled tests (23), Clippy and six-format native decoding passed. Independent reviews and focused re-review completed.
+
+Physical Windows/Linux keyboard routing and macOS Control Center presentation remain untested. Ubuntu emitted a Wayland teardown warning despite successful exit; investigate before production integration. These limits are recorded in the results report and do not constitute physical-output or production certification.
 
 ## Suggested Review Order
 
