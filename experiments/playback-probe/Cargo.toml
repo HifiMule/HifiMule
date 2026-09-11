@@ -1,0 +1,14 @@
+[package]
+name = "playback-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "=1.0.102"
+cpal = "=0.16.0"
+crossbeam-queue = "=0.3.12"
+serde_json = "=1.0.149"
+symphonia = { version = "=0.5.5", features = ["all"] }
