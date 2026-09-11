@@ -4,7 +4,7 @@ Date: 2026-09-11. Targets: Windows, macOS, Linux.
 
 This document distinguishes code inspection, synthetic tests, and real integration tests. The experiment is isolated in `experiments/playback-probe`; no production playback feature has been implemented.
 
-Latest cross-platform status: native output has now run on the Mac, Windows ARM64 VM and Ubuntu ARM64 VM. Mac/Windows passed six decoded formats; Ubuntu passed five but failed AAC continuity with its FFmpeg 8.0.1 libraries. The sections below record successive experiments; earlier pending items are updated by the later platform reports.
+Latest cross-platform status: native output and six-format decoded continuity have passed on the Mac, Windows ARM64 VM and Ubuntu ARM64 VM using tested FFmpeg 9 builds. Ubuntu's distribution FFmpeg 8.0.1 failed AAC continuity; the isolated version 9 comparison resolved that observed failure. The sections below record successive experiments; earlier pending items are updated by the later platform reports.
 
 ## Repository findings
 
@@ -155,3 +155,9 @@ The unchanged native probe compiled with Ubuntu's Rust 1.93.1 and FFmpeg 8.0.1 d
 Silent AAC and Opus runs through the explicitly selected `pipewire` endpoint reported zero underruns. PipeWire snapshots confirmed active stereo links from the probe's ALSA client to the virtual output, followed by stream removal on exit. AAC delivered all 289,792 decoded frames, including its unwanted excess; successful callback delivery is not successful album continuity.
 
 See [Linux VM results](playback-linux-vm-results.md) for measurements, build/network recovery, captured evidence and cleanup. The result supports native Rust playback on this Linux desktop route, while exposing a runtime-version dependency absent from the Mac/Windows FFmpeg 9 results. Next compare a controlled FFmpeg 9 build on Linux before selecting a distribution baseline. Physical output, concurrent mixing/real sync, media keys, production lifecycle and packaging remain separate requirements.
+
+### Controlled Linux FFmpeg 9 follow-up
+
+That comparison now passes: the unchanged probe linked to private libavcodec/libavformat 63.1.101 and libavutil 61.1.101, passed all 14 Rust tests and all six decoded formats, and delivered complete silent AAC/Opus sequences through PipeWire with zero reported underruns. Both sequences contained exactly 288,041 frames. The initial attempt silently linked distribution libraries despite version 9 pkg-config output; a runtime identity assertion caught the mismatch before measurement, and explicit private-library linker precedence corrected it.
+
+The [Linux comparison report](playback-linux-vm-results.md#controlled-ffmpeg-9-comparison) preserves both outcomes, exact build provenance and cleanup. Use a controlled, verified runtime for subsequent integration work. These experiments establish native feasibility on the tested OS/architecture combinations, not physical gaplessness or a production packaging baseline. Durable user-session daemon lifetime and OS media controls are still the next integration proof.

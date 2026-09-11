@@ -2,6 +2,8 @@
 
 Executed 2026-09-11 against probe source commit `90ee210`. No Rust or production sources changed. Guest source hashes match the Mac checkout.
 
+Follow-up against checkout `ed9d110`: a controlled FFmpeg 9 build passes all six formats and silent PipeWire playback. The original FFmpeg 8 failure below remains valid; see the final comparison section for the successful configuration.
+
 ## Outcome
 
 Native ARM64 Linux compilation, all 14 Rust tests, and silent PipeWire output passed. WAV, FLAC, ALAC, MP3 and Opus passed the existing decoded continuity checks. **AAC failed with Ubuntu's FFmpeg 8.0.1 libraries**, producing 1,751 extra frames across three tracks. The full six-format requirement therefore remains failed on this Linux configuration.
@@ -82,3 +84,56 @@ The temporary HTTP transfer server was restricted to the VM's private interface 
 Rust can drive this Linux desktop audio route with the same worker, bounded PCM queue and callback code as Mac and Windows. However, linking whichever FFmpeg version a distribution supplies is insufficient for the tested AAC requirement. A controlled FFmpeg runtime/build needs validation on Linux; repeating with the FFmpeg 9 family used on the other platforms is the next focused comparison. This experiment does not establish the minimum fixed version or the exact upstream cause.
 
 Still untested: physical gaplessness and USB-interface behavior, Linux x86_64 and other distributions/desktops, concurrent audio mixing and real sync, endpoint loss, OS media keys, production daemon/UI lifetime, clean-machine packaging, and live-server buffering/adaptation. The wrapper threading assessment remains open. Production playback is not implemented.
+
+## Controlled FFmpeg 9 comparison
+
+The same Ubuntu VM, user session, Rust sources, lockfile, fixture files and verifier were used with an isolated [BtbN FFmpeg 9 ARM64 shared build](https://github.com/BtbN/FFmpeg-Builds/releases/tag/latest). Asset: `ffmpeg-n9.0-latest-linuxarm64-lgpl-shared-9.0.tar.xz`, published 2026-09-11 at 13:43 UTC, 53,577,376 bytes. The moving release URL is recorded with the asset metadata and checksum rather than treated as an immutable version pin.
+
+SHA-256, checked against GitHub's asset digest on the Mac and again after transfer inside Ubuntu:
+`37fc094ef6625fc1f9d04cd9560d64b105530e4fc6bf898e1a948c0cce3bc992`
+
+Runtime identity and `ldd` confirmed libavcodec 63.1.101, libavformat 63.1.101 and libavutil 61.1.101 from the private extracted bundle, with the system ALSA library retained. Distribution FFmpeg packages were not replaced. Source hashes matched the checkout; no Rust change or decoder trimming was needed.
+
+### Build selection and verification
+
+The first attempt set `FFMPEG_DIR`, `PKG_CONFIG_PATH`, `LD_LIBRARY_PATH` and a separate Cargo target directory. Although pkg-config reported version 9 libraries, the executable's runtime identity still reported distribution version 8. The explicit identity assertion stopped the experiment before decoding/playback. This attempt is not counted as a version 9 test.
+
+A temporary compiler wrapper prepended the private library search directory to the linker invocation. A fresh Cargo target directory then produced an executable resolving the intended version 9 libraries. The successful process-local setup was:
+
+```sh
+export FFMPEG_DIR="<absolute extracted FFmpeg bundle directory>"
+export PKG_CONFIG_PATH="$FFMPEG_DIR/lib/pkgconfig"
+export LD_LIBRARY_PATH="$FFMPEG_DIR/lib"
+export CARGO_TARGET_DIR="$PWD/target-nine-fixed"
+cat > ffmpeg-nine/linker <<'LINKER'
+#!/bin/sh
+exec /usr/bin/cc -L"$FFMPEG_DIR/lib" "$@"
+LINKER
+chmod u+x ffmpeg-nine/linker
+export RUSTFLAGS="-C linker=$PWD/ffmpeg-nine/linker"
+cargo build --locked --offline --features native-ffmpeg
+cargo test --locked --offline --features native-ffmpeg
+```
+
+Here `ffmpeg-nine` is an existing temporary directory within the standalone probe workspace. This is an experiment recipe, not a production installer or selected release toolchain. The environment changes existed only in the runner shell and its children. Production packaging must select both matching headers and actual runtime libraries; a successful build or pkg-config version alone is insufficient evidence.
+
+The corrected native build completed in 9.45 seconds, and all 14 Rust tests passed. The unchanged verifier explicitly targeted `target-nine-fixed/debug/playback-probe` and required all six available formats.
+
+### Measurements
+
+| Format | FFmpeg 9 frames | Full-signal RMS error | Continuity result |
+|---|---:|---:|---|
+| WAV / FLAC / ALAC | 288,041 each | 0 | Pass |
+| MP3 | 288,041 | 0.002652617 | Pass |
+| AAC | 288,041 | 0.002405662 | Pass |
+| Opus | 288,041 | 0.000944166 | Pass |
+
+Every individual track length and boundary check passed. AAC's 1,751 excess frames observed with the distribution build disappeared. Captured guest PCM independently reproduced the reported frame counts and full-signal RMS when inspected on the Mac. The thresholds and original reference were unchanged. Vorbis remains not run.
+
+Silent AAC and Opus playback each consumed 288,041 frames with zero reported underruns, exit code 0, and approximately 6.33 seconds command wall time. Both used the explicit `pipewire` endpoint at volume zero in the same user session. PipeWire snapshots showed active stereo links to the virtual output during each run and no probe streams afterward. Physical output was not captured. Skipped/discarded timestamp warnings remain in stderr; this does not validate seeking.
+
+### Evidence and conclusion
+
+Raw evidence is retained separately in ignored `experiments/playback-probe/results/linux-arm64-ffmpeg9/`: successful build/test logs, linked-library identity, PCM, decoder/playback commands and results, PipeWire snapshots, source hashes, independent capture checks, asset metadata, both runners, and the first library-selection failure. The previous FFmpeg 8 capture is preserved in `linux-arm64/`. The temporary transfer listener was stopped after collection. No persistent launcher or global library/audio configuration was introduced; test files remain in the temporary guest workspace.
+
+This closes the observed six-format continuity gap on the tested Ubuntu ARM64 configuration using this controlled FFmpeg 9 build. Together with the Mac and Windows results, it supports the native Rust/FFmpeg approach on all three tested OS families. It does not isolate the precise upstream change or establish the minimum fixed FFmpeg version: version and build configuration both differ. Runtime packaging, wrapper thread-safety assessment, physical gaplessness, media keys and durable daemon/UI lifecycle remain open.

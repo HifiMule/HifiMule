@@ -463,3 +463,5 @@ The user's UTM Windows 11 ARM64 VM provided a working native test target. The un
 ### Ubuntu VM follow-up
 
 The user's Ubuntu 26.04.1 ARM64 VM compiled the unchanged probe and passed all 14 native Rust tests. Five formats passed continuity checks, but AAC produced 1,751 extra frames with Ubuntu's FFmpeg 8.0.1 libraries. Silent AAC/Opus playback reached the desktop PipeWire route with zero reported underruns; this does not erase the AAC timing failure. Native output is now exercised on all three target OS families, with a controlled Linux FFmpeg runtime comparison needed before claiming the same codec coverage. Full evidence and remaining limits are in `../implementation-artifacts/playback-linux-vm-results.md`.
+
+The approved controlled FFmpeg 9 comparison now passes all six formats in the same Ubuntu VM without changing Rust sources or fixtures. Silent AAC/Opus output each consumed exactly 288,041 frames with zero reported underruns. Native feasibility is established across the three tested OS families; deliberate runtime packaging is required, and physical gaplessness, durable daemon lifetime and OS media controls remain separate proofs.
