@@ -455,3 +455,7 @@ The approved isolated FFmpeg comparison passed WAV, FLAC, ALAC, MP3, AAC, and Op
 ### Native Rust decoder follow-up
 
 The approved native FFmpeg/Rust probe passes the same six-format continuity matrix. Silent AAC and Opus sequences each consumed all frames through CoreAudio with zero reported underruns. This supports Rust feasibility on the tested Mac; Windows/Linux runtime, packaging, physical gapless output and daemon/media-key lifecycle remain pending. The isolated default build still uses Symphonia without FFmpeg linkage. See the feasibility report for review corrections and measurement limits.
+
+### Windows VM follow-up
+
+The user's UTM Windows 11 ARM64 VM provided a working native test target. The unchanged Rust/FFmpeg probe passed all six codec checks, and silent WASAPI AAC/Opus sequences completed with zero reported underruns in the active user session. Physical output, Windows x64, Linux, media keys and daemon lifecycle remain separate checks. Full evidence is in `../implementation-artifacts/playback-windows-vm-results.md`.

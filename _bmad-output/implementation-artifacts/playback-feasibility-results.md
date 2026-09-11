@@ -139,3 +139,9 @@ Rust plus FFmpeg plus native output is therefore a viable candidate on this Mac 
 Independent general, edge-case and acceptance reviews found three corrections: restrict nested protocols, select the first audio stream consistently with the CLI adapter, and reject RIFF/WAVE truncation even when FFmpeg reaches a clean packet boundary. The packet-boundary defect was reproduced with a 32,768-byte declared payload containing only 16,384 bytes; FFmpeg otherwise returned success. The backend now validates RIFF and chunk bounds before decoding. RF64 and other containers still rely on FFmpeg's own detection; this is not exhaustive corruption validation.
 
 After correction, 14 native Rust tests, 9 default Rust tests and both nine-test Python suites pass; native Clippy is clean. The six-format matrix was repeated successfully. An additional two-stream container with its second stream marked default still selected the first stream and matched reference PCM exactly. A generated HLS manifest referencing HTTP failed with the explicit file-only protocol whitelist error. Follow-up edge review found no remaining actionable defects.
+
+## Windows ARM64 VM validation
+
+The native probe was cross-built for ARM64 Windows and run in the active Windows 11 user session in UTM. All six available formats passed the unchanged PCM/frame/boundary checks. Silent AAC and Opus playback through `Speakers (High Definition Audio Device)` each consumed all 288,041 frames with zero reported underruns. No application source changes were needed.
+
+See [Windows VM results](playback-windows-vm-results.md) for exact toolchains, library versions, measurements, timestamp warnings, evidence and cleanup. This closes the runtime gap for this Windows ARM64 virtual device. Windows x64, physical hardware, Linux, media keys and production daemon lifecycle remain pending.

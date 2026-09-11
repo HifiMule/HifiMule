@@ -111,3 +111,7 @@ Real server tests need representative Jellyfin/Navidrome instances and authorize
 Metadata sampling should count recording IDs, contributor/artist relationships, gain fields, and candidate duplicate matches. Keep counts rather than exporting private library details. A successful API call does not establish enough metadata coverage for meaningful artist drift.
 
 See `_bmad-output/implementation-artifacts/playback-feasibility-results.md` for the actual local results and remaining work.
+
+## Windows ARM64 VM evidence
+
+The optional native backend has been cross-built for `aarch64-pc-windows-gnullvm` and executed in an interactive Windows 11 ARM64 UTM session. The six-format matrix and silent AAC/Opus WASAPI runs passed. See the [Windows VM validation report](../../_bmad-output/implementation-artifacts/playback-windows-vm-results.md) for the build recipe and limits. Run audio checks in the signed-in user's session; guest-agent SYSTEM execution alone does not establish desktop audio behavior.
