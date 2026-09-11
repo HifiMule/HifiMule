@@ -447,3 +447,7 @@ The user approved starting the proposed experiments. An isolated native Rust pro
 Mac synthetic decoding: WAV/FLAC/ALAC exact sample reproduction; MP3 passes fixture length/boundary checks; AAC adds padding; Opus unsupported in the tested decoder; Vorbis fixture unavailable with the installed encoder. Silent CoreAudio callbacks reported zero underruns, including synthetic I/O pressure. Basic stdin transport was exercised. Physical gapless output, real sync, OS media keys, Windows/Linux runtime, live-provider adaptation, and real-library relationship coverage remain pending.
 
 Lifecycle inspection found UI-owned sidecars are killed on UI exit, especially relevant to Linux. Existing external user-session daemons survive. This needs a deliberate lifecycle change before the product can promise close-window/keep-listening behavior. The experiment does not alter production behavior or settle the final decoder choice.
+
+### Decoder comparison follow-up
+
+The approved isolated FFmpeg comparison passed WAV, FLAC, ALAC, MP3, AAC, and Opus on macOS with exact per-track lengths under the existing verifier. This resolves the synthetic AAC padding and Opus support obstacles for the CLI backend; it does not yet establish native Rust integration or Windows/Linux behavior. See `../implementation-artifacts/playback-feasibility-results.md` for measurements and the next integration decision.

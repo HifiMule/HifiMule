@@ -19,9 +19,42 @@ def module(name, filename):
 
 generator = module("fixture_generator", "generate-fixtures.py")
 stress = module("stress_probe", "stress.py")
+verifier = module("decoder_verifier", "verify.py")
 
 
 class FailureReporting(unittest.TestCase):
+    def test_decoder_selection_preserves_argument_boundaries(self):
+        root = Path("directory with spaces")
+        self.assertEqual(verifier.decoder_command("ffmpeg", Path("unused"), root)[1],
+                         str(root / "ffmpeg_decode.py"))
+        self.assertEqual(verifier.decoder_command("symphonia", Path("probe path"), root),
+                         [str(Path("probe path").resolve())])
+
+    def test_missing_version_is_an_explicit_error(self):
+        with patch.object(verifier.subprocess, "run", side_effect=FileNotFoundError("not found")):
+            self.assertIn("error", verifier.tool_version("ffmpeg"))
+
+    def test_failed_alternative_writes_fresh_required_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "reference").write_bytes(b"\0" * 8)
+            (root / "manifest.json").write_text(json.dumps({
+                "sample_rate": 48000, "channels": 2, "track_frames": [1],
+                "total_frames": 1, "reference": "reference",
+                "variants": {"aac": {"files": ["input.m4a"], "lossless": False}}}))
+            output = root / "report.json"
+            output.write_text('{"required_failed": []}')
+            argv = ["verify.py", "--decoder", "ffmpeg", "--fixtures", str(root),
+                    "--require", "aac", "--output", str(output)]
+            with patch("sys.argv", argv), patch.object(verifier, "tool_version", return_value={"version": "test"}), \
+                 patch.object(verifier.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "decoder failed")), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(verifier.main(), 1)
+            report = json.loads(output.read_text())
+            self.assertEqual(report["required_failed"], ["aac"])
+            self.assertEqual(report["decoder_backend"], "ffmpeg")
+            self.assertEqual(report["variants"]["aac"]["error"], "decoder failed")
+
     def test_encoder_timeout_is_recorded_for_each_variant(self):
         with tempfile.TemporaryDirectory() as temporary:
             argv = ["generate-fixtures.py", "--output", temporary]

@@ -81,3 +81,28 @@ Independent adversarial, edge-case, and acceptance reviews identified output har
 Windows/Linux runtime, USB unplug, audible/loopback gapless output, real sync, OS media keys, production UI lifecycle, live-provider bandwidth adaptation, and actual metadata coverage remain untested. Repository examples and mock tests are not evidence of a running test server. No credential stores were inspected.
 
 The next technical decision should compare a backend/decoder combination that covers the required AAC and Opus cases, then implement the durable user-session lifecycle and media-key proof on all three OSes. The existing experiment is a repeatable baseline for that comparison, not a shipping playback engine.
+
+## FFmpeg decoder comparison
+
+The same verifier now supports an optional FFmpeg CLI adapter. On this Mac, **FFmpeg 9.0.1** passed all six available formats with identical tolerances and exactly **288,041 frames**, including exact per-track lengths. No manifest-driven trimming or explicit resampling was applied.
+
+| Format | Full-signal RMS error | Boundary RMS errors | Result |
+|---|---:|---|---|
+| WAV / FLAC / ALAC | 0 | 0 / 0 | Exact PCM match |
+| MP3 | 0.002653 | 0.003058 / 0.003051 | Pass |
+| AAC | 0.002406 | 0.003049 / 0.002934 | Pass |
+| Opus | 0.000944 | 0.001696 / 0.001169 | Pass |
+
+Vorbis remains not run because the fixture encoder is unavailable. The Symphonia comparison was repeated and retained its AAC padding and unsupported Opus outcomes. These are short synthetic fixtures; measured RMS thresholds are not perceptual quality certification. Reports retain executable version and build configuration in ignored `results/ffmpeg-comparison.json` and `results/symphonia-comparison.json`; the commands in the experiment README reproduce them.
+
+### Integration recommendation
+
+FFmpeg is a credible candidate for the next Rust decoding experiment. The CLI result does **not** prove that a Rust binding automatically reproduces container trimming, decoder draining, timestamps, or Opus pre-skip. A worker using libavformat/libavcodec and, when needed, libswresample should reproduce this exact matrix before connection to the native audio callback. Keep FFmpeg-owned objects on that worker and transfer owned PCM through the bounded queue.
+
+The [ffmpeg-next wrapper](https://github.com/zmwangx/rust-ffmpeg) is in maintenance mode. Version 9 is a candidate, but its upstream [unreleased changelog](https://raw.githubusercontent.com/zmwangx/rust-ffmpeg/master/CHANGELOG.md) reports fixes to unsound Send implementations involving shared contexts. Establish which fixes a pinned release contains before adopting it. Thread confinement reduces exposure but does not replace that check.
+
+The [build documentation](https://github.com/zmwangx/rust-ffmpeg/wiki/Notes-on-building) describes native headers/libraries and platform setup. Shipping would require pinned matching libraries, Windows DLL/import-library packaging, macOS relocation and signing, and a defined Linux runtime baseline. Test installation and playback on clean machines for each supported OS and architecture. This CLI test has exercised none of that packaging.
+
+The local Homebrew binary has `--enable-gpl --enable-version3`; it is an experiment tool, not a selected distribution build. FFmpeg's [licensing documentation](https://ffmpeg.org/legal.html) explains how enabled components affect distribution obligations. Choose and document an intentional audio build if FFmpeg is adopted.
+
+This removes the observed AAC/Opus decoder obstacle for these files. Native FFmpeg playback, physical gapless transitions, Windows/Linux runtime, media keys, durable daemon lifetime, USB disconnects, live sync contention, and server quality adaptation remain pending.

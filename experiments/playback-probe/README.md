@@ -30,6 +30,20 @@ The verifier compares concatenated decoded float32 samples to the original PCM r
 
 Generated results are written to `experiments/playback-probe/results/decode.json`. The fixture manifest records exact frame counts, successfully encoded variants, and generation failures.
 
+## Compare an FFmpeg decoder
+
+The optional `ffmpeg_decode.py` adapter uses installed `ffmpeg` and `ffprobe` executables through the same verifier. Python remains a test harness, not a proposed production playback runtime. Select the backend explicitly and retain separate reports:
+
+```sh
+rtk proxy python3 experiments/playback-probe/verify.py --decoder symphonia --output experiments/playback-probe/results/symphonia-comparison.json
+rtk proxy python3 experiments/playback-probe/verify.py --decoder ffmpeg --require wav,flac,alac,mp3,aac,opus --output experiments/playback-probe/results/ffmpeg-comparison.json
+rtk proxy python3 experiments/playback-probe/test_ffmpeg_decode.py
+```
+
+Both backends use identical frame, sample-error, and boundary checks. The FFmpeg adapter does not read the fixture manifest or trim samples to its expected lengths. Reports retain the FFmpeg/ffprobe version and build configuration; a pass with one version is not evidence for another. Native output still uses the original Rust/Symphonia path; this comparison is decoded PCM only.
+
+The adapter selects the first audio stream, requires finite local standard-stereo inputs with matching sample rates, and rejects existing output paths. It uses temporary files and bounded copying instead of capturing decoded audio in memory. Nonzero subprocess exits, malformed metadata, incomplete frames, and timeouts are errors. Partial output on failure is not a successful decode.
+
 ## Native output
 
 ```sh

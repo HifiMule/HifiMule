@@ -35,11 +35,30 @@ def errors(actual, reference, start=0, end=None):
             "max_abs": maximum}
 
 
+def decoder_command(name, probe, root):
+    if name == "ffmpeg":
+        return [sys.executable, str(root / "ffmpeg_decode.py")]
+    return [str(probe.resolve())]
+
+
+def tool_version(name):
+    try:
+        result = subprocess.run([name, "-version"], capture_output=True, text=True, timeout=5)
+        if result.returncode:
+            return {"error": result.stderr.strip(), "exit_code": result.returncode}
+        lines = result.stdout.splitlines()
+        return {"version": lines[0] if lines else "unreported",
+                "configuration": next((line for line in lines if line.startswith("configuration:")), None)}
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {"error": str(error)}
+
+
 def main():
     root = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixtures", type=Path, default=root / "fixtures")
     parser.add_argument("--probe", type=Path, default=root / "target/debug/playback-probe")
+    parser.add_argument("--decoder", choices=("symphonia", "ffmpeg"), default="symphonia")
     parser.add_argument("--output", type=Path, default=root / "results/decode.json")
     parser.add_argument("--require", default="wav,flac",
                         help="comma-separated variants required to pass; others are exploratory")
@@ -48,13 +67,18 @@ def main():
     reference = floats(args.fixtures / manifest["reference"])
     required = set(filter(None, args.require.split(",")))
     report = {"scope": "decoded PCM only; native output and streaming not tested",
+              "decoder_backend": args.decoder,
               "sample_rate": manifest["sample_rate"], "channels": manifest["channels"],
               "expected_frames": manifest["total_frames"],
               "generation_failures": manifest.get("generation_failures", {}), "variants": {}}
+    prefix = decoder_command(args.decoder, args.probe, root)
+    report["decoder_command"] = prefix
+    if args.decoder == "ffmpeg":
+        report["tool_versions"] = {name: tool_version(name) for name in ("ffmpeg", "ffprobe")}
     with tempfile.TemporaryDirectory(prefix="hifimule-decode-") as temporary:
         for name, variant in manifest["variants"].items():
             output = Path(temporary) / f"{name}.f32le"
-            command = [str(args.probe.resolve()), "decode", "--output", str(output)]
+            command = [*prefix, "decode", "--output", str(output)]
             command.extend(str((args.fixtures / filename).resolve()) for filename in variant["files"])
             try:
                 result = subprocess.run(command, capture_output=True, text=True, timeout=60)
