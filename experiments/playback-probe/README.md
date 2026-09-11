@@ -60,7 +60,7 @@ Build prerequisites include compatible FFmpeg development libraries and Clang fo
 Select the decoder for native output explicitly:
 
 ```sh
-rtk cargo run --manifest-path experiments/playback-probe/Cargo.toml --features native-ffmpeg -- play --decoder native-ffmpeg --volume 0 --device "YOUR EXACT DEVICE NAME" experiments/playback-probe/fixtures/track-1.m4a experiments/playback-probe/fixtures/track-2.m4a experiments/playback-probe/fixtures/track-3.m4a
+rtk cargo run --manifest-path experiments/playback-probe/Cargo.toml --features native-ffmpeg -- play --decoder native-ffmpeg --volume 0 --device "YOUR EXACT DEVICE NAME" experiments/playback-probe/fixtures/track-1.aac.m4a experiments/playback-probe/fixtures/track-2.aac.m4a experiments/playback-probe/fixtures/track-3.aac.m4a
 ```
 
 The native backend selects the first audio stream and restricts nested input protocols to local files. It validates RIFF/WAVE chunk bounds to catch clean-packet truncation; RF64 and other containers rely on FFmpeg error/corruption detection. FFmpeg contexts remain local to each decoding invocation. Preflight and the playback worker create their own contexts; only PCM reaches the existing queue. The pinned wrapper's thread-sharing limitations still need resolution before production adoption. Native sample conversion changes representation to interleaved float32 at the same source rate; it does not add endpoint-rate conversion or multichannel mapping.
@@ -115,3 +115,7 @@ See `_bmad-output/implementation-artifacts/playback-feasibility-results.md` for 
 ## Windows ARM64 VM evidence
 
 The optional native backend has been cross-built for `aarch64-pc-windows-gnullvm` and executed in an interactive Windows 11 ARM64 UTM session. The six-format matrix and silent AAC/Opus WASAPI runs passed. See the [Windows VM validation report](../../_bmad-output/implementation-artifacts/playback-windows-vm-results.md) for the build recipe and limits. Run audio checks in the signed-in user's session; guest-agent SYSTEM execution alone does not establish desktop audio behavior.
+
+## Ubuntu ARM64 VM evidence
+
+Ubuntu 26.04.1 compiled the unchanged native probe and passed all 14 Rust tests. Five decoded formats passed; AAC failed continuity with the distribution's FFmpeg 8.0.1 libraries. Silent AAC/Opus output through the enumerated `pipewire` endpoint completed without reported underruns, with active desktop routing confirmed by PipeWire snapshots. AAC's callback success includes its extra decoded frames and does not count as a continuity pass. See the [Linux VM validation report](../../_bmad-output/implementation-artifacts/playback-linux-vm-results.md) for the exact environment, failure measurements and repeatable commands. Do not assume the wrapper version pins the linked FFmpeg runtime or that every Linux desktop exposes an endpoint named `pipewire`.

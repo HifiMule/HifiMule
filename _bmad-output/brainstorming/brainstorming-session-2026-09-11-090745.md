@@ -459,3 +459,7 @@ The approved native FFmpeg/Rust probe passes the same six-format continuity matr
 ### Windows VM follow-up
 
 The user's UTM Windows 11 ARM64 VM provided a working native test target. The unchanged Rust/FFmpeg probe passed all six codec checks, and silent WASAPI AAC/Opus sequences completed with zero reported underruns in the active user session. Physical output, Windows x64, Linux, media keys and daemon lifecycle remain separate checks. Full evidence is in `../implementation-artifacts/playback-windows-vm-results.md`.
+
+### Ubuntu VM follow-up
+
+The user's Ubuntu 26.04.1 ARM64 VM compiled the unchanged probe and passed all 14 native Rust tests. Five formats passed continuity checks, but AAC produced 1,751 extra frames with Ubuntu's FFmpeg 8.0.1 libraries. Silent AAC/Opus playback reached the desktop PipeWire route with zero reported underruns; this does not erase the AAC timing failure. Native output is now exercised on all three target OS families, with a controlled Linux FFmpeg runtime comparison needed before claiming the same codec coverage. Full evidence and remaining limits are in `../implementation-artifacts/playback-linux-vm-results.md`.

@@ -4,6 +4,8 @@ Date: 2026-09-11. Targets: Windows, macOS, Linux.
 
 This document distinguishes code inspection, synthetic tests, and real integration tests. The experiment is isolated in `experiments/playback-probe`; no production playback feature has been implemented.
 
+Latest cross-platform status: native output has now run on the Mac, Windows ARM64 VM and Ubuntu ARM64 VM. Mac/Windows passed six decoded formats; Ubuntu passed five but failed AAC continuity with its FFmpeg 8.0.1 libraries. The sections below record successive experiments; earlier pending items are updated by the later platform reports.
+
 ## Repository findings
 
 ### Selection reuse
@@ -145,3 +147,11 @@ After correction, 14 native Rust tests, 9 default Rust tests and both nine-test 
 The native probe was cross-built for ARM64 Windows and run in the active Windows 11 user session in UTM. All six available formats passed the unchanged PCM/frame/boundary checks. Silent AAC and Opus playback through `Speakers (High Definition Audio Device)` each consumed all 288,041 frames with zero reported underruns. No application source changes were needed.
 
 See [Windows VM results](playback-windows-vm-results.md) for exact toolchains, library versions, measurements, timestamp warnings, evidence and cleanup. This closes the runtime gap for this Windows ARM64 virtual device. Windows x64, physical hardware, Linux, media keys and production daemon lifecycle remain pending.
+
+## Ubuntu ARM64 VM validation
+
+The unchanged native probe compiled with Ubuntu's Rust 1.93.1 and FFmpeg 8.0.1 development libraries; all 14 native Rust tests passed. WAV, FLAC, ALAC, MP3 and Opus passed the existing continuity checks. AAC failed: 289,792 decoded frames instead of 288,041, with incorrect individual lengths and failing boundary checks. The complete six-format requirement remains failed on this configuration.
+
+Silent AAC and Opus runs through the explicitly selected `pipewire` endpoint reported zero underruns. PipeWire snapshots confirmed active stereo links from the probe's ALSA client to the virtual output, followed by stream removal on exit. AAC delivered all 289,792 decoded frames, including its unwanted excess; successful callback delivery is not successful album continuity.
+
+See [Linux VM results](playback-linux-vm-results.md) for measurements, build/network recovery, captured evidence and cleanup. The result supports native Rust playback on this Linux desktop route, while exposing a runtime-version dependency absent from the Mac/Windows FFmpeg 9 results. Next compare a controlled FFmpeg 9 build on Linux before selecting a distribution baseline. Physical output, concurrent mixing/real sync, media keys, production lifecycle and packaging remain separate requirements.
