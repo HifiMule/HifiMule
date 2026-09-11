@@ -1,9 +1,24 @@
+---
 stepsCompleted: ['step-01-init', 'step-02-context', 'step-03-starter', 'step-04-decisions', 'step-05-patterns', 'step-06-structure', 'step-07-validation', 'step-08-complete']
 workflowType: 'architecture'
 status: 'complete'
 completedAt: '2026-01-26'
-lastAmended: '2026-06-09'
+lastAmended: '2026-09-11'
 amendments: ['epic-8-library-browsing-rpc-contract', 'epic-8-provider-layer-type-definitions', 'epic-8-factory-lifecycle-config', 'epic-8-subsonic-auth-scrobble-incremental-sync', 'epic-11-selection-as-playlist-write-trait', 'multi-server-management']
+playbackExtension:
+  stepsCompleted: [1, 2, 3, 4, 5, 6, 7, 8]
+  lastStep: 8
+  status: complete
+  completedAt: '2026-09-11'
+  readiness: 'ready-for-planning; implementation gates open'
+  inputDocuments:
+    - '_bmad-output/brainstorming/brainstorming-session-2026-09-11-090745.md'
+    - '_bmad-output/implementation-artifacts/playback-session-results.md'
+    - '_bmad-output/implementation-artifacts/playback-feasibility-results.md'
+    - '_bmad-output/implementation-artifacts/playback-windows-vm-results.md'
+    - '_bmad-output/implementation-artifacts/playback-linux-vm-results.md'
+    - '_bmad-output/planning-artifacts/prd.md'
+    - '_bmad-output/planning-artifacts/project-context.md'
 ---
 
 # Architecture Decision Document
@@ -921,3 +936,248 @@ pub async fn get_provider_by_server_id(state: &AppState, server_id: &str)
 - Route every auto-fill pipeline expansion through `get_provider_by_server_id(slot.serverId)`; never assume the active provider.
 - Store auto-fill pipeline **config** in the manifest (portable `server_id`-keyed); store cooldown/rotation **history** in the daemon DB. Never put runtime history in the manifest, never put user config in the DB.
 - Evict provider cache entry on `server.remove` before returning `{ ok: true }`.
+
+## Playback Extension — Approved Context (2026-09-11)
+
+Playback architecture workflow: context approved; existing application foundation retained; core decisions in progress. The completed base architecture remains authoritative outside explicit playback amendments. No production code changes are authorized by this design document alone.
+
+### Inputs and precedence
+
+- User-approved playback brainstorming and subsequent conversation decisions.
+- `../brainstorming/brainstorming-session-2026-09-11-090745.md`: accepted listening behaviors; early feasibility statements are superseded by completed reports.
+- `../implementation-artifacts/playback-session-results.md`: completed lifecycle/native-controls proof and limitations.
+- `../implementation-artifacts/playback-feasibility-results.md`, `playback-windows-vm-results.md`, `playback-linux-vm-results.md`: decoder/output evidence.
+- Existing PRD and architecture: provider boundaries, portable server identities, managed-device safety, RPC conventions and idle resource goals. Earlier no-device UI locking requires a playback-specific amendment.
+
+### Requirements overview
+
+1. The local Rust daemon owns audio and native controls independently of the detachable UI. Playback and sync normally run together; conditional backoff protects playback when actual contention appears.
+2. Sessions support ordered gapless albums, continually replenished Radio, and full-track previews preserving the original queue and position. A preview's natural end resumes the preserved listening session. Restored sessions remain paused on launch.
+3. Playback reuses the selection engine with independent settings, bounded upcoming tracks and cross-server identities. Radio remains close to its current artist and moves through meaningful relationships, not shared genre alone. Same-recording duplicates must not merge distinct performances.
+4. Session-scoped skipped-track exclusions survive restoration of that session and reset with a new Radio. There is no cross-session local taste model. Durable preferences belong to capable underlying servers.
+5. Playback chooses the highest sustainable quality, using buffering to inform automatic adaptation. Album continuity and recorded silence are preserved. Loudness matching respects Radio versus album context. Output-device loss pauses playback without silently switching speakers.
+6. Playback is the first, always-present virtual destination, selected when no physical device is connected. Physical-device arrival selects its basket without stopping music; unconfigured devices retain their configuration affordance. Floating controls and Play something support low-friction listening.
+7. Explicit session snapshots retain accepted played tracks and upcoming tracks, omitting skipped/disliked tracks. Server export splits a mixed-source snapshot into ordered per-server playlists. Connected-device export offers distinct Add and Replace actions.
+
+### Non-functional constraints
+
+Windows, macOS and Linux are required. Shared audio is the default; OS Do Not Disturb remains outside HifiMule. Callback delivery must be isolated from blocking I/O, allocations and sync-held locks. Compressed prefetch, decoded PCM and candidate discovery each need independent bounds. The existing less-than-10-MB requirement concerns idle operation; active playback needs measured resource budgets rather than an invented promise.
+
+Native FFmpeg decoding and callback delivery passed short generated-fixture tests on the three tested ARM64 environments. Those results do not establish streaming adaptation, real-library relationship coverage, mixed-rate physical gaplessness, x64 parity or prolonged real-sync coexistence. Ubuntu Wayland teardown warnings and physical Windows/Linux keyboard routing remain integration checks.
+
+### Existing foundation retained
+
+This is an extension of the current Rust daemon, Tokio runtime, native Tao tray loop, SQLite persistence, provider abstraction, JSON-RPC bridge and Tauri/TypeScript UI. No starter generation, application reinitialization or framework migration is required. The existing completed starter selection is inherited; the next work concerns playback-specific design decisions.
+
+### Architectural concerns to resolve
+
+- Separate playback destination identity from mounted-device identity and destructive sync operations.
+- Define session/queue/source identity, restoration, preview state and snapshot consistency.
+- Keep audio ownership and native registration in the interactive desktop session with one daemon instance.
+- Bound queue growth and library candidate work while sharing selection behavior with sync.
+- Extend provider capabilities for streams, reporting, preferences and metadata without leaking provider APIs into playback/UI.
+- Define quality adaptation and reporting behavior that can honestly degrade when providers lack necessary capabilities.
+- Package and verify the actual audio runtime on each target; preserve the project's deployment and credential boundaries.
+
+### Playback State and Ownership — Approved
+
+The Playback destination owns selection settings independently of physical devices. It is a typed playback destination, never a simulated mount or a target for filesystem synchronization.
+
+A daemon session manager owns queue order, current position, Radio state and temporary audition state. UI and native media controls address that same manager. The audio engine consumes buffered PCM independently of UI and sync work.
+
+Use the existing SQLite database for durable session restoration. Restore paused, including the current logical Radio session's skipped-track exclusions. Starting a new Radio clears those exclusions; restoration does not create a cross-session taste model. Playback configuration remains separate from physical-device settings; its persistence format will be specified with implementation patterns.
+
+Each queued occurrence has its own queue-entry identity. Source identity is the portable server ID plus provider track ID. Recording identity is separate and supports conservative cross-server deduplication without collapsing repeated queue entries or distinct performances. The shared selection engine currently lacks an explicit server dimension in Candidate/SourceKey: its playback integration must preserve source identity through a deliberate typed boundary rather than merge raw provider IDs.
+
+Maintain one preserved main session during preview. A subsequent preview replaces the current audition without nesting preserved sessions. Natural completion resumes the preserved session according to its retained state. Explicit stop and preview without a prior session require state-machine definitions before implementation.
+
+Playback architecture workflow: state/ownership category approved; audio/streaming category next. Existing completed base-workflow steps remain unchanged.
+
+### Playback Audio Pipeline — Approved
+
+Use native FFmpeg decoding and CPAL output, building on the verified experiment. Package a controlled FFmpeg runtime; do not rely on arbitrary system versions. The experiment used CPAL 0.16.0 and ffmpeg-next 9.0.0 with FFmpeg 9 libraries. Newer CPAL versions require renewed platform validation before adoption; exact release packaging is a later implementation gate.
+
+Pipeline: provider stream → bounded compressed prefetch → FFmpeg decoding and audio processing → bounded PCM queue → native shared output. Network, decoding and preparation run outside the audio callback; the callback must not perform blocking I/O, allocate, or acquire locks held by sync. Keep decoder objects on their owning workers.
+
+Maintain a continuous output stream and prepare the next track before the current track completes. Preserve recorded silence, remove only known encoder padding, and perform explicit sample-rate/channel conversion when needed without reopening the output between tracks. Resampler continuity and mixed-format boundaries need validation beyond the existing same-rate fixture proof.
+
+Bound compressed and decoded buffering separately. Keep decoded buffering small enough for responsive controls and compressed prefetch large enough to absorb network variation within measured resource limits. Select concrete sizes and thresholds from streaming measurements rather than fixed untested promises.
+
+Prefer the best available sustainable quality. Use buffer duration and refill behavior to predict starvation; reduce quality automatically and recover conservatively to prevent oscillation. Initially switch quality at track boundaries. Mid-track replacement requires provider-specific seeking/timing validation; support for a transcode offset alone does not prove seamless switching. If the connection cannot sustain any available representation, surface buffering/retry rather than promise uninterrupted output.
+
+Recovery respects listening mode: Radio may bypass unavailable tracks, whereas album playback pauses and retries without silently omitting tracks. Output-device loss pauses playback and does not silently reroute to another device. Sync backoff remains conditional on actual playback risk.
+
+References checked during design: https://docs.rs/crate/cpal/latest and https://opensubsonic.netlify.app/docs/extensions/transcodeoffset/. Versions used in the experiment are evidence baselines, not claims about the latest release.
+
+Playback architecture workflow: audio/streaming category approved; provider integration next.
+
+### Playback Provider Integration — Approved
+
+Extend the existing MediaProvider boundary for playback. Providers return a playback description covering source, representation/quality, authentication and seeking capabilities, rather than exposing only a download URL. Detect streaming, reporting, feedback and metadata capabilities independently per server; adapter behavior must be verified against supported server versions.
+
+Route each playback, feedback, reporting and export operation through the track's portable source-server identity, independent of the currently browsed server. Credentials and authenticated stream URLs remain inside the daemon; controls receive metadata and status. Provider-specific URLs and API semantics stay in provider adapters.
+
+Separate now-playing notifications from completed-listen submissions. Avoid submitting skipped tracks where server behavior allows it, and count completed previews. Exact completion/seek eligibility and server-side counting side effects require a reporting contract and integration tests. Never promise that a reported play can be undone. OpenSubsonic distinguishes now-playing from submission through its scrobble API: https://opensubsonic.netlify.app/docs/endpoints/scrobble/.
+
+Expose Like/Dislike only when an adapter has a genuine supported server equivalent. Removing a favorite is not an implicit dislike. Unsupported feedback must not become a hidden HifiMule-only preference model.
+
+Normalize recording identifiers, artist relationships and loudness metadata with provenance and explicit missing values. Availability of an API or server brand does not establish completeness or correctness of its metadata.
+
+Playlist export freezes one local snapshot and splits it by contributing server, preserving relative order within each part. Track each server's success/failure independently and retain returned playlist identities for safe retry/reconciliation. Reporting retries require durable tracking; remote exactly-once effects cannot be promised without server idempotency support or reliable reconciliation.
+
+Playback architecture workflow: provider integration approved; Radio selection next.
+
+### Playback Radio Selection — Approved
+
+Reuse the existing pure selection engine with playback-owned settings, candidate pools, session exclusions and a track-count budget. Preserve physical-device sync behavior. Play something uses the engine's first eligible selection and establishes that artist as the initial Radio center.
+
+Stay with the current artist while eligible unheard tracks remain, then prefer an artist connected by supported relationship metadata. Retain the transition explanation and metadata provenance. Initially use metadata supplied by configured servers; no external metadata service is introduced by this decision.
+
+If the current artist is exhausted and no meaningful relationship is available, select a fresh center using the original playback selection settings and explicitly label the transition as a new starting point. Do not present a shared genre or unsupported relationship as evidence of a musical connection. This fallback does not itself settle total candidate exhaustion or permission to repeat heard tracks.
+
+Keep a bounded upcoming-track lookahead and replenish incrementally. Bound candidate fetching/index work separately; do not reload the entire library for each refill. Replenishment appends without reordering existing queue entries. Manually removed automatic suggestions stay excluded for the logical session, including across restoration.
+
+Deduplicate conservatively at the recording level while retaining distinct source-server copies for playback-source resolution. Uncertain matches remain separate. Track occurrence identity, recording identity and source identity remain distinct.
+
+Playback architecture workflow: Radio selection approved, including fresh-center fallback; UI/session-control integration next.
+
+### Playback UI and Session Control — Approved
+
+The daemon owns the authoritative playback session. UI actions, native media keys and app-menu commands use common command handlers. Browsing context and playback context are independent: changing the selected server or physical device does not change the playing source or stop playback.
+
+Playback is the first always-present destination and is selected when no physical device is connected. A physical-device arrival selects that device's context and exposes initialization/configuration when needed. Floating playback controls remain available across views; reserve sufficient scroll space to keep final list items accessible.
+
+Extend the existing JSON-RPC bridge with playback commands and versioned state. On reconnect, fetch an authoritative session snapshot. Queue edits carry a revision expectation; reject stale edits and refresh instead of overwriting newer changes. Define snapshot/event ordering and reconnect behavior in implementation patterns.
+
+Animate progress locally between authoritative daemon updates, correcting after pause, seek or reconnect. Interpolation is presentation only: consumed audio state in the daemon determines position and reporting. Avoid constant high-frequency polling solely to animate the UI.
+
+Closing the UI leaves playback running. Explicit Quit HifiMule saves session state and stops the daemon; a later launch restores paused. Production shutdown must coordinate existing sync work and managed-device safety. Play something starts a new Radio, while Resume continues the existing saved session.
+
+Playback architecture workflow: UI/session-control integration approved; deployment and implementation sequence next.
+
+### Playback Deployment and Implementation Sequence — Approved
+
+Run playback in the signed-in user's daemon on Windows, macOS and Linux. Reuse the existing daemon native event loop for media controls. Introduce single-instance coordination so UI and startup launches cannot create competing players. Package a controlled FFmpeg runtime and verify actual loaded library versions in release validation. Test every shipping architecture; the ARM64 VM experiments do not establish Windows/Linux x64 compatibility.
+
+Implementation sequence:
+1. Daemon lifecycle: UI-independent lifetime, single instance, safe quit and paused restoration.
+2. Basic player: server streaming, native controls, output selection and disconnect handling.
+3. Albums/previews: gapless preparation, format conversion and preserved-session auditions.
+4. Playback destination: independent settings, floating controls and manual queue editing.
+5. Radio: shared selection engine, bounded replenishment, artist transitions and deduplication.
+6. Library integration: listening reports, supported feedback, playlist and basket exports.
+7. Reliability/release: adaptive quality, real-sync stress tests, resource measurements and packaged-platform checks.
+
+Begin streaming experiments during stage 2 to discover adaptation constraints early. The stages are dependency order, not permission to omit cross-platform support or delay basic error handling until release.
+
+Playback architecture workflow: core decision categories approved; implementation contracts and edge cases under review.
+
+### Playback Implementation Contracts — Approved
+
+One session manager serializes mutations from UI, native controls and background work. Queue edits carry the expected queue revision; stale edits return a conflict and current revision so the caller refreshes before retrying. Position updates do not increment the queue-edit revision. Command IDs suppress duplicate queue mutations within a documented retention window; this is not a promise of indefinite or remote exactly-once execution.
+
+Preview completion restores the main session's saved position and previous playing/paused state. Explicit preview Stop restores the main session paused. Without a main session, preview completion leaves playback idle. Output reconnection does not automatically resume audio.
+
+When Radio exhausts unheard eligible tracks, begin another listening cycle while retaining logical-session skipped/removed exclusions. If no eligible track remains, enter an explained waiting state rather than loop or discard exclusions. Technical failures remain distinct from explicit user skips/dislikes.
+
+Quit stops audio, checkpoints playback, and requests orderly sync cancellation before daemon exit, respecting existing managed-device integrity rules. Shutdown deadlines and failure behavior must be implemented without pretending that interrupted writes completed.
+
+Save/export operates on an immutable snapshot and does not track subsequent queue changes. Include the current track once unless explicitly rejected; omit skipped/disliked entries. Queue occurrence identity prevents accidentally including the current occurrence twice without collapsing deliberate repeated occurrences.
+
+Keep existing Rust/SQL snake_case and JSON camelCase conventions. Distinguish session IDs, queue-entry IDs, recording IDs and source identities in types. Store playback configuration in a versioned local configuration file; store recoverable session state in SQLite. Persist transitions and periodic position checkpoints outside the audio callback.
+
+Use explicit idle, buffering, playing, paused and stopping states with structured reasons such as output loss or unavailable source. Test transition behavior, command races, restart recovery and immutable snapshots independently of audio hardware. Revision and timing values need explicit wire representations and units when schemas are finalized.
+
+Playback architecture workflow: implementation contracts approved; project structure next.
+
+### Playback Project Structure — Approved
+
+Keep playback inside the existing daemon with these modules:
+
+```text
+hifimule-daemon/src/playback/
+  mod.rs          Public commands and session handle
+  model.rs        Typed identities, states and snapshots
+  session.rs      Queue, previews and command ordering
+  audio.rs        Output stream and PCM callback
+  decoder.rs      FFmpeg ownership and conversion
+  streaming.rs    Fetching, prefetch and quality adaptation
+  radio.rs        Replenishment through shared selection
+  persistence.rs  Session checkpoints and restoration
+  config.rs       Versioned Playback settings
+  reporting.rs    Listening eligibility and submission
+  export.rs       Playlist and basket snapshots
+  native.rs       Media-control integration
+
+hifimule-ui/src/
+  state/playback.ts
+  components/PlaybackBar.ts
+  components/PlaybackQueue.ts
+  components/PlaybackSettings.ts
+```
+
+Existing boundaries remain: auto_fill/ is the shared selection engine and radio.rs supplies playback-specific inputs; providers/ owns server APIs, capabilities and normalized metadata; db.rs owns migrations and playback persistence uses its tables; main.rs owns lifecycle and the native event loop; rpc.rs validates and forwards commands; sync.rs owns sync cancellation and conditional resource backoff. Native platform details may be split beneath playback/native/ when warranted, without introducing another application event loop.
+
+Existing browse/basket components expose playback actions through shared playback state. Extend existing daemon/UI manifests and build/release workflows for audio dependencies rather than scaffold another application. The Tauri RPC proxy remains the release-mode communication boundary. Keep tests beside relevant Rust modules, with cross-platform integration coverage for lifecycle, streaming and packaged audio. Retain experiments/playback-probe as a regression reference.
+
+Playback architecture workflow: project structure approved; architecture validation next.
+
+### Playback Validation Refinements — Approved
+
+For playback, these amendments supersede incompatible older statements in this document:
+- No-device locking applies to physical-device basket/sync actions, not library playback or its destination.
+- Multiple source providers may be active for playback/prefetch; provider lifetime follows in-flight work and bounded cache policy, not the browsed server alone.
+- Album playback must preserve disc/track sequence; entity expansion ordering is not discretionary for this use case.
+- Physical auto-fill configuration remains in device manifests; Playback configuration lives in its versioned local file. Session/runtime state remains in SQLite.
+- The idle-memory target must not be presented as a validated active-playback memory limit.
+
+Every asynchronous playback operation carries a generation identity. Skip, seek, preview replacement and session replacement invalidate superseded work; late fetch/decode completions cannot publish PCM or mutate the current session. Cancellation and stale-result rejection are separate obligations.
+
+Store the long-running Radio journey in SQLite and page history into the UI. Bound candidate retrieval/index caches, compressed prefetch, PCM and upcoming entries independently. Retain session-scoped exclusions without materializing an unbounded UI list or repeatedly rebuilding the whole library.
+
+Preserve main-track resume information during previews and reopen the source when necessary. A failed return preserves the main session and exposes a recoverable error; it must not silently discard the queue or claim a successful resume. Seek/reopen accuracy requires provider integration tests.
+
+Use track loudness gain for Radio and consistent album gain for album playback, with peak protection. When usable metadata is missing, leave gain unchanged. Do not infer dynamic-range compression or launch background loudness analysis from this requirement.
+
+### Playback Architecture Validation Results
+
+**Coherence:** Approved responsibilities, ownership, identities and module boundaries fit the existing Rust/Tauri/provider architecture. The explicit precedence rules above resolve older no-device, single-provider, configuration and ordering statements. Experimental compatibility is evidence for the tested versions/platforms only.
+
+**Coverage:** Listening/preview, album continuity, Radio, virtual destination, restart recovery, multi-server routing, reporting, feedback, export, native controls and sync coexistence have architectural owners. Privacy boundaries retain server communication inside providers and introduce no external metadata service. Performance is addressed through independent bounds and measurement gates, not an unverified memory claim.
+
+**Implementation readiness:** Ready to create implementation stories, not a complete executable contract for every feature. Exact RPC schemas/error codes, database migrations, wire units, event/snapshot recovery, command-dedup retention and packaged dependency versions remain to be specified. Scope these before coding the affected stage.
+
+**Critical implementation gates:**
+- Define the lifecycle/single-instance mechanism, authenticated local command access as appropriate to the existing application boundary, and safe shutdown/cancellation contract before stage 1 implementation.
+- Finalize versioned state/command schemas, generation fencing, persistence migrations and configuration validation for the first consuming story.
+- Pin and verify shipping decoder/output/native-control versions and the controlled FFmpeg build for each supported architecture.
+
+**Important validation gates:** streaming/seek behavior and reporting semantics on supported servers; buffer/resource tuning; loudness metadata behavior; cross-server recording/relationship coverage; physical gapless and real-sync coexistence; output loss, sleep/wake and extended-run reliability; Windows/Linux physical media keys and Wayland teardown.
+
+Checklist (architecture-wide implementation readiness, not workflow completion):
+- [x] Project context analyzed
+- [x] Scale and complexity assessed: existing desktop application with real-time audio and multi-provider integration
+- [x] Technical constraints identified
+- [x] Cross-cutting concerns mapped
+- [ ] All critical implementation decisions documented with final versions
+- [ ] Shipping technology/runtime configuration fully specified and verified
+- [x] Integration boundaries defined
+- [x] Performance considerations addressed
+- [x] Naming conventions established
+- [x] Module structure patterns defined
+- [ ] Exact communication schemas and recovery contracts specified
+- [x] Process behavior and recovery principles documented
+- [x] Playback directory structure defined
+- [x] Component boundaries established
+- [x] Integration points mapped
+- [x] Feature responsibilities mapped to modules
+
+**Formal readiness: NOT READY for unrestricted implementation while critical gates above remain open.** The architecture design workflow is complete and ready for staged story planning. This status does not invalidate the completed feasibility experiments or prevent writing the first scoped implementation spec.
+
+### Playback Implementation Handoff
+
+Create playback epics/stories in the approved seven-stage sequence. Each story must close its applicable contract/version gate and define meaningful acceptance checks before execution. Start with daemon lifecycle, single-instance coordination and safe restoration; preserve physical sync safety and existing provider routing. Carry all accepted product behavior into the playback requirements/epics so older PRD assumptions cannot override this extension.
+
+Keep experiments/playback-probe as the audio regression reference. No production playback code was added by this architecture workflow. Do not treat prior ARM64 VM tests as shipping-architecture certification.
+
+Playback architecture workflow complete: context, decisions, implementation patterns, structure and validation approved. Outstanding implementation gates are explicit above.

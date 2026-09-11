@@ -1,13 +1,17 @@
+---
 stepsCompleted: ['step-01-init', 'step-02-discovery', 'step-03-success', 'step-04-journeys', 'step-05-domain', 'step-06-innovation', 'step-07-project-type', 'step-08-scoping', 'step-09-functional', 'step-10-nonfunctional', 'step-11-polish']
-inputDocuments: ['product-brief-bmad-2026-01-26.md', 'project-context.md']
+inputDocuments: ['product-brief-bmad-2026-01-26.md', 'project-context.md', 'architecture.md', 'playback-prd-source-extract.md', 'reconcile-playback-brainstorming.md', 'reconcile-playback-architecture.md']
 documentCounts: {briefCount: 1, researchCount: 0, brainstormingCount: 0, projectDocsCount: 0}
 classification:
   projectType: 'Desktop App (Rust-based Headless Sync Engine + Detachable UI)'
   strategy: 'Event-Driven Mount Watcher + Manifest Probing'
   domain: 'Media Utility / General'
   complexity: 'Low (Performance-focused)'
-  projectContext: 'Greenfield'
+  projectContext: 'Brownfield — sync product extended with playback'
 workflowType: 'prd'
+status: final
+updated: '2026-09-11'
+playbackUpdate: 'final — ready for staged epic planning; implementation gates remain open'
 ---
 
 # Product Requirements Document - HifiMule
@@ -146,7 +150,7 @@ As a cross-platform desktop application, HifiMule consists of a performance-crit
 - **FR2:** Users can manually select a target device folder if automatic detection fails. Manual fallback applies to Mass Storage devices only; MTP devices must be detected automatically via the OS device manager.
 - **FR3:** The system can identify the presence of a `.hifimule.json` manifest on discovery.
 - **FR4:** The system can read persistent hardware identifiers to link devices across different sessions. When multiple managed devices are connected simultaneously, the system tracks all of them and allows the user to select the active device context.
-- **FR33:** The system presents a persistent device hub showing all connected managed devices, each identified by its name and icon. The user can switch the active device context at any time. When no device is selected, the basket is empty and adding items is disabled.
+- **FR33:** The system presents a persistent device hub showing all connected managed devices, each identified by its name and icon. The user can switch the active device context at any time. The Playback destination is always available and selected when no physical device is connected (FR55). Without a physical target, physical-device basket and sync actions remain unavailable; playback and library browsing remain usable.
 - **FR26:** The system can initialize a new `.hifimule.json` manifest on a connected device that has not previously been managed, capturing a hardware identifier, a designated music sync folder path, a playlist folder path that defaults from the selected device profile or otherwise the music folder, an associated media-server user profile, a user-provided display name, and an optional icon identifier selected from a built-in library.
 
 ### 2. Server & Profile Management
@@ -188,7 +192,7 @@ As a cross-platform desktop application, HifiMule consists of a performance-crit
 - **FR19:** The system can track which scrobbles have already been submitted to prevent duplication.
 
 ### 6. Service & System Integration
-- **FR20:** The system can run as a background service (headless) with minimal resource usage. MVP: Tauri sidecar process. Post-MVP: OS-native user-session daemon (Windows startup application, systemd user unit, launchd agent).
+- **FR20:** The system can run as a background service (headless) with minimal resource usage. Existing sync-only delivery may use a Tauri-owned sidecar. Playback requires an independent daemon in the signed-in desktop session, surviving UI closure (FR56); startup registration remains user-controlled.
 - **FR21:** Users can toggle "Launch on Startup" behavior. Post-MVP: Fulfilled natively by platform-specific mechanisms (Windows Registry Run key, systemd user unit enable/disable, launchd agent load/unload).
 - **FR22:** The system can provide tray-icon status updates for sync progress and hardware state.
 - **FR23:** The system can send OS-native notifications for sync completion or errors.
@@ -235,3 +239,86 @@ As a cross-platform desktop application, HifiMule consists of a performance-crit
 ### 5. Maintainability
 - **CLI-First Architecture:** The core engine must remain fully functional and testable via CLI independent of the detached UI.
 - **standard Tooling:** The project should follow established Rust workspace patterns for ease of future contribution.
+
+## Playback Extension — Approved Product Requirements
+
+### Purpose and scope
+
+HifiMule becomes the desktop listening companion for the same curated libraries it synchronizes. The primary outcome is an easy answer to “what should I listen to?” through Play something, alongside faithful album listening and auditioning music before choosing it for a playlist or device. Windows, macOS and Linux are in scope from the start.
+
+These requirements extend the existing sync product. They supersede older no-device locking and UI-owned lifetime assumptions for playback only. The implementation stages in the architecture are delivery order, not permission to omit requirements below.
+
+### Listening destinations and controls
+
+- **FR55:** Playback is an always-present destination listed first, with independent source/selection settings and a manually editable queue. Select it when no physical device is connected; do not expose storage, folder or file-sync actions for Playback.
+- **FR56:** Music and native media controls remain operational after the main UI closes. Reopening the UI shows the same session and current state without restarting playback.
+- **FR57:** Play something starts a fresh Radio using the first eligible result from the shared sync/playback selection engine under Playback settings. Resume continues the existing queue and position. Both actions are available from the desktop app menu without opening the main window when configured sources are available.
+- **FR58:** Users can control play/pause, stop, next, playback position where supported, and output selection. UI and native controls act on one session. Capability limits and recoverable errors are visible rather than silently ignored.
+- **FR59:** A translucent floating playback bar below the media browser remains visible while idle, browsing or working with a device basket, and offers Play something when idle. The bar does not obscure the final list items. Selecting a different server/device does not stop music or change its source; arriving physical devices become selected and unconfigured devices retain a visible setup action. Show detected-device open failures with actionable feedback.
+- **FR60:** Full application quit preserves queue, position and logical-session exclusions. Relaunch restores paused. Quit during sync stops audio and requests orderly sync cancellation without marking incomplete device writes successful.
+
+### Album listening and auditions
+
+- **FR61:** Album playback follows disc/track order and preserves the intended continuity, including silence recorded in the source. Track boundaries introduce no additional gap when both tracks are prepared and their tested formats are supported. No automatic crossfade or silence removal is implied.
+- **FR62:** An explicit Preview action, distinct from Play, starts a full-track audition while preserving the main session and position. Another audition replaces the audition, not the preserved main session. Provide an explicit return-to-session action; exact button/context-menu placement is settled in the UI story.
+- **FR63:** Natural audition completion restores the main session's previous playing/paused state and position. Explicit audition Stop restores it paused. With no main session, completion leaves playback idle. Failed resumption preserves the session and presents a recoverable error.
+- **FR64:** Loss of the selected output pauses playback without automatically sending music to another output. Reconnection leaves playback paused until resumed. Shared output is the default; OS Do Not Disturb remains managed by the OS.
+
+### Radio and selection
+
+- **FR65:** Radio continually replenishes a limited upcoming queue until stopped or no eligible music is available. It uses the same selection engine as sync with separate settings; it does not enqueue the whole library.
+- **FR66:** Radio stays with the current artist while eligible unheard tracks remain, then moves to a meaningfully connected artist using available relationship evidence stronger than shared genre alone. The transition reason is explainable.
+- **FR67:** When no meaningful artist connection is available, Radio chooses a fresh center using the original Playback settings and labels it as a new starting point. When all eligible tracks have been heard, begin another listening cycle while preserving exclusions; when none are eligible, show an explained waiting state.
+- **FR68:** Users can reorder and remove queued tracks. Automatic replenishment appends without reordering existing entries. Removed automatic suggestions remain excluded for the logical session; stale concurrent edits cannot overwrite newer queue changes.
+- **FR69:** Skips exclude tracks for the current logical Radio session, including across restoration. A new Radio resets those exclusions. HifiMule does not accumulate a cross-session taste-learning profile.
+- **FR70:** Radio may draw from multiple configured sources. Copies confidently identified as the same recording count as one Radio selection, while distinct performances and uncertain matches remain separate. Playback and server actions retain the chosen source identity regardless of the browsed server.
+
+### Quality and reliability
+
+- **FR71:** Playback requests the highest sustainable available quality independently of portable-device transcoding preferences. A brief startup buffer is allowed. Buffer/refill behavior informs automatic quality reduction and conservative recovery, with a discreet explanation of reduced quality.
+- **FR72:** Initial quality changes occur at track boundaries. Mid-track replacement is enabled only for provider/format combinations validated for correct resume timing. If no available representation can be sustained, expose buffering/retry rather than promise uninterrupted playback.
+- **FR73:** For an unavailable source, Radio may continue with another eligible track; album playback pauses and retries without silently omitting tracks. A technical failure is not treated as a user skip or dislike.
+- **FR74:** Radio uses track-level loudness matching; album playback uses consistent album gain to preserve relative levels. Apply peak protection. Leave gain unchanged when usable metadata is absent; automatic dynamic-range compression is not required.
+- **FR75:** Playback and device sync normally run together. Reduce sync demand only when needed to protect playback. Switching, skipping or seeking cannot allow obsolete buffered content to become the new session's audio.
+
+### History, preferences and curation
+
+- **FR76:** Distinguish currently-playing status from a completed listen. Avoid counting skipped/interrupted tracks where provider semantics allow; completed auditions count where supported. Do not promise reversal of server-counted plays. Listening eligibility and reporting behavior must be verified for supported providers before enabling reports.
+- **FR77:** Explicit Like/Dislike persists on the source server only when a genuine supported equivalent exists. Unsupported actions are unavailable; removing a favorite is not silently mapped to dislike. No local-only durable taste state is created as a fallback.
+- **FR78:** Users can save an immutable snapshot of accepted played occurrences, the current occurrence once unless rejected, and upcoming occurrences, omitting skipped/disliked entries. Further playback does not alter the saved snapshot; deliberate repeated queue occurrences remain distinct.
+- **FR79:** Saving a mixed-source snapshot creates one playlist per contributing capable server, preserving relative order within each part. Display per-server successes, unsupported parts and failures; retries must not blindly duplicate already-created playlists. The complete cross-server order remains local.
+- **FR80:** With a connected physical target, users can explicitly Add the snapshot to its basket or Replace its basket. Without a physical target these actions are unavailable. Sending music to a basket does not itself start synchronization or establish a live link to Radio.
+- **FR81:** Maintain recoverable reporting/export operation state across interruption. Reconcile ambiguous results before repeating non-idempotent writes; do not promise exactly-once remote effects where server APIs cannot support them.
+
+### Playback quality requirements
+
+- **P-NFR1 — Continuity:** Prepared supported album boundaries introduce zero extra decoded samples of silence or omitted source samples in deterministic fixtures. Physical-output continuity and real-sync coexistence require separate release tests; callback counters alone are insufficient.
+- **P-NFR2 — Resource bounds:** Bound upcoming entries, compressed prefetch, decoded PCM and candidate caches separately. Long-session history is paged rather than held as an ever-growing UI list. Measure idle and active memory separately; retain the existing idle target without extending it to active playback. Numeric active budgets and buffer thresholds must be set in the owning implementation story before performance acceptance.
+- **P-NFR3 — Cross-platform operation:** Validate installed builds on every shipping architecture, including UI-close/reopen, native transport, output loss, sleep/wake and safe shutdown. Test physical media-key routing separately from OS API delivery.
+- **P-NFR4 — State integrity:** Restore only valid persisted state; reject stale queue mutations; prevent obsolete asynchronous work from changing the current session. Failed restoration or preview return must preserve recoverable listening state and explain the problem.
+- **P-NFR5 — Privacy:** Use existing source-server credentials and capabilities. Do not expose authenticated stream URLs in the UI or logs. Initial relationship enrichment uses configured-server metadata; no third-party listening or metadata service is introduced.
+- **P-NFR6 — Usability/accessibility:** Playback remains keyboard-operable with visible focus, accessible control names and status changes, consistent with existing WCAG 2.1 AA targets. Floating controls and background updates must not steal focus or make bottom rows unreachable.
+
+### User scenarios captured in the playback discussion
+
+- **UJ-P1 — Alexis working with headphones:** Start music without choosing a first artist; Radio replenishes from his curated sources while the main UI is closed. Skip an unwanted track without creating a durable taste profile.
+- **UJ-P2 — Alexis listening through his USB audio interface:** Play an album in order with its intended transitions while other applications can still use audio. Disconnecting the output pauses music instead of sending it to laptop speakers.
+- **UJ-P3 — Alexis curating portable music:** Audition a complete track, return to the preserved session, then explicitly save a listening snapshot to server playlists or add/replace a connected device basket.
+
+### Success and release evidence
+
+Success is demonstrated when configured Play something starts listening without opening the UI, album/preview behavior retains the agreed order and position, and users can move discoveries into playlists or a device basket without reconstructing the queue. Counter-metrics are playback underruns, unintended output reroutes, duplicate reporting/export effects, memory growth and unnecessary sync-throughput loss. Report actual measurements; do not replace unknown thresholds with invented latency guarantees.
+
+The isolated playback experiments establish short-run decoding/output and session-control feasibility on tested ARM64 environments. They do not certify streaming adaptation, packaged x64 behavior, metadata coverage or sustained physical playback under real sync load. The architecture lists the remaining gates.
+
+### Non-goals and open implementation decisions
+
+ASIO/exclusive-mode playback, crossfade, cross-session taste learning, automatic external metadata lookup, automatic server-queue synchronization and guaranteed seamless adaptation through an outage are not requirements of this extension. Server playlist saves remain explicit snapshots.
+
+The owning implementation story must settle source-selection ranking, reporting eligibility after seeking, unavailable initial setup, physical-target changes during basket export, buffer budgets and repeat/export reconciliation details before coding that behavior. These are tracked contract questions, not permission to change the approved user outcomes. Owner: implementation-story author, reviewed against this PRD and architecture before the affected stage starts.
+
+### Playback glossary and design reference
+
+Playback destination: the always-available local listening context. Main session: the queue/state preserved while auditioning. Audition: temporary full-track playback. Radio center: the current artist around which selection proceeds. Logical session: listening state that survives restoration and ends when replaced with a new Radio. Recording: musical identity distinct from server copies and queue occurrences. Snapshot: immutable export of the agreed queue/history contents.
+
+Implementation mechanisms, module layout and technology decisions remain in [architecture.md](architecture.md), Playback Extension, rather than being duplicated here.

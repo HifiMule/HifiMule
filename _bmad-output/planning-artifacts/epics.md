@@ -1,9 +1,18 @@
+---
 stepsCompleted: ['step-01-validate-prerequisites', 'step-02-design-epics', 'step-03-create-stories', 'step-04-final-validation']
 inputDocuments: ['prd.md', 'architecture.md', 'ux-design-specification.md', 'product-brief-bmad-2026-01-26.md', 'project-context.md']
 status: 'complete'
 completedAt: '2026-01-27'
 lastAmended: '2026-06-09'
 amendments: ['epic-11-selection-as-playlist', 'story-9-7-virtualized-list-view', 'multi-server-management', 'server-identity-name-and-icon']
+
+playbackExtension:
+  stepsCompleted: ['step-01-validate-prerequisites', 'step-02-design-epics', 'step-03-create-stories']
+  status: 'stories-approved-coverage-reviewed-implementation-gates-open'
+  approvedStories: ['15.1', '15.2', '15.3', '15.4', '15.5', '15.6', '15.7', '15.8', '15.9', '15.10', '15.11', '15.12', '15.13', '15.14', '15.15', '15.16', '15.17', '15.18', '15.19', '15.20', '15.21', '15.22', '15.23', '15.24', '15.25', '15.26', '15.27', '15.28', '15.29']
+  updated: '2026-09-11'
+  inputDocuments: ['prd.md', 'architecture.md', 'ux-design-specification.md', 'playback-prd-source-extract.md']
+---
 
 # HifiMule - Epic Breakdown
 
@@ -3103,3 +3112,1912 @@ Time-of-day (#3), energy-curve (#17), seasonal drift cheap version (#32); encodi
 ### Story 13.6: Advanced Units & Promotion
 
 Artist Spotlight (#33), album/track space ratio (#8), affinity-triggered album promotion (#9), coherence-optimized fill (#27).
+
+
+## Epic 14: Sync Throughput Pipeline
+
+Existing epic, tracked in [its approved sprint change proposal](sprint-change-proposal-2026-07-11-sync-throughput-pipeline.md) and [sprint-status.yaml](../implementation-artifacts/sprint-status.yaml). Its implementation stories 14.1–14.3 and existing statuses are unchanged.
+
+## Playback Extension — Requirements Inventory
+
+Status: requirements and one consolidated playback epic approved; stories are pending. The completed baseline above remains intact. PRD FR20 and FR33 are amended by the playback lifecycle and always-available destination rules. Existing security, accessibility, device-integrity and sync requirements remain inherited constraints.
+
+### Functional Requirements
+
+- **FR55:** Playback is an always-present destination listed first, with independent source/selection settings and a manually editable queue. Select it when no physical device is connected; do not expose storage, folder or file-sync actions for Playback.
+- **FR56:** Music and native media controls remain operational after the main UI closes. Reopening the UI shows the same session and current state without restarting playback.
+- **FR57:** Play something starts a fresh Radio using the first eligible result from the shared sync/playback selection engine under Playback settings. Resume continues the existing queue and position. Both actions are available from the desktop app menu without opening the main window when configured sources are available.
+- **FR58:** Users can control play/pause, stop, next, playback position where supported, and output selection. UI and native controls act on one session. Capability limits and recoverable errors are visible rather than silently ignored.
+- **FR59:** A translucent floating playback bar below the media browser remains visible while idle, browsing or working with a device basket, and offers Play something when idle. The bar does not obscure the final list items. Selecting a different server/device does not stop music or change its source; arriving physical devices become selected and unconfigured devices retain a visible setup action. Show detected-device open failures with actionable feedback.
+- **FR60:** Full application quit preserves queue, position and logical-session exclusions. Relaunch restores paused. Quit during sync stops audio and requests orderly sync cancellation without marking incomplete device writes successful.
+- **FR61:** Album playback follows disc/track order and preserves the intended continuity, including silence recorded in the source. Track boundaries introduce no additional gap when both tracks are prepared and their tested formats are supported. No automatic crossfade or silence removal is implied.
+- **FR62:** An explicit Preview action, distinct from Play, starts a full-track audition while preserving the main session and position. Another audition replaces the audition, not the preserved main session. Provide an explicit return-to-session action; exact button/context-menu placement is settled in the UI story.
+- **FR63:** Natural audition completion restores the main session's previous playing/paused state and position. Explicit audition Stop restores it paused. With no main session, completion leaves playback idle. Failed resumption preserves the session and presents a recoverable error.
+- **FR64:** Loss of the selected output pauses playback without automatically sending music to another output. Reconnection leaves playback paused until resumed. Shared output is the default; OS Do Not Disturb remains managed by the OS.
+- **FR65:** Radio continually replenishes a limited upcoming queue until stopped or no eligible music is available. It uses the same selection engine as sync with separate settings; it does not enqueue the whole library.
+- **FR66:** Radio stays with the current artist while eligible unheard tracks remain, then moves to a meaningfully connected artist using available relationship evidence stronger than shared genre alone. The transition reason is explainable.
+- **FR67:** When no meaningful artist connection is available, Radio chooses a fresh center using the original Playback settings and labels it as a new starting point. When all eligible tracks have been heard, begin another listening cycle while preserving exclusions; when none are eligible, show an explained waiting state.
+- **FR68:** Users can reorder and remove queued tracks. Automatic replenishment appends without reordering existing entries. Removed automatic suggestions remain excluded for the logical session; stale concurrent edits cannot overwrite newer queue changes.
+- **FR69:** Skips exclude tracks for the current logical Radio session, including across restoration. A new Radio resets those exclusions. HifiMule does not accumulate a cross-session taste-learning profile.
+- **FR70:** Radio may draw from multiple configured sources. Copies confidently identified as the same recording count as one Radio selection, while distinct performances and uncertain matches remain separate. Playback and server actions retain the chosen source identity regardless of the browsed server.
+- **FR71:** Playback requests the highest sustainable available quality independently of portable-device transcoding preferences. A brief startup buffer is allowed. Buffer/refill behavior informs automatic quality reduction and conservative recovery, with a discreet explanation of reduced quality.
+- **FR72:** Initial quality changes occur at track boundaries. Mid-track replacement is enabled only for provider/format combinations validated for correct resume timing. If no available representation can be sustained, expose buffering/retry rather than promise uninterrupted playback.
+- **FR73:** For an unavailable source, Radio may continue with another eligible track; album playback pauses and retries without silently omitting tracks. A technical failure is not treated as a user skip or dislike.
+- **FR74:** Radio uses track-level loudness matching; album playback uses consistent album gain to preserve relative levels. Apply peak protection. Leave gain unchanged when usable metadata is absent; automatic dynamic-range compression is not required.
+- **FR75:** Playback and device sync normally run together. Reduce sync demand only when needed to protect playback. Switching, skipping or seeking cannot allow obsolete buffered content to become the new session's audio.
+- **FR76:** Distinguish currently-playing status from a completed listen. Avoid counting skipped/interrupted tracks where provider semantics allow; completed auditions count where supported. Do not promise reversal of server-counted plays. Listening eligibility and reporting behavior must be verified for supported providers before enabling reports.
+- **FR77:** Explicit Like/Dislike persists on the source server only when a genuine supported equivalent exists. Unsupported actions are unavailable; removing a favorite is not silently mapped to dislike. No local-only durable taste state is created as a fallback.
+- **FR78:** Users can save an immutable snapshot of accepted played occurrences, the current occurrence once unless rejected, and upcoming occurrences, omitting skipped/disliked entries. Further playback does not alter the saved snapshot; deliberate repeated queue occurrences remain distinct.
+- **FR79:** Saving a mixed-source snapshot creates one playlist per contributing capable server, preserving relative order within each part. Display per-server successes, unsupported parts and failures; retries must not blindly duplicate already-created playlists. The complete cross-server order remains local.
+- **FR80:** With a connected physical target, users can explicitly Add the snapshot to its basket or Replace its basket. Without a physical target these actions are unavailable. Sending music to a basket does not itself start synchronization or establish a live link to Radio.
+- **FR81:** Maintain recoverable reporting/export operation state across interruption. Reconcile ambiguous results before repeating non-idempotent writes; do not promise exactly-once remote effects where server APIs cannot support them.
+
+### NonFunctional Requirements
+
+- **P-NFR1 — Continuity:** Prepared supported album boundaries introduce zero extra decoded samples of silence or omitted source samples in deterministic fixtures. Physical-output continuity and real-sync coexistence require separate release tests; callback counters alone are insufficient.
+- **P-NFR2 — Resource bounds:** Bound upcoming entries, compressed prefetch, decoded PCM and candidate caches separately. Long-session history is paged rather than held as an ever-growing UI list. Measure idle and active memory separately; retain the existing idle target without extending it to active playback. Numeric active budgets and buffer thresholds must be set in the owning implementation story before performance acceptance.
+- **P-NFR3 — Cross-platform operation:** Validate installed builds on every shipping architecture, including UI-close/reopen, native transport, output loss, sleep/wake and safe shutdown. Test physical media-key routing separately from OS API delivery.
+- **P-NFR4 — State integrity:** Restore only valid persisted state; reject stale queue mutations; prevent obsolete asynchronous work from changing the current session. Failed restoration or preview return must preserve recoverable listening state and explain the problem.
+- **P-NFR5 — Privacy:** Use existing source-server credentials and capabilities. Do not expose authenticated stream URLs in the UI or logs. Initial relationship enrichment uses configured-server metadata; no third-party listening or metadata service is introduced.
+- **P-NFR6 — Usability/accessibility:** Playback remains keyboard-operable with visible focus, accessible control names and status changes, consistent with existing WCAG 2.1 AA targets. Floating controls and background updates must not steal focus or make bottom rows unreachable.
+
+### Additional Requirements
+
+- P-AR1: Extend the existing brownfield workspace; no starter scaffold or replacement of completed sync epics. Playback runs in one signed-in-user Rust daemon independently of UI lifetime on Windows, macOS and Linux.
+- P-AR2: Before lifecycle implementation, specify single-instance ownership, authenticated local command access, startup coordination and shutdown deadlines; reuse the desktop event loop and preserve safe sync cancellation.
+- P-AR3: Before dependent implementation, define versioned command/event/snapshot schemas, wire units, occurrence/source/recording identities, queue revisions, bounded command-ID retention and reconnect recovery.
+- P-AR4: Persist versioned session/history in SQLite with migrations; store validated Playback settings locally, independently of portable-device manifests. Restore paused and page history; keep persistence outside audio callbacks.
+- P-AR5: Use the tested native FFmpeg and CPAL approach with a controlled packaged runtime. Resolve exact dependencies, licensing/distribution and installed-build validation for every shipping architecture before release; ARM64 VM evidence is not x64 certification.
+- P-AR6: Maintain separate bounded compressed and PCM buffers, continuous output and next-track preparation. No allocation, blocking IO or sync locks in the output callback; fence obsolete asynchronous work after seek, skip or session changes.
+- P-AR7: Preserve recorded silence and trim only known codec padding; define channel/rate conversion and loudness/peak behavior with deterministic fixtures plus physical-output tests.
+- P-AR8: Extract one pure selection engine for sync and Radio with separate consumer contexts; carry explicit portable server identities, confident recording deduplication and independent queue occurrence IDs.
+- P-AR9: Extend provider capabilities for source-routed authenticated streaming, quality alternatives, seek, reporting, genuine feedback and playlist writes. Keep credentials and authenticated URLs daemon-side; use configured-server relationship metadata only.
+- P-AR10: Serialize session commands; queue revisions must not advance merely for progress. Publish authoritative snapshots/events and permit UI position interpolation without a second player state owner.
+- P-AR11: Implement immutable per-server export operations with partial results, durable recovery and ambiguity reconciliation before retrying non-idempotent writes. Resolve physical-target changes before basket mutation.
+- P-AR12: Before affected acceptance, measure resource/streaming thresholds, reporting eligibility and source quality ranking. Initial adaptation switches at boundaries; enable mid-track resume only for validated provider/format pairs.
+- P-AR13: Deliver in dependency order: lifecycle/restoration; player/native outputs; albums/previews; Playback UI/settings; Radio; reporting/exports; adaptation and sustained validation. Cross-platform checks and failure handling accompany every stage.
+- P-AR14: Validate real sync coexistence with conditional backoff, sustained memory, sleep/wake, output loss, installed lifecycle and native controls. Distinguish API command delivery from physical key routing and callback counters from audible gaplessness.
+
+### UX Design Requirements
+
+- P-UX-DR1: List Playback first and retain it with no physical device. Device arrival selects its basket and exposes setup for blank devices, while preserving the listening session; display open/detection failures.
+- P-UX-DR2: Add a translucent floating playback bar under the media browser across views, including idle Play something. Reserve reachable space for final rows; do not intercept their controls or steal focus.
+- P-UX-DR3: Provide separately named Play and Preview actions; settle preview button/context-menu placement near existing curation affordances. Show audition state and an explicit return to the preserved session.
+- P-UX-DR4: Expose Play something and Resume in the desktop menu without requiring the main window; distinguish fresh Radio from resumed state and provide actionable missing-setup feedback.
+- P-UX-DR5: Provide an editable Playback queue with occurrence-based reorder/removal, bounded upcoming entries and paged history; append Radio suggestions without resetting user order or selection.
+- P-UX-DR6: Provide Playback-specific source/selection settings using suitable existing auto-fill controls; omit physical storage/capacity/manifest settings and do not share device preference values.
+- P-UX-DR7: Communicate artist transition reasons, fresh-center fallback, exhausted eligibility, buffering, reduced quality, output loss and recoverable errors with accessible statuses.
+- P-UX-DR8: Show Like/Dislike and server-save actions only for genuine provider capabilities; report split-server export success/failure/unsupported parts individually and preserve retry context.
+- P-UX-DR9: Offer explicit Add to basket and Replace basket only with a connected physical target; preserve source identity indicators and prevent writes to a changed or unavailable target.
+- P-UX-DR10: Reuse Shoelace tokens, purple #52348B, amber #EBB334, midnight #1A1A2E, Outfit headings, Inter data and glass overlays; integrate with the established library/basket layout.
+- P-UX-DR11: Preserve virtualized grid/list browsing, no-refetch view toggles, identity-based multi-selection, Ctrl/Cmd/Shift ranges, Escape clearing and accessible sticky selection counts when adding playback actions.
+- P-UX-DR12: Adapt controls and queue to existing narrow (<600px), medium (600–1000px) and wide (>1000px) layouts; retain control labels/targets and avoid overlap with the basket.
+- P-UX-DR13: Provide keyboard operation, visible focus, accessible names and ARIA-live status updates consistent with WCAG 2.1 AA; verify with accessibility tooling and OS-theme visual checks.
+- P-UX-DR14: Preserve capability-driven navigation, server names/icons and source badges. Browsing a different server must not reroute playback or its reporting/feedback.
+- P-UX-DR15: Keep existing live server-playlist editing semantics distinct from local Radio and explicit snapshot export. Existing no-device placeholders and device-only hub visibility are superseded only where Playback requires availability.
+
+### FR Coverage Map
+
+Epic 15 owns all FR55–81, P-NFR1–6, P-AR1–14 and P-UX-DR1–15. The table assigns delivery work within that single epic; story groups are sequencing aids, not separate epics. Individual story mappings will be added during story creation.
+
+| Requirements | Completion owner | Earlier foundation / qualification |
+|---|---|---|
+| FR55, FR59 | Radio group | Album/UI groups supplies the manual Playback destination, independent configuration, floating bar and device feedback; Radio group adds automatic-selection settings and idle Play something. |
+| FR56, FR58, FR64 | Lifecycle/player groups | Complete basic transport, native controls and output safety. |
+| FR60 | Radio group | Lifecycle/player groups supplies safe quit and paused queue/position restoration; Radio group completes logical Radio exclusion restoration. |
+| FR57, FR65–70 | Radio group | Lifecycle/player groups supplies Resume; Album/UI groups supplies manual queue editing. |
+| FR61–63 | Album/UI groups | Complete album continuity and audition return behavior. |
+| FR71–72, FR75 | Reliability group | Lifecycle/player groups provides best available initial source selection, bounded buffering, generation fencing and ordinary sync coexistence; Reliability group completes measured adaptation/backoff. |
+| FR73–74 | Radio group | Album/UI groups supplies album pause/retry and album gain; Radio group completes Radio failure bypass and track gain. |
+| FR76–81 | Curation group | Provider-specific eligibility, feedback and export recovery completed here. |
+
+### Quality, Architecture and UX Coverage
+
+| Requirement | Delivery and acceptance responsibility |
+|---|---|
+| P-NFR1 | Album/UI groups deterministic and physical album continuity; Reliability group sustained real-sync regression. |
+| P-NFR2 | Lifecycle/player groups audio bounds; Album/UI groups paged queue/history; Radio group candidate/lookahead bounds; Reliability group measured sustained budgets. |
+| P-NFR3 | Every story validates its behavior on Windows, macOS and Linux; Lifecycle/player groups establishes installed lifecycle/native checks; Reliability group completes shipping architecture matrix and sustained evidence. |
+| P-NFR4 | Lifecycle/player groups state and generation integrity; Album/UI groups audition/queue recovery; Radio group Radio restoration; Curation group remote-operation recovery. |
+| P-NFR5 | Lifecycle/player groups authenticated source privacy; Radio group configured-server metadata; Curation group credential-safe writes. |
+| P-NFR6 | Every UI-bearing story; Album/UI groups establishes full floating controls and queue accessibility, Reliability group runs integrated regression. |
+| P-AR1–4, P-AR10 | Lifecycle/player groups establishes lifecycle, schemas, identity, persistence and serialization; the album/UI, Radio and curation groups extend schemas/migrations only as their behavior is introduced. |
+| P-AR5–6 | Lifecycle/player groups controlled runtime and bounded audio path; Album/UI groups next-track preparation; Reliability group installed distribution and stress evidence. |
+| P-AR7 | Album/UI groups conversion, padding and album gain; Radio group Radio gain. |
+| P-AR8 | Radio group shared selection and recording deduplication; source/occurrence identity starts in Lifecycle/player groups. |
+| P-AR9 | Lifecycle/player groups streaming/seek; Radio group relationships; Curation group reporting/feedback/export; Reliability group quality alternatives. |
+| P-AR11 | Curation group durable immutable exports and physical-target validation. |
+| P-AR12 | Lifecycle/player groups initial source ranking/bounds; Curation group reporting eligibility; Reliability group adaptation thresholds and resume validation. |
+| P-AR13 | The seven internal story groups preserve the approved implementation order. |
+| P-AR14 | Lifecycle/player groups lifecycle/output baseline; Reliability group sustained coexistence and integrated release evidence. |
+| P-UX-DR1, P-UX-DR3, P-UX-DR10–12 | Album/UI groups destination, preview, existing design system, browse preservation and responsive layout. |
+| P-UX-DR2, P-UX-DR5–6 | Album/UI groups manual bar/queue/settings; Radio group completes idle Play something and Radio settings/replenishment. |
+| P-UX-DR4 | Lifecycle/player groups Resume; Radio group Play something and missing-setup feedback. |
+| P-UX-DR7 | Lifecycle/player groups output/errors; Radio group Radio reasons/exhaustion; Reliability group quality/buffering feedback. |
+| P-UX-DR8–9 | Curation group capability-aware feedback and playlist/basket exports. |
+| P-UX-DR13–14 | All UI-bearing stories preserve accessibility and source identity. |
+| P-UX-DR15 | Album/UI groups nodevice navigation precedence; Curation group explicit snapshot versus live playlist semantics. |
+
+### Epic List
+
+#### Epic 15: Desktop Playback
+
+Users can listen to their curated libraries directly in HifiMule on Windows, macOS and Linux: play albums with their intended continuity, preview music while curating, start ongoing Radio, and save discoveries to server playlists or a connected device basket. Playback belongs to the local Rust daemon, remains usable with the UI closed, and adapts to available connection quality.
+
+**FRs covered:** FR55–81, with the approved playback amendments to FR20 and FR33.
+
+**Quality and design coverage:** P-NFR1–6, P-AR1–14 and P-UX-DR1–15. Existing sync integrity, security and accessibility constraints continue to apply.
+
+**Dependencies:** The existing sync/provider product. There is no dependency on a later epic.
+
+**Internal story groups, in implementation order:**
+
+1. **Daemon lifecycle and session restoration:** Single-instance user-session ownership, safe shutdown, authenticated control, versioned state and paused restoration.
+2. **Streaming, audio output and native controls:** Controlled native runtime, bounded audio path, user-facing basic Play/transport/Resume, shared output and disconnect safety.
+3. **Album continuity and previews:** Ordered albums, prepared gapless boundaries, conversion/padding, album gain and preserved main-session audition/return.
+4. **Playback destination, settings and queue:** Always-available virtual destination, independent local settings, manual queue, floating controls and device-arrival feedback.
+5. **Radio using the shared selection engine:** Play something, bounded replenishment, meaningful artist transitions, cross-server recording identity, logical-session exclusions and Radio gain/failure handling.
+6. **Server feedback and playlist/basket exports:** Capability-aware reporting and genuine preferences, immutable snapshots, per-server saves, Add/Replace basket and recoverable operations.
+7. **Adaptive quality and sustained reliability:** Measured thresholds, conservative quality adaptation, conditional sync backoff and prolonged installed-build validation.
+
+Each group will contain small, testable stories rather than one large story. Stories may depend only on completed earlier stories. Introduce schemas and migrations only as required by the behavior being delivered. Supply a usable basic playback path before the full destination and Radio; do not expose dead controls awaiting later stories.
+
+**Implementation gates:** Close lifecycle/command contracts before affected implementation, pin and validate the controlled runtime before dependent audio integration, and establish measurable resource and provider-specific eligibility criteria before accepting that behavior. Windows, macOS and Linux validation, accessible interaction and failure handling accompany each relevant story; final sustained checks do not replace those earlier checks.
+
+### Grouping Rationale and Approval State
+
+The user approved one Desktop Playback epic with more stories. Playback was renumbered from the provisional 14 to 15 after checking sprint-status.yaml, where Epic 14 already belongs to Sync Throughput Pipeline. The seven groups describe the delivery sequence within that capability; they are not independent epic boundaries. The earlier five-epic playback proposal was consolidated before implementation. Existing Epics 1–14 remain unchanged; Sync Throughput Pipeline is tracked in its sprint change proposal and sprint-status.yaml. Requirement coverage is preserved above; individual stories and acceptance criteria are the next planning step.
+
+
+## Epic 15: Desktop Playback
+
+Deliver daemon-owned listening, faithful albums, previews, Radio and explicit curation across Windows, macOS and Linux. Stories are approved incrementally; remaining requirements retain the coverage assignments above.
+
+### Story 15.1: Close and reopen the UI without restarting the daemon
+
+As a HifiMule user,
+I want closing and reopening the UI to reconnect to the same background daemon,
+So that ongoing work remains available and repeated launches do not create competing sessions.
+
+**Requirements:** FR20 amendment; lifecycle foundation for FR56; P-AR1–2 and lifecycle portion of P-AR10; P-NFR3–5 where applicable. This story does not claim audible playback, native media keys or paused playback restoration; those require subsequent stories.
+
+**Dependencies:** Existing application only. No new audio dependency or playback database tables are required.
+
+**Acceptance Criteria:**
+
+**Given** an installed build in a signed-in desktop session with no daemon running,
+**When** the user launches HifiMule,
+**Then** exactly one daemon starts in that user session and the UI connects to it,
+**And** startup failures produce an actionable error rather than an indefinite connecting state.
+
+**Given** a healthy daemon with existing background work,
+**When** the user closes the UI and later reopens it,
+**Then** the daemon process and ongoing work survive the window closure,
+**And** the reopened UI obtains authoritative current state through the existing application communication boundary without restarting the daemon or replaying prior commands.
+
+**Given** simultaneous UI, tray or configured startup launches for the same signed-in user,
+**When** they attempt to acquire daemon ownership,
+**Then** only one process becomes the owner and the others reconnect to it or report a bounded connection failure,
+**And** the solution does not create another native event loop or enable login startup without the user's existing preference.
+
+**Given** stale ownership metadata after an abnormal daemon exit,
+**When** the user launches HifiMule again,
+**Then** verified stale ownership can be recovered and one new daemon can start,
+**And** a slow but live owner or a reused process identifier is not mistaken for a dead owner.
+
+**Given** a local client lacking the required application credentials or user-session access,
+**When** it attempts to control the daemon through the ownership/reconnect mechanism,
+**Then** access is rejected without exposing credentials in UI messages or logs,
+**And** a protocol-incompatible daemon produces an actionable compatibility error rather than a second competing daemon.
+
+**Given** an idle daemon with the UI closed,
+**When** the user selects the existing explicit Quit action,
+**Then** the daemon exits and releases its ownership resources,
+**And** no abandoned launcher automatically restarts it. Active-sync shutdown coordination is covered by the next lifecycle story and must retain existing protections meanwhile.
+
+**Given** installed builds on Windows, macOS and Linux,
+**When** launch, close/reopen, concurrent launch, crash recovery, rejected access and idle Quit checks run,
+**Then** each scenario records process identity, connection outcome and cleanup evidence,
+**And** the platform/architecture tested is explicit; a VM result is not presented as certification of an untested architecture.
+
+**Implementation gate:** Before coding, record the selected ownership/liveness mechanism, local access model, protocol compatibility check and bounded startup timeout against the existing launch and RPC paths. Resolve that contract within this story's preparation; do not substitute a test-only probe or leave the production behavior unspecified. Preserve managed-device write safety throughout.
+
+**Scope check:** One lifecycle integration story with existing daemon/UI entry points. Safe quit during active sync and versioned paused playback restoration are separate subsequent stories. No production code changes are authorized by this planning artifact itself.
+
+
+### Story 15.2: Quit safely while a device sync is running
+
+As a HifiMule user,
+I want explicit Quit to stop background work in an orderly way,
+So that HifiMule exits without leaving my device falsely marked as successfully synchronized.
+
+**Requirements:** Shutdown foundation for FR60 and FR75; P-AR2; P-NFR3–4; inherited managed-device integrity and interrupted-sync recovery requirements.
+
+**Dependencies:** Story 15.1. This story uses current sync operations; it does not require future audio playback. Audio stop/checkpoint integration is added when playback state exists.
+
+**Acceptance Criteria:**
+
+**Given** an idle daemon,
+**When** the user selects Quit HifiMule,
+**Then** new work is rejected, the daemon releases its ownership resources and exits,
+**And** closing only the UI continues to leave the daemon running as established by Story 15.1.
+
+**Given** one or more active device sync operations,
+**When** the user selects Quit HifiMule,
+**Then** shutdown requests cancellation of each active operation and prevents new sync work from starting,
+**And** the UI or remaining desktop status surface reports that shutdown is waiting for device writes to finish safely.
+
+**Given** cancellation reaches a transfer, conversion or managed metadata write,
+**When** the operation stops,
+**Then** incomplete work is not recorded as completed,
+**And** existing atomic manifest and managed-file integrity guarantees are preserved without altering unmanaged files.
+
+**Given** the user requests Quit repeatedly or reopens the UI during shutdown,
+**When** those requests arrive,
+**Then** they observe the same shutdown operation without launching another daemon or starting new work,
+**And** a reopened UI displays the authoritative shutdown state.
+
+**Given** a device disconnects or an operation fails during shutdown,
+**When** cleanup proceeds,
+**Then** affected work retains an interrupted or failed outcome with recoverable state,
+**And** cleanup of other operations continues without reporting the failed operation as successful.
+
+**Given** an operation has not reached a safe cancellation point within the documented shutdown deadline,
+**When** that deadline is reached,
+**Then** HifiMule exposes an actionable shutdown failure or waiting state according to the specified contract,
+**And** it does not silently force termination, discard recovery state or claim a clean exit. The contract must define which blocked operations may safely be abandoned and which require continued waiting.
+
+**Given** a shutdown interrupted a sync before completion,
+**When** HifiMule is relaunched and the device reconnects,
+**Then** the existing interrupted-sync reconciliation or repair path can identify the incomplete work,
+**And** the device is not treated as fully synchronized solely because shutdown completed.
+
+**Given** Windows, macOS and Linux builds,
+**When** idle Quit, active-transfer cancellation, metadata-write cancellation, repeated Quit, disconnect and stalled-operation scenarios are exercised,
+**Then** tests verify exit or explicit unresolved status, ownership cleanup when exited, and persisted device integrity,
+**And** injected failure checks complement a real-device smoke check without being presented as equivalent evidence.
+
+**Implementation gate:** Before coding, specify shutdown states, cancellation ownership, safe write boundaries, deadline values and blocked-operation behavior using the existing sync implementation. Document how the later audio stop and session checkpoint participate in this contract. Do not add playback tables or implement playback itself in this story.
+
+
+### Story 15.3: Preserve and restore a paused listening session
+
+As a HifiMule user,
+I want HifiMule to retain my listening queue and position between launches,
+So that I can resume deliberately without reconstructing my session or being surprised by automatic playback.
+
+**Requirements:** Session-state foundation for FR56, FR58 and FR60; P-NFR2, P-NFR4–5; P-AR3–4 and P-AR10. Radio exclusions and preview restoration extend this foundation in their own stories.
+
+**Dependencies:** Stories 15.1–15.2. This story delivers the production session-state and persistence contract through the daemon command boundary. It is testable using command-driven queue/position fixtures without requiring the future decoder or UI player; it does not claim audible Resume is delivered yet.
+
+**Acceptance Criteria:**
+
+**Given** a queue containing source-server track references and deliberate repeated entries,
+**When** the session is checkpointed and the daemon restarts,
+**Then** queue order, each occurrence identity, current occurrence and its last checkpointed position are restored,
+**And** playback is paused regardless of the previous playing state; server credentials and authenticated stream URLs are not stored in the session record.
+
+**Given** an empty queue or an explicitly cleared session,
+**When** HifiMule restarts,
+**Then** it restores an idle state without reviving an older queue.
+
+**Given** a valid restored session whose server is temporarily unavailable,
+**When** the daemon loads its local state,
+**Then** it retains the queue and position without requiring an online server,
+**And** it exposes source availability separately without silently deleting entries or choosing another recording.
+
+**Given** an unsupported persistence version, invalid current occurrence or malformed session record,
+**When** restoration runs,
+**Then** it exposes a recoverable restoration error and retains the stored evidence without overwriting it with an empty session,
+**And** known supported versions migrate transactionally while failed migration leaves the previous data recoverable.
+
+**Given** concurrent session commands carrying the specified queue revision and command identity,
+**When** the daemon processes them,
+**Then** one serialized owner accepts valid changes, rejects stale queue mutations and returns the authoritative revision,
+**And** progress-only changes do not invalidate queue edits; repeated command IDs have documented bounded deduplication behavior.
+
+**Given** the UI reconnects after missing state updates,
+**When** it requests the current session,
+**Then** it receives a versioned authoritative snapshot with the queue revision and position units defined by the contract,
+**And** reconnection does not replay mutations or create a second session owner.
+
+**Given** position updates arrive while a session is active,
+**When** periodic checkpointing or orderly Quit occurs,
+**Then** persistence runs outside any future real-time audio callback and orderly Quit attempts a final checkpoint before exiting,
+**And** a checkpoint failure is surfaced through the shutdown contract rather than reported as successful preservation. Abrupt process termination restores at most the last committed checkpoint.
+
+**Given** a long queue/history and an interrupted database write,
+**When** state is queried or the daemon restarts,
+**Then** reads use bounded pages and the last committed state remains internally consistent,
+**And** the story defines the checkpoint interval and page limits before acceptance rather than inventing an active-playback memory guarantee.
+
+**Given** Windows, macOS and Linux builds,
+**When** round-trip restoration, idle restoration, duplicate occurrences, stale mutations, reconnect, migration failure and interrupted-checkpoint checks run,
+**Then** they verify the same state contract and paused/idle outcomes on each tested platform.
+
+**Implementation gate:** Before coding, settle the minimum session schema, source/occurrence identity, position units, snapshot/command versions, queue revision rules, command-ID retention, migration strategy and checkpoint limits. Create only session data needed here; defer Radio, preview and export entities until their stories. Expose a narrow progress-update boundary for later audio integration without implementing audio in this story.
+
+
+### Story 15.4: Play a selected library track through the daemon
+
+As a HifiMule user,
+I want to play a track from a configured music server,
+So that I can listen directly in HifiMule without opening another player.
+
+**Requirements:** Initial audible path for FR56 and FR58; initial source-quality foundation for FR71; output and state-safety foundations for FR64 and FR75; P-NFR2–5; P-AR5–6 and streaming portion of P-AR9; applicable P-UX-DR11, P-UX-DR13–14.
+
+**Dependencies:** Stories 15.1–15.3. Scope is one selected track on the current shared default output, with a minimal accessible Play/Pause/Stop path in the existing browser. Output selection/native keys, seeking and queue advancement are subsequent stories. This story is complete and usable without those controls.
+
+**Acceptance Criteria:**
+
+**Given** a playable track on a configured server,
+**When** the user selects its explicit Play action,
+**Then** the daemon resolves the track using its server identity and existing credentials, buffers and decodes it with the controlled native runtime, and plays it through shared audio output,
+**And** the UI shows the selected track and actual loading/playing/error state without receiving an authenticated stream URL. Browsing another server does not redirect the request.
+
+**Given** the provider exposes original or alternative audio representations,
+**When** playback chooses the initial source,
+**Then** it uses the documented playback quality ranking independently of device sync transcoding settings,
+**And** unsupported representations or server capability limits are reported accurately. Automatic quality adaptation is deferred, not silently claimed by this initial player.
+
+**Given** a playing track,
+**When** the user pauses and resumes through the UI,
+**Then** playback holds and continues the same session position without creating a new occurrence,
+**And** Stop halts output and records the documented stopped-state position behavior through the session manager.
+
+**Given** a track is loading or playing,
+**When** the user plays another track or stops,
+**Then** obsolete fetch/decode work cannot later emit audio or replace the current session state,
+**And** only one session owns the output stream.
+
+**Given** a selected track is playing,
+**When** the user closes and reopens the main UI,
+**Then** audio continues in the daemon and the UI reconnects to its authoritative track/state/position,
+**And** UI controls remain keyboard-operable with accessible names and do not break existing browser selection behavior.
+
+**Given** a track reaches its natural end, loses its source connection or cannot be decoded,
+**When** the daemon processes that outcome,
+**Then** it transitions to an explicit completed, buffering or error state as specified by the transport contract,
+**And** it does not silently repeat the track, count the error as a user dislike, or grow compressed/PCM storage without bounds.
+
+**Given** the active output disappears,
+**When** the audio backend reports the loss,
+**Then** playback pauses or enters a recoverable paused error state without automatically routing music to another output,
+**And** this safety behavior is present even before the later output-selection story.
+
+**Given** playback and an existing device sync are active,
+**When** the user selects Quit HifiMule,
+**Then** audio stops, the session is checkpointed using Story 15.3 and sync cancellation follows Story 15.2,
+**And** relaunch remains paused. Audio callbacks perform no blocking IO, persistence or acquisition of sync locks.
+
+**Given** installed Windows, macOS and Linux builds with the controlled decoder runtime,
+**When** supported-format fixtures and a configured-server playback smoke test exercise Play/Pause/Stop, replacement during loading, UI closure and shutdown,
+**Then** output and state transitions are verified, actual loaded runtime versions are recorded and compressed/PCM bounds are checked,
+**And** unsupported provider/format/platform combinations remain explicit rather than being implied by a successful local-file probe.
+
+**Implementation gate:** Before coding, pin the runtime/dependencies and packaging approach for the tested builds, define provider stream resolution and initial quality ranking, buffer bounds, transport completion/Stop semantics and the minimal command/UI contract. Reuse established session identities and generation fencing. Limit implementation to this vertical single-track path; no Radio, full Playback destination, adaptive replacement or album-gapless claim is included. If provider differences cannot fit one implementation session, split provider enablement into ordered stories before execution while retaining a usable first-provider path.
+
+
+### Story 15.5: Choose an audio output and recover safely from disconnection
+
+As a HifiMule user,
+I want to choose my headphones or audio interface as the playback output,
+So that music plays where I intend and never unexpectedly moves to another speaker after a disconnection.
+
+**Requirements:** Output selection portion of FR58; FR64; P-NFR3–4 and P-NFR6; output lifecycle portion of P-AR14; relevant P-UX-DR7 and P-UX-DR13.
+
+**Dependencies:** Stories 15.1–15.4. Reuses the working single-track player and session owner. Native media-key controls and queue transport remain separate stories.
+
+**Acceptance Criteria:**
+
+**Given** one or more available shared audio outputs,
+**When** the user opens the output selector,
+**Then** HifiMule presents accessible output names and identifies the selected output,
+**And** device identity distinguishes outputs with identical display names without exposing raw implementation identifiers as the primary label.
+
+**Given** a track is playing or paused,
+**When** the user explicitly selects another available output,
+**Then** HifiMule opens that output in shared mode and preserves the logical track position and previous playing/paused state after a successful switch,
+**And** it prevents simultaneous playback on the old and new outputs; a brief explicit-switch interruption is allowed without claiming gapless device switching.
+
+**Given** the selected output disconnects or becomes unusable,
+**When** the backend detects the loss,
+**Then** HifiMule preserves the current session and position in a paused recoverable state,
+**And** it explains the output problem without automatically routing music to another device.
+
+**Given** playback paused because the selected output disappeared,
+**When** that output reconnects or the system default changes,
+**Then** playback remains paused until the user explicitly resumes,
+**And** selecting a replacement output while paused does not itself start music.
+
+**Given** a previously selected output preference was saved,
+**When** HifiMule restarts,
+**Then** it restores the preference using the platform's supported stable identity and keeps playback paused,
+**And** if the output is absent or cannot be identified confidently, it shows an unavailable selection and requires an explicit available choice rather than silently substituting another output.
+
+**Given** an output switch fails or races with Stop, another selection or device removal,
+**When** asynchronous backend operations complete,
+**Then** stale operations cannot replace the latest selection or resume stopped audio,
+**And** the user sees the actual active/unavailable output and recoverable error without losing the listening queue.
+
+**Given** other applications need audio access,
+**When** HifiMule plays through the selected output,
+**Then** it requests shared-mode access and does not change OS Do Not Disturb settings,
+**And** ASIO and exclusive-mode controls are not required for this story.
+
+**Given** Windows, macOS and Linux builds,
+**When** explicit switching, unplug/replug, missing output at startup, failed open, duplicate names and sleep/wake are exercised,
+**Then** tests verify output ownership and preserved paused/playing state as appropriate,
+**And** a physical-output smoke check confirms that disconnection does not unexpectedly send sound to another speaker; virtual-device evidence is labeled separately.
+
+**Implementation gate:** Before coding, settle output identity persistence and migration, platform enumeration/hotplug behavior, explicit-switch state transitions and handling of default-output changes while the selected output remains available. Define backend limits and actionable error states. Preserve the approved no-automatic-reroute rule on every platform.
+
+
+### Story 15.6: Control playback through the operating system with the window closed
+
+As a HifiMule user,
+I want native media controls to operate the same player as the UI,
+So that I can pause and resume music while working without reopening HifiMule.
+
+**Requirements:** Native controls portion of FR56 and FR58; Resume portion of FR57; P-NFR3–4; native event-loop portion of P-AR1 and P-AR10; applicable P-UX-DR4 and P-UX-DR13.
+
+**Dependencies:** Stories 15.1–15.5. Uses existing Play/Pause/Stop behavior. Native Next and seek are advertised only when their later transport stories enable them; this story does not create placeholder functionality.
+
+**Acceptance Criteria:**
+
+**Given** a playing or paused track,
+**When** a supported native Play, Pause, Toggle or Stop command is delivered,
+**Then** it executes through the same serialized session owner as the equivalent UI command,
+**And** native and UI state reflect the actual result rather than maintaining separate transport states.
+
+**Given** a track is playing and the main UI closes,
+**When** the user uses the operating system's media controls,
+**Then** Pause and Resume continue to control the daemon without opening a window,
+**And** reopening the UI shows the resulting state and position without replaying the native command.
+
+**Given** an existing paused session has a playable current track and usable selected output,
+**When** the user chooses Resume from the desktop app menu,
+**Then** HifiMule resumes that session without opening the main window or creating a fresh Radio,
+**And** missing source/output or restoration errors remain paused and are reported accessibly. If there is no resumable session, the action is unavailable or gives a clear explanation.
+
+**Given** the current session changes track, pauses, buffers, fails or ends,
+**When** its authoritative state changes,
+**Then** supported native now-playing fields and transport availability update consistently,
+**And** unavailable metadata remains absent rather than showing information from a previous track. Local OS metadata updates do not themselves submit listening reports to the media server.
+
+**Given** an unsupported transport command or a Play command while the selected output remains unavailable,
+**When** the operating system delivers that command,
+**Then** HifiMule neither fabricates success nor silently reroutes output,
+**And** unsupported native actions are disabled or omitted where the platform permits.
+
+**Given** native commands arrive during track replacement, output switching or shutdown,
+**When** they reach the session owner,
+**Then** the established generation and shutdown rules determine the result,
+**And** commands cannot restart audio after Quit or activate obsolete session work.
+
+**Given** HifiMule starts, closes its UI, reopens it and finally quits,
+**When** native controls are registered and released,
+**Then** their lifetime follows the daemon using the existing native event loop,
+**And** repeated UI launches do not create duplicate registrations; explicit Quit clears the app's native playback registration and stale metadata as supported by the OS.
+
+**Given** installed Windows, macOS and Linux builds,
+**When** native API delivery and physical media-key routing are checked separately with the UI open and closed,
+**Then** evidence identifies the OS, architecture, desktop session and command path actually tested,
+**And** successful API delivery is not reported as proof of physical-key routing. Where the desktop does not deliver a key to HifiMule, the limitation is recorded without installing a global keyboard hook to seize it from other applications.
+
+**Implementation gate:** Before coding, specify platform adapter ownership, supported command/metadata mappings, native registration cleanup and Resume menu behavior. Reuse the existing daemon event loop and proven native-control feasibility work; do not introduce a second player, cross-application media priority override or new server reporting behavior.
+
+
+### Story 15.7: Seek within a track and see the actual playback position
+
+As a HifiMule user,
+I want to move to another point in a track when its source supports seeking,
+So that I can replay a passage or continue from a chosen position without restarting the whole track.
+
+**Requirements:** Position-control portion of FR58; seeking integrity portion of FR75; P-NFR4 and P-NFR6; seek portions of P-AR3, P-AR6, P-AR9 and P-AR10; applicable P-UX-DR7 and P-UX-DR13.
+
+**Dependencies:** Stories 15.1–15.6. Uses existing single-track playback, provider stream resolution, native adapters and checkpointed state. Queue advancement and album continuity are separate stories.
+
+**Acceptance Criteria:**
+
+**Given** a loaded track with a known duration and validated seek support for its provider/representation,
+**When** the user chooses a valid target position through the UI,
+**Then** the daemon moves to that position within the documented and tested timing tolerance,
+**And** it preserves the previous playing/paused state after the seek completes. The displayed position reflects the actual result rather than an unconfirmed requested target.
+
+**Given** a selected source lacks reliable seeking or a duration required by the seek UI,
+**When** controls are displayed,
+**Then** unsupported seek actions are unavailable with a clear accessible explanation,
+**And** ordinary playback remains usable; server byte-range support alone is not taken as proof of correct media-time seeking.
+
+**Given** an invalid, non-finite, negative or beyond-duration seek target,
+**When** a command reaches the daemon,
+**Then** it is validated according to the explicit boundary contract without corrupting position or queue state,
+**And** seeking exactly to the end uses the documented completion behavior and cannot accidentally repeat the track.
+
+**Given** a seek is pending,
+**When** a newer seek, track replacement or Stop supersedes it,
+**Then** obsolete fetch/decode completions cannot emit old-position audio or overwrite current session state,
+**And** temporary compressed and decoded buffers remain bounded during repeated seeks.
+
+**Given** a seek fails because the source disconnects or returns an invalid response,
+**When** recovery is attempted,
+**Then** HifiMule preserves recoverable session state and reports the actual paused, buffering or playing outcome,
+**And** it does not claim the requested position was reached or treat the failure as a user skip/dislike.
+
+**Given** a supported native seek command is delivered,
+**When** the native adapter forwards it,
+**Then** it uses the same capability checks, time units and serialized command path as UI seeking,
+**And** native position metadata updates from authoritative playback state. Unsupported native seek actions are omitted where the platform permits.
+
+**Given** playback is running, paused, buffering or newly restored,
+**When** the UI renders elapsed position,
+**Then** it uses authoritative daemon updates with interpolation only while playback is advancing,
+**And** pause, seek completion, reconnect and source changes correct interpolation without modifying queue revision merely for progress.
+
+**Given** a successful seek is followed by a checkpoint and application restart,
+**When** the session is restored,
+**Then** it restores paused at the last committed actual position rather than a failed or superseded request,
+**And** seeking itself does not submit a completed-listen report; provider reporting eligibility is defined in the later reporting story.
+
+**Given** supported provider/format combinations on Windows, macOS and Linux,
+**When** forward/backward seeks, paused seeks, exact-end targets, repeated seeks and failed-source cases are tested,
+**Then** decoded-position fixtures establish the documented accuracy tolerance and integration checks verify transport state,
+**And** combinations without evidence retain disabled seeking rather than inheriting support from another format or provider.
+
+**Implementation gate:** Before coding, define position/duration units, supported provider/representation seek mechanisms, accuracy tolerances, invalid-target behavior, exact-end semantics and failure recovery. Reuse the existing generation and session contracts. Seeking within the current representation does not enable mid-track quality switching, which requires separate validation in the adaptation stories.
+
+
+### Story 15.8: Play an album in order and advance through its tracks
+
+As a HifiMule user,
+I want to start an album and hear its tracks in their intended order,
+So that I can listen to the complete album without starting every track individually.
+
+**Requirements:** Album-order portion of FR61; Next portion of FR58; album failure behavior of FR73; session continuity portions of FR56 and FR60; P-NFR4–6; applicable P-AR3–4 and P-AR10; P-UX-DR11, P-UX-DR13–14.
+
+**Dependencies:** Stories 15.1–15.7. Delivers ordered queue transport using the working single-track player. Prepared gapless boundaries and album loudness handling are separate following stories; this story does not claim them complete.
+
+**Acceptance Criteria:**
+
+**Given** an album with source-provided disc and track ordering,
+**When** the user chooses Play album,
+**Then** HifiMule creates the main session queue in disc/track order and starts its first playable attempt,
+**And** each queue occurrence retains its source identity independently of the currently browsed server. This explicit Play action replaces the main listening queue; it is not the later Preview action.
+
+**Given** an album has multiple discs, missing ordering fields or tied track numbers,
+**When** its queue is constructed,
+**Then** valid disc/track ordering is honored and missing/tied values use a documented deterministic fallback based on available provider ordering,
+**And** the daemon does not silently substitute arbitrary title sorting or drop distinct occurrences.
+
+**Given** an album track reaches natural completion,
+**When** the daemon processes its terminal event,
+**Then** it advances exactly once to the next occurrence,
+**And** delayed or duplicate completion events from the old generation cannot skip an additional track or modify a replaced session.
+
+**Given** a current occurrence has a successor,
+**When** the user selects Next in the UI or through a supported native control,
+**Then** the daemon moves once to the successor through the same queue command path and preserves the current playing/paused intent,
+**And** the previous occurrence is recorded as explicitly skipped rather than naturally completed. Server reporting is not enabled by this local disposition record.
+
+**Given** the current occurrence is the last in the album,
+**When** it finishes naturally,
+**Then** playback becomes idle/completed with the queue retained for inspection and restoration,
+**And** it does not automatically repeat or start Radio. Next without a successor is unavailable where the control surface permits, and a delivered unsupported command cannot mutate the queue.
+
+**Given** an album track is unavailable, fails to load or encounters an unrecoverable decode error,
+**When** that track is reached,
+**Then** HifiMule pauses at the affected occurrence and offers an explicit retry with its error visible,
+**And** it does not silently omit the track or mark the technical failure as a user skip/dislike. The user may explicitly choose Next when a successor exists.
+
+**Given** an album is playing or paused,
+**When** the user closes/reopens the UI or quits/relaunches HifiMule,
+**Then** UI reconnection retains the active occurrence and full queue, while application relaunch restores paused at the last committed position,
+**And** temporary server unavailability does not discard remaining album entries.
+
+**Given** album playback is available in the existing browser,
+**When** controls and current-track metadata update,
+**Then** Play album and Next have accessible names and keyboard operation, native Next availability matches the actual queue, and source badges remain accurate,
+**And** existing grid/list selection and playlist/basket actions continue to work without requiring the later full Playback destination.
+
+**Given** Windows, macOS and Linux builds,
+**When** ordered multi-disc fixtures, missing/tied numbering, duplicate completion events, paused Next, final-track completion, failed-track retry and restoration scenarios run,
+**Then** they verify the expected occurrence sequence and transport state,
+**And** these checks are not reported as evidence of gapless physical output, which has its own story.
+
+**Implementation gate:** Before coding, define provider album ordering/fallback rules, queue completion states, Next behavior and retry semantics. Extend persisted occurrence disposition only as needed for natural completion, explicit skip and technical failure; retain the distinctions for later snapshot/reporting stories. Reuse serialized queue revisions and generation fences.
+
+
+### Story 15.9: Preserve album continuity across prepared track boundaries
+
+As a HifiMule user,
+I want album tracks to join without player-added gaps,
+So that live recordings, continuous compositions and intentional pauses sound as recorded.
+
+**Requirements:** Continuity portion of FR61; applicable FR73 and FR75; P-NFR1–4; P-AR5–7 and continuity evidence portion of P-AR14.
+
+**Dependencies:** Stories 15.1–15.8. Builds on ordered album transport. Loudness gain is a following story; this story preserves continuity at unchanged gain. It does not guarantee uninterrupted playback when the next source cannot be prepared in time.
+
+**Acceptance Criteria:**
+
+**Given** adjacent supported album tracks with the next track prepared before the boundary,
+**When** the current track finishes,
+**Then** decoded output continues through the same active output stream without inserting silence, omitting valid samples or duplicating boundary samples,
+**And** exactly one queue advancement occurs at the audible handoff, with track metadata and position associated with the correct occurrence rather than the prefetch start.
+
+**Given** source audio contains intentional silence at the beginning or end of a track,
+**When** it crosses an album boundary,
+**Then** that recorded silence is preserved,
+**And** HifiMule does not apply silence detection, automatic crossfade or overlap to conceal a boundary.
+
+**Given** a supported encoded format provides validated encoder-delay or end-padding information,
+**When** it is decoded,
+**Then** only known non-musical padding is removed according to that format's verified behavior,
+**And** absent or ambiguous padding metadata does not justify guessing or trimming source samples; any resulting continuity limitation is recorded explicitly.
+
+**Given** adjacent tracks differ in sample rate or channel layout,
+**When** both are supported by the selected output conversion policy,
+**Then** they are converted into the established output format without reopening the output stream at every track boundary,
+**And** tests account for resampling duration and delay with a reference conversion, rather than comparing unconverted input sample counts. Unsupported transitions produce an explicit recoverable state rather than corrupt output.
+
+**Given** the next track is being fetched and decoded in advance,
+**When** playback proceeds,
+**Then** compressed prefetch and decoded PCM remain separately bounded,
+**And** the audio callback performs no allocation, blocking IO or synchronization with device-sync locks. Preparation cannot grow into an unbounded album download or decode.
+
+**Given** a prepared successor becomes obsolete after Next, seek, Stop, queue replacement or output loss,
+**When** its asynchronous work completes,
+**Then** generation checks prevent its audio or completion event from entering the current session,
+**And** stopping or pausing at the boundary does not leak the first samples of the successor.
+
+**Given** the successor is not ready in time or cannot be loaded,
+**When** the current track ends,
+**Then** HifiMule exposes buffering or the established album pause/retry state without silently skipping the successor,
+**And** the event is not claimed as a successful gapless transition or classified as a user rejection.
+
+**Given** deterministic adjacent-track fixtures for the supported format matrix,
+**When** their combined decoded output is checked,
+**Then** same-format boundaries contain zero extra silence, missing valid samples or duplicate valid samples relative to the expected reference,
+**And** fixtures include known padding, intentional silence, different rates/layouts and cancellation around the boundary. Exact supported combinations and runtime versions accompany the results.
+
+**Given** Windows, macOS and Linux builds with prepared album boundaries,
+**When** physical-output continuity is checked separately from decoder fixtures and callback counters,
+**Then** captured-output comparison or a documented equivalent measurement checks for player-added boundary gaps,
+**And** listening checks supplement that evidence. VM output and API counters are labeled separately; sustained real-sync stress remains part of later reliability acceptance.
+
+**Implementation gate:** Before coding, specify the continuous-output handoff, prefetch bounds, supported padding interpretation, fixed-output conversion policy and sample-reference method, using the feasibility findings and controlled runtime. Do not imply that successful decoding of one format proves gapless handling for every representation or platform.
+
+
+### Story 15.10: Preserve an album's relative loudness with consistent gain
+
+As a HifiMule user,
+I want an album's tracks to share one appropriate loudness adjustment,
+So that quiet and loud passages retain their intended relationship while usable metadata helps avoid excessive playback levels.
+
+**Requirements:** Album portion of FR74; continuity regression for FR61; P-NFR1–2 and P-NFR4; loudness portion of P-AR7. Radio track-level gain is implemented in the Radio group.
+
+**Dependencies:** Stories 15.1–15.9. Applies to the ordered album session and continuous audio path. Does not introduce a metadata analysis service, dynamic-range compression or a new user taste setting.
+
+**Acceptance Criteria:**
+
+**Given** an album has valid, consistent album loudness and peak metadata under the supported metadata policy,
+**When** its playback session is prepared,
+**Then** HifiMule derives one album gain and applies it consistently across its tracks,
+**And** it does not normalize individual tracks to the same loudness or otherwise erase their relative level differences.
+
+**Given** the metadata-based gain would exceed the permitted output peak,
+**When** the effective gain is calculated,
+**Then** a documented static peak-protection rule reduces the common gain sufficiently for the supported peak reference,
+**And** protection does not apply a different gain to each track, introduce a limiter or compress the signal dynamically.
+
+**Given** album loudness or peak metadata is missing, malformed, non-finite, contradictory or expressed in an unsupported convention,
+**When** HifiMule evaluates it,
+**Then** unusable metadata is rejected and gain remains unchanged where a safe consistent album adjustment cannot be established,
+**And** it does not substitute per-track normalization, guess an album gain, or claim metadata-based clipping protection when the necessary peak evidence is absent.
+
+**Given** source metadata uses supported gain units and reference loudness conventions,
+**When** it is normalized into the playback model,
+**Then** conversion and precedence rules yield a documented deterministic result,
+**And** provider metadata and embedded tags cannot cause gain to be applied twice.
+
+**Given** an album transitions between tracks, seeks within a track, pauses/resumes or restores after restart,
+**When** playback continues,
+**Then** the same resolved album gain policy remains in effect,
+**And** track handoff does not create an unintended gain step, extra silence or duplicate samples. Late-arriving metadata cannot silently change gain on each new track.
+
+**Given** conversion to the established output format and album gain are both required,
+**When** samples reach the output path,
+**Then** gain and peak calculations use the documented signal scale and conversion order,
+**And** bounded processing stays outside blocking or allocating callback work. Any claim concerning inter-sample peaks is limited to what the implementation actually validates.
+
+**Given** deterministic albums with known relative levels, valid and invalid tags, excessive suggested gain and intentional silence,
+**When** adjusted samples are compared against reference calculations,
+**Then** tests verify the common gain, preserved relative levels, fallback behavior and peak limit for supported metadata,
+**And** no dynamic compression or boundary artifacts are introduced.
+
+**Given** Windows, macOS and Linux builds,
+**When** the same fixtures run through the playback pipeline,
+**Then** results satisfy the documented numerical tolerance and retain Story 15.9 continuity checks,
+**And** the evidence distinguishes digital pipeline behavior from volume adjustments or processing applied by the OS or external audio interface.
+
+**Implementation gate:** Before coding, define supported loudness/peak tags and units, reference loudness, metadata precedence, consistency checks, static peak margin, conversion order and incomplete-album fallback. Resolve how common gain is established with bounded metadata access before playback; do not require decoding or downloading the entire album. Missing usable metadata must preserve unchanged gain rather than introduce an unapproved normalization policy.
+
+
+### Story 15.11: Preview a full track without losing the main listening session
+
+As a HifiMule user,
+I want to audition a track while keeping my current listening session,
+So that I can assess music for a playlist or basket and then return to where I was listening.
+
+**Requirements:** FR62–63; applicable FR58, FR60 and FR64; P-NFR2, P-NFR4–6; session portions of P-AR3–4 and P-AR10; P-UX-DR3, P-UX-DR11 and P-UX-DR13–14.
+
+**Dependencies:** Stories 15.1–15.10. Uses existing single-track/album transport, output safety and restoration. Preview is usable in the existing browser before the later floating Playback bar. This story does not enable server listening reports or basket/playlist export.
+
+**Acceptance Criteria:**
+
+**Given** a main session is playing or paused,
+**When** the user invokes an explicit Preview action on a library track,
+**Then** HifiMule preserves the main queue, current occurrence, actual position, playing/paused intent and album gain context before auditioning the selected full track,
+**And** Preview is clearly distinct from Play and ordinary playlist/basket actions, with its source identity retained independently of browsing context.
+
+**Given** an audition is active,
+**When** the user previews another track,
+**Then** the new audition replaces only the previous audition,
+**And** the original main session remains preserved without nesting another saved session or accumulating unbounded audio buffers.
+
+**Given** an audition finishes naturally with a preserved main session,
+**When** HifiMule returns to that session,
+**Then** it restores its queue, occurrence and position with the previous playing/paused intent,
+**And** no audition track is inserted into the main queue or advances its album sequence.
+
+**Given** an audition is active,
+**When** the user explicitly chooses Return to session,
+**Then** the audition ends and the preserved main session is restored with its previous playing/paused intent,
+**And** the action is accessible by keyboard and clearly labeled. This action is distinct from Stop, which restores the main session paused.
+
+**Given** an audition is active,
+**When** the user selects Stop through the UI or native transport,
+**Then** the audition ends and the preserved main session is restored paused,
+**And** Stop never unexpectedly starts the main session. With no preserved main session, it leaves playback idle.
+
+**Given** an audition has no preserved main session,
+**When** it completes naturally,
+**Then** playback becomes idle without starting Radio or repeating the track,
+**And** the UI does not offer a misleading return-to-session action.
+
+**Given** audition loading or return to the main session fails,
+**When** the daemon handles the error,
+**Then** it retains recoverable main-session state and explains the failed operation,
+**And** it does not discard the queue, silently choose another output, or repeatedly alternate between failed preview and resume attempts. Output loss retains the existing pause-until-explicit-resume rule.
+
+**Given** preview replacement, Stop, return or ordinary Play races with pending fetch/decode work,
+**When** asynchronous work completes,
+**Then** only the current transport generation can emit audio or change state,
+**And** an explicit ordinary Play replaces the listening session under its established contract rather than allowing a later audition completion to resurrect the old session.
+
+**Given** the UI closes while previewing,
+**When** it reopens,
+**Then** it reflects the same audition and preserved-main state from the daemon,
+**And** native commands target the active audition. If the application quits and restarts, restoration remains paused; the persistence contract must preserve the main session and define whether the pending audition is retained or dismissed without losing it.
+
+**Given** preview transport records local outcomes,
+**When** an audition finishes, is stopped, is replaced or fails,
+**Then** its disposition remains distinct from main-queue occurrences and technical errors,
+**And** later reporting can distinguish a fully heard audition from an interrupted one without reporting it to the server in this story.
+
+**Given** Windows, macOS and Linux builds,
+**When** tests cover playing/paused/no-main previews, successive auditions, natural completion, Stop, explicit return, failed return, output loss and restart,
+**Then** they verify exactly one active audio owner and preservation of the expected main queue, position and intent,
+**And** browser controls preserve selection behavior, accessible names and visible audition status.
+
+**Implementation gate:** Before coding, define preview/main state transitions, explicit Return intent, preview failure recovery, active-audition persistence on restart and native Next behavior during audition. Resolve exact Preview placement within existing browser/context-menu patterns. Create only persistence fields needed for one preserved main session and one audition; use existing generation fencing and output safety rules.
+
+
+### Story 15.12: Access Playback as an always-available destination
+
+As a HifiMule user,
+I want Playback listed alongside my physical devices even when none are connected,
+So that I can listen and curate my local listening queue without attaching a sync device.
+
+**Requirements:** Destination and independent configuration portions of FR55; device navigation portion of FR59; FR33 amendment; P-NFR4–6; configuration portion of P-AR4; P-UX-DR1, P-UX-DR6, P-UX-DR10, P-UX-DR12–15.
+
+**Dependencies:** Stories 15.1–15.11. Uses the existing playable main session. Full queue editing and the floating bar follow in separate stories; this story exposes the current queue read-only through the destination. Automatic-selection settings are added with Radio, not shown as nonfunctional controls.
+
+**Acceptance Criteria:**
+
+**Given** HifiMule is open with any number of physical devices,
+**When** destinations are displayed,
+**Then** Playback is always present and listed first,
+**And** it is identified as a local listening context rather than a mounted or synchronizable device.
+
+**Given** no physical device is connected,
+**When** the UI opens or the selected physical device disconnects,
+**Then** Playback is selected and library browsing and playback remain usable,
+**And** only physical-target basket and sync actions remain unavailable; the old global no-device lock is not applied to listening.
+
+**Given** the user selects Playback,
+**When** its destination view is displayed,
+**Then** it shows the daemon's current listening queue and state, or an actionable empty state pointing to manual library playback,
+**And** it does not expose storage capacity, mount paths, folder layout, device transcoding, manifest, sync or repair actions.
+
+**Given** a physical device arrives while Playback or another destination is selected,
+**When** device detection completes,
+**Then** the UI selects the arriving device's basket and visibly identifies it,
+**And** a blank/unconfigured device retains an accessible configuration action. Device-open failure is shown with recovery guidance rather than appearing as an unexplained absent device.
+
+**Given** music or an audition is active,
+**When** the user selects a destination, browses another server, or a physical device arrives/disconnects,
+**Then** listening continues from the same source and main/preview state unless the actual audio output is lost,
+**And** navigation changes alone neither replace the listening queue nor reroute server commands.
+
+**Given** destination configuration is loaded or changed,
+**When** HifiMule stores Playback-specific values needed by existing playback behavior,
+**Then** those values are stored locally under a typed Playback configuration with validated defaults,
+**And** device/server auto-fill settings and portable manifests are neither copied implicitly into Playback nor modified. Source/selection controls not yet implemented remain absent.
+
+**Given** the UI reconnects or configuration cannot be loaded,
+**When** the destination is rendered,
+**Then** queue/state comes from the authoritative daemon and invalid configuration produces a recoverable explanation,
+**And** failure does not remove Playback from navigation or overwrite valid device settings.
+
+**Given** narrow, medium and wide supported layouts,
+**When** Playback and physical devices are navigated by keyboard or assistive technology,
+**Then** the active destination, empty state and configuration action have accessible names and visible focus using existing design tokens,
+**And** device-arrival selection is announced without stealing keyboard focus from the user's current control or obscuring essential actions.
+
+**Given** Windows, macOS and Linux builds,
+**When** no-device launch, managed/blank-device arrival, selected-device removal, open failure, server navigation and UI reconnection are exercised,
+**Then** tests verify the expected selected destination and unchanged daemon listening identity,
+**And** physical sync and basket restrictions remain intact.
+
+**Implementation gate:** Before coding, define the typed destination discriminator, navigation fallback, multiple-arrival ordering and minimal local configuration version/defaults. Reuse existing device detection, source badges and responsive design components. Keep Playback out of physical-device manifests and sync enumeration; add only configuration fields needed by delivered behavior.
+
+
+### Story 15.13: Edit the upcoming listening queue
+
+As a HifiMule user,
+I want to add, reorder and remove upcoming tracks in Playback,
+So that I can shape what I hear next without interrupting the current track.
+
+**Requirements:** Manual queue portion of FR55 and FR68; occurrence-preservation foundation for FR78; P-NFR2, P-NFR4–6; queue portions of P-AR3–4 and P-AR10; P-UX-DR5, P-UX-DR11–14. Radio replenishment and exclusion behavior extend this story later.
+
+**Dependencies:** Stories 15.1–15.12. Uses the existing Playback destination, queue transport and persistence. Server playlist writes and basket exports are not triggered by local queue editing.
+
+**Acceptance Criteria:**
+
+**Given** tracks are selected in the library,
+**When** the user explicitly adds them to the Playback queue,
+**Then** the daemon appends occurrences in the specified selection order, retaining their source identities,
+**And** deliberately adding the same recording again creates a distinct occurrence rather than silently deduplicating it. Adding tracks does not interrupt current playback or automatically start an idle session.
+
+**Given** upcoming occurrences are displayed,
+**When** the user reorders them through an accessible queue action,
+**Then** their new order becomes authoritative and persists across reconnection,
+**And** the currently playing occurrence, its position and past history are unchanged. Keyboard operation must provide an alternative to drag-and-drop.
+
+**Given** an upcoming occurrence is selected,
+**When** the user removes it,
+**Then** only that occurrence is removed and playback continues,
+**And** removal of one repeated entry does not remove every occurrence of the recording or alter the source server's library or playlists.
+
+**Given** a queue edit invalidates a prefetched successor,
+**When** pending preparation completes,
+**Then** generation/revision checks prevent the obsolete successor from playing,
+**And** the next boundary uses the latest accepted queue order with bounded preparation buffers.
+
+**Given** playback advances while a queue edit is being submitted,
+**When** the edit reaches the daemon with a stale revision or targets an occurrence that is no longer upcoming,
+**Then** it is rejected with current authoritative state rather than silently removing/reordering the active track,
+**And** the UI explains the conflict and refreshes without blindly replaying the mutation. Progress-only updates do not cause such conflicts.
+
+**Given** an album queue is manually changed,
+**When** the edit is accepted,
+**Then** subsequent playback follows the explicit user order,
+**And** unchanged album playback still follows disc/track order. The session's album-versus-manual mode and gain policy are resolved explicitly before implementation rather than silently applying album assumptions to mixed material.
+
+**Given** a preview is active with a preserved main queue,
+**When** the user edits upcoming main-session occurrences,
+**Then** the edits apply to that preserved queue without replacing the audition or its saved current occurrence,
+**And** returning from preview exposes the accepted edited queue.
+
+**Given** a long listening history and queue,
+**When** the destination is opened or scrolled,
+**Then** history is paged and queue rendering is bounded or virtualized with stable occurrence identities,
+**And** local loading, empty and mutation-error states remain accessible without resetting unrelated browser multi-selection. Manual-queue limits are documented separately from later Radio lookahead limits.
+
+**Given** the UI closes or the application restarts after accepted edits,
+**When** state is restored,
+**Then** the accepted queue order and repeated occurrences are retained, with application relaunch paused,
+**And** no remote playlist or device basket has changed as a side effect.
+
+**Given** Windows, macOS and Linux builds,
+**When** append/reorder/remove, repeated occurrences, edit-versus-advance races, preview editing, keyboard operations and long-history rendering are tested,
+**Then** results verify occurrence identity, preserved current playback and bounded display behavior,
+**And** the existing provider capability and source-identity rules remain intact.
+
+**Implementation gate:** Before coding, define batch selection ordering, queue edit commands, manual-queue limits, persisted revision behavior and album-to-manual transition/gain semantics. Scope remove/reorder to upcoming entries; current-track transport and historical rejection retain their separate meanings. Reuse existing UI selection and virtualization patterns without treating the Playback queue as a live server playlist.
+
+
+### Story 15.14: Control listening from a floating playback bar across views
+
+As a HifiMule user,
+I want playback controls to remain visible while I browse music or work with a device basket,
+So that I can manage listening without navigating away from what I am doing.
+
+**Requirements:** Floating controls portion of FR59; presentation of FR58 and FR62–63; P-NFR6; UI snapshot/interpolation portion of P-AR10; P-UX-DR2–3, P-UX-DR7, P-UX-DR10–14. The idle Play something action is completed with Radio.
+
+**Dependencies:** Stories 15.1–15.13. Consolidates already working transport, output selection and preview return controls into a shared bar. Does not introduce another playback state owner or nonfunctional Radio controls.
+
+**Acceptance Criteria:**
+
+**Given** any library or destination view is open,
+**When** the user navigates between servers, Playback and physical-device baskets,
+**Then** a translucent floating playback bar remains visible below the media browser using the established design tokens,
+**And** navigation neither recreates the session nor changes the source of its controls.
+
+**Given** the current session is playing, paused or stopped,
+**When** the bar renders,
+**Then** it exposes the implemented transport, position and output controls with accurate capability availability,
+**And** track identity and elapsed position come from authoritative daemon state with interpolation only while playback advances.
+
+**Given** playback is idle,
+**When** the bar renders before Radio is implemented,
+**Then** it remains visible with an actionable manual-listening empty state and Resume only when a resumable session exists,
+**And** it does not display a dead Play something button. The later Radio story must replace this interim idle action with working Play something to complete FR59.
+
+**Given** an audition is active,
+**When** the bar renders,
+**Then** it clearly identifies preview playback and exposes Return to session only when a main session exists,
+**And** Return restores the previously approved playing/paused intent while Stop restores the main session paused.
+
+**Given** playback is loading, buffering, disconnected or in a recoverable error state,
+**When** the bar updates,
+**Then** it communicates the actual state and relevant recovery action without claiming that audio is playing,
+**And** unsupported controls are unavailable with an accessible explanation where needed. Later quality-adaptation messages use this same status area.
+
+**Given** a long list or basket reaches its final rows,
+**When** the user scrolls to the bottom or focuses a bottom-row action,
+**Then** every row and action can be brought fully above the floating controls,
+**And** the translucent treatment does not reduce text/control contrast below the existing accessibility target or intercept interactions with visible content outside the bar.
+
+**Given** narrow, medium and wide supported layouts,
+**When** the window resizes or text is enlarged,
+**Then** essential transport and error/recovery actions remain reachable without overlapping the basket,
+**And** secondary controls can use accessible overflow patterns without clipping labels or forcing horizontal page scrolling.
+
+**Given** the user is interacting with another control,
+**When** playback metadata, time or status changes in the background,
+**Then** the bar does not steal focus or announce every elapsed-time tick,
+**And** meaningful state/error changes are announced appropriately while all bar controls have keyboard operation, accessible names and visible focus.
+
+**Given** the UI reconnects after missing events,
+**When** the bar receives a fresh snapshot,
+**Then** it corrects displayed track, position and control availability without replaying commands,
+**And** pending interactions cannot apply to an obsolete occurrence through stale UI state.
+
+**Given** Windows, macOS and Linux UI builds,
+**When** view navigation, preview return, output errors, idle state, long-list bottom rows, keyboard navigation, zoom and responsive layouts are verified,
+**Then** the bar remains usable and consistent with the daemon,
+**And** accessibility checks and visual review cover supported OS themes and translucent-background contrast.
+
+**Implementation gate:** Before coding, define responsive bar layout, reserved scroll/focus space, status announcement policy and supported-control overflow behavior using existing UI components. Preserve the approved placement under the browser and the authoritative shared playback state. Keep Radio, quality adaptation and exports in their own stories while retaining explicit completion coverage for their future controls.
+
+
+### Story 15.15: Configure Playback selection and start its first selected track
+
+As a HifiMule user,
+I want independent Playback source and selection settings using HifiMule's existing selection engine,
+So that I can start listening from my curated music without choosing the first track manually or changing device sync preferences.
+
+**Requirements:** Source/selection settings portion of FR55; first-result selection foundation for FR57 and FR65; shared-engine portion of P-AR8; local configuration portion of P-AR4; P-NFR2, P-NFR4–6; P-UX-DR6, P-UX-DR13–14.
+
+**Dependencies:** Stories 15.1–15.14 and the existing auto-fill engine. This story provides a working selection-settings action that plays its first eligible result. It does not label this finite behavior as ongoing Radio or expose final Play something yet; bounded replenishment follows in the next story.
+
+**Acceptance Criteria:**
+
+**Given** configured music servers,
+**When** the user opens Playback selection settings,
+**Then** the user can choose participating sources and supported playlist/artist/genre selection inputs using suitable existing selection controls,
+**And** capability-dependent inputs are unavailable with an explanation rather than silently ignored. Physical capacity, folder layout and device transcoding controls are absent.
+
+**Given** Playback selection settings are edited and saved,
+**When** the UI reconnects or HifiMule restarts,
+**Then** the validated settings remain available from local Playback configuration,
+**And** no physical device/server settings or portable manifests are changed. Existing device preferences are not implicitly adopted as Playback defaults.
+
+**Given** equivalent eligible candidates, ordering settings and an explicit deterministic seed where the strategy needs one,
+**When** sync and Playback request selection through their respective consumer contexts,
+**Then** both invoke the same pure selection implementation and obtain equivalent ordering before consumer-specific constraints,
+**And** Playback has no copied selection algorithm or dependence on a device mount/capacity. Existing sync selection behavior remains unchanged under its existing inputs.
+
+**Given** valid Playback settings produce at least one eligible track,
+**When** the user explicitly starts the first selected track from the settings view,
+**Then** the daemon plays the first eligible result in the engine's order using its retained source identity,
+**And** it uses the existing main-session Play behavior rather than an audition. This deliberate action starts listening; merely saving settings does not replace an active session.
+
+**Given** selection inputs include multiple servers or identical server-local track IDs,
+**When** candidates are normalized and selected,
+**Then** every candidate retains a portable server-plus-track identity through the shared engine boundary,
+**And** source routing is unaffected by the browsed server. Cross-copy recording deduplication is added separately and is not inferred from matching local IDs or titles.
+
+**Given** no sources are configured, a required source is unavailable or no eligible track is found,
+**When** the selection action runs,
+**Then** the user receives an actionable setup, source or empty-selection explanation,
+**And** the existing main session is preserved if no replacement can be prepared. Failed selection is not treated as a user skip or taste signal.
+
+**Given** selection is running,
+**When** the user changes settings and starts a newer request or cancels the pending request,
+**Then** obsolete results cannot replace the current session,
+**And** candidate retrieval/cache use is bounded independently of device sync limits. No entire-library playback queue is created.
+
+**Given** Playback is active while sync selection runs,
+**When** either consumer uses its settings,
+**Then** the consumers do not mutate each other's configuration, random state or selection memory,
+**And** Playback introduces no durable cross-session taste profile.
+
+**Given** Windows, macOS and Linux builds,
+**When** settings persistence, shared-engine equivalence, source identity collisions, empty/unavailable selection, concurrent requests and keyboard interaction are tested,
+**Then** selection produces the expected first track and preserves the existing sync behavior,
+**And** controls use the existing responsive design and accessible names/status feedback.
+
+**Implementation gate:** Before coding, define the pure selection interface, consumer-specific eligibility/context, source identity and settings schema/defaults, deterministic testing inputs, candidate bounds and invalid-setting behavior. Preserve all existing sync selection semantics. Keep continuous replenishment, artist transitions, logical-session exclusions and final Play something menu/bar wiring assigned to subsequent Radio stories.
+
+
+### Story 15.16: Replenish Radio within a bounded upcoming queue
+
+As a HifiMule user,
+I want my listening queue to replenish as I listen while respecting my edits and skips,
+So that music can continue without assembling the whole library into a playlist or repeatedly suggesting tracks I rejected in this session.
+
+**Requirements:** FR65, FR68–69; logical-session restoration portion of FR60; exhaustion foundation for FR67; Radio error behavior of FR73; P-NFR2 and P-NFR4–5; relevant P-AR3–4, P-AR6, P-AR8 and P-AR10; P-UX-DR5 and P-UX-DR7.
+
+**Dependencies:** Stories 15.1–15.15. Implements the replenishment/session policy behind an explicit settings-view start action. Until artist-transition policy is delivered, automatic selection stays within the initial artist and enters an explained waiting state when that artist is exhausted. Final Play something in the bar/menu follows after artist transitions; this intermediate behavior is not presented as the completed Radio experience.
+
+**Acceptance Criteria:**
+
+**Given** the first selected track establishes an initial artist and valid Playback settings,
+**When** the user starts the replenishing session,
+**Then** the daemon creates a logical Radio session and fills a documented bounded number of upcoming automatic occurrences from eligible unheard tracks of that artist,
+**And** it never converts the whole library into the playback queue. Ambiguous or missing artist identity uses a documented conservative waiting state until the relationship policy is available.
+
+**Given** the automatic lookahead falls below its refill threshold,
+**When** replenishment runs,
+**Then** new suggestions append without reordering existing occurrences,
+**And** only one accepted refill result affects the current queue revision; stale or duplicate work cannot add duplicate automatic suggestions.
+
+**Given** the user adds, reorders or removes upcoming entries,
+**When** replenishment resumes,
+**Then** accepted manual order is preserved and removed automatic suggestions are excluded for the logical session,
+**And** automatic lookahead limits do not silently truncate manual additions. Manual queue, candidate cache, compressed prefetch and PCM limits remain independently defined.
+
+**Given** the user explicitly skips a Radio track,
+**When** the session records that outcome,
+**Then** the track is excluded from automatic selection for the current logical session,
+**And** a technical fetch/decode failure is recorded separately rather than as a skip or dislike. This story uses source-qualified track identity; the later recording-deduplication story extends exclusions across confident copies.
+
+**Given** a suggested track fails to load,
+**When** the daemon attempts another eligible suggestion,
+**Then** Radio can bypass the failed source while preserving the failure explanation,
+**And** attempts and retry eligibility are bounded so an unavailable artist/source cannot cause a busy loop. Album pause/retry behavior remains unchanged.
+
+**Given** no eligible unheard track remains within the currently implemented artist scope,
+**When** replenishment cannot fill the queue,
+**Then** it exposes an explained waiting state and allows already queued tracks to finish,
+**And** it does not improvise genre-only drift, clear exclusions or silently restart a cycle. The next artist-transition story completes those explicit continuation rules.
+
+**Given** Radio is paused, stopped, previewed or replaced,
+**When** refill work completes,
+**Then** it cannot restart stopped audio or change a replaced session,
+**And** preview preserves the logical main Radio session. The refill contract bounds background preparation and distinguishes Pause, Stop and replacement without resetting exclusions implicitly.
+
+**Given** the application quits and restarts during Radio,
+**When** its session is restored,
+**Then** the queue, logical-session identity, heard set and skip/removal exclusions restore paused,
+**And** resuming retains those exclusions. Explicitly starting a new Radio resets them; no preference state is accumulated across independent Radio sessions.
+
+**Given** a lengthy Radio session,
+**When** history and exclusions grow,
+**Then** durable session records and paged reads prevent unbounded in-memory history,
+**And** lookahead and candidate caches remain within their documented limits while preserving the full logical-session exclusion behavior.
+
+**Given** Windows, macOS and Linux builds,
+**When** tests exercise refill thresholds, manual edits, duplicate refill completion, skips, source failures, pause/preview/replacement and restart,
+**Then** they verify bounded preparation, stable queue order and retained session exclusions,
+**And** no result is presented as proof that artist drift or cross-server recording deduplication is complete.
+
+**Implementation gate:** Before coding, define lookahead/refill thresholds, source-qualified eligibility/identity, heard semantics, retry bounds, pause/Stop refill behavior and session persistence limits. Reuse the shared selection engine and revision/generation contracts. Artist transitions, repeat cycles, recording-level deduplication and final entry-point wiring remain explicit subsequent work.
+
+
+### Story 15.17: Continue Radio through meaningful artist connections
+
+As a HifiMule user,
+I want Radio to stay close to the current artist before moving to a clearly related artist,
+So that its progression feels understandable within my curated libraries rather than drifting on genre alone.
+
+**Requirements:** FR66–67; continuation of FR65; P-NFR2, P-NFR4–5; relationship portions of P-AR8–9; P-UX-DR7.
+
+**Dependencies:** Stories 15.1–15.16. Completes artist progression and cycle renewal on the bounded replenishment path. Cross-server recording deduplication, Radio gain and final Play something entry points remain subsequent stories.
+
+**Acceptance Criteria:**
+
+**Given** the current artist has eligible unheard tracks under the logical session's settings and exclusions,
+**When** Radio selects more automatic suggestions,
+**Then** those tracks take precedence over changing artist,
+**And** existing manual queue order and bounded lookahead remain unchanged.
+
+**Given** the current artist has no remaining eligible unheard tracks,
+**When** configured-server metadata supports a meaningful connection to another eligible artist,
+**Then** Radio selects that artist as its new center using the documented relationship ranking,
+**And** it exposes a concise reason supported by the actual metadata rather than inventing a relationship. Shared genre alone is insufficient evidence of connection.
+
+**Given** no supported meaningful connection leads to eligible unheard music,
+**When** Radio needs a new center,
+**Then** it uses the original Playback selection settings to choose a fresh eligible starting point,
+**And** labels the transition as a new starting point rather than a related-artist recommendation. It retains logical-session exclusions and heard state.
+
+**Given** all eligible tracks under the session's selection scope have been heard,
+**When** further listening is requested by the running Radio,
+**Then** it begins another listening cycle with renewed cycle-level heard eligibility,
+**And** retains skip/removal exclusions for the logical session instead of replaying rejected suggestions. This renewal does not create a new Radio session or reset its user edits.
+
+**Given** exclusions or source availability leave no eligible music,
+**When** a refill or cycle renewal is attempted,
+**Then** Radio enters an explained waiting state without a tight retry loop,
+**And** it does not silently broaden the source settings, discard exclusions or start an external recommendation service.
+
+**Given** artist metadata is missing, ambiguous, contradictory or available only as a shared genre,
+**When** relationship eligibility is evaluated,
+**Then** unsupported links are not presented as meaningful connections,
+**And** the fresh-center fallback remains usable. Candidate retrieval and relationship caches stay within documented bounds.
+
+**Given** sources are temporarily unavailable,
+**When** the engine evaluates exhaustion,
+**Then** it distinguishes unknown availability from verified absence of eligible unheard music,
+**And** it does not clear cycle heard state solely because a metadata request failed. Retry behavior preserves the current queue and explains the limitation.
+
+**Given** a center transition or cycle renewal races with a queue edit, new Radio or settings change,
+**When** its result is applied,
+**Then** the session revision/generation contract rejects obsolete work,
+**And** current center, cycle identity and explanation reflect the accepted transition only. Saving settings alone does not silently rewrite the active session's original selection context.
+
+**Given** the application restarts after a transition or cycle renewal,
+**When** the logical session is restored,
+**Then** its center, cycle-level heard state and logical-session exclusions restore consistently and paused,
+**And** resuming neither repeats a transition because of lost state nor starts a new taste profile.
+
+**Given** deterministic metadata fixtures on Windows, macOS and Linux,
+**When** tests cover current-artist priority, meaningful links, genre-only evidence, no-link fallback, cycle renewal, total exclusion, unavailable sources and restart,
+**Then** each expected selection and user-facing reason is verified against the fixture evidence,
+**And** relationships are derived only from configured-server metadata. Claims about real-library coverage are supported separately from synthetic fixtures.
+
+**Implementation gate:** Before coding, inventory relationship metadata actually available from supported providers and define accepted evidence types, ranking/tie-breaking, artist identity, original-settings snapshot semantics, cycle exhaustion and retry bounds. Missing provider relationship support must use the approved fresh-center fallback; it is not permission to introduce third-party enrichment or genre-only links.
+
+
+### Story 15.18: Avoid duplicate Radio recordings across configured servers
+
+As a HifiMule user,
+I want Radio to recognize confident copies of the same recording across my servers,
+So that duplicate library copies do not repeat unnecessarily while distinct performances remain available.
+
+**Requirements:** FR70; recording-level eligibility portions of FR66–69; identity foundation for FR78–79; P-NFR2 and P-NFR4–5; P-AR8 and source-routing portion of P-AR9; P-UX-DR14.
+
+**Dependencies:** Stories 15.1–15.17. Extends existing source-qualified candidates and logical Radio state. Does not deduplicate manual queue occurrences or write to server libraries. Feedback and export remain subsequent stories.
+
+**Acceptance Criteria:**
+
+**Given** candidates from configured servers have evidence meeting the documented same-recording confidence policy,
+**When** Radio evaluates automatic suggestions,
+**Then** those copies count as one recording for heard eligibility and automatic queue selection,
+**And** a duplicate copy cannot consume another automatic suggestion slot merely because its source ID differs.
+
+**Given** candidates have only matching titles, ambiguous metadata or evidence of different performances,
+**When** recording identity is resolved,
+**Then** uncertain matches and distinct performances remain separate,
+**And** live versions, covers or materially distinct recordings are not merged solely on artist/title similarity or duration proximity.
+
+**Given** a recording has several eligible source copies,
+**When** Radio selects one for an occurrence,
+**Then** the chosen source follows a documented deterministic availability/quality ranking and retains its server-plus-track identity,
+**And** the queue distinguishes recording identity from occurrence identity. Duplicate recognition does not itself authorize silent mid-track source replacement.
+
+**Given** a Radio recording is heard, skipped or excluded by removing an automatic suggestion,
+**When** another confident copy is considered within the same cycle or logical session as applicable,
+**Then** recording-level eligibility respects the corresponding heard or exclusion state,
+**And** a new logical Radio resets session exclusions while cycle renewal retains them. Uncertain copies retain independent eligibility.
+
+**Given** the user deliberately queues the same recording more than once,
+**When** those manual occurrences coexist with Radio,
+**Then** each deliberate occurrence is preserved with its own position and source reference,
+**And** recording deduplication affects automatic suggestions without collapsing explicit repetitions or rewriting accepted queue entries.
+
+**Given** metadata identity evidence changes or conflicting identifiers are discovered,
+**When** the identity resolver updates its view,
+**Then** existing occurrence source references remain stable and reconciliation follows a documented conservative policy,
+**And** it does not delete uncertain tracks, rewrite previously played sources or silently erase exclusions. Identity state required for restoration is versioned.
+
+**Given** a source is unavailable or lacks useful identity metadata,
+**When** Radio gathers candidates,
+**Then** it can continue using eligible available sources under the established selection/failure rules,
+**And** missing evidence does not become a confident match. A technical source failure is not recorded as a rejection of every copy.
+
+**Given** the user browses another server or the application restarts,
+**When** a queued occurrence plays or its state is restored,
+**Then** its chosen source, recording and occurrence identities remain distinct and recoverable,
+**And** future reporting/export uses that chosen source rather than the currently browsed server.
+
+**Given** a large multi-server candidate set,
+**When** identity matching and lookahead run,
+**Then** candidate retrieval and identity caches remain bounded with persistence/paging where required,
+**And** no third-party lookup or full-library audio fingerprint download is introduced.
+
+**Given** deterministic multi-server fixtures on Windows, macOS and Linux,
+**When** tests cover confident copies, colliding local IDs, uncertain matches, distinct performances, manual repeats, cross-copy exclusions, metadata conflicts and restart,
+**Then** the expected recording groups and occurrence sources are verified,
+**And** real-library identity coverage is reported separately from synthetic correctness tests.
+
+**Implementation gate:** Before coding, define accepted recording evidence, confidence/conflict rules, source-copy ranking, persisted identity versioning and reconciliation of existing source-qualified heard/exclusion state. Use metadata from configured servers only. Preserve uncertain recordings rather than broadening heuristics to inflate deduplication coverage.
+
+
+### Story 15.19: Match Radio track loudness using available metadata
+
+As a HifiMule user,
+I want Radio to use available track loudness metadata,
+So that music from different albums has more consistent listening levels without compressing its dynamics.
+
+**Requirements:** Radio portion of FR74; P-NFR1–2 and P-NFR4; loudness portion of P-AR7.
+
+**Dependencies:** Stories 15.1–15.18. Reuses Story 15.10 metadata normalization and static gain/peak protection. Adds the Radio policy rather than a second audio gain implementation.
+
+**Acceptance Criteria:**
+
+**Given** a Radio occurrence has valid track loudness and usable peak metadata,
+**When** it is prepared for playback,
+**Then** HifiMule derives track-level gain under the documented reference loudness and peak policy,
+**And** applies that gain once to the chosen source's decoded audio without dynamic compression or automatic crossfade.
+
+**Given** the suggested track gain would exceed the supported peak limit,
+**When** effective gain is calculated,
+**Then** the existing static peak-protection rule reduces it as necessary,
+**And** the protection claim is limited to the validated peak convention and signal conversion path.
+
+**Given** a track lacks usable loudness metadata or sufficient peak evidence for a safe adjustment,
+**When** Radio prepares it,
+**Then** gain remains unchanged according to the established fallback,
+**And** the player does not guess loudness, substitute unrelated album tags or analyze/download an entire library to manufacture metadata.
+
+**Given** consecutive Radio tracks require different gains,
+**When** prepared playback crosses their boundary,
+**Then** each gain applies to the correct occurrence's samples without leaking into the previous or next track,
+**And** there is no additional silence, overlap or dropped sample introduced by the gain switch. The story does not promise equal perceived loudness when metadata is unavailable or inaccurate.
+
+**Given** an explicit album session is active instead of Radio,
+**When** its tracks play,
+**Then** the common album gain policy remains in force,
+**And** Radio's per-track policy does not replace it. Session mode, rather than the currently browsed album or server, selects the applicable policy.
+
+**Given** a Radio occurrence is replaced, sought, paused, resumed or restored,
+**When** audio preparation completes,
+**Then** gain belongs to the active occurrence and chosen source under the existing generation contract,
+**And** stale metadata or gain calculations cannot alter a newer track. Restored playback remains paused until explicitly resumed.
+
+**Given** an audition interrupts Radio and later returns,
+**When** the preserved session resumes,
+**Then** its Radio gain context is restored without double application,
+**And** the audition's gain policy is explicitly defined using existing standalone playback behavior rather than accidentally inheriting the main track's gain.
+
+**Given** deterministic tracks with known gain/peak tags, invalid tags, missing metadata and different source copies,
+**When** reference comparisons run on Windows, macOS and Linux,
+**Then** tests verify gain selection, safe fallback, correct occurrence boundaries and preservation of album behavior,
+**And** processing remains bounded and introduces no blocking or allocating work into the audio callback.
+
+**Implementation gate:** Before coding, confirm track metadata conventions and precedence against the album implementation, define Radio/album/standalone-preview policy dispatch and freeze gain per prepared occurrence. Reuse the existing conversion and static peak-protection primitives; do not add user taste memory or dynamic-range processing.
+
+
+### Story 15.20: Start Radio with Play something without opening the main window
+
+As a HifiMule user,
+I want a Play something action in the desktop menu and idle playback bar,
+So that I can start an ongoing Radio from my configured libraries with one action instead of facing an empty listening page.
+
+**Requirements:** FR57; idle Play something completion of FR59; entry-point integration of FR55 and FR65–70; P-NFR4–6; P-AR10; P-UX-DR2, P-UX-DR4 and P-UX-DR7.
+
+**Dependencies:** Stories 15.1–15.19. Wires existing selection, replenishment, artist progression, deduplication and Radio gain to final user entry points. Does not create a new selection implementation.
+
+**Acceptance Criteria:**
+
+**Given** Playback settings contain usable configured sources,
+**When** the user selects Play something from the desktop app menu with the main UI closed,
+**Then** the daemon starts a fresh logical Radio with the first eligible result from the shared selection engine under those settings,
+**And** playback proceeds without opening the main window or requiring a physical sync device.
+
+**Given** playback is idle and the floating bar is visible,
+**When** the user activates Play something,
+**Then** it starts the same daemon operation as the desktop menu,
+**And** the interim manual-listening empty state is replaced by the working action with accessible loading, success and failure feedback.
+
+**Given** a resumable existing session is present,
+**When** the user chooses Resume instead,
+**Then** its queue, position and logical-session exclusions are retained,
+**And** Resume does not rerun initial selection or create a fresh Radio. Play something remains a distinct explicit new-session action.
+
+**Given** another session or audition exists,
+**When** Play something successfully prepares a replacement session,
+**Then** it becomes the new main Radio and starts a new logical-session exclusion scope,
+**And** obsolete audition or selection work cannot later restore the replaced session. Saving settings alone never triggers this replacement.
+
+**Given** no sources are configured, settings are invalid, sources are unavailable or no eligible first track can be prepared,
+**When** Play something is requested,
+**Then** it presents the specific setup or recoverable failure with an actionable route to the relevant settings,
+**And** it preserves any existing session when replacement cannot be prepared. An error does not silently open the main window; opening settings remains an explicit user action.
+
+**Given** the selected audio output is unavailable,
+**When** Play something is requested,
+**Then** it respects the existing output-loss pause rule and explains the required output choice,
+**And** it does not send music to an automatically substituted output merely to satisfy one-action startup.
+
+**Given** repeated menu/UI activation or a pending start superseded by Resume, Stop or another session command,
+**When** selection and preparation complete,
+**Then** the documented command ordering and generation policy prevents duplicate starts and obsolete replacement,
+**And** loading feedback reflects the accepted request rather than a stale one.
+
+**Given** Radio starts successfully,
+**When** the user continues listening with the UI closed,
+**Then** bounded replenishment, current-artist priority, meaningful transitions or labeled fresh-center fallback, recording deduplication and cycle/exclusion behavior continue in the daemon,
+**And** native controls remain available. Reopening the UI shows the same Radio and current transition or waiting explanation.
+
+**Given** saved Playback settings change during an existing Radio,
+**When** the user saves those settings,
+**Then** the current session retains its original selection context,
+**And** the next explicit Play something uses the updated settings. The UI explains this distinction without silently rebuilding the active queue.
+
+**Given** Windows, macOS and Linux installed builds,
+**When** Play something is exercised from the platform-appropriate desktop menu and floating bar, including a closed UI, missing setup, unavailable output, repeated activation and existing paused Radio,
+**Then** checks verify the expected first track, fresh-versus-resumed session identity and continued replenishment,
+**And** the native menu placement and tested platform are recorded without assuming macOS Dock behavior maps identically to Windows or Linux tray menus.
+
+**Implementation gate:** Before coding, define each platform's menu placement, windowless setup/error presentation and start-command supersession rules. Reuse existing generation, output and replacement contracts. Keep first-track selection deterministic under controlled test inputs and avoid adding a confirmation dialog to the normal configured one-action start path.
+
+
+### Story 15.21: Report listening accurately to the source server
+
+As a HifiMule user,
+I want supported listening activity recorded on the server that supplied the track,
+So that its listening history reflects what I heard without HifiMule creating its own taste profile.
+
+**Requirements:** FR76; reporting portion of FR81; P-NFR4–5; reporting portions of P-AR9 and P-AR12; source identity portion of P-UX-DR14.
+
+**Dependencies:** Stories 15.1–15.20. Uses occurrence identities, actual playback progress, preview outcomes and durable session state. Like/Dislike and exports remain separate stories.
+
+**Acceptance Criteria:**
+
+**Given** a provider supports now-playing status separately from completed-listen reporting,
+**When** audible playback starts or its relevant state changes,
+**Then** HifiMule sends the supported status to the occurrence's source server,
+**And** prefetch, queue insertion, local native metadata updates and merely restoring a paused session do not themselves submit a completed listen.
+
+**Given** a track reaches the provider's verified completed-listen eligibility conditions,
+**When** its outcome is evaluated,
+**Then** HifiMule submits the appropriate report through that provider's documented semantics,
+**And** eligibility is derived from actual listening and transport events rather than assuming that requesting or downloading a full stream means it was heard.
+
+**Given** a user skips, stops or replaces a track before it qualifies,
+**When** the reporting policy evaluates it,
+**Then** HifiMule avoids submitting a completed-listen report where the provider permits,
+**And** it does not promise to reverse a play already counted by the server or treat technical failures as dislikes.
+
+**Given** the user seeks forward, repeats a passage, pauses, buffers or resumes after restart,
+**When** listening eligibility is calculated,
+**Then** the provider-specific tested policy handles those events explicitly,
+**And** wall-clock time, skipped-over duration and repeated progress messages cannot accidentally manufacture a completed listen.
+
+**Given** an audition finishes or is interrupted,
+**When** its outcome is evaluated,
+**Then** a fully heard audition counts where supported and an interrupted one follows the same provider eligibility rules,
+**And** returning to the main session does not count its preserved occurrence a second time solely because it resumed.
+
+**Given** a queue spans multiple servers or contains repeated occurrences,
+**When** reporting is submitted,
+**Then** each qualifying occurrence targets its chosen source using existing credentials,
+**And** browsing another server does not reroute it. Deliberate repeat occurrences remain distinguishable from retries of one report.
+
+**Given** the network fails, the server rejects a report or the daemon exits during submission,
+**When** the reporting operation is recovered,
+**Then** durable operation state distinguishes pending, confirmed, failed and ambiguous outcomes as needed,
+**And** retries use verified provider idempotency or reconciliation where available. An ambiguous non-idempotent write is not blindly repeated or represented as guaranteed exactly-once delivery.
+
+**Given** reporting is unsupported or an operation cannot be safely reconciled,
+**When** its status is exposed,
+**Then** HifiMule makes that limitation or unresolved result inspectable without interrupting playback,
+**And** stored operation evidence and logs do not expose credentials or authenticated stream URLs.
+
+**Given** pending reporting state grows during a server outage,
+**When** recovery and retries run,
+**Then** backoff, persistence, retention and in-memory work are bounded under a documented policy,
+**And** bookkeeping is not performed in the audio callback and does not become a cross-session recommendation/taste model.
+
+**Given** supported providers and Windows, macOS and Linux builds,
+**When** tests cover completion, early skip, seeking, preview completion, main-session return, duplicate events, repeated occurrences, restart and ambiguous responses,
+**Then** provider request fixtures verify routing and eligibility, and configured-server integration checks verify actual play-count/status effects,
+**And** unsupported semantics remain disabled or explicitly limited rather than inferred from another provider's behavior.
+
+**Implementation gate:** Before coding, verify each provider's now-playing, completion, automatic play-count, seek/resume and idempotency semantics; define eligibility thresholds and durable operation identity/reconciliation/retention. No universal counting threshold is assumed. Enable only verified reporting behavior; if provider integrations exceed one implementation session, split them into ordered provider-specific stories before execution.
+
+
+### Story 15.22: Save supported Like and Dislike preferences on the source server
+
+As a HifiMule user,
+I want explicit Like or Dislike actions to update my source server's track preference,
+So that the preference is available outside HifiMule rather than becoming a separate local taste profile.
+
+**Requirements:** FR77; rejected-occurrence foundation for FR78; P-NFR4–6; feedback portion of P-AR9; P-UX-DR8 and P-UX-DR13–14.
+
+**Dependencies:** Stories 15.1–15.21. Uses provider capabilities, occurrence/source identity and existing operation recovery patterns. Playlist/basket snapshots are subsequent stories.
+
+**Acceptance Criteria:**
+
+**Given** a source provider exposes a verified equivalent of Like or Dislike for the relevant user and track,
+**When** playback feedback controls are displayed,
+**Then** HifiMule exposes only the supported actions with accessible names and the server's known current state,
+**And** unknown preference state is distinguishable from an explicit neutral or negative state.
+
+**Given** a provider supports favorites but no genuine Dislike equivalent,
+**When** controls are displayed or an unsupported command is submitted,
+**Then** Dislike is unavailable and the daemon rejects unsupported feedback,
+**And** removing a favorite is never silently interpreted as Dislike. Any mapping from favorite to Like must be explicitly verified and documented.
+
+**Given** the user explicitly invokes a supported feedback action on an occurrence,
+**When** the operation is sent,
+**Then** it targets that occurrence's server and track using existing credentials,
+**And** a browsing-context change or confident duplicate on another server does not cause the preference to be written to other sources.
+
+**Given** a feedback request is in flight,
+**When** it succeeds, fails or returns an ambiguous result,
+**Then** the UI distinguishes pending, confirmed and unresolved/error states,
+**And** it does not present an unconfirmed write as a server-confirmed preference. Retry/reconciliation follows verified provider semantics without silently toggling a value twice.
+
+**Given** the user submits opposing feedback or changes tracks while a request is pending,
+**When** responses arrive out of order,
+**Then** results remain associated with their original source/track operation and the latest accepted intent is resolved explicitly,
+**And** a stale response cannot change the displayed preference of the new current track.
+
+**Given** the user explicitly dislikes a listening occurrence,
+**When** local session disposition is recorded,
+**Then** that occurrence is marked rejected for the later listening snapshot,
+**And** this session record is distinguishable from server confirmation and does not become a durable cross-session recommendation profile. Failed remote persistence remains visible; it must not erase the user's explicit rejection from the current session.
+
+**Given** Like/Dislike is applied during playback or preview,
+**When** the preference operation completes,
+**Then** it does not implicitly issue transport commands, replace the queue or undo a previously counted listen,
+**And** any logical-session Radio exclusion behavior is explicitly defined before implementation rather than inferred as a new global taste-learning rule.
+
+**Given** feedback state is refreshed from the server after reconnect,
+**When** the provider returns an authoritative value,
+**Then** HifiMule reconciles its displayed state and pending operations according to the documented conflict policy,
+**And** local operational caching does not claim authority over preferences changed by another client.
+
+**Given** Windows, macOS and Linux builds and each enabled provider mapping,
+**When** supported/unsupported actions, pending failures, ambiguous writes, rapid opposing actions, source changes and preview feedback are tested,
+**Then** checks verify correct server scope, accessible feedback states and retained session rejection,
+**And** configured-server integration evidence confirms actual preference semantics rather than relying solely on endpoint names.
+
+**Implementation gate:** Before coding, define provider equivalence mappings, read/write capabilities, pending-operation identity and reconciliation, feedback-versus-transport behavior and local rejection semantics including explicit later preference reversal. Use bounded operational persistence only; no local-only durable taste fallback or cross-server preference propagation is introduced.
+
+
+### Story 15.23: Save an immutable local listening snapshot
+
+As a HifiMule user,
+I want to save the accepted history and upcoming queue from my listening session locally,
+So that I can keep what I discovered without ongoing playback changing the saved selection.
+
+**Requirements:** FR78; local cross-server order portion of FR79; P-NFR2 and P-NFR4–6; snapshot portion of P-AR11; P-UX-DR15.
+
+**Dependencies:** Stories 15.1–15.22. Saves and exposes a read-only local snapshot using existing queue presentation. Server playlist and physical basket export follow in separate stories; this story does not write to either destination.
+
+**Acceptance Criteria:**
+
+**Given** a main session has accepted played occurrences, a current occurrence and upcoming entries,
+**When** the user explicitly saves its listening snapshot,
+**Then** the saved sequence contains accepted played occurrences in order, the current occurrence once unless rejected, and upcoming occurrences in their accepted order,
+**And** skipped/disliked entries are omitted without duplicating the current occurrence at the history/queue boundary.
+
+**Given** the same recording was deliberately queued more than once,
+**When** the snapshot is built,
+**Then** each included occurrence is retained separately in order,
+**And** recording-level Radio deduplication does not collapse deliberate repetitions in the saved snapshot.
+
+**Given** playback advances or the queue is edited while saving,
+**When** the daemon captures the snapshot,
+**Then** it represents one consistent session revision and disposition boundary,
+**And** later playback, feedback or edits do not mutate the saved sequence. A duplicate save request with the same operation identity follows the documented deduplication contract.
+
+**Given** an audition is active over a preserved main session,
+**When** the user saves the listening snapshot,
+**Then** it captures the preserved main listening history/current/upcoming sequence,
+**And** temporary audition playback does not silently insert an extra occurrence. The UI identifies which session is being saved.
+
+**Given** the snapshot spans several servers,
+**When** it is saved and displayed,
+**Then** its global order, occurrence identities and chosen server/track references remain local and intact,
+**And** saving neither merges copies across servers nor requires each server to support playlist writes.
+
+**Given** a track was technically interrupted or its remote feedback/reporting remains unresolved,
+**When** snapshot inclusion is evaluated,
+**Then** the documented local listening-disposition policy determines inclusion without misclassifying technical failure as an explicit rejection,
+**And** server report success is not used as a substitute for whether the user accepted or skipped the occurrence.
+
+**Given** a saved snapshot exists,
+**When** the user opens it or restarts HifiMule,
+**Then** the same saved selection is available for inspection with source labels and stable ordering,
+**And** temporarily unavailable sources do not remove entries. History/snapshot reads are paged rather than requiring the entire result in UI memory.
+
+**Given** the user saves an empty eligible selection or persistence fails,
+**When** the operation finishes,
+**Then** the UI explains that no snapshot was saved or reports the recoverable error,
+**And** no partial snapshot is presented as complete and existing saved snapshots remain intact.
+
+**Given** Windows, macOS and Linux builds,
+**When** tests cover current/history boundary races, manual repeats, skips/dislikes, preview, mixed sources, unavailable sources and interrupted persistence,
+**Then** they verify the exact expected immutable sequence and recovery behavior,
+**And** saving produces no provider writes or device basket changes.
+
+**Implementation gate:** Before coding, define snapshot identity and atomic capture boundary, local naming/listing access, disposition inclusion rules, duplicate-request retention and paged persistence. Resolve incomplete/technically failed occurrence treatment and preview-only sessions explicitly. Preserve the approved accepted-history/current/upcoming formula and keep snapshots distinct from live server playlists or an automatically synchronized queue.
+
+
+### Story 15.24: Save a listening snapshot as playlists on its source servers
+
+As a HifiMule user,
+I want to save a listening snapshot to playlists on its contributing servers,
+So that I can reuse my discoveries in other clients while understanding what was saved on each server.
+
+**Requirements:** FR79; export portion of FR81; P-NFR2 and P-NFR4–6; P-AR11 and playlist-write portion of P-AR9; P-UX-DR8 and P-UX-DR14–15.
+
+**Dependencies:** Stories 15.1–15.23. Uses immutable local snapshots and existing provider playlist capabilities. Physical basket export remains a separate story.
+
+**Acceptance Criteria:**
+
+**Given** a saved snapshot contains tracks from one playlist-capable server,
+**When** the user explicitly chooses Save to server playlists and supplies a valid name,
+**Then** HifiMule creates a playlist containing that server's included occurrences in snapshot order,
+**And** deliberate repeated occurrences are preserved where supported. If the provider cannot represent them faithfully, that limitation is disclosed rather than silently claiming an exact save.
+
+**Given** a snapshot contains tracks from multiple servers,
+**When** export runs,
+**Then** it creates one playlist per contributing capable server containing only that server's referenced tracks in relative snapshot order,
+**And** the complete cross-server order remains in the local snapshot. No tracks are copied or uploaded between servers.
+
+**Given** a contributing server lacks playlist creation or required write permission,
+**When** export capabilities are evaluated,
+**Then** its part is shown as unsupported or denied with the reason,
+**And** other capable parts can proceed without misrepresenting the overall export as fully successful.
+
+**Given** the user confirms the explicit save action,
+**When** the daemon submits provider requests,
+**Then** each request uses the snapshot's chosen source identities and existing credentials,
+**And** browsing another server or continued listening cannot redirect or change the exported content. Naming collisions do not overwrite an existing playlist implicitly.
+
+**Given** one server succeeds and another fails,
+**When** results are displayed,
+**Then** each part shows its actual success, failure, unsupported or unresolved state and any known created playlist identity,
+**And** retry targets unfinished work without recreating already confirmed playlists.
+
+**Given** creation or population times out after a request may have reached the server,
+**When** recovery evaluates the operation,
+**Then** durable state records the ambiguity and attempts only provider-supported idempotency or reliable reconciliation,
+**And** it does not blindly create another playlist or promise exactly-once remote effects. If reconciliation cannot establish the result, the UI exposes the uncertainty and an explicit recovery path.
+
+**Given** a provider requires separate create and populate operations or batched track additions,
+**When** an intermediate step fails,
+**Then** HifiMule retains the known playlist identity and confirmed progress with an accurate partial result,
+**And** resumption avoids duplicating confirmed entries. If that cannot be established safely, it remains unresolved instead of guessing. No remote playlist is deleted as an implicit rollback.
+
+**Given** the application exits or loses network connectivity during export,
+**When** it restarts or reconnects,
+**Then** it recovers the persisted operation state tied to the same immutable snapshot,
+**And** retry backoff, batch sizes and in-memory work are bounded without blocking audio callbacks or playback controls.
+
+**Given** referenced source tracks disappear or provider limits prevent an exact export,
+**When** export encounters the limitation,
+**Then** it exposes the affected part and any partial contents accurately,
+**And** it does not silently substitute another server copy, drop entries or reorder the result while calling it complete.
+
+**Given** Windows, macOS and Linux builds and enabled playlist providers,
+**When** tests cover mixed sources, repeats, naming collisions, unsupported writes, partial population, ambiguous responses and restart,
+**Then** request fixtures verify order/routing and configured-server checks verify actual saved contents and safe retry behavior,
+**And** logs and UI never expose credentials or authenticated stream URLs.
+
+**Implementation gate:** Before coding, verify provider create/populate limits, duplicate handling, naming policy, operation identity, batch checkpoints and ambiguity reconciliation. Define user-visible partial-result recovery. Reuse immutable snapshot storage and existing playlist provider methods; split provider enablement before execution if needed to retain single-session story scope.
+
+
+### Story 15.25: Add a listening snapshot to a connected device basket or replace it
+
+As a HifiMule user,
+I want to add my saved listening selection to a connected device basket or replace that basket,
+So that I can take the music with me using HifiMule's existing sync workflow.
+
+**Requirements:** FR80; applicable operation integrity portion of FR81; P-NFR4–6; physical-target portion of P-AR11; P-UX-DR9 and P-UX-DR14–15.
+
+**Dependencies:** Stories 15.1–15.24 and existing device-basket behavior. Uses the immutable snapshot from Story 15.23; it does not start sync or write music to the device.
+
+**Acceptance Criteria:**
+
+**Given** a saved snapshot and an eligible connected physical device,
+**When** basket export actions are displayed,
+**Then** the user can explicitly choose Add to basket or Replace basket with the intended device clearly identified,
+**And** Playback itself is not offered as a physical target. With no connected eligible device, both actions are unavailable with an explanation.
+
+**Given** the user chooses Add to basket,
+**When** the operation is accepted,
+**Then** the snapshot's compatible entries are incorporated using the documented existing basket identity/order rules while retaining existing basket content,
+**And** any representational limits, including duplicate handling, are disclosed before claiming a faithful transfer. The immutable snapshot remains unchanged.
+
+**Given** the user chooses Replace basket,
+**When** the operation is accepted,
+**Then** the intended basket selection is replaced with the validated snapshot selection as one consistent mutation,
+**And** it does not append accidentally, affect other device baskets or delete files from the connected device. The action label and target make the replacement scope explicit.
+
+**Given** a snapshot spans sources or contains entries the target basket cannot represent,
+**When** export is validated,
+**Then** the existing basket/provider constraints are checked before any replacement,
+**And** unsupported content is explained without silent source substitution or partial replacement presented as complete. This story does not bypass server-specific basket locks.
+
+**Given** the target disconnects, changes identity, becomes unconfigured or the UI selects another device while export is pending,
+**When** the mutation is about to commit,
+**Then** the daemon revalidates the originally selected physical target and applicable basket state,
+**And** it rejects an invalid target rather than writing to the newly selected device or treating a stale mount path as proof of identity.
+
+**Given** another action modifies the target basket during export preparation,
+**When** the snapshot mutation is submitted,
+**Then** concurrency validation prevents Replace from overwriting an unseen newer selection,
+**And** the user receives a recoverable conflict rather than an automatically replayed destructive mutation. Add follows the documented safe concurrency policy.
+
+**Given** basket mutation fails or the daemon exits before its result is acknowledged,
+**When** the operation is recovered or retried,
+**Then** its result can be determined from the existing basket persistence/operation contract,
+**And** an Add retry does not blindly duplicate entries or leave a partially applied replacement. Failure preserves the last valid basket state.
+
+**Given** export succeeds,
+**When** the basket and listening session are inspected,
+**Then** the intended basket reflects the action and provides visible completion feedback,
+**And** playback and the saved snapshot remain unchanged. Sync starts only through the user's separate existing sync action; later Radio changes do not update the basket automatically.
+
+**Given** Windows, macOS and Linux builds,
+**When** tests cover Add, Replace, no device, blank device, incompatible sources, target switch/disconnection, concurrent edits and retry after interruption,
+**Then** they verify the intended basket contents and preservation of all other baskets and device files,
+**And** actions remain keyboard-accessible with clear target and error announcements.
+
+**Implementation gate:** Before coding, inspect existing basket representation, source locks, duplicates/order semantics and mutation persistence. Define target identity/revalidation and concurrency policy without changing approved device safety guarantees. Resolve unsupported snapshot content explicitly; do not quietly expand this story into cross-server basket redesign or automatic synchronization.
+
+
+### Story 15.26: Adapt playback quality at track boundaries using buffer health
+
+As a HifiMule user,
+I want playback to choose the best quality my connection can sustain,
+So that I can keep listening with minimal interruption without manually tuning streaming settings.
+
+**Requirements:** FR71; boundary adaptation and insufficient-bandwidth portions of FR72; P-NFR2 and P-NFR4–6; quality portions of P-AR9 and P-AR12; quality-status portion of P-UX-DR7.
+
+**Dependencies:** Stories 15.1–15.25. Extends initial source ranking and bounded buffering. Mid-track representation replacement remains disabled unless separately validated; seeking support alone does not enable it. Sync backoff and sustained release validation follow separately.
+
+**Acceptance Criteria:**
+
+**Given** a source exposes verified playable quality alternatives,
+**When** a track is prepared,
+**Then** HifiMule selects the highest sustainable available representation using the documented quality ranking and measured refill/buffer evidence,
+**And** portable-device transcoding preferences do not influence that choice. Unknown connection capacity follows the documented startup policy with bounded buffering rather than an invented throughput estimate.
+
+**Given** buffer depletion and refill measurements show that current quality is unsustainable,
+**When** the next track's representation is selected,
+**Then** the daemon chooses a lower supported sustainable alternative when available,
+**And** it uses hysteresis and a defined observation window to avoid oscillating on isolated samples. Reduced quality has a discreet accessible explanation.
+
+**Given** sustained connection recovery provides enough evidence for a higher quality,
+**When** a later track is prepared,
+**Then** HifiMule upgrades conservatively under the documented recovery threshold,
+**And** one brief fast transfer does not force an immediate upgrade that repeatedly empties the buffer.
+
+**Given** an active track is playing at one representation,
+**When** the estimator changes its recommendation,
+**Then** this story does not replace that representation mid-track,
+**And** the next boundary applies the new choice without corrupting position, padding, gain or occurrence identity. Existing prepared album continuity remains required when both tracks are ready.
+
+**Given** the next track was already prefetched at a different quality,
+**When** a revised choice is considered,
+**Then** the implementation follows a documented preparation cutoff and bounded replacement policy,
+**And** it does not discard ready audio so late that it unnecessarily creates a gap or allow obsolete preparation to win a generation race.
+
+**Given** a provider has no lower representation or none can be sustained,
+**When** the buffer cannot support continued playback,
+**Then** HifiMule exposes buffering/retry and the actual limitation,
+**And** it neither promises uninterrupted playback nor silently skips an album track. Radio retains its established unavailable-source policy, with technical failures separate from user rejection.
+
+**Given** compressed downloads are bursty, cached, served by different sources or require server transcoding startup,
+**When** the estimator processes measurements,
+**Then** it separates relevant source/representation observations and accounts for startup/cached samples under the documented policy,
+**And** it does not confuse decoded PCM depth, device-sync write bandwidth or a fast cache hit with sustained server delivery capacity.
+
+**Given** adaptation runs during seek, preview, output loss, Stop or session replacement,
+**When** measurement and preparation work completes,
+**Then** the existing generation and paused-state rules still govern output,
+**And** adaptation cannot restart stopped audio, reroute outputs or submit an extra completed-listen report for the same occurrence.
+
+**Given** controlled network profiles representing stable fast service, sustained slowdown, recovery, jitter and outage,
+**When** deterministic and provider integration tests run on Windows, macOS and Linux,
+**Then** results record selected representations, buffer bounds, switching frequency, buffering events and actual recovery behavior against defined thresholds,
+**And** improved reliability is demonstrated rather than inferred from a quality label alone. Memory stays within separately defined compressed/PCM limits.
+
+**Implementation gate:** Before coding, verify provider alternatives and quality ordering; define startup assumptions, estimator scope, observation windows, depletion/recovery thresholds, preparation cutoff and maximum buffer budgets from measurements. Keep authenticated URLs daemon-side. Do not claim codec bitrate alone establishes comparative quality, and do not enable mid-track replacement without a separate provider/format validation decision.
+
+
+### Story 15.27: Protect playback during sync without unnecessary throttling
+
+As a HifiMule user,
+I want music playback and device synchronization to run together,
+So that preparing a device does not interrupt listening or slow down unnecessarily when resources are sufficient.
+
+**Requirements:** FR75; P-NFR1–4; coexistence portions of P-AR6 and P-AR14.
+
+**Dependencies:** Stories 15.1–15.26 and the existing sync scheduler/cancellation boundaries. Reuses playback buffer measurements. This story adjusts sync demand conditionally; it does not replace adaptive streaming or change device write-integrity rules.
+
+**Acceptance Criteria:**
+
+**Given** playback buffers are healthy while a device sync runs,
+**When** the sync scheduler admits work,
+**Then** normal sync throughput/concurrency is retained,
+**And** starting playback alone does not impose a permanent bandwidth cap, pause sync or classify slow device writes as a server-streaming bottleneck.
+
+**Given** sustained measured contention puts playback delivery at risk,
+**When** the documented protection threshold is reached,
+**Then** the scheduler reduces applicable sync demand at safe scheduling boundaries,
+**And** the control does not acquire sync locks from the audio callback or interrupt an atomic device metadata write.
+
+**Given** protection is active and playback health recovers,
+**When** the recovery observation window is satisfied,
+**Then** sync demand returns toward its normal level under the documented recovery policy,
+**And** hysteresis prevents repeated throttle/release oscillation. Pausing or ending playback cannot leave a stale restriction indefinitely.
+
+**Given** the limiting resource is slow device write bandwidth and playback remains healthy,
+**When** coexistence is monitored,
+**Then** no playback-driven backoff is applied solely because sync progress is slow,
+**And** diagnostics distinguish source delivery, decoding/output health and physical-device throughput without claiming causality from one metric alone.
+
+**Given** the source connection is too slow even without sync contention,
+**When** backoff cannot improve delivery,
+**Then** playback retains its quality-adaptation/buffering behavior and the protection policy avoids indefinite unjustified suppression of sync,
+**And** it does not promise uninterrupted audio or silently cancel synchronization.
+
+**Given** several sync jobs or sources are active,
+**When** protection is required,
+**Then** the documented policy targets relevant resource demand and preserves fair progress where possible,
+**And** unrelated jobs are not blindly stopped. Existing cancellation, retry and managed-file integrity contracts continue to apply.
+
+**Given** the user seeks, changes output, stops playback or quits while backoff is active,
+**When** those transitions complete,
+**Then** stale protection signals cannot revive a replaced session or leave the scheduler permanently restricted,
+**And** Quit still follows safe audio checkpoint and sync cancellation behavior.
+
+**Given** reproducible scenarios with a slow device, constrained server delivery, CPU contention and sufficient resources,
+**When** real playback and real sync are measured together on Windows, macOS and Linux,
+**Then** evidence records underruns/buffering, sync throughput, protection decisions and recovery against playback-only and sync-only baselines,
+**And** a healthy device-limited scenario shows no unnecessary playback-triggered throttling. Claims of improved continuity require output evidence, not just an enabled protection flag.
+
+**Implementation gate:** Before coding, identify the existing safe scheduler controls and define risk/recovery thresholds, resource attribution, fairness, minimum progress and stale-signal expiry from measured scenarios. Set acceptable throughput impact for healthy coexistence before acceptance. Do not introduce blocking coordination into the audio callback or weaken device integrity to meet a throughput target.
+
+
+### Story 15.28: Keep long listening sessions bounded and recoverable
+
+As a HifiMule user,
+I want long album and Radio sessions to remain responsive and recoverable,
+So that leaving music playing through a workday does not progressively consume memory or lose my session after interruptions.
+
+**Requirements:** Sustained evidence for P-NFR1–4; FR60 and FR65–75 regression; resource portions of P-AR12 and P-AR14.
+
+**Dependencies:** Stories 15.1–15.27. Validates integrated runtime behavior and fixes bounded resource/recovery defects found within this scope. Packaged distribution and the complete shipping-platform matrix are covered separately. Larger unrelated defects become explicitly linked blockers rather than silently expanding this story.
+
+**Acceptance Criteria:**
+
+**Given** documented active-playback resource budgets and a representative long-session workload,
+**When** album and Radio playback run for the defined soak duration,
+**Then** compressed prefetch, decoded PCM, upcoming automatic entries, candidate caches and in-memory history stay within their respective bounds,
+**And** measurements distinguish idle from active memory rather than applying the existing idle target to an active decoder.
+
+**Given** Radio cycles, skips, removals and manual queue edits accumulate over a long session,
+**When** history and logical-session exclusions grow,
+**Then** the full required exclusion behavior persists through bounded/paged access,
+**And** neither the daemon nor reopened UI loads the whole history into memory. Storage growth and cleanup policy remain explicit without erasing an active logical session's exclusions.
+
+**Given** repeated seeks, previews, track replacements and output changes occur during the soak,
+**When** obsolete work is cancelled,
+**Then** decoder tasks, output streams, file handles and pending requests are released under documented limits,
+**And** no obsolete audio or state appears after the accepted session generation changes.
+
+**Given** source outages, slow responses and reporting/export failures are introduced,
+**When** playback and operation recovery continue,
+**Then** retry work and in-memory operation queues remain bounded while durable unresolved state is retained according to policy,
+**And** restoration or reconciliation does not blindly duplicate remote writes or turn technical failures into user rejections.
+
+**Given** the system sleeps/wakes or the output disconnects during a long session,
+**When** HifiMule resumes handling events,
+**Then** it reconciles actual output/source availability and preserves recoverable session state,
+**And** output loss never causes automatic rerouting or an unrequested restart of paused audio. Sleep-specific transport behavior is defined and verified on each tested OS.
+
+**Given** a running session experiences orderly Quit, an abrupt daemon exit or interrupted checkpointing,
+**When** HifiMule restarts,
+**Then** it restores valid committed state paused, retaining Radio identity/exclusions and the applicable preview/main recovery behavior,
+**And** corrupt or unsupported state remains recoverable and visibly diagnosed rather than silently overwritten.
+
+**Given** prepared album playback runs with a representative real-device sync workload,
+**When** sustained continuity and sync protection are measured,
+**Then** the evidence includes physical-output continuity, underruns/buffering, sync throughput and protection recovery,
+**And** callback counters alone are not used to certify audible continuity.
+
+**Given** Windows, macOS and Linux test environments,
+**When** the same documented workload and fault schedule run,
+**Then** results record duration, hardware/VM status, build/runtime versions, resource time series and recovery outcomes against budgets fixed before acceptance,
+**And** a failed budget or untested scenario remains an explicit blocker or limitation rather than being hidden by a short successful run.
+
+**Implementation gate:** Before execution, set soak duration, sampling interval, memory/task/handle budgets, workload sizes, fault schedule, acceptable growth and evidence method using earlier measurements. Investigate reproducible growth or recovery failures, rerun affected scenarios after fixes, and retain raw evidence locations. Do not invent passing thresholds after seeing the results.
+
+
+### Story 15.29: Ship verified playback builds for Windows, macOS and Linux
+
+As a HifiMule user,
+I want the installed application to provide the tested playback behavior on my supported platform,
+So that listening works without a development environment or manually installed decoder libraries.
+
+**Requirements:** P-NFR3 and integrated P-NFR1–6 regression; P-AR5 and P-AR14; release evidence for FR55–81 and applicable P-UX-DR1–15.
+
+**Dependencies:** Stories 15.1–15.28. Completes packaged-build integration and release verification; earlier stories remain responsible for their own cross-platform checks. Does not itself publish a release or certify untested architectures.
+
+**Acceptance Criteria:**
+
+**Given** the project's explicitly enumerated shipping OS/architecture matrix,
+**When** release artifacts are built,
+**Then** each artifact contains or resolves the controlled playback runtime through the documented distribution mechanism,
+**And** exact decoder/audio dependency versions, licensing obligations and runtime loading paths are recorded. A development-machine library must not silently substitute for the shipped runtime.
+
+**Given** an installed artifact on a clean supported environment,
+**When** the user starts HifiMule and plays supported source formats,
+**Then** streaming, decoding and shared output work without development tools or manually locating native libraries,
+**And** packaging/signing/permission behavior follows the existing platform distribution model without requiring elevated privileges for ordinary playback.
+
+**Given** an existing installation with device and server configuration,
+**When** it is upgraded to the playback build,
+**Then** supported configuration/session migrations preserve existing sync settings and credentials,
+**And** an interrupted or failed migration produces recoverable state instead of erasing device configuration. Unsupported downgrade behavior is documented without claiming automatic rollback safety.
+
+**Given** each installed platform build,
+**When** UI close/reopen, simultaneous launches, native transport, output loss, sleep/wake, paused restoration and safe Quit during sync are exercised,
+**Then** results verify the production daemon lifetime and selected-output behavior,
+**And** native API delivery and physical media-key routing have separate evidence entries.
+
+**Given** configured supported providers and representative library metadata,
+**When** the integrated manual album, preview, Radio, feedback, snapshot, playlist and basket workflows run,
+**Then** their results match the approved capability-dependent behavior and source routing,
+**And** unsupported provider features remain accurately unavailable rather than appearing successful.
+
+**Given** prepared albums and representative playback-plus-sync workloads,
+**When** release evidence is assembled,
+**Then** deterministic continuity, physical-output checks, adaptive-quality results and sustained resource measurements from compatible builds are linked with versions and environments,
+**And** changed packaged dependencies trigger the affected checks rather than inheriting incompatible probe evidence.
+
+**Given** the UI is used across supported themes, widths, text scaling and keyboard navigation,
+**When** the complete Playback experience is reviewed,
+**Then** the floating bar, queue, preview, error states and export results retain accessible names, visible focus, sufficient contrast and reachable bottom-row actions,
+**And** background updates do not steal focus or overwhelm assistive technology with time ticks.
+
+**Given** a platform, architecture or hardware interaction has not been tested or has a failing check,
+**When** the release decision is recorded,
+**Then** that entry remains an explicit blocker or accurately scoped unsupported capability,
+**And** ARM64 VM results do not certify x64, API calls do not certify physical keys, and callback counters do not certify physical gaplessness. Existing Linux teardown warnings must be resolved or assessed with reproducible evidence before acceptance.
+
+**Given** the verification matrix is complete,
+**When** the story is reviewed for acceptance,
+**Then** each shipping entry links its artifact, loaded runtime versions, test outcomes and material limitations,
+**And** no failed required check is hidden by a global pass. Actual release publication remains outside this story's validation action.
+
+**Implementation gate:** Before execution, enumerate shipping platforms/architectures and provider capability expectations from the actual release configuration, define clean-install/upgrade environments and evidence ownership, and settle controlled-runtime licensing/signing requirements. Close applicable architecture gates with recorded evidence. Mid-track quality switching remains disabled unless a separate provider/format validation supports it; boundary-only adaptation is the initial supported scope.
+
+
+## Playback Story Coverage and Readiness
+
+All 29 stories have user approval. See [playback-epic-validation.md](playback-epic-validation.md) for the FR55–81, P-NFR1–6, P-AR1–14 and P-UX-DR1–15 coverage map, dependency checks and implementation readiness limits. Coverage is complete at planning level; unresolved contract gates and provider-specific sizing prevent an unrestricted ready-for-development declaration.
