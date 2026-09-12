@@ -182,12 +182,12 @@ development_status:
   14-3-per-server-producer-fairness-and-priority-buckets: done  # review complete: 6 patches applied; 627 daemon tests pass
 
   # Epic 15 — Desktop Playback (epics.md; 29 approved planning stories)
-  # Stories 15.1–15.3 prepared; remaining dedicated story files and contract gates are pending.
+  # Stories 15.1–15.4 prepared; remaining dedicated story files and contract gates are pending.
   epic-15: in-progress
   15-1-close-and-reopen-the-ui-without-restarting-the-daemon: done
   15-2-quit-safely-while-a-device-sync-is-running: done
   15-3-preserve-and-restore-a-paused-listening-session: done
-  15-4-play-a-selected-library-track-through-the-daemon: backlog
+  15-4-play-a-selected-library-track-through-the-daemon: ready-for-dev
   15-5-choose-an-audio-output-and-recover-safely-from-disconnection: backlog
   15-6-control-playback-through-the-operating-system-with-the-window-closed: backlog
   15-7-seek-within-a-track-and-see-the-actual-playback-position: backlog
