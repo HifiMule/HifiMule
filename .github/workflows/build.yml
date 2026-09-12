@@ -41,7 +41,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libappindicator3-dev libmtp-dev pkgconf
+          sudo apt-get install -y libgtk-3-dev libappindicator3-dev libmtp-dev libxdo-dev pkgconf
 
       - name: Install macOS daemon dependencies
         if: runner.os == 'macOS'

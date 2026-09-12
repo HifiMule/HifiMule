@@ -224,6 +224,7 @@ GPT-6 (Codex)
 - 2026-09-12: Validation: playback tests 8/8; full daemon suite 663/663; lifecycle 13/13; Rust UI 6/6; Node behavior 9/9; `cargo fmt --check` passed; daemon clippy passed with 13 pre-existing warnings; UI production build passed with existing Vite chunk warnings.
 - 2026-09-12: macOS ARM64 environment recorded (`Darwin 25.6.0`, `aarch64-apple-darwin`, baseline revision above). Windows, Linux and macOS x64 command-driven production-path runs were not available in this workspace and are not claimed.
 - 2026-09-12: Added a non-release GitHub Actions `Build` matrix for Windows x64, Linux x64, macOS x64 and macOS ARM64. It runs the isolated playback restoration evidence command on pull requests and pushes to `main`, then uploads a sanitized per-platform JSON artifact even on failure. Workflow YAML and the evidence command were validated locally; remote runner results remain unclaimed until the workflow executes.
+- 2026-09-12: First Build matrix run passed Windows x64, macOS x64 and macOS ARM64. Linux x64 failed before tests at link time because `libxdo-dev` was absent (`rust-lld: unable to find library -lxdo`); added the missing CI build dependency. The failed Linux artifact correctly recorded exit code 101 and is not claimed as platform evidence pending rerun.
 
 ### Implementation Plan
 
@@ -262,3 +263,4 @@ GPT-6 (Codex)
 - 2026-09-12: Created story 15.3 with production session persistence contract, shutdown integration and acceptance evidence requirements.
 - 2026-09-12: Added initial production playback-session contract, transactional persistence/restoration, authenticated RPC surface, checkpoint-aware shutdown integration, localized diagnostics and deterministic test coverage; story remains in progress pending remaining contract and platform gates.
 - 2026-09-12: Added the normal-build GitHub Actions playback evidence matrix and sanitized evidence runner for Windows, Linux and both macOS architectures; no release trigger added.
+- 2026-09-12: Fixed Linux normal-build provisioning by installing `libxdo-dev` after the first evidence run exposed a missing `-lxdo` linker dependency.
