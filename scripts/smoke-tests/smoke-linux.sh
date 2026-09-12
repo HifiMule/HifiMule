@@ -15,6 +15,7 @@ set -euo pipefail
 
 PLATFORM="linux"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/smoke-common.sh"
 
 XVFB_PID=""
 APP_PID=""
@@ -99,7 +100,8 @@ echo "  DISPLAY: $DISPLAY"
 
 # The installed binary name comes from productName in tauri.conf.json (lowercase on Linux)
 APP_BIN="hifimule-ui"
-if ! command -v "$APP_BIN" &>/dev/null; then
+if ! command -v new_ui_smoke_id
+"$APP_BIN" --smoke-id "$UI_SMOKE_ID" &>/dev/null; then
     # Fallback search in common install locations
     APP_BIN=$(find /usr/bin /usr/local/bin /opt -name "hifimule-ui" 2>/dev/null | head -1 || true)
     if [[ -z "$APP_BIN" ]]; then
@@ -108,7 +110,8 @@ if ! command -v "$APP_BIN" &>/dev/null; then
     fi
 fi
 echo "  Binary: $APP_BIN"
-"$APP_BIN" &
+new_ui_smoke_id
+"$APP_BIN" --smoke-id "$UI_SMOKE_ID" &
 APP_PID=$!
 sleep 1
 if ! kill -0 "$APP_PID" 2>/dev/null; then
@@ -124,6 +127,7 @@ if ! poll_health 30; then
     kill "$APP_PID" "$XVFB_PID" 2>/dev/null || true
     fail "daemon-health" "Daemon did not respond with status=ok after 30s"
 fi
+poll_ui_ready 30 || fail "ui-hydration" "Installed UI failed to render authoritative state"
 echo "  Daemon responded OK"
 
 INITIAL_IDENTITY=$(lifecycle_identity)
@@ -131,19 +135,23 @@ DAEMON_PID=${INITIAL_IDENTITY%%$'\t'*}
 assert_unauthenticated_access_rejected || fail "local-access" "Unauthenticated health request was not rejected"
 
 echo "==> STEP 3a: Concurrent launch and UI close/reopen ..."
-"$APP_BIN" &
+new_ui_smoke_id
+"$APP_BIN" --smoke-id "$UI_SMOKE_ID" &
 SECOND_UI_PID=$!
 sleep 1
 poll_health 15 || fail "concurrent-launch" "Concurrent UI lost the daemon"
+poll_ui_ready 30 || fail "ui-hydration" "Installed UI failed to confirm attachment"
 [[ "$(lifecycle_identity)" == "$INITIAL_IDENTITY" ]] || fail "concurrent-launch" "Daemon identity changed"
 kill "$SECOND_UI_PID" 2>/dev/null || true
 kill "$APP_PID" 2>/dev/null || true
 APP_PID=""
 sleep 1
 kill -0 "$DAEMON_PID" 2>/dev/null || fail "close-ui" "Closing the UI stopped the daemon"
-"$APP_BIN" &
+new_ui_smoke_id
+"$APP_BIN" --smoke-id "$UI_SMOKE_ID" &
 APP_PID=$!
 poll_health 15 || fail "reopen-ui" "Reopened UI did not attach"
+poll_ui_ready 30 || fail "ui-hydration" "Installed UI failed to confirm attachment"
 [[ "$(lifecycle_identity)" == "$INITIAL_IDENTITY" ]] || fail "reopen-ui" "Reopen created a competing daemon"
 echo "  Concurrent launch and close/reopen preserved PID and instance"
 
@@ -156,9 +164,11 @@ done
 kill -0 "$DAEMON_PID" 2>/dev/null && fail "crash-recovery" "Test-owned daemon did not terminate"
 kill "$APP_PID" 2>/dev/null || true
 APP_PID=""
-"$APP_BIN" &
+new_ui_smoke_id
+"$APP_BIN" --smoke-id "$UI_SMOKE_ID" &
 APP_PID=$!
 poll_health 15 || fail "crash-recovery" "Replacement owner did not become ready"
+poll_ui_ready 30 || fail "ui-hydration" "Installed UI failed to confirm attachment"
 RECOVERED_IDENTITY=$(lifecycle_identity)
 [[ "$RECOVERED_IDENTITY" != "$INITIAL_IDENTITY" ]] || fail "crash-recovery" "Replacement reused the stale PID and instance identity"
 DAEMON_PID=${RECOVERED_IDENTITY%%$'\t'*}

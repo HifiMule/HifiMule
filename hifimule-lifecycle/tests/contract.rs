@@ -147,3 +147,112 @@ fn unsafe_runtime_permissions_are_rejected() {
         LifecycleErrorCode::LocalAccessDenied
     );
 }
+
+#[test]
+fn contended_ticket_lock_respects_deadline() {
+    use hifimule_lifecycle::{lock_launch_ticket, lock_launch_ticket_until};
+    use std::time::{Duration, Instant};
+    let temp = tempfile::tempdir().unwrap();
+    let held = lock_launch_ticket(temp.path()).unwrap();
+    let started = Instant::now();
+    let error = lock_launch_ticket_until(temp.path(), started + Duration::from_millis(60))
+        .err()
+        .unwrap();
+    assert_eq!(error.code(), LifecycleErrorCode::StartupTimeout);
+    assert!(started.elapsed() < Duration::from_secs(1));
+    drop(held);
+    assert!(
+        lock_launch_ticket_until(temp.path(), Instant::now() + Duration::from_millis(60)).is_ok()
+    );
+}
+
+#[test]
+fn startup_failure_is_sanitized_and_attempt_scoped() {
+    use hifimule_lifecycle::{clear_launch_failure, publish_launch_failure, read_launch_failure};
+    let temp = tempfile::tempdir().unwrap();
+    let id = create_launch_ticket(temp.path(), 0).unwrap();
+    let other = create_launch_ticket(temp.path(), 0).unwrap();
+    publish_launch_failure(temp.path(), &id, LifecycleErrorCode::LegacyDaemonRunning).unwrap();
+    assert_eq!(
+        read_launch_failure(temp.path(), &id).unwrap(),
+        Some(LifecycleErrorCode::LegacyDaemonRunning)
+    );
+    assert_eq!(read_launch_failure(temp.path(), &other).unwrap(), None);
+    let saved =
+        std::fs::read_to_string(temp.path().join(format!("runtime/failure-{id}.json"))).unwrap();
+    assert_eq!(saved, "\"LEGACY_DAEMON_RUNNING\"");
+    clear_launch_failure(temp.path(), &id);
+    assert_eq!(read_launch_failure(temp.path(), &id).unwrap(), None);
+}
+
+#[test]
+fn health_reports_access_protocol_identity_and_stopping_distinctly() {
+    use hifimule_lifecycle::{LifecycleState, check_owner_health};
+    use std::io::{Read, Write};
+    use std::time::Duration;
+    let temp = tempfile::tempdir().unwrap();
+    let owner = OwnerGuard::acquire(temp.path()).unwrap();
+    for (http_status, body, expected) in [
+        (401, "{}", Err(LifecycleErrorCode::LocalAccessDenied)),
+        (
+            200,
+            r#"{"result":{"data":{"protocolVersion":2,"instanceId":"owner","status":"ok"}}}"#,
+            Err(LifecycleErrorCode::ProtocolMismatch),
+        ),
+        (
+            200,
+            r#"{"result":{"data":{"protocolVersion":1,"instanceId":"other","status":"ok"}}}"#,
+            Err(LifecycleErrorCode::OwnerChanged),
+        ),
+        (
+            200,
+            r#"{"result":{"data":{"protocolVersion":1,"instanceId":"owner","status":"stopping"}}}"#,
+            Ok(LifecycleState::Stopping),
+        ),
+    ] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut descriptor = owner
+            .prepare_descriptor(listener.local_addr().unwrap().port())
+            .unwrap();
+        descriptor.instance_id = "owner".into();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0; 4096];
+            let length = stream.read(&mut request).unwrap();
+            assert!(
+                String::from_utf8_lossy(&request[..length])
+                    .to_lowercase()
+                    .contains("authorization: bearer ")
+            );
+            write!(stream, "HTTP/1.1 {http_status} Result\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        assert_eq!(
+            check_owner_health(&descriptor, Duration::from_secs(2)).map_err(|error| error.code()),
+            expected
+        );
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn ui_evidence_contains_hydration_identity_but_no_credentials() {
+    let temp = tempfile::tempdir().unwrap();
+    let owner = OwnerGuard::acquire(temp.path()).unwrap();
+    let descriptor = owner.prepare_descriptor(31234).unwrap();
+    let marker = uuid::Uuid::new_v4().to_string();
+    hifimule_lifecycle::publish_ui_ready(temp.path(), &marker, &descriptor).unwrap();
+    let bytes =
+        std::fs::read_to_string(temp.path().join(format!("runtime/ui-ready-{marker}.json")))
+            .unwrap();
+    assert!(!bytes.contains(&descriptor.token));
+    let evidence: serde_json::Value = serde_json::from_str(&bytes).unwrap();
+    assert_eq!(evidence["state"], "hydrated");
+    assert_eq!(evidence["instanceId"], descriptor.instance_id);
+    assert_eq!(evidence["uiPid"], std::process::id());
+    assert!(
+        hifimule_lifecycle::publish_ui_ready(temp.path(), "../../outside", &descriptor).is_err()
+    );
+}

@@ -184,7 +184,7 @@ pub fn start_daemon_core(
             }
         };
 
-        rt.block_on(async {
+        let rpc_thread = rt.block_on(async {
             daemon_log!("HifiMule Daemon tokio runtime started");
 
             // Initialize database
@@ -194,7 +194,7 @@ pub fn start_daemon_core(
                     daemon_log!("Failed to get app data directory: {}", e);
                     let _ = ready_tx.send(Err(format!("Cannot resolve app data: {e}")));
                     let _ = state_tx.send(DaemonState::Error);
-                    return;
+                    return None;
                 }
             };
             let db = match db::Database::new(db_path) {
@@ -203,7 +203,7 @@ pub fn start_daemon_core(
                     daemon_log!("Failed to initialize database: {}", e);
                     let _ = ready_tx.send(Err(format!("Cannot initialize database: {e}")));
                     let _ = state_tx.send(DaemonState::Error);
-                    return;
+                    return None;
                 }
             };
 
@@ -220,19 +220,19 @@ pub fn start_daemon_core(
             if let Err(e) = state_tx.send(DaemonState::Idle) {
                 daemon_log!("Failed to send initial state: {}", e);
                 let _ = ready_tx.send(Err(format!("Cannot initialize daemon state: {e}")));
-                return;
+                return None;
             }
 
             // Start Device Observer
             let (device_tx, mut device_rx) = tokio::sync::mpsc::channel(10);
             let device_tx_msc = device_tx.clone();
-            tokio::spawn(async move {
+            let msc_observer = tokio::spawn(async move {
                 device::run_observer(device_tx_msc).await;
             });
 
             // Start MTP Observer
             let device_tx_mtp = device_tx.clone();
-            tokio::spawn(async move {
+            let mtp_observer = tokio::spawn(async move {
                 device::run_mtp_observer(device_tx_mtp).await;
             });
 
@@ -256,31 +256,24 @@ pub fn start_daemon_core(
             let som_rpc = Arc::clone(&sync_operation_manager);
             let rpc_shutdown = Arc::new(AtomicBool::new(false));
             let rpc_shutdown_server = Arc::clone(&rpc_shutdown);
-            let rpc_task = tokio::spawn(async move {
-                if let Err(error) = rpc::run_server(
-                    rpc::RpcServerConfig {
-                        listener,
-                        descriptor,
-                        ready_tx,
-                        shutdown: rpc_shutdown_server,
-                    },
-                    db_clone,
-                    dm_clone,
-                    scrobbler_result_rpc,
-                    state_tx_rpc,
-                    som_rpc,
-                )
-                .await
-                {
-                    daemon_log!("RPC server stopped with error: {}", error);
-                }
+            // Keep authenticated health on a separate runtime until the device/core
+            // runtime (including blocking MTP calls) has actually shut down.
+            let rpc_thread = thread::spawn(move || {
+                let rpc_runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                    Ok(runtime) => runtime,
+                    Err(error) => { let _ = ready_tx.send(Err(error.to_string())); return; }
+                };
+                if let Err(error) = rpc_runtime.block_on(rpc::run_server(
+                    rpc::RpcServerConfig { listener, descriptor, ready_tx, shutdown: rpc_shutdown_server },
+                    db_clone, dm_clone, scrobbler_result_rpc, state_tx_rpc, som_rpc,
+                )) { daemon_log!("RPC server stopped with error: {}", error); }
             });
 
             // Handle Device Events
             let state_tx_clone = state_tx.clone();
             let jellyfin_client = Arc::new(api::JellyfinClient::new());
             let som_events = Arc::clone(&sync_operation_manager);
-            tokio::spawn(async move {
+            let device_events = tokio::spawn(async move {
                 while let Some(event) = device_rx.recv().await {
                     let Some(_event_admission) = som_events.try_admit_mutation() else {
                         daemon_log!("Ignoring device mutation while daemon shutdown is committed");
@@ -431,9 +424,13 @@ pub fn start_daemon_core(
             }
 
             daemon_log!("HifiMule Daemon shutting down gracefully");
-            rpc_shutdown.store(true, Ordering::Release);
-            let _ = tokio::time::timeout(Duration::from_secs(5), rpc_task).await;
+            msc_observer.abort();
+            mtp_observer.abort();
+            device_events.abort();
+            let _ = tokio::join!(msc_observer, mtp_observer, device_events);
+            Some((rpc_shutdown, rpc_thread))
         });
+        finish_runtime_shutdown(rt, rpc_thread);
         let _ = completed_tx.send(());
     });
 
@@ -446,32 +443,58 @@ pub fn start_daemon_core(
     })
 }
 
+fn finish_runtime_shutdown(
+    runtime: tokio::runtime::Runtime,
+    rpc_thread: Option<(Arc<AtomicBool>, thread::JoinHandle<()>)>,
+) {
+    // Runtime Drop joins its blocking pool. Health stays available throughout.
+    drop(runtime);
+    if let Some((rpc_shutdown, rpc_thread)) = rpc_thread {
+        rpc_shutdown.store(true, Ordering::Release);
+        if rpc_thread.join().is_err() {
+            daemon_log!("RPC runtime panicked during shutdown");
+        }
+    }
+}
+
 fn daemon_worker_threads() -> usize {
     std::thread::available_parallelism()
         .map(|cores| cores.get().min(MAX_TOKIO_WORKER_THREADS))
         .unwrap_or(1)
 }
 
-fn reject_legacy_endpoint() -> Result<()> {
-    use std::io::{Read, Write};
+fn reject_legacy_endpoint(deadline: Instant) -> Result<()> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        anyhow::bail!("STARTUP_TIMEOUT: legacy check exceeded deadline");
+    }
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], 19140));
-    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&address, Duration::from_millis(300))
-    else {
-        return Ok(());
-    };
-    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
-    let body = r#"{"jsonrpc":"2.0","method":"daemon.health","params":{},"id":1}"#;
-    let request = format!(
-        "POST / HTTP/1.1\r\nHost: 127.0.0.1:19140\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    stream.write_all(request.as_bytes())?;
-    let mut response = Vec::new();
-    let _ = stream.take(16 * 1024).read_to_end(&mut response);
-    let response = String::from_utf8_lossy(&response);
-    if response.contains("\"status\":\"ok\"") || response.contains("\"status\": \"ok\"") {
+    match std::net::TcpStream::connect_timeout(&address, remaining.min(Duration::from_millis(300)))
+    {
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => return Ok(()),
+        Err(_) => anyhow::bail!("LEGACY_ENDPOINT_OCCUPIED: cannot verify the legacy endpoint"),
+        Ok(stream) => drop(stream),
+    }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        anyhow::bail!("STARTUP_TIMEOUT: legacy check exceeded deadline");
+    }
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(remaining.min(hifimule_lifecycle::HEALTH_TIMEOUT))
+        .build()?;
+    let response = client
+        .post("http://127.0.0.1:19140")
+        .json(&serde_json::json!({"jsonrpc":"2.0","method":"daemon.health","params":{},"id":1}))
+        .send()
+        .and_then(|response| response.json::<serde_json::Value>());
+    if response.is_ok_and(|value| {
+        value
+            .pointer("/result/data/status")
+            .and_then(serde_json::Value::as_str)
+            == Some("ok")
+    }) {
         anyhow::bail!("LEGACY_DAEMON_RUNNING: close the older HifiMule daemon and retry");
     }
     anyhow::bail!("LEGACY_ENDPOINT_OCCUPIED: another process is using 127.0.0.1:19140");
@@ -479,6 +502,7 @@ fn reject_legacy_endpoint() -> Result<()> {
 
 /// Interactive mode: tray icon + event loop on the main thread
 fn run_interactive(args: &[String]) -> Result<()> {
+    let deadline = Instant::now() + hifimule_lifecycle::STARTUP_DEADLINE;
     let app_data = hifimule_lifecycle::resolve_app_data_dir()?;
     let supplied_generation = args
         .windows(2)
@@ -496,43 +520,118 @@ fn run_interactive(args: &[String]) -> Result<()> {
         None => hifimule_lifecycle::read_generation(&app_data)?,
     };
     let attempt_id = match supplied_attempt {
-        Some(attempt_id) => attempt_id,
-        None => hifimule_lifecycle::create_launch_ticket(&app_data, expected_generation)?,
+        Some(ref attempt_id) => attempt_id.clone(),
+        None => hifimule_lifecycle::create_launch_ticket_until(
+            &app_data,
+            expected_generation,
+            deadline,
+        )?,
     };
-    hifimule_lifecycle::validate_launch_ticket(&app_data, &attempt_id, expected_generation)?;
-    let mut lifecycle_owner = match hifimule_lifecycle::OwnerGuard::acquire(&app_data) {
+    let result = run_candidate(&app_data, &attempt_id, expected_generation, deadline);
+    if let Err(error) = &result {
+        let code = error
+            .downcast_ref::<hifimule_lifecycle::LifecycleError>()
+            .map(|error| error.code())
+            .unwrap_or_else(|| {
+                let message = error.to_string();
+                if message.starts_with("LEGACY_DAEMON_RUNNING") {
+                    hifimule_lifecycle::LifecycleErrorCode::LegacyDaemonRunning
+                } else if message.starts_with("LEGACY_ENDPOINT_OCCUPIED") {
+                    hifimule_lifecycle::LifecycleErrorCode::LegacyEndpointOccupied
+                } else if message.starts_with("DAEMON_STOPPED") {
+                    hifimule_lifecycle::LifecycleErrorCode::DaemonStopped
+                } else if message.starts_with("STARTUP_TIMEOUT") {
+                    hifimule_lifecycle::LifecycleErrorCode::StartupTimeout
+                } else {
+                    hifimule_lifecycle::LifecycleErrorCode::SpawnFailed
+                }
+            });
+        let _ = hifimule_lifecycle::publish_launch_failure(&app_data, &attempt_id, code);
+    }
+    // UI consumes its attempt outcome before cancellation; direct launch has no reader.
+    if supplied_attempt.is_none() {
+        let _ = hifimule_lifecycle::cancel_launch_ticket(&app_data, &attempt_id);
+        hifimule_lifecycle::clear_launch_failure(&app_data, &attempt_id);
+    }
+    result
+}
+
+fn run_candidate(
+    app_data: &std::path::Path,
+    attempt_id: &str,
+    expected_generation: u64,
+    deadline: Instant,
+) -> Result<()> {
+    hifimule_lifecycle::validate_launch_ticket(app_data, attempt_id, expected_generation)?;
+    let mut lifecycle_owner = match hifimule_lifecycle::OwnerGuard::acquire(app_data) {
         Ok(owner) => owner,
         Err(error) if error.code() == hifimule_lifecycle::LifecycleErrorCode::OwnerChanged => {
-            let descriptor = hifimule_lifecycle::read_descriptor(&app_data);
-            let _ = hifimule_lifecycle::cancel_launch_ticket(&app_data, &attempt_id);
-            let descriptor = descriptor?;
-            daemon_log!(
-                "Compatible daemon already owns this profile (pid={}, instance={})",
-                descriptor.pid,
-                descriptor.instance_id
-            );
-            return Ok(());
+            // Lock contention never authorizes election again. Confirm the live
+            // owner's identity, or return a bounded failure even with stale metadata.
+            loop {
+                hifimule_lifecycle::validate_launch_ticket(
+                    app_data,
+                    attempt_id,
+                    expected_generation,
+                )?;
+                if hifimule_lifecycle::read_generation(app_data)? != expected_generation {
+                    anyhow::bail!("DAEMON_STOPPED: owner quit while attaching");
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    anyhow::bail!("STARTUP_TIMEOUT: owner did not become ready");
+                }
+                let descriptor = match hifimule_lifecycle::read_descriptor(app_data) {
+                    Ok(descriptor) => Some(descriptor),
+                    Err(error)
+                        if error.code()
+                            == hifimule_lifecycle::LifecycleErrorCode::ProtocolMismatch =>
+                    {
+                        return Err(error.into());
+                    }
+                    Err(_) => None,
+                };
+                if let Some(descriptor) = descriptor {
+                    match hifimule_lifecycle::check_owner_health(&descriptor, remaining) {
+                        Ok(hifimule_lifecycle::LifecycleState::Ready) => {
+                            daemon_log!(
+                                "Attached to daemon (pid={}, instance={})",
+                                descriptor.pid,
+                                descriptor.instance_id
+                            );
+                            let _ = hifimule_lifecycle::cancel_launch_ticket(app_data, attempt_id);
+                            return Ok(());
+                        }
+                        Ok(_) => anyhow::bail!("DAEMON_STOPPED: owner is stopping"),
+                        Err(error) if !error.is_retryable() => {
+                            return Err(error.into());
+                        }
+                        Err(_) => {}
+                    }
+                }
+                thread::sleep(remaining.min(hifimule_lifecycle::POLL_INTERVAL));
+            }
         }
         Err(error) => return Err(error.into()),
     };
     lifecycle_owner.verify_expected_generation(expected_generation)?;
-    hifimule_lifecycle::validate_launch_ticket(&app_data, &attempt_id, expected_generation)?;
-    reject_legacy_endpoint()?;
+    hifimule_lifecycle::validate_launch_ticket(app_data, attempt_id, expected_generation)?;
+    reject_legacy_endpoint(deadline)?;
     let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
     let port = listener.local_addr()?.port();
     let descriptor = lifecycle_owner.prepare_descriptor(port)?;
-    hifimule_lifecycle::validate_launch_ticket(&app_data, &attempt_id, expected_generation)?;
+    hifimule_lifecycle::validate_launch_ticket(app_data, attempt_id, expected_generation)?;
     let core = start_daemon_core(listener, descriptor.clone())?;
     match core
         .ready_rx
-        .recv_timeout(hifimule_lifecycle::STARTUP_DEADLINE)
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
     {
         Ok(Ok(())) => {
-            let launch_fence = hifimule_lifecycle::lock_launch_ticket(&app_data)?;
-            launch_fence.validate(&attempt_id, expected_generation)?;
+            let launch_fence = hifimule_lifecycle::lock_launch_ticket_until(app_data, deadline)?;
+            launch_fence.validate(attempt_id, expected_generation)?;
             lifecycle_owner.publish_descriptor(&descriptor)?;
             drop(launch_fence);
-            hifimule_lifecycle::cancel_launch_ticket(&app_data, &attempt_id)?;
+            hifimule_lifecycle::cancel_launch_ticket(app_data, attempt_id)?;
         }
         Ok(Err(error)) => anyhow::bail!("Daemon startup failed: {error}"),
         Err(_) => {
@@ -544,6 +643,7 @@ fn run_interactive(args: &[String]) -> Result<()> {
     let command_tx = core.command_tx;
     let completed_rx = core.completed_rx;
     let mut lifecycle_owner = Some(lifecycle_owner);
+    let mut quit_reply: Option<mpsc::Receiver<bool>> = None;
     let mut shutdown_pending = false;
     let mut shutdown_started: Option<Instant> = None;
     let mut shutdown_timeout_reported = false;
@@ -601,6 +701,42 @@ fn run_interactive(args: &[String]) -> Result<()> {
         // deadline expires. ControlFlow::Poll would spin at 100% CPU when idle.
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250));
 
+        if let Some(reply) = quit_reply.as_ref() {
+            match reply.try_recv() {
+                Ok(accepted) => {
+                    quit_reply = None;
+                    if !accepted {
+                        daemon_log!(
+                            "QUIT_BLOCKED_ACTIVE_SYNC: finish or cancel the active sync first"
+                        );
+                        if let Some(ref mut tray) = tray_icon {
+                            let _ = tray.set_tooltip(Some(&hifimule_i18n::t(
+                                "lifecycle.quit_blocked_active_sync",
+                            )));
+                        }
+                    } else {
+                        let generation_result = lifecycle_owner
+                            .as_ref()
+                            .expect("owner is held until shutdown completes")
+                            .advance_generation();
+                        if let Err(error) = generation_result {
+                            let _ = command_tx.send(CoreCommand::ReopenAdmission);
+                            daemon_log!("QUIT_PERSISTENCE_FAILED: {}", error);
+                        } else {
+                            rpc::set_lifecycle_stopping(true);
+                            let _ = command_tx.send(CoreCommand::Shutdown);
+                            shutdown_pending = true;
+                            shutdown_started = Some(Instant::now());
+                        }
+                    }
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    quit_reply = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
         if shutdown_pending && completed_rx.try_recv().is_ok() {
             lifecycle_owner.take();
             tray_icon.take();
@@ -612,6 +748,7 @@ fn run_interactive(args: &[String]) -> Result<()> {
             && shutdown_started.is_some_and(|started| started.elapsed() >= Duration::from_secs(5))
         {
             shutdown_timeout_reported = true;
+            rpc::set_shutdown_timeout();
             daemon_log!(
                 "SHUTDOWN_TIMEOUT: daemon teardown exceeded five seconds; ownership retained"
             );
@@ -658,35 +795,12 @@ fn run_interactive(args: &[String]) -> Result<()> {
         // Handle menu events (Quit, Open UI)
         if let Ok(event) = menu_channel.try_recv() {
             if event.id == quit_item.id() {
-                println!("Quit requested - shutting down gracefully");
-                let (reply_tx, reply_rx) = mpsc::channel();
-                let accepted = command_tx.send(CoreCommand::CheckIdle(reply_tx)).is_ok()
-                    && reply_rx
-                        .recv_timeout(Duration::from_secs(6))
-                        .unwrap_or(false);
-                if !accepted {
-                    daemon_log!("QUIT_BLOCKED_ACTIVE_SYNC: finish or cancel the active sync first");
-                    if let Some(ref mut tray) = tray_icon {
-                        let _ = tray.set_tooltip(Some(&hifimule_i18n::t(
-                            "lifecycle.quit_blocked_active_sync",
-                        )));
+                if !shutdown_pending && quit_reply.is_none() {
+                    let (reply_tx, reply_rx) = mpsc::channel();
+                    if command_tx.send(CoreCommand::CheckIdle(reply_tx)).is_ok() {
+                        quit_reply = Some(reply_rx);
                     }
-                    return;
                 }
-                let generation_result = lifecycle_owner
-                    .as_ref()
-                    .expect("owner is held until shutdown completes")
-                    .advance_generation();
-                if let Err(error) = generation_result {
-                    let _ = command_tx.send(CoreCommand::ReopenAdmission);
-                    rpc::set_lifecycle_stopping(false);
-                    daemon_log!("QUIT_PERSISTENCE_FAILED: {}", error);
-                    return;
-                }
-                rpc::set_lifecycle_stopping(true);
-                let _ = command_tx.send(CoreCommand::Shutdown);
-                shutdown_pending = true;
-                shutdown_started = Some(Instant::now());
             } else if event.id == open_ui_item.id() {
                 println!("'Open UI' clicked - Launching Tauri UI...");
 
@@ -1393,4 +1507,65 @@ fn load_icon(bytes: &[u8], name: &str) -> anyhow::Result<Icon> {
     let (width, height) = image.dimensions();
     Icon::from_rgba(image.into_raw(), width, height)
         .map_err(|e| anyhow::anyhow!("Failed to create {} tray icon: {}", name, e))
+}
+
+#[cfg(test)]
+mod lifecycle_shutdown_tests {
+    use super::*;
+
+    #[test]
+    fn teardown_completion_waits_for_blocking_device_work() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (complete_tx, complete_rx) = mpsc::channel();
+        let rpc_shutdown = Arc::new(AtomicBool::new(false));
+        let flag = rpc_shutdown.clone();
+        let thread = thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            let rpc_flag = flag.clone();
+            let rpc = thread::spawn(move || {
+                while !rpc_flag.load(Ordering::Acquire) {
+                    thread::sleep(Duration::from_millis(5));
+                }
+            });
+            finish_runtime_shutdown(runtime, Some((flag, rpc)));
+            complete_tx.send(()).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(complete_rx.recv_timeout(Duration::from_millis(75)).is_err());
+        assert!(
+            !rpc_shutdown.load(Ordering::Acquire),
+            "health must remain available during core teardown"
+        );
+        release_tx.send(()).unwrap();
+        complete_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn duplicate_launch_cannot_succeed_from_stale_descriptor() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut owner = hifimule_lifecycle::OwnerGuard::acquire(temp.path()).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        owner
+            .publish_ready(listener.local_addr().unwrap().port())
+            .unwrap();
+        // Keep the port bound but never answer health: metadata alone is not readiness.
+        let ticket = hifimule_lifecycle::create_launch_ticket(temp.path(), 0).unwrap();
+        let result = run_candidate(
+            temp.path(),
+            &ticket,
+            0,
+            Instant::now() + Duration::from_millis(100),
+        );
+        assert!(result.is_err());
+    }
 }

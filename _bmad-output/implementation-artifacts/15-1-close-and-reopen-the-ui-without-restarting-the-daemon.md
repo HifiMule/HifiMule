@@ -4,7 +4,7 @@ baseline_commit: 09b6a8b580b704c8df3d33a697974f4e74e48af5
 
 # Story 15.1: Close and reopen the UI without restarting the daemon
 
-Status: review
+Status: done
 
 ## Story
 
@@ -52,6 +52,35 @@ so that ongoing work remains available and repeated launches do not create compe
   - [x] Replace fixed-port/unauthenticated probes; exercise the real installed daemon and UI, not a substitute lifecycle probe.
   - [x] Record both PID and instance identity, outcomes and cleanup on the release matrix; preserve logs on success as well as failure.
   - [x] Run relevant Rust tests, frontend type/build checks, packaging checks and installed platform scenarios; document unavailable evidence explicitly.
+
+### Review Findings
+
+Review date: 2026-09-12. Reviewed `09b6a8b..23eeae2` with Blind Hunter, Edge Case Hunter and Acceptance Auditor; all layers completed. Triage: 0 decision-needed, 12 patch, 0 defer, 0 dismissed; duplicate findings merged. Validation during review: `rtk cargo test -p hifimule-lifecycle` passed 9 tests. Installed platform scenarios were not rerun.
+
+- [x] [Review][Patch] **P1 — Fence a waiting UI launch across Quit.** A coordinator that observes a live/stopping owner keeps retrying election; it reads the generation only after the lock becomes available, adopting the post-Quit generation and restarting the daemon without a new explicit launch. Capture the attempt generation at entry, stop on authenticated stopping status, and forbid later takeover after observing a live owner. Violates AC6. [hifimule-ui/src-tauri/src/lib.rs:176]
+- [x] [Review][Patch] **P1 — Signal teardown completion only after runtime and observer shutdown.** `completed_tx` is sent while the Tokio runtime still exists, observer task handles are discarded, and the RPC join timeout is ignored. Idle Quit during slow MTP `spawn_blocking` work can release ownership and exit before that work finishes. Stop/join observers and runtime work before reporting completion; retain ownership and stopping health on timeout. Violates AC6 and the five-second teardown contract. [hifimule-daemon/src/main.rs:435]
+- [x] [Review][Patch] **P1 — Validate the complete Windows discovery ACL and owner.** The validator only rejects Everyone and built-in Users; a protected DACL granting Authenticated Users or another explicit user SID access passes, exposing the bearer token to that principal. Inspect ownership and all allowed principals/access rights rather than two SDDL substrings. Violates AC5. [hifimule-lifecycle/src/lib.rs:846]
+- [x] [Review][Patch] **P2 — Retry must create a fresh native startup attempt.** Reloading either webview repeats polling but does not rerun Tauri setup, the only caller of `coordinate_daemon`. After a candidate timeout or spawn failure, fixing the cause and clicking Retry cannot start the absent daemon. Add a native retry operation that cancels stale coordination and starts a new bounded attempt. [hifimule-ui/src/main.ts:94]
+- [x] [Review][Patch] **P2 — Splash Close must terminate the UI and cancel pending launch.** Closing only the splash leaves the configured hidden main window alive, so `RunEvent::Exit` does not execute and launch-ticket cancellation is skipped. Close the entire UI session through native coordination while preserving an already accepted daemon owner. [hifimule-ui/src/main.ts:297]
+- [x] [Review][Patch] **P2 — Preserve detached candidate failure outcomes.** Child output is discarded and no per-attempt failure channel exists. A legacy daemon/occupied endpoint rejection therefore becomes a generic 15-second timeout instead of its actionable `LEGACY_DAEMON_RUNNING` or `LEGACY_ENDPOINT_OCCUPIED` result. Publish sanitized native startup failure outcomes. Violates AC1/5. [hifimule-ui/src-tauri/src/lib.rs:134]
+- [x] [Review][Patch] **P2 — Preserve structured health errors during startup.** `check_daemon_health` reduces HTTP 401 and health protocol/identity failures to `false`; a locked live owner then yields `STARTUP_TIMEOUT` instead of immediate access/compatibility feedback. Return and consume typed health outcomes. Violates AC5. [hifimule-ui/src-tauri/src/lib.rs:76]
+- [x] [Review][Patch] **P2 — Bound launch-ticket lock acquisition.** Blocking `File::lock()` has no deadline or cancellation. A paused process holding the ticket lock can indefinitely block startup or the UI exit callback. Use nonblocking acquisition with a bounded remaining-time budget and cancellation. Violates the startup deadline contract. [hifimule-lifecycle/src/lib.rs:184]
+- [x] [Review][Patch] **P2 — Enforce the hydration deadline across awaited requests.** The frontend checks time only before each request; a request started near expiry can consume another two-second health check plus a 15-second state request. Splash and main independently repeat this behavior. Share readiness, apply a remaining-budget timeout to hydration, and ignore abandoned results. [hifimule-ui/src/main.ts:65]
+- [x] [Review][Patch] **P2 — Keep the native event loop responsive during Quit admission.** `recv_timeout` blocks the Tao thread for up to six seconds while the core intentionally drains mutations for up to five seconds. Poll an outstanding admission result in later event-loop iterations instead of freezing tray interaction. [hifimule-daemon/src/main.rs:664]
+- [x] [Review][Patch] **P2 — Validate readiness before reporting duplicate direct-launch success.** On owner-lock contention, the daemon reads the descriptor and reports a compatible owner without an authenticated health/instance check. A stale descriptor while a replacement initializes can produce false success even if replacement startup fails. Attach through the bounded handshake or return an explicit bounded failure. Violates AC3. [hifimule-daemon/src/main.rs:505]
+- [x] [Review][Patch] **P2 — Assert reopened UI attachment in installed smoke tests.** Reopen checks only probe the surviving daemon and compare its identity; they pass even if the reopened UI crashes or stays on an error screen. Assert actual UI readiness/current-state hydration through the production proxy on all platform scripts before claiming attachment evidence. Violates AC2/7 evidence requirements. [scripts/smoke-tests/smoke-linux.sh:146]
+
+### Review Resolution
+
+All 12 review patches were applied on 2026-09-12. Native startup now retains its original generation, stops election after observing an owner, distinguishes authenticated health failures, and supports fresh Retry attempts and whole-UI Close. Splash and main share native readiness; only main hydrates state, under an independent deadline that ignores late responses. Startup remediation is translated in all four locales.
+
+Daemon shutdown keeps health on a separate Tokio runtime while the device runtime and blocking observer work finish, then drains RPC work and joins its thread before signaling completion. Quit admission is polled by the existing Tao loop; a slow teardown retains ownership and publishes `SHUTDOWN_TIMEOUT`. Direct duplicate launches require the same authenticated identity handshake. Launch-ticket locks are bounded and detached candidate failures are communicated through sanitized per-attempt outcomes. Windows validation checks the current-user owner, protected DACL, reparse attribute and every allowed ACE principal.
+
+Installed smoke scripts now pass a fresh marker to each real UI launch and require a matching acknowledgment from the main webview after production-proxy hydration and route rendering. A live daemon alone no longer satisfies reopen evidence. The acknowledgment contains only process/instance identity and the non-secret marker.
+
+Validation: 664 Rust tests passed (646 daemon, 13 lifecycle, 5 native UI); 2 frontend deadline tests and 2 smoke acknowledgment gate tests passed. TypeScript/Vite build passed. Lifecycle/native UI clippy passed with warnings denied; daemon clippy passed with 93 existing warnings. Windows ARM64 lifecycle code and Windows-specific ACL tests cross-compiled successfully using the installed rustup toolchain. Bash and PowerShell syntax, lifecycle locale-key parity, and diff whitespace checks passed.
+
+Installed Windows/macOS/Linux smoke scenarios and Windows ACL runtime tests were not rerun in this review-fix session. The earlier ARM64 installed evidence predates these patches; this validation does not certify updated installers or additional architectures.
 
 ## Dev Notes
 
@@ -213,6 +242,10 @@ GPT-5 (Codex)
 
 ### File List
 
+- `hifimule-ui/src/lifecycleDeadline.ts` (review regression fix)
+- `hifimule-ui/tests/lifecycleDeadline.test.mjs` (review regression tests)
+- `scripts/smoke-tests/test-ui-evidence.py` (smoke acknowledgment gate tests)
+
 - `_bmad-output/implementation-artifacts/15-1-close-and-reopen-the-ui-without-restarting-the-daemon.md` (story preparation)
 - `_bmad-output/implementation-artifacts/sprint-status.yaml` (tracking)
 - `.github/workflows/smoke-test.yml`
@@ -246,3 +279,5 @@ GPT-5 (Codex)
 
 - 2026-09-11: Implemented production daemon/UI lifecycle ownership, authenticated discovery and proxies, bounded detached launch, idle-Quit admission fencing, startup preference preservation, and release-matrix lifecycle smoke coverage. Story remains in progress pending installed cross-platform evidence.
 - 2026-09-12: Completed installed ARM64 MSI, deb and DMG lifecycle evidence on Windows, Ubuntu and macOS, including user-observed tray Quit; moved Story 15.1 to review.
+
+- 2026-09-12: Applied all 12 code-review patches, added lifecycle/UI/shutdown/ACL/smoke regression coverage, and marked Story 15.1 done after local validation. Updated installed-platform evidence remains pending rerun.

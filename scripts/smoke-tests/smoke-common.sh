@@ -12,11 +12,7 @@ poll_health() {
     local timeout=$1
     local started=$SECONDS
     local descriptor
-    if [[ "$(uname -s)" == "Darwin" ]]; then
-        descriptor="$HOME/Library/Application Support/HifiMule/runtime/owner.json"
-    else
-        descriptor="${XDG_DATA_HOME:-$HOME/.local/share}/HifiMule/runtime/owner.json"
-    fi
+    descriptor=$(lifecycle_descriptor_path)
 
     for ((i = 0; i < timeout; i++)); do
         if python3 - "$descriptor" <<'PY' >/dev/null 2>&1
@@ -57,7 +53,9 @@ PY
 }
 
 lifecycle_descriptor_path() {
-    if [[ "$(uname -s)" == "Darwin" ]]; then
+    if [[ -n "${HIFIMULE_APP_DATA_DIR:-}" ]]; then
+        printf '%s\n' "$HIFIMULE_APP_DATA_DIR/runtime/owner.json"
+    elif [[ "$(uname -s)" == "Darwin" ]]; then
         printf '%s\n' "$HOME/Library/Application Support/HifiMule/runtime/owner.json"
     else
         printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/HifiMule/runtime/owner.json"
@@ -83,4 +81,37 @@ except urllib.error.HTTPError as error:
 else:
     raise AssertionError("unauthenticated lifecycle access was accepted")
 PY
+}
+
+# Each real UI launch receives a fresh non-secret marker. The main webview writes
+# its acknowledgment only after rendering state returned by the native RPC proxy.
+new_ui_smoke_id() {
+    UI_SMOKE_ID=$(python3 -c 'import uuid; print(uuid.uuid4())')
+}
+
+poll_ui_ready() {
+    local timeout=$1
+    local descriptor
+    descriptor=$(lifecycle_descriptor_path)
+    python3 - "$descriptor" "$UI_SMOKE_ID" "$timeout" <<'PYCODE'
+import json, os, pathlib, sys, time
+owner_path = pathlib.Path(sys.argv[1])
+marker = sys.argv[2]
+ready_path = owner_path.parent / f"ui-ready-{marker}.json"
+deadline = time.monotonic() + int(sys.argv[3])
+while time.monotonic() < deadline:
+    try:
+        ready = json.loads(ready_path.read_text())
+        owner = json.loads(owner_path.read_text())
+        assert ready["smokeId"] == marker and ready["state"] == "hydrated"
+        assert (ready["daemonPid"], ready["instanceId"]) == (owner["pid"], owner["instanceId"])
+        os.kill(ready["uiPid"], 0)
+        print("UI_ATTACHMENT_EVIDENCE " + json.dumps(ready))
+        ready_path.unlink()
+        sys.exit(0)
+    except (OSError, ValueError, KeyError, AssertionError):
+        time.sleep(0.25)
+print("UI did not confirm current-state hydration", file=sys.stderr)
+sys.exit(1)
+PYCODE
 }

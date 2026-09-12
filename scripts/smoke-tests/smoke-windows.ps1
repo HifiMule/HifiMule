@@ -48,6 +48,28 @@ function Get-InstallDir {
     return $null
 }
 
+function Assert-UiReady([string]$marker) {
+    $runtime = Join-Path $env:APPDATA "HifiMule\runtime"
+    if ($env:HIFIMULE_APP_DATA_DIR) { $runtime = Join-Path $env:HIFIMULE_APP_DATA_DIR "runtime" }
+    $readyPath = Join-Path $runtime "ui-ready-$marker.json"
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        try {
+            $ready = Get-Content $readyPath -Raw | ConvertFrom-Json
+            $owner = Get-Content (Join-Path $runtime "owner.json") -Raw | ConvertFrom-Json
+            if ($ready.smokeId -eq $marker -and $ready.state -eq "hydrated" -and
+                $ready.daemonPid -eq $owner.pid -and $ready.instanceId -eq $owner.instanceId -and
+                (Get-Process -Id $ready.uiPid -ErrorAction SilentlyContinue)) {
+                Write-Host "UI_ATTACHMENT_EVIDENCE $($ready | ConvertTo-Json -Compress)"
+                Remove-Item $readyPath
+                return
+            }
+        } catch { }
+        Start-Sleep -Milliseconds 250
+    }
+    Fail $Platform "ui-hydration" "Installed UI did not confirm current-state hydration"
+}
+
 # --- STEP 1: Install ---
 Write-Step "STEP 1: Installing MSI ..."
 $msi = Get-Item "*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -87,7 +109,8 @@ if (-not $exe) {
     Fail $Platform "launch" "No executable found under $installDir"
 }
 Write-Host "  Executable: $($exe.FullName)"
-$appProc = Start-Process $exe.FullName -WindowStyle Hidden -PassThru
+$smokeId = [guid]::NewGuid().ToString()
+$appProc = Start-Process $exe.FullName -ArgumentList "--smoke-id $smokeId" -WindowStyle Hidden -PassThru
 
 # --- STEP 3: Daemon health poll ---
 Write-Step "STEP 3: Polling daemon health (30s timeout) ..."
@@ -125,6 +148,7 @@ if (-not $ok) {
     }
     Fail $Platform "daemon-health" "Daemon did not respond with status=ok after 30s"
 }
+Assert-UiReady $smokeId
 Write-Host "  Daemon responded OK"
 $safe = Get-Content $descriptorPath -Raw | ConvertFrom-Json | Select-Object schemaVersion, protocolVersion, instanceId, pid, port, launchGeneration
 Write-Host "  LIFECYCLE_EVIDENCE os=Windows architecture=$env:PROCESSOR_ARCHITECTURE descriptor=$($safe | ConvertTo-Json -Compress)"
@@ -142,7 +166,9 @@ try {
 Write-Step "STEP 3a: Concurrent launch and UI close/reopen ..."
 $initialPid = [int]$descriptor.pid
 $initialInstance = [string]$descriptor.instanceId
-$secondUi = Start-Process $exe.FullName -WindowStyle Hidden -PassThru
+$secondSmokeId = [guid]::NewGuid().ToString()
+$secondUi = Start-Process $exe.FullName -ArgumentList "--smoke-id $secondSmokeId" -WindowStyle Hidden -PassThru
+Assert-UiReady $secondSmokeId
 Start-Sleep 2
 $afterConcurrent = Get-Content $descriptorPath -Raw | ConvertFrom-Json
 if ($afterConcurrent.pid -ne $initialPid -or $afterConcurrent.instanceId -ne $initialInstance) {
@@ -154,8 +180,10 @@ Start-Sleep 1
 if (-not (Get-Process -Id $initialPid -ErrorAction SilentlyContinue)) {
     Fail $Platform "close-ui" "Closing the UI stopped the daemon"
 }
-$appProc = Start-Process $exe.FullName -WindowStyle Hidden -PassThru
+$smokeId = [guid]::NewGuid().ToString()
+$appProc = Start-Process $exe.FullName -ArgumentList "--smoke-id $smokeId" -WindowStyle Hidden -PassThru
 Start-Sleep 2
+Assert-UiReady $smokeId
 $afterReopen = Get-Content $descriptorPath -Raw | ConvertFrom-Json
 if ($afterReopen.pid -ne $initialPid -or $afterReopen.instanceId -ne $initialInstance) {
     Fail $Platform "reopen-ui" "Reopen created a competing daemon"
@@ -174,7 +202,8 @@ if (Get-Process -Id $initialPid -ErrorAction SilentlyContinue) {
 if ($appProc -and -not $appProc.HasExited) {
     Stop-Process -Id $appProc.Id -Force
 }
-$appProc = Start-Process $exe.FullName -WindowStyle Hidden -PassThru
+$smokeId = [guid]::NewGuid().ToString()
+$appProc = Start-Process $exe.FullName -ArgumentList "--smoke-id $smokeId" -WindowStyle Hidden -PassThru
 $recovered = $null
 for ($i = 0; $i -lt 30; $i++) {
     try {
@@ -197,6 +226,7 @@ for ($i = 0; $i -lt 30; $i++) {
 if (-not $recovered) {
     Fail $Platform "crash-recovery" "UI did not recover a fresh authenticated daemon within 30s"
 }
+Assert-UiReady $smokeId
 $safeRecovered = $recovered | Select-Object schemaVersion, protocolVersion, instanceId, pid, port, launchGeneration
 Write-Host "  RECOVERY_EVIDENCE os=Windows architecture=$env:PROCESSOR_ARCHITECTURE descriptor=$($safeRecovered | ConvertTo-Json -Compress)"
 $initialPid = [int]$recovered.pid

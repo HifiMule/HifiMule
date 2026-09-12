@@ -19,7 +19,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering as AtomicOrdering};
 
 // JSON-RPC 2.0 Error Codes
 const ERR_METHOD_NOT_FOUND: i32 = -32601;
@@ -105,6 +105,16 @@ pub struct AppState {
 
 static LIFECYCLE_IDENTITY: OnceLock<hifimule_lifecycle::OwnerDescriptor> = OnceLock::new();
 static LIFECYCLE_STATE: AtomicU8 = AtomicU8::new(0);
+static ACTIVE_LOCAL_REQUESTS: AtomicUsize = AtomicUsize::new(0);
+struct LocalRequestGuard;
+impl Drop for LocalRequestGuard {
+    fn drop(&mut self) {
+        ACTIVE_LOCAL_REQUESTS.fetch_sub(1, AtomicOrdering::AcqRel);
+    }
+}
+pub fn set_shutdown_timeout() {
+    LIFECYCLE_STATE.store(3, AtomicOrdering::Release);
+}
 
 pub fn set_lifecycle_stopping(stopping: bool) {
     LIFECYCLE_STATE.store(if stopping { 2 } else { 1 }, AtomicOrdering::Release);
@@ -114,11 +124,12 @@ fn daemon_health_result() -> Value {
     let descriptor = LIFECYCLE_IDENTITY.get();
     serde_json::json!({
         "data": {
-            "status": if LIFECYCLE_STATE.load(AtomicOrdering::Acquire) == 2 { "stopping" } else { "ok" },
+            "status": if LIFECYCLE_STATE.load(AtomicOrdering::Acquire) >= 2 { "stopping" } else { "ok" },
             "protocolVersion": hifimule_lifecycle::PROTOCOL_VERSION,
             "instanceId": descriptor.map(|value| value.instance_id.as_str()).unwrap_or("test-instance"),
             "pid": descriptor.map(|value| value.pid).unwrap_or_else(std::process::id),
-            "daemonVersion": env!("CARGO_PKG_VERSION")
+            "daemonVersion": env!("CARGO_PKG_VERSION"),
+            "errorCode": if LIFECYCLE_STATE.load(AtomicOrdering::Acquire) == 3 { Some("SHUTDOWN_TIMEOUT") } else { None }
         }
     })
 }
@@ -138,6 +149,11 @@ async fn authenticate_local_request(
     }) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    if LIFECYCLE_STATE.load(AtomicOrdering::Acquire) >= 2 && request.uri().path() != "/" {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    ACTIVE_LOCAL_REQUESTS.fetch_add(1, AtomicOrdering::AcqRel);
+    let _guard = LocalRequestGuard;
     next.run(request).await
 }
 
@@ -250,7 +266,9 @@ pub async fn run_server(
     let _ = config.ready_tx.send(Ok(()));
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            while !config.shutdown.load(std::sync::atomic::Ordering::Acquire) {
+            while !config.shutdown.load(std::sync::atomic::Ordering::Acquire)
+                || ACTIVE_LOCAL_REQUESTS.load(AtomicOrdering::Acquire) != 0
+            {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         })
@@ -262,6 +280,18 @@ async fn handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
+    if LIFECYCLE_STATE.load(AtomicOrdering::Acquire) >= 2 && payload.method != "daemon.health" {
+        return Json(JsonRpcResponse {
+            jsonrpc: "2.0".into(),
+            result: None,
+            id: payload.id,
+            error: Some(JsonRpcError {
+                code: ERR_SYNC_IN_PROGRESS,
+                message: "The daemon is stopping".into(),
+                data: Some(serde_json::json!({"errorCode":"DAEMON_STOPPED"})),
+            }),
+        });
+    }
     let _mutation_guard = if is_mutating_method(&payload.method) {
         match state.sync_operation_manager.try_admit_mutation() {
             Some(guard) => Some(guard),

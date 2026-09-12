@@ -2,8 +2,9 @@ import '@shoelace-style/shoelace/dist/themes/dark.css';
 import '@shoelace-style/shoelace/dist/shoelace.js';
 import { setBasePath } from '@shoelace-style/shoelace/dist/utilities/base-path.js';
 import { LogicalSize } from '@tauri-apps/api/dpi';
-import { Window, currentMonitor, getCurrentWindow } from '@tauri-apps/api/window';
+import { Window, currentMonitor } from '@tauri-apps/api/window';
 import { t } from './i18n';
+import { withDeadline } from './lifecycleDeadline';
 
 const isDev = Boolean((import.meta as any).env?.DEV);
 setBasePath(new URL(isDev
@@ -53,30 +54,49 @@ async function init() {
     const { rpcCall } = await import('./rpc');
 
     try {
+        await waitForNativeReadiness();
         const state = await waitForDaemonState(rpcCall);
         await routeFromDaemonState(state);
+        await showMainWindow();
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('report_ui_ready');
     } catch (e) {
         console.error("Failed to check daemon state", e);
         renderLifecycleFailure(e);
+        await showMainWindow();
     }
+}
+
+async function showMainWindow(): Promise<void> {
+    await (await Window.getByLabel('main'))?.show();
+    await (await Window.getByLabel('splashscreen'))?.close();
+}
+
+async function waitForNativeReadiness(): Promise<void> {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const deadline = performance.now() + 15_000;
+    while (performance.now() < deadline) {
+        const status = await invoke<{ state: string; errorCode?: string }>('get_sidecar_status');
+        if (status.state === 'ready') return;
+        if (['failed', 'stopping', 'stopped'].includes(status.state)) {
+            throw new Error(status.errorCode ?? 'DAEMON_STOPPED');
+        }
+        await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    throw new Error('STARTUP_TIMEOUT');
 }
 
 async function waitForDaemonState(rpcCall: (method: string, params?: any) => Promise<any>): Promise<any> {
-    const deadline = Date.now() + 15_000;
-    let lastError: unknown;
-    while (Date.now() < deadline) {
-        try {
-            return await rpcCall('get_daemon_state');
-        } catch (error) {
-            lastError = error;
-            await new Promise(resolve => setTimeout(resolve, 250));
-        }
-    }
-    throw lastError;
+    return withDeadline(rpcCall('get_daemon_state'), 15_000, 'STATE_LOAD_TIMEOUT');
 }
 
 function renderLifecycleFailure(error: unknown): void {
-    const message = error instanceof Error ? error.message : String(error);
+    const raw = error instanceof Error ? error.message : String(error);
+    const code = raw.split(':', 1)[0];
+    const knownCodes = ['LEGACY_DAEMON_RUNNING', 'LEGACY_ENDPOINT_OCCUPIED', 'LOCAL_ACCESS_DENIED',
+        'PROTOCOL_MISMATCH', 'OWNER_CHANGED', 'DAEMON_STOPPED', 'SPAWN_FAILED', 'STARTUP_TIMEOUT',
+        'STATE_LOAD_TIMEOUT', 'UNSAFE_RUNTIME_PATH'];
+    const message = knownCodes.includes(code) ? t(`lifecycle.error.${code}`) : raw;
     document.body.innerHTML = `
         <main class="login-container" role="alert" aria-live="assertive">
             <section class="login-card" style="padding:2rem;max-width:36rem">
@@ -91,9 +111,14 @@ function renderLifecycleFailure(error: unknown): void {
         </main>`;
     const retry = document.getElementById('lifecycle-retry') as HTMLButtonElement | null;
     retry?.focus();
-    retry?.addEventListener('click', () => window.location.reload());
+    retry?.addEventListener('click', async () => {
+        retry.disabled = true;
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('retry_daemon_startup');
+        window.location.reload();
+    });
     document.getElementById('lifecycle-close')?.addEventListener('click', () => {
-        void getCurrentWindow().close();
+        void import('@tauri-apps/api/core').then(({ invoke }) => invoke('close_ui'));
     });
 }
 
@@ -294,7 +319,7 @@ async function initSplashScreen(mainWin: Window | null, splashWin: Window | null
     if (retryButton) retryButton.textContent = t('lifecycle.retry');
     if (closeButton) closeButton.textContent = t('lifecycle.close');
     document.getElementById('close-btn')?.addEventListener('click', () => {
-        void getCurrentWindow().close();
+        void import('@tauri-apps/api/core').then(({ invoke }) => invoke('close_ui'));
     });
 
     if (!statusEl) {
@@ -302,77 +327,42 @@ async function initSplashScreen(mainWin: Window | null, splashWin: Window | null
         return;
     }
 
-    const timeout = 15000;
-    const startTime = Date.now();
-    let isPolling = false;
-
+    // The main webview alone hydrates and changes routes. Splash reflects the same
+    // native attempt and is closed by main only after routing (or rendering failure).
+    const { invoke } = await import('@tauri-apps/api/core');
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    window.addEventListener('pagehide', () => {
+        disposed = true;
+        if (timer !== undefined) clearTimeout(timer);
+    }, { once: true });
+    retryButton?.addEventListener('click', async () => {
+        await invoke('retry_daemon_startup');
+        // Restart the main webview too; it owns state hydration.
+        await invoke('reload_main_window');
+        window.location.reload();
+    });
     const poll = async () => {
-        if (isPolling) {
-            console.log("Poll already in progress, skipping...");
-            return;
-        }
-
-        isPolling = true;
         try {
-            statusEl.textContent = t('ui.splash.connecting_daemon');
-            console.log("Polling daemon via invoke...");
-
-            // Use Tauri invoke to bypass browser security restrictions
-            // (fetch from https://tauri.localhost to http://localhost is blocked as mixed content)
-            const { invoke } = await import('@tauri-apps/api/core');
-            await invoke('rpc_proxy', { method: 'get_daemon_state', params: {} });
-
-            console.log("Daemon responded!");
-            statusEl.textContent = t('ui.splash.daemon_ready');
-
-            try {
-                // Show main window and close splash
-                if (mainWin) {
-                    console.log("Showing main window");
-                    await mainWin.show();
-                }
-                if (splashWin) {
-                    console.log("Closing splash screen");
-                    await splashWin.close();
-                }
-                return; // Successfully finished
-            } catch (winError) {
-                console.error("Window API Error (Permissions?):", winError);
-                statusEl.textContent = t('ui.splash.ui_api_error');
+            const status = await invoke<{state: string; errorCode?: string}>('get_sidecar_status');
+            if (disposed) return;
+            statusEl.textContent = status.state === 'ready'
+                ? t('ui.splash.daemon_ready')
+                : status.errorCode ?? t('ui.splash.connecting_daemon');
+            if (['failed', 'stopped'].includes(status.state)) {
+                container?.classList.add('error');
+                (retryButton as HTMLButtonElement | null)?.focus();
+                return;
             }
-        } catch (e: any) {
-            console.log("Daemon not reachable yet:", e?.message);
-            try {
-                const { invoke } = await import('@tauri-apps/api/core');
-                const sidecarStatus = await invoke('get_sidecar_status');
-                statusEl.textContent = t('ui.splash.connecting_daemon_sidecar', { status: String(sidecarStatus) });
-            } catch {
-                statusEl.textContent = t('ui.splash.connecting_daemon_error', {
-                    error: e?.message || t('ui.splash.connection_failed')
-                });
-            }
-        } finally {
-            isPolling = false;
+        } catch {
+            if (disposed) return;
+            statusEl.textContent = t('ui.splash.failed');
         }
-
-        if (Date.now() - startTime > timeout) {
-            console.log("Timeout reached");
-            if (container) container.classList.add('error');
-            try {
-                const { invoke } = await import('@tauri-apps/api/core');
-                const sidecarStatus = await invoke('get_sidecar_status');
-                statusEl.textContent = t('ui.splash.failed_sidecar', { status: String(sidecarStatus) });
-            } catch {
-                statusEl.textContent = t('ui.splash.failed');
-            }
-            (document.getElementById('retry-btn') as HTMLButtonElement | null)?.focus();
-            return;
-        }
-
-        setTimeout(poll, 250);
+        if (!disposed) timer = setTimeout(poll, 250);
     };
-
-    poll();
+    void mainWin;
+    void splashWin;
+    void poll();
 }
 
 window.addEventListener('DOMContentLoaded', init);

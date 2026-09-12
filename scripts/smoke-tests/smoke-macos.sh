@@ -16,6 +16,7 @@ set -euo pipefail
 
 PLATFORM="macos"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/smoke-common.sh"
 MOUNT_POINT="/Volumes/HifiMule"
 APP_NAME=""
 APP_PATH=""
@@ -78,7 +79,8 @@ echo "  Quarantine removed (or not present)"
 # --- STEP 3: Launch ---
 echo ""
 echo "==> STEP 3: Launching ${APP_NAME} ..."
-open "$APP_PATH" || fail "launch" "open $APP_PATH failed"
+new_ui_smoke_id
+open "$APP_PATH" --args --smoke-id "$UI_SMOKE_ID" || fail "launch" "open $APP_PATH failed"
 # Give Tauri time to spawn the daemon sidecar
 sleep 3
 if ! pgrep -f "$APP_PATH" >/dev/null 2>&1 && ! pgrep -f "$APP_NAME" >/dev/null 2>&1; then
@@ -95,6 +97,7 @@ if ! poll_health 30; then
     cleanup
     fail "daemon-health" "Daemon did not respond with status=ok after 30s"
 fi
+poll_ui_ready 30 || fail "ui-hydration" "Installed UI failed to render authoritative state"
 echo "  Daemon responded OK"
 
 INITIAL_IDENTITY=$(lifecycle_identity)
@@ -102,14 +105,18 @@ DAEMON_PID=${INITIAL_IDENTITY%%$'\t'*}
 assert_unauthenticated_access_rejected || fail "local-access" "Unauthenticated health request was not rejected"
 
 echo "==> STEP 4a: Concurrent launch and UI close/reopen ..."
-open -n "$APP_PATH" || fail "concurrent-launch" "Second application launch failed"
+new_ui_smoke_id
+open -n "$APP_PATH" --args --smoke-id "$UI_SMOKE_ID" || fail "concurrent-launch" "Second application launch failed"
 poll_health 15 || fail "concurrent-launch" "Concurrent launch lost the daemon"
+poll_ui_ready 30 || fail "ui-hydration" "Installed UI failed to confirm attachment"
 [[ "$(lifecycle_identity)" == "$INITIAL_IDENTITY" ]] || fail "concurrent-launch" "Daemon identity changed"
 pkill -f "$APP_PATH/Contents/MacOS/hifimule-ui" || fail "close-ui" "Could not close the UI"
 sleep 1
 kill -0 "$DAEMON_PID" 2>/dev/null || fail "close-ui" "Closing the UI stopped the daemon"
-open "$APP_PATH" || fail "reopen-ui" "Could not reopen the UI"
+new_ui_smoke_id
+open "$APP_PATH" --args --smoke-id "$UI_SMOKE_ID" || fail "reopen-ui" "Could not reopen the UI"
 poll_health 15 || fail "reopen-ui" "Reopened UI did not attach"
+poll_ui_ready 30 || fail "ui-hydration" "Installed UI failed to confirm attachment"
 [[ "$(lifecycle_identity)" == "$INITIAL_IDENTITY" ]] || fail "reopen-ui" "Reopen created a competing daemon"
 echo "  Concurrent launch and close/reopen preserved PID and instance"
 
@@ -121,8 +128,10 @@ for _ in $(seq 1 20); do
 done
 kill -0 "$DAEMON_PID" 2>/dev/null && fail "crash-recovery" "Original daemon did not terminate"
 pkill -f "$APP_PATH/Contents/MacOS/hifimule-ui" 2>/dev/null || true
-open "$APP_PATH" || fail "crash-recovery" "Could not relaunch the UI"
+new_ui_smoke_id
+open "$APP_PATH" --args --smoke-id "$UI_SMOKE_ID" || fail "crash-recovery" "Could not relaunch the UI"
 poll_health 30 || fail "crash-recovery" "UI did not recover a fresh authenticated daemon"
+poll_ui_ready 30 || fail "ui-hydration" "Installed UI failed to confirm attachment"
 RECOVERED_IDENTITY=$(lifecycle_identity)
 [[ "$RECOVERED_IDENTITY" != "$INITIAL_IDENTITY" ]] || fail "crash-recovery" "Recovered daemon retained stale identity"
 DAEMON_PID=${RECOVERED_IDENTITY%%$'\t'*}

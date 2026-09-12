@@ -1,17 +1,146 @@
 use std::sync::Mutex;
 use tauri::{Manager, RunEvent};
 
-struct PendingLaunch(Mutex<Option<String>>);
+use hifimule_lifecycle::{LifecycleErrorCode as Code, LifecycleState, LifecycleStatus};
+use std::sync::Arc;
+use std::time::Instant;
 
-/// Stores the sidecar launch status so the frontend can query it.
-/// Values: "starting", "startup" (connected to running daemon via health check),
-/// "service" (started via sc start), "running (pid=N)",
-/// "spawn_failed: ...", "command_failed: ...", "terminated (code=N)"
-struct SidecarStatus(Mutex<String>);
+struct StartupState {
+    epoch: u64,
+    closed: bool,
+    ticket: Option<String>,
+    status: LifecycleStatus,
+    hydrated: Option<(u64, hifimule_lifecycle::OwnerDescriptor)>,
+}
+
+#[derive(Clone)]
+struct StartupCoordinator(Arc<Mutex<StartupState>>);
+
+fn status(state: LifecycleState, error_code: Option<Code>) -> LifecycleStatus {
+    LifecycleStatus {
+        state,
+        error_code,
+        instance_id: None,
+        pid: None,
+    }
+}
 
 #[tauri::command]
-fn get_sidecar_status(state: tauri::State<'_, SidecarStatus>) -> String {
-    state.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+fn get_sidecar_status(coordinator: tauri::State<'_, StartupCoordinator>) -> LifecycleStatus {
+    coordinator
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .status
+        .clone()
+}
+
+impl StartupCoordinator {
+    fn current(&self, epoch: u64) -> bool {
+        let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        !state.closed && state.epoch == epoch
+    }
+
+    fn begin_attempt(&self) -> Option<(u64, Option<String>)> {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if state.closed {
+            return None;
+        }
+        state.epoch += 1;
+        state.hydrated = None;
+        state.status = status(LifecycleState::Starting, None);
+        Some((state.epoch, state.ticket.take()))
+    }
+
+    fn restart(&self) {
+        let Some((epoch, old_ticket)) = self.begin_attempt() else {
+            return;
+        };
+        let coordinator = self.clone();
+        std::thread::spawn(move || {
+            if let (Some(ticket), Ok(path)) =
+                (old_ticket, hifimule_lifecycle::resolve_app_data_dir())
+            {
+                let _ = hifimule_lifecycle::cancel_launch_ticket(&path, &ticket);
+            }
+            let outcome = coordinate_daemon(&coordinator, epoch);
+            let mut state = coordinator.0.lock().unwrap_or_else(|e| e.into_inner());
+            if state.epoch == epoch && !state.closed {
+                state.status = match outcome {
+                    Ok(owner) => LifecycleStatus {
+                        state: LifecycleState::Ready,
+                        instance_id: Some(owner.instance_id),
+                        pid: Some(owner.pid),
+                        error_code: None,
+                    },
+                    Err(code) => status(
+                        if code == Code::DaemonStopped {
+                            LifecycleState::Stopped
+                        } else {
+                            LifecycleState::Failed
+                        },
+                        Some(code),
+                    ),
+                };
+                state.ticket = None;
+            }
+        });
+    }
+
+    fn close(&self) {
+        let ticket = {
+            let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            state.closed = true;
+            state.epoch += 1;
+            state.ticket.take()
+        };
+        if let (Some(ticket), Ok(path)) = (ticket, hifimule_lifecycle::resolve_app_data_dir()) {
+            let _ = hifimule_lifecycle::cancel_launch_ticket(&path, &ticket);
+        }
+    }
+}
+
+#[tauri::command]
+fn retry_daemon_startup(coordinator: tauri::State<'_, StartupCoordinator>) {
+    coordinator.restart();
+}
+
+#[tauri::command]
+fn reload_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    app.get_webview_window("main")
+        .ok_or("Main window is unavailable")?
+        .eval("window.location.reload()")
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn close_ui(
+    app: tauri::AppHandle,
+    coordinator: tauri::State<'_, StartupCoordinator>,
+) -> Result<(), String> {
+    let coordinator = coordinator.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || coordinator.close())
+        .await
+        .map_err(|e| e.to_string())?;
+    app.exit(0);
+    Ok(())
+}
+
+/// An installed smoke run may request a non-secret acknowledgment after the actual
+/// main webview has hydrated through rpc_proxy and finished rendering its route.
+#[tauri::command]
+fn report_ui_ready(coordinator: tauri::State<'_, StartupCoordinator>) -> Result<(), String> {
+    let state = coordinator.0.lock().unwrap_or_else(|e| e.into_inner());
+    let (epoch, owner) = state.hydrated.as_ref().ok_or("UI has not hydrated")?;
+    if *epoch != state.epoch || state.closed || state.status.state != LifecycleState::Ready {
+        return Err("UI startup attempt was abandoned".into());
+    }
+    let args: Vec<_> = std::env::args().collect();
+    if let Some(pair) = args.windows(2).find(|pair| pair[0] == "--smoke-id") {
+        let path = hifimule_lifecycle::resolve_app_data_dir().map_err(|e| e.to_string())?;
+        hifimule_lifecycle::publish_ui_ready(&path, &pair[1], owner).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn resolve_daemon_binary_path() -> Option<std::path::PathBuf> {
@@ -29,56 +158,6 @@ fn resolve_daemon_binary_path() -> Option<std::path::PathBuf> {
         }
     }
     None
-}
-
-/// Check if the daemon is already running by sending a health-check RPC call.
-fn daemon_health_response_ok(
-    data: &serde_json::Value,
-    descriptor: &hifimule_lifecycle::OwnerDescriptor,
-) -> bool {
-    data.get("error").is_none_or(serde_json::Value::is_null)
-        && data
-            .pointer("/result/data/status")
-            .and_then(serde_json::Value::as_str)
-            == Some("ok")
-        && data
-            .pointer("/result/data/protocolVersion")
-            .and_then(serde_json::Value::as_u64)
-            == Some(u64::from(hifimule_lifecycle::PROTOCOL_VERSION))
-        && data
-            .pointer("/result/data/instanceId")
-            .and_then(serde_json::Value::as_str)
-            == Some(descriptor.instance_id.as_str())
-}
-
-fn check_daemon_health(descriptor: &hifimule_lifecycle::OwnerDescriptor) -> bool {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .build();
-    let client = match client {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "daemon.health",
-        "params": {},
-        "id": 1
-    });
-    match client
-        .post(format!("http://127.0.0.1:{}", descriptor.port))
-        .bearer_auth(&descriptor.token)
-        .json(&body)
-        .send()
-    {
-        Ok(resp) if resp.status().is_success() => resp
-            .json::<serde_json::Value>()
-            .is_ok_and(|data| daemon_health_response_ok(&data, descriptor)),
-        Ok(_) => false,
-        Err(_) => false,
-    }
 }
 
 async fn validate_owner_async(
@@ -106,17 +185,14 @@ async fn validate_owner_async(
         .json::<serde_json::Value>()
         .await
         .map_err(|_| "OWNER_CHANGED: local daemon health response was malformed".to_string())?;
-    if data
-        .pointer("/result/data/status")
-        .and_then(serde_json::Value::as_str)
-        == Some("stopping")
-    {
-        return Err("DAEMON_STOPPED: local daemon is stopping".to_string());
+    match hifimule_lifecycle::validate_health_response(&data, descriptor) {
+        Ok(LifecycleState::Ready) => Ok(()),
+        Ok(_) => Err("DAEMON_STOPPED: local daemon is stopping".into()),
+        Err(error) => Err(format!(
+            "{}: local health validation failed",
+            error.code().as_str()
+        )),
     }
-    if !daemon_health_response_ok(&data, descriptor) {
-        return Err("OWNER_CHANGED: daemon identity or protocol changed".to_string());
-    }
-    Ok(())
 }
 
 fn spawn_detached_daemon(expected_generation: u64, attempt_id: &str) -> Result<(), String> {
@@ -154,73 +230,117 @@ fn spawn_detached_daemon(expected_generation: u64, attempt_id: &str) -> Result<(
 }
 
 fn coordinate_daemon(
-    pending: &PendingLaunch,
-) -> Result<hifimule_lifecycle::OwnerDescriptor, String> {
-    let app_data = hifimule_lifecycle::resolve_app_data_dir().map_err(|error| error.to_string())?;
-    let deadline = std::time::Instant::now() + hifimule_lifecycle::STARTUP_DEADLINE;
-    let mut launched = false;
-    let mut attempt_id: Option<String> = None;
-    loop {
-        match hifimule_lifecycle::read_descriptor(&app_data) {
-            Ok(descriptor) => {
-                descriptor
-                    .validate_compatible()
-                    .map_err(|error| error.to_string())?;
-                if check_daemon_health(&descriptor) {
-                    if let Some(id) = attempt_id.as_deref() {
-                        let _ = hifimule_lifecycle::cancel_launch_ticket(&app_data, id);
-                    }
-                    *pending.0.lock().unwrap_or_else(|error| error.into_inner()) = None;
-                    return Ok(descriptor);
-                }
-                if !launched && let Some(id) = try_launch_candidate(&app_data, pending)? {
-                    attempt_id = Some(id);
-                    launched = true;
-                }
-            }
-            Err(error) if !launched => {
-                if let Some(id) = try_launch_candidate(&app_data, pending)? {
-                    attempt_id = Some(id);
-                    launched = true;
-                } else if error.code() == hifimule_lifecycle::LifecycleErrorCode::ProtocolMismatch {
-                    return Err(error.to_string());
-                }
-            }
-            Err(_) => {}
-        }
-        if std::time::Instant::now() >= deadline {
-            if let Some(id) = attempt_id.as_deref() {
-                let _ = hifimule_lifecycle::cancel_launch_ticket(&app_data, id);
-            }
-            *pending.0.lock().unwrap_or_else(|error| error.into_inner()) = None;
-            return Err("STARTUP_TIMEOUT: daemon readiness exceeded 15 seconds".to_string());
-        }
-        std::thread::sleep(hifimule_lifecycle::POLL_INTERVAL);
-    }
+    coordinator: &StartupCoordinator,
+    epoch: u64,
+) -> Result<hifimule_lifecycle::OwnerDescriptor, Code> {
+    let deadline = Instant::now() + hifimule_lifecycle::STARTUP_DEADLINE;
+    let app_data = hifimule_lifecycle::resolve_app_data_dir().map_err(|e| e.code())?;
+    coordinate_daemon_at(
+        &app_data,
+        coordinator,
+        epoch,
+        deadline,
+        spawn_detached_daemon,
+    )
 }
 
-fn try_launch_candidate(
+fn coordinate_daemon_at(
     app_data: &std::path::Path,
-    pending: &PendingLaunch,
-) -> Result<Option<String>, String> {
-    match hifimule_lifecycle::OwnerGuard::acquire(app_data) {
-        Ok(owner) => drop(owner),
-        Err(error) if error.code() == hifimule_lifecycle::LifecycleErrorCode::OwnerChanged => {
-            return Ok(None);
+    coordinator: &StartupCoordinator,
+    epoch: u64,
+    deadline: Instant,
+    mut spawn: impl FnMut(u64, &str) -> Result<(), String>,
+) -> Result<hifimule_lifecycle::OwnerDescriptor, Code> {
+    let generation = hifimule_lifecycle::read_generation(app_data).map_err(|e| e.code())?;
+    let mut observed_owner = false;
+    let mut ticket: Option<String> = None;
+    let result = (|| {
+        loop {
+            if !coordinator.current(epoch) {
+                return Err(Code::DaemonStopped);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(Code::StartupTimeout);
+            }
+            if hifimule_lifecycle::read_generation(app_data).map_err(|e| e.code())? != generation {
+                return Err(Code::DaemonStopped);
+            }
+            if let Some(id) = ticket.as_deref()
+                && let Some(code) =
+                    hifimule_lifecycle::read_launch_failure(app_data, id).map_err(|e| e.code())?
+            {
+                return Err(code);
+            }
+            let mut incompatible_discovery = false;
+            match hifimule_lifecycle::read_descriptor(app_data) {
+                Ok(descriptor) => {
+                    match hifimule_lifecycle::check_owner_health(&descriptor, remaining) {
+                        Ok(LifecycleState::Ready) => {
+                            if !coordinator.current(epoch) {
+                                return Err(Code::DaemonStopped);
+                            }
+                            return Ok(descriptor);
+                        }
+                        Ok(_) => return Err(Code::DaemonStopped),
+                        Err(error) if !error.is_retryable() => {
+                            return Err(error.code());
+                        }
+                        Err(_) => {}
+                    }
+                }
+                Err(error) if error.code() == Code::UnsafeRuntimePath => return Err(error.code()),
+                Err(error) if error.code() == Code::ProtocolMismatch => {
+                    if observed_owner {
+                        return Err(Code::ProtocolMismatch);
+                    }
+                    incompatible_discovery = true;
+                }
+                Err(_) => {}
+            }
+            if ticket.is_none() && !observed_owner {
+                match hifimule_lifecycle::OwnerGuard::acquire(app_data) {
+                    Ok(owner) => {
+                        owner
+                            .verify_expected_generation(generation)
+                            .map_err(|e| e.code())?;
+                        drop(owner);
+                        let mut state = coordinator.0.lock().unwrap_or_else(|e| e.into_inner());
+                        if state.closed || state.epoch != epoch {
+                            return Err(Code::DaemonStopped);
+                        }
+                        if Instant::now() >= deadline {
+                            return Err(Code::StartupTimeout);
+                        }
+                        let id = hifimule_lifecycle::create_launch_ticket_until(
+                            app_data, generation, deadline,
+                        )
+                        .map_err(|e| e.code())?;
+                        state.ticket = Some(id.clone());
+                        ticket = Some(id.clone());
+                        spawn(generation, &id).map_err(|_| Code::SpawnFailed)?;
+                    }
+                    Err(error) if error.code() == Code::OwnerChanged => {
+                        if incompatible_discovery {
+                            return Err(Code::ProtocolMismatch);
+                        }
+                        observed_owner = true;
+                    }
+                    Err(error) => return Err(error.code()),
+                }
+            }
+            std::thread::sleep(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(hifimule_lifecycle::POLL_INTERVAL),
+            );
         }
-        Err(error) => return Err(error.to_string()),
+    })();
+    if let Some(id) = ticket {
+        let _ = hifimule_lifecycle::cancel_launch_ticket_until(app_data, &id, deadline);
+        hifimule_lifecycle::clear_launch_failure(app_data, &id);
     }
-    let generation =
-        hifimule_lifecycle::read_generation(app_data).map_err(|error| error.to_string())?;
-    let id = hifimule_lifecycle::create_launch_ticket(app_data, generation)
-        .map_err(|error| error.to_string())?;
-    *pending.0.lock().unwrap_or_else(|error| error.into_inner()) = Some(id.clone());
-    if let Err(error) = spawn_detached_daemon(generation, &id) {
-        let _ = hifimule_lifecycle::cancel_launch_ticket(app_data, &id);
-        *pending.0.lock().unwrap_or_else(|error| error.into_inner()) = None;
-        return Err(error);
-    }
-    Ok(Some(id))
+    result
 }
 
 #[cfg(target_os = "macos")]
@@ -380,7 +500,13 @@ async fn image_proxy(
 async fn rpc_proxy(
     method: String,
     params: serde_json::Value,
+    coordinator: tauri::State<'_, StartupCoordinator>,
 ) -> Result<serde_json::Value, serde_json::Value> {
+    let epoch = coordinator
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .epoch;
     let app_data = hifimule_lifecycle::resolve_app_data_dir().map_err(
         |error| serde_json::json!({ "code": "LOCAL_ACCESS_DENIED", "message": error.to_string() }),
     )?;
@@ -438,6 +564,12 @@ async fn rpc_proxy(
         return Err(error.clone());
     }
 
+    if method == "get_daemon_state" {
+        let mut state = coordinator.0.lock().unwrap_or_else(|e| e.into_inner());
+        if state.epoch == epoch && !state.closed {
+            state.hydrated = Some((epoch, descriptor));
+        }
+    }
     Ok(data
         .get("result")
         .cloned()
@@ -529,31 +661,24 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             get_sidecar_status,
+            retry_daemon_startup,
+            reload_main_window,
+            close_ui,
+            report_ui_ready,
             rpc_proxy,
             image_proxy,
             settings_set_launch_on_startup
         ])
         .setup(|app| {
-            app.manage(SidecarStatus(Mutex::new("starting".to_string())));
-            app.manage(PendingLaunch(Mutex::new(None)));
-            let app_handle = app.handle().clone();
-            std::thread::spawn(move || {
-                let result = app_handle
-                    .try_state::<PendingLaunch>()
-                    .ok_or_else(|| "Lifecycle coordinator state is unavailable".to_string())
-                    .and_then(|pending| coordinate_daemon(&pending));
-                if let Some(state) = app_handle.try_state::<SidecarStatus>()
-                    && let Ok(mut status) = state.0.lock()
-                {
-                    *status = match result {
-                        Ok(descriptor) => format!(
-                            "ready (pid={}, instance={})",
-                            descriptor.pid, descriptor.instance_id
-                        ),
-                        Err(error) => format!("failed: {error}"),
-                    };
-                }
-            });
+            let coordinator = StartupCoordinator(Arc::new(Mutex::new(StartupState {
+                epoch: 0,
+                closed: false,
+                ticket: None,
+                hydrated: None,
+                status: status(LifecycleState::Starting, None),
+            })));
+            app.manage(coordinator.clone());
+            coordinator.restart();
 
             Ok(())
         })
@@ -561,63 +686,17 @@ pub fn run() {
         .expect("error while building tauri application");
 
     builder.run(|app_handle, event| {
-        if let RunEvent::Exit = event {
-            // Cancels only an unaccepted launch ticket. An established owner is detached
-            // and intentionally survives UI closure.
-            if let Some(state) = app_handle.try_state::<PendingLaunch>()
-                && let Ok(mut pending) = state.0.lock()
-                && let Some(attempt_id) = pending.take()
-                && let Ok(app_data) = hifimule_lifecycle::resolve_app_data_dir()
-            {
-                let _ = hifimule_lifecycle::cancel_launch_ticket(&app_data, &attempt_id);
-            }
+        if let RunEvent::Exit = event
+            && let Some(coordinator) = app_handle.try_state::<StartupCoordinator>()
+        {
+            coordinator.close();
         }
     });
 }
 
 #[cfg(test)]
 mod log_timestamp_tests {
-    use super::{daemon_health_response_ok, log_timestamp};
-
-    #[test]
-    fn daemon_health_response_requires_ok_result() {
-        let descriptor = hifimule_lifecycle::OwnerDescriptor {
-            schema_version: 1,
-            protocol_version: 1,
-            instance_id: "instance-1".to_string(),
-            pid: 123,
-            port: 12345,
-            token: "00".repeat(32),
-            launch_generation: "0".to_string(),
-        };
-        assert!(daemon_health_response_ok(
-            &serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": { "data": { "status": "ok", "protocolVersion": 1, "instanceId": "instance-1" } },
-                "error": null,
-                "id": 1
-            }),
-            &descriptor
-        ));
-        assert!(!daemon_health_response_ok(
-            &serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": null,
-                "error": { "code": -32601, "message": "Method not found" },
-                "id": 1
-            }),
-            &descriptor
-        ));
-        assert!(!daemon_health_response_ok(
-            &serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": { "data": { "status": "starting" } },
-                "error": null,
-                "id": 1
-            }),
-            &descriptor
-        ));
-    }
+    use super::log_timestamp;
 
     #[test]
     fn log_timestamp_is_readable_and_sortable() {
@@ -628,5 +707,111 @@ mod log_timestamp_tests {
         assert_eq!(&timestamp[10..11], " ");
         assert_eq!(&timestamp[13..14], ":");
         assert_eq!(&timestamp[16..17], ":");
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn coordinator() -> StartupCoordinator {
+        StartupCoordinator(Arc::new(Mutex::new(StartupState {
+            epoch: 1,
+            closed: false,
+            ticket: None,
+            hydrated: None,
+            status: status(LifecycleState::Starting, None),
+        })))
+    }
+
+    #[test]
+    fn pre_quit_waiter_never_adopts_new_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let owner = hifimule_lifecycle::OwnerGuard::acquire(temp.path()).unwrap();
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            owner.advance_generation().unwrap();
+            drop(owner);
+        });
+        let mut spawned = false;
+        let result = coordinate_daemon_at(
+            temp.path(),
+            &coordinator(),
+            1,
+            Instant::now() + Duration::from_secs(1),
+            |_, _| {
+                spawned = true;
+                Ok(())
+            },
+        );
+        worker.join().unwrap();
+        assert_eq!(result.err(), Some(Code::DaemonStopped));
+        assert!(!spawned);
+    }
+
+    #[test]
+    fn observed_slow_owner_never_authorizes_later_election() {
+        let temp = tempfile::tempdir().unwrap();
+        let owner = hifimule_lifecycle::OwnerGuard::acquire(temp.path()).unwrap();
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(owner);
+        });
+        let mut spawned = false;
+        let result = coordinate_daemon_at(
+            temp.path(),
+            &coordinator(),
+            1,
+            Instant::now() + Duration::from_millis(450),
+            |_, _| {
+                spawned = true;
+                Ok(())
+            },
+        );
+        worker.join().unwrap();
+        assert_eq!(result.err(), Some(Code::StartupTimeout));
+        assert!(!spawned);
+    }
+
+    #[test]
+    fn candidate_failure_is_reported_without_waiting_for_timeout() {
+        let temp = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let result = coordinate_daemon_at(
+            temp.path(),
+            &coordinator(),
+            1,
+            started + Duration::from_secs(2),
+            |_, id| {
+                hifimule_lifecycle::publish_launch_failure(
+                    temp.path(),
+                    id,
+                    Code::LegacyEndpointOccupied,
+                )
+                .unwrap();
+                Ok(())
+            },
+        );
+        assert_eq!(result.err(), Some(Code::LegacyEndpointOccupied));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn retry_replaces_failed_attempt_and_invalidates_old_results() {
+        let coordinator = coordinator();
+        coordinator.0.lock().unwrap().status =
+            status(LifecycleState::Failed, Some(Code::SpawnFailed));
+        let (epoch, _) = coordinator.begin_attempt().unwrap();
+        assert_eq!(epoch, 2);
+        assert!(!coordinator.current(1));
+        assert!(coordinator.current(2));
+        assert_eq!(
+            coordinator.0.lock().unwrap().status.state,
+            LifecycleState::Starting
+        );
+        coordinator.close();
+        assert!(!coordinator.current(2));
+        assert!(coordinator.begin_attempt().is_none());
     }
 }
