@@ -31,8 +31,8 @@ so that I can resume deliberately without reconstructing my session or being sur
 ## Tasks / Subtasks
 
 - [ ] Define typed contract and one session owner (AC: 1–6, 8)
-  - [ ] Add `playback/{mod,model,session,persistence}.rs`; encode the contract below and contract serialization fixtures.
-  - [ ] Implement bounded command admission, instance/session fencing, revision conflicts, command deduplication and an internal generation-fenced progress boundary.
+  - [x] Add `playback/{mod,model,session,persistence}.rs`; encode the contract below and contract serialization fixtures.
+  - [x] Implement bounded command admission, instance/session fencing, revision conflicts, command deduplication and an internal generation-fenced progress boundary.
   - [ ] Implement bounded snapshot/occurrence queries without cloning all queue/history entries.
 - [ ] Add transactional session persistence (AC: 1–4, 7–8)
   - [ ] Add isolated playback schema migration through `db.rs` and database transaction methods; preserve existing server/device/scrobble/auto-fill tables and migrations.
@@ -225,6 +225,9 @@ GPT-6 (Codex)
 - 2026-09-12: macOS ARM64 environment recorded (`Darwin 25.6.0`, `aarch64-apple-darwin`, baseline revision above). Windows, Linux and macOS x64 command-driven production-path runs were not available in this workspace and are not claimed.
 - 2026-09-12: Added a non-release GitHub Actions `Build` matrix for Windows x64, Linux x64, macOS x64 and macOS ARM64. It runs the isolated playback restoration evidence command on pull requests and pushes to `main`, then uploads a sanitized per-platform JSON artifact even on failure. Workflow YAML and the evidence command were validated locally; remote runner results remain unclaimed until the workflow executes.
 - 2026-09-12: First Build matrix run passed Windows x64, macOS x64 and macOS ARM64. Linux x64 failed before tests at link time because `libxdo-dev` was absent (`rust-lld: unable to find library -lxdo`); added the missing CI build dependency. The failed Linux artifact correctly recorded exit code 101 and is not claimed as platform evidence pending rerun.
+- 2026-09-12: Follow-up GitHub Actions Build matrix completed successfully on Windows x64, Linux x64, macOS x64 and macOS ARM64. Each runner uploaded its sanitized playback evidence JSON; the artifact-recorded OS release, architecture, revision, fixtures and outcomes are the authoritative run details.
+- 2026-09-12: Replaced direct playback mutation execution with a named single-owner worker and nonblocking 64-slot mailbox. Added retryable overflow, off-runtime RPC execution, queued mutation-guard ownership, independent checkpoint/shutdown control, saturation draining and no-post-snapshot-commit tests on macOS ARM64.
+- 2026-09-12: Post-worker validation: focused playback 11/11, full daemon 668/668, lifecycle 13/13, evidence command passed on Darwin ARM64, formatting passed and daemon clippy reported no errors (pre-existing warnings remain).
 
 ### Implementation Plan
 
@@ -239,8 +242,9 @@ GPT-6 (Codex)
 - Scoped contract gates resolved: identities, versions, position units, serialized commands, revisions/deduplication, transactional schema, recovery, page/checkpoint limits and shutdown failure/retry.
 - Status ready-for-dev; implementation tasks and platform verification remain unchecked.
 - Initial implementation slice is working and regression-green: paused/idle persistence, repeated occurrence identity, offline restoration metadata, unsupported-version evidence preservation, stale revisions, command reuse, position checkpointing, 10,000-entry paging and authenticated snapshot routing are covered.
-- Completion gate remains open: the selected story contract still requires a bounded 64-request serialized worker (the current owner is mutex-serialized), fully bounded structural/current lookups, complete injected migration/interrupted-transaction coverage, and actual Windows/macOS/Linux command-driven evidence. Per the story’s evidence rule, these are not marked complete or promoted to review.
+- Completion gate remains open: the bounded 64-request serialized worker is now implemented and locally verified. The selected story contract still requires fully bounded structural/current lookups and complete injected migration/interrupted-transaction coverage. Cross-platform execution is green, but the remaining implementation and fault-test gates are not marked complete or promoted to review.
 - Cross-platform evidence is now wired into the normal build rather than the release workflow. Each artifact records OS release, architecture, source/binary revision, isolated database scope, executed fixtures, exit code and actual outcome.
+- Cross-platform playback evidence subsequently passed on all four configured native runners: Windows x64, Linux x64, macOS x64 and macOS ARM64.
 
 ### File List
 
@@ -264,3 +268,5 @@ GPT-6 (Codex)
 - 2026-09-12: Added initial production playback-session contract, transactional persistence/restoration, authenticated RPC surface, checkpoint-aware shutdown integration, localized diagnostics and deterministic test coverage; story remains in progress pending remaining contract and platform gates.
 - 2026-09-12: Added the normal-build GitHub Actions playback evidence matrix and sanitized evidence runner for Windows, Linux and both macOS architectures; no release trigger added.
 - 2026-09-12: Fixed Linux normal-build provisioning by installing `libxdo-dev` after the first evidence run exposed a missing `-lxdo` linker dependency.
+- 2026-09-12: Recorded successful playback evidence from all four normal-build runners.
+- 2026-09-12: Added the bounded 64-command playback owner, retryable admission overflow and shutdown-safe queued-command fencing.

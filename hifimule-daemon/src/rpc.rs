@@ -302,7 +302,7 @@ async fn handler(
             }),
         });
     }
-    let _mutation_guard = if is_mutating_method(&payload.method) {
+    let mut mutation_guard = if is_mutating_method(&payload.method) {
         match state.sync_operation_manager.try_admit_mutation() {
             Some(guard) => Some(guard),
             None => {
@@ -379,8 +379,12 @@ async fn handler(
         "playback.listOccurrences" => {
             handle_playback_list_occurrences(&state, payload.params).await
         }
-        "playback.applySession" => handle_playback_apply_session(&state, payload.params).await,
-        "playback.retryRestore" => handle_playback_retry_restore(&state, payload.params).await,
+        "playback.applySession" => {
+            handle_playback_apply_session(&state, payload.params, mutation_guard.take()).await
+        }
+        "playback.retryRestore" => {
+            handle_playback_retry_restore(&state, payload.params, mutation_guard.take()).await
+        }
         "daemon.retryQuit" => {
             if state.sync_operation_manager.request_quit_retry() {
                 Ok(serde_json::json!({ "data": { "accepted": true } }))
@@ -498,7 +502,10 @@ fn playback_error(error: crate::playback::session::PlaybackError) -> JsonRpcErro
             ERR_INVALID_PARAMS
         },
         message: error.message.into(),
-        data: Some(serde_json::json!({ "code": error.code })),
+        data: Some(serde_json::json!({
+            "code": error.code,
+            "retryable": error.code == "PLAYBACK_BUSY"
+        })),
     }
 }
 
@@ -553,6 +560,7 @@ async fn handle_playback_list_occurrences(
 async fn handle_playback_apply_session(
     state: &AppState,
     params: Option<Value>,
+    mutation_guard: Option<crate::sync::MutationGuard>,
 ) -> Result<Value, JsonRpcError> {
     let p = serde_json::from_value::<crate::playback::model::ApplySessionParams>(
         params.unwrap_or(Value::Null),
@@ -562,9 +570,14 @@ async fn handle_playback_apply_session(
         message: "Invalid playback.applySession parameters".into(),
         data: Some(serde_json::json!({"code":"INVALID_SESSION"})),
     })?;
-    state
-        .playback
-        .apply(p)
+    let playback = state.playback.clone();
+    tokio::task::spawn_blocking(move || playback.apply_with_guard(p, mutation_guard))
+        .await
+        .map_err(|_| JsonRpcError {
+            code: -32603,
+            message: "Playback owner task failed".into(),
+            data: Some(serde_json::json!({"code":"PERSISTENCE_FAILED"})),
+        })?
         .map(|data| serde_json::json!({"data":data}))
         .map_err(playback_error)
 }
@@ -572,6 +585,7 @@ async fn handle_playback_apply_session(
 async fn handle_playback_retry_restore(
     state: &AppState,
     params: Option<Value>,
+    mutation_guard: Option<crate::sync::MutationGuard>,
 ) -> Result<Value, JsonRpcError> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -592,9 +606,14 @@ async fn handle_playback_retry_restore(
             conflict: false,
         }));
     }
-    state
-        .playback
-        .retry_restore()
+    let playback = state.playback.clone();
+    tokio::task::spawn_blocking(move || playback.retry_restore_with_guard(mutation_guard))
+        .await
+        .map_err(|_| JsonRpcError {
+            code: -32603,
+            message: "Playback owner task failed".into(),
+            data: Some(serde_json::json!({"code":"PERSISTENCE_FAILED"})),
+        })?
         .map(|data| serde_json::json!({"data":data}))
         .map_err(playback_error)
 }

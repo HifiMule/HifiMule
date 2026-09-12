@@ -1,7 +1,8 @@
 use super::model::*;
 use crate::db::Database;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -32,6 +33,28 @@ type PResult<T> = std::result::Result<T, PlaybackError>;
 #[derive(Clone)]
 pub struct PlaybackSession {
     inner: Arc<Mutex<Inner>>,
+    command_tx: mpsc::SyncSender<OwnerCommand>,
+    control_tx: mpsc::Sender<OwnerControl>,
+    #[allow(dead_code)]
+    executing: Arc<AtomicBool>,
+}
+
+enum OwnerCommand {
+    Apply(
+        ApplySessionParams,
+        Option<crate::sync::MutationGuard>,
+        mpsc::Sender<PResult<ApplyResult>>,
+    ),
+    RetryRestore(
+        Option<crate::sync::MutationGuard>,
+        mpsc::Sender<PResult<SessionSnapshot>>,
+    ),
+}
+
+enum OwnerControl {
+    #[allow(dead_code)]
+    Checkpoint(mpsc::Sender<PResult<()>>),
+    ShutdownCheckpoint(mpsc::Sender<PResult<()>>),
 }
 
 struct Inner {
@@ -117,35 +140,38 @@ impl PlaybackSession {
             }
         };
         let checkpointed_position_ms = session.position_ms;
-        let result = Self {
-            inner: Arc::new(Mutex::new(Inner {
-                db,
-                instance_id,
-                session,
-                generation_id: Uuid::new_v4().to_string(),
-                state_sequence: 0,
-                persistence: Status {
-                    status: "ok".into(),
-                    code: None,
-                },
-                restoration,
-                dedup: HashMap::new(),
-                dedup_order: VecDeque::new(),
-                progress: None,
-                dirty: false,
-                checkpointed_position_ms,
-            })),
-        };
-        let weak = Arc::downgrade(&result.inner);
-        std::thread::spawn(move || {
-            loop {
-                std::thread::sleep(Duration::from_secs(5));
-                let Some(inner) = weak.upgrade() else { return };
-                let session = PlaybackSession { inner };
-                let _ = session.final_checkpoint();
-            }
-        });
-        result
+        let inner = Arc::new(Mutex::new(Inner {
+            db,
+            instance_id,
+            session,
+            generation_id: Uuid::new_v4().to_string(),
+            state_sequence: 0,
+            persistence: Status {
+                status: "ok".into(),
+                code: None,
+            },
+            restoration,
+            dedup: HashMap::new(),
+            dedup_order: VecDeque::new(),
+            progress: None,
+            dirty: false,
+            checkpointed_position_ms,
+        }));
+        let (command_tx, command_rx) = mpsc::sync_channel(64);
+        let (control_tx, control_rx) = mpsc::channel();
+        let worker_inner = Arc::clone(&inner);
+        let executing = Arc::new(AtomicBool::new(false));
+        let worker_executing = Arc::clone(&executing);
+        std::thread::Builder::new()
+            .name("hifimule-playback-owner".into())
+            .spawn(move || owner_loop(worker_inner, command_rx, control_rx, worker_executing))
+            .expect("playback owner thread must start");
+        Self {
+            inner,
+            command_tx,
+            control_tx,
+            executing,
+        }
     }
 
     pub fn snapshot(&self) -> PResult<SessionSnapshot> {
@@ -201,50 +227,43 @@ impl PlaybackSession {
         })
     }
 
+    #[allow(dead_code)]
     pub fn apply(&self, p: ApplySessionParams) -> PResult<ApplyResult> {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        prune_dedup(&mut inner);
-        if let Some(old) = inner.dedup.get(&p.command_id) {
-            return if old.payload == p {
-                old.result.clone()
-            } else {
-                Err(PlaybackError::conflict(
-                    "COMMAND_ID_REUSED",
-                    "command identity was reused with another payload",
-                ))
-            };
-        }
-        let result = apply_inner(&mut inner, &p);
-        retain_dedup(&mut inner, p, result.clone());
-        result
+        self.apply_with_guard(p, None)
     }
 
-    pub fn retry_restore(&self) -> PResult<SessionSnapshot> {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if inner.restoration.status != "error" || inner.dirty {
-            return Err(PlaybackError::conflict(
+    pub fn apply_with_guard(
+        &self,
+        p: ApplySessionParams,
+        guard: Option<crate::sync::MutationGuard>,
+    ) -> PResult<ApplyResult> {
+        self.admit_apply(p, guard)?.recv().unwrap_or_else(|_| {
+            Err(PlaybackError::conflict(
                 "PLAYBACK_BUSY",
-                "restore retry is unavailable",
-            ));
-        }
-        let mut loaded = inner
-            .db
-            .load_playback_session()
-            .map_err(storage)?
-            .ok_or_else(|| PlaybackError::invalid("INVALID_SESSION", "stored session is absent"))?;
-        validate_stored(&inner.db, &loaded)?;
-        if loaded.state != TransportState::Idle {
-            loaded.state = TransportState::Paused;
-        }
-        inner.checkpointed_position_ms = loaded.position_ms;
-        inner.session = loaded;
-        inner.generation_id = Uuid::new_v4().to_string();
-        inner.state_sequence += 1;
-        inner.restoration = Status {
-            status: "ok".into(),
-            code: None,
-        };
-        snapshot(&inner)
+                "playback owner stopped before replying",
+            ))
+        })
+    }
+
+    #[allow(dead_code)]
+    pub fn retry_restore(&self) -> PResult<SessionSnapshot> {
+        self.retry_restore_with_guard(None)
+    }
+
+    pub fn retry_restore_with_guard(
+        &self,
+        guard: Option<crate::sync::MutationGuard>,
+    ) -> PResult<SessionSnapshot> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.command_tx
+            .try_send(OwnerCommand::RetryRestore(guard, reply_tx))
+            .map_err(admission_error)?;
+        reply_rx.recv().unwrap_or_else(|_| {
+            Err(PlaybackError::conflict(
+                "PLAYBACK_BUSY",
+                "playback owner stopped before replying",
+            ))
+        })
     }
 
     #[allow(dead_code)]
@@ -280,42 +299,194 @@ impl PlaybackSession {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn final_checkpoint(&self) -> PResult<()> {
-        let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if i.restoration.status == "error" {
-            return Ok(());
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.control_tx
+            .send(OwnerControl::Checkpoint(reply_tx))
+            .map_err(|_| PlaybackError::conflict("PLAYBACK_BUSY", "playback owner stopped"))?;
+        reply_rx.recv().unwrap_or_else(|_| {
+            Err(PlaybackError::conflict(
+                "PLAYBACK_BUSY",
+                "playback owner stopped before checkpointing",
+            ))
+        })
+    }
+
+    pub fn shutdown_checkpoint(&self) -> PResult<()> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.control_tx
+            .send(OwnerControl::ShutdownCheckpoint(reply_tx))
+            .map_err(|_| PlaybackError::conflict("PLAYBACK_BUSY", "playback owner stopped"))?;
+        reply_rx.recv().unwrap_or_else(|_| {
+            Err(PlaybackError::conflict(
+                "PLAYBACK_BUSY",
+                "playback owner stopped before shutdown checkpoint",
+            ))
+        })
+    }
+
+    fn admit_apply(
+        &self,
+        params: ApplySessionParams,
+        guard: Option<crate::sync::MutationGuard>,
+    ) -> PResult<mpsc::Receiver<PResult<ApplyResult>>> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.command_tx
+            .try_send(OwnerCommand::Apply(params, guard, reply_tx))
+            .map_err(admission_error)?;
+        Ok(reply_rx)
+    }
+}
+
+fn admission_error<T>(error: mpsc::TrySendError<T>) -> PlaybackError {
+    match error {
+        mpsc::TrySendError::Full(_) => {
+            PlaybackError::conflict("PLAYBACK_BUSY", "playback command mailbox is full")
         }
-        if !i.dirty {
-            return Ok(());
+        mpsc::TrySendError::Disconnected(_) => {
+            PlaybackError::conflict("PLAYBACK_BUSY", "playback owner is unavailable")
         }
-        let seq = i
-            .session
-            .checkpoint_sequence
-            .checked_add(1)
-            .ok_or_else(|| {
-                PlaybackError::invalid("PERSISTENCE_FAILED", "checkpoint sequence overflow")
-            })?;
-        match i
-            .db
-            .checkpoint_playback_position(&i.session.session_id, seq, i.session.position_ms)
-        {
-            Ok(()) => {
-                i.session.checkpoint_sequence = seq;
-                i.checkpointed_position_ms = i.session.position_ms;
-                i.dirty = false;
-                i.persistence = Status {
-                    status: "ok".into(),
-                    code: None,
-                };
-                Ok(())
+    }
+}
+
+fn owner_loop(
+    inner: Arc<Mutex<Inner>>,
+    command_rx: mpsc::Receiver<OwnerCommand>,
+    control_rx: mpsc::Receiver<OwnerControl>,
+    executing: Arc<AtomicBool>,
+) {
+    let mut last_periodic_checkpoint = Instant::now();
+    loop {
+        while let Ok(control) = control_rx.try_recv() {
+            match control {
+                OwnerControl::Checkpoint(reply) => {
+                    let mut inner = inner.lock().unwrap_or_else(|e| e.into_inner());
+                    let _ = reply.send(checkpoint_inner(&mut inner));
+                }
+                OwnerControl::ShutdownCheckpoint(reply) => {
+                    while let Ok(command) = command_rx.try_recv() {
+                        reject_unstarted(command);
+                    }
+                    let mut inner = inner.lock().unwrap_or_else(|e| e.into_inner());
+                    let _ = reply.send(checkpoint_inner(&mut inner));
+                }
             }
-            Err(_) => {
-                i.persistence = Status {
-                    status: "error".into(),
-                    code: Some("PERSISTENCE_FAILED".into()),
+        }
+        match command_rx.recv_timeout(Duration::from_millis(25)) {
+            Ok(OwnerCommand::Apply(params, _mutation_guard, reply)) => {
+                executing.store(true, Ordering::Release);
+                let mut inner = inner.lock().unwrap_or_else(|e| e.into_inner());
+                prune_dedup(&mut inner);
+                let result = if let Some(old) = inner.dedup.get(&params.command_id) {
+                    if old.payload == params {
+                        old.result.clone()
+                    } else {
+                        Err(PlaybackError::conflict(
+                            "COMMAND_ID_REUSED",
+                            "command identity was reused with another payload",
+                        ))
+                    }
+                } else {
+                    let result = apply_inner(&mut inner, &params);
+                    retain_dedup(&mut inner, params, result.clone());
+                    result
                 };
-                Err(storage(anyhow::anyhow!("checkpoint failed")))
+                let _ = reply.send(result);
+                executing.store(false, Ordering::Release);
             }
+            Ok(OwnerCommand::RetryRestore(_mutation_guard, reply)) => {
+                executing.store(true, Ordering::Release);
+                let mut inner = inner.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = reply.send(retry_restore_inner(&mut inner));
+                executing.store(false, Ordering::Release);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        }
+        if last_periodic_checkpoint.elapsed() >= Duration::from_secs(5) {
+            let mut inner = inner.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = checkpoint_inner(&mut inner);
+            last_periodic_checkpoint = Instant::now();
+        }
+    }
+}
+
+fn reject_unstarted(command: OwnerCommand) {
+    match command {
+        OwnerCommand::Apply(_, _guard, reply) => {
+            let _ = reply.send(Err(PlaybackError::conflict(
+                "DAEMON_STOPPED",
+                "daemon shutdown rejected an unstarted playback command",
+            )));
+        }
+        OwnerCommand::RetryRestore(_guard, reply) => {
+            let _ = reply.send(Err(PlaybackError::conflict(
+                "DAEMON_STOPPED",
+                "daemon shutdown rejected an unstarted playback command",
+            )));
+        }
+    }
+}
+
+fn retry_restore_inner(inner: &mut Inner) -> PResult<SessionSnapshot> {
+    if inner.restoration.status != "error" || inner.dirty {
+        return Err(PlaybackError::conflict(
+            "PLAYBACK_BUSY",
+            "restore retry is unavailable",
+        ));
+    }
+    let mut loaded = inner
+        .db
+        .load_playback_session()
+        .map_err(storage)?
+        .ok_or_else(|| PlaybackError::invalid("INVALID_SESSION", "stored session is absent"))?;
+    validate_stored(&inner.db, &loaded)?;
+    if loaded.state != TransportState::Idle {
+        loaded.state = TransportState::Paused;
+    }
+    inner.checkpointed_position_ms = loaded.position_ms;
+    inner.session = loaded;
+    inner.generation_id = Uuid::new_v4().to_string();
+    inner.state_sequence += 1;
+    inner.restoration = Status {
+        status: "ok".into(),
+        code: None,
+    };
+    snapshot(inner)
+}
+
+fn checkpoint_inner(i: &mut Inner) -> PResult<()> {
+    if i.restoration.status == "error" || !i.dirty {
+        return Ok(());
+    }
+    let seq = i
+        .session
+        .checkpoint_sequence
+        .checked_add(1)
+        .ok_or_else(|| {
+            PlaybackError::invalid("PERSISTENCE_FAILED", "checkpoint sequence overflow")
+        })?;
+    match i
+        .db
+        .checkpoint_playback_position(&i.session.session_id, seq, i.session.position_ms)
+    {
+        Ok(()) => {
+            i.session.checkpoint_sequence = seq;
+            i.checkpointed_position_ms = i.session.position_ms;
+            i.dirty = false;
+            i.persistence = Status {
+                status: "ok".into(),
+                code: None,
+            };
+            Ok(())
+        }
+        Err(_) => {
+            i.persistence = Status {
+                status: "error".into(),
+                code: Some("PERSISTENCE_FAILED".into()),
+            };
+            Err(storage(anyhow::anyhow!("checkpoint failed")))
         }
     }
 }
@@ -885,5 +1056,112 @@ mod tests {
                 .unwrap(),
             99
         );
+    }
+
+    #[test]
+    fn mailbox_admits_64_pending_commands_and_rejects_the_next() {
+        let db = Arc::new(Database::memory().unwrap());
+        let playback = PlaybackSession::restore(db, "owner".into());
+        let snapshot = playback.snapshot().unwrap();
+        let guard = playback.inner.lock().unwrap();
+
+        let first = playback
+            .admit_apply(params(&snapshot, SessionOperation::Clear), None)
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !playback.executing.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline, "owner did not begin the command");
+            std::thread::yield_now();
+        }
+
+        let mut pending = Vec::new();
+        for _ in 0..64 {
+            pending.push(
+                playback
+                    .admit_apply(params(&snapshot, SessionOperation::Clear), None)
+                    .unwrap(),
+            );
+        }
+        let overflow = playback
+            .admit_apply(params(&snapshot, SessionOperation::Clear), None)
+            .unwrap_err();
+        assert_eq!(overflow.code, "PLAYBACK_BUSY");
+
+        let checkpoint_session = playback.clone();
+        let checkpoint = std::thread::spawn(move || checkpoint_session.final_checkpoint());
+        drop(guard);
+        assert!(first.recv().unwrap().is_ok());
+        for reply in pending {
+            let _ = reply.recv().unwrap();
+        }
+        checkpoint.join().unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropped_caller_keeps_mutation_admitted_until_owner_finishes() {
+        let db = Arc::new(Database::memory().unwrap());
+        let playback = PlaybackSession::restore(db, "owner".into());
+        let snapshot = playback.snapshot().unwrap();
+        let operations = Arc::new(crate::sync::SyncOperationManager::new());
+        let mutation_guard = operations.try_admit_mutation().unwrap();
+        let inner_guard = playback.inner.lock().unwrap();
+        let reply = playback
+            .admit_apply(
+                params(&snapshot, SessionOperation::Clear),
+                Some(mutation_guard),
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !playback.executing.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline, "owner did not begin the command");
+            std::thread::yield_now();
+        }
+        drop(reply);
+        let fencing = operations.begin_shutdown_fence();
+        assert_eq!(fencing.pending_mutation_count, 1);
+        drop(inner_guard);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let snapshot = operations.shutdown_snapshot().await.unwrap();
+            if snapshot.pending_mutation_count == 0 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "mutation guard was not released");
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[test]
+    fn saturated_mailbox_cannot_block_shutdown_or_commit_queued_work_after_snapshot() {
+        let db = Arc::new(Database::memory().unwrap());
+        let playback = PlaybackSession::restore(db, "owner".into());
+        let snapshot = playback.snapshot().unwrap();
+        let guard = playback.inner.lock().unwrap();
+        let executing = playback
+            .admit_apply(params(&snapshot, SessionOperation::Clear), None)
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !playback.executing.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline, "owner did not begin the command");
+            std::thread::yield_now();
+        }
+        let queued: Vec<_> = (0..64)
+            .map(|_| {
+                playback
+                    .admit_apply(params(&snapshot, SessionOperation::Clear), None)
+                    .unwrap()
+            })
+            .collect();
+        let shutdown_session = playback.clone();
+        let shutdown = std::thread::spawn(move || shutdown_session.shutdown_checkpoint());
+        std::thread::sleep(Duration::from_millis(10));
+        drop(guard);
+        assert!(executing.recv().unwrap().is_ok());
+        shutdown.join().unwrap().unwrap();
+        for reply in queued {
+            assert_eq!(reply.recv().unwrap().unwrap_err().code, "DAEMON_STOPPED");
+        }
+        assert_eq!(playback.snapshot().unwrap().queue_revision, "1");
     }
 }

@@ -431,7 +431,7 @@ pub fn start_daemon_core(
                     match command {
                         CoreCommand::BeginShutdown(reply) => {
                             let mut snapshot = sync_operation_manager.begin_shutdown_fence();
-                            if playback.final_checkpoint().is_err() {
+                            if playback.shutdown_checkpoint().is_err() {
                                 sync_operation_manager.fail_shutdown_fence();
                                 snapshot = sync_operation_manager
                                     .shutdown_snapshot()
