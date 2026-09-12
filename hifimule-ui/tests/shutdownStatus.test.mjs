@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import ts from 'typescript';
+import { runInNewContext } from 'node:vm';
 
 const source = await readFile(new URL('../src/shutdownStatus.ts', import.meta.url), 'utf8');
 const js = ts.transpileModule(source, {
@@ -50,6 +51,35 @@ function clock() {
         } await Promise.resolve(); await Promise.resolve(); },
     };
 }
+
+test('default timers retain the browser Window receiver', () => {
+    const commonJs = ts.transpileModule(source, {
+        compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+    }).outputText;
+    const context = { exports: {}, assert };
+    runInNewContext(`
+        let scheduled = 0;
+        let cancelled = 0;
+        globalThis.performance = { now: () => 0 };
+        globalThis.setTimeout = function (callback, delay) {
+            assert.equal(this, globalThis, 'setTimeout requires the Window receiver');
+            assert.equal(delay, 1000);
+            scheduled++;
+            return 42;
+        };
+        globalThis.clearTimeout = function (id) {
+            assert.equal(this, globalThis, 'clearTimeout requires the Window receiver');
+            assert.equal(id, 42);
+            cancelled++;
+        };
+        ${commonJs}
+        const poller = new exports.ShutdownPoller(async () => {});
+        poller.refresh();
+        assert.equal(scheduled, 1);
+        poller.dispose();
+        assert.equal(cancelled, 1);
+    `, context);
+});
 
 test('refresh spam retains one timer and at most one request each second', async () => {
     const time = clock(); let calls = 0;

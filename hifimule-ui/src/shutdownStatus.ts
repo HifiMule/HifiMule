@@ -37,8 +37,9 @@ export class ShutdownPoller {
     private lastStart: number;
     constructor(private readonly request: () => Promise<void>,
         private readonly now = () => performance.now(),
-        private readonly schedule = setTimeout,
-        private readonly cancel = clearTimeout) {
+        // WebKit requires the Window receiver; never store unbound browser timers.
+        private readonly schedule = (callback: () => void, delay: number) => globalThis.setTimeout(callback, delay),
+        private readonly cancel = (timer: ReturnType<typeof setTimeout>) => globalThis.clearTimeout(timer)) {
         this.lastStart = now();
         this.refresh();
     }
