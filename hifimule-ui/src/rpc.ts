@@ -72,6 +72,13 @@ function rawErrorMessage(error: unknown): string | null {
 /** JSON-RPC error code for an expired/invalid server credential (daemon ERR_UNAUTHORIZED). */
 export const ERR_UNAUTHORIZED = -8;
 
+export class RpcError extends Error {
+    constructor(message: string, public readonly code: number | null, public readonly data: unknown, public readonly causeValue: unknown) {
+        super(message);
+        this.name = 'RpcError';
+    }
+}
+
 /** Extracts the JSON-RPC error code from a structured rpc_proxy rejection, if present. */
 function rpcErrorCode(error: unknown): number | null {
     if (error && typeof error === 'object') {
@@ -102,7 +109,8 @@ export async function rpcCall(method: string, params: any = {}): Promise<any> {
                 new CustomEvent('hifimule:server-unauthorized', { detail: { method } })
             );
         }
-        throw new Error(getErrorMessage(error));
+        const record = error && typeof error === 'object' ? error as Record<string, unknown> : null;
+        throw new RpcError(getErrorMessage(error), rpcErrorCode(error), record?.data, error);
     }
 }
 
@@ -186,6 +194,7 @@ export interface BrowsePlaylist {
 
 export interface BrowseTrack {
     id: string;
+    serverId?: string;
     title: string;
     artistId?: string | null;
     artistName: string;
@@ -200,6 +209,38 @@ export interface BrowseTrack {
     lastPlayedAt?: string | null;
     playCount?: number | null;
     isFavorite?: boolean | null;
+}
+
+export type PlaybackStatus = 'idle' | 'loading' | 'active' | 'paused' | 'stopped' | 'completed' | 'error';
+export interface PlaybackSessionSnapshot {
+    schemaVersion: number; instanceId: string; sessionId: string; queueRevision: string;
+    stateSequence: string; generationId: string; state: string; positionMs: number;
+    current: { occurrenceId: string; source: { serverId: string; trackId: string } } | null;
+    playback: { status: PlaybackStatus; metadata: { title: string; artist?: string | null; source: { serverId: string; trackId: string } } | null; durationMs?: number | null; error?: { code: string; retryable: boolean } | null };
+}
+
+export async function playbackGetSession(): Promise<PlaybackSessionSnapshot> {
+    const result = await rpcCall('playback.getSession', { schemaVersion: 1 });
+    return result.data;
+}
+
+export async function playbackPlayTrack(serverId: string, trackId: string): Promise<void> {
+    const current = await playbackGetSession();
+    await rpcCall('playback.applySession', {
+        schemaVersion: 1, instanceId: current.instanceId, sessionId: current.sessionId,
+        commandId: crypto.randomUUID(), expectedQueueRevision: current.queueRevision,
+        operation: { type: 'playTrack', source: { serverId, trackId } },
+    });
+}
+
+export async function playbackControl(action: 'pause' | 'resume' | 'stop'): Promise<void> {
+    const current = await playbackGetSession();
+    if (!current.current) return;
+    await rpcCall('playback.control', {
+        schemaVersion: 1, instanceId: current.instanceId, sessionId: current.sessionId,
+        commandId: crypto.randomUUID(), expectedGenerationId: current.generationId,
+        occurrenceId: current.current.occurrenceId, action,
+    });
 }
 
 export interface BrowseGenre {

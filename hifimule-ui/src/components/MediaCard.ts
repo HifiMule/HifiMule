@@ -2,7 +2,7 @@
 // Handles rendering of media items in the grid with selection support.
 
 import { basketStore } from '../state/basket';
-import { getImageUrl, rpcCall } from '../rpc';
+import { getImageUrl, playbackPlayTrack, rpcCall } from '../rpc';
 import { t } from '../i18n';
 import { showToast } from '../toast';
 
@@ -25,6 +25,7 @@ export interface JellyfinView {
 
 export interface BrowseDisplayItem {
     id: string;
+    serverId?: string;
     name: string;
     type: 'MusicArtist' | 'MusicAlbum' | 'Playlist' | 'Audio' | 'MusicGenre';
     basketId?: string;
@@ -103,6 +104,25 @@ export class MediaCard {
                 ${yearHtml}
             </div>
         `;
+
+        if (isBrowseItem && (item as BrowseDisplayItem).type === 'Audio') {
+            const audio = item as BrowseDisplayItem;
+            const play = document.createElement('sl-icon-button') as any;
+            play.name = 'play-fill';
+            play.label = t('playback.play_track', { title: itemName });
+            play.disabled = !audio.serverId;
+            const playbackSource = audio.serverId
+                ? { serverId: audio.serverId, trackId: audio.id }
+                : null;
+            play.addEventListener('mousedown', (event: Event) => event.stopPropagation());
+            play.addEventListener('click', async (event: Event) => {
+                event.stopPropagation();
+                if (!playbackSource) return;
+                try { await playbackPlayTrack(playbackSource.serverId, playbackSource.trackId); }
+                catch (error) { showToast((error as Error).message, 'danger'); }
+            });
+            card.querySelector('.card-content')?.appendChild(play);
+        }
 
         // Load image asynchronously via Tauri proxy
         const cardImage = card.querySelector('.card-image') as HTMLElement;

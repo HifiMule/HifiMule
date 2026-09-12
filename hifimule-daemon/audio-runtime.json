@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "ffmpegRelease": "9.0.1",
+  "sourceUrl": "https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz",
+  "signatureUrl": "https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz.asc",
+  "signingKey": "DD1EC9E8DE085C629B3E1846B18E8928B3948D64",
+  "configureFlags": [
+    "--enable-shared", "--disable-static", "--disable-programs", "--disable-doc",
+    "--disable-network", "--disable-avdevice", "--disable-avfilter", "--disable-swscale",
+    "--disable-postproc", "--disable-everything", "--enable-avcodec", "--enable-avformat",
+    "--enable-avutil", "--enable-swresample", "--enable-protocol=file",
+    "--enable-demuxer=wav,flac,mov,mp3,aac,ogg", "--enable-decoder=pcm_s16le,pcm_s24le,pcm_s32le,flac,alac,mp3,aac,opus"
+  ],
+  "requiredLibraries": ["avcodec", "avformat", "avutil", "swresample"],
+  "abiVersions": { "avcodec": "63.1.100", "avformat": "63.1.100", "avutil": "61.1.100", "swresample": "7.1.100" },
+  "bindingVersions": { "ffmpeg-next": "9.0.0", "ffmpeg-sys-next": "9.0.0", "cpal": "0.16.0" },
+  "licenses": ["LGPL-2.1-or-later"],
+  "sourceSha256": "cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635",
+  "windowsDistribution": {
+    "provider": "BtbN/FFmpeg-Builds",
+    "releaseTag": "autobuild-2026-09-10-15-31",
+    "revision": "n9.0.1-27-g9b0578816c",
+    "variant": "lgpl-shared-9.0",
+    "abiVersions": { "avcodec": "63.1.101", "avformat": "63.1.101", "avutil": "61.1.101", "swresample": "7.1.101" },
+    "artifacts": {
+      "aarch64-pc-windows-msvc": {
+        "archive": "ffmpeg-n9.0.1-27-g9b0578816c-winarm64-lgpl-shared-9.0.zip",
+        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-10-15-31/ffmpeg-n9.0.1-27-g9b0578816c-winarm64-lgpl-shared-9.0.zip",
+        "sha256": "ac4d7532998a44b314e549d12a53e521fb7eecb016c10b655097ebf3ca402e18"
+      },
+      "x86_64-pc-windows-msvc": {
+        "archive": "ffmpeg-n9.0.1-27-g9b0578816c-win64-lgpl-shared-9.0.zip",
+        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-10-15-31/ffmpeg-n9.0.1-27-g9b0578816c-win64-lgpl-shared-9.0.zip",
+        "sha256": "69e2b4b44695f6bbe1562e0accb59fa4b4c620b01f9d19667de6f52fe10b1cb6"
+      }
+    }
+  },
+  "verification": { "macosArm64": "local-pending", "macosX64": "user", "linuxArm64": "user", "linuxX64": "user", "windowsX64": "user" }
+}

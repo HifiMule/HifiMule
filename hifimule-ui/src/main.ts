@@ -432,6 +432,8 @@ function renderMainLayout(_state: any = null) {
 
         <div id="browse-mode-bar"></div>
 
+        <div id="playback-controls-container"></div>
+
         <div id="library-content" class="content">
           <!-- Media grid will be rendered here by library.ts -->
         </div>
@@ -451,6 +453,11 @@ function renderMainLayout(_state: any = null) {
             // The instance stays reachable via its DOM event listeners.
             new ServerHub(container, () => { reloadFromDaemon(); });
         }
+    });
+
+    import('./components/PlaybackControls').then(({ PlaybackControls }) => {
+        const container = document.getElementById('playback-controls-container');
+        if (container) new PlaybackControls(container);
     });
 
     // Initialize Basket Sidebar

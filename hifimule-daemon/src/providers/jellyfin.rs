@@ -5,7 +5,8 @@ use crate::domain::models::{
     Song,
 };
 use crate::providers::{
-    BrowseCapabilities, BrowseMode, Capabilities, MediaProvider, ProviderChangeContext,
+    BrowseCapabilities, BrowseMode, Capabilities, MediaProvider, PlaybackDescription,
+    PlaybackProvenance, PlaybackRepresentation, PlaybackRequest, ProviderChangeContext,
     ProviderError, ScrobbleRequest, ScrobbleSubmission, ServerType, TrackListFilter, TrackListPage,
     TranscodeProfile,
 };
@@ -554,6 +555,43 @@ impl MediaProvider for JellyfinProvider {
             query.append_pair("ApiKey", token);
         }
         Ok(url.into())
+    }
+
+    async fn resolve_playback(&self, song_id: &str) -> Result<PlaybackDescription, ProviderError> {
+        let song = self.get_song(song_id).await?;
+        let url = reqwest::Url::parse(&format!(
+            "{}/Items/{}/Download",
+            self.url().trim_end_matches('/'),
+            song_id
+        ))
+        .map_err(|_| {
+            ProviderError::UnsupportedCapability("invalid Jellyfin playback route".into())
+        })?;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_str(&format!(
+                "MediaBrowser Token=\"{}\"",
+                self.token()
+            ))
+            .map_err(|_| ProviderError::Auth("invalid Jellyfin credential".into()))?,
+        );
+        Ok(PlaybackDescription {
+            representations: vec![PlaybackRepresentation {
+                codec: song.suffix.clone(),
+                container: song.suffix.clone(),
+                bitrate_kbps: song.bitrate_kbps,
+                sample_rate: None,
+                bit_depth: None,
+                provenance: PlaybackProvenance::Original,
+                request: PlaybackRequest {
+                    url,
+                    headers,
+                    range_supported: true,
+                },
+            }],
+            song,
+        })
     }
 
     async fn cover_art_url(&self, cover_art_id: &str) -> Result<String, ProviderError> {

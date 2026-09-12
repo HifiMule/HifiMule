@@ -126,6 +126,7 @@ async fn finish_shutdown_with_playback(
     playback: &playback::PlaybackSession,
 ) -> bool {
     operations.begin_session_checkpoint();
+    playback::audio::global().control(playback::model::ControlAction::Stop);
     // Fence/queue the final write, then cancel sync without waiting for SQLite.
     let initial = playback.begin_shutdown_checkpoint();
     operations.commit_shutdown().await;
@@ -161,9 +162,11 @@ async fn finish_shutdown_with_playback(
         }
     };
     tokio::join!(checkpoint, operations.wait_for_shutdown_drain());
+    let audio_joined =
+        tokio::task::spawn_blocking(|| playback::audio::global().stop_and_join()).await;
     let playback = playback.clone();
     let joined = tokio::task::spawn_blocking(move || playback.stop_and_join()).await;
-    let succeeded = matches!(joined, Ok(Ok(())));
+    let succeeded = matches!(joined, Ok(Ok(()))) && matches!(audio_joined, Ok(Ok(())));
     if !succeeded {
         operations.fail_playback_teardown();
     }

@@ -2171,3 +2171,16 @@ h2 {
 }
 
 /* Login View */
+.playback-controls {
+    min-height: 3.25rem;
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    padding: .5rem 1rem;
+    border-block: 1px solid var(--surface-border-soft);
+    background: var(--surface-fill);
+}
+.playback-controls__info { min-width: 0; flex: 1; display: flex; flex-direction: column; }
+.playback-controls__info strong, .playback-controls__status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.playback-controls__status { font-size: .75rem; opacity: .72; }
+.playback-controls sl-button:focus-visible { outline: 2px solid var(--sl-color-primary-500); outline-offset: 2px; }

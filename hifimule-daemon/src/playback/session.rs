@@ -1,7 +1,7 @@
 use super::model::*;
 use crate::db::Database;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -36,8 +36,8 @@ type PResult<T> = std::result::Result<T, PlaybackError>;
 #[derive(Clone)]
 pub struct PlaybackSession {
     instance_id: String,
-    #[cfg(test)]
     inner: Arc<Mutex<Inner>>,
+    generation_serial: Arc<AtomicU64>,
     command_tx: mpsc::SyncSender<OwnerCommand>,
     control_tx: mpsc::Sender<OwnerControl>,
     #[allow(dead_code)]
@@ -60,6 +60,12 @@ enum OwnerCommand {
         Option<crate::sync::MutationGuard>,
         mpsc::Sender<PResult<SessionSnapshot>>,
     ),
+    Control(
+        ControlParams,
+        Option<crate::sync::MutationGuard>,
+        mpsc::Sender<PResult<SessionSnapshot>>,
+    ),
+    Event(String, PlaybackEvent),
 }
 
 enum OwnerControl {
@@ -79,8 +85,11 @@ struct Inner {
     persistence: Status,
     dedup: HashMap<String, DedupEntry>,
     dedup_order: VecDeque<String>,
+    control_dedup: HashMap<String, (ControlParams, PResult<SessionSnapshot>)>,
+    control_dedup_order: VecDeque<String>,
     dirty: bool,
     checkpointed_position_ms: u64,
+    playback: PlaybackState,
 }
 #[derive(Clone)]
 struct DedupEntry {
@@ -103,6 +112,7 @@ struct OwnerResources {
     ingress: Arc<Mutex<ProgressIngress>>,
     fenced: Arc<AtomicBool>,
     health: Arc<Mutex<PlaybackHealth>>,
+    generation_serial: Arc<AtomicU64>,
 }
 
 impl PlaybackSession {
@@ -164,6 +174,11 @@ impl PlaybackSession {
             }
         };
         let checkpointed_position_ms = session.position_ms;
+        let restored_playback_status = if session.current_occurrence_id.is_some() {
+            PlaybackStatus::Paused
+        } else {
+            PlaybackStatus::Idle
+        };
         let inner = Arc::new(Mutex::new(Inner {
             db,
             instance_id,
@@ -177,8 +192,14 @@ impl PlaybackSession {
             restoration,
             dedup: HashMap::new(),
             dedup_order: VecDeque::new(),
+            control_dedup: HashMap::new(),
+            control_dedup_order: VecDeque::new(),
             dirty: false,
             checkpointed_position_ms,
+            playback: PlaybackState {
+                status: restored_playback_status,
+                ..Default::default()
+            },
         }));
         let (ingress, health) = {
             let i = inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -197,6 +218,7 @@ impl PlaybackSession {
             )
         };
         let fenced = Arc::new(AtomicBool::new(false));
+        let generation_serial = Arc::new(AtomicU64::new(0));
         let (command_tx, command_rx) = mpsc::sync_channel(64);
         let (control_tx, control_rx) = mpsc::channel();
         let worker_inner = Arc::clone(&inner);
@@ -211,6 +233,7 @@ impl PlaybackSession {
             ingress: worker_ingress,
             fenced: worker_fenced,
             health: worker_health,
+            generation_serial: generation_serial.clone(),
         };
         let worker = std::thread::Builder::new()
             .name("hifimule-playback-owner".into())
@@ -218,8 +241,8 @@ impl PlaybackSession {
             .expect("playback owner thread must start");
         Self {
             instance_id: owner_id,
-            #[cfg(test)]
             inner,
+            generation_serial,
             command_tx,
             control_tx,
             executing,
@@ -270,6 +293,36 @@ impl PlaybackSession {
         self.admit_apply(p, guard)?
             .recv()
             .unwrap_or_else(|_| Err(owner_stopped()))
+    }
+
+    pub fn control_with_guard(
+        &self,
+        p: ControlParams,
+        guard: Option<crate::sync::MutationGuard>,
+    ) -> PResult<SessionSnapshot> {
+        if self.fenced.load(Ordering::Acquire) {
+            return Err(owner_stopped());
+        }
+        let (tx, rx) = mpsc::channel();
+        self.command_tx
+            .try_send(OwnerCommand::Control(p, guard, tx))
+            .map_err(admission_error)?;
+        rx.recv().unwrap_or_else(|_| Err(owner_stopped()))
+    }
+
+    pub fn publish_event(&self, generation_id: String, event: PlaybackEvent) {
+        let _ = self
+            .command_tx
+            .try_send(OwnerCommand::Event(generation_id, event));
+    }
+
+    pub(crate) fn generation_guard(&self, generation_id: &str) -> Option<(Arc<AtomicU64>, u64)> {
+        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        if inner.generation_id != generation_id || self.fenced.load(Ordering::Acquire) {
+            return None;
+        }
+        let serial = self.generation_serial.load(Ordering::Acquire);
+        Some((self.generation_serial.clone(), serial))
     }
 
     #[allow(dead_code)]
@@ -456,6 +509,7 @@ fn owner_loop(
         ingress,
         fenced,
         health,
+        generation_serial,
     } = resources;
     let mut last_periodic_checkpoint = Instant::now();
     let mut last_sample = Instant::now();
@@ -516,7 +570,7 @@ fn owner_loop(
                             &mut last_sample,
                             Instant::now(),
                         )
-                        .and_then(|()| apply_inner(&mut i, &params));
+                        .and_then(|()| apply_inner(&mut i, &params, &generation_serial));
                         if result.is_ok() {
                             refresh_ingress(&i, &ingress);
                         }
@@ -532,13 +586,85 @@ fn owner_loop(
                 let _ = reply.send(result);
                 executing.store(false, Ordering::Release);
             }
+            Ok(OwnerCommand::Control(params, _mutation_guard, reply)) => {
+                executing.store(true, Ordering::Release);
+                let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
+                let result = if fenced.load(Ordering::Acquire) {
+                    Err(owner_stopped())
+                } else if let Some((old, result)) = i.control_dedup.get(&params.command_id) {
+                    if old == &params {
+                        result.clone()
+                    } else {
+                        Err(PlaybackError::conflict(
+                            "COMMAND_ID_REUSED",
+                            "command identity was reused with another payload",
+                        ))
+                    }
+                } else {
+                    let result = sample_progress(&mut i, &ingress)
+                        .and_then(|()| control_inner(&mut i, &params, &generation_serial));
+                    i.control_dedup
+                        .insert(params.command_id.clone(), (params.clone(), result.clone()));
+                    i.control_dedup_order.push_back(params.command_id.clone());
+                    while i.control_dedup_order.len() > 1024 {
+                        if let Some(id) = i.control_dedup_order.pop_front() {
+                            i.control_dedup.remove(&id);
+                        }
+                    }
+                    result
+                };
+                if result.is_ok() {
+                    refresh_ingress(&i, &ingress);
+                }
+                publish_health(&i, &health);
+                let _ = reply.send(with_metadata(result, &i));
+                executing.store(false, Ordering::Release);
+            }
+            Ok(OwnerCommand::Event(generation_id, event)) => {
+                let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
+                if !fenced.load(Ordering::Acquire) && i.generation_id == generation_id {
+                    match event {
+                        PlaybackEvent::Resolved {
+                            metadata,
+                            duration_ms,
+                            representation,
+                        } => {
+                            i.playback.metadata = Some(metadata);
+                            i.playback.duration_ms = duration_ms;
+                            i.playback.representation = Some(representation);
+                            i.playback.error = None;
+                        }
+                        PlaybackEvent::Active => {
+                            i.session.state = TransportState::Playing;
+                            i.playback.status = PlaybackStatus::Active;
+                        }
+                        PlaybackEvent::Buffering => {
+                            i.session.state = TransportState::Buffering;
+                            i.playback.status = PlaybackStatus::Loading;
+                        }
+                        PlaybackEvent::Completed { position_ms } => {
+                            i.session.position_ms = position_ms;
+                            i.session.state = TransportState::Paused;
+                            i.playback.status = PlaybackStatus::Completed;
+                            i.dirty = true;
+                        }
+                        PlaybackEvent::Failed { code, retryable } => {
+                            i.session.state = TransportState::Paused;
+                            i.playback.status = PlaybackStatus::Error;
+                            i.playback.error = Some(PlaybackFailure { code, retryable });
+                        }
+                    }
+                    i.state_sequence = i.state_sequence.saturating_add(1);
+                    refresh_ingress(&i, &ingress);
+                }
+            }
             Ok(OwnerCommand::RetryRestore(_mutation_guard, reply)) => {
                 executing.store(true, Ordering::Release);
                 let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
                 let result = if fenced.load(Ordering::Acquire) {
                     Err(owner_stopped())
                 } else {
-                    retry_restore_inner(&mut i)
+                    retry_restore_inner(&mut i, &generation_serial)
                 };
                 if result.is_ok() {
                     refresh_ingress(&i, &ingress);
@@ -644,10 +770,17 @@ fn reject_unstarted(command: OwnerCommand) {
         OwnerCommand::List(_, reply) => {
             let _ = reply.send(Err(owner_stopped()));
         }
+        OwnerCommand::Control(_, _guard, reply) => {
+            let _ = reply.send(Err(owner_stopped()));
+        }
+        OwnerCommand::Event(_, _) => {}
     }
 }
 
-fn retry_restore_inner(inner: &mut Inner) -> PResult<SessionSnapshot> {
+fn retry_restore_inner(
+    inner: &mut Inner,
+    generation_serial: &AtomicU64,
+) -> PResult<SessionSnapshot> {
     if inner.restoration.status != "error" || inner.dirty {
         return Err(PlaybackError::conflict(
             "PLAYBACK_BUSY",
@@ -677,10 +810,19 @@ fn retry_restore_inner(inner: &mut Inner) -> PResult<SessionSnapshot> {
         loaded.state = TransportState::Paused;
     }
     // Build all fallible response data before accepting the recovered live state.
+    let restored_playback_status = if loaded.current_occurrence_id.is_some() {
+        PlaybackStatus::Paused
+    } else {
+        PlaybackStatus::Idle
+    };
     let candidate = Inner {
         db: inner.db.clone(),
         instance_id: inner.instance_id.clone(),
         checkpointed_position_ms: loaded.position_ms,
+        playback: PlaybackState {
+            status: restored_playback_status,
+            ..Default::default()
+        },
         session: loaded,
         generation_id: Uuid::new_v4().to_string(),
         state_sequence: next_sequence,
@@ -694,12 +836,15 @@ fn retry_restore_inner(inner: &mut Inner) -> PResult<SessionSnapshot> {
         },
         dedup: HashMap::new(),
         dedup_order: VecDeque::new(),
+        control_dedup: HashMap::new(),
+        control_dedup_order: VecDeque::new(),
         dirty: false,
     };
     let response = snapshot(&candidate)?;
     inner.session = candidate.session;
     inner.checkpointed_position_ms = candidate.checkpointed_position_ms;
     inner.generation_id = candidate.generation_id;
+    generation_serial.fetch_add(1, Ordering::AcqRel);
     inner.state_sequence = candidate.state_sequence;
     inner.restoration = candidate.restoration;
     inner.persistence = candidate.persistence;
@@ -782,7 +927,11 @@ fn validate_stored(db: &Database, s: &PersistedSession) -> PResult<()> {
     db.validate_playback_session(s)
         .map_err(|_| PlaybackError::invalid("INVALID_SESSION", "stored session invariants failed"))
 }
-fn apply_inner(i: &mut Inner, p: &ApplySessionParams) -> PResult<ApplyResult> {
+fn apply_inner(
+    i: &mut Inner,
+    p: &ApplySessionParams,
+    generation_serial: &AtomicU64,
+) -> PResult<ApplyResult> {
     require_schema(p.schema_version)?;
     if Uuid::parse_str(&p.command_id).is_err() {
         return Err(PlaybackError::invalid(
@@ -872,11 +1021,13 @@ fn apply_inner(i: &mut Inner, p: &ApplySessionParams) -> PResult<ApplyResult> {
                 .ok_or_else(|| {
                     PlaybackError::invalid("INVALID_SESSION", "queue revision overflow")
                 })?;
-            next_session.state = if next_session.current_occurrence_id.is_none() {
-                TransportState::Idle
-            } else {
-                TransportState::Paused
-            };
+            if was_empty {
+                next_session.state = if next_session.current_occurrence_id.is_none() {
+                    TransportState::Idle
+                } else {
+                    TransportState::Paused
+                };
+            }
             i.db.append_playback_occurrences(&next_session, &assigned)
                 .map_err(storage)?;
         }
@@ -902,19 +1053,52 @@ fn apply_inner(i: &mut Inner, p: &ApplySessionParams) -> PResult<ApplyResult> {
             i.db.clear_playback_session(&next_session)
                 .map_err(storage)?;
         }
+        SessionOperation::PlayTrack { source } => {
+            source
+                .validate()
+                .map_err(|m| PlaybackError::invalid("INVALID_SESSION", m))?;
+            assigned = make_occurrences(std::slice::from_ref(source), 0);
+            decorate_availability(&i.db, &mut assigned)?;
+            next_session.current_occurrence_id = Some(assigned[0].occurrence_id.clone());
+            next_session.position_ms = 0;
+            next_session.queue_revision = next_session
+                .queue_revision
+                .checked_add(1)
+                .filter(|n| *n <= i64::MAX as u64)
+                .ok_or_else(|| {
+                    PlaybackError::invalid("INVALID_SESSION", "queue revision overflow")
+                })?;
+            next_session.state = TransportState::Buffering;
+            i.db.persist_playback_structure(&next_session, &assigned)
+                .map_err(storage)?;
+        }
     }
     let preserve_generation = matches!(p.operation, SessionOperation::AppendQueue { .. })
         && i.session.current_occurrence_id == next_session.current_occurrence_id;
-    i.session = next_session;
-    i.state_sequence = next_sequence;
     if !preserve_generation {
+        generation_serial.fetch_add(1, Ordering::AcqRel);
+        super::audio::global().control(ControlAction::Stop);
         i.generation_id = Uuid::new_v4().to_string();
     }
+    i.session = next_session;
+    i.state_sequence = next_sequence;
     i.dirty = false;
     i.checkpointed_position_ms = i.session.position_ms;
     i.persistence = Status {
         status: "ok".into(),
         code: None,
+    };
+    i.playback = match &p.operation {
+        SessionOperation::PlayTrack { .. } => PlaybackState {
+            status: PlaybackStatus::Loading,
+            ..Default::default()
+        },
+        SessionOperation::Clear => PlaybackState::default(),
+        SessionOperation::AppendQueue { .. } => i.playback.clone(),
+        _ => PlaybackState {
+            status: PlaybackStatus::Paused,
+            ..Default::default()
+        },
     };
     Ok(ApplyResult {
         current_metadata: metadata(i),
@@ -994,7 +1178,77 @@ fn snapshot(i: &Inner) -> PResult<SessionSnapshot> {
         },
         occurrences: rows,
         next_cursor: next,
+        playback: i.playback.clone(),
     })
+}
+
+fn control_inner(
+    i: &mut Inner,
+    p: &ControlParams,
+    generation_serial: &AtomicU64,
+) -> PResult<SessionSnapshot> {
+    require_schema(p.schema_version)?;
+    if Uuid::parse_str(&p.command_id).is_err() {
+        return Err(PlaybackError::invalid(
+            "INVALID_SESSION",
+            "commandId must be a UUID",
+        ));
+    }
+    if p.instance_id != i.instance_id || p.session_id != i.session.session_id {
+        return Err(PlaybackError::conflict(
+            "SESSION_MISMATCH",
+            "session identity is stale",
+        ));
+    }
+    if p.expected_generation_id != i.generation_id
+        || i.session.current_occurrence_id.as_deref() != Some(&p.occurrence_id)
+    {
+        return Err(PlaybackError::conflict(
+            "GENERATION_CONFLICT",
+            "playback generation is stale",
+        ));
+    }
+    i.state_sequence = i
+        .state_sequence
+        .checked_add(1)
+        .ok_or_else(|| PlaybackError::invalid("INVALID_SESSION", "state sequence overflow"))?;
+    match p.action {
+        ControlAction::Pause => {
+            super::audio::global().control(ControlAction::Pause);
+            i.session.state = TransportState::Paused;
+            i.playback.status = PlaybackStatus::Paused;
+        }
+        ControlAction::Resume => {
+            if i.playback.status == PlaybackStatus::Completed {
+                generation_serial.fetch_add(1, Ordering::AcqRel);
+                super::audio::global().control(ControlAction::Stop);
+                i.session.position_ms = 0;
+                i.generation_id = Uuid::new_v4().to_string();
+            }
+            i.session.state = TransportState::Buffering;
+            i.playback.status = PlaybackStatus::Loading;
+            i.playback.error = None;
+        }
+        ControlAction::Stop => {
+            generation_serial.fetch_add(1, Ordering::AcqRel);
+            super::audio::global().control(ControlAction::Stop);
+            i.session.state = if i.session.current_occurrence_id.is_some() {
+                TransportState::Paused
+            } else {
+                TransportState::Idle
+            };
+            i.session.position_ms = 0;
+            i.generation_id = Uuid::new_v4().to_string();
+            i.playback.status = if i.session.current_occurrence_id.is_some() {
+                PlaybackStatus::Stopped
+            } else {
+                PlaybackStatus::Idle
+            };
+            i.dirty = true;
+            checkpoint_inner(i)?;
+        }
+    }
+    snapshot(i)
 }
 fn availability(db: &Database, server_id: &str) -> PResult<SourceAvailability> {
     db.has_portable_server(server_id)
@@ -1792,6 +2046,102 @@ mod tests {
             assert_eq!(reply.recv().unwrap().unwrap_err().code, "DAEMON_STOPPED");
         }
         assert_eq!(playback.snapshot().unwrap().queue_revision, "0");
+        playback.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn play_track_is_atomic_and_controls_are_generation_fenced() {
+        let db = Arc::new(Database::memory().unwrap());
+        let playback = PlaybackSession::restore(db, "owner".into());
+        let initial = playback.snapshot().unwrap();
+        playback
+            .apply(params(
+                &initial,
+                SessionOperation::PlayTrack {
+                    source: TrackSource {
+                        server_id: "portable-a".into(),
+                        track_id: "same-id".into(),
+                    },
+                },
+            ))
+            .unwrap();
+        let loading = playback.snapshot().unwrap();
+        assert_eq!(loading.total_occurrence_count, 1);
+        assert_eq!(loading.state, TransportState::Buffering);
+        assert_eq!(loading.playback.status, PlaybackStatus::Loading);
+        let occurrence_id = loading.current.as_ref().unwrap().occurrence_id.clone();
+        let control = |snapshot: &SessionSnapshot, action| ControlParams {
+            schema_version: 1,
+            instance_id: snapshot.instance_id.clone(),
+            session_id: snapshot.session_id.clone(),
+            command_id: Uuid::new_v4().to_string(),
+            expected_generation_id: snapshot.generation_id.clone(),
+            occurrence_id: occurrence_id.clone(),
+            action,
+        };
+        let paused = playback
+            .control_with_guard(control(&loading, ControlAction::Pause), None)
+            .unwrap();
+        assert_eq!(paused.playback.status, PlaybackStatus::Paused);
+        let stopped = playback
+            .control_with_guard(control(&paused, ControlAction::Stop), None)
+            .unwrap();
+        assert_eq!(stopped.position_ms, 0);
+        assert_eq!(stopped.playback.status, PlaybackStatus::Stopped);
+        assert_eq!(
+            playback
+                .control_with_guard(control(&paused, ControlAction::Resume), None)
+                .unwrap_err()
+                .code,
+            "GENERATION_CONFLICT"
+        );
+        playback.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn append_preserves_active_generation_and_control_dedup_is_payload_checked() {
+        let (_db, playback, queued) = queued();
+        let generation = queued.generation_id.clone();
+        let current = queued.current.as_ref().unwrap().occurrence_id.clone();
+        playback.publish_event(generation.clone(), PlaybackEvent::Active);
+
+        let active = playback.snapshot().unwrap();
+        let appended = playback
+            .apply(params(
+                &active,
+                SessionOperation::AppendQueue {
+                    sources: vec![TrackSource {
+                        server_id: "other-server".into(),
+                        track_id: "other-track".into(),
+                    }],
+                },
+            ))
+            .unwrap();
+        let after_append = playback.snapshot().unwrap();
+        assert_eq!(appended.generation_id, generation);
+        assert_eq!(after_append.current.unwrap().occurrence_id, current);
+        assert_eq!(after_append.state, TransportState::Playing);
+        assert_eq!(after_append.playback.status, PlaybackStatus::Active);
+
+        let pause = ControlParams {
+            schema_version: 1,
+            instance_id: after_append.instance_id.clone(),
+            session_id: after_append.session_id.clone(),
+            command_id: Uuid::new_v4().to_string(),
+            expected_generation_id: generation,
+            occurrence_id: current,
+            action: ControlAction::Pause,
+        };
+        let first = playback.control_with_guard(pause.clone(), None).unwrap();
+        let replay = playback.control_with_guard(pause.clone(), None).unwrap();
+        assert_eq!(first.state_sequence, replay.state_sequence);
+
+        let mut changed = pause;
+        changed.action = ControlAction::Resume;
+        assert_eq!(
+            playback.control_with_guard(changed, None).unwrap_err().code,
+            "COMMAND_ID_REUSED"
+        );
         playback.stop_and_join().unwrap();
     }
 }

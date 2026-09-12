@@ -141,7 +141,8 @@ async fn daemon_health_result(
             "daemonVersion": env!("CARGO_PKG_VERSION"),
             "errorCode": error_code,
             "shutdown": shutdown,
-            "playback": playback.health()
+            "playback": playback.health(),
+            "audioRuntime": crate::playback::audio::runtime_identity()
         }
     })
 }
@@ -395,6 +396,9 @@ async fn handler(
         "playback.applySession" => {
             handle_playback_apply_session(&state, payload.params, mutation_guard.take()).await
         }
+        "playback.control" => {
+            handle_playback_control(&state, payload.params, mutation_guard.take()).await
+        }
         "playback.retryRestore" => {
             handle_playback_retry_restore(&state, payload.params, mutation_guard.take()).await
         }
@@ -495,6 +499,7 @@ fn is_mutating_method(method: &str) -> bool {
             | "device.select"
             | "playlist.create"
             | "playback.applySession"
+            | "playback.control"
             | "playback.retryRestore"
             | "playlist.addItems"
             | "playlist.addTracks"
@@ -649,16 +654,159 @@ async fn handle_playback_apply_session(
         message: "Invalid playback.applySession parameters".into(),
         data: Some(serde_json::json!({"code":"INVALID_SESSION"})),
     })?;
+    let source = match &p.operation {
+        crate::playback::model::SessionOperation::PlayTrack { source } => Some(source.clone()),
+        _ => None,
+    };
     let playback = state.playback.clone();
-    tokio::task::spawn_blocking(move || playback.apply_with_guard(p, mutation_guard))
+    let owner = playback.clone();
+    let result = tokio::task::spawn_blocking(move || owner.apply_with_guard(p, mutation_guard))
         .await
         .map_err(|_| JsonRpcError {
             code: -32603,
             message: "Playback owner task failed".into(),
             data: Some(serde_json::json!({"code":"PERSISTENCE_FAILED"})),
         })?
-        .map(|data| serde_json::json!({"data":data}))
-        .map_err(playback_error)
+        .map_err(playback_error)?;
+    if let Some(source) = source {
+        let manager = state.server_manager.clone();
+        let db = state.db.clone();
+        let generation = result.generation_id.clone();
+        tokio::spawn(async move {
+            let resolved = match crate::server_manager::get_provider_by_server_id(
+                &manager,
+                &db,
+                &source.server_id,
+            )
+            .await
+            {
+                Ok(provider) => provider.resolve_playback(&source.track_id).await,
+                Err(error) => Err(error),
+            };
+            match resolved {
+                Ok(description) => {
+                    if let Err(error) = crate::playback::audio::global()
+                        .start(description, source, 0, generation.clone(), playback.clone())
+                        .await
+                    {
+                        let message = error.to_string();
+                        playback.publish_event(
+                            generation,
+                            crate::playback::model::PlaybackEvent::Failed {
+                                code: if message.contains("timeout") {
+                                    "PLAYBACK_TIMEOUT"
+                                } else if message.contains("source")
+                                    || message.contains("non-audio")
+                                {
+                                    "SOURCE_UNAVAILABLE"
+                                } else {
+                                    "OUTPUT_UNAVAILABLE"
+                                }
+                                .into(),
+                                retryable: true,
+                            },
+                        );
+                    }
+                }
+                Err(crate::providers::ProviderError::UnsupportedCapability(_)) => playback
+                    .publish_event(
+                        generation,
+                        crate::playback::model::PlaybackEvent::Failed {
+                            code: "PLAYBACK_UNSUPPORTED".into(),
+                            retryable: false,
+                        },
+                    ),
+                Err(_) => playback.publish_event(
+                    generation,
+                    crate::playback::model::PlaybackEvent::Failed {
+                        code: "SOURCE_UNAVAILABLE".into(),
+                        retryable: true,
+                    },
+                ),
+            }
+        });
+    }
+    Ok(serde_json::json!({"data":result}))
+}
+
+async fn handle_playback_control(
+    state: &AppState,
+    params: Option<Value>,
+    mutation_guard: Option<crate::sync::MutationGuard>,
+) -> Result<Value, JsonRpcError> {
+    let p = serde_json::from_value::<crate::playback::model::ControlParams>(
+        params.unwrap_or(Value::Null),
+    )
+    .map_err(|_| JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Invalid playback.control parameters".into(),
+        data: Some(serde_json::json!({"code":"INVALID_SESSION"})),
+    })?;
+    let playback = state.playback.clone();
+    let action = p.action;
+    let result =
+        tokio::task::spawn_blocking(move || playback.control_with_guard(p, mutation_guard))
+            .await
+            .map_err(playback_task_error)?
+            .map_err(playback_error)?;
+    match action {
+        crate::playback::model::ControlAction::Pause
+        | crate::playback::model::ControlAction::Stop => {}
+        crate::playback::model::ControlAction::Resume => {
+            if !crate::playback::audio::global().resume_existing(&result.generation_id)
+                && let Some(current) = result.current.clone()
+            {
+                let manager = state.server_manager.clone();
+                let db = state.db.clone();
+                let playback = state.playback.clone();
+                let generation = result.generation_id.clone();
+                let position_ms = result.position_ms;
+                tokio::spawn(async move {
+                    let resolved = match crate::server_manager::get_provider_by_server_id(
+                        &manager,
+                        &db,
+                        &current.source.server_id,
+                    )
+                    .await
+                    {
+                        Ok(provider) => provider.resolve_playback(&current.source.track_id).await,
+                        Err(error) => Err(error),
+                    };
+                    match resolved {
+                        Ok(description) => {
+                            if crate::playback::audio::global()
+                                .start(
+                                    description,
+                                    current.source,
+                                    position_ms,
+                                    generation.clone(),
+                                    playback.clone(),
+                                )
+                                .await
+                                .is_err()
+                            {
+                                playback.publish_event(
+                                    generation,
+                                    crate::playback::model::PlaybackEvent::Failed {
+                                        code: "RESUME_UNAVAILABLE".into(),
+                                        retryable: true,
+                                    },
+                                );
+                            }
+                        }
+                        Err(_) => playback.publish_event(
+                            generation,
+                            crate::playback::model::PlaybackEvent::Failed {
+                                code: "RESUME_UNAVAILABLE".into(),
+                                retryable: true,
+                            },
+                        ),
+                    }
+                });
+            }
+        }
+    }
+    Ok(serde_json::json!({"data":result}))
 }
 
 async fn handle_playback_retry_restore(
@@ -793,6 +941,40 @@ fn current_server_id(state: &AppState) -> Result<Option<String>, JsonRpcError> {
 /// always portable.
 fn current_server_portable_id(state: &AppState) -> Result<Option<String>, JsonRpcError> {
     Ok(current_server_config(state)?.and_then(|c| c.server_id))
+}
+
+async fn require_browse_provider(
+    state: &AppState,
+) -> Result<(Arc<dyn MediaProvider>, Option<String>), JsonRpcError> {
+    let (local_id, portable_id) = {
+        let manager = state.server_manager.read().await;
+        let record = manager.selected_record().ok_or(JsonRpcError {
+            code: ERR_CONNECTION_FAILED,
+            message: hifimule_i18n::t("error.no_active_media_provider"),
+            data: None,
+        })?;
+        (record.id.clone(), record.server_id.clone())
+    };
+    let provider = crate::server_manager::get_provider(&state.server_manager, &state.db, &local_id)
+        .await
+        .map_err(provider_error_to_rpc)?;
+    Ok((provider, portable_id))
+}
+
+fn playback_tagged_tracks(server_id: Option<&str>, tracks: Vec<Song>) -> Vec<Value> {
+    tracks
+        .into_iter()
+        .map(|track| {
+            let mut value = serde_json::to_value(track).expect("Song serialization is infallible");
+            if let Some(server_id) = server_id {
+                value
+                    .as_object_mut()
+                    .expect("Song serializes as an object")
+                    .insert("serverId".into(), Value::String(server_id.to_string()));
+            }
+            value
+        })
+        .collect()
 }
 
 /// Story 2.13: tag every untagged DesiredItem with the selected server's portable
@@ -1055,12 +1237,14 @@ async fn handle_browse_get_album(
             data: None,
         })?
         .to_owned();
-    let provider = require_provider(state).await?;
+    let (provider, server_id) = require_browse_provider(state).await?;
     let result = provider
         .get_album(&album_id)
         .await
         .map_err(provider_error_to_rpc)?;
-    Ok(serde_json::json!({ "album": result.album, "tracks": result.tracks }))
+    Ok(
+        serde_json::json!({ "album": result.album, "tracks": playback_tagged_tracks(server_id.as_deref(), result.tracks) }),
+    )
 }
 
 async fn handle_browse_list_playlists(state: &AppState) -> Result<Value, JsonRpcError> {
@@ -1085,12 +1269,14 @@ async fn handle_browse_get_playlist(
             data: None,
         })?
         .to_owned();
-    let provider = require_provider(state).await?;
+    let (provider, server_id) = require_browse_provider(state).await?;
     let result = provider
         .get_playlist(&playlist_id)
         .await
         .map_err(provider_error_to_rpc)?;
-    Ok(serde_json::json!({ "playlist": result.playlist, "tracks": result.tracks }))
+    Ok(
+        serde_json::json!({ "playlist": result.playlist, "tracks": playback_tagged_tracks(server_id.as_deref(), result.tracks) }),
+    )
 }
 
 async fn handle_browse_list_genres(
@@ -1135,7 +1321,7 @@ async fn handle_browse_get_genre(
         })?
         .to_owned();
     let (offset, limit) = browse_pagination(&params);
-    let provider = require_provider(state).await?;
+    let (provider, server_id) = require_browse_provider(state).await?;
     let (genres, _) = provider
         .list_genres(None, 0, 10_000)
         .await
@@ -1153,7 +1339,9 @@ async fn handle_browse_get_genre(
         .await
         .map_err(provider_error_to_rpc)?;
     let total = total as u64;
-    Ok(serde_json::json!({ "genre": genre, "tracks": tracks, "total": total }))
+    Ok(
+        serde_json::json!({ "genre": genre, "tracks": playback_tagged_tracks(server_id.as_deref(), tracks), "total": total }),
+    )
 }
 
 async fn handle_browse_list_recently_added(
@@ -1183,13 +1371,15 @@ async fn handle_browse_list_frequently_played(
         .and_then(|p| p["libraryId"].as_str())
         .map(str::to_owned);
     let (offset, limit) = browse_pagination(&params);
-    let provider = require_provider(state).await?;
+    let (provider, server_id) = require_browse_provider(state).await?;
     let (tracks, total) = provider
         .list_frequently_played(library_id.as_deref(), offset, limit)
         .await
         .map_err(provider_error_to_rpc)?;
     let total = total as u64;
-    Ok(serde_json::json!({ "tracks": tracks, "total": total }))
+    Ok(
+        serde_json::json!({ "tracks": playback_tagged_tracks(server_id.as_deref(), tracks), "total": total }),
+    )
 }
 
 async fn handle_browse_list_recently_played(
@@ -1201,13 +1391,15 @@ async fn handle_browse_list_recently_played(
         .and_then(|p| p["libraryId"].as_str())
         .map(str::to_owned);
     let (offset, limit) = browse_pagination(&params);
-    let provider = require_provider(state).await?;
+    let (provider, server_id) = require_browse_provider(state).await?;
     let (tracks, total) = provider
         .list_recently_played(library_id.as_deref(), offset, limit)
         .await
         .map_err(provider_error_to_rpc)?;
     let total = total as u64;
-    Ok(serde_json::json!({ "tracks": tracks, "total": total }))
+    Ok(
+        serde_json::json!({ "tracks": playback_tagged_tracks(server_id.as_deref(), tracks), "total": total }),
+    )
 }
 
 async fn handle_browse_list_favorites(
@@ -1219,13 +1411,15 @@ async fn handle_browse_list_favorites(
         .and_then(|p| p["libraryId"].as_str())
         .map(str::to_owned);
     let (offset, limit) = browse_pagination(&params);
-    let provider = require_provider(state).await?;
+    let (provider, server_id) = require_browse_provider(state).await?;
     let (tracks, total) = provider
         .list_favorites(library_id.as_deref(), offset, limit)
         .await
         .map_err(provider_error_to_rpc)?;
     let total = total as u64;
-    Ok(serde_json::json!({ "tracks": tracks, "total": total }))
+    Ok(
+        serde_json::json!({ "tracks": playback_tagged_tracks(server_id.as_deref(), tracks), "total": total }),
+    )
 }
 
 async fn handle_browse_list_favorite_items(
@@ -1236,7 +1430,7 @@ async fn handle_browse_list_favorite_items(
         .as_ref()
         .and_then(|p| p["libraryId"].as_str())
         .map(str::to_owned);
-    let provider = require_provider(state).await?;
+    let (provider, server_id) = require_browse_provider(state).await?;
     let favorites = provider
         .list_favorite_items(library_id.as_deref())
         .await
@@ -1244,7 +1438,7 @@ async fn handle_browse_list_favorite_items(
     Ok(serde_json::json!({
         "artists": favorites.artists,
         "albums": favorites.albums,
-        "tracks": favorites.songs,
+        "tracks": playback_tagged_tracks(server_id.as_deref(), favorites.songs),
     }))
 }
 
@@ -1269,7 +1463,7 @@ async fn handle_browse_list_tracks(
         .and_then(|p| p["letter"].as_str())
         .map(str::to_owned);
     let (start_index, limit) = browse_pagination(&params);
-    let provider = require_provider(state).await?;
+    let (provider, server_id) = require_browse_provider(state).await?;
     if !provider
         .capabilities()
         .browse
@@ -1294,8 +1488,9 @@ async fn handle_browse_list_tracks(
         .list_tracks(filter)
         .await
         .map_err(provider_error_to_rpc)?;
+    let tracks = playback_tagged_tracks(server_id.as_deref(), page.tracks);
     Ok(serde_json::json!({
-        "tracks": page.tracks,
+        "tracks": tracks,
         "total": page.total,
         "startIndex": page.start_index,
         "limit": page.limit,
@@ -1306,7 +1501,7 @@ async fn handle_browse_search(
     state: &AppState,
     params: Option<Value>,
 ) -> Result<Value, JsonRpcError> {
-    let provider = require_provider(state).await?;
+    let (provider, server_id) = require_browse_provider(state).await?;
     let query = params
         .as_ref()
         .and_then(|p| p["query"].as_str())
@@ -1325,7 +1520,7 @@ async fn handle_browse_search(
         .search(&query)
         .await
         .map_err(provider_error_to_rpc)?;
-    Ok(serde_json::json!({ "tracks": result.songs }))
+    Ok(serde_json::json!({ "tracks": playback_tagged_tracks(server_id.as_deref(), result.songs) }))
 }
 
 async fn handle_playlist_create(
@@ -13251,5 +13446,14 @@ mod tests {
         .await
         .expect_err("reorder should fail");
         assert_eq!(reorder_err.code, ERR_UNSUPPORTED_CAPABILITY);
+    }
+
+    #[test]
+    fn playback_track_tags_keep_identical_raw_ids_source_qualified() {
+        let first = playback_tagged_tracks(Some("portable-a"), vec![fake_song("same-id")]);
+        let second = playback_tagged_tracks(Some("portable-b"), vec![fake_song("same-id")]);
+        assert_eq!(first[0]["id"], second[0]["id"]);
+        assert_eq!(first[0]["serverId"], "portable-a");
+        assert_eq!(second[0]["serverId"], "portable-b");
     }
 }

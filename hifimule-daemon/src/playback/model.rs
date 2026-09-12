@@ -77,6 +77,75 @@ pub struct SessionSnapshot {
     pub total_occurrence_count: u64,
     pub occurrences: Vec<Occurrence>,
     pub next_cursor: Option<String>,
+    pub playback: PlaybackState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PlaybackStatus {
+    Idle,
+    Loading,
+    Active,
+    Paused,
+    Stopped,
+    Completed,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackFailure {
+    pub code: String,
+    pub retryable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackTrackMetadata {
+    pub source: TrackSource,
+    pub title: String,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackState {
+    pub status: PlaybackStatus,
+    pub metadata: Option<PlaybackTrackMetadata>,
+    pub duration_ms: Option<u64>,
+    pub representation: Option<String>,
+    pub error: Option<PlaybackFailure>,
+}
+
+impl Default for PlaybackState {
+    fn default() -> Self {
+        Self {
+            status: PlaybackStatus::Idle,
+            metadata: None,
+            duration_ms: None,
+            representation: None,
+            error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum PlaybackEvent {
+    Resolved {
+        metadata: PlaybackTrackMetadata,
+        duration_ms: Option<u64>,
+        representation: String,
+    },
+    Active,
+    Buffering,
+    Completed {
+        position_ms: u64,
+    },
+    Failed {
+        code: String,
+        retryable: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +171,27 @@ pub enum SessionOperation {
     AppendQueue { sources: Vec<TrackSource> },
     SelectCurrent { occurrence_id: String },
     Clear,
+    PlayTrack { source: TrackSource },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControlParams {
+    pub schema_version: u32,
+    pub instance_id: String,
+    pub session_id: String,
+    pub command_id: String,
+    pub expected_generation_id: String,
+    pub occurrence_id: String,
+    pub action: ControlAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ControlAction {
+    Pause,
+    Resume,
+    Stop,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

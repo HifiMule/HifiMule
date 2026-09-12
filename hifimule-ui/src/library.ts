@@ -21,6 +21,7 @@ import {
     fetchBrowseFavoriteItems,
     getImageUrl,
     rpcCall,
+    playbackPlayTrack,
 } from './rpc';
 import { MediaCard, BrowseDisplayItem } from './components/MediaCard';
 import { PlaylistCurationView } from './components/PlaylistCurationView';
@@ -314,6 +315,7 @@ function mapFlatTracks(
         }
         return {
             id: t.id,
+            serverId: t.serverId,
             name: t.title,
             type: 'Audio' as const,
             coverArtId: t.coverArtId,
@@ -328,6 +330,7 @@ function mapFlatTracks(
 function mapAlbumTracks(tracks: BrowseTrack[]): BrowseDisplayItem[] {
     return tracks.map(t => ({
         id: t.id,
+        serverId: t.serverId,
         name: t.title,
         type: 'Audio' as const,
         coverArtId: t.coverArtId,
@@ -1030,6 +1033,23 @@ function renderListRow(item: BrowseDisplayItem, index: number, onCurate?: (id: s
     }
     row.appendChild(thumb);
     row.appendChild(info);
+    if (item.type === 'Audio') {
+        const play = document.createElement('sl-icon-button') as any;
+        play.name = 'play-fill';
+        play.label = t('playback.play_track', { title: item.name });
+        play.disabled = !item.serverId;
+        const playbackSource = item.serverId
+            ? { serverId: item.serverId, trackId: item.id }
+            : null;
+        play.addEventListener('mousedown', (event: Event) => event.stopPropagation());
+        play.addEventListener('click', async (event: Event) => {
+            event.stopPropagation();
+            if (!playbackSource) return;
+            try { await playbackPlayTrack(playbackSource.serverId, playbackSource.trackId); }
+            catch (error) { showToast((error as Error).message, 'danger'); }
+        });
+        row.appendChild(play);
+    }
     // Curate button: appears on Playlist rows when playlist write is supported (mirrors MediaCard grid behavior)
     if (onCurate && item.type === 'Playlist') {
         const curateBtn = document.createElement('sl-icon-button') as any;

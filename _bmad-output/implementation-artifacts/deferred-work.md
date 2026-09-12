@@ -3,6 +3,12 @@
 Status: open
 Last updated: 2026-06-20
 
+## Deferred from: FLAC playback fix review for Story 15.4 (2026-09-12)
+
+- **Cancellation joins only the outer playback worker** (`hifimule-daemon/src/playback/audio.rs`). `run_output` owns a nested decoder thread and can leave it detached on cancellation/error paths; make every exit cancel and join the decoder before claiming worker retirement.
+- **Natural completion does not explicitly drain the device-submitted PCM tail** (`hifimule-daemon/src/playback/audio.rs`). The queue can be empty while the final CPAL callback buffer is still pending at the device; define a backend-safe drain boundary before dropping the stream.
+- **Large tail-moov M4A needs real range-backed random access** (`hifimule-daemon/src/playback/streaming.rs`). The bounded reader cannot seek back to media bytes evicted while finding metadata at EOF; connect `PlaybackRequest::range_supported` to authenticated HTTP range reads and add range-honored/ignored coverage.
+
 ## Deferred from: code review of 15-2-quit-safely-while-a-device-sync-is-running.md (2026-09-12)
 
 - **Manual sync cancellation can race final clean-manifest persistence** (`hifimule-daemon/src/sync.rs:863`, `hifimule-daemon/src/rpc.rs:5543`). `request_cancel` only sets the token; it does not acquire the new finalization gate. A manual cancellation accepted after the finalizer reads the token can therefore be followed by clean dirty/pending state and a Complete result. This check/write race predates Story 15.2, whose committed-Quit path now takes the gate. Follow up by defining one manual-cancel/final-commit outcome boundary and testing cancellation while final persistence is blocked. Classified deferred as pre-existing during review, not a user-approved product exception.

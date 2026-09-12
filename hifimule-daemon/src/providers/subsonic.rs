@@ -4,6 +4,7 @@ use crate::domain::models::{
 };
 use crate::providers::{
     BrowseCapabilities, BrowseMode, Capabilities, CredentialKind, MediaProvider,
+    PlaybackDescription, PlaybackProvenance, PlaybackRepresentation, PlaybackRequest,
     ProviderChangeContext, ProviderChangeMetadata, ProviderCredentials, ProviderError,
     ProviderSyncedSong, SUBSONIC_PLAYLISTS_LIBRARY_ID, ScrobbleRequest, ScrobbleSubmission,
     ServerType, TrackListFilter, TrackListPage, TranscodeProfile,
@@ -466,6 +467,37 @@ impl MediaProvider for SubsonicProvider {
             Some(profile) => self.client.stream_url(song_id, profile),
             None => self.client.download_url(song_id),
         }
+    }
+
+    async fn resolve_playback(&self, song_id: &str) -> Result<PlaybackDescription, ProviderError> {
+        let song = self.get_song(song_id).await?;
+        let url = reqwest::Url::parse(&self.client.stream_url(
+            song_id,
+            &TranscodeProfile {
+                container: Some("raw".into()),
+                audio_codec: None,
+                max_bitrate_kbps: None,
+            },
+        )?)
+        .map_err(|_| {
+            ProviderError::UnsupportedCapability("invalid Subsonic playback route".into())
+        })?;
+        Ok(PlaybackDescription {
+            representations: vec![PlaybackRepresentation {
+                codec: song.suffix.clone(),
+                container: song.suffix.clone(),
+                bitrate_kbps: song.bitrate_kbps,
+                sample_rate: None,
+                bit_depth: None,
+                provenance: PlaybackProvenance::Original,
+                request: PlaybackRequest {
+                    url,
+                    headers: reqwest::header::HeaderMap::new(),
+                    range_supported: false,
+                },
+            }],
+            song,
+        })
     }
 
     async fn cover_art_url(&self, cover_art_id: &str) -> Result<String, ProviderError> {

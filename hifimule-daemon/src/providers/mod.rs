@@ -13,6 +13,101 @@ pub mod subsonic;
 
 pub const SUBSONIC_PLAYLISTS_LIBRARY_ID: &str = "playlists";
 
+pub const MAX_PLAYBACK_REPRESENTATIONS: usize = 8;
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct PlaybackRequest {
+    pub url: reqwest::Url,
+    pub headers: reqwest::header::HeaderMap,
+    pub range_supported: bool,
+}
+
+impl fmt::Debug for PlaybackRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PlaybackRequest")
+            .field("origin", &self.url.origin().ascii_serialization())
+            .field("path", &self.url.path())
+            .field("headers", &"[redacted]")
+            .field("range_supported", &self.range_supported)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackProvenance {
+    Original,
+    Alternative,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaybackRepresentation {
+    pub codec: Option<String>,
+    pub container: Option<String>,
+    pub bitrate_kbps: Option<u32>,
+    pub sample_rate: Option<u32>,
+    pub bit_depth: Option<u8>,
+    pub provenance: PlaybackProvenance,
+    pub request: PlaybackRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaybackDescription {
+    pub song: Song,
+    pub representations: Vec<PlaybackRepresentation>,
+}
+
+pub(crate) fn select_playback_representation(
+    mut representations: Vec<PlaybackRepresentation>,
+) -> Result<PlaybackRepresentation, ProviderError> {
+    if representations.len() > MAX_PLAYBACK_REPRESENTATIONS {
+        return Err(ProviderError::UnsupportedCapability(
+            "provider advertised more than eight playback representations".into(),
+        ));
+    }
+    representations.retain(representation_is_supported);
+    representations.sort_by(|left, right| {
+        let left_group = representation_group(left);
+        let right_group = representation_group(right);
+        left_group.cmp(&right_group).then_with(|| match left_group {
+            1 => right
+                .sample_rate
+                .cmp(&left.sample_rate)
+                .then_with(|| right.bit_depth.cmp(&left.bit_depth)),
+            2 if left.codec == right.codec => right.bitrate_kbps.cmp(&left.bitrate_kbps),
+            _ => std::cmp::Ordering::Equal,
+        })
+    });
+    representations.into_iter().next().ok_or_else(|| {
+        ProviderError::UnsupportedCapability("no supported playback representation".into())
+    })
+}
+
+fn representation_group(representation: &PlaybackRepresentation) -> u8 {
+    if representation.provenance == PlaybackProvenance::Original {
+        return 0;
+    }
+    if representation.codec.as_deref().is_some_and(|codec| {
+        matches!(
+            codec.to_ascii_lowercase().as_str(),
+            "flac" | "alac" | "pcm_s16le" | "pcm_s24le" | "pcm_s32le"
+        )
+    }) {
+        1
+    } else {
+        2
+    }
+}
+
+fn representation_is_supported(representation: &PlaybackRepresentation) -> bool {
+    let Some(codec) = representation.codec.as_deref() else {
+        return true;
+    };
+    matches!(
+        codec.to_ascii_lowercase().as_str(),
+        "pcm_s16le" | "pcm_s24le" | "pcm_s32le" | "flac" | "alac" | "mp3" | "aac" | "opus"
+    )
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderChangeContext {
@@ -92,6 +187,12 @@ pub trait MediaProvider: Send + Sync {
         song_id: &str,
         profile: Option<&TranscodeProfile>,
     ) -> Result<String, ProviderError>;
+
+    async fn resolve_playback(&self, _song_id: &str) -> Result<PlaybackDescription, ProviderError> {
+        Err(ProviderError::UnsupportedCapability(
+            "resolve_playback is not supported by this provider".to_string(),
+        ))
+    }
 
     async fn cover_art_url(&self, cover_art_id: &str) -> Result<String, ProviderError>;
 
@@ -1230,5 +1331,116 @@ mod tests {
             msg.contains("reorder_playlist"),
             "message should name the method: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn trait_default_playback_resolution_is_explicitly_unsupported() {
+        let result = MinimalProvider.resolve_playback("song-1").await;
+        let Err(ProviderError::UnsupportedCapability(message)) = result else {
+            panic!("expected UnsupportedCapability, got {result:?}");
+        };
+        assert!(message.contains("resolve_playback"));
+    }
+
+    #[test]
+    fn playback_request_debug_redacts_headers_and_query_credentials() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_static("Bearer very-secret"),
+        );
+        let request = PlaybackRequest {
+            url: reqwest::Url::parse("https://music.example/stream/song?token=also-secret")
+                .unwrap(),
+            headers,
+            range_supported: true,
+        };
+        let debug = format!("{request:?}");
+        assert!(debug.contains("/stream/song"));
+        assert!(!debug.contains("very-secret"));
+        assert!(!debug.contains("also-secret"));
+        assert!(!debug.contains("token="));
+    }
+
+    fn representation(
+        codec: &str,
+        provenance: PlaybackProvenance,
+        bitrate_kbps: Option<u32>,
+        sample_rate: Option<u32>,
+        bit_depth: Option<u8>,
+    ) -> PlaybackRepresentation {
+        PlaybackRepresentation {
+            codec: Some(codec.into()),
+            container: None,
+            bitrate_kbps,
+            sample_rate,
+            bit_depth,
+            provenance,
+            request: PlaybackRequest {
+                url: reqwest::Url::parse(&format!("https://music.example/{codec}")).unwrap(),
+                headers: reqwest::header::HeaderMap::new(),
+                range_supported: false,
+            },
+        }
+    }
+
+    #[test]
+    fn playback_representation_ranking_is_bounded_and_deterministic() {
+        let selected = select_playback_representation(vec![
+            representation(
+                "aac",
+                PlaybackProvenance::Alternative,
+                Some(320),
+                None,
+                None,
+            ),
+            representation(
+                "flac",
+                PlaybackProvenance::Alternative,
+                None,
+                Some(96_000),
+                Some(24),
+            ),
+            representation("mp3", PlaybackProvenance::Original, Some(192), None, None),
+        ])
+        .unwrap();
+        assert_eq!(selected.codec.as_deref(), Some("mp3"));
+
+        let selected = select_playback_representation(vec![
+            representation(
+                "flac",
+                PlaybackProvenance::Alternative,
+                None,
+                Some(48_000),
+                Some(24),
+            ),
+            representation(
+                "flac",
+                PlaybackProvenance::Alternative,
+                None,
+                Some(96_000),
+                Some(24),
+            ),
+        ])
+        .unwrap();
+        assert_eq!(selected.sample_rate, Some(96_000));
+
+        let too_many = (0..=MAX_PLAYBACK_REPRESENTATIONS)
+            .map(|_| representation("aac", PlaybackProvenance::Alternative, None, None, None))
+            .collect();
+        assert!(matches!(
+            select_playback_representation(too_many),
+            Err(ProviderError::UnsupportedCapability(_))
+        ));
+        assert!(matches!(
+            select_playback_representation(vec![representation(
+                "h264",
+                PlaybackProvenance::Original,
+                None,
+                None,
+                None,
+            )]),
+            Err(ProviderError::UnsupportedCapability(_))
+        ));
     }
 }

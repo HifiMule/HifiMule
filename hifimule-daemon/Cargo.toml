@@ -46,6 +46,10 @@ tracing = "0.1"
 tempfile = "3"
 windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Devices_DeviceAndDriverInstallation"] }
 notify-rust.workspace = true
+cpal.workspace = true
+ffmpeg-next.workspace = true
+ffmpeg-sys-next.workspace = true
+crossbeam-queue.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"

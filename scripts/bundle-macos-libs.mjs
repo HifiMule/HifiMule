@@ -71,6 +71,17 @@ function findLibmtpDylib() {
   return candidates[0];
 }
 
+function findFfmpegDylibs() {
+  const prefix = run("brew", ["--prefix", "ffmpeg"]);
+  const required = ["libavcodec", "libavformat", "libavutil", "libswresample"];
+  return required.map((stem) => {
+    const match = walkFiles(join(prefix, "lib"))
+      .find((path) => basename(path).startsWith(`${stem}.`) && path.endsWith(".dylib") && !lstatSync(path).isSymbolicLink());
+    if (!match) throw new Error(`Controlled FFmpeg library ${stem} not found under ${prefix}/lib`);
+    return match;
+  });
+}
+
 const copied = new Map();
 
 function copyBrewDylib(source) {
@@ -86,7 +97,7 @@ function copyBrewDylib(source) {
 
   run("install_name_tool", [
     "-id",
-    `${bundledLoadPrefix}/${name}`,
+    `@loader_path/${name}`,
     target,
   ]);
 
@@ -99,14 +110,14 @@ function copyBrewDylib(source) {
   return target;
 }
 
-function rewriteHomebrewDependencies(path) {
+function rewriteHomebrewDependencies(path, prefix) {
   for (const dep of dylibDependencies(path).filter(isHomebrewPath)) {
     const depName = basename(dep);
     if (copied.has(depName)) {
       run("install_name_tool", [
         "-change",
         dep,
-        `${bundledLoadPrefix}/${depName}`,
+        `${prefix}/${depName}`,
         path,
       ]);
     }
@@ -121,17 +132,28 @@ mkdirSync(libDir, { recursive: true });
 
 const libmtpDylib = findLibmtpDylib();
 copyBrewDylib(libmtpDylib);
-
-for (const dylib of [...copied.values()]) {
-  rewriteHomebrewDependencies(dylib);
-}
+for (const dylib of findFfmpegDylibs()) copyBrewDylib(dylib);
 
 const sidecars = existsSync(sidecarsDir)
   ? walkFiles(sidecarsDir).filter((path) => /^hifimule-daemon-.*apple-darwin$/.test(basename(path)))
   : [];
 
+// Linkers commonly record the ABI symlink (for example libavformat.63.dylib)
+// while the initial discovery above selects the fully-versioned regular file.
+// Copy every private direct dependency under its recorded basename before
+// rewriting so the packaged load command always has a matching resource.
 for (const sidecar of sidecars) {
-  rewriteHomebrewDependencies(sidecar);
+  for (const dependency of dylibDependencies(sidecar).filter(isHomebrewPath)) {
+    if (existsSync(dependency)) copyBrewDylib(dependency);
+  }
+}
+
+for (const dylib of [...copied.values()]) {
+  rewriteHomebrewDependencies(dylib, "@loader_path");
+}
+
+for (const sidecar of sidecars) {
+  rewriteHomebrewDependencies(sidecar, bundledLoadPrefix);
 }
 
 for (const dylib of [...copied.values()]) {

@@ -52,20 +52,16 @@
     "externalBin": [
       "sidecars/hifimule-daemon"
     ],
-    "resources": [
-      "bundled-libs/*"
-    ],
+    "resources": {
+      "../../hifimule-daemon/audio-runtime.json": "audio-runtime.json",
+      "../../hifimule-daemon/THIRD_PARTY_AUDIO_NOTICES.md": "THIRD_PARTY_AUDIO_NOTICES.md"
+    },
     "macOS": {
       "minimumSystemVersion": "10.15",
       "signingIdentity": "-",
       "hardenedRuntime": false
     },
     "linux": {
-      "appimage": {
-        "files": {
-          "usr/lib/libmtp.so.9": "/usr/lib/x86_64-linux-gnu/libmtp.so.9"
-        }
-      },
       "deb": {
         "depends": [
           "libmtp9"

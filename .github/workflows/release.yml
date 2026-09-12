@@ -61,16 +61,23 @@ jobs:
             libappindicator3-dev \
             librsvg2-dev \
             patchelf \
+            build-essential \
+            clang \
+            libclang-dev \
+            libc6-dev \
+            curl \
+            xz-utils \
+            binutils \
             pkgconf \
             libxdo-dev \
             libmtp-dev
           pkg-config --libs libmtp
-          test -e /usr/lib/x86_64-linux-gnu/libmtp.so.9
+          test -n "$(find /usr/lib -name 'libmtp.so.9' -print -quit)"
 
       - name: Install macOS dependencies
         if: startsWith(matrix.platform, 'macos')
         run: |
-          brew install pkg-config libmtp
+          brew install pkg-config libmtp ffmpeg
           LIBMTP_PREFIX="$(brew --prefix libmtp)"
           LIBMTP_PC_DIR="$LIBMTP_PREFIX/lib/pkgconfig"
 
@@ -109,7 +116,7 @@ jobs:
           projectPath: hifimule-ui
           args: ${{ matrix.args }}
 
-      - name: Verify Linux AppImage bundles libmtp
+      - name: Verify Linux AppImage bundles private daemon libraries
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           set -euo pipefail
@@ -125,13 +132,21 @@ jobs:
           chmod +x "$APPIMAGE"
           rm -rf squashfs-root
           "$APPIMAGE" --appimage-extract >/dev/null
-          if ! test -e squashfs-root/usr/lib/libmtp.so.9; then
-            echo "Bundled libmtp.so.9 not found in extracted AppImage"
-            find squashfs-root -name 'libmtp*' -print
-            rm -rf squashfs-root
-            exit 1
-          fi
+          TARGET_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+          node scripts/linux-audio-runtime.mjs verify-bundle "$TARGET_TRIPLE" squashfs-root
           rm -rf squashfs-root
+
+      - name: Verify Linux deb bundles a resolvable private daemon closure
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          set -euo pipefail
+          DEB="$(find target hifimule-ui/src-tauri/target -path '*/release/bundle/*' -name '*.deb' -print -quit 2>/dev/null)"
+          test -n "$DEB" || { echo "Deb artifact not found"; exit 1; }
+          rm -rf deb-root
+          dpkg-deb -x "$DEB" deb-root
+          TARGET_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+          node scripts/linux-audio-runtime.mjs verify-bundle "$TARGET_TRIPLE" deb-root
+          rm -rf deb-root
 
       - name: Verify macOS bundle uses bundled libmtp
         if: startsWith(matrix.platform, 'macos')

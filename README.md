@@ -103,7 +103,7 @@ cd hifimule-ui && npm install && cd ..
 
 # Development (two terminals)
 # Terminal 1 — daemon
-cargo run -p hifimule-daemon
+npm run build:daemon -- run -p hifimule-daemon
 
 # Terminal 2 — UI with hot-reload
 cd hifimule-ui
@@ -115,14 +115,19 @@ npx tauri dev
 ```bash
 npm run build            # Full build (UI + daemon)
 npm run build:ui         # UI only (Tauri bundle)
-npm run build:daemon     # Daemon release binary (builds full workspace)
+npm run build:daemon     # Daemon release binary with the controlled audio runtime
 ```
 
 ### Run tests
 
 ```bash
-cargo test               # All workspace tests
+npm run build:daemon -- test --workspace   # All workspace tests
 ```
+
+Use `npm run build:daemon -- <cargo arguments>` for daemon-related Cargo
+commands. The wrapper provisions the pinned FFmpeg runtime and exports the
+native build environment before Cargo starts. A raw `cargo build` cannot do
+that early enough for dependency build scripts on Linux or Windows.
 
 ## Project Structure
 

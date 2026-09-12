@@ -1,6 +1,10 @@
+---
+baseline_commit: 4dae294accd384fd2664fe5d1c49d64efc300064
+---
+
 # Story 15.4: Play a selected library track through the daemon
 
-Status: ready-for-dev
+Status: in-progress
 
 ## Story
 
@@ -29,26 +33,26 @@ so that I can listen directly in HifiMule without opening another player.
 - [ ] Establish controlled audio build and runtime identity (AC: 1, 7, 9)
   - [ ] Pin dependencies/build recipe below, bundle private native libraries and record verified source/archive hashes, build flags and notices in a runtime manifest.
   - [ ] Add runtime-version/ABI checks and clean-install dependency checks to normal Build and release packaging for all existing targets.
-  - [ ] Reproduce the six-format native fixture matrix using the production decoder before connecting live provider streams.
-- [ ] Extend provider-neutral playback resolution (AC: 1–2, 6)
-  - [ ] Add typed private representation/request description and default unsupported trait behavior; implement Jellyfin and Subsonic original streaming separately from sync download/transcoding.
-  - [ ] Route captured portable identities through `get_provider_by_server_id`; sanitize all errors and prevent credential forwarding across redirects.
-  - [ ] Test actual response type, unavailable source, unsupported format, alternative selection and two servers with identical raw track IDs.
-- [ ] Extend the existing serialized session owner (AC: 3–4, 6, 8)
-  - [ ] Add atomic PlayTrack and generation-fenced transport operations, bounded deduplication and orthogonal playback status/metadata.
-  - [ ] Integrate all pre-existing queue operations with the audio owner, preserving active playback on append and stopping obsolete generations on clear/select/replace.
-  - [ ] Add consumed-position sampling, explicit Stop/completion semantics, paused restoration and checkpoint handling without introducing a second session manager.
+  - [x] Reproduce the six-format native fixture matrix using the production decoder before connecting live provider streams.
+- [x] Extend provider-neutral playback resolution (AC: 1–2, 6)
+  - [x] Add typed private representation/request description and default unsupported trait behavior; implement Jellyfin and Subsonic original streaming separately from sync download/transcoding.
+  - [x] Route captured portable identities through `get_provider_by_server_id`; sanitize all errors and prevent credential forwarding across redirects.
+  - [x] Test actual response type, unavailable source, unsupported format, alternative selection and two servers with identical raw track IDs.
+- [x] Extend the existing serialized session owner (AC: 3–4, 6, 8)
+  - [x] Add atomic PlayTrack and generation-fenced transport operations, bounded deduplication and orthogonal playback status/metadata.
+  - [x] Integrate all pre-existing queue operations with the audio owner, preserving active playback on append and stopping obsolete generations on clear/select/replace.
+  - [x] Add consumed-position sampling, explicit Stop/completion semantics, paused restoration and checkpoint handling without introducing a second session manager.
 - [ ] Implement bounded fetch, decode/conversion and shared output (AC: 1, 3–4, 6–9)
-  - [ ] Add cancellable bounded compressed input with custom FFmpeg IO, worker-confined decoder/converter contexts and preallocated PCM handoff.
-  - [ ] Support tested WAV, FLAC, ALAC/M4A, MP3, AAC/M4A and Opus input, mono/stereo and explicit endpoint sample conversion; reject unsupported layouts safely.
-  - [ ] Implement callback gating, output loss, starvation, clean EOF/drain, restored-position preparation and bounded worker retirement.
+  - [x] Add cancellable bounded compressed input with custom FFmpeg IO, worker-confined decoder/converter contexts and preallocated PCM handoff.
+  - [x] Support tested WAV, FLAC, ALAC/M4A, MP3, AAC/M4A and Opus input, mono/stereo and explicit endpoint sample conversion; reject unsupported layouts safely.
+  - [x] Implement callback gating, output loss, starvation, clean EOF/drain, restored-position preparation and bounded worker retirement.
   - [ ] Measure/tune the selected buffer parameters against the streaming matrix and record final values before acceptance.
 - [ ] Add browser Play and minimal transport UI (AC: 1, 3, 5–7)
-  - [ ] Add a dedicated track action and a compact transport region in the existing browser shell; wire through the authenticated native RPC proxy.
-  - [ ] Reconcile snapshots with one bounded polling schedule; use daemon metadata independent of browse context and preserve no-device browsing.
+  - [x] Add a dedicated track action and a compact transport region in the existing browser shell; wire through the authenticated native RPC proxy.
+  - [x] Reconcile snapshots with one bounded polling schedule; use daemon metadata independent of browse context and preserve no-device browsing.
   - [ ] Add four-locale strings, keyboard/focus/live-region behavior and behavioral regression tests.
 - [ ] Integrate shutdown and produce evidence (AC: 8–9)
-  - [ ] Add audio-stop acknowledgement/worker completion to committed Quit without delaying sync cancellation or reopening admission.
+  - [x] Add audio-stop acknowledgement/worker completion to committed Quit without delaying sync cancellation or reopening admission.
   - [ ] Run deterministic router/session/audio tests, controlled HTTP fixtures, native installed smoke tests and relevant existing regressions.
   - [ ] Save sanitized per-target evidence and explicitly retain any unavailable checks as unverified; do not mark this story done based solely on the probe.
 
@@ -220,20 +224,103 @@ Checked 2026-09-12: official FFmpeg download identifies 9.0.1; docs.rs identifie
 
 GPT-6 (Codex)
 
+### Implementation Plan
+
+- Extend the existing playback owner and authenticated RPC contract before starting asynchronous provider/audio work.
+- Resolve portable provider identity into private authenticated requests, then stream through bounded custom FFmpeg IO into one generation-gated CPAL output.
+- Add captured-source Play actions and an authoritative compact transport while preserving existing browse, basket and selection behavior.
+- Package the pinned runtime manifest/notices and expose sanitized installed evidence through authenticated daemon health.
+
 ### Debug Log References
 
 - 2026-09-12: Resolved create-story customization/configuration; analyzed planning, previous-story review, production session/provider/UI/packaging boundaries and official runtime documentation.
+- 2026-09-12: Dev workflow baseline captured at `4dae294accd384fd2664fe5d1c49d64efc300064`. Local runtime inspection found Darwin ARM64 with libavcodec/libavformat `63.1.101`, libavutil/libswresample `61.1.101`/`7.1.101`, but the required installed Windows x64, Linux x64 and macOS x64 environments plus configured Jellyfin/Subsonic servers are unavailable. Halted before implementation under the required-configuration/evidence gate; no task was marked complete and no runtime claim was inferred from probe fixtures.
+- 2026-09-12: User explicitly requested implementation proceed and retained installed Windows/Linux/macOS/provider listening verification for their platform runs.
+- 2026-09-12: Implemented and regression-tested the daemon/provider/session/audio/UI vertical slice. A macOS ARM64 `.app` packaging run exposed and then verified a fix for FFmpeg ABI-symlink bundling. Installed audible/provider/output-loss evidence remains unverified.
+- 2026-09-12: Ubuntu ARM64 exposed host FFmpeg 8 (libavcodec ABI 62); added an architecture-neutral, source-hash-pinned FFmpeg 9.0.1 Linux build cache, exact receipt/ELF validation, recursive private-library closure bundling and installed AppImage/deb checks. Windows ARM64 exposed the incorrectly unconditional Unix `pkg-config` verifier; Windows now uses a target-aware MSVC FFmpeg prefix preflight and stages validated DLLs without requiring `pkg-config`.
+- 2026-09-12: Reproduced the reported one-second FLAC failure with the supplied 23.9 MB track containing attached artwork. FFmpeg probing exceeded the bounded reader's retained window and could not honor the advertised backward seek. Native FLAC is now detected from its `fLaC` signature and exposed as sequential custom IO; the supplied 194-second file decodes completely.
+- 2026-09-12: Split native-library Tauri resources into non-overlapping macOS/Linux/Windows platform configs after the cross-platform DLL glob broke macOS packaging. The first DMG attempt failed because sandboxed `hdiutil` returned “device not configured”; the identical disk-image operation and full Tauri build succeeded with macOS disk-image access.
+- 2026-09-12: Ubuntu ARM64 then reached `ffmpeg-sys-next` bindgen but failed when glibc's `limits.h` could not find Clang's compiler resource header. Linux preparation now preflights Clang/libclang/glibc headers with exact Ubuntu install guidance, validates the native header chain, and passes the discovered resource directory and libclang path into Cargo.
+- 2026-09-12: Review identified raw Cargo as an unsupported escape from native-runtime setup and a possible Clang/libclang version mismatch. Added a cross-platform daemon build wrapper that derives the rustc host, prepares the matching platform environment, and forwards Cargo arguments; standard Ubuntu now pairs libclang with the invoking Clang resource tree rather than an arbitrary configured library.
+- 2026-09-12: Native Windows ARM64 still lacked an FFmpeg SDK. Added automatic provisioning from the dated BtbN LGPL shared 9.0 build with per-architecture immutable artifact names, SHA-256 validation, staged extraction/receipt validation and complete DLL staging; explicit `FFMPEG_DIR` remains a validated override.
+- 2026-09-12: Follow-up review fixed the cross-target wrapper path, completed fresh-machine prerequisite and wrapper-based run/test documentation, and retained the third-party Windows binary choice as a pending contract deviation rather than claiming Story 15.4 acceptance.
+- 2026-09-12: Linux ARM64 exposed a redundant daemon build-script `pkg-config` failure after the wrapper had already validated the controlled prefix. Added a sanitized, exact-value verification handoff so Cargo skips only that duplicate probe; raw Cargo remains fail-closed. Windows ARM64 exposed Node 24 passing the `Array.map` index into `path.basename` as its suffix argument; staging now uses an explicit one-argument callback.
 
 ### Completion Notes List
 
-- Ultimate context engine analysis completed - comprehensive developer guide created.
-- Selected runtime/packaging approach, provider quality contract, command/state semantics, initial measurable buffer limits, UI scope and cross-platform acceptance requirements. Implementation and runtime verification remain unchecked.
+- Implemented authenticated source-qualified Play, Pause, Resume and Stop with atomic occurrence replacement, durable position semantics and generation fencing through the audio callback.
+- Implemented bounded HTTP/custom-AVIO decode and resampling for the six required fixtures, a preallocated PCM handoff, shared output, starvation/completion/error transitions and shutdown joining.
+- Implemented captured-source Play actions plus compact localized transport UI and authoritative single-schedule polling.
+- Added FFmpeg 9.0.1 runtime identity, packaged notices, endpoint/buffer evidence fields and corrected macOS ABI-symlink bundling. Local macOS ARM64 `.app` builds and validates; audible and other installed-platform claims remain intentionally open for user evidence.
+- Added controlled Linux provisioning for native x64/ARM64, cache-staleness and ELF/SONAME checks, recursive dependency closure packaging, and package-resolution verification. Windows x64/ARM64 now automatically cache and validate the pinned BtbN LGPL shared FFmpeg 9 SDK and stage its DLL closure; an exact `FFMPEG_DIR` remains supported as an explicit override.
+- The Windows BtbN SDK is a dated, hash-pinned practical build unblocker, but it is not the story's required build from the official signed 9.0.1 source. This contract deviation and native installed verification remain open, so the story stays `in-progress`.
+- Validation: daemon 698 tests, lifecycle 13, Tauri library 7, localization 6, frontend production build, formatting, relevant clippy (no new playback warnings), six-format production decoder, controlled HTTP/ranking tests, runtime ABI probe and signed macOS ARM64 app packaging all pass.
+- Runtime packaging regression validation: thirty-five Node tests covering the cross-platform daemon wrapper and explicit Cargo target selection, sanitized runtime-verification handoff, Linux receipts/ABI rejection/compiler preflight/platform gating, Windows pinned provisioning/version/architecture/hash/override/staging-name checks and non-overlapping effective Tauri platform resources; the normal Build workflow runs the complete `scripts/tests/*.test.mjs` suite. Node syntax checks, Cargo formatting/check, native macOS wrapper check and diff whitespace checks pass. Native Linux and Windows installed-package execution remains pending user runs.
+- Linux bindgen preparation now requires `clang`, `libclang-dev` and `libc6-dev`, probes native `limits.h`/`stdint.h` preprocessing for both supported Linux triples, and supplies target-specific bindgen arguments to every sidecar Cargo build. CI Build and release package lists enforce the same prerequisites.
+- Root `npm run build:daemon` now uses the supported platform-aware wrapper: Linux provisions and selects the pinned runtime plus matching Clang/libclang environment, Windows provisions a hash-pinned MSVC SDK or validates an explicit `FFMPEG_DIR`, and macOS retains ABI verification. The wrapper's native macOS check passes; native Ubuntu ARM64 and Windows builds remain explicitly pending the user's reruns.
+- FLAC regression validation: supplied 194-second file, generated attached-picture fixture, runtime-generated metadata beyond the 8 MiB window, restored-position discard, extensionless/MIME provider hints and reader cancellation pass. The supplied recording was used only as local diagnostic input and was not copied into the repository.
+- macOS packaging validation: the full `npm run tauri build` completed, producing a strictly verified ad-hoc-signed `.app` and a 31 MB ARM64 DMG with bundled FFmpeg dylibs. The earlier DMG failure was confirmed as sandbox-only and required no product workaround.
 
 ### File List
 
+- `.github/workflows/build.yml`
+- `.github/workflows/release.yml`
+- `.gitignore`
 - `_bmad-output/implementation-artifacts/15-4-play-a-selected-library-track-through-the-daemon.md`
+- `_bmad-output/implementation-artifacts/deferred-work.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `Cargo.lock`
+- `Cargo.toml`
+- `docs/api-contracts-hifimule-daemon.md`
+- `docs/playback-installed-test-checklist.md`
+- `hifimule-daemon/Cargo.toml`
+- `hifimule-daemon/THIRD_PARTY_AUDIO_NOTICES.md`
+- `hifimule-daemon/audio-runtime.json`
+- `hifimule-daemon/build.rs`
+- `hifimule-daemon/src/main.rs`
+- `hifimule-daemon/src/playback/audio.rs`
+- `hifimule-daemon/src/playback/decoder.rs`
+- `hifimule-daemon/src/playback/mod.rs`
+- `hifimule-daemon/src/playback/model.rs`
+- `hifimule-daemon/src/playback/session.rs`
+- `hifimule-daemon/src/playback/streaming.rs`
+- `hifimule-daemon/tests/fixtures/generated-attached-cover.flac`
+- `hifimule-daemon/tests/fixtures/generated-attached-cover.source.md`
+- `hifimule-daemon/src/providers/jellyfin.rs`
+- `hifimule-daemon/src/providers/mod.rs`
+- `hifimule-daemon/src/providers/subsonic.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-i18n/catalog.json`
+- `package.json`
+- `hifimule-ui/src-tauri/tauri.conf.json`
+- `hifimule-ui/src-tauri/tauri.linux.conf.json`
+- `hifimule-ui/src-tauri/tauri.macos.conf.json`
+- `hifimule-ui/src-tauri/tauri.windows.conf.json`
+- `hifimule-ui/src/components/MediaCard.ts`
+- `hifimule-ui/src/components/PlaybackControls.ts`
+- `hifimule-ui/src/components/TracksBrowseView.ts`
+- `hifimule-ui/src/library.ts`
+- `hifimule-ui/src/main.ts`
+- `hifimule-ui/src/rpc.ts`
+- `hifimule-ui/src/styles.css`
+- `scripts/build-daemon.mjs`
+- `scripts/bundle-macos-libs.mjs`
+- `scripts/linux-audio-runtime.mjs`
+- `scripts/prepare-sidecar.mjs`
+- `scripts/tests/linux-audio-runtime.test.mjs`
+- `scripts/tests/build-daemon.test.mjs`
+- `scripts/tests/tauri-platform-config.test.mjs`
+- `scripts/tests/windows-audio-runtime.test.mjs`
+- `scripts/verify-audio-runtime.mjs`
+- `scripts/windows-audio-runtime.mjs`
 
 ## Change Log
 
 - 2026-09-12: Created story 15.4 and marked ready-for-dev after context/checklist validation.
+- 2026-09-12: Built the single-track playback vertical slice and local macOS ARM64 package; retained cross-platform installed/provider/audio evidence items as in-progress.
+- 2026-09-12: Fixed Ubuntu FFmpeg ABI drift with a private pinned Linux runtime and replaced Windows' Unix verifier with target-native FFmpeg SDK validation/staging; retained installed listening evidence as in-progress.
+- 2026-09-12: Fixed large FLAC files with attached artwork failing after initial playback by correcting custom-IO seekability and adding signature-based, over-window and resume regressions.
+- 2026-09-12: Isolated native-library resource globs by Tauri platform, enforced their effective mappings in the normal Build test gate, and completed signed macOS app plus DMG packaging.
+- 2026-09-12: Fixed Ubuntu ARM64 bindgen header discovery with native compiler prerequisite checks and an explicit Clang resource/libclang Cargo environment.
+- 2026-09-12: Added the supported platform-aware daemon build wrapper and matched Ubuntu's libclang library to Clang's resource headers; retained native ARM64 evidence as pending.
+- 2026-09-12: Added hash-pinned automatic BtbN FFmpeg SDK provisioning for native Windows ARM64/x64 builds while preserving validated overrides.

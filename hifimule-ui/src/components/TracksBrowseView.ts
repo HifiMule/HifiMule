@@ -6,6 +6,7 @@ import {
     BrowseArtist,
     BrowseAlbum,
     BrowseTrack,
+    playbackPlayTrack,
 } from '../rpc';
 import { MediaCard } from './MediaCard';
 import { basketStore, BasketItem } from '../state/basket';
@@ -543,6 +544,23 @@ export class TracksBrowseView {
         info.appendChild(title);
         info.appendChild(meta);
         row.appendChild(info);
+
+        const playBtn = document.createElement('sl-icon-button') as any;
+        playBtn.name = 'play-fill';
+        playBtn.label = t('playback.play_track', { title: track.title });
+        playBtn.disabled = !track.serverId;
+        playBtn.style.fontSize = '1.1rem';
+        const playbackSource = track.serverId
+            ? { serverId: track.serverId, trackId: track.id }
+            : null;
+        playBtn.addEventListener('mousedown', (event: Event) => event.stopPropagation());
+        playBtn.addEventListener('click', async (event: Event) => {
+            event.stopPropagation();
+            if (!playbackSource) return;
+            try { await playbackPlayTrack(playbackSource.serverId, playbackSource.trackId); }
+            catch (error) { showToast((error as Error).message, 'danger'); }
+        });
+        row.appendChild(playBtn);
 
         const isInBasket = basketStore.has(track.id);
         const toggleBtn = document.createElement('sl-icon-button') as any;

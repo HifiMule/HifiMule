@@ -13,7 +13,7 @@
 
 ### macOS
 ```bash
-brew install pkg-config libmtp
+brew install pkg-config libmtp ffmpeg
 # For universal builds, the CI also merges arm64+x86_64 libmtp dylibs (see release.yml)
 ```
 
@@ -21,7 +21,8 @@ brew install pkg-config libmtp
 ```bash
 sudo apt-get install -y \
   libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
-  patchelf pkgconf libxdo-dev libmtp-dev
+  libxdo-dev libmtp-dev build-essential clang libclang-dev libc6-dev curl \
+  xz-utils pkg-config binutils patchelf
 ```
 
 ### Windows
@@ -40,7 +41,9 @@ hifimule/
 └── hifimule-ui/           Tauri 2 + TypeScript frontend
 ```
 
-All `cargo` commands should be run from the repo root (workspace). UI npm commands normally run from `hifimule-ui/`; root `package.json` also exposes aggregate build scripts.
+Daemon-related Cargo commands should be run through the root audio-runtime
+wrapper. UI npm commands normally run from `hifimule-ui/`; root `package.json`
+also exposes aggregate build scripts.
 
 ---
 
@@ -48,17 +51,24 @@ All `cargo` commands should be run from the repo root (workspace). UI npm comman
 
 ```bash
 # Debug build
-rtk cargo build -p hifimule-daemon
+rtk npm run build:daemon -- build -p hifimule-daemon
 
 # Release build
-rtk cargo build -p hifimule-daemon --release
+rtk npm run build:daemon -- build -p hifimule-daemon --release
 
 # Check only (fast type-check, no binary)
-rtk cargo check -p hifimule-daemon
+rtk npm run build:daemon -- check -p hifimule-daemon
 
 # Clippy
-rtk cargo clippy -p hifimule-daemon
+rtk npm run build:daemon -- clippy -p hifimule-daemon
 ```
+
+Do not invoke raw `cargo build` for the daemon. FFmpeg's dependency build
+scripts run before `hifimule-daemon/build.rs`, so only the wrapper can prepare
+and export the controlled native runtime in time. On Linux it builds and caches
+the pinned runtime; on Windows it downloads and verifies the matching pinned
+MSVC development archive unless `FFMPEG_DIR` explicitly selects a verified
+override.
 
 Binary output: `target/debug/hifimule-daemon` or `target/release/hifimule-daemon`.
 
@@ -104,15 +114,15 @@ Before running `pnpm tauri build`, the daemon binary must exist in `src-tauri/si
 
 ```bash
 # All daemon tests (unit + integration)
-rtk cargo test -p hifimule-daemon
+rtk npm run build:daemon -- test -p hifimule-daemon
 
 # Specific test module
-rtk cargo test -p hifimule-daemon --lib db::tests
-rtk cargo test -p hifimule-daemon auto_fill
-rtk cargo test -p hifimule-daemon providers::subsonic
+rtk npm run build:daemon -- test -p hifimule-daemon --lib db::tests
+rtk npm run build:daemon -- test -p hifimule-daemon auto_fill
+rtk npm run build:daemon -- test -p hifimule-daemon providers::subsonic
 
 # With output (for debugging)
-rtk cargo test -p hifimule-daemon -- --nocapture
+rtk npm run build:daemon -- test -p hifimule-daemon -- --nocapture
 ```
 
 Tests in `api.rs` and `providers/*` use `mockito` (HTTP mock server). Tests in `db.rs` use in-memory SQLite. No external services are required for automated tests.
@@ -121,11 +131,12 @@ Tests in `api.rs` and `providers/*` use `mockito` (HTTP mock server). Tests in `
 
 ## Running Daemon Standalone
 
-The daemon can run standalone without the UI:
+The daemon can run standalone without the UI. Keep it inside the wrapper so
+the private FFmpeg runtime remains available to the process:
 
 ```bash
 # Start daemon (interactive mode with system tray)
-./target/debug/hifimule-daemon
+rtk npm run build:daemon -- run -p hifimule-daemon
 
 # The daemon listens on localhost:19140
 # Test it with:
@@ -151,7 +162,7 @@ This starts:
 For faster UI iteration, you can run the daemon separately and start just Vite:
 ```bash
 # Terminal 1: start daemon
-./target/debug/hifimule-daemon
+rtk npm run build:daemon -- run -p hifimule-daemon
 
 # Terminal 2: start Vite + Tauri
 cd hifimule-ui
@@ -228,9 +239,9 @@ The daemon supports Jellyfin, Subsonic, Navidrome, and OpenSubsonic through `Med
 Useful targeted tests:
 
 ```bash
-rtk cargo test -p hifimule-daemon providers::subsonic
-rtk cargo test -p hifimule-daemon providers::jellyfin
-rtk cargo test -p hifimule-daemon rpc::tests::browse
+rtk npm run build:daemon -- test -p hifimule-daemon providers::subsonic
+rtk npm run build:daemon -- test -p hifimule-daemon providers::jellyfin
+rtk npm run build:daemon -- test -p hifimule-daemon rpc::tests::browse
 ```
 
 ---

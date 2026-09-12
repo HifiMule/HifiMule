@@ -1,5 +1,26 @@
 fn main() {
-    if std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "macos" {
+    const VERIFIED_ENV: &str = "HIFIMULE_FFMPEG_RUNTIME_VERIFIED";
+    const VERIFIED_VALUE: &str = "ffmpeg-9-runtime-verified-v2";
+
+    println!("cargo:rerun-if-env-changed={VERIFIED_ENV}");
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let runtime_was_verified = match std::env::var(VERIFIED_ENV) {
+        Ok(value) if value == VERIFIED_VALUE => true,
+        Ok(value) => panic!(
+            "invalid {VERIFIED_ENV} marker {value:?}; do not set this build-orchestration variable manually. Use `npm run build:daemon -- <cargo arguments>` so the exact controlled FFmpeg runtime is validated first"
+        ),
+        Err(std::env::VarError::NotPresent) => false,
+        Err(std::env::VarError::NotUnicode(_)) => panic!(
+            "invalid non-Unicode {VERIFIED_ENV} marker; remove it and use `npm run build:daemon -- <cargo arguments>`"
+        ),
+    };
+
+    if !runtime_was_verified {
+        panic!(
+            "the controlled FFmpeg runtime was not verified. Raw `cargo` is unsupported; use `npm run build:daemon -- <cargo arguments>` (for example `npm run build:daemon -- build -p hifimule-daemon`)"
+        );
+    }
+    if target_os == "macos" {
         // Embed Info.plist so macOS reads LSUIElement=true at process launch,
         // suppressing the Dock icon before NSApplication is even initialised.
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -8,7 +29,7 @@ fn main() {
         println!("cargo:rustc-link-arg=__info_plist");
         println!("cargo:rustc-link-arg={manifest_dir}/Info.plist");
     }
-    if std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "windows" {
+    if target_os == "windows" {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("../hifimule-ui/src-tauri/icons/icon.ico");
         res.compile().expect("Failed to compile Windows resources");

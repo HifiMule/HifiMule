@@ -10,6 +10,11 @@ All error responses: `{ "jsonrpc": "2.0", "error": { "code": <N>, "message": "<t
 
 The daemon now exposes a provider-neutral media-server layer. Legacy `jellyfin_*` RPC names remain supported for compatibility, but active Subsonic/OpenSubsonic connections are routed through `MediaProvider` where possible.
 
+Authenticated `daemon.health` includes a sanitized `audioRuntime` object with the
+loaded FFmpeg component versions, selected shared endpoint (when opened), and
+compressed/PCM high-water counters. It never contains playback request URLs,
+headers, credentials, or provider response bodies.
+
 ---
 
 ## Server Connection & Credentials
@@ -771,3 +776,10 @@ Current selection uses `operation: { "type": "selectCurrent", "occurrenceId": "<
 After committed Quit, `shutdown.sessionCheckpoint` is `pending`, `failed` or `succeeded` (`notRequired` before participation starts). Pending/failed saves add a `sessionCheckpoint` blocker. A failed save reports `PLAYBACK_CHECKPOINT_FAILED` and retains ownership/admission fencing while sync cancellation and drain continue. Retry uses the authenticated `playback.retryCheckpoint` method with `{ "schemaVersion": 1, "instanceId": "<owner>", "shutdownId": "<observed shutdown>" }`. Only a completed failure may start a retry; concurrent retries join that attempt. Neither the shutdown ID nor its deadline changes. The stopping-method exception is limited to health and this scoped retry; Continue remains available only for a precommit launch-fence failure.
 
 The playback worker is joined after successful preservation and sync drain. A join failure reports `PLAYBACK_OWNER_FAILED` separately; it does not offer a session-save retry that cannot recover worker teardown.
+# Playback audio (schema v1)
+
+`playback.applySession` accepts `operation: { type: "playTrack", source: { serverId, trackId } }`. The portable server identity is resolved by the daemon; authenticated URLs and headers are never returned. Admission atomically replaces the queue with one occurrence and returns before source preparation completes.
+
+`playback.control` accepts `{ schemaVersion, instanceId, sessionId, commandId, expectedGenerationId, occurrenceId, action }`, where action is `pause`, `resume`, or `stop`. Stale generation/occurrence controls return a conflict with authoritative session metadata. Command IDs are bounded and idempotent; reuse with another payload is rejected.
+
+`playback.getSession` includes an additive `playback` object with safe metadata, representation, duration, status (`idle`, `loading`, `active`, `paused`, `stopped`, `completed`, `error`) and a sanitized `{ code, retryable }` failure. It never includes provider requests or credentials.
