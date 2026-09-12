@@ -24,6 +24,8 @@ FIXTURES = [
     "unsupported-version evidence preservation",
     "64-request mailbox saturation and retryable overflow",
     "shutdown control under saturation and dropped-caller admission",
+    "transactional migration rollback and checkpoint retry",
+    "abrupt child-process termination during SQLite transaction",
 ]
 
 
@@ -41,17 +43,19 @@ def revision() -> str:
 
 def main() -> int:
     output = Path(os.environ.get("HIFIMULE_EVIDENCE_PATH", "playback-evidence.json"))
-    command = [
-        "cargo",
-        "test",
-        "-p",
-        "hifimule-daemon",
-        "playback::session::tests",
-        "--",
-        "--nocapture",
+    commands = [
+        [
+            "cargo", "test", "-p", "hifimule-daemon",
+            "playback::session::tests", "--", "--nocapture",
+        ],
+        [
+            "cargo", "test", "-p", "hifimule-daemon",
+            "playback::persistence::tests", "--", "--nocapture",
+        ],
     ]
     started = datetime.now(timezone.utc)
-    result = subprocess.run(command, text=True)
+    results = [subprocess.run(command, text=True) for command in commands]
+    exit_code = next((result.returncode for result in results if result.returncode), 0)
     record = {
         "schemaVersion": 1,
         "recordedAt": datetime.now(timezone.utc).isoformat(),
@@ -60,16 +64,16 @@ def main() -> int:
         "osRelease": platform.release(),
         "architecture": platform.machine(),
         "binaryRevision": revision(),
-        "command": " ".join(command),
+        "commands": [" ".join(command) for command in commands],
         "databaseScope": "isolated test databases only",
         "fixtures": FIXTURES,
-        "outcome": "passed" if result.returncode == 0 else "failed",
-        "exitCode": result.returncode,
+        "outcome": "passed" if exit_code == 0 else "failed",
+        "exitCode": exit_code,
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(record, indent=2))
-    return result.returncode
+    return exit_code
 
 
 if __name__ == "__main__":
