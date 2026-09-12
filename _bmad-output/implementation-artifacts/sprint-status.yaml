@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-09-12  # Story 15.1: 12 review patches applied
+last_updated: 2026-09-12  # Story 15.1: 12 review patches applied; Story 15.2 prepared
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -182,10 +182,10 @@ development_status:
   14-3-per-server-producer-fairness-and-priority-buckets: done  # review complete: 6 patches applied; 627 daemon tests pass
 
   # Epic 15 — Desktop Playback (epics.md; 29 approved planning stories)
-  # Story 15.1 prepared; remaining dedicated story files and contract gates are pending.
+  # Stories 15.1–15.2 prepared; remaining dedicated story files and contract gates are pending.
   epic-15: in-progress
   15-1-close-and-reopen-the-ui-without-restarting-the-daemon: done
-  15-2-quit-safely-while-a-device-sync-is-running: backlog
+  15-2-quit-safely-while-a-device-sync-is-running: ready-for-dev
   15-3-preserve-and-restore-a-paused-listening-session: backlog
   15-4-play-a-selected-library-track-through-the-daemon: backlog
   15-5-choose-an-audio-output-and-recover-safely-from-disconnection: backlog
