@@ -2,7 +2,7 @@ import '@shoelace-style/shoelace/dist/themes/dark.css';
 import '@shoelace-style/shoelace/dist/shoelace.js';
 import { setBasePath } from '@shoelace-style/shoelace/dist/utilities/base-path.js';
 import { LogicalSize } from '@tauri-apps/api/dpi';
-import { Window, currentMonitor } from '@tauri-apps/api/window';
+import { Window, currentMonitor, getCurrentWindow } from '@tauri-apps/api/window';
 import { t } from './i18n';
 
 const isDev = Boolean((import.meta as any).env?.DEV);
@@ -57,23 +57,50 @@ async function init() {
         await routeFromDaemonState(state);
     } catch (e) {
         console.error("Failed to check daemon state", e);
-        // Fallback to first-run login.
-        const { initLoginView } = await import('./login');
-        initLoginView(() => { reloadFromDaemon(); });
+        renderLifecycleFailure(e);
     }
 }
 
 async function waitForDaemonState(rpcCall: (method: string, params?: any) => Promise<any>): Promise<any> {
+    const deadline = Date.now() + 15_000;
     let lastError: unknown;
-    for (let attempt = 0; attempt < 10; attempt++) {
+    while (Date.now() < deadline) {
         try {
             return await rpcCall('get_daemon_state');
         } catch (error) {
             lastError = error;
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            await new Promise(resolve => setTimeout(resolve, 250));
         }
     }
     throw lastError;
+}
+
+function renderLifecycleFailure(error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    document.body.innerHTML = `
+        <main class="login-container" role="alert" aria-live="assertive">
+            <section class="login-card" style="padding:2rem;max-width:36rem">
+                <h2>${t('lifecycle.startup_failed_title')}</h2>
+                <p>${t('lifecycle.startup_failed_body')}</p>
+                <p class="error-text">${escapeLifecycleText(message)}</p>
+                <div style="display:flex;gap:.75rem">
+                    <button id="lifecycle-retry" type="button">${t('lifecycle.retry')}</button>
+                    <button id="lifecycle-close" type="button">${t('lifecycle.close')}</button>
+                </div>
+            </section>
+        </main>`;
+    const retry = document.getElementById('lifecycle-retry') as HTMLButtonElement | null;
+    retry?.focus();
+    retry?.addEventListener('click', () => window.location.reload());
+    document.getElementById('lifecycle-close')?.addEventListener('click', () => {
+        void getCurrentWindow().close();
+    });
+}
+
+function escapeLifecycleText(value: string): string {
+    const element = document.createElement('span');
+    element.textContent = value;
+    return element.innerHTML;
 }
 
 /**
@@ -262,13 +289,20 @@ async function initSplashScreen(mainWin: Window | null, splashWin: Window | null
     console.log("initSplashScreen started");
     const statusEl = document.getElementById('status-text');
     const container = document.getElementById('container');
+    const retryButton = document.getElementById('retry-btn');
+    const closeButton = document.getElementById('close-btn');
+    if (retryButton) retryButton.textContent = t('lifecycle.retry');
+    if (closeButton) closeButton.textContent = t('lifecycle.close');
+    document.getElementById('close-btn')?.addEventListener('click', () => {
+        void getCurrentWindow().close();
+    });
 
     if (!statusEl) {
         console.error("Status element not found!");
         return;
     }
 
-    const timeout = 10000;
+    const timeout = 15000;
     const startTime = Date.now();
     let isPolling = false;
 
@@ -331,10 +365,11 @@ async function initSplashScreen(mainWin: Window | null, splashWin: Window | null
             } catch {
                 statusEl.textContent = t('ui.splash.failed');
             }
+            (document.getElementById('retry-btn') as HTMLButtonElement | null)?.focus();
             return;
         }
 
-        setTimeout(poll, 1000);
+        setTimeout(poll, 250);
     };
 
     poll();

@@ -1,0 +1,21 @@
+[package]
+name = "hifimule-lifecycle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rand = "0.8"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid = { version = "1.0", features = ["v4"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_SystemInformation"] }
+
+[dev-dependencies]
+tempfile = "3"

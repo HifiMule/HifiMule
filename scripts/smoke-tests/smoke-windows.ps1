@@ -55,6 +55,7 @@ if (-not $msi) {
     Fail $Platform "install" "No .msi file found in working directory: $(Get-Location)"
 }
 Write-Host "  Installer: $($msi.Name)"
+Write-Host "  SHA256: $((Get-FileHash $msi.FullName -Algorithm SHA256).Hash)"
 
 $proc = Start-Process msiexec.exe `
     -ArgumentList "/i `"$($msi.FullName)`" /qn /norestart" `
@@ -70,12 +71,16 @@ $installDir = Get-InstallDir
 if (-not $installDir) {
     Fail $Platform "launch" "Install directory not found in registry or common install locations"
 }
-$exe = Get-ChildItem $installDir -Filter "hifimule.exe" -Recurse -ErrorAction SilentlyContinue |
+$exe = Get-ChildItem $installDir -Filter "hifimule-ui.exe" -Recurse -ErrorAction SilentlyContinue |
        Select-Object -First 1
 if (-not $exe) {
-    # Fallback: find any .exe in install dir
+    # Legacy package-name fallback. Never mistake the daemon for the UI.
+    $exe = Get-ChildItem $installDir -Filter "hifimule.exe" -Recurse -ErrorAction SilentlyContinue |
+           Select-Object -First 1
+}
+if (-not $exe) {
     $exe = Get-ChildItem $installDir -Filter "*.exe" -Recurse -ErrorAction SilentlyContinue |
-           Where-Object { $_.Name -notlike "unins*" } |
+           Where-Object { $_.Name -notlike "unins*" -and $_.Name -ne "hifimule-daemon.exe" } |
            Select-Object -First 1
 }
 if (-not $exe) {
@@ -87,17 +92,22 @@ $appProc = Start-Process $exe.FullName -WindowStyle Hidden -PassThru
 # --- STEP 3: Daemon health poll ---
 Write-Step "STEP 3: Polling daemon health (30s timeout) ..."
 $body = '{"jsonrpc":"2.0","method":"daemon.health","params":{},"id":1}'
+$descriptorPath = Join-Path $env:APPDATA "HifiMule\runtime\owner.json"
 $ok = $false
 for ($i = 0; $i -lt 30; $i++) {
     try {
+        $descriptor = Get-Content $descriptorPath -Raw | ConvertFrom-Json
+        if ($descriptor.schemaVersion -ne 1 -or $descriptor.protocolVersion -ne 1) { throw "incompatible descriptor" }
+        $headers = @{ Authorization = "Bearer $($descriptor.token)" }
         $r = Invoke-RestMethod `
-            -Uri "http://127.0.0.1:19140" `
+            -Uri "http://127.0.0.1:$($descriptor.port)" `
             -Method Post `
             -Body $body `
             -ContentType "application/json" `
+            -Headers $headers `
             -TimeoutSec 2 `
             -ErrorAction SilentlyContinue
-        if ($r.result.data.status -eq "ok") {
+        if ($r.result.data.status -eq "ok" -and $r.result.data.instanceId -eq $descriptor.instanceId) {
             $ok = $true
             break
         }
@@ -107,16 +117,89 @@ for ($i = 0; $i -lt 30; $i++) {
     Start-Sleep 1
 }
 if (-not $ok) {
-    Write-Host "DIAGNOSTIC: Attempting verbose request to http://127.0.0.1:19140 ..."
-    try {
-        Invoke-WebRequest -Uri "http://127.0.0.1:19140" -Method Post -Body $body `
-            -ContentType "application/json" -TimeoutSec 5 | Select-Object StatusCode, Content
-    } catch {
-        Write-Host "  Error: $_"
+    if (Test-Path $descriptorPath) {
+        $safe = Get-Content $descriptorPath -Raw | ConvertFrom-Json | Select-Object schemaVersion, protocolVersion, instanceId, pid, port, launchGeneration
+        Write-Host "DIAGNOSTIC: $($safe | ConvertTo-Json -Compress)"
+    } else {
+        Write-Host "DIAGNOSTIC: owner descriptor was not published"
     }
     Fail $Platform "daemon-health" "Daemon did not respond with status=ok after 30s"
 }
 Write-Host "  Daemon responded OK"
+$safe = Get-Content $descriptorPath -Raw | ConvertFrom-Json | Select-Object schemaVersion, protocolVersion, instanceId, pid, port, launchGeneration
+Write-Host "  LIFECYCLE_EVIDENCE os=Windows architecture=$env:PROCESSOR_ARCHITECTURE descriptor=$($safe | ConvertTo-Json -Compress)"
+
+try {
+    Invoke-WebRequest -Uri "http://127.0.0.1:$($descriptor.port)" -Method Post -Body $body `
+        -ContentType "application/json" -TimeoutSec 2 -ErrorAction Stop | Out-Null
+    Fail $Platform "local-access" "Unauthenticated health request was accepted"
+} catch {
+    if ($_.Exception.Response.StatusCode.value__ -ne 401) {
+        Fail $Platform "local-access" "Unauthenticated health request did not return 401"
+    }
+}
+
+Write-Step "STEP 3a: Concurrent launch and UI close/reopen ..."
+$initialPid = [int]$descriptor.pid
+$initialInstance = [string]$descriptor.instanceId
+$secondUi = Start-Process $exe.FullName -WindowStyle Hidden -PassThru
+Start-Sleep 2
+$afterConcurrent = Get-Content $descriptorPath -Raw | ConvertFrom-Json
+if ($afterConcurrent.pid -ne $initialPid -or $afterConcurrent.instanceId -ne $initialInstance) {
+    Fail $Platform "concurrent-launch" "Daemon identity changed"
+}
+if ($secondUi -and -not $secondUi.HasExited) { Stop-Process -Id $secondUi.Id -Force }
+if ($appProc -and -not $appProc.HasExited) { Stop-Process -Id $appProc.Id -Force }
+Start-Sleep 1
+if (-not (Get-Process -Id $initialPid -ErrorAction SilentlyContinue)) {
+    Fail $Platform "close-ui" "Closing the UI stopped the daemon"
+}
+$appProc = Start-Process $exe.FullName -WindowStyle Hidden -PassThru
+Start-Sleep 2
+$afterReopen = Get-Content $descriptorPath -Raw | ConvertFrom-Json
+if ($afterReopen.pid -ne $initialPid -or $afterReopen.instanceId -ne $initialInstance) {
+    Fail $Platform "reopen-ui" "Reopen created a competing daemon"
+}
+Write-Host "  Concurrent launch and close/reopen preserved PID and instance"
+
+Write-Step "STEP 3b: Daemon crash recovery ..."
+Stop-Process -Id $initialPid -Force
+for ($i = 0; $i -lt 10; $i++) {
+    if (-not (Get-Process -Id $initialPid -ErrorAction SilentlyContinue)) { break }
+    Start-Sleep -Milliseconds 500
+}
+if (Get-Process -Id $initialPid -ErrorAction SilentlyContinue) {
+    Fail $Platform "crash-recovery" "Unable to terminate the original daemon"
+}
+if ($appProc -and -not $appProc.HasExited) {
+    Stop-Process -Id $appProc.Id -Force
+}
+$appProc = Start-Process $exe.FullName -WindowStyle Hidden -PassThru
+$recovered = $null
+for ($i = 0; $i -lt 30; $i++) {
+    try {
+        $candidate = Get-Content $descriptorPath -Raw | ConvertFrom-Json
+        if ($candidate.instanceId -eq $initialInstance -or $candidate.pid -eq $initialPid) {
+            throw "stale descriptor"
+        }
+        $headers = @{ Authorization = "Bearer $($candidate.token)" }
+        $r = Invoke-RestMethod -Uri "http://127.0.0.1:$($candidate.port)" -Method Post `
+            -Body $body -ContentType "application/json" -Headers $headers -TimeoutSec 2
+        if ($r.result.data.status -eq "ok" -and $r.result.data.instanceId -eq $candidate.instanceId) {
+            $recovered = $candidate
+            break
+        }
+    } catch {
+        # The new daemon has not replaced the stale descriptor yet.
+    }
+    Start-Sleep 1
+}
+if (-not $recovered) {
+    Fail $Platform "crash-recovery" "UI did not recover a fresh authenticated daemon within 30s"
+}
+$safeRecovered = $recovered | Select-Object schemaVersion, protocolVersion, instanceId, pid, port, launchGeneration
+Write-Host "  RECOVERY_EVIDENCE os=Windows architecture=$env:PROCESSOR_ARCHITECTURE descriptor=$($safeRecovered | ConvertTo-Json -Compress)"
+$initialPid = [int]$recovered.pid
 
 # --- STEP 4: Uninstall ---
 Write-Step "STEP 4: Uninstalling ..."
@@ -124,6 +207,7 @@ if ($appProc -and -not $appProc.HasExited) {
     Stop-Process -Id $appProc.Id -Force -ErrorAction SilentlyContinue
     Start-Sleep 2
 }
+Stop-Process -Id $initialPid -Force -ErrorAction SilentlyContinue
 $proc = Start-Process msiexec.exe `
     -ArgumentList "/x `"$($msi.FullName)`" /qn /norestart" `
     -Wait -PassThru -NoNewWindow

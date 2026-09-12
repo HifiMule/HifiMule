@@ -10,8 +10,6 @@
     "core:default",
     "core:window:allow-show",
     "core:window:allow-close",
-    "opener:default",
-    "shell:allow-spawn",
-    "shell:allow-execute"
+    "opener:default"
   ]
 }

@@ -6,16 +6,20 @@ use crate::providers::{
 };
 use axum::{
     Json, Router,
+    body::Body,
     extract::{DefaultBodyLimit, Path, State},
-    response::IntoResponse,
+    http::{Request, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use notify_rust::Notification;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
 
 // JSON-RPC 2.0 Error Codes
 const ERR_METHOD_NOT_FOUND: i32 = -32601;
@@ -99,6 +103,44 @@ pub struct AppState {
     pub state_tx: std::sync::mpsc::Sender<crate::DaemonState>,
 }
 
+static LIFECYCLE_IDENTITY: OnceLock<hifimule_lifecycle::OwnerDescriptor> = OnceLock::new();
+static LIFECYCLE_STATE: AtomicU8 = AtomicU8::new(0);
+
+pub fn set_lifecycle_stopping(stopping: bool) {
+    LIFECYCLE_STATE.store(if stopping { 2 } else { 1 }, AtomicOrdering::Release);
+}
+
+fn daemon_health_result() -> Value {
+    let descriptor = LIFECYCLE_IDENTITY.get();
+    serde_json::json!({
+        "data": {
+            "status": if LIFECYCLE_STATE.load(AtomicOrdering::Acquire) == 2 { "stopping" } else { "ok" },
+            "protocolVersion": hifimule_lifecycle::PROTOCOL_VERSION,
+            "instanceId": descriptor.map(|value| value.instance_id.as_str()).unwrap_or("test-instance"),
+            "pid": descriptor.map(|value| value.pid).unwrap_or_else(std::process::id),
+            "daemonVersion": env!("CARGO_PKG_VERSION")
+        }
+    })
+}
+
+async fn authenticate_local_request(
+    State(expected_token): State<Arc<String>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let supplied = request
+        .headers()
+        .get(http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    if supplied.is_none_or(|token| {
+        !hifimule_lifecycle::constant_time_token_eq(expected_token.as_bytes(), token.as_bytes())
+    }) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    next.run(request).await
+}
+
 fn send_sync_complete_notification() {
     if let Err(e) = Notification::new()
         .summary(&hifimule_i18n::t("notification.sync_complete_ready"))
@@ -128,14 +170,23 @@ async fn reconnect_subsonic_provider_from_config(
         .ok()
 }
 
+pub struct RpcServerConfig {
+    pub listener: std::net::TcpListener,
+    pub descriptor: hifimule_lifecycle::OwnerDescriptor,
+    pub ready_tx: std::sync::mpsc::Sender<Result<(), String>>,
+    pub shutdown: Arc<std::sync::atomic::AtomicBool>,
+}
+
 pub async fn run_server(
-    port: u16,
+    config: RpcServerConfig,
     db: Arc<crate::db::Database>,
     device_manager: Arc<crate::device::DeviceManager>,
     last_scrobbler_result: Arc<tokio::sync::RwLock<Option<crate::scrobbler::ScrobblerResult>>>,
     state_tx: std::sync::mpsc::Sender<crate::DaemonState>,
     sync_operation_manager: Arc<crate::sync::SyncOperationManager>,
-) {
+) -> Result<(), String> {
+    let token = Arc::new(config.descriptor.token.clone());
+    let _ = LIFECYCLE_IDENTITY.set(config.descriptor);
     let state = Arc::new(AppState {
         jellyfin_client: JellyfinClient::new(),
         server_manager: Arc::new(tokio::sync::RwLock::new(
@@ -176,21 +227,60 @@ pub async fn run_server(
                         .unwrap(),
                 ])
                 .allow_methods([http::Method::POST, http::Method::GET])
-                .allow_headers([http::header::CONTENT_TYPE]),
+                .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION]),
         )
+        .layer(middleware::from_fn_with_state(
+            token,
+            authenticate_local_request,
+        ))
         .with_state(state);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    config
+        .listener
+        .set_nonblocking(true)
+        .map_err(|error| error.to_string())?;
+    let addr = config
+        .listener
+        .local_addr()
+        .map_err(|error| error.to_string())?;
     println!("RPC server listening on {}", addr);
-
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let listener =
+        tokio::net::TcpListener::from_std(config.listener).map_err(|error| error.to_string())?;
+    LIFECYCLE_STATE.store(1, AtomicOrdering::Release);
+    let _ = config.ready_tx.send(Ok(()));
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            while !config.shutdown.load(std::sync::atomic::Ordering::Acquire) {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .map_err(|error| error.to_string())
 }
 
 async fn handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
+    let _mutation_guard = if is_mutating_method(&payload.method) {
+        match state.sync_operation_manager.try_admit_mutation() {
+            Some(guard) => Some(guard),
+            None => {
+                return Json(JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: ERR_SYNC_IN_PROGRESS,
+                        message: "The daemon is stopping and is not accepting new work".to_string(),
+                        data: Some(serde_json::json!({ "errorCode": "DAEMON_STOPPED" })),
+                    }),
+                    id: payload.id,
+                });
+            }
+        }
+    } else {
+        None
+    };
     let result = match payload.method.as_str() {
         "test_connection" => handle_test_connection(&state, payload.params).await,
         "server.connect" => handle_server_connect(&state, payload.params).await,
@@ -244,7 +334,7 @@ async fn handler(
         "device.list" => handle_device_list(&state).await,
         "device.select" => handle_device_select(&state, payload.params).await,
         "server.probe" => handle_server_probe(payload.params).await,
-        "daemon.health" => Ok(serde_json::json!({ "data": { "status": "ok" } })),
+        "daemon.health" => Ok(daemon_health_result()),
         "browse.listModes" => handle_browse_list_modes(&state).await,
         "browse.listArtists" => handle_browse_list_artists(&state, payload.params).await,
         "browse.getArtist" => handle_browse_get_artist(&state, payload.params).await,
@@ -297,6 +387,44 @@ async fn handler(
             id: payload.id,
         }),
     }
+}
+
+fn is_mutating_method(method: &str) -> bool {
+    matches!(
+        method,
+        "server.connect"
+            | "server.logout"
+            | "server.select"
+            | "server.update"
+            | "server.remove"
+            | "login"
+            | "save_credentials"
+            | "set_device_profile"
+            | "sync_calculate_delta"
+            | "sync_execute"
+            | "sync_cancel"
+            | "sync_get_resume_state"
+            | "manifest_prune"
+            | "manifest_relink"
+            | "manifest_clear_dirty"
+            | "manifest_save_basket"
+            | "device_initialize"
+            | "device.update_manifest"
+            | "device_set_auto_sync_on_connect"
+            | "basket.autoFill"
+            | "autoFill.setPipeline"
+            | "sync.setAutoFill"
+            | "device_profiles.list"
+            | "device.set_transcoding_profile"
+            | "device.select"
+            | "playlist.create"
+            | "playlist.addItems"
+            | "playlist.addTracks"
+            | "playlist.removeTracks"
+            | "playlist.delete"
+            | "playlist.rename"
+            | "playlist.reorder"
+    )
 }
 
 async fn handle_server_probe(params: Option<Value>) -> Result<Value, JsonRpcError> {
@@ -424,7 +552,6 @@ async fn handle_test_connection(
         message: "Invalid params".to_string(),
         data: None,
     })?;
-
     let url = params["url"].as_str().ok_or(JsonRpcError {
         code: ERR_INVALID_PARAMS,
         message: hifimule_i18n::t("error.missing_url"),
@@ -4969,6 +5096,15 @@ async fn handle_sync_execute(
         message: "Missing params".to_string(),
         data: None,
     })?;
+    let pipeline_guard = state
+        .sync_operation_manager
+        .try_start_pipeline()
+        .ok_or(JsonRpcError {
+            code: ERR_SYNC_IN_PROGRESS,
+            message: "A sync operation is already in progress or the daemon is stopping"
+                .to_string(),
+            data: None,
+        })?;
 
     // Extract delta from params
     let mut delta: crate::sync::SyncDelta = serde_json::from_value(params["delta"].clone())
@@ -5081,24 +5217,12 @@ async fn handle_sync_execute(
             data: None,
         })?;
 
-    // The UI calls sync_execute immediately after sync_calculate_delta. Give the
-    // preparation-only lock a short handoff window to drop before treating it as
-    // a real concurrent sync.
-    for _ in 0..20 {
-        if state
-            .sync_operation_manager
-            .get_active_operation_id()
-            .await
-            .is_some()
-        {
-            break;
-        }
-        if !state.sync_operation_manager.is_pipeline_active() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-    if state.sync_operation_manager.has_active_operation().await {
+    if state
+        .sync_operation_manager
+        .get_active_operation_id()
+        .await
+        .is_some()
+    {
         return Err(JsonRpcError {
             code: ERR_SYNC_IN_PROGRESS,
             message: "A sync operation is already in progress".to_string(),
@@ -5178,6 +5302,7 @@ async fn handle_sync_execute(
         let _ = state_tx.send(crate::DaemonState::Syncing);
 
         tokio::spawn(async move {
+            let _pipeline_guard = pipeline_guard;
             let (sync_manifest, device_io) = match device_manager.get_manifest_and_io().await {
                 Some(pair) => pair,
                 None => {
@@ -5303,6 +5428,7 @@ async fn handle_sync_execute(
         let _ = state_tx.send(crate::DaemonState::Syncing);
 
         tokio::spawn(async move {
+            let _pipeline_guard = pipeline_guard;
             let (sync_manifest, device_io) = match device_manager.get_manifest_and_io().await {
                 Some(pair) => pair,
                 None => {
@@ -10919,6 +11045,89 @@ mod tests {
             "ok",
             "daemon.health result must be {{ data: {{ status: ok }} }}"
         );
+        assert_eq!(
+            response.result.as_ref().unwrap()["data"]["protocolVersion"],
+            hifimule_lifecycle::PROTOCOL_VERSION
+        );
+        assert!(response.result.as_ref().unwrap()["data"]["instanceId"].is_string());
+        assert!(response.result.as_ref().unwrap()["data"]["pid"].is_number());
+        assert_eq!(
+            response.result.as_ref().unwrap()["data"]["daemonVersion"],
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+
+    #[tokio::test]
+    async fn production_router_rejects_missing_token_before_rpc_dispatch() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let descriptor = hifimule_lifecycle::OwnerDescriptor {
+            schema_version: 1,
+            protocol_version: 1,
+            instance_id: uuid::Uuid::new_v4().to_string(),
+            pid: std::process::id(),
+            port,
+            token: "ab".repeat(32),
+            launch_generation: "0".to_string(),
+        };
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let task_shutdown = shutdown.clone();
+        let task = tokio::spawn(run_server(
+            RpcServerConfig {
+                listener,
+                descriptor: descriptor.clone(),
+                ready_tx,
+                shutdown: task_shutdown,
+            },
+            db,
+            device_manager,
+            Arc::new(tokio::sync::RwLock::new(None)),
+            std::sync::mpsc::channel::<crate::DaemonState>().0,
+            Arc::new(crate::sync::SyncOperationManager::new()),
+        ));
+        tokio::task::spawn_blocking(move || {
+            ready_rx.recv_timeout(std::time::Duration::from_secs(2))
+        })
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let body = json!({"jsonrpc":"2.0","method":"daemon.health","params":{},"id":1});
+        let unauthorized = client
+            .post(format!("http://127.0.0.1:{port}"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), http::StatusCode::UNAUTHORIZED);
+        let invalid = client
+            .post(format!("http://127.0.0.1:{port}"))
+            .bearer_auth("wrong-token")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), http::StatusCode::UNAUTHORIZED);
+        let image_unauthorized = client
+            .get(format!("http://127.0.0.1:{port}/jellyfin/image/example"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(image_unauthorized.status(), http::StatusCode::UNAUTHORIZED);
+        let authorized = client
+            .post(format!("http://127.0.0.1:{port}"))
+            .bearer_auth(&descriptor.token)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(authorized.status(), http::StatusCode::OK);
+        shutdown.store(true, std::sync::atomic::Ordering::Release);
+        task.await.unwrap().unwrap();
     }
 
     #[tokio::test]

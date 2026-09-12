@@ -19,6 +19,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MOUNT_POINT="/Volumes/HifiMule"
 APP_NAME=""
 APP_PATH=""
+DAEMON_PID=""
+INSTALL_ROOT="${HIFIMULE_SMOKE_INSTALL_ROOT:-/Applications}"
 
 fail() {
     local step="$1"
@@ -30,7 +32,8 @@ fail() {
 
 cleanup() {
     echo "  Cleaning up ..."
-    [[ -n "$APP_NAME" ]] && pkill -f "$APP_NAME" 2>/dev/null || true
+    [[ -n "$APP_PATH" ]] && pkill -f "$APP_PATH/Contents/MacOS/hifimule-ui" 2>/dev/null || true
+    [[ -n "$DAEMON_PID" ]] && kill "$DAEMON_PID" 2>/dev/null || true
     hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
     [[ -n "$APP_PATH" ]] && rm -rf "$APP_PATH" 2>/dev/null || true
 }
@@ -44,6 +47,7 @@ if [[ -z "$DMG" ]]; then
     fail "install" "No .dmg file found in working directory: $(pwd)"
 fi
 echo "  Installer: $DMG"
+echo "  SHA256: $(shasum -a 256 "$DMG" | awk '{print $1}')"
 
 # Detach existing mount if stale
 hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
@@ -56,10 +60,11 @@ if [[ -z "$APP_IN_DMG" ]]; then
     fail "install" "No .app found at DMG mount point: $MOUNT_POINT"
 fi
 APP_NAME="$(basename "$APP_IN_DMG" .app)"
-APP_PATH="/Applications/${APP_NAME}.app"
+mkdir -p "$INSTALL_ROOT"
+APP_PATH="${INSTALL_ROOT}/${APP_NAME}.app"
 
-cp -R "$APP_IN_DMG" /Applications/ ||
-    fail "install" "Failed to copy .app to /Applications"
+cp -R "$APP_IN_DMG" "$INSTALL_ROOT/" ||
+    fail "install" "Failed to copy .app to $INSTALL_ROOT"
 
 hdiutil detach "$MOUNT_POINT" -quiet || true
 echo "  Install OK"
@@ -92,10 +97,41 @@ if ! poll_health 30; then
 fi
 echo "  Daemon responded OK"
 
+INITIAL_IDENTITY=$(lifecycle_identity)
+DAEMON_PID=${INITIAL_IDENTITY%%$'\t'*}
+assert_unauthenticated_access_rejected || fail "local-access" "Unauthenticated health request was not rejected"
+
+echo "==> STEP 4a: Concurrent launch and UI close/reopen ..."
+open -n "$APP_PATH" || fail "concurrent-launch" "Second application launch failed"
+poll_health 15 || fail "concurrent-launch" "Concurrent launch lost the daemon"
+[[ "$(lifecycle_identity)" == "$INITIAL_IDENTITY" ]] || fail "concurrent-launch" "Daemon identity changed"
+pkill -f "$APP_PATH/Contents/MacOS/hifimule-ui" || fail "close-ui" "Could not close the UI"
+sleep 1
+kill -0 "$DAEMON_PID" 2>/dev/null || fail "close-ui" "Closing the UI stopped the daemon"
+open "$APP_PATH" || fail "reopen-ui" "Could not reopen the UI"
+poll_health 15 || fail "reopen-ui" "Reopened UI did not attach"
+[[ "$(lifecycle_identity)" == "$INITIAL_IDENTITY" ]] || fail "reopen-ui" "Reopen created a competing daemon"
+echo "  Concurrent launch and close/reopen preserved PID and instance"
+
+echo "==> STEP 4b: Daemon crash recovery ..."
+kill -9 "$DAEMON_PID" || fail "crash-recovery" "Could not terminate the original daemon"
+for _ in $(seq 1 20); do
+    ! kill -0 "$DAEMON_PID" 2>/dev/null && break
+    sleep 0.25
+done
+kill -0 "$DAEMON_PID" 2>/dev/null && fail "crash-recovery" "Original daemon did not terminate"
+pkill -f "$APP_PATH/Contents/MacOS/hifimule-ui" 2>/dev/null || true
+open "$APP_PATH" || fail "crash-recovery" "Could not relaunch the UI"
+poll_health 30 || fail "crash-recovery" "UI did not recover a fresh authenticated daemon"
+RECOVERED_IDENTITY=$(lifecycle_identity)
+[[ "$RECOVERED_IDENTITY" != "$INITIAL_IDENTITY" ]] || fail "crash-recovery" "Recovered daemon retained stale identity"
+DAEMON_PID=${RECOVERED_IDENTITY%%$'\t'*}
+echo "  Crash recovery published a new PID and instance"
+
 # --- STEP 5: Remove app ---
 echo ""
 echo "==> STEP 5: Removing installed app ..."
-pkill -f "$APP_NAME" 2>/dev/null || true
+pkill -f "$APP_PATH/Contents/MacOS/hifimule-ui" 2>/dev/null || true
 sleep 1
 rm -rf "$APP_PATH" || fail "uninstall" "Failed to remove $APP_PATH"
 echo "  Removal OK"

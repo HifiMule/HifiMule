@@ -1,6 +1,10 @@
+---
+baseline_commit: 09b6a8b580b704c8df3d33a697974f4e74e48af5
+---
+
 # Story 15.1: Close and reopen the UI without restarting the daemon
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -24,30 +28,30 @@ so that ongoing work remains available and repeated launches do not create compe
 
 ## Tasks / Subtasks
 
-- [ ] Implement the shared lifecycle contract below (AC 1, 3–5).
-  - [ ] Add a small internal `hifimule-lifecycle` library crate for shared paths, descriptor/wire types, ownership guards and discovery. Add it to the existing workspace; do not create another daemon application.
-  - [ ] Acquire the OS ownership lock before daemon-core initialization, bind the listener explicitly, and publish readiness only after startup succeeds.
-  - [ ] Implement private discovery, credential rotation, legacy-owner detection, compatibility validation and structured failure outcomes.
-  - [ ] Add process-level tests for simultaneous candidates, slow owners, stale descriptors, lock release after crash, mismatched identity and rejected access.
-- [ ] Decouple launch and UI exit (AC 1–3, 6).
-  - [ ] Replace UI-owned shell child management with detached native process launch; remove exit-time child killing and pipe ownership coupling.
-  - [ ] Route UI, direct daemon and configured-startup entry points through the same owner election. Remove automatic Windows service fallback and implicit macOS LaunchAgent installation.
-  - [ ] Preserve startup opt-in/opt-out across reopening and installer upgrades, including Windows registration paths.
-  - [ ] Fence pending launch attempts across explicit Quit; terminate launch coordination at its deadline or when the UI closes.
-- [ ] Integrate authenticated production communication and current-state hydration (AC 2, 5).
-  - [ ] Authenticate JSON-RPC and artwork routes; keep credentials entirely in Rust/native code.
-  - [ ] Update Tauri `rpc_proxy` and `image_proxy` to discover and validate the owner and preserve existing result/error contracts.
-  - [ ] Make splash/main share one bounded lifecycle readiness outcome; after readiness, fetch existing current state and restore existing operation/progress polling.
-  - [ ] Preserve server-scoped provider re-authentication and distinguish it from local daemon access failure. Never route lifecycle failure to first-run login.
-  - [ ] Add localized, keyboard-accessible startup errors and working Retry/Close actions; dispose stale polls and ignore late results.
-- [ ] Implement idle termination with an interim active-work guard (AC 2, 6).
-  - [ ] Serialize work admission against Quit; reject Quit while a sync pipeline/operation is active, including delta calculation.
-  - [ ] Stop accepting new work during accepted idle Quit, signal/join daemon-core shutdown, clean discovery under ownership, and exit the existing Tao loop.
-  - [ ] Test simultaneous sync start/Quit, slow teardown and delayed pre-Quit launchers without force-killing a live owner or modifying device completion state.
-- [ ] Update installed smoke tests and collect lifecycle evidence (AC 1–7).
-  - [ ] Replace fixed-port/unauthenticated probes; exercise the real installed daemon and UI, not a substitute lifecycle probe.
-  - [ ] Record both PID and instance identity, outcomes and cleanup on the release matrix; preserve logs on success as well as failure.
-  - [ ] Run relevant Rust tests, frontend type/build checks, packaging checks and installed platform scenarios; document unavailable evidence explicitly.
+- [x] Implement the shared lifecycle contract below (AC 1, 3–5).
+  - [x] Add a small internal `hifimule-lifecycle` library crate for shared paths, descriptor/wire types, ownership guards and discovery. Add it to the existing workspace; do not create another daemon application.
+  - [x] Acquire the OS ownership lock before daemon-core initialization, bind the listener explicitly, and publish readiness only after startup succeeds.
+  - [x] Implement private discovery, credential rotation, legacy-owner detection, compatibility validation and structured failure outcomes.
+  - [x] Add process-level tests for simultaneous candidates, slow owners, stale descriptors, lock release after crash, mismatched identity and rejected access.
+- [x] Decouple launch and UI exit (AC 1–3, 6).
+  - [x] Replace UI-owned shell child management with detached native process launch; remove exit-time child killing and pipe ownership coupling.
+  - [x] Route UI, direct daemon and configured-startup entry points through the same owner election. Remove automatic Windows service fallback and implicit macOS LaunchAgent installation.
+  - [x] Preserve startup opt-in/opt-out across reopening and installer upgrades, including Windows registration paths.
+  - [x] Fence pending launch attempts across explicit Quit; terminate launch coordination at its deadline or when the UI closes.
+- [x] Integrate authenticated production communication and current-state hydration (AC 2, 5).
+  - [x] Authenticate JSON-RPC and artwork routes; keep credentials entirely in Rust/native code.
+  - [x] Update Tauri `rpc_proxy` and `image_proxy` to discover and validate the owner and preserve existing result/error contracts.
+  - [x] Make splash/main share one bounded lifecycle readiness outcome; after readiness, fetch existing current state and restore existing operation/progress polling.
+  - [x] Preserve server-scoped provider re-authentication and distinguish it from local daemon access failure. Never route lifecycle failure to first-run login.
+  - [x] Add localized, keyboard-accessible startup errors and working Retry/Close actions; dispose stale polls and ignore late results.
+- [x] Implement idle termination with an interim active-work guard (AC 2, 6).
+  - [x] Serialize work admission against Quit; reject Quit while a sync pipeline/operation is active, including delta calculation.
+  - [x] Stop accepting new work during accepted idle Quit, signal/join daemon-core shutdown, clean discovery under ownership, and exit the existing Tao loop.
+  - [x] Test simultaneous sync start/Quit, slow teardown and delayed pre-Quit launchers without force-killing a live owner or modifying device completion state.
+- [x] Update installed smoke tests and collect lifecycle evidence (AC 1–7).
+  - [x] Replace fixed-port/unauthenticated probes; exercise the real installed daemon and UI, not a substitute lifecycle probe.
+  - [x] Record both PID and instance identity, outcomes and cleanup on the release matrix; preserve logs on success as well as failure.
+  - [x] Run relevant Rust tests, frontend type/build checks, packaging checks and installed platform scenarios; document unavailable evidence explicitly.
 
 ## Dev Notes
 
@@ -179,18 +183,66 @@ Use the actual release matrix from `.github/workflows/release.yml` and `smoke-te
 
 ### Agent Model Used
 
-GPT-6 (Codex), story preparation; implementation agent to record its own model here.
+GPT-5 (Codex)
 
 ### Debug Log References
 
 - Preparation reviewed current production code, planning artifacts and official lifecycle API documentation. No production code or runtime tests were changed/run by story creation.
+- 2026-09-11: Implemented the lifecycle contract through red-green-refactor. Initial shared-crate contract tests failed on missing APIs, then passed after ownership/discovery implementation.
+- 2026-09-11: Full daemon suite initially hit sandbox-denied loopback/mock-server access; rerun with local-network permission passed all 644 tests.
+- 2026-09-11: Windows lifecycle crate cross-check passed for `aarch64-pc-windows-gnullvm`; full Tauri cross-check could not run without the target-specific packaged sidecar. Installed MSI, DMG/App and deb/AppImage scenarios require their release-matrix runners and remain unverified.
+- 2026-09-11: Windows 11 Pro ARM64 UTM compiled the production UI and daemon with MSVC. Isolated-profile smoke evidence passed authenticated cold launch (3.193 s), concurrent launch, close/reopen with stable PID+instance, forced-crash recovery with a new PID+instance, and unauthenticated rejection (401). WiX/NSIS installer execution and tray Quit remain open; Ubuntu SSH is reachable from the user's Terminal but not from the Codex sandbox route.
+- 2026-09-12: Ubuntu ARM64 installed-deb smoke passed authenticated cold launch, rejected unauthenticated access, concurrent launch, close/reopen (PID 19488, instance `f2c49b7c-db10-4dea-be04-890c288e968b`), crash recovery (PID 20513, instance `63f07f6d-fe14-4e1c-b880-1ade1029d693`) and verified package removal. The smoke harness was corrected to remove the actual `hifi-mule` package name.
+- 2026-09-12: Windows 11 Pro ARM64 MSI `AF5159F130D75F0F0FBD43AB2D922D1A8EE2B47C7A7B83D6EAFCFCBD384AF1D0` passed installed authenticated cold launch, 401 rejection, concurrent launch and close/reopen (PID 2944, instance `ac9d1ef5-7d49-4ba5-91ed-1473de496e76`), crash recovery (PID 12528, instance `cdf4a512-a718-4398-91ff-c3c9616b74c7`) and clean uninstall. The first run exposed and fixed a harness error that selected the daemon executable as the UI.
+- 2026-09-12: User-observed Windows installed idle-Quit evidence passed: launching the UI started the daemon, quitting the UI left the daemon running, and choosing Quit from the tray stopped the daemon.
+- 2026-09-12: macOS ARM64 DMG `5d3ce24c541e3c9822c66d4b89f116bdaf3305d6db8183c1482750ec1204663f` passed isolated installed-app cold launch, unauthenticated rejection, concurrent launch and close/reopen (PID 82330, instance `386c9870-7267-4bc1-bb5a-b173cd121485`), crash recovery (PID 82423, instance `ce1c564f-dfe7-4b97-80be-04c7318b22a5`) and cleanup without touching the pre-existing `/Applications/HifiMule.app`. AppleScript application Quit had targeted the daemon tray process, so the harness now closes only the exact installed UI executable.
+- 2026-09-12: User-observed macOS installed idle-Quit evidence passed: launching the UI started the daemon, stopping the UI left it running, and tray Quit stopped it.
+- 2026-09-12: User-observed Ubuntu installed idle-Quit evidence passed: launching the UI started the daemon, stopping the UI left it running, and tray Quit stopped it within the five-second shutdown contract. The short visible delay was unique to the Linux VM.
 
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
 - Lifecycle ownership, access, compatibility, startup, interim idle shutdown and launch fencing contracts are specified for implementation; subsequent playback contracts remain with their owning stories.
+- Added private per-profile ownership/discovery with dynamic loopback binding, protocol/instance health validation, rotating native-only bearer credentials, monotonic launch tickets, durable Quit generation fencing, Unix permissions and protected Windows DACLs.
+- Replaced Tauri shell-child ownership with detached native launch and removed UI-exit daemon killing, Windows service fallback, implicit macOS startup enrollment and fixed-port frontend assumptions.
+- Added authenticated RPC/artwork middleware, native owner validation, bounded hydration, accessible lifecycle errors, active-operation rehydration through existing daemon state, and a serialized mutation/sync admission gate for idle Quit.
+- Updated Windows startup registration preservation and installed smoke scripts/workflow for authenticated discovery, rejected access, concurrent launch, close/reopen identity, sanitized evidence and success/failure log retention.
+- Validation passed: lifecycle tests 9/9, daemon tests 644/644, native UI tests 2/2, frontend TypeScript/Vite build, lifecycle/UI clippy with warnings denied, daemon clippy with 0 errors (94 pre-existing warnings), Rust formatting, shell syntax and WiX XML. Installed release-matrix evidence remains unavailable, so AC 7 and the final smoke task are intentionally open.
+- Windows ARM64 VM behavior evidence additionally passed for cold launch, single ownership under concurrency, UI close/reopen, crash recovery and local credential rejection. It is portable-build evidence only; installer and tray-Quit evidence is not claimed.
+- Installed ARM64 evidence passes MSI (Windows 11 Pro), deb (Ubuntu) and DMG/app (macOS) cold launch, authenticated attachment, rejected access, concurrent launch, close/reopen identity, forced-crash recovery and cleanup. Tray-menu idle Quit passes by user observation on all three platforms, including Ubuntu shutdown within the five-second contract. AC 7 and the final smoke task are complete.
 
 ### File List
 
 - `_bmad-output/implementation-artifacts/15-1-close-and-reopen-the-ui-without-restarting-the-daemon.md` (story preparation)
 - `_bmad-output/implementation-artifacts/sprint-status.yaml` (tracking)
+- `.github/workflows/smoke-test.yml`
+- `Cargo.lock`
+- `Cargo.toml`
+- `hifimule-lifecycle/Cargo.toml`
+- `hifimule-lifecycle/src/bin/lifecycle-owner-probe.rs`
+- `hifimule-lifecycle/src/lib.rs`
+- `hifimule-lifecycle/tests/contract.rs`
+- `hifimule-daemon/Cargo.toml`
+- `hifimule-daemon/src/main.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-daemon/src/service.rs`
+- `hifimule-daemon/src/sync.rs`
+- `hifimule-daemon/src/tests.rs`
+- `hifimule-i18n/catalog.json`
+- `hifimule-ui/splashscreen.html`
+- `hifimule-ui/src-tauri/Cargo.toml`
+- `hifimule-ui/src-tauri/capabilities/default.json`
+- `hifimule-ui/src-tauri/nsis/hooks.nsh`
+- `hifimule-ui/src-tauri/src/lib.rs`
+- `hifimule-ui/src-tauri/wix/startup-fragment.wxs`
+- `hifimule-ui/src/main.ts`
+- `hifimule-ui/src/rpc.ts`
+- `scripts/smoke-tests/smoke-common.sh`
+- `scripts/smoke-tests/smoke-linux.sh`
+- `scripts/smoke-tests/smoke-macos.sh`
+- `scripts/smoke-tests/smoke-windows.ps1`
+
+## Change Log
+
+- 2026-09-11: Implemented production daemon/UI lifecycle ownership, authenticated discovery and proxies, bounded detached launch, idle-Quit admission fencing, startup preference preservation, and release-matrix lifecycle smoke coverage. Story remains in progress pending installed cross-platform evidence.
+- 2026-09-12: Completed installed ARM64 MSI, deb and DMG lifecycle evidence on Windows, Ubuntu and macOS, including user-observed tray Quit; moved Story 15.1 to review.

@@ -3,7 +3,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
@@ -493,6 +493,13 @@ impl Drop for PipelineGuard {
     }
 }
 
+pub struct MutationGuard(Arc<AtomicUsize>);
+impl Drop for MutationGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// Manager for tracking active sync operations in memory.
 pub struct SyncOperationManager {
     operations: Arc<RwLock<HashMap<String, SyncOperation>>>,
@@ -501,6 +508,9 @@ pub struct SyncOperationManager {
     /// where `has_active_operation` would otherwise return false.
     pipeline_active: Arc<AtomicBool>,
     pipeline_cancelled: Arc<AtomicBool>,
+    /// Closed before an accepted daemon Quit so no new pipeline can race teardown.
+    admission_closed: Arc<AtomicBool>,
+    active_mutations: Arc<AtomicUsize>,
     /// Per-operation cancellation flags. Set to `true` by `request_cancel`; polled by
     /// the sync loop between files via `is_cancelled`. Never removed — old entries for
     /// completed operations are harmless and naturally sized (one AtomicBool per UUID).
@@ -513,6 +523,8 @@ impl SyncOperationManager {
             operations: Arc::new(RwLock::new(HashMap::new())),
             pipeline_active: Arc::new(AtomicBool::new(false)),
             pipeline_cancelled: Arc::new(AtomicBool::new(false)),
+            admission_closed: Arc::new(AtomicBool::new(false)),
+            active_mutations: Arc::new(AtomicUsize::new(0)),
             cancel_tokens: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -521,11 +533,20 @@ impl SyncOperationManager {
     /// the lock on drop. Returns `None` if a pipeline is already active — the caller
     /// must treat this as a concurrency conflict and abort.
     pub fn try_start_pipeline(&self) -> Option<PipelineGuard> {
+        if self.admission_closed.load(Ordering::Acquire) {
+            return None;
+        }
         let flag = Arc::clone(&self.pipeline_active);
         if flag
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
+            return None;
+        }
+        // Serialize admission with Quit. If Quit closed the gate after our first
+        // read, surrender the pipeline before any device/provider work begins.
+        if self.admission_closed.load(Ordering::Acquire) {
+            flag.store(false, Ordering::Release);
             return None;
         }
         self.pipeline_cancelled.store(false, Ordering::Release);
@@ -547,6 +568,48 @@ impl SyncOperationManager {
 
     pub fn is_pipeline_active(&self) -> bool {
         self.pipeline_active.load(Ordering::Acquire)
+    }
+
+    /// Close work admission and report whether shutdown can proceed immediately.
+    /// A blocked attempt reopens admission so the user can finish or cancel sync.
+    pub async fn try_begin_idle_shutdown(&self) -> bool {
+        if self
+            .admission_closed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        if self.has_active_operation().await {
+            self.admission_closed.store(false, Ordering::Release);
+            return false;
+        }
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while self.active_mutations.load(Ordering::Acquire) != 0 {
+            if tokio::time::Instant::now() >= deadline {
+                self.admission_closed.store(false, Ordering::Release);
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        true
+    }
+
+    pub fn reopen_admission(&self) {
+        self.admission_closed.store(false, Ordering::Release);
+    }
+
+    pub fn try_admit_mutation(&self) -> Option<MutationGuard> {
+        if self.admission_closed.load(Ordering::Acquire) {
+            return None;
+        }
+        let counter = Arc::clone(&self.active_mutations);
+        counter.fetch_add(1, Ordering::AcqRel);
+        if self.admission_closed.load(Ordering::Acquire) {
+            counter.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(MutationGuard(counter))
     }
 
     pub async fn create_operation(
@@ -6943,5 +7006,34 @@ mod tests {
             manifest_entry.track_count, 2,
             "track_count should be 2 (only resolved tracks)"
         );
+    }
+
+    #[tokio::test]
+    async fn idle_shutdown_closes_pipeline_admission() {
+        let manager = SyncOperationManager::new();
+        assert!(manager.try_begin_idle_shutdown().await);
+        assert!(manager.try_start_pipeline().is_none());
+    }
+
+    #[tokio::test]
+    async fn active_pipeline_blocks_quit_and_reopens_admission() {
+        let manager = SyncOperationManager::new();
+        let active = manager.try_start_pipeline().unwrap();
+        assert!(!manager.try_begin_idle_shutdown().await);
+        drop(active);
+        assert!(manager.try_start_pipeline().is_some());
+    }
+
+    #[tokio::test]
+    async fn idle_quit_drains_mutation_and_stopping_rejects_new_mutations() {
+        let manager = std::sync::Arc::new(SyncOperationManager::new());
+        let mutation = manager.try_admit_mutation().unwrap();
+        let shutdown_manager = std::sync::Arc::clone(&manager);
+        let shutdown =
+            tokio::spawn(async move { shutdown_manager.try_begin_idle_shutdown().await });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        drop(mutation);
+        assert!(shutdown.await.unwrap());
+        assert!(manager.try_admit_mutation().is_none());
     }
 }

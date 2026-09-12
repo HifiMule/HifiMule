@@ -1,6 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Fragment>
+    <Property Id="HIFIMULE_STARTUP_ENABLED">
+      <RegistrySearch Id="FindExistingHifiMuleStartup"
+                      Root="HKCU"
+                      Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                      Name="HifiMule"
+                      Type="raw" />
+    </Property>
     <!--
       Register hifimule-daemon as a startup application via Registry Run key.
       Runs in the user's interactive session (HKCU) for full tray icon support.
@@ -10,6 +17,7 @@
       <Component Id="StartupRegistryComponent"
                  Directory="INSTALLDIR"
                  Guid="1ba6130d-4fab-4dd0-b5cb-35477b1b5f4e">
+        <Condition>HIFIMULE_STARTUP_ENABLED</Condition>
         <RegistryValue
           Root="HKCU"
           Key="Software\Microsoft\Windows\CurrentVersion\Run"
@@ -17,12 +25,17 @@
           Type="string"
           Value="[INSTALLDIR]hifimule-daemon.exe"
           KeyPath="yes" />
+      </Component>
+      <Component Id="InstallDiscoveryRegistryComponent"
+                 Directory="INSTALLDIR"
+                 Guid="2d67b0f8-cce7-4c9d-a56a-e34c2ba3ac41">
         <RegistryValue
           Root="HKCU"
           Key="Software\HifiMule"
           Name="InstallDir"
           Type="string"
-          Value="[INSTALLDIR]" />
+          Value="[INSTALLDIR]"
+          KeyPath="yes" />
       </Component>
     </ComponentGroup>
   </Fragment>

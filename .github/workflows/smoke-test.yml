@@ -42,8 +42,8 @@ jobs:
             Tee-Object smoke.log
           exit $LASTEXITCODE
 
-      - name: Upload smoke test log on failure
-        if: failure()
+      - name: Upload sanitized lifecycle evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: smoke-log-windows
@@ -74,8 +74,8 @@ jobs:
           set -o pipefail
           bash ../scripts/smoke-tests/smoke-linux.sh 2>&1 | tee smoke.log
 
-      - name: Upload smoke test log on failure
-        if: failure()
+      - name: Upload sanitized lifecycle evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: smoke-log-linux
@@ -111,8 +111,8 @@ jobs:
           set -o pipefail
           bash ../scripts/smoke-tests/smoke-macos.sh 2>&1 | tee smoke.log
 
-      - name: Upload smoke test log on failure
-        if: failure()
+      - name: Upload sanitized lifecycle evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: smoke-log-${{ matrix.log-suffix }}

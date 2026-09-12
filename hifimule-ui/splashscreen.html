@@ -166,14 +166,14 @@
         <h1>HifiMule</h1>
 
         <div class="status-container">
-            <div id="status-text">Initializing Hub...</div>
+            <div id="status-text" role="status" aria-live="polite">Initializing Hub...</div>
             <div class="loader">
                 <div class="loader-bar"></div>
             </div>
 
             <div class="error-ui">
                 <button id="retry-btn">Retry Connection</button>
-                <button id="settings-btn" class="secondary">Open Settings</button>
+                <button id="close-btn" class="secondary">Close</button>
             </div>
         </div>
     </div>
@@ -181,9 +181,6 @@
     <script>
         // These will be wired up by the main process or frontend coordinator
         document.getElementById('retry-btn').onclick = () => window.location.reload();
-        document.getElementById('settings-btn').onclick = () => {
-            // Logic handled via main process
-        };
     </script>
 </body>
 

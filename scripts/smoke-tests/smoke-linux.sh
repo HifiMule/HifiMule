@@ -18,9 +18,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 XVFB_PID=""
 APP_PID=""
+DAEMON_PID=""
 
 cleanup() {
     [[ -n "$APP_PID" ]] && kill "$APP_PID" 2>/dev/null || true
+    [[ -n "$DAEMON_PID" ]] && kill "$DAEMON_PID" 2>/dev/null || true
     [[ -n "$XVFB_PID" ]] && kill "$XVFB_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -74,10 +76,15 @@ if [[ -z "$DEB" ]]; then
     fail "install" "No .deb file found in working directory: $(pwd)"
 fi
 echo "  Package: $DEB"
+echo "  SHA256: $(sha256sum "$DEB" | awk '{print $1}')"
 DEB_DEPENDS=$(dpkg-deb -f "$DEB" Depends || true)
+DEB_PACKAGE=$(dpkg-deb -f "$DEB" Package || true)
 echo "  Depends: $DEB_DEPENDS"
 if [[ "$DEB_DEPENDS" != *libmtp* ]]; then
     fail "install" "Package Depends does not include libmtp runtime dependency"
+fi
+if [[ -z "$DEB_PACKAGE" ]]; then
+    fail "install" "Package metadata does not declare a package name"
 fi
 if ! sudo dpkg -i "$DEB"; then
     sudo apt-get install -f -y || fail "install" "dpkg -i and dependency fix both failed"
@@ -119,15 +126,57 @@ if ! poll_health 30; then
 fi
 echo "  Daemon responded OK"
 
+INITIAL_IDENTITY=$(lifecycle_identity)
+DAEMON_PID=${INITIAL_IDENTITY%%$'\t'*}
+assert_unauthenticated_access_rejected || fail "local-access" "Unauthenticated health request was not rejected"
+
+echo "==> STEP 3a: Concurrent launch and UI close/reopen ..."
+"$APP_BIN" &
+SECOND_UI_PID=$!
+sleep 1
+poll_health 15 || fail "concurrent-launch" "Concurrent UI lost the daemon"
+[[ "$(lifecycle_identity)" == "$INITIAL_IDENTITY" ]] || fail "concurrent-launch" "Daemon identity changed"
+kill "$SECOND_UI_PID" 2>/dev/null || true
+kill "$APP_PID" 2>/dev/null || true
+APP_PID=""
+sleep 1
+kill -0 "$DAEMON_PID" 2>/dev/null || fail "close-ui" "Closing the UI stopped the daemon"
+"$APP_BIN" &
+APP_PID=$!
+poll_health 15 || fail "reopen-ui" "Reopened UI did not attach"
+[[ "$(lifecycle_identity)" == "$INITIAL_IDENTITY" ]] || fail "reopen-ui" "Reopen created a competing daemon"
+echo "  Concurrent launch and close/reopen preserved PID and instance"
+
+echo "==> STEP 3b: Crash recovery from stale discovery ..."
+kill -9 "$DAEMON_PID" 2>/dev/null || fail "crash-recovery" "Unable to terminate the test-owned daemon"
+for _ in {1..50}; do
+    kill -0 "$DAEMON_PID" 2>/dev/null || break
+    sleep 0.1
+done
+kill -0 "$DAEMON_PID" 2>/dev/null && fail "crash-recovery" "Test-owned daemon did not terminate"
+kill "$APP_PID" 2>/dev/null || true
+APP_PID=""
+"$APP_BIN" &
+APP_PID=$!
+poll_health 15 || fail "crash-recovery" "Replacement owner did not become ready"
+RECOVERED_IDENTITY=$(lifecycle_identity)
+[[ "$RECOVERED_IDENTITY" != "$INITIAL_IDENTITY" ]] || fail "crash-recovery" "Replacement reused the stale PID and instance identity"
+DAEMON_PID=${RECOVERED_IDENTITY%%$'\t'*}
+echo "  Crash recovery replaced the stale owner identity"
+
 # --- STEP 4: Uninstall ---
 echo ""
 echo "==> STEP 4: Uninstalling ..."
 kill "$APP_PID" 2>/dev/null || true
+kill "$DAEMON_PID" 2>/dev/null || true
 kill "$XVFB_PID" 2>/dev/null || true
 APP_PID=""
+DAEMON_PID=""
 XVFB_PID=""
-# Package name from productName (lowercase)
-sudo dpkg -r hifimule || fail "uninstall" "dpkg -r failed with exit code $?"
+sudo dpkg -r "$DEB_PACKAGE" || fail "uninstall" "dpkg -r failed with exit code $?"
+if dpkg-query -W -f='${db:Status-Status}' "$DEB_PACKAGE" 2>/dev/null | grep -qx installed; then
+    fail "uninstall" "Package $DEB_PACKAGE remains installed after dpkg -r"
+fi
 echo "  Uninstall OK"
 
 echo ""

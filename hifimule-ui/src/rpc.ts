@@ -2,10 +2,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { t } from './i18n';
 import type { AutoFillPipeline } from './state/autoFill';
 
-export const RPC_PORT = (import.meta as any).env?.VITE_RPC_PORT || '19140';
-export const RPC_URL = `http://localhost:${RPC_PORT}`;
-export const IMAGE_PROXY_URL = `${RPC_URL}/jellyfin/image`;
-
 function getErrorMessage(error: unknown): string {
     const localized = localizeKnownRpcError(error);
     if (localized) return localized;

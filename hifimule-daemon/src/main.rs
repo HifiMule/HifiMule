@@ -105,6 +105,20 @@ pub enum DaemonState {
     Error,
 }
 
+enum CoreCommand {
+    CheckIdle(mpsc::Sender<bool>),
+    ReopenAdmission,
+    Shutdown,
+}
+
+pub struct DaemonCoreHandle {
+    shutdown: Arc<AtomicBool>,
+    state_rx: mpsc::Receiver<DaemonState>,
+    ready_rx: mpsc::Receiver<Result<(), String>>,
+    command_tx: mpsc::Sender<CoreCommand>,
+    completed_rx: mpsc::Receiver<()>,
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let service_mode = args.iter().any(|arg| arg == "--service");
@@ -137,25 +151,38 @@ fn main() -> Result<()> {
         }
     }
 
-    run_interactive()
+    run_interactive(&args)
 }
 
 /// Starts the core daemon logic (RPC server, device observer, event handling)
 /// in a background thread. Returns the shutdown signal and state receiver.
 /// The caller is responsible for the main thread's event loop (tray icon or service wait).
-pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonState>)> {
+pub fn start_daemon_core(
+    listener: std::net::TcpListener,
+    descriptor: hifimule_lifecycle::OwnerDescriptor,
+) -> Result<DaemonCoreHandle> {
     let (state_tx, state_rx) = mpsc::channel::<DaemonState>();
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = Arc::clone(&shutdown);
+    let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
+    let (command_tx, command_rx) = mpsc::channel::<CoreCommand>();
+    let (completed_tx, completed_rx) = mpsc::channel::<()>();
 
     // Start Tokio runtime in a background thread
     // REQUIRED for macOS: main thread MUST handle the event loop
     thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread()
+        let rt = match tokio::runtime::Builder::new_multi_thread()
             .worker_threads(daemon_worker_threads())
             .enable_all()
             .build()
-            .expect("Failed to build tokio runtime");
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let _ = ready_tx.send(Err(format!("Failed to build Tokio runtime: {error}")));
+                let _ = completed_tx.send(());
+                return;
+            }
+        };
 
         rt.block_on(async {
             daemon_log!("HifiMule Daemon tokio runtime started");
@@ -165,6 +192,7 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                 Ok(p) => p.join("hifimule.db"),
                 Err(e) => {
                     daemon_log!("Failed to get app data directory: {}", e);
+                    let _ = ready_tx.send(Err(format!("Cannot resolve app data: {e}")));
                     let _ = state_tx.send(DaemonState::Error);
                     return;
                 }
@@ -173,6 +201,7 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                 Ok(db) => Arc::new(db),
                 Err(e) => {
                     daemon_log!("Failed to initialize database: {}", e);
+                    let _ = ready_tx.send(Err(format!("Cannot initialize database: {e}")));
                     let _ = state_tx.send(DaemonState::Error);
                     return;
                 }
@@ -190,6 +219,7 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
             // Initial state
             if let Err(e) = state_tx.send(DaemonState::Idle) {
                 daemon_log!("Failed to send initial state: {}", e);
+                let _ = ready_tx.send(Err(format!("Cannot initialize daemon state: {e}")));
                 return;
             }
 
@@ -218,14 +248,32 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
             let sync_operation_manager = Arc::new(sync::SyncOperationManager::new());
 
             // Start RPC server
-            daemon_log!("Starting RPC server on port 19140");
+            daemon_log!("Starting RPC server on port {}", descriptor.port);
             let db_clone = Arc::clone(&db);
             let dm_clone = Arc::clone(&device_manager);
             let scrobbler_result_rpc = Arc::clone(&last_scrobbler_result);
             let state_tx_rpc = state_tx.clone();
             let som_rpc = Arc::clone(&sync_operation_manager);
-            tokio::spawn(async move {
-                rpc::run_server(19140, db_clone, dm_clone, scrobbler_result_rpc, state_tx_rpc, som_rpc).await;
+            let rpc_shutdown = Arc::new(AtomicBool::new(false));
+            let rpc_shutdown_server = Arc::clone(&rpc_shutdown);
+            let rpc_task = tokio::spawn(async move {
+                if let Err(error) = rpc::run_server(
+                    rpc::RpcServerConfig {
+                        listener,
+                        descriptor,
+                        ready_tx,
+                        shutdown: rpc_shutdown_server,
+                    },
+                    db_clone,
+                    dm_clone,
+                    scrobbler_result_rpc,
+                    state_tx_rpc,
+                    som_rpc,
+                )
+                .await
+                {
+                    daemon_log!("RPC server stopped with error: {}", error);
+                }
             });
 
             // Handle Device Events
@@ -234,6 +282,10 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
             let som_events = Arc::clone(&sync_operation_manager);
             tokio::spawn(async move {
                 while let Some(event) = device_rx.recv().await {
+                    let Some(_event_admission) = som_events.try_admit_mutation() else {
+                        daemon_log!("Ignoring device mutation while daemon shutdown is committed");
+                        continue;
+                    };
                     match event {
                         device::DeviceEvent::Detected { path, manifest, device_io } => {
                             daemon_log!("Device detected at {:?}: {:?}", path, manifest);
@@ -264,7 +316,11 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
                                         let scrobbler_result_clone = Arc::clone(&last_scrobbler_result);
                                         let scrobble_device_id = manifest_device_id.clone();
                                         let scrobble_manifest = Arc::clone(&scrobble_manifest);
+                                        let scrobble_admission = som_events.try_admit_mutation();
                                         tokio::spawn(async move {
+                                            let Some(_scrobble_admission) = scrobble_admission else {
+                                                return;
+                                            };
                                             let result = scrobbler::process_device_scrobbles(
                                                 scrobble_device_io,
                                                 scrobble_device_id,
@@ -362,14 +418,32 @@ pub fn start_daemon_core() -> Result<(Arc<AtomicBool>, mpsc::Receiver<DaemonStat
 
             // Daemon work loop - check for shutdown signal
             while !shutdown_clone.load(Ordering::Relaxed) {
+                while let Ok(command) = command_rx.try_recv() {
+                    match command {
+                        CoreCommand::CheckIdle(reply) => {
+                            let _ = reply.send(sync_operation_manager.try_begin_idle_shutdown().await);
+                        }
+                        CoreCommand::ReopenAdmission => sync_operation_manager.reopen_admission(),
+                        CoreCommand::Shutdown => shutdown_clone.store(true, Ordering::Release),
+                    }
+                }
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
 
             daemon_log!("HifiMule Daemon shutting down gracefully");
+            rpc_shutdown.store(true, Ordering::Release);
+            let _ = tokio::time::timeout(Duration::from_secs(5), rpc_task).await;
         });
+        let _ = completed_tx.send(());
     });
 
-    Ok((shutdown, state_rx))
+    Ok(DaemonCoreHandle {
+        shutdown,
+        state_rx,
+        ready_rx,
+        command_tx,
+        completed_rx,
+    })
 }
 
 fn daemon_worker_threads() -> usize {
@@ -378,9 +452,101 @@ fn daemon_worker_threads() -> usize {
         .unwrap_or(1)
 }
 
+fn reject_legacy_endpoint() -> Result<()> {
+    use std::io::{Read, Write};
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], 19140));
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&address, Duration::from_millis(300))
+    else {
+        return Ok(());
+    };
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    let body = r#"{"jsonrpc":"2.0","method":"daemon.health","params":{},"id":1}"#;
+    let request = format!(
+        "POST / HTTP/1.1\r\nHost: 127.0.0.1:19140\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream.write_all(request.as_bytes())?;
+    let mut response = Vec::new();
+    let _ = stream.take(16 * 1024).read_to_end(&mut response);
+    let response = String::from_utf8_lossy(&response);
+    if response.contains("\"status\":\"ok\"") || response.contains("\"status\": \"ok\"") {
+        anyhow::bail!("LEGACY_DAEMON_RUNNING: close the older HifiMule daemon and retry");
+    }
+    anyhow::bail!("LEGACY_ENDPOINT_OCCUPIED: another process is using 127.0.0.1:19140");
+}
+
 /// Interactive mode: tray icon + event loop on the main thread
-fn run_interactive() -> Result<()> {
-    let (shutdown, state_rx) = start_daemon_core()?;
+fn run_interactive(args: &[String]) -> Result<()> {
+    let app_data = hifimule_lifecycle::resolve_app_data_dir()?;
+    let supplied_generation = args
+        .windows(2)
+        .find(|pair| pair[0] == "--launch-generation")
+        .and_then(|pair| pair[1].parse::<u64>().ok());
+    let supplied_attempt = args
+        .windows(2)
+        .find(|pair| pair[0] == "--launch-attempt")
+        .map(|pair| pair[1].clone());
+    if supplied_generation.is_some() != supplied_attempt.is_some() {
+        anyhow::bail!("DAEMON_STOPPED: launch generation and attempt must be provided together");
+    }
+    let expected_generation = match supplied_generation {
+        Some(value) => value,
+        None => hifimule_lifecycle::read_generation(&app_data)?,
+    };
+    let attempt_id = match supplied_attempt {
+        Some(attempt_id) => attempt_id,
+        None => hifimule_lifecycle::create_launch_ticket(&app_data, expected_generation)?,
+    };
+    hifimule_lifecycle::validate_launch_ticket(&app_data, &attempt_id, expected_generation)?;
+    let mut lifecycle_owner = match hifimule_lifecycle::OwnerGuard::acquire(&app_data) {
+        Ok(owner) => owner,
+        Err(error) if error.code() == hifimule_lifecycle::LifecycleErrorCode::OwnerChanged => {
+            let descriptor = hifimule_lifecycle::read_descriptor(&app_data);
+            let _ = hifimule_lifecycle::cancel_launch_ticket(&app_data, &attempt_id);
+            let descriptor = descriptor?;
+            daemon_log!(
+                "Compatible daemon already owns this profile (pid={}, instance={})",
+                descriptor.pid,
+                descriptor.instance_id
+            );
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    lifecycle_owner.verify_expected_generation(expected_generation)?;
+    hifimule_lifecycle::validate_launch_ticket(&app_data, &attempt_id, expected_generation)?;
+    reject_legacy_endpoint()?;
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+    let port = listener.local_addr()?.port();
+    let descriptor = lifecycle_owner.prepare_descriptor(port)?;
+    hifimule_lifecycle::validate_launch_ticket(&app_data, &attempt_id, expected_generation)?;
+    let core = start_daemon_core(listener, descriptor.clone())?;
+    match core
+        .ready_rx
+        .recv_timeout(hifimule_lifecycle::STARTUP_DEADLINE)
+    {
+        Ok(Ok(())) => {
+            let launch_fence = hifimule_lifecycle::lock_launch_ticket(&app_data)?;
+            launch_fence.validate(&attempt_id, expected_generation)?;
+            lifecycle_owner.publish_descriptor(&descriptor)?;
+            drop(launch_fence);
+            hifimule_lifecycle::cancel_launch_ticket(&app_data, &attempt_id)?;
+        }
+        Ok(Err(error)) => anyhow::bail!("Daemon startup failed: {error}"),
+        Err(_) => {
+            core.shutdown.store(true, Ordering::Release);
+            anyhow::bail!("STARTUP_TIMEOUT: daemon startup exceeded 15 seconds")
+        }
+    }
+    let state_rx = core.state_rx;
+    let command_tx = core.command_tx;
+    let completed_rx = core.completed_rx;
+    let mut lifecycle_owner = Some(lifecycle_owner);
+    let mut shutdown_pending = false;
+    let mut shutdown_started: Option<Instant> = None;
+    let mut shutdown_timeout_reported = false;
 
     // 3. Setup Tray Icon and Event Loop on the main thread
     #[cfg(target_os = "macos")]
@@ -435,6 +601,22 @@ fn run_interactive() -> Result<()> {
         // deadline expires. ControlFlow::Poll would spin at 100% CPU when idle.
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250));
 
+        if shutdown_pending && completed_rx.try_recv().is_ok() {
+            lifecycle_owner.take();
+            tray_icon.take();
+            *control_flow = ControlFlow::Exit;
+            return;
+        }
+        if shutdown_pending
+            && !shutdown_timeout_reported
+            && shutdown_started.is_some_and(|started| started.elapsed() >= Duration::from_secs(5))
+        {
+            shutdown_timeout_reported = true;
+            daemon_log!(
+                "SHUTDOWN_TIMEOUT: daemon teardown exceeded five seconds; ownership retained"
+            );
+        }
+
         // Handle state updates from tokio thread
         if let Ok(state) = state_rx.try_recv()
             && let Some(ref mut tray) = tray_icon
@@ -477,15 +659,34 @@ fn run_interactive() -> Result<()> {
         if let Ok(event) = menu_channel.try_recv() {
             if event.id == quit_item.id() {
                 println!("Quit requested - shutting down gracefully");
-
-                // Signal tokio thread to shutdown
-                shutdown.store(true, Ordering::Relaxed);
-
-                // Clean up tray icon
-                tray_icon.take();
-
-                // Exit event loop
-                *control_flow = ControlFlow::Exit;
+                let (reply_tx, reply_rx) = mpsc::channel();
+                let accepted = command_tx.send(CoreCommand::CheckIdle(reply_tx)).is_ok()
+                    && reply_rx
+                        .recv_timeout(Duration::from_secs(6))
+                        .unwrap_or(false);
+                if !accepted {
+                    daemon_log!("QUIT_BLOCKED_ACTIVE_SYNC: finish or cancel the active sync first");
+                    if let Some(ref mut tray) = tray_icon {
+                        let _ = tray.set_tooltip(Some(&hifimule_i18n::t(
+                            "lifecycle.quit_blocked_active_sync",
+                        )));
+                    }
+                    return;
+                }
+                let generation_result = lifecycle_owner
+                    .as_ref()
+                    .expect("owner is held until shutdown completes")
+                    .advance_generation();
+                if let Err(error) = generation_result {
+                    let _ = command_tx.send(CoreCommand::ReopenAdmission);
+                    rpc::set_lifecycle_stopping(false);
+                    daemon_log!("QUIT_PERSISTENCE_FAILED: {}", error);
+                    return;
+                }
+                rpc::set_lifecycle_stopping(true);
+                let _ = command_tx.send(CoreCommand::Shutdown);
+                shutdown_pending = true;
+                shutdown_started = Some(Instant::now());
             } else if event.id == open_ui_item.id() {
                 println!("'Open UI' clicked - Launching Tauri UI...");
 

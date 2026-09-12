@@ -6,14 +6,28 @@ fn test_start_daemon_core_returns_shutdown_and_receiver() {
     let temp_dir = tempfile::tempdir().unwrap();
     crate::paths::set_test_app_data_dir(temp_dir.path().to_path_buf());
 
-    // Verify start_daemon_core returns a working shutdown signal and state receiver
-    let result = start_daemon_core();
+    let mut owner = hifimule_lifecycle::OwnerGuard::acquire(temp_dir.path()).unwrap();
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let descriptor = owner
+        .prepare_descriptor(listener.local_addr().unwrap().port())
+        .unwrap();
+    // Verify start_daemon_core returns lifecycle readiness and state.
+    let result = start_daemon_core(listener, descriptor.clone());
     assert!(result.is_ok(), "start_daemon_core should succeed");
 
-    let (shutdown, state_rx) = result.unwrap();
+    let core = result.unwrap();
+    assert!(
+        core.ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .is_ok()
+    );
+    owner.publish_descriptor(&descriptor).unwrap();
 
     // Should receive initial Idle state from the daemon core
-    let state = state_rx.recv_timeout(std::time::Duration::from_secs(5));
+    let state = core
+        .state_rx
+        .recv_timeout(std::time::Duration::from_secs(5));
     assert!(state.is_ok(), "Should receive initial state");
     assert!(
         matches!(state.unwrap(), DaemonState::Idle),
@@ -21,7 +35,8 @@ fn test_start_daemon_core_returns_shutdown_and_receiver() {
     );
 
     // Signal shutdown
-    shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+    core.shutdown
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     // Give the daemon thread time to clean up
     std::thread::sleep(std::time::Duration::from_millis(200));
     crate::paths::clear_test_app_data_dir();

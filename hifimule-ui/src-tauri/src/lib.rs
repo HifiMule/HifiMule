@@ -1,9 +1,7 @@
 use std::sync::Mutex;
 use tauri::{Manager, RunEvent};
-use tauri_plugin_shell::ShellExt;
-use tauri_plugin_shell::process::CommandChild;
 
-struct DaemonProcess(Mutex<Option<CommandChild>>);
+struct PendingLaunch(Mutex<Option<String>>);
 
 /// Stores the sidecar launch status so the frontend can query it.
 /// Values: "starting", "startup" (connected to running daemon via health check),
@@ -11,23 +9,22 @@ struct DaemonProcess(Mutex<Option<CommandChild>>);
 /// "spawn_failed: ...", "command_failed: ...", "terminated (code=N)"
 struct SidecarStatus(Mutex<String>);
 
-const RPC_PORT: u16 = 19140;
-
 #[tauri::command]
 fn get_sidecar_status(state: tauri::State<'_, SidecarStatus>) -> String {
     state.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-#[cfg(target_os = "macos")]
 fn resolve_daemon_binary_path() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
-        if entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with("hifimule-daemon")
-        {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        #[cfg(windows)]
+        let matches = name.starts_with("hifimule-daemon") && name.ends_with(".exe");
+        #[cfg(not(windows))]
+        let matches = name == "hifimule-daemon" || name.starts_with("hifimule-daemon-");
+        if matches && entry.path().is_file() {
             return Some(entry.path());
         }
     }
@@ -35,17 +32,30 @@ fn resolve_daemon_binary_path() -> Option<std::path::PathBuf> {
 }
 
 /// Check if the daemon is already running by sending a health-check RPC call.
-fn daemon_health_response_ok(data: &serde_json::Value) -> bool {
-    data.get("error").map_or(true, serde_json::Value::is_null)
+fn daemon_health_response_ok(
+    data: &serde_json::Value,
+    descriptor: &hifimule_lifecycle::OwnerDescriptor,
+) -> bool {
+    data.get("error").is_none_or(serde_json::Value::is_null)
         && data
             .pointer("/result/data/status")
             .and_then(serde_json::Value::as_str)
             == Some("ok")
+        && data
+            .pointer("/result/data/protocolVersion")
+            .and_then(serde_json::Value::as_u64)
+            == Some(u64::from(hifimule_lifecycle::PROTOCOL_VERSION))
+        && data
+            .pointer("/result/data/instanceId")
+            .and_then(serde_json::Value::as_str)
+            == Some(descriptor.instance_id.as_str())
 }
 
-fn check_daemon_health() -> bool {
+fn check_daemon_health(descriptor: &hifimule_lifecycle::OwnerDescriptor) -> bool {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .build();
     let client = match client {
         Ok(c) => c,
@@ -58,16 +68,159 @@ fn check_daemon_health() -> bool {
         "id": 1
     });
     match client
-        .post(format!("http://127.0.0.1:{}", RPC_PORT))
+        .post(format!("http://127.0.0.1:{}", descriptor.port))
+        .bearer_auth(&descriptor.token)
         .json(&body)
         .send()
     {
         Ok(resp) if resp.status().is_success() => resp
             .json::<serde_json::Value>()
-            .is_ok_and(|data| daemon_health_response_ok(&data)),
+            .is_ok_and(|data| daemon_health_response_ok(&data, descriptor)),
         Ok(_) => false,
         Err(_) => false,
     }
+}
+
+async fn validate_owner_async(
+    client: &reqwest::Client,
+    descriptor: &hifimule_lifecycle::OwnerDescriptor,
+) -> Result<(), String> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "daemon.health",
+        "params": {},
+        "id": 1
+    });
+    let response = client
+        .post(format!("http://127.0.0.1:{}", descriptor.port))
+        .bearer_auth(&descriptor.token)
+        .json(&body)
+        .timeout(hifimule_lifecycle::HEALTH_TIMEOUT)
+        .send()
+        .await
+        .map_err(|_| "OWNER_CHANGED: local daemon health check failed".to_string())?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err("LOCAL_ACCESS_DENIED: local daemon rejected access".to_string());
+    }
+    let data = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|_| "OWNER_CHANGED: local daemon health response was malformed".to_string())?;
+    if data
+        .pointer("/result/data/status")
+        .and_then(serde_json::Value::as_str)
+        == Some("stopping")
+    {
+        return Err("DAEMON_STOPPED: local daemon is stopping".to_string());
+    }
+    if !daemon_health_response_ok(&data, descriptor) {
+        return Err("OWNER_CHANGED: daemon identity or protocol changed".to_string());
+    }
+    Ok(())
+}
+
+fn spawn_detached_daemon(expected_generation: u64, attempt_id: &str) -> Result<(), String> {
+    let path = resolve_daemon_binary_path()
+        .ok_or_else(|| "SPAWN_FAILED: daemon binary was not found".to_string())?;
+    let mut command = std::process::Command::new(path);
+    let generation_arg = expected_generation.to_string();
+    command
+        .args([
+            "--launch-generation",
+            &generation_arg,
+            "--launch-attempt",
+            attempt_id,
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW);
+    }
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("SPAWN_FAILED: {error}"))
+}
+
+fn coordinate_daemon(
+    pending: &PendingLaunch,
+) -> Result<hifimule_lifecycle::OwnerDescriptor, String> {
+    let app_data = hifimule_lifecycle::resolve_app_data_dir().map_err(|error| error.to_string())?;
+    let deadline = std::time::Instant::now() + hifimule_lifecycle::STARTUP_DEADLINE;
+    let mut launched = false;
+    let mut attempt_id: Option<String> = None;
+    loop {
+        match hifimule_lifecycle::read_descriptor(&app_data) {
+            Ok(descriptor) => {
+                descriptor
+                    .validate_compatible()
+                    .map_err(|error| error.to_string())?;
+                if check_daemon_health(&descriptor) {
+                    if let Some(id) = attempt_id.as_deref() {
+                        let _ = hifimule_lifecycle::cancel_launch_ticket(&app_data, id);
+                    }
+                    *pending.0.lock().unwrap_or_else(|error| error.into_inner()) = None;
+                    return Ok(descriptor);
+                }
+                if !launched && let Some(id) = try_launch_candidate(&app_data, pending)? {
+                    attempt_id = Some(id);
+                    launched = true;
+                }
+            }
+            Err(error) if !launched => {
+                if let Some(id) = try_launch_candidate(&app_data, pending)? {
+                    attempt_id = Some(id);
+                    launched = true;
+                } else if error.code() == hifimule_lifecycle::LifecycleErrorCode::ProtocolMismatch {
+                    return Err(error.to_string());
+                }
+            }
+            Err(_) => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            if let Some(id) = attempt_id.as_deref() {
+                let _ = hifimule_lifecycle::cancel_launch_ticket(&app_data, id);
+            }
+            *pending.0.lock().unwrap_or_else(|error| error.into_inner()) = None;
+            return Err("STARTUP_TIMEOUT: daemon readiness exceeded 15 seconds".to_string());
+        }
+        std::thread::sleep(hifimule_lifecycle::POLL_INTERVAL);
+    }
+}
+
+fn try_launch_candidate(
+    app_data: &std::path::Path,
+    pending: &PendingLaunch,
+) -> Result<Option<String>, String> {
+    match hifimule_lifecycle::OwnerGuard::acquire(app_data) {
+        Ok(owner) => drop(owner),
+        Err(error) if error.code() == hifimule_lifecycle::LifecycleErrorCode::OwnerChanged => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error.to_string()),
+    }
+    let generation =
+        hifimule_lifecycle::read_generation(app_data).map_err(|error| error.to_string())?;
+    let id = hifimule_lifecycle::create_launch_ticket(app_data, generation)
+        .map_err(|error| error.to_string())?;
+    *pending.0.lock().unwrap_or_else(|error| error.into_inner()) = Some(id.clone());
+    if let Err(error) = spawn_detached_daemon(generation, &id) {
+        let _ = hifimule_lifecycle::cancel_launch_ticket(app_data, &id);
+        *pending.0.lock().unwrap_or_else(|error| error.into_inner()) = None;
+        return Err(error);
+    }
+    Ok(Some(id))
 }
 
 #[cfg(target_os = "macos")]
@@ -162,31 +315,6 @@ fn unload_and_remove_launchd_plist() -> Result<(), String> {
     Ok(())
 }
 
-/// Attempt to start the daemon Windows Service via `sc start`.
-#[cfg(windows)]
-fn try_start_service() -> bool {
-    use std::process::Command;
-    let result = Command::new("sc")
-        .args(["start", "hifimule-daemon"])
-        .output();
-    match result {
-        Ok(output) => {
-            if !output.status.success() {
-                ui_log(&format!(
-                    "sc start failed (exit={}): {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr)
-                ));
-            }
-            output.status.success()
-        }
-        Err(e) => {
-            ui_log(&format!("sc start command failed: {}", e));
-            false
-        }
-    }
-}
-
 /// Proxies a Jellyfin image from the daemon, returning it as a base64 data URL.
 /// Images loaded via CSS `background-image: url(...)` can't use invoke, so the frontend
 /// must call this and set the result as inline style.
@@ -196,8 +324,16 @@ async fn image_proxy(
     max_height: Option<u32>,
     quality: Option<u32>,
 ) -> Result<String, String> {
-    let client = reqwest::Client::new();
-    let mut url = format!("http://127.0.0.1:{}/jellyfin/image/{}", RPC_PORT, id);
+    let app_data = hifimule_lifecycle::resolve_app_data_dir().map_err(|error| error.to_string())?;
+    let descriptor =
+        hifimule_lifecycle::read_descriptor(&app_data).map_err(|error| error.to_string())?;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| format!("LOCAL_ACCESS_DENIED: {error}"))?;
+    validate_owner_async(&client, &descriptor).await?;
+    let mut url = format!("http://127.0.0.1:{}/jellyfin/image/{}", descriptor.port, id);
     let mut query_parts = Vec::new();
     if let Some(h) = max_height {
         query_parts.push(format!("maxHeight={}", h));
@@ -211,6 +347,7 @@ async fn image_proxy(
 
     let response = client
         .get(&url)
+        .bearer_auth(&descriptor.token)
         .send()
         .await
         .map_err(|e| format!("Image fetch failed: {}", e))?;
@@ -244,7 +381,28 @@ async fn rpc_proxy(
     method: String,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, serde_json::Value> {
-    let client = reqwest::Client::new();
+    let app_data = hifimule_lifecycle::resolve_app_data_dir().map_err(
+        |error| serde_json::json!({ "code": "LOCAL_ACCESS_DENIED", "message": error.to_string() }),
+    )?;
+    let descriptor = hifimule_lifecycle::read_descriptor(&app_data).map_err(
+        |error| serde_json::json!({ "code": error.code().as_str(), "message": error.to_string() }),
+    )?;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| serde_json::json!({ "code": "LOCAL_ACCESS_DENIED", "message": error.to_string() }))?;
+    if method != "daemon.health" {
+        validate_owner_async(&client, &descriptor)
+            .await
+            .map_err(|message| {
+                let code = message
+                    .split_once(':')
+                    .map(|(code, _)| code)
+                    .unwrap_or("OWNER_CHANGED");
+                serde_json::json!({ "code": code, "message": message })
+            })?;
+    }
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "method": method,
@@ -252,13 +410,24 @@ async fn rpc_proxy(
         "id": 1
     });
 
-    let response = client
-        .post(format!("http://127.0.0.1:{}", RPC_PORT))
-        .json(&body)
+    let mut request = client
+        .post(format!("http://127.0.0.1:{}", descriptor.port))
+        .bearer_auth(&descriptor.token)
+        .json(&body);
+    if method == "get_daemon_state" || method == "daemon.health" {
+        request = request.timeout(std::time::Duration::from_secs(15));
+    }
+    let response = request
         .send()
         .await
-        .map_err(|e| serde_json::json!({ "message": format!("RPC connection failed: {}", e) }))?;
+        .map_err(|e| serde_json::json!({ "code": "OWNER_CHANGED", "message": format!("RPC connection failed: {}", e) }))?;
 
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(serde_json::json!({
+            "code": "LOCAL_ACCESS_DENIED",
+            "message": "Local daemon access was rejected"
+        }));
+    }
     let data: serde_json::Value = response.json().await.map_err(
         |e| serde_json::json!({ "message": format!("RPC response parse failed: {}", e) }),
     )?;
@@ -292,6 +461,7 @@ async fn settings_set_launch_on_startup(enabled: bool) -> Result<(), String> {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 const LOG_MAX_BYTES: u64 = 1_048_576; // 1 MB
 
 fn log_timestamp() -> String {
@@ -304,6 +474,7 @@ fn ui_log(msg: &str) {
     // Always try println (works in debug mode)
     println!("{}", msg);
 
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     let timestamp = log_timestamp();
 
     #[cfg(target_os = "windows")]
@@ -347,30 +518,105 @@ fn ui_log(msg: &str) {
     }
 }
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    ui_log(&format!(
+        "HifiMule UI starting (release={})",
+        !cfg!(debug_assertions)
+    ));
+
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .invoke_handler(tauri::generate_handler![
+            get_sidecar_status,
+            rpc_proxy,
+            image_proxy,
+            settings_set_launch_on_startup
+        ])
+        .setup(|app| {
+            app.manage(SidecarStatus(Mutex::new("starting".to_string())));
+            app.manage(PendingLaunch(Mutex::new(None)));
+            let app_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let result = app_handle
+                    .try_state::<PendingLaunch>()
+                    .ok_or_else(|| "Lifecycle coordinator state is unavailable".to_string())
+                    .and_then(|pending| coordinate_daemon(&pending));
+                if let Some(state) = app_handle.try_state::<SidecarStatus>()
+                    && let Ok(mut status) = state.0.lock()
+                {
+                    *status = match result {
+                        Ok(descriptor) => format!(
+                            "ready (pid={}, instance={})",
+                            descriptor.pid, descriptor.instance_id
+                        ),
+                        Err(error) => format!("failed: {error}"),
+                    };
+                }
+            });
+
+            Ok(())
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    builder.run(|app_handle, event| {
+        if let RunEvent::Exit = event {
+            // Cancels only an unaccepted launch ticket. An established owner is detached
+            // and intentionally survives UI closure.
+            if let Some(state) = app_handle.try_state::<PendingLaunch>()
+                && let Ok(mut pending) = state.0.lock()
+                && let Some(attempt_id) = pending.take()
+                && let Ok(app_data) = hifimule_lifecycle::resolve_app_data_dir()
+            {
+                let _ = hifimule_lifecycle::cancel_launch_ticket(&app_data, &attempt_id);
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod log_timestamp_tests {
     use super::{daemon_health_response_ok, log_timestamp};
 
     #[test]
     fn daemon_health_response_requires_ok_result() {
-        assert!(daemon_health_response_ok(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "result": { "data": { "status": "ok" } },
-            "error": null,
-            "id": 1
-        })));
-        assert!(!daemon_health_response_ok(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "result": null,
-            "error": { "code": -32601, "message": "Method not found" },
-            "id": 1
-        })));
-        assert!(!daemon_health_response_ok(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "result": { "data": { "status": "starting" } },
-            "error": null,
-            "id": 1
-        })));
+        let descriptor = hifimule_lifecycle::OwnerDescriptor {
+            schema_version: 1,
+            protocol_version: 1,
+            instance_id: "instance-1".to_string(),
+            pid: 123,
+            port: 12345,
+            token: "00".repeat(32),
+            launch_generation: "0".to_string(),
+        };
+        assert!(daemon_health_response_ok(
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "result": { "data": { "status": "ok", "protocolVersion": 1, "instanceId": "instance-1" } },
+                "error": null,
+                "id": 1
+            }),
+            &descriptor
+        ));
+        assert!(!daemon_health_response_ok(
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "result": null,
+                "error": { "code": -32601, "message": "Method not found" },
+                "id": 1
+            }),
+            &descriptor
+        ));
+        assert!(!daemon_health_response_ok(
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "result": { "data": { "status": "starting" } },
+                "error": null,
+                "id": 1
+            }),
+            &descriptor
+        ));
     }
 
     #[test]
@@ -383,184 +629,4 @@ mod log_timestamp_tests {
         assert_eq!(&timestamp[13..14], ":");
         assert_eq!(&timestamp[16..17], ":");
     }
-}
-
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    ui_log(&format!(
-        "HifiMule UI starting (release={})",
-        !cfg!(debug_assertions)
-    ));
-
-    let builder = tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![get_sidecar_status, rpc_proxy, image_proxy, settings_set_launch_on_startup])
-        .setup(|app| {
-            app.manage(DaemonProcess(Mutex::new(None)));
-            app.manage(SidecarStatus(Mutex::new("starting".to_string())));
-
-            // macOS: install launchd user agent on first launch (or after upgrade removes plist)
-            #[cfg(target_os = "macos")]
-            {
-                let plist_missing = launchd_plist_path().is_some_and(|p| !p.exists());
-                if plist_missing {
-                    match install_launchd_plist() {
-                        Ok(()) => ui_log("launchd plist installed and loaded"),
-                        Err(e) => ui_log(&format!("launchd plist install failed: {}", e)),
-                    }
-                }
-            }
-
-            // Perform daemon detection off the main thread to avoid blocking UI startup
-            let app_handle = app.handle().clone();
-            std::thread::spawn(move || {
-                // Step 1: Check if daemon is already running (e.g., as startup app or Windows Service)
-                if check_daemon_health() {
-                    ui_log("Daemon already running (startup app or existing instance), skipping sidecar spawn");
-                    if let Some(state) = app_handle.try_state::<SidecarStatus>()
-                        && let Ok(mut s) = state.0.lock() {
-                            *s = "startup".to_string();
-                        }
-                    return;
-                }
-
-                // Step 2: Try to start the Windows Service
-                #[cfg(windows)]
-                {
-                    ui_log("Daemon not running, attempting to start Windows Service...");
-                    if try_start_service() {
-                        // Give the service a moment to start and verify
-                        std::thread::sleep(std::time::Duration::from_secs(2));
-                        if check_daemon_health() {
-                            ui_log("Windows Service started successfully");
-                            if let Some(state) = app_handle.try_state::<SidecarStatus>() {
-                                if let Ok(mut s) = state.0.lock() {
-                                    *s = "service".to_string();
-                                }
-                            }
-                            return;
-                        }
-                        ui_log("Service started but health check failed, falling back to sidecar");
-                    } else {
-                        ui_log("Windows Service not available, falling back to sidecar");
-                    }
-                }
-
-                // Step 3: On non-Windows (or Windows fallback), spawn sidecar
-                // Note: spawn_sidecar needs the App, but we're on a background thread.
-                // Use the app_handle to get state and spawn via shell.
-                ui_log("Spawning sidecar from background thread");
-
-                // On macOS, Gatekeeper bypass only clears com.apple.quarantine on the
-                // top-level bundle directory, not recursively. Strip it from the sidecar
-                // binary explicitly so macOS allows programmatic spawning.
-                // Tauri bundles sidecars with a target-triple suffix (e.g.
-                // hifimule-daemon-universal-apple-darwin), so scan the directory rather
-                // than joining a plain name that does not exist.
-                #[cfg(target_os = "macos")]
-                if let Some(sp) = resolve_daemon_binary_path() {
-                    ui_log(&format!("Resolving macOS sidecar at {:?}", sp));
-                    let _ = std::process::Command::new("xattr")
-                        .args(["-d", "com.apple.quarantine"])
-                        .arg(&sp)
-                        .output();
-                }
-
-                match app_handle.shell().sidecar("hifimule-daemon") {
-                    Ok(sidecar) => {
-                        ui_log("Sidecar command created, spawning...");
-                        match sidecar.spawn() {
-                            Ok((mut rx, child)) => {
-                                ui_log(&format!(
-                                    "Sidecar spawned successfully (pid={})",
-                                    child.pid()
-                                ));
-                                if let Some(state) = app_handle.try_state::<SidecarStatus>()
-                                    && let Ok(mut s) = state.0.lock() {
-                                        *s = format!("running (pid={})", child.pid());
-                                    }
-                                if let Some(state) = app_handle.try_state::<DaemonProcess>()
-                                    && let Ok(mut daemon_proc) = state.0.lock() {
-                                        *daemon_proc = Some(child);
-                                    }
-                                let handle_clone = app_handle.clone();
-                                tauri::async_runtime::spawn(async move {
-                                    use tauri_plugin_shell::process::CommandEvent;
-                                    while let Some(event) = rx.recv().await {
-                                        match event {
-                                            CommandEvent::Stdout(line) => {
-                                                ui_log(&format!(
-                                                    "Daemon stdout: {}",
-                                                    String::from_utf8_lossy(&line)
-                                                ));
-                                            }
-                                            CommandEvent::Stderr(line) => {
-                                                ui_log(&format!(
-                                                    "Daemon stderr: {}",
-                                                    String::from_utf8_lossy(&line)
-                                                ));
-                                            }
-                                            CommandEvent::Terminated(payload) => {
-                                                let msg = format!(
-                                                    "Daemon process terminated (code={:?}, signal={:?})",
-                                                    payload.code, payload.signal
-                                                );
-                                                ui_log(&msg);
-                                                if let Some(state) =
-                                                    handle_clone.try_state::<SidecarStatus>()
-                                                    && let Ok(mut s) = state.0.lock() {
-                                                        *s = format!(
-                                                            "terminated (code={:?})",
-                                                            payload.code
-                                                        );
-                                                    }
-                                                break;
-                                            }
-                                            CommandEvent::Error(err) => {
-                                                ui_log(&format!("Daemon event error: {}", err));
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                });
-                            }
-                            Err(e) => {
-                                let msg = format!("Failed to spawn sidecar: {}", e);
-                                ui_log(&msg);
-                                if let Some(state) = app_handle.try_state::<SidecarStatus>()
-                                    && let Ok(mut s) = state.0.lock() {
-                                        *s = format!("spawn_failed: {}", e);
-                                    }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let msg = format!("Failed to create sidecar command: {}", e);
-                        ui_log(&msg);
-                        if let Some(state) = app_handle.try_state::<SidecarStatus>()
-                            && let Ok(mut s) = state.0.lock() {
-                                *s = format!("command_failed: {}", e);
-                            }
-                    }
-                }
-            });
-
-            Ok(())
-        })
-        .build(tauri::generate_context!())
-        .expect("error while building tauri application");
-
-    builder.run(|app_handle, event| {
-        if let RunEvent::Exit = event {
-            // Explicitly kill the daemon sidecar process to prevent zombie processes
-            if let Some(state) = app_handle.try_state::<DaemonProcess>()
-                && let Ok(mut daemon_proc) = state.0.lock()
-                && let Some(child) = daemon_proc.take()
-            {
-                ui_log("Killing hifimule-daemon sidecar before exit");
-                let _ = child.kill();
-            }
-        }
-    });
 }

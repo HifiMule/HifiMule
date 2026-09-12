@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "hifimule-i18n",
+    "hifimule-lifecycle",
     "hifimule-daemon",
     "hifimule-ui/src-tauri",
 ]

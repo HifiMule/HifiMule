@@ -1,8 +1,9 @@
 ; HifiMule NSIS installer hooks
-; Registers hifimule-daemon as a startup application via HKCU Run key.
+; Preserves an existing startup opt-in without enrolling fresh/disabled users.
 
 !macro NSIS_HOOK_POSTINSTALL
-  ; Register daemon as a startup application (runs on user login)
+  ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${PRODUCTNAME}"
+  StrCmp $0 "" +2
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${PRODUCTNAME}" "$INSTDIR\hifimule-daemon.exe"
   ; Record install location for smoke tests and tooling
   WriteRegStr HKCU "Software\HifiMule" "InstallDir" "$INSTDIR"

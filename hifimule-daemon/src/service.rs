@@ -1,13 +1,11 @@
 use std::ffi::OsString;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use windows_service::{
     define_windows_service,
     service::{
-        ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
-        ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
+        ServiceAccess, ServiceErrorControl, ServiceInfo, ServiceStartType, ServiceState,
+        ServiceType,
     },
-    service_control_handler::{self, ServiceControlHandlerResult},
     service_dispatcher,
     service_manager::{ServiceManager, ServiceManagerAccess},
 };
@@ -153,76 +151,7 @@ fn daemon_service_main(_args: Vec<OsString>) {
 }
 
 fn run_service() -> anyhow::Result<()> {
-    // Register SCM handler FIRST so stop signals aren't lost during startup
-    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let shutdown_for_handler = shutdown.clone();
-
-    let status_handle =
-        service_control_handler::register(SERVICE_NAME, move |control| match control {
-            ServiceControl::Stop => {
-                shutdown_for_handler.store(true, Ordering::Relaxed);
-                ServiceControlHandlerResult::NoError
-            }
-            ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
-            _ => ServiceControlHandlerResult::NotImplemented,
-        })?;
-
-    // Report StartPending while we initialize
-    status_handle.set_service_status(ServiceStatus {
-        service_type: SERVICE_TYPE,
-        current_state: ServiceState::StartPending,
-        controls_accepted: ServiceControlAccept::empty(),
-        exit_code: ServiceExitCode::Win32(0),
-        checkpoint: 1,
-        wait_hint: Duration::from_secs(10),
-        process_id: None,
-    })?;
-
-    // Now start the core daemon (RPC server, device observer, etc.)
-    let (core_shutdown, _state_rx) = crate::start_daemon_core()?;
-
-    // Link the SCM shutdown signal to the daemon core's shutdown signal
-    let core_shutdown_link = core_shutdown.clone();
-    let scm_shutdown = shutdown.clone();
-    std::thread::spawn(move || {
-        while !scm_shutdown.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        core_shutdown_link.store(true, Ordering::Relaxed);
-    });
-
-    // Report running status to SCM
-    status_handle.set_service_status(ServiceStatus {
-        service_type: SERVICE_TYPE,
-        current_state: ServiceState::Running,
-        controls_accepted: ServiceControlAccept::STOP,
-        exit_code: ServiceExitCode::Win32(0),
-        checkpoint: 0,
-        wait_hint: Duration::default(),
-        process_id: None,
-    })?;
-
-    crate::daemon_log!("Windows Service running");
-
-    // Wait for shutdown signal from service control handler
-    while !shutdown.load(Ordering::Relaxed) {
-        std::thread::sleep(Duration::from_millis(100));
-    }
-
-    // Ensure daemon core also shuts down
-    core_shutdown.store(true, Ordering::Relaxed);
-    crate::daemon_log!("Windows Service stopping");
-
-    // Report stopped status to SCM
-    status_handle.set_service_status(ServiceStatus {
-        service_type: SERVICE_TYPE,
-        current_state: ServiceState::Stopped,
-        controls_accepted: ServiceControlAccept::empty(),
-        exit_code: ServiceExitCode::Win32(0),
-        checkpoint: 0,
-        wait_hint: Duration::default(),
-        process_id: None,
-    })?;
-
-    Ok(())
+    anyhow::bail!(
+        "LEGACY_DAEMON_RUNNING: Windows service mode cannot own a signed-in desktop profile; uninstall the legacy service and launch HifiMule normally"
+    )
 }

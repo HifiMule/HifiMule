@@ -23,6 +23,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 hifimule-i18n = { path = "../hifimule-i18n" }
+hifimule-lifecycle = { path = "../hifimule-lifecycle" }
 axum.workspace = true
 tower-http.workspace = true
 http.workspace = true
