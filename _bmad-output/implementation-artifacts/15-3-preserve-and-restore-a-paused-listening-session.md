@@ -4,7 +4,7 @@ baseline_commit: 9fb42946ac506f1f8b60c3649c8f99ec569e4c96
 
 # Story 15.3: Preserve and restore a paused listening session
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -48,9 +48,9 @@ so that I can resume deliberately without reconstructing my session or being sur
   - [x] Add final-checkpoint participation, dedicated error/blocker state and narrowly authorized retry to committed shutdown.
   - [x] Preserve sync cancellation even if checkpoint blocks/fails; join persistence before core-runtime teardown and ownership release.
   - [x] Extend tray and existing shutdown UI with localized checkpoint failure/retry wording, owner-bound observation and accessible status.
-- [ ] Verify and record evidence (AC: 1–9)
-  - [ ] Run deterministic model, authenticated router, real-file SQLite and process-restart/fault tests from the matrix below.
-  - [ ] Run relevant regression suites and three-OS command-driven restoration checks; record limitations without marking unrun checks passed.
+- [x] Verify and record evidence (AC: 1–9)
+  - [x] Run deterministic model, authenticated router, real-file SQLite and process-restart/fault tests from the matrix below.
+  - [x] Run relevant regression suites and three-OS command-driven restoration checks; record limitations without marking unrun checks passed.
 
 ## Dev Notes
 
@@ -232,6 +232,7 @@ GPT-6 (Codex)
 - 2026-09-12: Added deterministic SQLite fault seams and real-file recovery evidence: v0→v1 DDL/version rollback, interruption after deleting the old queue, failed checkpoint preservation/retry, and abrupt child-process termination with an open structural transaction all retain the previous coherent commit.
 - 2026-09-12: Expanded normal Build evidence passed on Windows x64, Linux x64, macOS x64 and macOS ARM64, including the 64-request owner, bounded lookup, transactional migration rollback, checkpoint retry and killed-process SQLite recovery fixtures. The per-run JSON artifacts remain authoritative for runner revisions and OS details.
 - 2026-09-12: Completed RPC/lifecycle acceptance validation: exact camelCase/error/cursor/offline contract, mutation classification, authenticated production-router apply, final-checkpoint failure visibility, reopened admission and narrowly authorized retry. Full daemon 675/675, lifecycle 13/13, Rust UI 6/6, Node UI 9/9 and frontend build passed; an initially parallel Rust UI run raced the frontend build output and passed when rerun after build completion.
+- 2026-09-12: Final expanded Build evidence succeeded on Windows x64, Linux x64, macOS x64 and macOS ARM64, including model/session, authenticated router, real-file restart, migration rollback, killed-process transaction recovery and shutdown checkpoint failure/retry fixtures. All acceptance and definition-of-done gates are satisfied; story promoted to review.
 
 ### Implementation Plan
 
@@ -244,10 +245,9 @@ GPT-6 (Codex)
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
 - Scoped contract gates resolved: identities, versions, position units, serialized commands, revisions/deduplication, transactional schema, recovery, page/checkpoint limits and shutdown failure/retry.
-- Status ready-for-dev; implementation tasks and platform verification remain unchecked.
 - Initial implementation slice is working and regression-green: paused/idle persistence, repeated occurrence identity, offline restoration metadata, unsupported-version evidence preservation, stale revisions, command reuse, position checkpointing, 10,000-entry paging and authenticated snapshot routing are covered.
 - The bounded owner, bounded structural/current lookups and transactional migration/interruption recovery are implemented and verified across all four normal Build runners.
-- RPC and lifecycle task groups are locally definition-of-done green. The expanded normal Build matrix must pass the newly added authenticated-router and lifecycle-checkpoint fixtures before the final evidence task can be checked and the story promoted to review.
+- Expanded evidence passed on all four configured native runners. All Story 15.3 tasks and acceptance criteria are complete and ready for review.
 - Cross-platform evidence is now wired into the normal build rather than the release workflow. Each artifact records OS release, architecture, source/binary revision, isolated database scope, executed fixtures, exit code and actual outcome.
 - Cross-platform playback evidence subsequently passed on all four configured native runners: Windows x64, Linux x64, macOS x64 and macOS ARM64.
 
@@ -279,3 +279,4 @@ GPT-6 (Codex)
 - 2026-09-12: Added transactional migration, interrupted structural write, failed checkpoint retry and killed-process SQLite rollback fixtures.
 - 2026-09-12: Recorded successful expanded playback evidence from Windows x64, Linux x64, macOS x64 and macOS ARM64.
 - 2026-09-12: Completed authenticated playback RPC and shutdown checkpoint failure/retry integration tests; expanded the normal Build evidence command accordingly.
+- 2026-09-12: Completed four-platform evidence and moved Story 15.3 to review.
