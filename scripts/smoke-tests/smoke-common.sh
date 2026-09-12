@@ -115,3 +115,38 @@ print("UI did not confirm current-state hydration", file=sys.stderr)
 sys.exit(1)
 PYCODE
 }
+
+# Distinct evidence that a reopened installed UI rendered the authoritative
+# shutdown operation. This must never be satisfied by ordinary hydration.
+poll_shutdown_rendered() {
+    local timeout=$1
+    local expected_shutdown_id=$2
+    local descriptor
+    descriptor=$(lifecycle_descriptor_path)
+    python3 - "$descriptor" "$UI_SMOKE_ID" "$expected_shutdown_id" "$timeout" <<'PYCODE'
+import json, os, pathlib, sys, time
+owner_path = pathlib.Path(sys.argv[1])
+marker, expected = sys.argv[2], sys.argv[3]
+rendered_path = owner_path.parent / f"shutdown-rendered-{marker}.json"
+deadline = time.monotonic() + int(sys.argv[4])
+while time.monotonic() < deadline:
+    try:
+        rendered = json.loads(rendered_path.read_text())
+        owner = json.loads(owner_path.read_text())
+        assert rendered["smokeId"] == marker and rendered["state"] == "shutdownRendered"
+        assert rendered["shutdownId"] == expected
+        assert (rendered["daemonPid"], rendered["instanceId"]) == (owner["pid"], owner["instanceId"])
+        os.kill(rendered["uiPid"], 0)
+        print("SHUTDOWN_UI_EVIDENCE " + json.dumps(rendered))
+        rendered_path.unlink()
+        sys.exit(0)
+    except (OSError, ValueError, KeyError, AssertionError):
+        time.sleep(0.25)
+print("UI did not confirm authoritative shutdown rendering", file=sys.stderr)
+sys.exit(1)
+PYCODE
+}
+
+record_unverified_real_device_shutdown() {
+    echo "DEVICE_SHUTDOWN_EVIDENCE os=$(uname -s) architecture=$(uname -m) status=UNVERIFIED transport=UNVERIFIED artifact=installed shutdownId=UNVERIFIED elapsedMs=UNVERIFIED outcome=UNVERIFIED integrity=UNVERIFIED ownershipCleanup=UNVERIFIED reason=no-real-device-or-human-tray-session"
+}

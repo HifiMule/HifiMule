@@ -146,4 +146,5 @@ rm -rf "$APP_PATH" || fail "uninstall" "Failed to remove $APP_PATH"
 echo "  Removal OK"
 
 echo ""
-echo "PASS: macOS smoke test complete"
+record_unverified_real_device_shutdown
+echo "PASS: macOS smoke test complete (real-device active Quit remains UNVERIFIED)"

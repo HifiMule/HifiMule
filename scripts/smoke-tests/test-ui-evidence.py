@@ -25,6 +25,15 @@ class UiEvidenceTests(unittest.TestCase):
         return subprocess.run(['bash', '-c', 'source "$HELPER"; poll_ui_ready "$TIMEOUT"'],
                               env=environment, capture_output=True, text=True, timeout=5)
 
+    def poll_shutdown(self, timeout, shutdown_id):
+        helper = Path(__file__).resolve().with_name('smoke-common.sh')
+        environment = dict(os.environ, HIFIMULE_APP_DATA_DIR=self.profile.name,
+                           UI_SMOKE_ID=self.marker, HELPER=str(helper), TIMEOUT=str(timeout),
+                           SHUTDOWN_ID=shutdown_id)
+        return subprocess.run(
+            ['bash', '-c', 'source "$HELPER"; poll_shutdown_rendered "$TIMEOUT" "$SHUTDOWN_ID"'],
+            env=environment, capture_output=True, text=True, timeout=5)
+
     def write_ready(self, instance):
         (self.runtime / f'ui-ready-{self.marker}.json').write_text(json.dumps({
             'smokeId': self.marker, 'state': 'hydrated', 'uiPid': os.getpid(),
@@ -43,6 +52,25 @@ class UiEvidenceTests(unittest.TestCase):
         self.assertIn('UI_ATTACHMENT_EVIDENCE', result.stdout)
         self.assertNotIn(self.owner['token'], result.stdout + result.stderr)
         self.assertFalse((self.runtime / f'ui-ready-{self.marker}.json').exists())
+
+    def test_shutdown_render_requires_matching_operation_and_owner(self):
+        shutdown_id = str(uuid.uuid4())
+        path = self.runtime / f'shutdown-rendered-{self.marker}.json'
+        path.write_text(json.dumps({
+            'smokeId': self.marker, 'state': 'shutdownRendered', 'uiPid': os.getpid(),
+            'daemonPid': self.owner['pid'], 'instanceId': self.owner['instanceId'],
+            'shutdownId': str(uuid.uuid4()),
+        }))
+        self.assertNotEqual(self.poll_shutdown(1, shutdown_id).returncode, 0)
+        path.write_text(json.dumps({
+            'smokeId': self.marker, 'state': 'shutdownRendered', 'uiPid': os.getpid(),
+            'daemonPid': self.owner['pid'], 'instanceId': self.owner['instanceId'],
+            'shutdownId': shutdown_id,
+        }))
+        result = self.poll_shutdown(1, shutdown_id)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('SHUTDOWN_UI_EVIDENCE', result.stdout)
+        self.assertNotIn(self.owner['token'], result.stdout + result.stderr)
 
 
 if __name__ == '__main__':

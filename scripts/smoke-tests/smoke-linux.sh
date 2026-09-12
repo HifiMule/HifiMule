@@ -100,8 +100,7 @@ echo "  DISPLAY: $DISPLAY"
 
 # The installed binary name comes from productName in tauri.conf.json (lowercase on Linux)
 APP_BIN="hifimule-ui"
-if ! command -v new_ui_smoke_id
-"$APP_BIN" --smoke-id "$UI_SMOKE_ID" &>/dev/null; then
+if ! command -v "$APP_BIN" &>/dev/null; then
     # Fallback search in common install locations
     APP_BIN=$(find /usr/bin /usr/local/bin /opt -name "hifimule-ui" 2>/dev/null | head -1 || true)
     if [[ -z "$APP_BIN" ]]; then
@@ -190,4 +189,5 @@ fi
 echo "  Uninstall OK"
 
 echo ""
-echo "PASS: Linux smoke test complete"
+record_unverified_real_device_shutdown
+echo "PASS: Linux smoke test complete (real-device active Quit remains UNVERIFIED)"

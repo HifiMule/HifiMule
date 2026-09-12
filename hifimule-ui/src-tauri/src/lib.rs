@@ -143,6 +143,24 @@ fn report_ui_ready(coordinator: tauri::State<'_, StartupCoordinator>) -> Result<
     Ok(())
 }
 
+#[tauri::command]
+fn report_shutdown_rendered(shutdown_id: String) -> Result<(), String> {
+    let args: Vec<_> = std::env::args().collect();
+    let Some(pair) = args.windows(2).find(|pair| pair[0] == "--smoke-id") else {
+        return Ok(());
+    };
+    let path = hifimule_lifecycle::resolve_app_data_dir().map_err(|e| e.to_string())?;
+    let owner = hifimule_lifecycle::read_descriptor(&path).map_err(|e| e.to_string())?;
+    if hifimule_lifecycle::check_owner_health(&owner, hifimule_lifecycle::HEALTH_TIMEOUT)
+        .map_err(|e| e.to_string())?
+        != LifecycleState::Stopping
+    {
+        return Err("Daemon is not stopping".into());
+    }
+    hifimule_lifecycle::publish_shutdown_rendered(&path, &pair[1], &owner, &shutdown_id)
+        .map_err(|e| e.to_string())
+}
+
 fn resolve_daemon_binary_path() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
@@ -665,6 +683,7 @@ pub fn run() {
             reload_main_window,
             close_ui,
             report_ui_ready,
+            report_shutdown_rendered,
             rpc_proxy,
             image_proxy,
             settings_set_launch_on_startup

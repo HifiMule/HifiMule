@@ -185,7 +185,7 @@ development_status:
   # Stories 15.1–15.2 prepared; remaining dedicated story files and contract gates are pending.
   epic-15: in-progress
   15-1-close-and-reopen-the-ui-without-restarting-the-daemon: done
-  15-2-quit-safely-while-a-device-sync-is-running: ready-for-dev
+  15-2-quit-safely-while-a-device-sync-is-running: review
   15-3-preserve-and-restore-a-paused-listening-session: backlog
   15-4-play-a-selected-library-track-through-the-daemon: backlog
   15-5-choose-an-audio-output-and-recover-safely-from-disconnection: backlog

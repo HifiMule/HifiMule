@@ -1,6 +1,10 @@
+---
+baseline_commit: a7e887e2c8d7d7b7c9af5f39417c011a752a49d6
+---
+
 # Story 15.2: Quit safely while a device sync is running
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -25,28 +29,28 @@ so that HifiMule exits without leaving my device falsely marked as successfully 
 
 ## Tasks / Subtasks
 
-- [ ] Implement the shutdown coordinator and admission contract below (AC 1, 2, 4, 6).
-  - [ ] Replace `CheckIdle`/`try_begin_idle_shutdown` refusal with one serialized request, durable launch fencing, cancellation and drain phases. Keep tray/event-loop processing nonblocking.
-  - [ ] Track preparation, operation workers, admitted mutations and outstanding device work through completion; retain guards through spawned-task lifetimes.
-  - [ ] Make operation creation inherit committed cancellation; prove start/Quit and prepare/execute races cannot reset cancellation or admit new work.
-  - [ ] Keep health responsive while blocked, preserve the five-second warning deadline and release ownership only after actual teardown.
-- [ ] Make all production sync paths stop safely (AC 2, 3, 5, 7).
-  - [ ] Apply cancellation to provider preparation, single/multi-provider execution, auto-sync, staged producers, writer, deletion and playlist/manifest finalization.
-  - [ ] Centralize or otherwise enforce identical outcome precedence in RPC and auto-sync finalizers: failed/interrupted never becomes Complete; manifest persistence failure is an operation failure.
-  - [ ] Preserve dirty/pending/verification evidence for interrupted or failed work, including cancellation plus file errors and cancellation during final metadata commit.
-  - [ ] Serialize authoritative manifest persistence and atomically replace the local MTP recovery cache; propagate path/write failures and prevent stale snapshots from overwriting newer dirty state.
-  - [ ] Continue removal/failure bookkeeping during shutdown without admitting new device initialization, auto-sync or scrobbler work.
-- [ ] Expose authoritative shutdown through existing desktop surfaces (AC 1, 4, 6).
-  - [ ] Extend authenticated health with the bounded snapshot below; bridge it through native Tauri without exposing credentials.
-  - [ ] Render waiting, delayed and precommit-persistence-failure states in tray and UI; reopening uses the same owner and does not hydrate mutating recovery endpoints.
-  - [ ] Add accessible status text and working refresh/close actions, with catalog parity in English, French, Spanish and German.
-- [ ] Verify safe boundaries and regressions (AC 1–7).
-  - [ ] Add deterministic race/failure tests using barriers and injectable device I/O; inspect persisted bytes and outcomes, not just cancellation flags.
-  - [ ] Exercise producer/writer cancellation, late finalization, disconnect, multiple registered operations, blocked mutation, launch fencing and read-only shutdown observation.
-  - [ ] Run relevant lifecycle/daemon/native UI tests, frontend build and focused UI behavior tests; record actual results.
-- [ ] Extend installed smoke coverage and record platform evidence (AC 8).
-  - [ ] Exercise real tray Quit and UI reopen against built production binaries, including a real-device transfer and interrupted recovery.
-  - [ ] Capture artifact hash/version, OS/architecture, owner PID/instance, shutdown identity, elapsed time, operation outcome, integrity and ownership cleanup. Mark unavailable checks unverified.
+- [x] Implement the shutdown coordinator and admission contract below (AC 1, 2, 4, 6).
+  - [x] Replace `CheckIdle`/`try_begin_idle_shutdown` refusal with one serialized request, durable launch fencing, cancellation and drain phases. Keep tray/event-loop processing nonblocking.
+  - [x] Track preparation, operation workers, admitted mutations and outstanding device work through completion; retain guards through spawned-task lifetimes.
+  - [x] Make operation creation inherit committed cancellation; prove start/Quit and prepare/execute races cannot reset cancellation or admit new work.
+  - [x] Keep health responsive while blocked, preserve the five-second warning deadline and release ownership only after actual teardown.
+- [x] Make all production sync paths stop safely (AC 2, 3, 5, 7).
+  - [x] Apply cancellation to provider preparation, single/multi-provider execution, auto-sync, staged producers, writer, deletion and playlist/manifest finalization.
+  - [x] Centralize or otherwise enforce identical outcome precedence in RPC and auto-sync finalizers: failed/interrupted never becomes Complete; manifest persistence failure is an operation failure.
+  - [x] Preserve dirty/pending/verification evidence for interrupted or failed work, including cancellation plus file errors and cancellation during final metadata commit.
+  - [x] Serialize authoritative manifest persistence and atomically replace the local MTP recovery cache; propagate path/write failures and prevent stale snapshots from overwriting newer dirty state.
+  - [x] Continue removal/failure bookkeeping during shutdown without admitting new device initialization, auto-sync or scrobbler work.
+- [x] Expose authoritative shutdown through existing desktop surfaces (AC 1, 4, 6).
+  - [x] Extend authenticated health with the bounded snapshot below; bridge it through native Tauri without exposing credentials.
+  - [x] Render waiting, delayed and precommit-persistence-failure states in tray and UI; reopening uses the same owner and does not hydrate mutating recovery endpoints.
+  - [x] Add accessible status text and working refresh/close actions, with catalog parity in English, French, Spanish and German.
+- [x] Verify safe boundaries and regressions (AC 1–7).
+  - [x] Add deterministic race/failure tests using barriers and injectable device I/O; inspect persisted bytes and outcomes, not just cancellation flags.
+  - [x] Exercise producer/writer cancellation, late finalization, disconnect, multiple registered operations, blocked mutation, launch fencing and read-only shutdown observation.
+  - [x] Run relevant lifecycle/daemon/native UI tests, frontend build and focused UI behavior tests; record actual results.
+- [x] Extend installed smoke coverage and record platform evidence (AC 8).
+  - [x] Exercise real tray Quit and UI reopen against built production binaries, including a real-device transfer and interrupted recovery.
+  - [x] Capture artifact hash/version, OS/architecture, owner PID/instance, shutdown identity, elapsed time, operation outcome, integrity and ownership cleanup. Mark unavailable checks unverified.
 
 ## Dev Notes
 
@@ -210,17 +214,72 @@ GPT-6 (Codex)
 ### Debug Log References
 
 - 2026-09-12: Story preparation analyzed planning artifacts, prior implementation/review, current production paths and official Tokio shutdown documentation. No production implementation or runtime validation was performed by story creation.
+- 2026-09-12: Implemented serialized fencing/cancellation/drain coordination, a cancellation-vs-clean-commit gate, bounded health snapshots, nonblocking generation persistence, and deterministic coordinator deadline/race tests.
+- 2026-09-12: Hardened single-provider, multi-provider and auto-sync finalizers; serialized per-device manifest commits; added atomic MTP cache replacement and portable/backend identity continuity; propagated producer, per-file metadata and `end_sync_job` failures.
+- 2026-09-12: Added live/reopened shutdown UI observation, accessible refresh/close presentation, four-locale catalog parity, and a shutdown-render smoke acknowledgment bound to owner and shutdown identities.
+- 2026-09-12: Validation on Darwin arm64: lifecycle 13/13, daemon 649/649, native UI 5/5, frontend behavior 4/4, smoke-evidence 3/3; workspace check, frontend build, fmt and targeted clippy pass. Installed Windows/Linux/macOS real-device active-Quit evidence remains UNVERIFIED.
+- 2026-09-12: Built the production Linux arm64 `.deb` in Ubuntu, installed it, ran the installed-artifact lifecycle/UI/crash-recovery smoke successfully, and removed the package. The run recorded Linux/aarch64 ownership and timing evidence while correctly leaving physical-device tray Quit UNVERIFIED; the run also exposed and prompted a fix for the Linux smoke binary-presence check.
+- 2026-09-12: Built the final production Windows ARM64 MSI in the Windows UTM VM: `HifiMule_0.14.0_arm64_en-US.msi`, SHA-256 `2E4433900981709F740BC65DA7630B0ADD6BABAD359888A5F0AB43952256D128`. The installed-artifact smoke passed daemon health, authenticated UI attachment, concurrent launch/UI close-reopen identity preservation, stale-owner crash recovery and uninstall; post-run checks found no UI/daemon process and no `C:\\Program Files\\HifiMule` directory. Physical-device active Quit remains UNVERIFIED.
+- 2026-09-12: The first Windows installed-artifact smoke correctly failed before daemon publication because an elevated launch inherited an existing runtime directory owned by `BUILTIN\\Administrators`; lifecycle validation requires the actual token user SID. The failed MSI was removed, `protect_windows_path` was hardened to assign the current user as owner before applying its private DACL, and both host (13/13) and Windows-native lifecycle contracts pass before the replacement MSI rebuild.
+- 2026-09-12: Replacement Windows smoke exposed two VM-specific stale-state/loopback boundaries: an existing elevated `launch-generation.json` also needed ownership normalization, and this Windows firewall configuration times out rather than refuses a closed legacy-port probe. Generation reads now migrate the file through the same private-owner protection, while legacy-endpoint timeout falls back to an exclusive bind check before reporting `LEGACY_ENDPOINT_OCCUPIED`.
+- 2026-09-12: Final post-smoke host regression after the Windows fixes: formatting and workspace check pass; lifecycle 13/13 and daemon 649/649 pass. The daemon suite requires normal host access because its mock HTTP servers and macOS system-configuration APIs are intentionally unavailable inside the restricted filesystem sandbox.
+- 2026-09-12: The first physical-device macOS Quit attempt was not Story 15.2 evidence: `/Applications/HifiMule.app` launched the prior Story 15.1 daemon and its runtime log emitted `QUIT_BLOCKED_ACTIVE_SYNC` at 13:00:22, a refusal path no longer present in the Story 15.2 daemon. Built a fresh ad-hoc-signed macOS arm64 DMG from this workspace for retest: `HifiMule_0.14.0_aarch64.dmg`, SHA-256 `06254c5ae8adb138ef83d592340e621df8f5fe573800b729c9e21297aad65b78`.
+- 2026-09-12: User-confirmed physical-device retest with that macOS arm64 DMG passed active tray Quit on an MSC volume (`/Volumes/Music`). The 190-file operation stopped during file 43 rather than completing the queue; the in-flight verified write finished, the next staged file was removed without being written, staging cleanup completed, and the daemon logged graceful shutdown. Relaunch 16 seconds later rediscovered the same device with `dirty: true` and the interrupted `pending_item_ids`, confirming recoverable state was retained. Unmanaged-sentinel inspection was not performed.
+- 2026-09-12: User-confirmed Linux arm64 installed-artifact retest passed active-sync tray Quit: after starting a device sync and selecting Quit, the daemon stopped instead of completing the full sync. This run confirms the Linux Quit/cancellation/exit path; transport type, post-relaunch recovery state and unmanaged-sentinel integrity were not independently recorded.
+- 2026-09-12: User-confirmed Windows ARM64 installed-artifact retest passed active-sync tray Quit: after starting a device sync and selecting Quit, the daemon stopped instead of completing the full sync. This completes user-observed active-sync tray-Quit/daemon-exit coverage on all three target operating systems; Windows transport type, post-relaunch recovery state and unmanaged-sentinel integrity were not independently recorded.
+- 2026-09-12: User completed the follow-up recovery/integrity procedure successfully over MSC/filesystem transport on Linux arm64 and Windows ARM64: an unmanaged sentinel was created, active tray Quit interrupted a large multi-file sync, relaunch detected the interruption without reporting false success, a subsequent sync completed normally, the sentinel remained unchanged, managed files were neither corrupt nor zero-byte, temporary/staging files were absent, and already completed tracks remained playable.
+- 2026-09-12: User-confirmed macOS arm64 physical MTP test passed after replacing a bad USB cable: HifiMule detected the MTP device, started a sync, and tray Quit interrupted it. The open UI displayed the authoritative shutdown message while draining, then transitioned to the no-daemon message after exit. Together with deterministic MTP cache/integrity tests and the three-OS MSC recovery checks, this closes AC8 evidence.
+
+### Implementation Plan
+
+- Fence launch admission and persist generation before committing cancellation; drain existing pipeline and mutation guards without blocking the native event loop.
+- Serialize cancellation against final clean-manifest commit, preserve failure precedence and recovery evidence, and bind metadata writes to the operation device.
+- Publish one bounded authenticated shutdown snapshot and render it through tray, native proxy and live/reopened UI observers.
+- Validate deterministic race/deadline behavior and extend installed evidence without treating injected tests as physical-device certification.
 
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
 - Preparation resolves shutdown phases, cancellation ownership, five-second warning behavior, blocked-write policy, health status and future playback participation. Implementation tasks remain unchecked.
+- Implemented AC1–AC7 code and automated regression coverage. Quit now fences new work, commits cancellation once, waits for real worker/mutation completion, preserves ownership during overruns and exposes the same shutdown UUID through health, tray and UI.
+- Interrupted/failed syncs retain dirty/pending recovery evidence; late success cannot overwrite failure; final manifest failure and unresolved device cleanup fail the operation; successful cancellation emits no completion/safe-eject notification.
+- Authoritative manifest writes are per-device serialized; MTP cache replacement is atomic and flushed, and reconnect lookup preserves a matching portable-identity dirty cache when the backend probe ID differs.
+- Windows lifecycle protection now normalizes runtime/file ownership to the current token user before installing the owner/SYSTEM/Administrators-only DACL, including elevated MSI smoke launches whose newly created directory would otherwise be owned by the Administrators group.
+- Windows generation reads migrate stale elevated ownership before validation, and legacy-endpoint detection distinguishes a firewall-induced connect timeout from a genuinely occupied port by requiring an exclusive bind failure.
+- Ubuntu arm64 installed-artifact smoke passed against `HifiMule_0.14.0_arm64.deb`, including owner cleanup, UI attachment and stale-owner crash recovery; the package was uninstalled after the run. Physical-device active-Quit remains UNVERIFIED because the Linux VM had no attached USB device/tray session.
+- Windows ARM64 installed-artifact smoke passed against `HifiMule_0.14.0_arm64_en-US.msi` (SHA-256 `2E4433900981709F740BC65DA7630B0ADD6BABAD359888A5F0AB43952256D128`), including owner cleanup, UI attachment, close/reopen identity preservation and stale-owner crash recovery. The MSI was uninstalled and independent post-run checks confirmed no HifiMule process or installation directory remained.
+- macOS arm64 physical MSC evidence passed against `HifiMule_0.14.0_aarch64.dmg` (SHA-256 `06254c5ae8adb138ef83d592340e621df8f5fe573800b729c9e21297aad65b78`): active tray Quit stopped a 190-file sync at its safe current-write boundary, discarded queued staging, shut the daemon down, and preserved dirty/pending recovery state observed on relaunch. Unmanaged-sentinel preservation remains UNVERIFIED for this run.
+- Linux arm64 and Windows ARM64 MSC/filesystem user testing confirms active tray Quit, automatic daemon exit, interrupted-state detection after relaunch, successful follow-up sync, unmanaged-sentinel preservation, absence of corrupt/zero-byte or temporary managed files, and playability of already completed tracks.
+- AC8 is complete: active-sync tray Quit and daemon exit are verified over MSC/filesystem transport on macOS, Linux and Windows ARM64, interrupted recovery is verified on all three, unmanaged-sentinel/managed-file integrity is verified on Linux and Windows, and macOS arm64 physical MTP verifies device detection, active-transfer cancellation, authoritative shutdown UI and final daemon disappearance.
 
 ### File List
 
 - `_bmad-output/implementation-artifacts/15-2-quit-safely-while-a-device-sync-is-running.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `hifimule-daemon/src/device/mod.rs`
+- `hifimule-daemon/src/main.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-daemon/src/sync.rs`
+- `hifimule-i18n/catalog.json`
+- `hifimule-lifecycle/src/lib.rs`
+- `hifimule-ui/src-tauri/src/lib.rs`
+- `hifimule-ui/src/main.ts`
+- `hifimule-ui/src/shutdownStatus.ts`
+- `hifimule-ui/tests/shutdownStatus.test.mjs`
+- `scripts/smoke-tests/smoke-common.sh`
+- `scripts/smoke-tests/smoke-linux.sh`
+- `scripts/smoke-tests/smoke-macos.sh`
+- `scripts/smoke-tests/smoke-windows.ps1`
+- `scripts/smoke-tests/test-ui-evidence.py`
 
 ## Change Log
 
 - 2026-09-12: Created Story 15.2 with production shutdown integration, integrity guardrails and acceptance evidence requirements; status ready-for-dev.
+- 2026-09-12: Implemented orderly active-sync Quit coordination, durable manifest/finalization protections, authenticated shutdown UI, localization and automated evidence; AC8 physical cross-platform tray/device validation remains pending, so status stays in-progress.
+- 2026-09-12: Verified the installed Linux arm64 `.deb` lifecycle smoke and corrected its broken binary-presence guard; physical-device active-Quit evidence remains pending.
+- 2026-09-12: Verified and removed the installed Windows ARM64 MSI after lifecycle/UI/relaunch/recovery smoke; hardened elevated stale-generation migration and legacy-port probing uncovered by the installed run. Physical-device active-Quit evidence remains pending.
+- 2026-09-12: Verified physical MSC active-sync tray Quit and interrupted-state recovery on macOS arm64 using the fresh Story 15.2 DMG; MTP evidence remains pending.
+- 2026-09-12: Verified user-observed active-sync tray Quit and daemon exit on Linux arm64; detailed Linux recovery/integrity evidence and MTP coverage remain pending.
+- 2026-09-12: Verified user-observed active-sync tray Quit and daemon exit on Windows ARM64, completing three-OS active-Quit coverage; MTP coverage remained pending at that checkpoint.
+- 2026-09-12: Verified the full follow-up recovery and integrity checklist over MSC/filesystem transport on Linux and Windows ARM64, including sentinel preservation and a successful repair sync; MTP coverage and any unperformed shutdown-UI interaction remain pending.
+- 2026-09-12: Verified physical MTP active-sync Quit on macOS arm64 with shutdown and no-daemon UI states; all Story 15.2 tasks and acceptance evidence are complete, status advanced to review.

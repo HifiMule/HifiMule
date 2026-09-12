@@ -247,6 +247,29 @@ pub fn publish_ui_ready(
     )
 }
 
+/// Sanitized installed-smoke acknowledgement for the dedicated shutdown view.
+pub fn publish_shutdown_rendered(
+    app_data: &Path,
+    smoke_id: &str,
+    owner: &OwnerDescriptor,
+    shutdown_id: &str,
+) -> Result<(), LifecycleError> {
+    if Uuid::parse_str(smoke_id).is_err() || Uuid::parse_str(shutdown_id).is_err() {
+        return Err(LifecycleError::new(
+            LifecycleErrorCode::LocalAccessDenied,
+            "Invalid shutdown smoke attempt",
+        ));
+    }
+    let runtime = prepare_runtime_dir(app_data)?;
+    atomic_write_json(
+        &runtime.join(format!("shutdown-rendered-{smoke_id}.json")),
+        &serde_json::json!({
+            "smokeId": smoke_id, "uiPid": std::process::id(), "daemonPid": owner.pid,
+            "instanceId": owner.instance_id, "shutdownId": shutdown_id, "state": "shutdownRendered"
+        }),
+    )
+}
+
 pub fn publish_launch_failure(
     app_data: &Path,
     attempt_id: &str,
@@ -631,30 +654,36 @@ impl OwnerGuard {
     }
 
     pub fn advance_generation(&self) -> Result<u64, LifecycleError> {
-        let current = self.launch_generation().map_err(|error| {
-            LifecycleError::new(
-                LifecycleErrorCode::QuitPersistenceFailed,
-                format!("Cannot read launch generation: {error}"),
-            )
-        })?;
-        let next = current.checked_add(1).ok_or_else(|| {
-            LifecycleError::new(
-                LifecycleErrorCode::QuitPersistenceFailed,
-                "Launch generation is exhausted",
-            )
-        })?;
-        atomic_write_bytes(
-            &self.runtime.join("launch-generation.json"),
-            next.to_string().as_bytes(),
-        )
-        .map_err(|error| {
-            LifecycleError::new(
-                LifecycleErrorCode::QuitPersistenceFailed,
-                format!("Cannot persist launch generation: {error}"),
-            )
-        })?;
-        Ok(next)
+        advance_launch_generation(&self.app_data)
     }
+}
+
+/// Durably advances the launch fence while an existing [`OwnerGuard`] retains
+/// ownership. This can run on a worker thread so native event loops stay responsive.
+pub fn advance_launch_generation(app_data: &Path) -> Result<u64, LifecycleError> {
+    let current = read_generation(app_data).map_err(|error| {
+        LifecycleError::new(
+            LifecycleErrorCode::QuitPersistenceFailed,
+            format!("Cannot read launch generation: {error}"),
+        )
+    })?;
+    let next = current.checked_add(1).ok_or_else(|| {
+        LifecycleError::new(
+            LifecycleErrorCode::QuitPersistenceFailed,
+            "Launch generation is exhausted",
+        )
+    })?;
+    atomic_write_bytes(
+        &prepare_runtime_dir(app_data)?.join("launch-generation.json"),
+        next.to_string().as_bytes(),
+    )
+    .map_err(|error| {
+        LifecycleError::new(
+            LifecycleErrorCode::QuitPersistenceFailed,
+            format!("Cannot persist launch generation: {error}"),
+        )
+    })?;
+    Ok(next)
 }
 
 impl Drop for OwnerGuard {
@@ -739,6 +768,11 @@ pub fn read_generation(app_data: &Path) -> Result<u64, LifecycleError> {
     if !path.exists() {
         return Ok(0);
     }
+    // Older elevated Windows launches can leave an otherwise private lifecycle
+    // file owned by the Administrators group. Normalize it inside the already
+    // protected runtime directory before enforcing current-user ownership.
+    #[cfg(windows)]
+    protect_windows_path(&path)?;
     ensure_regular_private_file(&path)?;
     let mut value = String::new();
     private_read(&path)?
@@ -966,7 +1000,90 @@ fn access_error(error: std::io::Error) -> LifecycleError {
 
 #[cfg(windows)]
 fn protect_windows_path(path: &Path) -> Result<(), LifecycleError> {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    let metadata = path.symlink_metadata().map_err(access_error)?;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(LifecycleError::new(
+            LifecycleErrorCode::UnsafeRuntimePath,
+            "Lifecycle path must not be a reparse point",
+        ));
+    }
+    set_windows_owner_to_current_user(path)?;
     set_windows_dacl(path, "D:P(A;;FA;;;OW)(A;;FA;;;SY)(A;;FA;;;BA)")
+}
+
+#[cfg(windows)]
+fn set_windows_owner_to_current_user(path: &Path) -> Result<(), LifecycleError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::Authorization::{SE_FILE_OBJECT, SetNamedSecurityInfoW};
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, OWNER_SECURITY_INFORMATION, TOKEN_USER, TokenUser,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    struct Token(HANDLE);
+    impl Drop for Token {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+
+    let mut token = Token(std::ptr::null_mut());
+    if unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            windows_sys::Win32::Security::TOKEN_QUERY,
+            &mut token.0,
+        )
+    } == 0
+    {
+        return Err(access_error(std::io::Error::last_os_error()));
+    }
+    let mut token_size = 0;
+    unsafe {
+        GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut token_size);
+    }
+    if token_size == 0 {
+        return Err(access_error(std::io::Error::last_os_error()));
+    }
+    let mut storage = vec![0_usize; (token_size as usize).div_ceil(std::mem::size_of::<usize>())];
+    if unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenUser,
+            storage.as_mut_ptr().cast(),
+            token_size,
+            &mut token_size,
+        )
+    } == 0
+    {
+        return Err(access_error(std::io::Error::last_os_error()));
+    }
+    let user = unsafe { &*storage.as_ptr().cast::<TOKEN_USER>() };
+    let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let result = unsafe {
+        SetNamedSecurityInfoW(
+            wide_path.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            user.User.Sid,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if result != 0 {
+        Err(access_error(std::io::Error::from_raw_os_error(
+            result as i32,
+        )))
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(windows)]

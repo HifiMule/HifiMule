@@ -247,4 +247,5 @@ if ($proc.ExitCode -ne 0) {
 Write-Host "  Uninstall OK"
 
 Write-Host ""
-Write-Host "PASS: Windows smoke test complete"
+Write-Host "DEVICE_SHUTDOWN_EVIDENCE os=Windows architecture=$env:PROCESSOR_ARCHITECTURE status=UNVERIFIED transport=UNVERIFIED artifact=installed shutdownId=UNVERIFIED elapsedMs=UNVERIFIED outcome=UNVERIFIED integrity=UNVERIFIED ownershipCleanup=UNVERIFIED reason=no-real-device-or-human-tray-session"
+Write-Host "PASS: Windows smoke test complete (real-device active Quit remains UNVERIFIED)"

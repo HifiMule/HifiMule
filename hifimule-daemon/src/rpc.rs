@@ -120,16 +120,23 @@ pub fn set_lifecycle_stopping(stopping: bool) {
     LIFECYCLE_STATE.store(if stopping { 2 } else { 1 }, AtomicOrdering::Release);
 }
 
-fn daemon_health_result() -> Value {
+async fn daemon_health_result(operation_manager: &crate::sync::SyncOperationManager) -> Value {
     let descriptor = LIFECYCLE_IDENTITY.get();
+    let shutdown = operation_manager.shutdown_snapshot().await;
+    let lifecycle_state = LIFECYCLE_STATE.load(AtomicOrdering::Acquire);
+    let error_code = shutdown
+        .as_ref()
+        .and_then(|snapshot| snapshot.error_code.clone())
+        .or_else(|| (lifecycle_state == 3).then(|| "SHUTDOWN_TIMEOUT".to_string()));
     serde_json::json!({
         "data": {
-            "status": if LIFECYCLE_STATE.load(AtomicOrdering::Acquire) >= 2 { "stopping" } else { "ok" },
+            "status": if lifecycle_state >= 2 { "stopping" } else { "ok" },
             "protocolVersion": hifimule_lifecycle::PROTOCOL_VERSION,
             "instanceId": descriptor.map(|value| value.instance_id.as_str()).unwrap_or("test-instance"),
             "pid": descriptor.map(|value| value.pid).unwrap_or_else(std::process::id),
             "daemonVersion": env!("CARGO_PKG_VERSION"),
-            "errorCode": if LIFECYCLE_STATE.load(AtomicOrdering::Acquire) == 3 { Some("SHUTDOWN_TIMEOUT") } else { None }
+            "errorCode": error_code,
+            "shutdown": shutdown
         }
     })
 }
@@ -364,7 +371,7 @@ async fn handler(
         "device.list" => handle_device_list(&state).await,
         "device.select" => handle_device_select(&state, payload.params).await,
         "server.probe" => handle_server_probe(payload.params).await,
-        "daemon.health" => Ok(daemon_health_result()),
+        "daemon.health" => Ok(daemon_health_result(&state.sync_operation_manager).await),
         "browse.listModes" => handle_browse_list_modes(&state).await,
         "browse.listArtists" => handle_browse_list_artists(&state, payload.params).await,
         "browse.getArtist" => handle_browse_get_artist(&state, payload.params).await,
@@ -5303,12 +5310,19 @@ async fn handle_sync_execute(
     // Failing to mark dirty MUST abort the sync to prevent undetectable interruptions.
     if let Err(e) = state
         .device_manager
-        .update_manifest(|m| {
+        .update_manifest_for_device(&manifest.device_id, |m| {
             m.dirty = true;
             m.pending_item_ids = pending_item_ids.clone();
         })
         .await
     {
+        fail_sync_operation(
+            &state.sync_operation_manager,
+            &operation_id,
+            "sync_execute",
+            format!("Failed to mark manifest dirty: {e}"),
+        )
+        .await;
         return Err(JsonRpcError {
             code: ERR_STORAGE_ERROR,
             message: format!("Failed to mark manifest dirty, aborting sync: {}", e),
@@ -5320,7 +5334,19 @@ async fn handle_sync_execute(
         // Resolve every group's provider up front so connection errors surface here.
         let mut group_providers: Vec<(String, Arc<dyn MediaProvider>)> = Vec::new();
         for sid in &add_servers {
-            let provider = get_provider_by_server_id_for(state, sid).await?;
+            let provider = match get_provider_by_server_id_for(state, sid).await {
+                Ok(provider) => provider,
+                Err(error) => {
+                    fail_sync_operation(
+                        &state.sync_operation_manager,
+                        &operation_id,
+                        "sync_execute",
+                        format!("Provider resolution failed for {sid}: {}", error.message),
+                    )
+                    .await;
+                    return Err(error);
+                }
+            };
             group_providers.push((sid.clone(), provider));
         }
 
@@ -5400,46 +5426,53 @@ async fn handle_sync_execute(
                 }],
             };
 
-            if all_errors.is_empty() && op_manager.is_cancelled(&op_id).await {
-                if let Some(mut operation) = op_manager.get_operation(&op_id).await {
-                    operation.status = crate::sync::SyncStatus::Cancelled;
-                    op_manager.update_operation(&op_id, operation).await;
-                }
-                let _ = state_tx.send(crate::DaemonState::Idle);
-                return;
-            }
-            if let Err(e) = device_manager
-                .update_manifest(|m| {
-                    m.dirty = false;
-                    m.pending_item_ids = vec![];
-                    if all_errors.is_empty() {
+            let finalization = op_manager.finalization_guard().await;
+            let cancelled = op_manager.is_cancelled(&op_id).await;
+            let mut final_errors = all_errors;
+            if !cancelled
+                && final_errors.is_empty()
+                && let Err(e) = device_manager
+                    .update_manifest_for_device(&sync_manifest.device_id, |m| {
+                        m.dirty = false;
+                        m.pending_item_ids = vec![];
                         m.last_synced_transcoding_profile_id = m.transcoding_profile_id.clone();
                         m.transcoding_profile_dirty = false;
-                    }
-                })
-                .await
+                    })
+                    .await
             {
-                eprintln!("Failed to clear dirty flag on final manifest: {}", e);
+                final_errors.push(crate::sync::SyncFileError {
+                    jellyfin_id: String::new(),
+                    filename: ".hifimule.json".into(),
+                    error_message: format!("Failed to commit final manifest: {e}"),
+                });
             }
-            // Story 13.1: record auto-fill history (last_synced_at + tier) for the synced tracks and
-            // advance rotation cursors. Best-effort — never affects sync status.
-            record_autofill_history_after_sync(
-                &db,
-                &sync_manifest,
-                &delta,
-                &all_errors,
-                now_unix_secs(),
-            );
+            drop(finalization);
+            let already_failed = op_manager
+                .get_operation(&op_id)
+                .await
+                .is_some_and(|operation| operation.status == crate::sync::SyncStatus::Failed);
+            // Story 13.1: success-gated history/cursor updates.
+            if !already_failed && !cancelled && final_errors.is_empty() {
+                record_autofill_history_after_sync(
+                    &db,
+                    &sync_manifest,
+                    &delta,
+                    &final_errors,
+                    now_unix_secs(),
+                );
+            }
             if let Some(mut operation) = op_manager.get_operation(&op_id).await {
-                operation.status = if all_errors.is_empty() {
-                    crate::sync::SyncStatus::Complete
-                } else {
+                operation.status = if already_failed || !final_errors.is_empty() {
                     crate::sync::SyncStatus::Failed
+                } else if cancelled {
+                    crate::sync::SyncStatus::Cancelled
+                } else {
+                    crate::sync::SyncStatus::Complete
                 };
-                operation.errors = all_errors.clone();
+                operation.errors.extend(final_errors.clone());
                 op_manager.update_operation(&op_id, operation).await;
             }
-            if all_errors.is_empty() {
+            if !already_failed && !cancelled && final_errors.is_empty() {
                 drop(tokio::task::spawn_blocking(send_sync_complete_notification));
             }
             let _ = state_tx.send(crate::DaemonState::Idle);
@@ -5507,47 +5540,57 @@ async fn handle_sync_execute(
 
             match result {
                 Ok((_synced_items, errors)) => {
-                    if errors.is_empty() && op_manager.is_cancelled(&op_id).await {
-                        if let Some(mut operation) = op_manager.get_operation(&op_id).await {
-                            operation.status = crate::sync::SyncStatus::Cancelled;
-                            op_manager.update_operation(&op_id, operation).await;
-                        }
-                        let _ = state_tx.send(crate::DaemonState::Idle);
-                        return;
-                    }
-
-                    if let Err(e) = device_manager
-                        .update_manifest(|m| {
-                            m.dirty = false;
-                            m.pending_item_ids = vec![];
-                            if errors.is_empty() {
+                    let finalization = op_manager.finalization_guard().await;
+                    let cancelled = op_manager.is_cancelled(&op_id).await;
+                    let mut final_errors = errors;
+                    if !cancelled
+                        && final_errors.is_empty()
+                        && let Err(e) = device_manager
+                            .update_manifest_for_device(&sync_manifest.device_id, |m| {
+                                m.dirty = false;
+                                m.pending_item_ids = vec![];
                                 m.last_synced_transcoding_profile_id =
                                     m.transcoding_profile_id.clone();
                                 m.transcoding_profile_dirty = false;
-                            }
-                        })
-                        .await
+                            })
+                            .await
                     {
-                        eprintln!("Failed to clear dirty flag on final manifest: {}", e);
+                        final_errors.push(crate::sync::SyncFileError {
+                            jellyfin_id: String::new(),
+                            filename: ".hifimule.json".into(),
+                            error_message: format!("Failed to commit final manifest: {e}"),
+                        });
                     }
-                    // Story 13.1: record auto-fill history + advance rotation cursors (best-effort).
-                    record_autofill_history_after_sync(
-                        &db,
-                        &sync_manifest,
-                        &delta,
-                        &errors,
-                        now_unix_secs(),
-                    );
+                    drop(finalization);
+                    let already_failed =
+                        op_manager
+                            .get_operation(&op_id)
+                            .await
+                            .is_some_and(|operation| {
+                                operation.status == crate::sync::SyncStatus::Failed
+                            });
+                    // Story 13.1: success-gated history/cursor updates.
+                    if !already_failed && !cancelled && final_errors.is_empty() {
+                        record_autofill_history_after_sync(
+                            &db,
+                            &sync_manifest,
+                            &delta,
+                            &final_errors,
+                            now_unix_secs(),
+                        );
+                    }
                     if let Some(mut operation) = op_manager.get_operation(&op_id).await {
-                        operation.status = if errors.is_empty() {
-                            crate::sync::SyncStatus::Complete
-                        } else {
+                        operation.status = if already_failed || !final_errors.is_empty() {
                             crate::sync::SyncStatus::Failed
+                        } else if cancelled {
+                            crate::sync::SyncStatus::Cancelled
+                        } else {
+                            crate::sync::SyncStatus::Complete
                         };
-                        operation.errors = errors.clone();
+                        operation.errors.extend(final_errors.clone());
                         op_manager.update_operation(&op_id, operation).await;
                     }
-                    if errors.is_empty() {
+                    if !already_failed && !cancelled && final_errors.is_empty() {
                         drop(tokio::task::spawn_blocking(send_sync_complete_notification));
                     }
                     let _ = state_tx.send(crate::DaemonState::Idle);

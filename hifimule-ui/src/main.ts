@@ -5,6 +5,7 @@ import { LogicalSize } from '@tauri-apps/api/dpi';
 import { Window, currentMonitor } from '@tauri-apps/api/window';
 import { t } from './i18n';
 import { withDeadline } from './lifecycleDeadline';
+import { shutdownMessageKey, ShutdownPollGate } from './shutdownStatus';
 
 const isDev = Boolean((import.meta as any).env?.DEV);
 setBasePath(new URL(isDev
@@ -60,11 +61,132 @@ async function init() {
         await showMainWindow();
         const { invoke } = await import('@tauri-apps/api/core');
         await invoke('report_ui_ready');
+        observeShutdown(rpcCall);
     } catch (e) {
         console.error("Failed to check daemon state", e);
-        renderLifecycleFailure(e);
+        const raw = e instanceof Error ? e.message : String(e);
+        if (raw.startsWith('DAEMON_STOPPED')) {
+            try {
+                const health = await rpcCall('daemon.health');
+                if (health?.data?.shutdown) {
+                    renderShutdownStatus(rpcCall, health.data);
+                    const { invoke } = await import('@tauri-apps/api/core');
+                    await invoke('report_shutdown_rendered', {
+                        shutdownId: health.data.shutdown.shutdownId,
+                    });
+                } else {
+                    renderLifecycleFailure(e);
+                }
+            } catch {
+                renderLifecycleFailure(e);
+            }
+        } else {
+            renderLifecycleFailure(e);
+        }
         await showMainWindow();
     }
+}
+
+function observeShutdown(rpcCall: (method: string, params?: any) => Promise<any>): void {
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const gate = new ShutdownPollGate(async () => {
+        try {
+            const health = await rpcCall('daemon.health');
+            if (!disposed && health?.data?.shutdown) {
+                renderShutdownStatus(rpcCall, health.data);
+                if (health.data.status === 'stopping') {
+                    const { invoke } = await import('@tauri-apps/api/core');
+                    await invoke('report_shutdown_rendered', {
+                        shutdownId: health.data.shutdown.shutdownId,
+                    });
+                }
+                disposed = true;
+            }
+        } catch {
+            // A transient health failure is unknown, not proof of clean exit.
+        }
+    });
+    const poll = async () => {
+        await gate.poll();
+        if (!disposed) timer = setTimeout(poll, 1_000);
+    };
+    window.addEventListener('pagehide', () => {
+        disposed = true;
+        if (timer !== undefined) clearTimeout(timer);
+    }, { once: true });
+    timer = setTimeout(poll, 1_000);
+}
+
+type ShutdownHealth = {
+    status: string;
+    errorCode?: string | null;
+    shutdown?: {
+        shutdownId: string;
+        phase: string;
+        elapsedMs: number;
+        deadlineExceeded: boolean;
+        activeOperationCount: number;
+        pendingMutationCount: number;
+    } | null;
+};
+
+function renderShutdownStatus(
+    rpcCall: (method: string, params?: any) => Promise<any>,
+    initial: ShutdownHealth,
+): void {
+    document.body.innerHTML = `
+        <main class="login-container" aria-labelledby="shutdown-title">
+            <section class="login-card" style="padding:2rem;max-width:40rem">
+                <h2 id="shutdown-title">${t('lifecycle.quitting_waiting')}</h2>
+                <p id="shutdown-status" role="status" aria-live="polite"></p>
+                <div style="display:flex;gap:.75rem">
+                    <button id="shutdown-refresh" type="button">${t('lifecycle.refresh')}</button>
+                    <button id="shutdown-close" type="button">${t('lifecycle.close')}</button>
+                </div>
+            </section>
+        </main>`;
+    const status = document.getElementById('shutdown-status');
+    const refresh = document.getElementById('shutdown-refresh') as HTMLButtonElement | null;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const update = (health: ShutdownHealth) => {
+        const shutdown = health.shutdown;
+        if (!status || !shutdown) return;
+        const messageKey = shutdownMessageKey(shutdown, health.errorCode);
+        status.textContent = messageKey !== 'lifecycle.shutdown_progress'
+            ? t(messageKey)
+            : t(messageKey, {
+                operations: String(shutdown.activeOperationCount),
+                mutations: String(shutdown.pendingMutationCount),
+            });
+        document.body.dataset.shutdownId = shutdown.shutdownId;
+        document.body.dataset.shutdownPhase = shutdown.phase;
+    };
+    const gate = new ShutdownPollGate(async () => {
+        if (disposed) return;
+        try {
+            const result = await rpcCall('daemon.health');
+            update(result.data);
+        } catch {
+            if (status) status.textContent = t('lifecycle.shutdown_unreachable');
+        }
+    });
+    const poll = async () => {
+        await gate.poll();
+        if (!disposed) timer = setTimeout(poll, 1_000);
+    };
+    update(initial);
+    refresh?.addEventListener('click', () => void poll());
+    refresh?.focus();
+    document.getElementById('shutdown-close')?.addEventListener('click', () => {
+        void import('@tauri-apps/api/core').then(({ invoke }) => invoke('close_ui'));
+    });
+    window.addEventListener('pagehide', () => {
+        disposed = true;
+        if (timer !== undefined) clearTimeout(timer);
+    }, { once: true });
+    timer = setTimeout(poll, 1_000);
 }
 
 async function showMainWindow(): Promise<void> {

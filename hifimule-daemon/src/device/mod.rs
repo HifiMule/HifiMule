@@ -420,6 +420,40 @@ pub async fn write_manifest(
         .await
 }
 
+async fn persist_local_manifest_atomic(path: &Path, manifest: &DeviceManifest) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Manifest cache path has no parent"))?;
+    tokio::fs::create_dir_all(parent).await?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Manifest cache path is invalid"))?;
+    let temporary = parent.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
+    let bytes = serde_json::to_vec_pretty(manifest)?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)
+        .await?;
+    if let Err(error) = async {
+        file.write_all(&bytes).await?;
+        file.flush().await?;
+        file.sync_all().await?;
+        drop(file);
+        tokio::fs::rename(&temporary, path).await?;
+        Ok::<(), std::io::Error>(())
+    }
+    .await
+    {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(error.into());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeviceClass {
     Msc,
@@ -515,6 +549,10 @@ pub struct DeviceManager {
     state: std::sync::Arc<tokio::sync::RwLock<DeviceManagerState>>,
     /// Pending initialization state is stored as one coherent snapshot.
     unrecognized_device: std::sync::Arc<tokio::sync::RwLock<Option<UnrecognizedDeviceState>>>,
+    /// Serializes authoritative manifest commits per portable device identity without
+    /// holding the global connected-device lock over device or filesystem I/O.
+    manifest_commit_locks:
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl DeviceManager {
@@ -526,6 +564,7 @@ impl DeviceManager {
                 selected_device_path: None,
             })),
             unrecognized_device: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            manifest_commit_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -844,15 +883,45 @@ impl DeviceManager {
     where
         F: FnOnce(&mut DeviceManifest),
     {
+        let device_id = self
+            .get_current_device()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("No device connected"))?
+            .device_id;
+        self.update_manifest_for_device(&device_id, mutation).await
+    }
+
+    /// Persist a manifest update against the operation's stable device identity, not
+    /// whichever device the UI happens to select while the operation is running.
+    pub async fn update_manifest_for_device<F>(&self, device_id: &str, mutation: F) -> Result<()>
+    where
+        F: FnOnce(&mut DeviceManifest),
+    {
+        let commit_lock = {
+            let mut locks = self
+                .manifest_commit_locks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            std::sync::Arc::clone(
+                locks
+                    .entry(device_id.to_string())
+                    .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(()))),
+            )
+        };
+        let _commit = commit_lock.lock().await;
         let mut state = self.state.write().await;
         let path = state
-            .selected_device_path
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("No device connected"))?;
+            .connected_devices
+            .iter()
+            .find_map(|(path, connected)| {
+                (connected.manifest.device_id == device_id).then(|| path.clone())
+            })
+            .ok_or_else(|| anyhow::anyhow!("Device is no longer connected: {device_id}"))?;
         let connected = state
             .connected_devices
             .get_mut(&path)
-            .ok_or_else(|| anyhow::anyhow!("Selected device not in connected map"))?;
+            .ok_or_else(|| anyhow::anyhow!("Device not in connected map"))?;
+        let previous_manifest = connected.manifest.clone();
         mutation(&mut connected.manifest);
         // Clone Arc and manifest so we can drop the write guard before the async I/O.
         // Serialization is still guaranteed: the in-memory state is mutated under the lock;
@@ -861,18 +930,24 @@ impl DeviceManager {
         let manifest_snapshot = connected.manifest.clone();
         let is_mtp = connected.device_class == DeviceClass::Mtp;
         drop(state);
-        if is_mtp {
+        let persist_result = if is_mtp {
             // For MTP devices the local cache is authoritative: on-device writes are
             // best-effort only (Garmin and similar devices have unreliable MTP write support).
             let _ = crate::device::write_manifest(device_io, &manifest_snapshot).await;
-            if let Ok(local_path) =
-                crate::paths::get_local_mtp_manifest_path(&manifest_snapshot.device_id)
-            {
-                let json = serde_json::to_string_pretty(&manifest_snapshot)?;
-                std::fs::write(&local_path, json)?;
-            }
+            let local_path =
+                crate::paths::get_local_mtp_manifest_path(&manifest_snapshot.device_id)?;
+            persist_local_manifest_atomic(&local_path, &manifest_snapshot).await
         } else {
-            crate::device::write_manifest(device_io, &manifest_snapshot).await?;
+            crate::device::write_manifest(device_io, &manifest_snapshot).await
+        };
+        if let Err(error) = persist_result {
+            let mut state = self.state.write().await;
+            if let Some(connected) = state.connected_devices.get_mut(&path)
+                && connected.manifest.device_id == manifest_snapshot.device_id
+            {
+                connected.manifest = previous_manifest;
+            }
+            return Err(error);
         }
         Ok(())
     }
@@ -2001,7 +2076,17 @@ async fn emit_mtp_probe_event(
 
     match backend_arc.read_file(".hifimule.json").await {
         Ok(data) => match serde_json::from_slice::<DeviceManifest>(&data) {
-            Ok(manifest) => {
+            Ok(device_manifest) => {
+                // The backend probe identity can differ from the portable manifest
+                // identity. Once the on-device copy establishes that mapping, prefer
+                // the matching authoritative local cache so older clean mirror bytes
+                // cannot hide interrupted/dirty recovery evidence.
+                let manifest =
+                    crate::paths::get_local_mtp_manifest_path(&device_manifest.device_id)
+                        .ok()
+                        .and_then(|path| std::fs::read_to_string(path).ok())
+                        .and_then(|json| serde_json::from_str::<DeviceManifest>(&json).ok())
+                        .unwrap_or(device_manifest);
                 // If the manifest carries a cached storage_id, open a second backend that
                 // uses it directly — this makes free_space() and path lookups skip the
                 // first-child DEVICE enumeration on every call.

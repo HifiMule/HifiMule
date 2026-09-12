@@ -500,6 +500,52 @@ impl Drop for MutationGuard {
     }
 }
 
+const SHUTDOWN_DEADLINE_MS: u64 = 5_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ShutdownPhase {
+    Fencing,
+    FenceFailed,
+    Cancelling,
+    Draining,
+    Waiting,
+    Finalizing,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShutdownBlocker {
+    pub operation_id: Option<String>,
+    pub device_id: Option<String>,
+    pub reason: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShutdownSnapshot {
+    pub schema_version: u8,
+    pub shutdown_id: String,
+    pub phase: ShutdownPhase,
+    pub elapsed_ms: u64,
+    pub deadline_ms: u64,
+    pub deadline_exceeded: bool,
+    pub active_operation_count: usize,
+    pub pending_mutation_count: usize,
+    pub blockers: Vec<ShutdownBlocker>,
+    pub blockers_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+}
+
+struct ShutdownTracker {
+    shutdown_id: String,
+    phase: ShutdownPhase,
+    requested_at: std::time::Instant,
+    committed_at: Option<std::time::Instant>,
+    error_code: Option<String>,
+}
+
 /// Manager for tracking active sync operations in memory.
 pub struct SyncOperationManager {
     operations: Arc<RwLock<HashMap<String, SyncOperation>>>,
@@ -511,6 +557,9 @@ pub struct SyncOperationManager {
     /// Closed before an accepted daemon Quit so no new pipeline can race teardown.
     admission_closed: Arc<AtomicBool>,
     active_mutations: Arc<AtomicUsize>,
+    shutdown_committed: Arc<AtomicBool>,
+    shutdown: Mutex<Option<ShutdownTracker>>,
+    finalization_gate: tokio::sync::Mutex<()>,
     /// Per-operation cancellation flags. Set to `true` by `request_cancel`; polled by
     /// the sync loop between files via `is_cancelled`. Never removed — old entries for
     /// completed operations are harmless and naturally sized (one AtomicBool per UUID).
@@ -525,6 +574,9 @@ impl SyncOperationManager {
             pipeline_cancelled: Arc::new(AtomicBool::new(false)),
             admission_closed: Arc::new(AtomicBool::new(false)),
             active_mutations: Arc::new(AtomicUsize::new(0)),
+            shutdown_committed: Arc::new(AtomicBool::new(false)),
+            shutdown: Mutex::new(None),
+            finalization_gate: tokio::sync::Mutex::new(()),
             cancel_tokens: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -549,7 +601,12 @@ impl SyncOperationManager {
             flag.store(false, Ordering::Release);
             return None;
         }
-        self.pipeline_cancelled.store(false, Ordering::Release);
+        // Never reset a cancellation committed by Quit. This closes the
+        // prepare/create-operation race for already-admitted work.
+        self.pipeline_cancelled.store(
+            self.shutdown_committed.load(Ordering::Acquire),
+            Ordering::Release,
+        );
         Some(PipelineGuard(flag))
     }
 
@@ -570,33 +627,183 @@ impl SyncOperationManager {
         self.pipeline_active.load(Ordering::Acquire)
     }
 
-    /// Close work admission and report whether shutdown can proceed immediately.
-    /// A blocked attempt reopens admission so the user can finish or cancel sync.
-    pub async fn try_begin_idle_shutdown(&self) -> bool {
-        if self
-            .admission_closed
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return false;
+    /// Begin the serialized pre-commit launch fence. This closes admission but
+    /// deliberately does not cancel existing work until generation persistence succeeds.
+    pub fn begin_shutdown_fence(&self) -> ShutdownSnapshot {
+        self.admission_closed.store(true, Ordering::Release);
+        let mut shutdown = self.shutdown.lock().unwrap_or_else(|e| e.into_inner());
+        let replace = shutdown
+            .as_ref()
+            .is_none_or(|tracker| tracker.phase == ShutdownPhase::FenceFailed);
+        if replace {
+            *shutdown = Some(ShutdownTracker {
+                shutdown_id: uuid::Uuid::new_v4().to_string(),
+                phase: ShutdownPhase::Fencing,
+                requested_at: std::time::Instant::now(),
+                committed_at: None,
+                error_code: None,
+            });
         }
-        if self.has_active_operation().await {
-            self.admission_closed.store(false, Ordering::Release);
-            return false;
-        }
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-        while self.active_mutations.load(Ordering::Acquire) != 0 {
-            if tokio::time::Instant::now() >= deadline {
-                self.admission_closed.store(false, Ordering::Release);
-                return false;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        true
+        self.snapshot_from_tracker(
+            shutdown.as_ref().expect("shutdown tracker exists"),
+            0,
+            vec![],
+        )
     }
 
-    pub fn reopen_admission(&self) {
-        self.admission_closed.store(false, Ordering::Release);
+    pub fn fail_shutdown_fence(&self) {
+        let mut shutdown = self.shutdown.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(tracker) = shutdown.as_mut()
+            && tracker.committed_at.is_none()
+        {
+            tracker.phase = ShutdownPhase::FenceFailed;
+            tracker.error_code = Some("QUIT_PERSISTENCE_FAILED".into());
+            self.admission_closed.store(false, Ordering::Release);
+        }
+    }
+
+    pub async fn commit_shutdown(&self) {
+        // Serialize the cancellation decision against the final clean-manifest
+        // commit. Whichever acquires this gate first owns the outcome boundary.
+        let _finalization = self.finalization_gate.lock().await;
+        self.shutdown_committed.store(true, Ordering::Release);
+        self.pipeline_cancelled.store(true, Ordering::Release);
+        {
+            let mut shutdown = self.shutdown.lock().unwrap_or_else(|e| e.into_inner());
+            let tracker = shutdown.get_or_insert_with(|| ShutdownTracker {
+                shutdown_id: uuid::Uuid::new_v4().to_string(),
+                phase: ShutdownPhase::Cancelling,
+                requested_at: std::time::Instant::now(),
+                committed_at: None,
+                error_code: None,
+            });
+            tracker
+                .committed_at
+                .get_or_insert_with(std::time::Instant::now);
+            tracker.phase = ShutdownPhase::Cancelling;
+            tracker.error_code = None;
+        }
+        for token in self.cancel_tokens.read().await.values() {
+            token.store(true, Ordering::Release);
+        }
+        if let Some(tracker) = self
+            .shutdown
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            tracker.phase = ShutdownPhase::Draining;
+        }
+    }
+
+    pub async fn finalization_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.finalization_gate.lock().await
+    }
+
+    pub async fn wait_for_shutdown_drain(&self) {
+        loop {
+            if !self.pipeline_active.load(Ordering::Acquire)
+                && self.active_mutations.load(Ordering::Acquire) == 0
+            {
+                if let Some(tracker) = self
+                    .shutdown
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_mut()
+                {
+                    tracker.phase = ShutdownPhase::Finalizing;
+                }
+                return;
+            }
+            let deadline_exceeded = self
+                .shutdown
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .and_then(|tracker| tracker.committed_at)
+                .is_some_and(|started| {
+                    started.elapsed() >= Duration::from_millis(SHUTDOWN_DEADLINE_MS)
+                });
+            if deadline_exceeded
+                && let Some(tracker) = self
+                    .shutdown
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_mut()
+            {
+                tracker.phase = ShutdownPhase::Waiting;
+                tracker.error_code = Some("SHUTDOWN_TIMEOUT".into());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    pub async fn shutdown_snapshot(&self) -> Option<ShutdownSnapshot> {
+        let operations = self.get_all_operations().await;
+        let active: Vec<_> = operations
+            .into_iter()
+            .filter(|operation| operation.status == SyncStatus::Running)
+            .collect();
+        let mut blockers = Vec::new();
+        if self.pipeline_active.load(Ordering::Acquire) && active.is_empty() {
+            blockers.push(ShutdownBlocker {
+                operation_id: None,
+                device_id: None,
+                reason: "preparing",
+            });
+        }
+        blockers.extend(
+            active
+                .iter()
+                .take(32usize.saturating_sub(blockers.len()))
+                .map(|operation| ShutdownBlocker {
+                    operation_id: Some(operation.id.clone()),
+                    device_id: None,
+                    reason: "transfer",
+                }),
+        );
+        let pending = self.active_mutations.load(Ordering::Acquire);
+        if pending > 0 && blockers.len() < 32 {
+            blockers.push(ShutdownBlocker {
+                operation_id: None,
+                device_id: None,
+                reason: "mutation",
+            });
+        }
+        let total_blockers = active.len()
+            + usize::from(self.pipeline_active.load(Ordering::Acquire) && active.is_empty())
+            + usize::from(pending > 0);
+        let shutdown = self.shutdown.lock().unwrap_or_else(|e| e.into_inner());
+        shutdown
+            .as_ref()
+            .map(|tracker| self.snapshot_from_tracker(tracker, active.len(), blockers))
+            .map(|mut snapshot| {
+                snapshot.blockers_truncated = total_blockers > snapshot.blockers.len();
+                snapshot
+            })
+    }
+
+    fn snapshot_from_tracker(
+        &self,
+        tracker: &ShutdownTracker,
+        active_operation_count: usize,
+        blockers: Vec<ShutdownBlocker>,
+    ) -> ShutdownSnapshot {
+        let started = tracker.committed_at.unwrap_or(tracker.requested_at);
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        ShutdownSnapshot {
+            schema_version: 1,
+            shutdown_id: tracker.shutdown_id.clone(),
+            phase: tracker.phase,
+            elapsed_ms,
+            deadline_ms: SHUTDOWN_DEADLINE_MS,
+            deadline_exceeded: elapsed_ms >= SHUTDOWN_DEADLINE_MS,
+            active_operation_count,
+            pending_mutation_count: self.active_mutations.load(Ordering::Acquire),
+            blockers,
+            blockers_truncated: false,
+            error_code: tracker.error_code.clone(),
+        }
     }
 
     pub fn try_admit_mutation(&self) -> Option<MutationGuard> {
@@ -641,7 +848,12 @@ impl SyncOperationManager {
         drop(ops);
 
         let mut tokens = self.cancel_tokens.write().await;
-        tokens.insert(operation_id, Arc::new(AtomicBool::new(false)));
+        tokens.insert(
+            operation_id,
+            Arc::new(AtomicBool::new(
+                self.shutdown_committed.load(Ordering::Acquire),
+            )),
+        );
         operation
     }
 
@@ -1910,6 +2122,10 @@ pub async fn execute_provider_sync(
     let completed_bytes_arc = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     let manifest_snapshot = device_manager.get_current_device().await;
+    let operation_device_id = manifest_snapshot
+        .as_ref()
+        .map(|manifest| manifest.device_id.clone())
+        .ok_or_else(|| anyhow::anyhow!("No device manifest available for sync"))?;
     let owned_manifest_paths: HashSet<String> = manifest_snapshot
         .as_ref()
         .map(|manifest| {
@@ -2774,14 +2990,25 @@ pub async fn execute_provider_sync(
                 }
                 let id_to_replace = staged.add_item.jellyfin_id.clone();
                 if let Err(e) = device_manager
-                    .update_manifest(|m| {
+                    .update_manifest_for_device(&operation_device_id, |m| {
                         m.synced_items
                             .retain(|item| item.jellyfin_id != id_to_replace);
                         m.synced_items.push(synced_item);
                     })
                     .await
                 {
-                    eprintln!("[Sync] Warning: per-file manifest write failed: {}", e);
+                    errors.push(SyncFileError {
+                        jellyfin_id: staged.add_item.jellyfin_id.clone(),
+                        filename: staged.add_item.name.clone(),
+                        error_message: format!("Per-file manifest write failed: {e}"),
+                    });
+                    operation_manager
+                        .modify_operation(&operation_id, |operation| {
+                            operation.files_completed = operation.files_completed.saturating_sub(1);
+                        })
+                        .await;
+                    let _ = operation_manager.request_cancel(&operation_id).await;
+                    writer_failed = true;
                 }
             }
             Err(e) => {
@@ -2801,9 +3028,18 @@ pub async fn execute_provider_sync(
     let mut staging_dirs = Vec::new();
     let mut source_timings = Vec::new();
     for producer in producers {
-        let producer_outcome = producer
-            .await
-            .context("provider sync producer task failed")?;
+        let producer_outcome = match producer.await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                errors.push(SyncFileError {
+                    jellyfin_id: String::new(),
+                    filename: "provider-producer".into(),
+                    error_message: format!("Provider sync producer task failed: {error}"),
+                });
+                let _ = operation_manager.request_cancel(&operation_id).await;
+                continue;
+            }
+        };
         errors.extend(producer_outcome.errors);
         sync_warnings.extend(producer_outcome.warnings);
         producer_blocked += producer_outcome.blocked;
@@ -2891,12 +3127,22 @@ pub async fn execute_provider_sync(
                 }
                 let id_to_remove = delete_item.jellyfin_id.clone();
                 if let Err(e) = device_manager
-                    .update_manifest(|m| {
+                    .update_manifest_for_device(&operation_device_id, |m| {
                         m.synced_items.retain(|i| i.jellyfin_id != id_to_remove);
                     })
                     .await
                 {
-                    eprintln!("[Sync] Warning: per-delete manifest write failed: {}", e);
+                    errors.push(SyncFileError {
+                        jellyfin_id: delete_item.jellyfin_id.clone(),
+                        filename: delete_item.name.clone(),
+                        error_message: format!("Per-delete manifest write failed: {e}"),
+                    });
+                    operation_manager
+                        .modify_operation(&operation_id, |operation| {
+                            operation.files_completed = operation.files_completed.saturating_sub(1);
+                        })
+                        .await;
+                    let _ = operation_manager.request_cancel(&operation_id).await;
                 }
             }
             Err(_) if already_absent => {
@@ -2909,12 +3155,22 @@ pub async fn execute_provider_sync(
 
                 let id_to_remove = delete_item.jellyfin_id.clone();
                 if let Err(e) = device_manager
-                    .update_manifest(|m| {
+                    .update_manifest_for_device(&operation_device_id, |m| {
                         m.synced_items.retain(|i| i.jellyfin_id != id_to_remove);
                     })
                     .await
                 {
-                    eprintln!("[Sync] Warning: per-delete manifest write failed: {}", e);
+                    errors.push(SyncFileError {
+                        jellyfin_id: delete_item.jellyfin_id.clone(),
+                        filename: delete_item.name.clone(),
+                        error_message: format!("Per-delete manifest write failed: {e}"),
+                    });
+                    operation_manager
+                        .modify_operation(&operation_id, |operation| {
+                            operation.files_completed = operation.files_completed.saturating_sub(1);
+                        })
+                        .await;
+                    let _ = operation_manager.request_cancel(&operation_id).await;
                 }
             }
             Err(e) => errors.push(SyncFileError {
@@ -2929,7 +3185,9 @@ pub async fn execute_provider_sync(
         .strip_prefix(device_path)
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_default();
-    if let Err(e) = device_io.cleanup_empty_subdirs(&managed_subfolder).await {
+    if !operation_manager.is_cancelled(&operation_id).await
+        && let Err(e) = device_io.cleanup_empty_subdirs(&managed_subfolder).await
+    {
         eprintln!("[Sync] Warning: directory cleanup failed: {}", e);
     }
 
@@ -2959,17 +3217,24 @@ pub async fn execute_provider_sync(
         let synced_item = synced_items.last().unwrap().clone();
         let id_to_remove = id_change.old_jellyfin_id.clone();
         if let Err(e) = device_manager
-            .update_manifest(|m| {
+            .update_manifest_for_device(&operation_device_id, |m| {
                 m.synced_items.retain(|i| i.jellyfin_id != id_to_remove);
                 m.synced_items.push(synced_item);
             })
             .await
         {
-            eprintln!("[Sync] Warning: per-ID-change manifest write failed: {}", e);
+            errors.push(SyncFileError {
+                jellyfin_id: id_change.new_jellyfin_id.clone(),
+                filename: id_change.name.clone(),
+                error_message: format!("Per-ID-change manifest write failed: {e}"),
+            });
+            let _ = operation_manager.request_cancel(&operation_id).await;
         }
     }
 
-    if let Some(mut manifest_snapshot) = device_manager.get_current_device().await
+    if !operation_manager.is_cancelled(&operation_id).await
+        && let Some(mut manifest_snapshot) = device_manager.get_current_device().await
+        && manifest_snapshot.device_id == operation_device_id
         && (!delta.playlists.is_empty() || !manifest_snapshot.playlists.is_empty())
     {
         let warnings = generate_m3u_files(
@@ -2986,22 +3251,28 @@ pub async fn execute_provider_sync(
         }
         let updated_playlists = manifest_snapshot.playlists;
         if let Err(e) = device_manager
-            .update_manifest(|m| {
+            .update_manifest_for_device(&operation_device_id, |m| {
                 m.playlists = updated_playlists;
             })
             .await
         {
-            eprintln!("[M3U] Failed to persist manifest after M3U update: {}", e);
+            errors.push(SyncFileError {
+                jellyfin_id: String::new(),
+                filename: "playlists".into(),
+                error_message: format!("Failed to persist manifest after M3U update: {e}"),
+            });
+            let _ = operation_manager.request_cancel(&operation_id).await;
         }
     }
 
     let mut device_warnings = sync_warnings;
     device_warnings.extend(device_io.take_warnings().await);
     if let Err(e) = device_io.end_sync_job().await {
-        device_warnings.push(format!(
-            "[DeviceIO] Failed to end device sync job cleanly: {}",
-            e
-        ));
+        errors.push(SyncFileError {
+            jellyfin_id: String::new(),
+            filename: "device-cleanup".into(),
+            error_message: format!("Failed to end device sync job cleanly: {e}"),
+        });
     }
     if !device_warnings.is_empty()
         && let Some(mut operation) = operation_manager.get_operation(&operation_id).await
@@ -5409,6 +5680,13 @@ mod tests {
         let sync_io: Arc<dyn crate::device_io::DeviceIO> = blocking_io.clone();
         let operation_manager = Arc::new(SyncOperationManager::new());
         let operation_id = unique_operation_id("op-pipeline-cancel");
+        manager
+            .update_manifest(|manifest| {
+                manifest.dirty = true;
+                manifest.pending_item_ids = vec!["song-a".into(), "song-b".into()];
+            })
+            .await
+            .unwrap();
         operation_manager
             .create_operation(operation_id.clone(), 2)
             .await;
@@ -5459,6 +5737,17 @@ mod tests {
         assert!(errors.is_empty(), "{errors:?}");
         assert!(provider_staging_dirs_for_operation(&operation_id).is_empty());
         let manifest = manager.get_current_device().await.unwrap();
+        assert!(
+            manifest.dirty,
+            "cancelled sync must retain durable dirty evidence"
+        );
+        assert!(
+            manifest
+                .synced_items
+                .iter()
+                .any(|item| item.jellyfin_id == "song-a"),
+            "the in-flight verified write should be durably represented"
+        );
         assert!(
             manifest
                 .synced_items
@@ -7009,31 +7298,105 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idle_shutdown_closes_pipeline_admission() {
+    async fn shutdown_fence_closes_pipeline_admission_and_is_idempotent() {
         let manager = SyncOperationManager::new();
-        assert!(manager.try_begin_idle_shutdown().await);
+        let first = manager.begin_shutdown_fence();
+        let second = manager.begin_shutdown_fence();
+        assert_eq!(first.shutdown_id, second.shutdown_id);
+        assert_eq!(first.phase, ShutdownPhase::Fencing);
         assert!(manager.try_start_pipeline().is_none());
     }
 
     #[tokio::test]
-    async fn active_pipeline_blocks_quit_and_reopens_admission() {
+    async fn committed_shutdown_cancels_active_and_late_operations() {
         let manager = SyncOperationManager::new();
         let active = manager.try_start_pipeline().unwrap();
-        assert!(!manager.try_begin_idle_shutdown().await);
+        manager.begin_shutdown_fence();
+        manager.commit_shutdown().await;
+        assert!(manager.is_pipeline_cancelled());
+
+        let operation = manager.create_operation("late".into(), 1).await;
+        assert_eq!(operation.status, SyncStatus::Running);
+        assert!(manager.is_cancelled("late").await);
         drop(active);
-        assert!(manager.try_start_pipeline().is_some());
     }
 
     #[tokio::test]
-    async fn idle_quit_drains_mutation_and_stopping_rejects_new_mutations() {
+    async fn committed_shutdown_drains_mutation_and_pipeline_workers() {
         let manager = std::sync::Arc::new(SyncOperationManager::new());
         let mutation = manager.try_admit_mutation().unwrap();
+        let pipeline = manager.try_start_pipeline().unwrap();
+        manager.begin_shutdown_fence();
         let shutdown_manager = std::sync::Arc::clone(&manager);
-        let shutdown =
-            tokio::spawn(async move { shutdown_manager.try_begin_idle_shutdown().await });
+        let shutdown = tokio::spawn(async move {
+            shutdown_manager.commit_shutdown().await;
+            shutdown_manager.wait_for_shutdown_drain().await;
+        });
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!shutdown.is_finished());
         drop(mutation);
-        assert!(shutdown.await.unwrap());
+        drop(pipeline);
+        shutdown.await.unwrap();
         assert!(manager.try_admit_mutation().is_none());
+    }
+
+    #[tokio::test]
+    async fn reopening_after_failed_fence_restores_admission() {
+        let manager = SyncOperationManager::new();
+        manager.begin_shutdown_fence();
+        manager.fail_shutdown_fence();
+        assert!(manager.try_start_pipeline().is_some());
+        let snapshot = manager.shutdown_snapshot().await.unwrap();
+        assert_eq!(snapshot.phase, ShutdownPhase::FenceFailed);
+        assert_eq!(
+            snapshot.error_code.as_deref(),
+            Some("QUIT_PERSISTENCE_FAILED")
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancellation_is_serialized_with_final_commit_boundary() {
+        let manager = Arc::new(SyncOperationManager::new());
+        manager.create_operation("commit-race".into(), 1).await;
+        manager.begin_shutdown_fence();
+        let finalization = manager.finalization_guard().await;
+        let committing = {
+            let manager = Arc::clone(&manager);
+            tokio::spawn(async move { manager.commit_shutdown().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!manager.is_cancelled("commit-race").await);
+        drop(finalization);
+        committing.await.unwrap();
+        assert!(manager.is_cancelled("commit-race").await);
+    }
+
+    #[tokio::test]
+    async fn shutdown_deadline_publishes_waiting_without_abandoning_work() {
+        let manager = Arc::new(SyncOperationManager::new());
+        let pipeline = manager.try_start_pipeline().unwrap();
+        manager.begin_shutdown_fence();
+        manager.commit_shutdown().await;
+        manager
+            .shutdown
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_mut()
+            .unwrap()
+            .committed_at = Some(std::time::Instant::now() - Duration::from_secs(6));
+        let waiting = {
+            let manager = Arc::clone(&manager);
+            tokio::spawn(async move { manager.wait_for_shutdown_drain().await })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let snapshot = manager.shutdown_snapshot().await.unwrap();
+        assert_eq!(snapshot.phase, ShutdownPhase::Waiting);
+        assert_eq!(snapshot.error_code.as_deref(), Some("SHUTDOWN_TIMEOUT"));
+        assert!(
+            !waiting.is_finished(),
+            "deadline must not abandon active work"
+        );
+        drop(pipeline);
+        waiting.await.unwrap();
     }
 }

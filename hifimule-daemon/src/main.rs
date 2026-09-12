@@ -106,9 +106,9 @@ pub enum DaemonState {
 }
 
 enum CoreCommand {
-    CheckIdle(mpsc::Sender<bool>),
-    ReopenAdmission,
-    Shutdown,
+    BeginShutdown(mpsc::Sender<sync::ShutdownSnapshot>),
+    FenceFailed,
+    CommitShutdown,
 }
 
 pub struct DaemonCoreHandle {
@@ -275,9 +275,16 @@ pub fn start_daemon_core(
             let som_events = Arc::clone(&sync_operation_manager);
             let device_events = tokio::spawn(async move {
                 while let Some(event) = device_rx.recv().await {
-                    let Some(_event_admission) = som_events.try_admit_mutation() else {
-                        daemon_log!("Ignoring device mutation while daemon shutdown is committed");
-                        continue;
+                    // Removal/failure bookkeeping must continue after admission closes so a
+                    // disconnected operation cannot be promoted to success during shutdown.
+                    let _event_admission = if matches!(&event, device::DeviceEvent::Removed(_)) {
+                        None
+                    } else {
+                        let Some(guard) = som_events.try_admit_mutation() else {
+                            daemon_log!("Ignoring new device work while daemon shutdown is committed");
+                            continue;
+                        };
+                        Some(guard)
                     };
                     match event {
                         device::DeviceEvent::Detected { path, manifest, device_io } => {
@@ -413,11 +420,15 @@ pub fn start_daemon_core(
             while !shutdown_clone.load(Ordering::Relaxed) {
                 while let Ok(command) = command_rx.try_recv() {
                     match command {
-                        CoreCommand::CheckIdle(reply) => {
-                            let _ = reply.send(sync_operation_manager.try_begin_idle_shutdown().await);
+                        CoreCommand::BeginShutdown(reply) => {
+                            let _ = reply.send(sync_operation_manager.begin_shutdown_fence());
                         }
-                        CoreCommand::ReopenAdmission => sync_operation_manager.reopen_admission(),
-                        CoreCommand::Shutdown => shutdown_clone.store(true, Ordering::Release),
+                        CoreCommand::FenceFailed => sync_operation_manager.fail_shutdown_fence(),
+                        CoreCommand::CommitShutdown => {
+                            sync_operation_manager.commit_shutdown().await;
+                            sync_operation_manager.wait_for_shutdown_drain().await;
+                            shutdown_clone.store(true, Ordering::Release);
+                        }
                     }
                 }
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -472,7 +483,20 @@ fn reject_legacy_endpoint(deadline: Instant) -> Result<()> {
     match std::net::TcpStream::connect_timeout(&address, remaining.min(Duration::from_millis(300)))
     {
         Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => return Ok(()),
-        Err(_) => anyhow::bail!("LEGACY_ENDPOINT_OCCUPIED: cannot verify the legacy endpoint"),
+        Err(_) => {
+            // Some Windows firewall configurations time out a loopback connect
+            // even when no process owns the port. A successful exclusive bind is
+            // authoritative evidence that the legacy endpoint is available.
+            match std::net::TcpListener::bind(address) {
+                Ok(listener) => {
+                    drop(listener);
+                    return Ok(());
+                }
+                Err(_) => {
+                    anyhow::bail!("LEGACY_ENDPOINT_OCCUPIED: cannot verify the legacy endpoint")
+                }
+            }
+        }
         Ok(stream) => drop(stream),
     }
     let remaining = deadline.saturating_duration_since(Instant::now());
@@ -643,7 +667,9 @@ fn run_candidate(
     let command_tx = core.command_tx;
     let completed_rx = core.completed_rx;
     let mut lifecycle_owner = Some(lifecycle_owner);
-    let mut quit_reply: Option<mpsc::Receiver<bool>> = None;
+    let mut quit_reply: Option<mpsc::Receiver<sync::ShutdownSnapshot>> = None;
+    let mut fence_reply: Option<mpsc::Receiver<Result<u64, String>>> = None;
+    let shutdown_app_data = app_data.to_path_buf();
     let mut shutdown_pending = false;
     let mut shutdown_started: Option<Instant> = None;
     let mut shutdown_timeout_reported = false;
@@ -703,35 +729,52 @@ fn run_candidate(
 
         if let Some(reply) = quit_reply.as_ref() {
             match reply.try_recv() {
-                Ok(accepted) => {
+                Ok(_snapshot) => {
                     quit_reply = None;
-                    if !accepted {
-                        daemon_log!(
-                            "QUIT_BLOCKED_ACTIVE_SYNC: finish or cancel the active sync first"
-                        );
-                        if let Some(ref mut tray) = tray_icon {
-                            let _ = tray.set_tooltip(Some(&hifimule_i18n::t(
-                                "lifecycle.quit_blocked_active_sync",
-                            )));
-                        }
-                    } else {
-                        let generation_result = lifecycle_owner
-                            .as_ref()
-                            .expect("owner is held until shutdown completes")
-                            .advance_generation();
-                        if let Err(error) = generation_result {
-                            let _ = command_tx.send(CoreCommand::ReopenAdmission);
-                            daemon_log!("QUIT_PERSISTENCE_FAILED: {}", error);
-                        } else {
-                            rpc::set_lifecycle_stopping(true);
-                            let _ = command_tx.send(CoreCommand::Shutdown);
-                            shutdown_pending = true;
-                            shutdown_started = Some(Instant::now());
-                        }
-                    }
+                    rpc::set_lifecycle_stopping(true);
+                    let (reply_tx, reply_rx) = mpsc::channel();
+                    let app_data = shutdown_app_data.clone();
+                    thread::spawn(move || {
+                        let result = hifimule_lifecycle::advance_launch_generation(&app_data)
+                            .map_err(|error| error.to_string());
+                        let _ = reply_tx.send(result);
+                    });
+                    fence_reply = Some(reply_rx);
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     quit_reply = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
+        if let Some(reply) = fence_reply.as_ref() {
+            match reply.try_recv() {
+                Ok(Ok(_generation)) => {
+                    fence_reply = None;
+                    let _ = command_tx.send(CoreCommand::CommitShutdown);
+                    shutdown_pending = true;
+                    shutdown_started = Some(Instant::now());
+                    if let Some(ref mut tray) = tray_icon {
+                        let _ =
+                            tray.set_tooltip(Some(&hifimule_i18n::t("lifecycle.quitting_waiting")));
+                    }
+                }
+                Ok(Err(error)) => {
+                    fence_reply = None;
+                    let _ = command_tx.send(CoreCommand::FenceFailed);
+                    rpc::set_lifecycle_stopping(false);
+                    daemon_log!("QUIT_PERSISTENCE_FAILED: {}", error);
+                    if let Some(ref mut tray) = tray_icon {
+                        let _ = tray.set_tooltip(Some(&hifimule_i18n::t(
+                            "lifecycle.quit_persistence_failed",
+                        )));
+                    }
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    fence_reply = None;
+                    let _ = command_tx.send(CoreCommand::FenceFailed);
+                    rpc::set_lifecycle_stopping(false);
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
@@ -752,10 +795,15 @@ fn run_candidate(
             daemon_log!(
                 "SHUTDOWN_TIMEOUT: daemon teardown exceeded five seconds; ownership retained"
             );
+            if let Some(ref mut tray) = tray_icon {
+                let _ = tray.set_tooltip(Some(&hifimule_i18n::t("lifecycle.shutdown_delayed")));
+                let _ = tray.set_icon(Some((*icon_error).clone()));
+            }
         }
 
         // Handle state updates from tokio thread
-        if let Ok(state) = state_rx.try_recv()
+        if !shutdown_pending
+            && let Ok(state) = state_rx.try_recv()
             && let Some(ref mut tray) = tray_icon
         {
             match state {
@@ -795,9 +843,12 @@ fn run_candidate(
         // Handle menu events (Quit, Open UI)
         if let Ok(event) = menu_channel.try_recv() {
             if event.id == quit_item.id() {
-                if !shutdown_pending && quit_reply.is_none() {
+                if !shutdown_pending && quit_reply.is_none() && fence_reply.is_none() {
                     let (reply_tx, reply_rx) = mpsc::channel();
-                    if command_tx.send(CoreCommand::CheckIdle(reply_tx)).is_ok() {
+                    if command_tx
+                        .send(CoreCommand::BeginShutdown(reply_tx))
+                        .is_ok()
+                    {
                         quit_reply = Some(reply_rx);
                     }
                 }
@@ -1151,17 +1202,42 @@ async fn run_auto_sync_via_provider(
         .chain(delta.id_changes.iter().map(|c| c.new_jellyfin_id.clone()))
         .collect();
 
-    device_manager
-        .update_manifest(|m| {
+    if let Err(error) = device_manager
+        .update_manifest_for_device(&manifest.device_id, |m| {
             m.dirty = true;
             m.pending_item_ids = pending_ids;
         })
-        .await?;
+        .await
+    {
+        if let Some(mut operation) = sync_op_manager.get_operation(&operation_id).await {
+            operation.status = sync::SyncStatus::Failed;
+            operation.errors.push(sync::SyncFileError {
+                jellyfin_id: String::new(),
+                filename: ".hifimule.json".into(),
+                error_message: format!("Failed to mark manifest dirty: {error}"),
+            });
+            sync_op_manager
+                .update_operation(&operation_id, operation)
+                .await;
+        }
+        return Err(error);
+    }
 
     let (current_manifest, device_io) = match device_manager.get_manifest_and_io().await {
         Some(pair) => pair,
         None => {
             daemon_log!("[AutoSync] Device disconnected before sync started — aborting");
+            if let Some(mut operation) = sync_op_manager.get_operation(&operation_id).await {
+                operation.status = sync::SyncStatus::Failed;
+                operation.errors.push(sync::SyncFileError {
+                    jellyfin_id: String::new(),
+                    filename: "auto_sync_provider".into(),
+                    error_message: "Device disconnected before sync started".into(),
+                });
+                sync_op_manager
+                    .update_operation(&operation_id, operation)
+                    .await;
+            }
             let _ = state_tx.send(DaemonState::Error);
             return Ok(());
         }
@@ -1203,40 +1279,45 @@ async fn run_auto_sync_via_provider(
 
     match result {
         Ok((_synced_items, errors)) => {
-            if errors.is_empty() && sync_op_manager.is_cancelled(&operation_id).await {
-                if let Some(mut operation) = sync_op_manager.get_operation(&operation_id).await {
-                    operation.status = sync::SyncStatus::Cancelled;
-                    sync_op_manager
-                        .update_operation(&operation_id, operation)
-                        .await;
-                }
-                let _ = state_tx.send(DaemonState::Idle);
-                return Ok(());
-            }
-
-            if let Err(e) = device_manager
-                .update_manifest(|m| {
-                    m.dirty = false;
-                    m.pending_item_ids = vec![];
-                })
-                .await
+            let finalization = sync_op_manager.finalization_guard().await;
+            let cancelled = sync_op_manager.is_cancelled(&operation_id).await;
+            let mut final_errors = errors;
+            if !cancelled
+                && final_errors.is_empty()
+                && let Err(e) = device_manager
+                    .update_manifest_for_device(&current_manifest.device_id, |m| {
+                        m.dirty = false;
+                        m.pending_item_ids = vec![];
+                    })
+                    .await
             {
-                daemon_log!("[AutoSync] Failed to clear dirty flag: {}", e);
+                final_errors.push(sync::SyncFileError {
+                    jellyfin_id: String::new(),
+                    filename: ".hifimule.json".into(),
+                    error_message: format!("Failed to commit final manifest: {e}"),
+                });
             }
+            drop(finalization);
 
+            let already_failed = sync_op_manager
+                .get_operation(&operation_id)
+                .await
+                .is_some_and(|operation| operation.status == sync::SyncStatus::Failed);
             if let Some(mut operation) = sync_op_manager.get_operation(&operation_id).await {
-                operation.status = if errors.is_empty() {
-                    sync::SyncStatus::Complete
-                } else {
+                operation.status = if already_failed || !final_errors.is_empty() {
                     sync::SyncStatus::Failed
+                } else if cancelled {
+                    sync::SyncStatus::Cancelled
+                } else {
+                    sync::SyncStatus::Complete
                 };
-                operation.errors = errors.clone();
+                operation.errors.extend(final_errors.clone());
                 sync_op_manager
                     .update_operation(&operation_id, operation)
                     .await;
             }
 
-            if errors.is_empty() {
+            if !already_failed && !cancelled && final_errors.is_empty() {
                 daemon_log!("[AutoSync] Sync completed successfully");
                 drop(tokio::task::spawn_blocking(|| {
                     if let Err(e) = notify_rust::Notification::new()
@@ -1248,9 +1329,12 @@ async fn run_auto_sync_via_provider(
                     }
                 }));
                 let _ = state_tx.send(DaemonState::Idle);
-            } else {
-                daemon_log!("[AutoSync] Sync completed with {} errors", errors.len());
-                let error_msg = format!("Sync completed with {} error(s)", errors.len());
+            } else if !cancelled {
+                daemon_log!(
+                    "[AutoSync] Sync interrupted with {} errors",
+                    final_errors.len()
+                );
+                let error_msg = format!("Sync failed with {} error(s)", final_errors.len());
                 drop(tokio::task::spawn_blocking(move || {
                     if let Err(e) = notify_rust::Notification::new()
                         .summary("HifiMule")
@@ -1261,6 +1345,9 @@ async fn run_auto_sync_via_provider(
                     }
                 }));
                 let _ = state_tx.send(DaemonState::Error);
+            } else {
+                daemon_log!("[AutoSync] Sync cancelled; recovery evidence retained");
+                let _ = state_tx.send(DaemonState::Idle);
             }
         }
         Err(e) => {
