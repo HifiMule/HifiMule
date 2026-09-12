@@ -98,6 +98,36 @@ impl Database {
             .map_err(Into::into)
     }
 
+    pub fn playback_occurrence(
+        &self,
+        session_id: &str,
+        occurrence_id: &str,
+    ) -> Result<Option<Occurrence>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.query_row(
+            "SELECT occurrence_id,ordinal,server_id,track_id FROM playback_occurrences WHERE session_id=?1 AND occurrence_id=?2",
+            params![session_id, occurrence_id],
+            occurrence_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn playback_next_ordinal(&self, session_id: &str) -> Result<u64> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let last: Option<i64> = conn.query_row(
+            "SELECT MAX(ordinal) FROM playback_occurrences WHERE session_id=?1",
+            [session_id],
+            |row| row.get(0),
+        )?;
+        match last {
+            Some(value) => (value as u64)
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("playback ordinal overflow")),
+            None => Ok(0),
+        }
+    }
+
     pub fn persist_playback_structure(
         &self,
         session: &PersistedSession,
@@ -126,6 +156,51 @@ impl Database {
         Ok(())
     }
 
+    pub fn append_playback_occurrences(
+        &self,
+        session: &PersistedSession,
+        occurrences: &[Occurrence],
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction()?;
+        update_session(&tx, session)?;
+        insert_occurrences(&tx, &session.session_id, occurrences)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn select_playback_current(&self, session: &PersistedSession) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction()?;
+        let current = session
+            .current_occurrence_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("current occurrence is required"))?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM playback_occurrences WHERE session_id=?1 AND occurrence_id=?2)",
+            params![session.session_id, current],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(anyhow!("selected playback occurrence is absent"));
+        }
+        update_session(&tx, session)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn clear_playback_session(&self, session: &PersistedSession) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM playback_occurrences WHERE session_id=?1",
+            [&session.session_id],
+        )?;
+        update_session(&tx, session)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn checkpoint_playback_position(
         &self,
         session_id: &str,
@@ -139,6 +214,47 @@ impl Database {
         }
         Ok(())
     }
+}
+
+fn occurrence_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Occurrence> {
+    Ok(Occurrence {
+        occurrence_id: row.get(0)?,
+        ordinal: row.get::<_, i64>(1)? as u64,
+        source: TrackSource {
+            server_id: row.get(2)?,
+            track_id: row.get(3)?,
+        },
+        availability: SourceAvailability::Unknown,
+    })
+}
+
+fn update_session(tx: &rusqlite::Transaction<'_>, session: &PersistedSession) -> Result<()> {
+    let changed = tx.execute(
+        "UPDATE playback_sessions SET session_id=?1,queue_revision=?2,checkpoint_sequence=?3,transport_state=?4,current_occurrence_id=?5,position_ms=?6 WHERE singleton_id=1",
+        params![session.session_id, session.queue_revision as i64, session.checkpoint_sequence as i64, state_name(session.state), session.current_occurrence_id, session.position_ms as i64],
+    )?;
+    if changed != 1 {
+        return Err(anyhow!("playback session is absent"));
+    }
+    Ok(())
+}
+
+fn insert_occurrences(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    occurrences: &[Occurrence],
+) -> Result<()> {
+    let mut stmt = tx.prepare("INSERT INTO playback_occurrences(session_id,occurrence_id,ordinal,server_id,track_id) VALUES(?1,?2,?3,?4,?5)")?;
+    for occurrence in occurrences {
+        stmt.execute(params![
+            session_id,
+            occurrence.occurrence_id,
+            occurrence.ordinal as i64,
+            occurrence.source.server_id,
+            occurrence.source.track_id
+        ])?;
+    }
+    Ok(())
 }
 
 fn state_name(state: TransportState) -> &'static str {

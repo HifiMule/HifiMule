@@ -595,66 +595,73 @@ fn apply_inner(i: &mut Inner, p: &ApplySessionParams) -> PResult<ApplyResult> {
         ));
     }
     let mut next_session = i.session.clone();
-    let mut all =
-        i.db.playback_page(&i.session.session_id, None, usize::MAX)
-            .map_err(storage)?;
     let mut assigned = Vec::new();
-    let mut structural = false;
-    match &p.operation {
-        SessionOperation::ReplaceQueue { sources } => {
-            validate_sources(sources)?;
-            all.clear();
-            assigned = make_occurrences(sources, 0);
-            all.extend(assigned.clone());
-            next_session.current_occurrence_id = all.first().map(|o| o.occurrence_id.clone());
-            next_session.position_ms = 0;
-            structural = true;
-        }
-        SessionOperation::AppendQueue { sources } => {
-            validate_sources(sources)?;
-            assigned = make_occurrences(sources, all.len() as u64);
-            let was_empty = all.is_empty();
-            all.extend(assigned.clone());
-            if was_empty {
-                next_session.current_occurrence_id = all.first().map(|o| o.occurrence_id.clone());
-                next_session.position_ms = 0;
-            }
-            structural = true;
-        }
-        SessionOperation::SelectCurrent { occurrence_id } => {
-            if !all.iter().any(|o| &o.occurrence_id == occurrence_id) {
-                return Err(PlaybackError::invalid(
-                    "INVALID_SESSION",
-                    "selected occurrence is absent",
-                ));
-            }
-            next_session.current_occurrence_id = Some(occurrence_id.clone());
-            next_session.position_ms = 0;
-        }
-        SessionOperation::Clear => {
-            all.clear();
-            next_session.current_occurrence_id = None;
-            next_session.position_ms = 0;
-            structural = true;
-        }
-    }
-    if structural {
-        next_session.queue_revision = next_session
-            .queue_revision
-            .checked_add(1)
-            .ok_or_else(|| PlaybackError::invalid("INVALID_SESSION", "queue revision overflow"))?;
-    }
-    next_session.state = if all.is_empty() {
-        TransportState::Idle
-    } else {
-        TransportState::Paused
-    };
     let next_sequence = i
         .state_sequence
         .checked_add(1)
         .ok_or_else(|| PlaybackError::invalid("INVALID_SESSION", "state sequence overflow"))?;
-    i.db.persist_playback_structure(&next_session, &all)
-        .map_err(storage)?;
+    match &p.operation {
+        SessionOperation::ReplaceQueue { sources } => {
+            validate_sources(sources)?;
+            assigned = make_occurrences(sources, 0);
+            next_session.current_occurrence_id = assigned.first().map(|o| o.occurrence_id.clone());
+            next_session.position_ms = 0;
+            next_session.queue_revision =
+                next_session.queue_revision.checked_add(1).ok_or_else(|| {
+                    PlaybackError::invalid("INVALID_SESSION", "queue revision overflow")
+                })?;
+            next_session.state = if assigned.is_empty() {
+                TransportState::Idle
+            } else {
+                TransportState::Paused
+            };
+            i.db.persist_playback_structure(&next_session, &assigned)
+                .map_err(storage)?;
+        }
+        SessionOperation::AppendQueue { sources } => {
+            validate_sources(sources)?;
+            let next_ordinal =
+                i.db.playback_next_ordinal(&i.session.session_id)
+                    .map_err(storage)?;
+            assigned = make_occurrences(sources, next_ordinal);
+            let was_empty = next_session.current_occurrence_id.is_none();
+            if was_empty {
+                next_session.current_occurrence_id =
+                    assigned.first().map(|o| o.occurrence_id.clone());
+                next_session.position_ms = 0;
+            }
+            next_session.queue_revision =
+                next_session.queue_revision.checked_add(1).ok_or_else(|| {
+                    PlaybackError::invalid("INVALID_SESSION", "queue revision overflow")
+                })?;
+            next_session.state = if next_session.current_occurrence_id.is_none() {
+                TransportState::Idle
+            } else {
+                TransportState::Paused
+            };
+            i.db.append_playback_occurrences(&next_session, &assigned)
+                .map_err(storage)?;
+        }
+        SessionOperation::SelectCurrent { occurrence_id } => {
+            next_session.current_occurrence_id = Some(occurrence_id.clone());
+            next_session.position_ms = 0;
+            next_session.state = TransportState::Paused;
+            i.db.select_playback_current(&next_session).map_err(|_| {
+                PlaybackError::invalid("INVALID_SESSION", "selected occurrence is absent")
+            })?;
+        }
+        SessionOperation::Clear => {
+            next_session.current_occurrence_id = None;
+            next_session.position_ms = 0;
+            next_session.queue_revision =
+                next_session.queue_revision.checked_add(1).ok_or_else(|| {
+                    PlaybackError::invalid("INVALID_SESSION", "queue revision overflow")
+                })?;
+            next_session.state = TransportState::Idle;
+            i.db.clear_playback_session(&next_session)
+                .map_err(storage)?;
+        }
+    }
     i.session = next_session;
     i.state_sequence = next_sequence;
     i.generation_id = Uuid::new_v4().to_string();
@@ -706,10 +713,8 @@ fn snapshot(i: &Inner) -> PResult<SessionSnapshot> {
     };
     decorate_availability(&i.db, &mut rows)?;
     let mut current = if let Some(id) = &i.session.current_occurrence_id {
-        i.db.playback_page(&i.session.session_id, None, usize::MAX)
+        i.db.playback_occurrence(&i.session.session_id, id)
             .map_err(storage)?
-            .into_iter()
-            .find(|o| &o.occurrence_id == id)
     } else {
         None
     };
@@ -988,10 +993,8 @@ mod tests {
             .unwrap();
         drop(db);
 
-        let restored = PlaybackSession::restore(
-            Arc::new(Database::new(path).unwrap()),
-            "new-instance".into(),
-        );
+        let reopened = Arc::new(Database::new(path).unwrap());
+        let restored = PlaybackSession::restore(reopened.clone(), "new-instance".into());
         let mut snapshot = restored.snapshot().unwrap();
         assert_eq!(snapshot.state, TransportState::Paused);
         assert_eq!(snapshot.position_ms, 9876);
@@ -1011,6 +1014,49 @@ mod tests {
             snapshot.next_cursor = page.next_cursor;
         }
         assert_eq!(seen, 10_000);
+
+        let before_append = reopened.conn.lock().unwrap().total_changes();
+        let append_sources = (0..200)
+            .map(|ordinal| TrackSource {
+                server_id: "offline".into(),
+                track_id: format!("appended-{ordinal}"),
+            })
+            .collect();
+        restored
+            .apply(params(
+                &snapshot,
+                SessionOperation::AppendQueue {
+                    sources: append_sources,
+                },
+            ))
+            .unwrap();
+        let after_append = reopened.conn.lock().unwrap().total_changes();
+        assert_eq!(
+            after_append - before_append,
+            201,
+            "append must update one session row and insert only its bounded batch"
+        );
+
+        let snapshot_after_append = restored.snapshot().unwrap();
+        assert_eq!(snapshot_after_append.total_occurrence_count, 10_200);
+        let last_original_id = occurrences[9999].occurrence_id.clone();
+        let before_select = reopened.conn.lock().unwrap().total_changes();
+        restored
+            .apply(params(
+                &snapshot_after_append,
+                SessionOperation::SelectCurrent {
+                    occurrence_id: last_original_id.clone(),
+                },
+            ))
+            .unwrap();
+        let after_select = reopened.conn.lock().unwrap().total_changes();
+        assert_eq!(after_select - before_select, 1);
+        let selected = restored.snapshot().unwrap();
+        assert_eq!(selected.current.unwrap().occurrence_id, last_original_id);
+        assert_eq!(
+            selected.queue_revision, snapshot_after_append.queue_revision,
+            "current selection must not revise the queue"
+        );
         occurrences.clear();
     }
 

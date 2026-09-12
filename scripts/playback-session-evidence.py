@@ -20,6 +20,7 @@ FIXTURES = [
     "generation-fenced position checkpoint",
     "revision-bound bounded paging",
     "10,000-occurrence real-file restart",
+    "bounded append and indexed last-occurrence selection",
     "unsupported-version evidence preservation",
     "64-request mailbox saturation and retryable overflow",
     "shutdown control under saturation and dropped-caller admission",
