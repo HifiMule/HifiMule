@@ -758,3 +758,8 @@ Always includes at least the built-in `"passthrough"` profile (no transcoding).
 `GET /jellyfin/image/:id[?maxHeight=N&quality=N]`
 
 Proxies cover art for the active provider. Jellyfin uses `GET /Items/:id/Images/Primary`; Subsonic/OpenSubsonic uses provider `cover_art_url`. Returns the image with its original content-type header. Used by the Rust-side `image_proxy` Tauri command, not directly by the WebView.
+# Playback session reconnect contract
+
+Playback session state is owned by the daemon and exposed through authenticated JSON-RPC methods `playback.getSession`, `playback.listOccurrences`, `playback.applySession`, and `playback.retryRestore`. Clients reconnect by calling `playback.getSession` with `schemaVersion: 1` and replacing their local presentation from the returned authoritative snapshot. They must not replay mutations after an instance change.
+
+Queue revisions and state sequences are canonical decimal strings. Occurrence pages are bounded (100 by default, 200 maximum). A page cursor is tied to its session and queue revision; `INVALID_CURSOR`, `SESSION_MISMATCH`, or `QUEUE_REVISION_CONFLICT` means the client must discard that cursor, refresh the snapshot, and fetch pages again. Source availability is metadata and does not remove offline queue entries.

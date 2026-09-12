@@ -101,6 +101,7 @@ pub struct AppState {
     pub sync_operation_manager: Arc<crate::sync::SyncOperationManager>,
     pub last_scrobbler_result: Arc<tokio::sync::RwLock<Option<crate::scrobbler::ScrobblerResult>>>,
     pub state_tx: std::sync::mpsc::Sender<crate::DaemonState>,
+    pub playback: crate::playback::PlaybackSession,
 }
 
 static LIFECYCLE_IDENTITY: OnceLock<hifimule_lifecycle::OwnerDescriptor> = OnceLock::new();
@@ -207,6 +208,7 @@ pub async fn run_server(
     last_scrobbler_result: Arc<tokio::sync::RwLock<Option<crate::scrobbler::ScrobblerResult>>>,
     state_tx: std::sync::mpsc::Sender<crate::DaemonState>,
     sync_operation_manager: Arc<crate::sync::SyncOperationManager>,
+    playback: crate::playback::PlaybackSession,
 ) -> Result<(), String> {
     let token = Arc::new(config.descriptor.token.clone());
     let _ = LIFECYCLE_IDENTITY.set(config.descriptor);
@@ -222,6 +224,7 @@ pub async fn run_server(
         sync_operation_manager,
         last_scrobbler_result,
         state_tx,
+        playback,
     });
     // Startup (Story 2.11): migrate a legacy single-server vault to the UUID-keyed
     // multi-server vault (if needed), then load server rows into the manager.
@@ -372,6 +375,12 @@ async fn handler(
         "device.select" => handle_device_select(&state, payload.params).await,
         "server.probe" => handle_server_probe(payload.params).await,
         "daemon.health" => Ok(daemon_health_result(&state.sync_operation_manager).await),
+        "playback.getSession" => handle_playback_get_session(&state, payload.params).await,
+        "playback.listOccurrences" => {
+            handle_playback_list_occurrences(&state, payload.params).await
+        }
+        "playback.applySession" => handle_playback_apply_session(&state, payload.params).await,
+        "playback.retryRestore" => handle_playback_retry_restore(&state, payload.params).await,
         "daemon.retryQuit" => {
             if state.sync_operation_manager.request_quit_retry() {
                 Ok(serde_json::json!({ "data": { "accepted": true } }))
@@ -468,6 +477,8 @@ fn is_mutating_method(method: &str) -> bool {
             | "device.set_transcoding_profile"
             | "device.select"
             | "playlist.create"
+            | "playback.applySession"
+            | "playback.retryRestore"
             | "playlist.addItems"
             | "playlist.addTracks"
             | "playlist.removeTracks"
@@ -475,6 +486,117 @@ fn is_mutating_method(method: &str) -> bool {
             | "playlist.rename"
             | "playlist.reorder"
     )
+}
+
+fn playback_error(error: crate::playback::session::PlaybackError) -> JsonRpcError {
+    JsonRpcError {
+        code: if error.conflict {
+            409
+        } else if error.code == "PERSISTENCE_FAILED" {
+            -32603
+        } else {
+            ERR_INVALID_PARAMS
+        },
+        message: error.message.into(),
+        data: Some(serde_json::json!({ "code": error.code })),
+    }
+}
+
+async fn handle_playback_get_session(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Params {
+        schema_version: u32,
+    }
+    let p: Params =
+        serde_json::from_value(params.unwrap_or(Value::Null)).map_err(|_| JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Invalid playback.getSession parameters".into(),
+            data: Some(serde_json::json!({"code":"INVALID_SESSION"})),
+        })?;
+    if p.schema_version != crate::playback::model::SCHEMA_VERSION {
+        return Err(playback_error(crate::playback::session::PlaybackError {
+            code: "UNSUPPORTED_PLAYBACK_VERSION",
+            message: "unsupported playback schema version",
+            conflict: false,
+        }));
+    }
+    state
+        .playback
+        .snapshot()
+        .map(|data| serde_json::json!({"data":data}))
+        .map_err(playback_error)
+}
+
+async fn handle_playback_list_occurrences(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let p = serde_json::from_value::<crate::playback::model::ListOccurrencesParams>(
+        params.unwrap_or(Value::Null),
+    )
+    .map_err(|_| JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Invalid playback.listOccurrences parameters".into(),
+        data: Some(serde_json::json!({"code":"INVALID_CURSOR"})),
+    })?;
+    state
+        .playback
+        .list(p)
+        .map(|data| serde_json::json!({"data":data}))
+        .map_err(playback_error)
+}
+
+async fn handle_playback_apply_session(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let p = serde_json::from_value::<crate::playback::model::ApplySessionParams>(
+        params.unwrap_or(Value::Null),
+    )
+    .map_err(|_| JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Invalid playback.applySession parameters".into(),
+        data: Some(serde_json::json!({"code":"INVALID_SESSION"})),
+    })?;
+    state
+        .playback
+        .apply(p)
+        .map(|data| serde_json::json!({"data":data}))
+        .map_err(playback_error)
+}
+
+async fn handle_playback_retry_restore(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Params {
+        schema_version: u32,
+    }
+    let p = serde_json::from_value::<Params>(params.unwrap_or(Value::Null)).map_err(|_| {
+        JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Invalid playback.retryRestore parameters".into(),
+            data: Some(serde_json::json!({"code":"INVALID_SESSION"})),
+        }
+    })?;
+    if p.schema_version != crate::playback::model::SCHEMA_VERSION {
+        return Err(playback_error(crate::playback::session::PlaybackError {
+            code: "UNSUPPORTED_PLAYBACK_VERSION",
+            message: "unsupported playback schema version",
+            conflict: false,
+        }));
+    }
+    state
+        .playback
+        .retry_restore()
+        .map(|data| serde_json::json!({"data":data}))
+        .map_err(playback_error)
 }
 
 async fn handle_server_probe(params: Option<Value>) -> Result<Value, JsonRpcError> {
@@ -7139,6 +7261,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         })
     }
 
@@ -9387,6 +9513,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         });
 
         let params = json!({
@@ -9416,6 +9546,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         });
 
         let request = JsonRpcRequest {
@@ -9446,6 +9580,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         });
 
         let params = json!({
@@ -9486,6 +9624,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         });
 
         // We can't easily mock the network call inside the RPC handler without a mock server or traits,
@@ -9530,6 +9672,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         });
 
         // Test missing params
@@ -9663,6 +9809,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         });
 
         // Test with specific parameters including includeItemTypes
@@ -9709,6 +9859,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         });
 
         // Test missing params
@@ -9750,6 +9904,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         });
 
         // No device connected — should return error
@@ -9924,6 +10082,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         });
 
         let result = handle_sync_get_device_status_map(&state).await.unwrap();
@@ -10015,6 +10177,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         };
 
         let result = handle_sync_get_device_status_map(&state).await.unwrap();
@@ -10042,6 +10208,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         };
         let result = handle_sync_get_resume_state(&state).await.unwrap();
         assert_eq!(result["isDirty"], false);
@@ -10093,6 +10263,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         };
         let result = handle_sync_get_resume_state(&state).await.unwrap();
         assert_eq!(result["isDirty"], false);
@@ -10149,6 +10323,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         };
         let result = handle_sync_get_resume_state(&state).await.unwrap();
         assert_eq!(result["isDirty"], true);
@@ -10176,6 +10354,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         };
         let result = handle_get_daemon_state(&state).await.unwrap();
         assert_eq!(
@@ -10224,6 +10406,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         };
         let result2 = handle_get_daemon_state(&state2).await.unwrap();
         assert_eq!(
@@ -10251,6 +10437,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         };
         let result = handle_get_daemon_state(&state).await.unwrap();
         assert!(
@@ -10362,6 +10552,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         });
 
         let request = JsonRpcRequest {
@@ -10468,6 +10662,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         });
 
         // Make request
@@ -10517,6 +10715,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         };
 
         // No params → ERR_INVALID_PARAMS
@@ -10551,6 +10753,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         };
 
         // No unrecognized device registered → ERR_INVALID_PARAMS (caught before reaching storage)
@@ -10587,6 +10793,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         };
 
         // Initialize with empty folderPath (device root)
@@ -10652,6 +10862,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         };
 
         // Initialize with a subfolder
@@ -10734,6 +10948,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         };
 
         // Enable auto-sync via RPC
@@ -10826,6 +11044,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         };
 
         let result = handle_get_daemon_state(&state).await.unwrap();
@@ -10853,6 +11075,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         };
         let result = handle_get_daemon_state(&state).await.unwrap();
         assert_eq!(
@@ -10909,6 +11135,10 @@ mod tests {
             sync_operation_manager: manager,
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         };
         let result2 = handle_get_daemon_state(&state2).await.unwrap();
         assert_eq!(
@@ -10935,6 +11165,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         })
     }
 
@@ -11101,6 +11335,10 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
+            playback: crate::playback::PlaybackSession::restore(
+                Arc::new(crate::db::Database::memory().unwrap()),
+                "test-instance".into(),
+            ),
         });
 
         let request = JsonRpcRequest {
@@ -11154,6 +11392,8 @@ mod tests {
         let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let task_shutdown = shutdown.clone();
+        let playback =
+            crate::playback::PlaybackSession::restore(db.clone(), descriptor.instance_id.clone());
         let task = tokio::spawn(run_server(
             RpcServerConfig {
                 listener,
@@ -11166,6 +11406,7 @@ mod tests {
             Arc::new(tokio::sync::RwLock::new(None)),
             std::sync::mpsc::channel::<crate::DaemonState>().0,
             Arc::new(crate::sync::SyncOperationManager::new()),
+            playback,
         ));
         tokio::task::spawn_blocking(move || {
             ready_rx.recv_timeout(std::time::Duration::from_secs(2))
@@ -11205,6 +11446,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(authorized.status(), http::StatusCode::OK);
+        let playback_body = json!({"jsonrpc":"2.0","method":"playback.getSession","params":{"schemaVersion":1},"id":2});
+        let playback_response = client
+            .post(format!("http://127.0.0.1:{port}"))
+            .bearer_auth(&descriptor.token)
+            .json(&playback_body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(playback_response.status(), http::StatusCode::OK);
+        let playback_json: Value = playback_response.json().await.unwrap();
+        assert_eq!(playback_json["result"]["data"]["schemaVersion"], 1);
+        assert_eq!(
+            playback_json["result"]["data"]["instanceId"],
+            descriptor.instance_id
+        );
         shutdown.store(true, std::sync::atomic::Ordering::Release);
         task.await.unwrap().unwrap();
     }

@@ -107,7 +107,7 @@ pub fn default_server_icon(server_type: &str) -> &'static str {
 }
 
 pub struct Database {
-    conn: Arc<Mutex<Connection>>,
+    pub(crate) conn: Arc<Mutex<Connection>>,
 }
 
 impl Database {

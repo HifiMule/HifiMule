@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-09-12  # Story 15.1: 12 review patches applied; Story 15.2: 8 review patches applied; Story 15.3: ready-for-dev
+last_updated: 2026-09-12  # Story 15.1: 12 review patches applied; Story 15.2: 8 review patches applied; Story 15.3: in-progress
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system
@@ -186,7 +186,7 @@ development_status:
   epic-15: in-progress
   15-1-close-and-reopen-the-ui-without-restarting-the-daemon: done
   15-2-quit-safely-while-a-device-sync-is-running: done
-  15-3-preserve-and-restore-a-paused-listening-session: ready-for-dev
+  15-3-preserve-and-restore-a-paused-listening-session: in-progress
   15-4-play-a-selected-library-track-through-the-daemon: backlog
   15-5-choose-an-audio-output-and-recover-safely-from-disconnection: backlog
   15-6-control-playback-through-the-operating-system-with-the-window-closed: backlog

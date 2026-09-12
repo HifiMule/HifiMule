@@ -82,6 +82,7 @@ pub mod device_io;
 #[allow(dead_code)]
 mod domain;
 mod paths;
+mod playback;
 #[allow(dead_code)]
 mod providers;
 mod rpc;
@@ -209,6 +210,10 @@ pub fn start_daemon_core(
                     return None;
                 }
             };
+            let playback = playback::PlaybackSession::restore(
+                Arc::clone(&db),
+                descriptor.instance_id.clone(),
+            );
 
             // Seed default device-profiles.json if not present
             let profiles_default = include_bytes!("../assets/device-profiles.json");
@@ -257,6 +262,7 @@ pub fn start_daemon_core(
             let scrobbler_result_rpc = Arc::clone(&last_scrobbler_result);
             let state_tx_rpc = state_tx.clone();
             let som_rpc = Arc::clone(&sync_operation_manager);
+            let playback_rpc = playback.clone();
             let rpc_shutdown = Arc::new(AtomicBool::new(false));
             let rpc_shutdown_server = Arc::clone(&rpc_shutdown);
             // Keep authenticated health on a separate runtime until the device/core
@@ -268,7 +274,7 @@ pub fn start_daemon_core(
                 };
                 if let Err(error) = rpc_runtime.block_on(rpc::run_server(
                     rpc::RpcServerConfig { listener, descriptor, ready_tx, shutdown: rpc_shutdown_server },
-                    db_clone, dm_clone, scrobbler_result_rpc, state_tx_rpc, som_rpc,
+                    db_clone, dm_clone, scrobbler_result_rpc, state_tx_rpc, som_rpc, playback_rpc,
                 )) { daemon_log!("RPC server stopped with error: {}", error); }
             });
 
@@ -424,7 +430,15 @@ pub fn start_daemon_core(
                 while let Ok(command) = command_rx.try_recv() {
                     match command {
                         CoreCommand::BeginShutdown(reply) => {
-                            let _ = reply.send(sync_operation_manager.begin_shutdown_fence());
+                            let mut snapshot = sync_operation_manager.begin_shutdown_fence();
+                            if playback.final_checkpoint().is_err() {
+                                sync_operation_manager.fail_shutdown_fence();
+                                snapshot = sync_operation_manager
+                                    .shutdown_snapshot()
+                                    .await
+                                    .expect("failed shutdown fence has a snapshot");
+                            }
+                            let _ = reply.send(snapshot);
                         }
                         CoreCommand::FenceFailed => sync_operation_manager.fail_shutdown_fence(),
                         CoreCommand::CommitShutdown => {

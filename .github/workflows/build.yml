@@ -1,0 +1,61 @@
+name: Build
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+
+jobs:
+  playback-session-evidence:
+    name: Playback evidence (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            label: windows-x64
+          - runner: ubuntu-22.04
+            label: linux-x64
+          - runner: macos-15-intel
+            label: macos-x64
+          - runner: macos-15
+            label: macos-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.93.0
+        uses: dtolnay/rust-toolchain@1.93.0
+
+      - name: Install Linux daemon dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libappindicator3-dev libmtp-dev pkgconf
+
+      - name: Install macOS daemon dependencies
+        if: runner.os == 'macOS'
+        run: brew install pkg-config libmtp
+
+      - name: Run isolated playback restoration evidence
+        env:
+          HIFIMULE_EVIDENCE_PATH: playback-evidence/${{ matrix.label }}.json
+        run: python scripts/playback-session-evidence.py
+
+      - name: Upload playback evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playback-evidence-${{ matrix.label }}
+          path: playback-evidence/${{ matrix.label }}.json
+          if-no-files-found: error

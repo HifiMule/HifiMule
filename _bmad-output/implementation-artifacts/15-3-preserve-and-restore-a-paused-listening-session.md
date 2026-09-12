@@ -1,3 +1,7 @@
+---
+baseline_commit: 9fb42946ac506f1f8b60c3649c8f99ec569e4c96
+---
+
 # Story 15.3: Preserve and restore a paused listening session
 
 Status: ready-for-dev
@@ -215,18 +219,46 @@ GPT-6 (Codex)
 ### Debug Log References
 
 - 2026-09-12: Story preparation reviewed planning artifacts, prior story/review, production persistence/RPC/lifecycle paths and official SQLite/Tokio/rusqlite documentation. No production implementation or runtime testing performed.
+- 2026-09-12: Captured baseline `9fb42946ac506f1f8b60c3649c8f99ec569e4c96`; marked sprint story in progress.
+- 2026-09-12: Implemented the initial daemon playback contract, SQLite persistence, restoration, paging, command fencing/deduplication, progress checkpoints, authenticated RPC methods, quit-fence checkpoint participation and localized retry wording.
+- 2026-09-12: Validation: playback tests 8/8; full daemon suite 663/663; lifecycle 13/13; Rust UI 6/6; Node behavior 9/9; `cargo fmt --check` passed; daemon clippy passed with 13 pre-existing warnings; UI production build passed with existing Vite chunk warnings.
+- 2026-09-12: macOS ARM64 environment recorded (`Darwin 25.6.0`, `aarch64-apple-darwin`, baseline revision above). Windows, Linux and macOS x64 command-driven production-path runs were not available in this workspace and are not claimed.
+- 2026-09-12: Added a non-release GitHub Actions `Build` matrix for Windows x64, Linux x64, macOS x64 and macOS ARM64. It runs the isolated playback restoration evidence command on pull requests and pushes to `main`, then uploads a sanitized per-platform JSON artifact even on failure. Workflow YAML and the evidence command were validated locally; remote runner results remain unclaimed until the workflow executes.
+
+### Implementation Plan
+
+- Establish a daemon-owned typed playback session and transactional playback-only schema without coupling restoration to providers.
+- Publish authenticated, revision-bound request/response RPCs and bounded page contracts.
+- Reuse the existing shutdown fence and UI retry path for final checkpoint failure rather than introducing another lifecycle protocol.
+- Prove deterministic model behavior, real-file restart/paging, router authentication and regression compatibility; leave unavailable platform execution explicitly unverified.
 
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
 - Scoped contract gates resolved: identities, versions, position units, serialized commands, revisions/deduplication, transactional schema, recovery, page/checkpoint limits and shutdown failure/retry.
 - Status ready-for-dev; implementation tasks and platform verification remain unchecked.
+- Initial implementation slice is working and regression-green: paused/idle persistence, repeated occurrence identity, offline restoration metadata, unsupported-version evidence preservation, stale revisions, command reuse, position checkpointing, 10,000-entry paging and authenticated snapshot routing are covered.
+- Completion gate remains open: the selected story contract still requires a bounded 64-request serialized worker (the current owner is mutex-serialized), fully bounded structural/current lookups, complete injected migration/interrupted-transaction coverage, and actual Windows/macOS/Linux command-driven evidence. Per the story’s evidence rule, these are not marked complete or promoted to review.
+- Cross-platform evidence is now wired into the normal build rather than the release workflow. Each artifact records OS release, architecture, source/binary revision, isolated database scope, executed fixtures, exit code and actual outcome.
 
 ### File List
 
 - `_bmad-output/implementation-artifacts/15-3-preserve-and-restore-a-paused-listening-session.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `.github/workflows/build.yml`
+- `docs/api-contracts-hifimule-daemon.md`
+- `hifimule-daemon/src/db.rs`
+- `hifimule-daemon/src/main.rs`
+- `hifimule-daemon/src/playback/mod.rs`
+- `hifimule-daemon/src/playback/model.rs`
+- `hifimule-daemon/src/playback/persistence.rs`
+- `hifimule-daemon/src/playback/session.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-i18n/catalog.json`
+- `scripts/playback-session-evidence.py`
 
 ## Change Log
 
 - 2026-09-12: Created story 15.3 with production session persistence contract, shutdown integration and acceptance evidence requirements.
+- 2026-09-12: Added initial production playback-session contract, transactional persistence/restoration, authenticated RPC surface, checkpoint-aware shutdown integration, localized diagnostics and deterministic test coverage; story remains in progress pending remaining contract and platform gates.
+- 2026-09-12: Added the normal-build GitHub Actions playback evidence matrix and sanitized evidence runner for Windows, Linux and both macOS architectures; no release trigger added.

@@ -1,0 +1,138 @@
+use serde::{Deserialize, Serialize};
+
+pub const SCHEMA_VERSION: u32 = 1;
+pub const DEFAULT_PAGE_SIZE: usize = 100;
+pub const MAX_PAGE_SIZE: usize = 200;
+pub const MAX_INSERT_BATCH: usize = 200;
+pub const MAX_ID_BYTES: usize = 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TrackSource {
+    pub server_id: String,
+    pub track_id: String,
+}
+
+impl TrackSource {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.server_id.is_empty() || self.track_id.is_empty() {
+            return Err("source identities must not be empty");
+        }
+        if self.server_id.len() > MAX_ID_BYTES || self.track_id.len() > MAX_ID_BYTES {
+            return Err("source identity exceeds 1024 UTF-8 bytes");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Occurrence {
+    pub occurrence_id: String,
+    pub ordinal: u64,
+    pub source: TrackSource,
+    pub availability: SourceAvailability,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SourceAvailability {
+    Unknown,
+    NotConfigured,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TransportState {
+    Idle,
+    Paused,
+    Buffering,
+    Playing,
+    Stopping,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Status {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSnapshot {
+    pub schema_version: u32,
+    pub instance_id: String,
+    pub session_id: String,
+    pub queue_revision: String,
+    pub state_sequence: String,
+    pub generation_id: String,
+    pub state: TransportState,
+    pub current: Option<Occurrence>,
+    pub position_ms: u64,
+    pub checkpointed_position_ms: u64,
+    pub persistence: Status,
+    pub restoration: Status,
+    pub total_occurrence_count: u64,
+    pub occurrences: Vec<Occurrence>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplySessionParams {
+    pub schema_version: u32,
+    pub instance_id: String,
+    pub session_id: String,
+    pub command_id: String,
+    pub expected_queue_revision: String,
+    pub operation: SessionOperation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+pub enum SessionOperation {
+    ReplaceQueue { sources: Vec<TrackSource> },
+    AppendQueue { sources: Vec<TrackSource> },
+    SelectCurrent { occurrence_id: String },
+    Clear,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ListOccurrencesParams {
+    pub schema_version: u32,
+    pub session_id: String,
+    pub expected_queue_revision: String,
+    pub cursor: Option<String>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OccurrencePage {
+    pub occurrences: Vec<Occurrence>,
+    pub next_cursor: Option<String>,
+    pub total_occurrence_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyResult {
+    pub session_id: String,
+    pub queue_revision: String,
+    pub state_sequence: String,
+    pub generation_id: String,
+    pub assigned_occurrences: Vec<Occurrence>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PersistedSession {
+    pub session_id: String,
+    pub queue_revision: u64,
+    pub checkpoint_sequence: u64,
+    pub state: TransportState,
+    pub current_occurrence_id: Option<String>,
+    pub position_ms: u64,
+}
