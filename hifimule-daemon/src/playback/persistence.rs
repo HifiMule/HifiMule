@@ -64,11 +64,77 @@ impl Database {
     pub fn load_playback_session(&self) -> Result<Option<PersistedSession>> {
         self.init_playback()?;
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.query_row("SELECT session_id,queue_revision,checkpoint_sequence,transport_state,current_occurrence_id,position_ms FROM playback_sessions WHERE singleton_id=1", [], |r| {
+        let loaded = conn.query_row("SELECT session_id,queue_revision,checkpoint_sequence,transport_state,current_occurrence_id,position_ms FROM playback_sessions WHERE singleton_id=1", [], |r| {
             let state: String = r.get(3)?;
             let state = match state.as_str() { "idle"=>TransportState::Idle, "paused"=>TransportState::Paused, "buffering"=>TransportState::Buffering, "playing"=>TransportState::Playing, "stopping"=>TransportState::Stopping, _=>return Err(rusqlite::Error::InvalidQuery) };
-            Ok(PersistedSession { session_id:r.get(0)?, queue_revision:r.get::<_,i64>(1)? as u64, checkpoint_sequence:r.get::<_,i64>(2)? as u64, state, current_occurrence_id:r.get(4)?, position_ms:r.get::<_,i64>(5)? as u64 })
-        }).optional().map_err(Into::into)
+            Ok(PersistedSession { session_id:r.get(0)?, queue_revision:nonnegative(r,1)?, checkpoint_sequence:nonnegative(r,2)?, state, current_occurrence_id:r.get(4)?, position_ms:nonnegative(r,5)? })
+        }).optional()?;
+        if loaded.is_none() {
+            let count: i64 =
+                conn.query_row("SELECT COUNT(*) FROM playback_occurrences", [], |r| {
+                    r.get(0)
+                })?;
+            if count != 0 {
+                return Err(anyhow!("INVALID_SESSION"));
+            }
+        }
+        Ok(loaded)
+    }
+
+    pub fn validate_playback_session(&self, session: &PersistedSession) -> Result<()> {
+        if uuid::Uuid::parse_str(&session.session_id).is_err()
+            || session.position_ms > 9_007_199_254_740_991
+            || session.queue_revision > i64::MAX as u64
+            || session.checkpoint_sequence > i64::MAX as u64
+        {
+            return Err(anyhow!("INVALID_SESSION"));
+        }
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction()?;
+        let count: i64 = tx.query_row("SELECT COUNT(*) FROM playback_occurrences", [], |r| {
+            r.get(0)
+        })?;
+        if (count == 0) != session.current_occurrence_id.is_none()
+            || (count == 0) != (session.state == TransportState::Idle)
+            || (count == 0 && session.position_ms != 0)
+        {
+            return Err(anyhow!("INVALID_SESSION"));
+        }
+        let duplicates: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM playback_occurrences GROUP BY occurrence_id HAVING COUNT(*) > 1)", [], |r|r.get(0))?;
+        if duplicates {
+            return Err(anyhow!("INVALID_SESSION"));
+        }
+        let mut after = -1i64;
+        let mut found = false;
+        let mut scanned = 0i64;
+        loop {
+            let mut stmt = tx.prepare("SELECT occurrence_id,ordinal,server_id,track_id FROM playback_occurrences WHERE session_id=?1 AND ordinal>?2 ORDER BY ordinal LIMIT 200")?;
+            let rows = stmt
+                .query_map(params![session.session_id, after], occurrence_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if rows.is_empty() {
+                break;
+            }
+            for row in rows {
+                if uuid::Uuid::parse_str(&row.occurrence_id).is_err()
+                    || row.source.validate().is_err()
+                    || row.ordinal > i64::MAX as u64
+                    || row.ordinal as i64 <= after
+                {
+                    return Err(anyhow!("INVALID_SESSION"));
+                }
+                found |= Some(&row.occurrence_id) == session.current_occurrence_id.as_ref();
+                after = row.ordinal as i64;
+                scanned += 1;
+            }
+        }
+        // Also detects orphaned/foreign-session rows and negative ordinals hidden
+        // by the keyset predicate; no whole-history collection is retained.
+        if scanned != count || (count > 0 && !found) {
+            return Err(anyhow!("INVALID_SESSION"));
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn playback_count(&self, session_id: &str) -> Result<u64> {
@@ -91,13 +157,13 @@ impl Database {
         let rows = stmt.query_map(
             params![
                 session_id,
-                after.map(|v| v as i64).unwrap_or(-1),
+                after.map(i64::try_from).transpose()?.unwrap_or(-1),
                 limit as i64
             ],
             |r| {
                 Ok(Occurrence {
                     occurrence_id: r.get(0)?,
-                    ordinal: r.get::<_, i64>(1)? as u64,
+                    ordinal: nonnegative(r, 1)?,
                     source: TrackSource {
                         server_id: r.get(2)?,
                         track_id: r.get(3)?,
@@ -133,8 +199,9 @@ impl Database {
             |row| row.get(0),
         )?;
         match last {
-            Some(value) => (value as u64)
+            Some(value) => u64::try_from(value)?
                 .checked_add(1)
+                .filter(|n| *n <= i64::MAX as u64)
                 .ok_or_else(|| anyhow!("playback ordinal overflow")),
             None => Ok(0),
         }
@@ -252,13 +319,18 @@ impl Database {
 fn occurrence_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Occurrence> {
     Ok(Occurrence {
         occurrence_id: row.get(0)?,
-        ordinal: row.get::<_, i64>(1)? as u64,
+        ordinal: nonnegative(row, 1)?,
         source: TrackSource {
             server_id: row.get(2)?,
             track_id: row.get(3)?,
         },
         availability: SourceAvailability::Unknown,
     })
+}
+
+fn nonnegative(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
+    let value: i64 = row.get(index)?;
+    u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
 }
 
 fn update_session(tx: &rusqlite::Transaction<'_>, session: &PersistedSession) -> Result<()> {

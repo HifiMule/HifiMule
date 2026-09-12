@@ -534,8 +534,18 @@ pub struct ShutdownSnapshot {
     pub pending_mutation_count: usize,
     pub blockers: Vec<ShutdownBlocker>,
     pub blockers_truncated: bool,
+    pub session_checkpoint: SessionCheckpointState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionCheckpointState {
+    NotRequired,
+    Pending,
+    Failed,
+    Succeeded,
 }
 
 struct ShutdownTracker {
@@ -544,6 +554,8 @@ struct ShutdownTracker {
     requested_at: std::time::Instant,
     committed_at: Option<std::time::Instant>,
     error_code: Option<String>,
+    session_checkpoint: SessionCheckpointState,
+    checkpoint_retry: bool,
 }
 
 /// Manager for tracking active sync operations in memory.
@@ -560,6 +572,7 @@ pub struct SyncOperationManager {
     shutdown_committed: Arc<AtomicBool>,
     shutdown: Mutex<Option<ShutdownTracker>>,
     quit_retry_requested: AtomicBool,
+    checkpoint_retry_requested: AtomicBool,
     finalization_gate: tokio::sync::Mutex<()>,
     /// Per-operation cancellation flags. Set to `true` by `request_cancel`; polled by
     /// the sync loop between files via `is_cancelled`. Never removed — old entries for
@@ -578,6 +591,7 @@ impl SyncOperationManager {
             shutdown_committed: Arc::new(AtomicBool::new(false)),
             shutdown: Mutex::new(None),
             quit_retry_requested: AtomicBool::new(false),
+            checkpoint_retry_requested: AtomicBool::new(false),
             finalization_gate: tokio::sync::Mutex::new(()),
             cancel_tokens: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -629,6 +643,10 @@ impl SyncOperationManager {
         self.pipeline_active.load(Ordering::Acquire)
     }
 
+    pub fn is_shutdown_committed(&self) -> bool {
+        self.shutdown_committed.load(Ordering::Acquire)
+    }
+
     /// Begin the serialized pre-commit launch fence. This closes admission but
     /// deliberately does not cancel existing work until generation persistence succeeds.
     pub fn begin_shutdown_fence(&self) -> ShutdownSnapshot {
@@ -644,6 +662,8 @@ impl SyncOperationManager {
                 requested_at: std::time::Instant::now(),
                 committed_at: None,
                 error_code: None,
+                session_checkpoint: SessionCheckpointState::NotRequired,
+                checkpoint_retry: false,
             });
         }
         self.snapshot_from_tracker(
@@ -682,6 +702,81 @@ impl SyncOperationManager {
         self.quit_retry_requested.swap(false, Ordering::AcqRel)
     }
 
+    pub fn begin_session_checkpoint(&self) {
+        if let Some(tracker) = self
+            .shutdown
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            tracker.session_checkpoint = SessionCheckpointState::Pending;
+        }
+    }
+
+    pub fn finish_session_checkpoint(&self, succeeded: bool) {
+        if let Some(tracker) = self
+            .shutdown
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            tracker.session_checkpoint = if succeeded {
+                SessionCheckpointState::Succeeded
+            } else {
+                SessionCheckpointState::Failed
+            };
+            if succeeded {
+                if tracker.error_code.as_deref() == Some("PLAYBACK_CHECKPOINT_FAILED") {
+                    tracker.error_code = None;
+                }
+            } else {
+                tracker.error_code = Some("PLAYBACK_CHECKPOINT_FAILED".into());
+            }
+        }
+    }
+
+    /// Concurrent requests join the already queued/in-flight attempt; only a
+    /// completed failure may start a new attempt. Identity/deadline never rotate.
+    pub fn request_checkpoint_retry(&self, shutdown_id: &str) -> bool {
+        let mut shutdown = self.shutdown.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(tracker) = shutdown.as_mut() else {
+            return false;
+        };
+        if tracker.shutdown_id != shutdown_id || tracker.committed_at.is_none() {
+            return false;
+        }
+        match tracker.session_checkpoint {
+            SessionCheckpointState::Failed => {
+                tracker.session_checkpoint = SessionCheckpointState::Pending;
+                tracker.checkpoint_retry = true;
+                tracker.error_code = None;
+                self.checkpoint_retry_requested
+                    .store(true, Ordering::Release);
+                true
+            }
+            SessionCheckpointState::Pending => tracker.checkpoint_retry,
+            _ => false,
+        }
+    }
+
+    pub fn take_checkpoint_retry(&self) -> bool {
+        self.checkpoint_retry_requested
+            .swap(false, Ordering::AcqRel)
+    }
+
+    pub fn fail_playback_teardown(&self) {
+        if let Some(tracker) = self
+            .shutdown
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            // The save already succeeded; its retry cannot recover a failed join.
+            tracker.error_code = Some("PLAYBACK_OWNER_FAILED".into());
+            tracker.phase = ShutdownPhase::Waiting;
+        }
+    }
+
     /// Synchronous tray observation never waits on operation or device locks.
     pub fn shutdown_tray_snapshot(&self) -> Option<ShutdownSnapshot> {
         self.shutdown
@@ -705,6 +800,8 @@ impl SyncOperationManager {
                 requested_at: std::time::Instant::now(),
                 committed_at: None,
                 error_code: None,
+                session_checkpoint: SessionCheckpointState::NotRequired,
+                checkpoint_retry: false,
             });
             tracker
                 .committed_at
@@ -734,6 +831,17 @@ impl SyncOperationManager {
         loop {
             if !self.pipeline_active.load(Ordering::Acquire)
                 && self.active_mutations.load(Ordering::Acquire) == 0
+                && self
+                    .shutdown
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                    .is_none_or(|t| {
+                        matches!(
+                            t.session_checkpoint,
+                            SessionCheckpointState::NotRequired | SessionCheckpointState::Succeeded
+                        )
+                    })
             {
                 if let Some(tracker) = self
                     .shutdown
@@ -762,7 +870,9 @@ impl SyncOperationManager {
                     .as_mut()
             {
                 tracker.phase = ShutdownPhase::Waiting;
-                tracker.error_code = Some("SHUTDOWN_TIMEOUT".into());
+                if tracker.session_checkpoint != SessionCheckpointState::Failed {
+                    tracker.error_code = Some("SHUTDOWN_TIMEOUT".into());
+                }
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -808,7 +918,7 @@ impl SyncOperationManager {
             .as_ref()
             .map(|tracker| self.snapshot_from_tracker(tracker, active.len(), blockers))
             .map(|mut snapshot| {
-                snapshot.blockers_truncated = total_blockers > snapshot.blockers.len();
+                snapshot.blockers_truncated |= total_blockers > snapshot.blockers.len();
                 snapshot
             })
     }
@@ -817,10 +927,25 @@ impl SyncOperationManager {
         &self,
         tracker: &ShutdownTracker,
         active_operation_count: usize,
-        blockers: Vec<ShutdownBlocker>,
+        mut blockers: Vec<ShutdownBlocker>,
     ) -> ShutdownSnapshot {
         let started = tracker.committed_at.unwrap_or(tracker.requested_at);
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let checkpoint_blocks = matches!(
+            tracker.session_checkpoint,
+            SessionCheckpointState::Pending | SessionCheckpointState::Failed
+        );
+        let truncated = checkpoint_blocks && blockers.len() >= 32;
+        if checkpoint_blocks {
+            if blockers.len() >= 32 {
+                blockers.pop();
+            }
+            blockers.push(ShutdownBlocker {
+                operation_id: None,
+                device_id: None,
+                reason: "sessionCheckpoint",
+            });
+        }
         ShutdownSnapshot {
             schema_version: 1,
             shutdown_id: tracker.shutdown_id.clone(),
@@ -831,7 +956,8 @@ impl SyncOperationManager {
             active_operation_count,
             pending_mutation_count: self.active_mutations.load(Ordering::Acquire),
             blockers,
-            blockers_truncated: false,
+            blockers_truncated: truncated,
+            session_checkpoint: tracker.session_checkpoint,
             error_code: tracker.error_code.clone(),
         }
     }

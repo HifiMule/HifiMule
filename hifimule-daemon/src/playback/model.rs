@@ -91,7 +91,12 @@ pub struct ApplySessionParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum SessionOperation {
     ReplaceQueue { sources: Vec<TrackSource> },
     AppendQueue { sources: Vec<TrackSource> },
@@ -125,6 +130,24 @@ pub struct ApplyResult {
     pub state_sequence: String,
     pub generation_id: String,
     pub assigned_occurrences: Vec<Occurrence>,
+    pub current_metadata: SessionMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionMetadata {
+    pub instance_id: String,
+    pub session_id: String,
+    pub queue_revision: String,
+    pub state_sequence: String,
+    pub generation_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackHealth {
+    pub restoration: Status,
+    pub persistence: Status,
 }
 
 #[derive(Debug, Clone)]

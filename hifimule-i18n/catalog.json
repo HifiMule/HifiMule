@@ -47,8 +47,8 @@
     "lifecycle.error.UNSAFE_RUNTIME_PATH": "The application-data path is unsafe. Use a private local folder owned by your user, then retry.",
     "lifecycle.quitting_waiting": "Quitting HifiMule — waiting for device writes to finish safely.",
     "lifecycle.shutdown_delayed": "Shutdown is taking longer than expected. HifiMule is still waiting for device writes.",
-    "lifecycle.quit_persistence_failed": "Your listening position could not be checkpointed, so HifiMule has not claimed a safe quit. Retry the checkpoint and Quit.",
-    "lifecycle.retry_quit": "Retry checkpoint and Quit",
+    "lifecycle.quit_persistence_failed": "Quit could not be started safely. Retry Quit.",
+    "lifecycle.retry_quit": "Retry Quit",
     "lifecycle.fencing_waiting": "Quitting HifiMule — saving the launch fence",
     "lifecycle.fencing_delayed": "Saving the launch fence is taking longer than expected. Existing work has not been cancelled.",
     "lifecycle.continue_running": "Continue using HifiMule",
@@ -415,7 +415,11 @@
     "library.empty.letter": "Nothing here starts with “{letter}”.",
     "library.error.title": "Could not load your library",
     "library.error.retry": "Try again",
-    "library.load_more": "Load {count} more"
+    "library.load_more": "Load {count} more",
+    "lifecycle.playback_checkpoint_failed": "HifiMule could not save your listening session. Quit remains in progress. Retry saving the session.",
+    "lifecycle.playback_checkpoint_pending": "Quitting HifiMule — saving your listening session while device writes finish.",
+    "lifecycle.retry_saving_session": "Retry saving session",
+    "lifecycle.playback_owner_failed": "Your session was saved, but HifiMule could not confirm that its playback worker stopped. Quit remains blocked."
   },
   "fr": {
     "app.name": "HifiMule",
@@ -465,8 +469,8 @@
     "lifecycle.error.UNSAFE_RUNTIME_PATH": "Le chemin des données est dangereux. Utilisez un dossier local privé appartenant à votre utilisateur, puis réessayez.",
     "lifecycle.quitting_waiting": "Fermeture de HifiMule — attente de la fin sécurisée des écritures sur l’appareil.",
     "lifecycle.shutdown_delayed": "La fermeture prend plus de temps que prévu. HifiMule attend toujours les écritures sur l’appareil.",
-    "lifecycle.quit_persistence_failed": "Votre position d’écoute n’a pas pu être enregistrée. HifiMule ne confirme donc pas une fermeture sûre. Réessayez l’enregistrement et la fermeture.",
-    "lifecycle.retry_quit": "Réessayer l’enregistrement et quitter",
+    "lifecycle.quit_persistence_failed": "La fermeture n’a pas pu démarrer en toute sécurité. Réessayez de quitter.",
+    "lifecycle.retry_quit": "Réessayer de quitter",
     "lifecycle.fencing_waiting": "Fermeture de HifiMule — enregistrement du verrou de lancement",
     "lifecycle.fencing_delayed": "L’enregistrement du verrou de lancement prend plus de temps que prévu. Le travail en cours n’a pas été annulé.",
     "lifecycle.continue_running": "Continuer à utiliser HifiMule",
@@ -833,7 +837,11 @@
     "library.empty.letter": "Rien ne commence par « {letter} ».",
     "library.error.title": "Impossible de charger votre bibliothèque",
     "library.error.retry": "Réessayer",
-    "library.load_more": "Charger {count} de plus"
+    "library.load_more": "Charger {count} de plus",
+    "lifecycle.playback_checkpoint_failed": "HifiMule n’a pas pu enregistrer votre session d’écoute. La fermeture reste en cours. Réessayez l’enregistrement.",
+    "lifecycle.playback_checkpoint_pending": "Fermeture de HifiMule — enregistrement de votre session d’écoute et fin des écritures sur l’appareil.",
+    "lifecycle.retry_saving_session": "Réessayer l’enregistrement de la session",
+    "lifecycle.playback_owner_failed": "Votre session est enregistrée, mais HifiMule n’a pas pu confirmer l’arrêt du service de lecture. La fermeture reste bloquée."
   },
   "es": {
     "app.name": "HifiMule",
@@ -883,8 +891,8 @@
     "lifecycle.error.UNSAFE_RUNTIME_PATH": "La ruta de datos no es segura. Usa una carpeta local privada que pertenezca a tu usuario y reintenta.",
     "lifecycle.quitting_waiting": "Cerrando HifiMule — esperando a que las escrituras del dispositivo terminen de forma segura.",
     "lifecycle.shutdown_delayed": "El cierre está tardando más de lo esperado. HifiMule sigue esperando las escrituras del dispositivo.",
-    "lifecycle.quit_persistence_failed": "No se pudo guardar la posición de escucha, por lo que HifiMule no confirma un cierre seguro. Reintenta el guardado y Salir.",
-    "lifecycle.retry_quit": "Reintentar guardado y Salir",
+    "lifecycle.quit_persistence_failed": "No se pudo iniciar el cierre de forma segura. Vuelve a intentar Salir.",
+    "lifecycle.retry_quit": "Volver a intentar Salir",
     "lifecycle.fencing_waiting": "Cerrando HifiMule — guardando el bloqueo de inicio",
     "lifecycle.fencing_delayed": "Guardar el bloqueo de inicio está tardando más de lo esperado. El trabajo en curso no se ha cancelado.",
     "lifecycle.continue_running": "Seguir usando HifiMule",
@@ -1251,7 +1259,11 @@
     "library.empty.letter": "Nada empieza por «{letter}».",
     "library.error.title": "No se pudo cargar tu biblioteca",
     "library.error.retry": "Reintentar",
-    "library.load_more": "Cargar {count} más"
+    "library.load_more": "Cargar {count} más",
+    "lifecycle.playback_checkpoint_failed": "HifiMule no pudo guardar la sesión de escucha. El cierre sigue en curso. Vuelve a guardar la sesión.",
+    "lifecycle.playback_checkpoint_pending": "Cerrando HifiMule — guardando la sesión de escucha mientras terminan las escrituras del dispositivo.",
+    "lifecycle.retry_saving_session": "Reintentar guardar la sesión",
+    "lifecycle.playback_owner_failed": "La sesión se ha guardado, pero HifiMule no pudo confirmar que el servicio de reproducción se detuvo. El cierre sigue bloqueado."
   },
   "de": {
     "app.name": "HifiMule",
@@ -1301,8 +1313,8 @@
     "lifecycle.error.UNSAFE_RUNTIME_PATH": "Der Datenpfad ist unsicher. Verwenden Sie einen privaten lokalen Ordner Ihres Benutzers und versuchen Sie es erneut.",
     "lifecycle.quitting_waiting": "HifiMule wird beendet — Geräte-Schreibvorgänge werden sicher abgeschlossen.",
     "lifecycle.shutdown_delayed": "Das Beenden dauert länger als erwartet. HifiMule wartet weiterhin auf Geräte-Schreibvorgänge.",
-    "lifecycle.quit_persistence_failed": "Die Wiedergabeposition konnte nicht gespeichert werden; HifiMule bestätigt daher kein sicheres Beenden. Versuchen Sie Speichern und Beenden erneut.",
-    "lifecycle.retry_quit": "Speichern und Beenden erneut versuchen",
+    "lifecycle.quit_persistence_failed": "Das sichere Beenden konnte nicht gestartet werden. Versuchen Sie Beenden erneut.",
+    "lifecycle.retry_quit": "Beenden erneut versuchen",
     "lifecycle.fencing_waiting": "HifiMule wird beendet — Startsperre wird gespeichert",
     "lifecycle.fencing_delayed": "Das Speichern der Startsperre dauert länger als erwartet. Laufende Arbeiten wurden nicht abgebrochen.",
     "lifecycle.continue_running": "HifiMule weiter verwenden",
@@ -1669,6 +1681,10 @@
     "library.empty.letter": "Nichts beginnt mit „{letter}“.",
     "library.error.title": "Bibliothek konnte nicht geladen werden",
     "library.error.retry": "Erneut versuchen",
-    "library.load_more": "{count} weitere laden"
+    "library.load_more": "{count} weitere laden",
+    "lifecycle.playback_checkpoint_failed": "HifiMule konnte Ihre Hörsitzung nicht speichern. Das Beenden läuft weiter. Versuchen Sie das Speichern erneut.",
+    "lifecycle.playback_checkpoint_pending": "HifiMule wird beendet — die Hörsitzung wird gespeichert und Geräte-Schreibvorgänge werden abgeschlossen.",
+    "lifecycle.retry_saving_session": "Sitzung erneut speichern",
+    "lifecycle.playback_owner_failed": "Ihre Sitzung wurde gespeichert, aber HifiMule konnte das Ende des Wiedergabedienstes nicht bestätigen. Das Beenden bleibt blockiert."
   }
 }

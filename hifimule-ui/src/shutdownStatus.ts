@@ -1,9 +1,12 @@
-export type ShutdownProgress = { deadlineExceeded: boolean; phase?: string };
+export type ShutdownProgress = { deadlineExceeded: boolean; phase?: string; sessionCheckpoint?: string };
 
 export function shutdownMessageKey(
     shutdown: ShutdownProgress,
     errorCode: string | null | undefined,
-): 'lifecycle.shutdown_delayed' | 'lifecycle.shutdown_progress' | 'lifecycle.quit_persistence_failed' | 'lifecycle.fencing_waiting' | 'lifecycle.fencing_delayed' {
+): 'lifecycle.shutdown_delayed' | 'lifecycle.shutdown_progress' | 'lifecycle.quit_persistence_failed' | 'lifecycle.fencing_waiting' | 'lifecycle.fencing_delayed' | 'lifecycle.playback_checkpoint_failed' | 'lifecycle.playback_checkpoint_pending' | 'lifecycle.playback_owner_failed' {
+    if (errorCode === 'PLAYBACK_OWNER_FAILED') return 'lifecycle.playback_owner_failed';
+    if (shutdown.sessionCheckpoint === 'failed' || errorCode === 'PLAYBACK_CHECKPOINT_FAILED') return 'lifecycle.playback_checkpoint_failed';
+    if (shutdown.sessionCheckpoint === 'pending') return 'lifecycle.playback_checkpoint_pending';
     if (errorCode === 'QUIT_PERSISTENCE_FAILED') return 'lifecycle.quit_persistence_failed';
     if (shutdown.phase === 'fencing') return shutdown.deadlineExceeded
         ? 'lifecycle.fencing_delayed' : 'lifecycle.fencing_waiting';
@@ -66,4 +69,9 @@ export class ShutdownPoller {
 
 export function canRetryQuit(health: { errorCode?: string | null; shutdown?: { phase: string } | null }): boolean {
     return health.shutdown?.phase === 'fenceFailed' && health.errorCode === 'QUIT_PERSISTENCE_FAILED';
+}
+
+export function canRetryCheckpoint(health: { status: string; instanceId?: string; shutdown?: { shutdownId: string; sessionCheckpoint?: string } | null }): boolean {
+    return health.status === 'stopping' && Boolean(health.instanceId) && Boolean(health.shutdown?.shutdownId)
+        && health.shutdown?.sessionCheckpoint === 'failed';
 }

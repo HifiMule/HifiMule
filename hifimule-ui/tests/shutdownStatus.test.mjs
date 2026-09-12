@@ -8,7 +8,7 @@ const source = await readFile(new URL('../src/shutdownStatus.ts', import.meta.ur
 const js = ts.transpileModule(source, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
 }).outputText;
-const { shutdownMessageKey, ShutdownPollGate, ShutdownPoller, canRetryQuit } = await import(
+const { shutdownMessageKey, ShutdownPollGate, ShutdownPoller, canRetryQuit, canRetryCheckpoint } = await import(
     `data:text/javascript;base64,${Buffer.from(js).toString('base64')}`
 );
 
@@ -128,10 +128,11 @@ test('rendered failed fence retries the same daemon and Continue only reloads th
     let reloads = 0; const window = { addEventListener() {}, location: { reload() { reloads++; } } };
     const stored = new Map(); const sessionStorage = { setItem: (key, value) => stored.set(key, value) };
     let disposed = false;
-    class Poller { constructor(request) { this.request = request; } refresh() {} dispose() { disposed = true; } }
-    const render = new Function('document', 'window', 'sessionStorage', 't', 'ShutdownPoller', 'shutdownMessageKey', 'canRetryQuit',
+    let latestPoller;
+    class Poller { constructor(request) { this.request = request; latestPoller = this; } refresh() {} dispose() { disposed = true; } }
+    const render = new Function('document', 'window', 'sessionStorage', 't', 'ShutdownPoller', 'shutdownMessageKey', 'canRetryQuit', 'canRetryCheckpoint',
         'let activeBasketSidebar = null; ' + renderJs + '; return renderShutdownStatus;')(
-        document, window, sessionStorage, key => key, Poller, shutdownMessageKey, canRetryQuit);
+        document, window, sessionStorage, key => key, Poller, shutdownMessageKey, canRetryQuit, canRetryCheckpoint);
     const calls = [];
     const health = { status: 'ok', errorCode: 'QUIT_PERSISTENCE_FAILED', shutdown: {
         shutdownId: 'failed-1', phase: 'fenceFailed', deadlineExceeded: false, activeOperationCount: 0, pendingMutationCount: 0 } };
@@ -145,4 +146,34 @@ test('rendered failed fence retries the same daemon and Continue only reloads th
     element('shutdown-continue').handlers.click();
     assert.equal(stored.get('dismissedQuit'), 'failed-1');
     assert.equal(reloads, 1); assert.equal(disposed, true);
+
+    const checkpoint = { status: 'stopping', instanceId: 'owner-1', errorCode: 'PLAYBACK_CHECKPOINT_FAILED', shutdown: {
+        shutdownId: 'quit-1', phase: 'waiting', sessionCheckpoint: 'failed', deadlineExceeded: true, activeOperationCount: 0, pendingMutationCount: 0 } };
+    const retries = [];
+    render(async (method, params) => {
+        if (method === 'daemon.health') return { data: { ...checkpoint, instanceId: 'replacement-owner' } };
+        retries.push([method, params]); return { data: { accepted: true } };
+    }, checkpoint);
+    assert.equal(element('shutdown-retry').hidden, false);
+    assert.equal(element('shutdown-retry').textContent, 'lifecycle.retry_saving_session');
+    assert.equal(element('shutdown-status').textContent, 'lifecycle.playback_checkpoint_failed');
+    assert.equal(element('shutdown-continue').hidden, true);
+    assert.match(document.body.innerHTML, /role="status" aria-live="polite"/);
+    await latestPoller.request(); // A stale replacement response must not rebind the action.
+    await element('shutdown-retry').handlers.click();
+    assert.deepEqual(retries, [['playback.retryCheckpoint', { schemaVersion: 1, instanceId: 'owner-1', shutdownId: 'quit-1' }]]);
+    assert.equal(element('shutdown-retry').hidden, true);
+    assert.equal(element('shutdown-continue').hidden, true);
+    element('shutdown-continue').handlers.click();
+    assert.equal(reloads, 1, 'committed shutdown must not allow Continue');
+});
+
+test('checkpoint failure takes precedence over timeouts and only completed failure enables retry', () => {
+    assert.equal(shutdownMessageKey({ deadlineExceeded: true, sessionCheckpoint: 'failed' }, 'SHUTDOWN_TIMEOUT'), 'lifecycle.playback_checkpoint_failed');
+    assert.equal(shutdownMessageKey({ deadlineExceeded: true, sessionCheckpoint: 'pending' }, 'SHUTDOWN_TIMEOUT'), 'lifecycle.playback_checkpoint_pending');
+    for (const sessionCheckpoint of ['notRequired', 'pending', 'succeeded']) {
+        assert.equal(canRetryCheckpoint({ status: 'stopping', instanceId: 'owner', shutdown: { shutdownId: 'quit', sessionCheckpoint } }), false);
+    }
+    assert.equal(canRetryCheckpoint({ status: 'stopping', instanceId: 'owner', shutdown: { shutdownId: 'quit', sessionCheckpoint: 'failed' } }), true);
+    assert.equal(canRetryCheckpoint({ status: 'ok', instanceId: 'owner', shutdown: { shutdownId: 'quit', sessionCheckpoint: 'failed' } }), false);
 });

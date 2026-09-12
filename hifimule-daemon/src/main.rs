@@ -121,19 +121,53 @@ pub struct DaemonCoreHandle {
     sync_operation_manager: Arc<sync::SyncOperationManager>,
 }
 
-async fn begin_shutdown_with_playback(
+async fn finish_shutdown_with_playback(
     operations: &sync::SyncOperationManager,
     playback: &playback::PlaybackSession,
-) -> sync::ShutdownSnapshot {
-    let mut snapshot = operations.begin_shutdown_fence();
-    if playback.shutdown_checkpoint().is_err() {
-        operations.fail_shutdown_fence();
-        snapshot = operations
-            .shutdown_snapshot()
-            .await
-            .expect("failed shutdown fence has a snapshot");
+) -> bool {
+    operations.begin_session_checkpoint();
+    // Fence/queue the final write, then cancel sync without waiting for SQLite.
+    let initial = playback.begin_shutdown_checkpoint();
+    operations.commit_shutdown().await;
+    let checkpoint = async {
+        let mut pending = initial.ok();
+        if pending.is_none() {
+            operations.finish_session_checkpoint(false);
+        }
+        loop {
+            if let Some(reply) = pending.as_ref() {
+                match reply.try_recv() {
+                    Ok(result) => {
+                        operations.finish_session_checkpoint(result.is_ok());
+                        pending = None;
+                        if result.is_ok() {
+                            return;
+                        }
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        operations.finish_session_checkpoint(false);
+                        pending = None;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {}
+                }
+            }
+            if pending.is_none() && operations.take_checkpoint_retry() {
+                pending = playback.begin_shutdown_checkpoint().ok();
+                if pending.is_none() {
+                    operations.finish_session_checkpoint(false);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::join!(checkpoint, operations.wait_for_shutdown_drain());
+    let playback = playback.clone();
+    let joined = tokio::task::spawn_blocking(move || playback.stop_and_join()).await;
+    let succeeded = matches!(joined, Ok(Ok(())));
+    if !succeeded {
+        operations.fail_playback_teardown();
     }
-    snapshot
+    succeeded
 }
 
 fn main() -> Result<()> {
@@ -225,10 +259,15 @@ pub fn start_daemon_core(
                     return None;
                 }
             };
-            let playback = playback::PlaybackSession::restore(
-                Arc::clone(&db),
-                descriptor.instance_id.clone(),
-            );
+            let playback_db = Arc::clone(&db);
+            let playback_instance = descriptor.instance_id.clone();
+            let playback = match tokio::task::spawn_blocking(move || playback::PlaybackSession::restore(playback_db, playback_instance)).await {
+                Ok(playback) => playback,
+                Err(_) => {
+                    let _ = ready_tx.send(Err("Playback owner initialization failed".into()));
+                    return None;
+                }
+            };
 
             // Seed default device-profiles.json if not present
             let profiles_default = include_bytes!("../assets/device-profiles.json");
@@ -445,18 +484,13 @@ pub fn start_daemon_core(
                 while let Ok(command) = command_rx.try_recv() {
                     match command {
                         CoreCommand::BeginShutdown(reply) => {
-                            let snapshot = begin_shutdown_with_playback(
-                                &sync_operation_manager,
-                                &playback,
-                            )
-                            .await;
-                            let _ = reply.send(snapshot);
+                            let _ = reply.send(sync_operation_manager.begin_shutdown_fence());
                         }
                         CoreCommand::FenceFailed => sync_operation_manager.fail_shutdown_fence(),
                         CoreCommand::CommitShutdown => {
-                            sync_operation_manager.commit_shutdown().await;
-                            sync_operation_manager.wait_for_shutdown_drain().await;
-                            shutdown_clone.store(true, Ordering::Release);
+                            if finish_shutdown_with_playback(&sync_operation_manager, &playback).await {
+                                shutdown_clone.store(true, Ordering::Release);
+                            }
                         }
                     }
                 }
@@ -485,6 +519,15 @@ pub fn start_daemon_core(
 }
 
 fn shutdown_tray_message(snapshot: &sync::ShutdownSnapshot) -> &'static str {
+    if snapshot.error_code.as_deref() == Some("PLAYBACK_OWNER_FAILED") {
+        return "lifecycle.playback_owner_failed";
+    }
+    if snapshot.session_checkpoint == sync::SessionCheckpointState::Failed {
+        return "lifecycle.playback_checkpoint_failed";
+    }
+    if snapshot.session_checkpoint == sync::SessionCheckpointState::Pending {
+        return "lifecycle.playback_checkpoint_pending";
+    }
     match snapshot.phase {
         sync::ShutdownPhase::FenceFailed => "lifecycle.quit_persistence_failed",
         sync::ShutdownPhase::Fencing if snapshot.deadline_exceeded => "lifecycle.fencing_delayed",
@@ -748,8 +791,13 @@ fn run_candidate(
     let tray_menu = Menu::new();
     let quit_item = MenuItem::new(hifimule_i18n::t("tray.quit"), true, None);
     let open_ui_item = MenuItem::new(hifimule_i18n::t("tray.open_ui"), true, None);
+    let retry_session_item = MenuItem::new(
+        hifimule_i18n::t("lifecycle.retry_saving_session"),
+        false,
+        None,
+    );
     tray_menu
-        .append_items(&[&open_ui_item, &quit_item])
+        .append_items(&[&open_ui_item, &retry_session_item, &quit_item])
         .map_err(|e| anyhow::anyhow!("Failed to create tray menu: {}", e))?;
 
     let mut tray_icon = Some(
@@ -859,17 +907,25 @@ fn run_candidate(
 
         // Handle state updates from tokio thread
         let shutdown_snapshot = shutdown_operations.shutdown_tray_snapshot();
+        retry_session_item.set_enabled(
+            shutdown_snapshot
+                .as_ref()
+                .is_some_and(|s| s.session_checkpoint == sync::SessionCheckpointState::Failed),
+        );
         if let Some(snapshot) = shutdown_snapshot.as_ref() {
             let tray_state = (
                 snapshot.shutdown_id.clone(),
                 snapshot.phase,
                 snapshot.deadline_exceeded,
+                snapshot.session_checkpoint,
+                snapshot.error_code.clone(),
             );
             if last_shutdown_tray_state.as_ref() != Some(&tray_state) {
                 if let Some(ref mut tray) = tray_icon {
                     let key = shutdown_tray_message(snapshot);
                     let _ = tray.set_tooltip(Some(&hifimule_i18n::t(key)));
                     if snapshot.deadline_exceeded
+                        || snapshot.session_checkpoint == sync::SessionCheckpointState::Failed
                         || snapshot.phase == sync::ShutdownPhase::FenceFailed
                     {
                         let _ = tray.set_icon(Some((*icon_error).clone()));
@@ -928,6 +984,10 @@ fn run_candidate(
                     {
                         quit_reply = Some(reply_rx);
                     }
+                }
+            } else if event.id == retry_session_item.id() {
+                if let Some(snapshot) = shutdown_operations.shutdown_tray_snapshot() {
+                    shutdown_operations.request_checkpoint_retry(&snapshot.shutdown_id);
                 }
             } else if event.id == open_ui_item.id() {
                 println!("'Open UI' clicked - Launching Tauri UI...");
@@ -1668,27 +1728,166 @@ mod lifecycle_shutdown_tests {
             )
             .unwrap();
 
-        let operations = sync::SyncOperationManager::new();
-        let failed = begin_shutdown_with_playback(&operations, &playback).await;
-        assert_eq!(failed.phase, sync::ShutdownPhase::FenceFailed);
+        let operations = Arc::new(sync::SyncOperationManager::new());
+        let pipeline = operations.try_start_pipeline().unwrap();
+        let before = operations.begin_shutdown_fence();
+        let task_operations = operations.clone();
+        let task_playback = playback.clone();
+        let task = tokio::spawn(async move {
+            finish_shutdown_with_playback(&task_operations, &task_playback).await
+        });
+        let failed = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let snapshot = operations.shutdown_snapshot().await.unwrap();
+                if snapshot.session_checkpoint == sync::SessionCheckpointState::Failed {
+                    break snapshot;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
         assert_eq!(
             failed.error_code.as_deref(),
-            Some("QUIT_PERSISTENCE_FAILED")
+            Some("PLAYBACK_CHECKPOINT_FAILED")
         );
-        let reopened_admission = operations.try_admit_mutation().unwrap();
-        drop(reopened_admission);
-        assert!(operations.request_quit_retry());
-        assert!(operations.take_quit_retry());
-
+        assert_eq!(failed.shutdown_id, before.shutdown_id);
+        assert!(operations.is_pipeline_cancelled());
+        assert!(operations.try_admit_mutation().is_none());
+        assert!(!operations.request_quit_retry());
+        assert!(!task.is_finished());
+        assert!(
+            failed
+                .blockers
+                .iter()
+                .any(|b| b.reason == "sessionCheckpoint")
+        );
+        assert!(!operations.request_checkpoint_retry("another-shutdown"));
         db.conn
             .lock()
             .unwrap()
             .execute_batch("DROP TRIGGER fail_shutdown_checkpoint")
             .unwrap();
-        let retried = begin_shutdown_with_playback(&operations, &playback).await;
-        assert_eq!(retried.phase, sync::ShutdownPhase::Fencing);
-        assert!(retried.error_code.is_none());
-        assert_eq!(playback.snapshot().unwrap().checkpointed_position_ms, 2500);
+        assert!(operations.request_checkpoint_retry(&failed.shutdown_id));
+        assert!(operations.request_checkpoint_retry(&failed.shutdown_id));
+        drop(pipeline);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        let finished = operations.shutdown_snapshot().await.unwrap();
+        assert_eq!(finished.shutdown_id, before.shutdown_id);
+        assert_eq!(finished.deadline_ms, before.deadline_ms);
+        assert_eq!(
+            finished.session_checkpoint,
+            sync::SessionCheckpointState::Succeeded
+        );
+        assert!(operations.try_admit_mutation().is_none());
+        assert_eq!(
+            db.load_playback_session().unwrap().unwrap().position_ms,
+            2500
+        );
+        assert!(
+            playback.snapshot().is_err(),
+            "playback worker must have been joined"
+        );
+    }
+
+    #[tokio::test]
+    async fn playback_join_failure_is_not_advertised_as_a_checkpoint_retry() {
+        let operations = sync::SyncOperationManager::new();
+        let before = operations.begin_shutdown_fence();
+        operations.begin_session_checkpoint();
+        operations.commit_shutdown().await;
+        assert!(
+            !operations.request_checkpoint_retry(&before.shutdown_id),
+            "the original pending save is not a retry attempt"
+        );
+        operations.finish_session_checkpoint(true);
+        operations.fail_playback_teardown();
+        let snapshot = operations.shutdown_snapshot().await.unwrap();
+        assert_eq!(
+            snapshot.error_code.as_deref(),
+            Some("PLAYBACK_OWNER_FAILED")
+        );
+        assert_eq!(
+            snapshot.session_checkpoint,
+            sync::SessionCheckpointState::Succeeded
+        );
+        assert!(!operations.request_checkpoint_retry(&before.shutdown_id));
+        assert!(!operations.request_quit_retry());
+        assert!(operations.try_admit_mutation().is_none());
+    }
+
+    #[tokio::test]
+    async fn stalled_playback_checkpoint_does_not_delay_sync_cancellation_or_health() {
+        let db = Arc::new(db::Database::memory().unwrap());
+        let playback = playback::PlaybackSession::restore(db.clone(), "owner".into());
+        let s = playback.snapshot().unwrap();
+        playback
+            .apply(playback::model::ApplySessionParams {
+                schema_version: 1,
+                instance_id: s.instance_id,
+                session_id: s.session_id,
+                command_id: uuid::Uuid::new_v4().to_string(),
+                expected_queue_revision: s.queue_revision,
+                operation: playback::model::SessionOperation::ReplaceQueue {
+                    sources: vec![playback::model::TrackSource {
+                        server_id: "s".into(),
+                        track_id: "t".into(),
+                    }],
+                },
+            })
+            .unwrap();
+        let s = playback.snapshot().unwrap();
+        playback
+            .report_progress(&s.generation_id, &s.current.unwrap().occurrence_id, 1, 1000)
+            .unwrap();
+        let operations = Arc::new(sync::SyncOperationManager::new());
+        let pipeline = operations.try_start_pipeline().unwrap();
+        operations.begin_shutdown_fence();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let stalled_db = db.clone();
+        let holder = std::thread::spawn(move || {
+            let _connection = stalled_db.conn.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        locked_rx.recv().unwrap();
+        let task_operations = operations.clone();
+        let task_playback = playback.clone();
+        let task = tokio::spawn(async move {
+            finish_shutdown_with_playback(&task_operations, &task_playback).await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !operations.is_pipeline_cancelled() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!task.is_finished());
+        assert_eq!(playback.health().restoration.status, "ok");
+        assert_eq!(
+            operations
+                .shutdown_snapshot()
+                .await
+                .unwrap()
+                .session_checkpoint,
+            sync::SessionCheckpointState::Pending
+        );
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        drop(pipeline);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap()
+        );
     }
 
     #[test]

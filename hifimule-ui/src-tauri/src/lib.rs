@@ -189,6 +189,8 @@ fn resolve_daemon_binary_path() -> Option<std::path::PathBuf> {
 async fn validate_owner_async(
     client: &reqwest::Client,
     descriptor: &hifimule_lifecycle::OwnerDescriptor,
+    method: &str,
+    params: &serde_json::Value,
 ) -> Result<(), String> {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -212,13 +214,36 @@ async fn validate_owner_async(
         .await
         .map_err(|_| "OWNER_CHANGED: local daemon health response was malformed".to_string())?;
     match hifimule_lifecycle::validate_health_response(&data, descriptor) {
-        Ok(LifecycleState::Ready) => Ok(()),
+        Ok(LifecycleState::Ready) if method != "playback.retryCheckpoint" => Ok(()),
+        Ok(LifecycleState::Stopping) if method == "playback.retryCheckpoint" => {
+            validate_checkpoint_retry_scope(&data, descriptor, params)
+        }
         Ok(_) => Err("DAEMON_STOPPED: local daemon is stopping".into()),
         Err(error) => Err(format!(
             "{}: local health validation failed",
             error.code().as_str()
         )),
     }
+}
+
+fn validate_checkpoint_retry_scope(
+    health: &serde_json::Value,
+    owner: &hifimule_lifecycle::OwnerDescriptor,
+    params: &serde_json::Value,
+) -> Result<(), String> {
+    let shutdown = &health["result"]["data"]["shutdown"];
+    if params["schemaVersion"] != 1
+        || params["instanceId"].as_str() != Some(owner.instance_id.as_str())
+        || params["shutdownId"].as_str().is_none()
+        || params["shutdownId"] != shutdown["shutdownId"]
+        || !matches!(
+            shutdown["sessionCheckpoint"].as_str(),
+            Some("failed" | "pending")
+        )
+    {
+        return Err("OWNER_CHANGED: checkpoint retry observation expired".into());
+    }
+    Ok(())
 }
 
 fn spawn_detached_daemon(expected_generation: u64, attempt_id: &str) -> Result<(), String> {
@@ -489,7 +514,7 @@ async fn image_proxy(
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| format!("LOCAL_ACCESS_DENIED: {error}"))?;
-    validate_owner_async(&client, &descriptor).await?;
+    validate_owner_async(&client, &descriptor, "image", &serde_json::Value::Null).await?;
     let mut url = format!("http://127.0.0.1:{}/jellyfin/image/{}", descriptor.port, id);
     let mut query_parts = Vec::new();
     if let Some(h) = max_height {
@@ -563,7 +588,7 @@ async fn rpc_proxy(
         .build()
         .map_err(|error| serde_json::json!({ "code": "LOCAL_ACCESS_DENIED", "message": error.to_string() }))?;
     if method != "daemon.health" {
-        validate_owner_async(&client, &descriptor)
+        validate_owner_async(&client, &descriptor, &method, &params)
             .await
             .map_err(|message| {
                 let code = message
@@ -789,6 +814,38 @@ mod log_timestamp_tests {
 mod lifecycle_tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn checkpoint_retry_requires_the_observed_owner_shutdown_and_completed_or_pending_attempt() {
+        let owner = hifimule_lifecycle::OwnerDescriptor {
+            schema_version: 1,
+            protocol_version: hifimule_lifecycle::PROTOCOL_VERSION,
+            instance_id: "owner".into(),
+            pid: 123,
+            port: 12345,
+            token: "secret".into(),
+            launch_generation: "0".into(),
+        };
+        let mut health = serde_json::json!({"result":{"data":{"shutdown":{"shutdownId":"quit","sessionCheckpoint":"failed"}}}});
+        let params =
+            serde_json::json!({"schemaVersion":1,"instanceId":"owner","shutdownId":"quit"});
+        assert!(validate_checkpoint_retry_scope(&health, &owner, &params).is_ok());
+        for (key, value) in [
+            ("instanceId", serde_json::json!("old-owner")),
+            ("shutdownId", serde_json::json!("old-quit")),
+            ("schemaVersion", serde_json::json!(2)),
+        ] {
+            let mut stale = params.clone();
+            stale[key] = value;
+            assert!(validate_checkpoint_retry_scope(&health, &owner, &stale).is_err());
+        }
+        for state in ["notRequired", "succeeded"] {
+            health["result"]["data"]["shutdown"]["sessionCheckpoint"] = serde_json::json!(state);
+            assert!(validate_checkpoint_retry_scope(&health, &owner, &params).is_err());
+        }
+        health["result"]["data"]["shutdown"]["sessionCheckpoint"] = serde_json::json!("pending");
+        assert!(validate_checkpoint_retry_scope(&health, &owner, &params).is_ok());
+    }
 
     fn coordinator() -> StartupCoordinator {
         StartupCoordinator(Arc::new(Mutex::new(StartupState {

@@ -121,7 +121,10 @@ pub fn set_lifecycle_stopping(stopping: bool) {
     LIFECYCLE_STATE.store(if stopping { 2 } else { 1 }, AtomicOrdering::Release);
 }
 
-async fn daemon_health_result(operation_manager: &crate::sync::SyncOperationManager) -> Value {
+async fn daemon_health_result(
+    operation_manager: &crate::sync::SyncOperationManager,
+    playback: &crate::playback::PlaybackSession,
+) -> Value {
     let descriptor = LIFECYCLE_IDENTITY.get();
     let shutdown = operation_manager.shutdown_snapshot().await;
     let lifecycle_state = LIFECYCLE_STATE.load(AtomicOrdering::Acquire);
@@ -131,13 +134,14 @@ async fn daemon_health_result(operation_manager: &crate::sync::SyncOperationMana
         .or_else(|| (lifecycle_state == 3).then(|| "SHUTDOWN_TIMEOUT".to_string()));
     serde_json::json!({
         "data": {
-            "status": if lifecycle_state >= 2 { "stopping" } else { "ok" },
+            "status": if lifecycle_state >= 2 || operation_manager.is_shutdown_committed() { "stopping" } else { "ok" },
             "protocolVersion": hifimule_lifecycle::PROTOCOL_VERSION,
             "instanceId": descriptor.map(|value| value.instance_id.as_str()).unwrap_or("test-instance"),
             "pid": descriptor.map(|value| value.pid).unwrap_or_else(std::process::id),
             "daemonVersion": env!("CARGO_PKG_VERSION"),
             "errorCode": error_code,
-            "shutdown": shutdown
+            "shutdown": shutdown,
+            "playback": playback.health()
         }
     })
 }
@@ -290,7 +294,13 @@ async fn handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
-    if LIFECYCLE_STATE.load(AtomicOrdering::Acquire) >= 2 && payload.method != "daemon.health" {
+    if (LIFECYCLE_STATE.load(AtomicOrdering::Acquire) >= 2
+        || state.sync_operation_manager.is_shutdown_committed())
+        && !matches!(
+            payload.method.as_str(),
+            "daemon.health" | "playback.retryCheckpoint"
+        )
+    {
         return Json(JsonRpcResponse {
             jsonrpc: "2.0".into(),
             result: None,
@@ -374,7 +384,10 @@ async fn handler(
         "device.list" => handle_device_list(&state).await,
         "device.select" => handle_device_select(&state, payload.params).await,
         "server.probe" => handle_server_probe(payload.params).await,
-        "daemon.health" => Ok(daemon_health_result(&state.sync_operation_manager).await),
+        "daemon.health" => {
+            Ok(daemon_health_result(&state.sync_operation_manager, &state.playback).await)
+        }
+        "playback.retryCheckpoint" => handle_playback_retry_checkpoint(&state, payload.params),
         "playback.getSession" => handle_playback_get_session(&state, payload.params).await,
         "playback.listOccurrences" => {
             handle_playback_list_occurrences(&state, payload.params).await
@@ -493,6 +506,15 @@ fn is_mutating_method(method: &str) -> bool {
 }
 
 fn playback_error(error: crate::playback::session::PlaybackError) -> JsonRpcError {
+    let mut data =
+        serde_json::json!({ "code": error.code, "retryable": error.code == "PLAYBACK_BUSY" });
+    if let Some(metadata) = &error.authoritative {
+        data["instanceId"] = serde_json::json!(metadata.instance_id);
+        data["sessionId"] = serde_json::json!(metadata.session_id);
+        data["queueRevision"] = serde_json::json!(metadata.queue_revision);
+        data["stateSequence"] = serde_json::json!(metadata.state_sequence);
+        data["generationId"] = serde_json::json!(metadata.generation_id);
+    }
     JsonRpcError {
         code: if error.conflict {
             409
@@ -502,11 +524,65 @@ fn playback_error(error: crate::playback::session::PlaybackError) -> JsonRpcErro
             ERR_INVALID_PARAMS
         },
         message: error.message.into(),
-        data: Some(serde_json::json!({
-            "code": error.code,
-            "retryable": error.code == "PLAYBACK_BUSY"
-        })),
+        data: Some(data),
     }
+}
+
+fn playback_task_error(_: tokio::task::JoinError) -> JsonRpcError {
+    JsonRpcError {
+        code: -32603,
+        message: "Playback owner task failed".into(),
+        data: Some(serde_json::json!({"code":"PERSISTENCE_FAILED"})),
+    }
+}
+
+fn handle_playback_retry_checkpoint(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Params {
+        schema_version: u32,
+        instance_id: String,
+        shutdown_id: String,
+    }
+    let p: Params =
+        serde_json::from_value(params.unwrap_or(Value::Null)).map_err(|_| JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Invalid playback.retryCheckpoint parameters".into(),
+            data: Some(serde_json::json!({"code":"INVALID_SESSION"})),
+        })?;
+    let instance_id = state.playback.instance_id();
+    let snapshot = state.sync_operation_manager.shutdown_tray_snapshot();
+    let code = if p.schema_version != crate::playback::model::SCHEMA_VERSION {
+        Some("UNSUPPORTED_PLAYBACK_VERSION")
+    } else if p.instance_id != instance_id {
+        Some("INSTANCE_MISMATCH")
+    } else if !state
+        .sync_operation_manager
+        .request_checkpoint_retry(&p.shutdown_id)
+    {
+        Some("PLAYBACK_BUSY")
+    } else {
+        None
+    };
+    if let Some(code) = code {
+        return Err(JsonRpcError {
+            code: if code == "UNSUPPORTED_PLAYBACK_VERSION" {
+                ERR_INVALID_PARAMS
+            } else {
+                409
+            },
+            message: "Session checkpoint retry is unavailable".into(),
+            data: Some(
+                serde_json::json!({"code":code,"instanceId":instance_id,"shutdownId":snapshot.map(|s|s.shutdown_id)}),
+            ),
+        });
+    }
+    Ok(
+        serde_json::json!({"data":{"accepted":true,"instanceId":instance_id,"shutdownId":p.shutdown_id}}),
+    )
 }
 
 async fn handle_playback_get_session(
@@ -529,11 +605,13 @@ async fn handle_playback_get_session(
             code: "UNSUPPORTED_PLAYBACK_VERSION",
             message: "unsupported playback schema version",
             conflict: false,
+            authoritative: None,
         }));
     }
-    state
-        .playback
-        .snapshot()
+    let playback = state.playback.clone();
+    tokio::task::spawn_blocking(move || playback.snapshot())
+        .await
+        .map_err(playback_task_error)?
         .map(|data| serde_json::json!({"data":data}))
         .map_err(playback_error)
 }
@@ -550,9 +628,10 @@ async fn handle_playback_list_occurrences(
         message: "Invalid playback.listOccurrences parameters".into(),
         data: Some(serde_json::json!({"code":"INVALID_CURSOR"})),
     })?;
-    state
-        .playback
-        .list(p)
+    let playback = state.playback.clone();
+    tokio::task::spawn_blocking(move || playback.list(p))
+        .await
+        .map_err(playback_task_error)?
         .map(|data| serde_json::json!({"data":data}))
         .map_err(playback_error)
 }
@@ -604,6 +683,7 @@ async fn handle_playback_retry_restore(
             code: "UNSUPPORTED_PLAYBACK_VERSION",
             message: "unsupported playback schema version",
             conflict: false,
+            authoritative: None,
         }));
     }
     let playback = state.playback.clone();
@@ -7268,6 +7348,8 @@ mod tests {
 
     fn make_test_state(db: Arc<crate::db::Database>) -> Arc<AppState> {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
+        let playback =
+            crate::playback::PlaybackSession::restore(db.clone(), "test-instance".into());
         Arc::new(AppState {
             jellyfin_client: JellyfinClient::new(),
             server_manager: Arc::new(tokio::sync::RwLock::new(
@@ -7280,10 +7362,7 @@ mod tests {
             sync_operation_manager: Arc::new(crate::sync::SyncOperationManager::new()),
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
-            playback: crate::playback::PlaybackSession::restore(
-                Arc::new(crate::db::Database::memory().unwrap()),
-                "test-instance".into(),
-            ),
+            playback,
         })
     }
 
@@ -7371,7 +7450,14 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(conflict.code, 409);
-        assert_eq!(conflict.data.unwrap()["code"], "QUEUE_REVISION_CONFLICT");
+        let conflict = conflict.data.unwrap();
+        assert_eq!(conflict["code"], "QUEUE_REVISION_CONFLICT");
+        assert_eq!(
+            conflict["queueRevision"],
+            refreshed["data"]["queueRevision"]
+        );
+        assert_eq!(conflict["instanceId"], refreshed["data"]["instanceId"]);
+        assert_eq!(conflict["sessionId"], refreshed["data"]["sessionId"]);
 
         let unknown_field = handle_playback_apply_session(
             &state,
@@ -7391,6 +7477,161 @@ mod tests {
         assert_eq!(unknown_field.code, ERR_INVALID_PARAMS);
         assert_eq!(unknown_field.data.unwrap()["code"], "INVALID_SESSION");
         assert!(state.server_manager.read().await.providers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn playback_retry_checkpoint_router_is_authenticated_owner_bound_and_shutdown_scoped() {
+        let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+        let operations = state.sync_operation_manager.clone();
+        let app = Router::new()
+            .route("/", post(handler))
+            .layer(middleware::from_fn_with_state(
+                Arc::new("checkpoint-token".to_string()),
+                authenticate_local_request,
+            ))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        let request = |method: &str, params: Value| {
+            client
+                .post(&url)
+                .json(&json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}))
+        };
+        let before = operations.begin_shutdown_fence();
+        let params =
+            json!({"schemaVersion":1,"instanceId":"test-instance","shutdownId":before.shutdown_id});
+        let precommit: Value = request("playback.retryCheckpoint", params.clone())
+            .bearer_auth("checkpoint-token")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(precommit["error"].is_object());
+        operations.begin_session_checkpoint();
+        operations.commit_shutdown().await;
+        operations.finish_session_checkpoint(false);
+        assert_eq!(
+            request("playback.retryCheckpoint", params.clone())
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            request("playback.retryCheckpoint", params.clone())
+                .bearer_auth("wrong")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let mut stale = params.clone();
+        stale["instanceId"] = json!("old-owner");
+        let rejected: Value = request("playback.retryCheckpoint", stale)
+            .bearer_auth("checkpoint-token")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(rejected["error"]["data"]["code"], "INSTANCE_MISMATCH");
+        let mut stale = params.clone();
+        stale["shutdownId"] = json!("old-shutdown");
+        let rejected: Value = request("playback.retryCheckpoint", stale)
+            .bearer_auth("checkpoint-token")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(rejected["error"].is_object());
+        assert!(!operations.take_checkpoint_retry());
+        for _ in 0..2 {
+            let accepted: Value = request("playback.retryCheckpoint", params.clone())
+                .bearer_auth("checkpoint-token")
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(accepted["result"]["data"]["accepted"], true, "{accepted}");
+        }
+        assert!(operations.take_checkpoint_retry());
+        assert!(!operations.take_checkpoint_retry());
+        let rejected: Value = request("playback.retryRestore", json!({"schemaVersion":1}))
+            .bearer_auth("checkpoint-token")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(rejected["error"]["data"]["errorCode"], "DAEMON_STOPPED");
+        let health: Value = request("daemon.health", json!({}))
+            .bearer_auth("checkpoint-token")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(health["result"]["data"]["status"], "stopping");
+        assert_eq!(
+            health["result"]["data"]["shutdown"]["shutdownId"],
+            before.shutdown_id
+        );
+        operations.finish_session_checkpoint(true);
+        let rejected: Value = request("playback.retryCheckpoint", params)
+            .bearer_auth("checkpoint-token")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(rejected["error"].is_object());
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn playback_read_waiting_for_database_does_not_block_health_executor() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let state = make_test_state(db.clone());
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let stalled_db = db.clone();
+        let holder = std::thread::spawn(move || {
+            let _connection = stalled_db.conn.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        locked_rx.recv().unwrap();
+        let reading = state.clone();
+        let task = tokio::spawn(async move {
+            handle_playback_get_session(&reading, Some(json!({"schemaVersion":1}))).await
+        });
+        tokio::task::yield_now().await;
+        let health = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            daemon_health_result(&state.sync_operation_manager, &state.playback),
+        )
+        .await
+        .unwrap();
+        assert_eq!(health["data"]["playback"]["restoration"]["status"], "ok");
+        assert!(!task.is_finished());
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(task.await.unwrap().is_ok());
     }
 
     #[tokio::test]
@@ -11596,7 +11837,7 @@ mod tests {
                 "sessionId":playback_data["sessionId"],
                 "commandId":uuid::Uuid::new_v4().to_string(),
                 "expectedQueueRevision":playback_data["queueRevision"],
-                "operation":{"type":"clear"}
+                "operation":{"type":"replaceQueue","sources":[{"serverId":"offline","trackId":"one"},{"serverId":"offline","trackId":"two"}]}
             },
             "id":3
         });
@@ -11611,6 +11852,41 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(applied["result"]["data"]["queueRevision"], "1");
+        let selected_id =
+            applied["result"]["data"]["assignedOccurrences"][1]["occurrenceId"].clone();
+        let mut select_body = apply_body.clone();
+        select_body["params"]["commandId"] = json!(uuid::Uuid::new_v4().to_string());
+        select_body["params"]["expectedQueueRevision"] = json!("1");
+        select_body["params"]["operation"] =
+            json!({"type":"selectCurrent","occurrenceId":selected_id});
+        let selected: Value = client
+            .post(format!("http://127.0.0.1:{port}"))
+            .bearer_auth(&descriptor.token)
+            .json(&select_body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            selected["result"]["data"]["queueRevision"], "1",
+            "{selected}"
+        );
+        let snapshot: Value = client
+            .post(format!("http://127.0.0.1:{port}"))
+            .bearer_auth(&descriptor.token)
+            .json(&playback_body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshot["result"]["data"]["current"]["occurrenceId"],
+            selected_id
+        );
         shutdown.store(true, std::sync::atomic::Ordering::Release);
         task.await.unwrap().unwrap();
     }

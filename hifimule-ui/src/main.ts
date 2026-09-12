@@ -5,7 +5,7 @@ import { LogicalSize } from '@tauri-apps/api/dpi';
 import { Window, currentMonitor } from '@tauri-apps/api/window';
 import { t } from './i18n';
 import { withDeadline } from './lifecycleDeadline';
-import { shutdownMessageKey, ShutdownPoller, canRetryQuit } from './shutdownStatus';
+import { shutdownMessageKey, ShutdownPoller, canRetryQuit, canRetryCheckpoint } from './shutdownStatus';
 
 const isDev = Boolean((import.meta as any).env?.DEV);
 setBasePath(new URL(isDev
@@ -116,6 +116,7 @@ function observeShutdown(rpcCall: (method: string, params?: any) => Promise<any>
 
 type ShutdownHealth = {
     status: string;
+    instanceId?: string;
     errorCode?: string | null;
     shutdown?: {
         shutdownId: string;
@@ -124,6 +125,7 @@ type ShutdownHealth = {
         deadlineExceeded: boolean;
         activeOperationCount: number;
         pendingMutationCount: number;
+        sessionCheckpoint?: string;
     } | null;
 };
 
@@ -154,8 +156,14 @@ function renderShutdownStatus(
     let current = initial;
     const update = (health: ShutdownHealth) => {
         if (disposed) return;
+        if (initial.instanceId && health.instanceId !== initial.instanceId) return;
+        if (current.shutdown && !['fencing', 'fenceFailed'].includes(current.shutdown.phase)
+            && health.shutdown?.shutdownId !== current.shutdown.shutdownId) return;
         current = health;
-        retry.hidden = resume.hidden = !canRetryQuit(health);
+        const checkpointRetry = canRetryCheckpoint(health);
+        retry.hidden = !(checkpointRetry || canRetryQuit(health));
+        resume.hidden = !canRetryQuit(health);
+        retry.textContent = t(checkpointRetry ? 'lifecycle.retry_saving_session' : 'lifecycle.retry_quit');
         const shutdown = health.shutdown;
         if (!status || !shutdown) return;
         const messageKey = shutdownMessageKey(shutdown, health.errorCode);
@@ -180,15 +188,21 @@ function renderShutdownStatus(
     update(initial);
     refresh?.addEventListener('click', () => poller.refresh());
     retry.addEventListener('click', async () => {
-        if (!canRetryQuit(current) || retry.disabled) return;
+        const checkpointRetry = canRetryCheckpoint(current);
+        if ((!canRetryQuit(current) && !checkpointRetry) || retry.disabled) return;
+        const observed = current;
         retry.disabled = true;
         resume.disabled = true;
         try {
-            await rpcCall('daemon.retryQuit');
+            await rpcCall(checkpointRetry ? 'playback.retryCheckpoint' : 'daemon.retryQuit', checkpointRetry ? {
+                schemaVersion: 1, instanceId: observed.instanceId, shutdownId: observed.shutdown!.shutdownId,
+            } : undefined);
+            if (disposed || current.instanceId !== observed.instanceId || current.shutdown?.shutdownId !== observed.shutdown?.shutdownId) return;
             retry.hidden = resume.hidden = true;
+            if (checkpointRetry) current = { ...current, shutdown: { ...current.shutdown!, sessionCheckpoint: 'pending' } };
             poller.refresh();
         } catch {
-            if (!disposed && status) status.textContent = t('lifecycle.quit_persistence_failed');
+            if (!disposed && status) status.textContent = t(checkpointRetry ? 'lifecycle.playback_checkpoint_failed' : 'lifecycle.quit_persistence_failed');
         } finally { retry.disabled = resume.disabled = false; }
     });
     resume.addEventListener('click', () => {

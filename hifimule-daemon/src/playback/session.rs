@@ -11,6 +11,7 @@ pub struct PlaybackError {
     pub code: &'static str,
     pub message: &'static str,
     pub conflict: bool,
+    pub authoritative: Option<Box<SessionMetadata>>,
 }
 impl PlaybackError {
     fn invalid(code: &'static str, msg: &'static str) -> Self {
@@ -18,6 +19,7 @@ impl PlaybackError {
             code,
             message: msg,
             conflict: false,
+            authoritative: None,
         }
     }
     fn conflict(code: &'static str, msg: &'static str) -> Self {
@@ -25,6 +27,7 @@ impl PlaybackError {
             code,
             message: msg,
             conflict: true,
+            authoritative: None,
         }
     }
 }
@@ -32,14 +35,22 @@ type PResult<T> = std::result::Result<T, PlaybackError>;
 
 #[derive(Clone)]
 pub struct PlaybackSession {
+    instance_id: String,
+    #[cfg(test)]
     inner: Arc<Mutex<Inner>>,
     command_tx: mpsc::SyncSender<OwnerCommand>,
     control_tx: mpsc::Sender<OwnerControl>,
     #[allow(dead_code)]
     executing: Arc<AtomicBool>,
+    fenced: Arc<AtomicBool>,
+    ingress: Arc<Mutex<ProgressIngress>>,
+    health: Arc<Mutex<PlaybackHealth>>,
+    worker: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 
 enum OwnerCommand {
+    Snapshot(mpsc::Sender<PResult<SessionSnapshot>>),
+    List(ListOccurrencesParams, mpsc::Sender<PResult<OccurrencePage>>),
     Apply(
         ApplySessionParams,
         Option<crate::sync::MutationGuard>,
@@ -55,6 +66,7 @@ enum OwnerControl {
     #[allow(dead_code)]
     Checkpoint(mpsc::Sender<PResult<()>>),
     ShutdownCheckpoint(mpsc::Sender<PResult<()>>),
+    Stop,
 }
 
 struct Inner {
@@ -67,7 +79,6 @@ struct Inner {
     persistence: Status,
     dedup: HashMap<String, DedupEntry>,
     dedup_order: VecDeque<String>,
-    progress: Option<Progress>,
     dirty: bool,
     checkpointed_position_ms: u64,
 }
@@ -77,13 +88,26 @@ struct DedupEntry {
     payload: ApplySessionParams,
     result: PResult<ApplyResult>,
 }
-#[derive(Clone)]
-struct Progress {
-    sequence: u64,
+// This lock is never held during database work. Producers only try_lock it.
+struct ProgressIngress {
+    generation_id: String,
+    occurrence_id: Option<String>,
+    sequence: Option<u64>,
+    position_ms: u64,
+    pending: Option<(u64, u64)>,
+}
+
+struct OwnerResources {
+    inner: Arc<Mutex<Inner>>,
+    executing: Arc<AtomicBool>,
+    ingress: Arc<Mutex<ProgressIngress>>,
+    fenced: Arc<AtomicBool>,
+    health: Arc<Mutex<PlaybackHealth>>,
 }
 
 impl PlaybackSession {
     pub fn restore(db: Arc<Database>, instance_id: String) -> Self {
+        let owner_id = instance_id.clone();
         let loaded = db.load_playback_session();
         let (session, restoration) = match loaded {
             Ok(Some(mut s)) => {
@@ -153,78 +177,84 @@ impl PlaybackSession {
             restoration,
             dedup: HashMap::new(),
             dedup_order: VecDeque::new(),
-            progress: None,
             dirty: false,
             checkpointed_position_ms,
         }));
+        let (ingress, health) = {
+            let i = inner.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                Arc::new(Mutex::new(ProgressIngress {
+                    generation_id: i.generation_id.clone(),
+                    occurrence_id: i.session.current_occurrence_id.clone(),
+                    sequence: None,
+                    position_ms: i.session.position_ms,
+                    pending: None,
+                })),
+                Arc::new(Mutex::new(PlaybackHealth {
+                    restoration: i.restoration.clone(),
+                    persistence: i.persistence.clone(),
+                })),
+            )
+        };
+        let fenced = Arc::new(AtomicBool::new(false));
         let (command_tx, command_rx) = mpsc::sync_channel(64);
         let (control_tx, control_rx) = mpsc::channel();
         let worker_inner = Arc::clone(&inner);
         let executing = Arc::new(AtomicBool::new(false));
         let worker_executing = Arc::clone(&executing);
-        std::thread::Builder::new()
+        let worker_ingress = ingress.clone();
+        let worker_fenced = fenced.clone();
+        let worker_health = health.clone();
+        let resources = OwnerResources {
+            inner: worker_inner,
+            executing: worker_executing,
+            ingress: worker_ingress,
+            fenced: worker_fenced,
+            health: worker_health,
+        };
+        let worker = std::thread::Builder::new()
             .name("hifimule-playback-owner".into())
-            .spawn(move || owner_loop(worker_inner, command_rx, control_rx, worker_executing))
+            .spawn(move || owner_loop(resources, command_rx, control_rx))
             .expect("playback owner thread must start");
         Self {
+            instance_id: owner_id,
+            #[cfg(test)]
             inner,
             command_tx,
             control_tx,
             executing,
+            fenced,
+            ingress,
+            health,
+            worker: Arc::new(Mutex::new(Some(worker))),
         }
     }
 
     pub fn snapshot(&self) -> PResult<SessionSnapshot> {
-        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        snapshot(&inner)
+        let (tx, rx) = mpsc::channel();
+        self.command_tx
+            .try_send(OwnerCommand::Snapshot(tx))
+            .map_err(admission_error)?;
+        rx.recv().unwrap_or_else(|_| Err(owner_stopped()))
     }
 
     pub fn list(&self, p: ListOccurrencesParams) -> PResult<OccurrencePage> {
-        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        require_schema(p.schema_version)?;
-        if p.session_id != inner.session.session_id {
-            return Err(PlaybackError::conflict(
-                "SESSION_MISMATCH",
-                "session identity is stale",
-            ));
-        }
-        if parse_revision(&p.expected_queue_revision)? != inner.session.queue_revision {
-            return Err(PlaybackError::conflict(
-                "QUEUE_REVISION_CONFLICT",
-                "queue revision is stale",
-            ));
-        }
-        let limit = p.limit.unwrap_or(DEFAULT_PAGE_SIZE);
-        if !(1..=MAX_PAGE_SIZE).contains(&limit) {
-            return Err(PlaybackError::invalid(
-                "INVALID_CURSOR",
-                "limit must be between 1 and 200",
-            ));
-        }
-        let after = match p.cursor {
-            Some(c) => Some(decode_cursor(&c, &inner.session)?),
-            None => None,
-        };
-        let mut rows = inner
-            .db
-            .playback_page(&inner.session.session_id, after, limit + 1)
-            .map_err(storage)?;
-        let next = if rows.len() > limit {
-            rows.truncate(limit);
-            rows.last()
-                .map(|o| encode_cursor(&inner.session, o.ordinal))
-        } else {
-            None
-        };
-        decorate_availability(&inner.db, &mut rows)?;
-        Ok(OccurrencePage {
-            occurrences: rows,
-            next_cursor: next,
-            total_occurrence_count: inner
-                .db
-                .playback_count(&inner.session.session_id)
-                .map_err(storage)?,
-        })
+        let (tx, rx) = mpsc::channel();
+        self.command_tx
+            .try_send(OwnerCommand::List(p, tx))
+            .map_err(admission_error)?;
+        rx.recv().unwrap_or_else(|_| Err(owner_stopped()))
+    }
+
+    pub fn health(&self) -> PlaybackHealth {
+        self.health
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn instance_id(&self) -> String {
+        self.instance_id.clone()
     }
 
     #[allow(dead_code)]
@@ -237,12 +267,9 @@ impl PlaybackSession {
         p: ApplySessionParams,
         guard: Option<crate::sync::MutationGuard>,
     ) -> PResult<ApplyResult> {
-        self.admit_apply(p, guard)?.recv().unwrap_or_else(|_| {
-            Err(PlaybackError::conflict(
-                "PLAYBACK_BUSY",
-                "playback owner stopped before replying",
-            ))
-        })
+        self.admit_apply(p, guard)?
+            .recv()
+            .unwrap_or_else(|_| Err(owner_stopped()))
     }
 
     #[allow(dead_code)]
@@ -254,16 +281,14 @@ impl PlaybackSession {
         &self,
         guard: Option<crate::sync::MutationGuard>,
     ) -> PResult<SessionSnapshot> {
-        let (reply_tx, reply_rx) = mpsc::channel();
+        if self.fenced.load(Ordering::Acquire) {
+            return Err(owner_stopped());
+        }
+        let (tx, rx) = mpsc::channel();
         self.command_tx
-            .try_send(OwnerCommand::RetryRestore(guard, reply_tx))
+            .try_send(OwnerCommand::RetryRestore(guard, tx))
             .map_err(admission_error)?;
-        reply_rx.recv().unwrap_or_else(|_| {
-            Err(PlaybackError::conflict(
-                "PLAYBACK_BUSY",
-                "playback owner stopped before replying",
-            ))
-        })
+        rx.recv().unwrap_or_else(|_| Err(owner_stopped()))
     }
 
     #[allow(dead_code)]
@@ -274,56 +299,72 @@ impl PlaybackSession {
         sequence: u64,
         position_ms: u64,
     ) -> PResult<()> {
-        const JS_SAFE: u64 = 9_007_199_254_740_991;
-        if position_ms > JS_SAFE {
+        if position_ms > 9_007_199_254_740_991 {
             return Err(PlaybackError::invalid(
                 "STALE_PROGRESS",
                 "position is out of range",
             ));
         }
-        let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let current = i.session.current_occurrence_id.as_deref();
-        let last = i.progress.as_ref().map(|p| p.sequence);
-        if generation_id != i.generation_id
-            || current != Some(occurrence_id)
-            || last.is_some_and(|v| sequence <= v)
+        let mut p = self
+            .ingress
+            .try_lock()
+            .map_err(|_| PlaybackError::conflict("PLAYBACK_BUSY", "progress slot is busy"))?;
+        if self.fenced.load(Ordering::Acquire) {
+            return Err(owner_stopped());
+        }
+        if p.generation_id != generation_id
+            || p.occurrence_id.as_deref() != Some(occurrence_id)
+            || p.sequence.is_some_and(|last| sequence <= last)
+            || position_ms < p.position_ms
         {
             return Err(PlaybackError::conflict(
                 "STALE_PROGRESS",
                 "progress sample is stale",
             ));
         }
-        i.session.position_ms = position_ms;
-        i.progress = Some(Progress { sequence });
-        i.dirty = true;
+        p.sequence = Some(sequence);
+        p.position_ms = position_ms;
+        p.pending = Some((sequence, position_ms));
         Ok(())
     }
 
     #[allow(dead_code)]
     pub fn final_checkpoint(&self) -> PResult<()> {
-        let (reply_tx, reply_rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         self.control_tx
-            .send(OwnerControl::Checkpoint(reply_tx))
-            .map_err(|_| PlaybackError::conflict("PLAYBACK_BUSY", "playback owner stopped"))?;
-        reply_rx.recv().unwrap_or_else(|_| {
-            Err(PlaybackError::conflict(
-                "PLAYBACK_BUSY",
-                "playback owner stopped before checkpointing",
-            ))
-        })
+            .send(OwnerControl::Checkpoint(tx))
+            .map_err(|_| owner_stopped())?;
+        rx.recv().unwrap_or_else(|_| Err(owner_stopped()))
     }
 
-    pub fn shutdown_checkpoint(&self) -> PResult<()> {
-        let (reply_tx, reply_rx) = mpsc::channel();
+    /// Fence ingress immediately; the reply establishes completion of the frozen write.
+    pub fn begin_shutdown_checkpoint(&self) -> PResult<mpsc::Receiver<PResult<()>>> {
+        {
+            let _ingress = self.ingress.lock().unwrap_or_else(|e| e.into_inner());
+            self.fenced.store(true, Ordering::Release);
+        }
+        let (tx, rx) = mpsc::channel();
         self.control_tx
-            .send(OwnerControl::ShutdownCheckpoint(reply_tx))
-            .map_err(|_| PlaybackError::conflict("PLAYBACK_BUSY", "playback owner stopped"))?;
-        reply_rx.recv().unwrap_or_else(|_| {
-            Err(PlaybackError::conflict(
-                "PLAYBACK_BUSY",
-                "playback owner stopped before shutdown checkpoint",
-            ))
-        })
+            .send(OwnerControl::ShutdownCheckpoint(tx))
+            .map_err(|_| owner_stopped())?;
+        Ok(rx)
+    }
+
+    #[allow(dead_code)]
+    pub fn shutdown_checkpoint(&self) -> PResult<()> {
+        self.begin_shutdown_checkpoint()?
+            .recv()
+            .unwrap_or_else(|_| Err(owner_stopped()))
+    }
+
+    pub fn stop_and_join(&self) -> PResult<()> {
+        let mut worker = self.worker.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(thread) = worker.take() {
+            self.fenced.store(true, Ordering::Release);
+            let _ = self.control_tx.send(OwnerControl::Stop);
+            thread.join().map_err(|_| owner_stopped())?;
+        }
+        Ok(())
     }
 
     fn admit_apply(
@@ -331,12 +372,66 @@ impl PlaybackSession {
         params: ApplySessionParams,
         guard: Option<crate::sync::MutationGuard>,
     ) -> PResult<mpsc::Receiver<PResult<ApplyResult>>> {
-        let (reply_tx, reply_rx) = mpsc::channel();
+        if self.fenced.load(Ordering::Acquire) {
+            return Err(owner_stopped());
+        }
+        let (tx, rx) = mpsc::channel();
         self.command_tx
-            .try_send(OwnerCommand::Apply(params, guard, reply_tx))
+            .try_send(OwnerCommand::Apply(params, guard, tx))
             .map_err(admission_error)?;
-        Ok(reply_rx)
+        Ok(rx)
     }
+}
+
+fn owner_stopped() -> PlaybackError {
+    PlaybackError::conflict("DAEMON_STOPPED", "daemon shutdown rejected playback work")
+}
+
+fn list_inner(inner: &Inner, p: ListOccurrencesParams) -> PResult<OccurrencePage> {
+    require_schema(p.schema_version)?;
+    if p.session_id != inner.session.session_id {
+        return Err(PlaybackError::conflict(
+            "SESSION_MISMATCH",
+            "session identity is stale",
+        ));
+    }
+    if parse_revision(&p.expected_queue_revision)? != inner.session.queue_revision {
+        return Err(PlaybackError::conflict(
+            "QUEUE_REVISION_CONFLICT",
+            "queue revision is stale",
+        ));
+    }
+    let limit = p.limit.unwrap_or(DEFAULT_PAGE_SIZE);
+    if !(1..=MAX_PAGE_SIZE).contains(&limit) {
+        return Err(PlaybackError::invalid(
+            "INVALID_CURSOR",
+            "limit must be between 1 and 200",
+        ));
+    }
+    let after = match p.cursor {
+        Some(c) => Some(decode_cursor(&c, &inner.session)?),
+        None => None,
+    };
+    let mut rows = inner
+        .db
+        .playback_page(&inner.session.session_id, after, limit + 1)
+        .map_err(storage)?;
+    let next = if rows.len() > limit {
+        rows.truncate(limit);
+        rows.last()
+            .map(|o| encode_cursor(&inner.session, o.ordinal))
+    } else {
+        None
+    };
+    decorate_availability(&inner.db, &mut rows)?;
+    Ok(OccurrencePage {
+        occurrences: rows,
+        next_cursor: next,
+        total_occurrence_count: inner
+            .db
+            .playback_count(&inner.session.session_id)
+            .map_err(storage)?,
+    })
 }
 
 fn admission_error<T>(error: mpsc::TrySendError<T>) -> PlaybackError {
@@ -351,80 +446,203 @@ fn admission_error<T>(error: mpsc::TrySendError<T>) -> PlaybackError {
 }
 
 fn owner_loop(
-    inner: Arc<Mutex<Inner>>,
+    resources: OwnerResources,
     command_rx: mpsc::Receiver<OwnerCommand>,
     control_rx: mpsc::Receiver<OwnerControl>,
-    executing: Arc<AtomicBool>,
 ) {
+    let OwnerResources {
+        inner,
+        executing,
+        ingress,
+        fenced,
+        health,
+    } = resources;
     let mut last_periodic_checkpoint = Instant::now();
+    let mut last_sample = Instant::now();
     loop {
         while let Ok(control) = control_rx.try_recv() {
             match control {
-                OwnerControl::Checkpoint(reply) => {
-                    let mut inner = inner.lock().unwrap_or_else(|e| e.into_inner());
-                    let _ = reply.send(checkpoint_inner(&mut inner));
-                }
-                OwnerControl::ShutdownCheckpoint(reply) => {
+                OwnerControl::Stop => {
                     while let Ok(command) = command_rx.try_recv() {
                         reject_unstarted(command);
                     }
-                    let mut inner = inner.lock().unwrap_or_else(|e| e.into_inner());
-                    let _ = reply.send(checkpoint_inner(&mut inner));
+                    return;
+                }
+                OwnerControl::Checkpoint(reply) | OwnerControl::ShutdownCheckpoint(reply) => {
+                    // The atomic fence also covers callers admitted before shutdown but
+                    // still waiting for a blocking-pool thread to enqueue their command.
+                    if fenced.load(Ordering::Acquire) {
+                        while let Ok(command) = command_rx.try_recv() {
+                            reject_unstarted(command);
+                        }
+                    }
+                    let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
+                    let result =
+                        sample_progress(&mut i, &ingress).and_then(|()| checkpoint_inner(&mut i));
+                    publish_health(&i, &health);
+                    let _ = reply.send(result);
                 }
             }
         }
         match command_rx.recv_timeout(Duration::from_millis(25)) {
+            Ok(OwnerCommand::Snapshot(reply)) => {
+                let i = inner.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = reply.send(with_metadata(snapshot(&i), &i));
+            }
+            Ok(OwnerCommand::List(params, reply)) => {
+                let i = inner.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = reply.send(with_metadata(list_inner(&i, params), &i));
+            }
             Ok(OwnerCommand::Apply(params, _mutation_guard, reply)) => {
                 executing.store(true, Ordering::Release);
-                let mut inner = inner.lock().unwrap_or_else(|e| e.into_inner());
-                prune_dedup(&mut inner);
-                let result = if let Some(old) = inner.dedup.get(&params.command_id) {
-                    if old.payload == params {
-                        old.result.clone()
-                    } else {
-                        Err(PlaybackError::conflict(
-                            "COMMAND_ID_REUSED",
-                            "command identity was reused with another payload",
-                        ))
-                    }
+                let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
+                let result = if fenced.load(Ordering::Acquire) {
+                    Err(owner_stopped())
                 } else {
-                    let result = apply_inner(&mut inner, &params);
-                    retain_dedup(&mut inner, params, result.clone());
-                    result
+                    prune_dedup(&mut i);
+                    if let Some(old) = i.dedup.get(&params.command_id) {
+                        if old.payload == params {
+                            old.result.clone()
+                        } else {
+                            Err(PlaybackError::conflict(
+                                "COMMAND_ID_REUSED",
+                                "command identity was reused with another payload",
+                            ))
+                        }
+                    } else {
+                        let result = sample_progress_if_due(
+                            &mut i,
+                            &ingress,
+                            &mut last_sample,
+                            Instant::now(),
+                        )
+                        .and_then(|()| apply_inner(&mut i, &params));
+                        if result.is_ok() {
+                            refresh_ingress(&i, &ingress);
+                        }
+                        retain_dedup(&mut i, params, result.clone());
+                        result
+                    }
                 };
+                let result = with_metadata(result, &i).map(|mut result| {
+                    result.current_metadata = metadata(&i);
+                    result
+                });
+                publish_health(&i, &health);
                 let _ = reply.send(result);
                 executing.store(false, Ordering::Release);
             }
             Ok(OwnerCommand::RetryRestore(_mutation_guard, reply)) => {
                 executing.store(true, Ordering::Release);
-                let mut inner = inner.lock().unwrap_or_else(|e| e.into_inner());
-                let _ = reply.send(retry_restore_inner(&mut inner));
+                let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
+                let result = if fenced.load(Ordering::Acquire) {
+                    Err(owner_stopped())
+                } else {
+                    retry_restore_inner(&mut i)
+                };
+                if result.is_ok() {
+                    refresh_ingress(&i, &ingress);
+                }
+                publish_health(&i, &health);
+                let _ = reply.send(with_metadata(result, &i));
                 executing.store(false, Ordering::Release);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
-        if last_periodic_checkpoint.elapsed() >= Duration::from_secs(5) {
-            let mut inner = inner.lock().unwrap_or_else(|e| e.into_inner());
-            let _ = checkpoint_inner(&mut inner);
-            last_periodic_checkpoint = Instant::now();
+        if !fenced.load(Ordering::Acquire)
+            && (last_sample.elapsed() >= Duration::from_millis(250)
+                || last_periodic_checkpoint.elapsed() >= Duration::from_secs(5))
+        {
+            let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
+            if last_sample.elapsed() >= Duration::from_millis(250) {
+                let _ = sample_progress_if_due(&mut i, &ingress, &mut last_sample, Instant::now());
+            }
+            if last_periodic_checkpoint.elapsed() >= Duration::from_secs(5) {
+                let _ = checkpoint_inner(&mut i);
+                last_periodic_checkpoint = Instant::now();
+            }
+            publish_health(&i, &health);
         }
     }
 }
 
+fn sample_progress_if_due(
+    i: &mut Inner,
+    ingress: &Mutex<ProgressIngress>,
+    last: &mut Instant,
+    now: Instant,
+) -> PResult<()> {
+    if now.saturating_duration_since(*last) >= Duration::from_millis(250) {
+        sample_progress(i, ingress)?;
+        *last = now;
+    }
+    Ok(())
+}
+
+fn sample_progress(i: &mut Inner, ingress: &Mutex<ProgressIngress>) -> PResult<()> {
+    let mut p = ingress.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, position)) = p.pending {
+        let next = i
+            .state_sequence
+            .checked_add(1)
+            .filter(|n| *n <= i64::MAX as u64)
+            .ok_or_else(|| PlaybackError::invalid("INVALID_SESSION", "state sequence overflow"))?;
+        p.pending = None;
+        if p.generation_id == i.generation_id && p.occurrence_id == i.session.current_occurrence_id
+        {
+            i.session.position_ms = position;
+            i.state_sequence = next;
+            i.dirty = true;
+        }
+    }
+    Ok(())
+}
+
+fn refresh_ingress(i: &Inner, ingress: &Mutex<ProgressIngress>) {
+    let mut p = ingress.lock().unwrap_or_else(|e| e.into_inner());
+    if p.generation_id != i.generation_id {
+        p.generation_id = i.generation_id.clone();
+        p.occurrence_id = i.session.current_occurrence_id.clone();
+        p.sequence = None;
+        p.position_ms = i.session.position_ms;
+        p.pending = None;
+    }
+}
+fn publish_health(i: &Inner, health: &Mutex<PlaybackHealth>) {
+    *health.lock().unwrap_or_else(|e| e.into_inner()) = PlaybackHealth {
+        restoration: i.restoration.clone(),
+        persistence: i.persistence.clone(),
+    };
+}
+fn metadata(i: &Inner) -> SessionMetadata {
+    SessionMetadata {
+        instance_id: i.instance_id.clone(),
+        session_id: i.session.session_id.clone(),
+        queue_revision: i.session.queue_revision.to_string(),
+        state_sequence: i.state_sequence.to_string(),
+        generation_id: i.generation_id.clone(),
+    }
+}
+fn with_metadata<T>(result: PResult<T>, i: &Inner) -> PResult<T> {
+    result.map_err(|mut error| {
+        error.authoritative = Some(Box::new(metadata(i)));
+        error
+    })
+}
 fn reject_unstarted(command: OwnerCommand) {
     match command {
         OwnerCommand::Apply(_, _guard, reply) => {
-            let _ = reply.send(Err(PlaybackError::conflict(
-                "DAEMON_STOPPED",
-                "daemon shutdown rejected an unstarted playback command",
-            )));
+            let _ = reply.send(Err(owner_stopped()));
         }
         OwnerCommand::RetryRestore(_guard, reply) => {
-            let _ = reply.send(Err(PlaybackError::conflict(
-                "DAEMON_STOPPED",
-                "daemon shutdown rejected an unstarted playback command",
-            )));
+            let _ = reply.send(Err(owner_stopped()));
+        }
+        OwnerCommand::Snapshot(reply) => {
+            let _ = reply.send(Err(owner_stopped()));
+        }
+        OwnerCommand::List(_, reply) => {
+            let _ = reply.send(Err(owner_stopped()));
         }
     }
 }
@@ -436,24 +654,56 @@ fn retry_restore_inner(inner: &mut Inner) -> PResult<SessionSnapshot> {
             "restore retry is unavailable",
         ));
     }
-    let mut loaded = inner
-        .db
-        .load_playback_session()
-        .map_err(storage)?
-        .ok_or_else(|| PlaybackError::invalid("INVALID_SESSION", "stored session is absent"))?;
+    let next_sequence = inner
+        .state_sequence
+        .checked_add(1)
+        .filter(|n| *n <= i64::MAX as u64)
+        .ok_or_else(|| PlaybackError::invalid("INVALID_SESSION", "state sequence overflow"))?;
+    let mut loaded = match inner.db.load_playback_session().map_err(storage)? {
+        Some(loaded) => loaded,
+        None => {
+            // load_playback_session rejects orphaned rows; only a fresh empty
+            // schema may reach this branch after a transient initialization failure.
+            let fresh = fresh_session();
+            inner
+                .db
+                .persist_playback_structure(&fresh, &[])
+                .map_err(storage)?;
+            fresh
+        }
+    };
     validate_stored(&inner.db, &loaded)?;
     if loaded.state != TransportState::Idle {
         loaded.state = TransportState::Paused;
     }
-    inner.checkpointed_position_ms = loaded.position_ms;
-    inner.session = loaded;
-    inner.generation_id = Uuid::new_v4().to_string();
-    inner.state_sequence += 1;
-    inner.restoration = Status {
-        status: "ok".into(),
-        code: None,
+    // Build all fallible response data before accepting the recovered live state.
+    let candidate = Inner {
+        db: inner.db.clone(),
+        instance_id: inner.instance_id.clone(),
+        checkpointed_position_ms: loaded.position_ms,
+        session: loaded,
+        generation_id: Uuid::new_v4().to_string(),
+        state_sequence: next_sequence,
+        restoration: Status {
+            status: "ok".into(),
+            code: None,
+        },
+        persistence: Status {
+            status: "ok".into(),
+            code: None,
+        },
+        dedup: HashMap::new(),
+        dedup_order: VecDeque::new(),
+        dirty: false,
     };
-    snapshot(inner)
+    let response = snapshot(&candidate)?;
+    inner.session = candidate.session;
+    inner.checkpointed_position_ms = candidate.checkpointed_position_ms;
+    inner.generation_id = candidate.generation_id;
+    inner.state_sequence = candidate.state_sequence;
+    inner.restoration = candidate.restoration;
+    inner.persistence = candidate.persistence;
+    Ok(response)
 }
 
 fn checkpoint_inner(i: &mut Inner) -> PResult<()> {
@@ -464,6 +714,7 @@ fn checkpoint_inner(i: &mut Inner) -> PResult<()> {
         .session
         .checkpoint_sequence
         .checked_add(1)
+        .filter(|n| *n <= i64::MAX as u64)
         .ok_or_else(|| {
             PlaybackError::invalid("PERSISTENCE_FAILED", "checkpoint sequence overflow")
         })?;
@@ -512,55 +763,24 @@ fn require_schema(v: u32) -> PResult<()> {
     }
 }
 fn parse_revision(v: &str) -> PResult<u64> {
-    if v.is_empty() || (v.len() > 1 && v.starts_with('0')) {
+    if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) || (v.len() > 1 && v.starts_with('0'))
+    {
         return Err(PlaybackError::invalid(
             "INVALID_SESSION",
             "revision is not canonical",
         ));
     }
-    v.parse()
-        .map_err(|_| PlaybackError::invalid("INVALID_SESSION", "revision is invalid"))
+    v.parse::<u64>()
+        .ok()
+        .filter(|n| *n <= i64::MAX as u64)
+        .ok_or_else(|| PlaybackError::invalid("INVALID_SESSION", "revision is invalid"))
 }
 fn storage(_: anyhow::Error) -> PlaybackError {
     PlaybackError::invalid("PERSISTENCE_FAILED", "playback storage operation failed")
 }
 fn validate_stored(db: &Database, s: &PersistedSession) -> PResult<()> {
-    let count = db.playback_count(&s.session_id).map_err(storage)?;
-    if (count == 0) != (s.current_occurrence_id.is_none()) || (count == 0 && s.position_ms != 0) {
-        return Err(PlaybackError::invalid(
-            "INVALID_SESSION",
-            "stored session invariants failed",
-        ));
-    }
-    if let Some(id) = &s.current_occurrence_id {
-        let mut after = None;
-        let mut found = false;
-        loop {
-            let page = db
-                .playback_page(&s.session_id, after, MAX_PAGE_SIZE)
-                .map_err(storage)?;
-            if page.is_empty() {
-                break;
-            }
-            for o in &page {
-                if Uuid::parse_str(&o.occurrence_id).is_err() || o.source.validate().is_err() {
-                    return Err(PlaybackError::invalid(
-                        "INVALID_SESSION",
-                        "stored occurrence is invalid",
-                    ));
-                }
-                found |= &o.occurrence_id == id;
-                after = Some(o.ordinal);
-            }
-        }
-        if !found {
-            return Err(PlaybackError::invalid(
-                "INVALID_SESSION",
-                "current occurrence is missing",
-            ));
-        }
-    }
-    Ok(())
+    db.validate_playback_session(s)
+        .map_err(|_| PlaybackError::invalid("INVALID_SESSION", "stored session invariants failed"))
 }
 fn apply_inner(i: &mut Inner, p: &ApplySessionParams) -> PResult<ApplyResult> {
     require_schema(p.schema_version)?;
@@ -599,15 +819,20 @@ fn apply_inner(i: &mut Inner, p: &ApplySessionParams) -> PResult<ApplyResult> {
     let next_sequence = i
         .state_sequence
         .checked_add(1)
+        .filter(|n| *n <= i64::MAX as u64)
         .ok_or_else(|| PlaybackError::invalid("INVALID_SESSION", "state sequence overflow"))?;
     match &p.operation {
         SessionOperation::ReplaceQueue { sources } => {
             validate_sources(sources)?;
             assigned = make_occurrences(sources, 0);
+            decorate_availability(&i.db, &mut assigned)?;
             next_session.current_occurrence_id = assigned.first().map(|o| o.occurrence_id.clone());
             next_session.position_ms = 0;
-            next_session.queue_revision =
-                next_session.queue_revision.checked_add(1).ok_or_else(|| {
+            next_session.queue_revision = next_session
+                .queue_revision
+                .checked_add(1)
+                .filter(|n| *n <= i64::MAX as u64)
+                .ok_or_else(|| {
                     PlaybackError::invalid("INVALID_SESSION", "queue revision overflow")
                 })?;
             next_session.state = if assigned.is_empty() {
@@ -623,15 +848,28 @@ fn apply_inner(i: &mut Inner, p: &ApplySessionParams) -> PResult<ApplyResult> {
             let next_ordinal =
                 i.db.playback_next_ordinal(&i.session.session_id)
                     .map_err(storage)?;
+            if next_ordinal
+                .checked_add(sources.len() as u64)
+                .is_none_or(|n| n > i64::MAX as u64)
+            {
+                return Err(PlaybackError::invalid(
+                    "INVALID_SESSION",
+                    "ordinal overflow",
+                ));
+            }
             assigned = make_occurrences(sources, next_ordinal);
+            decorate_availability(&i.db, &mut assigned)?;
             let was_empty = next_session.current_occurrence_id.is_none();
             if was_empty {
                 next_session.current_occurrence_id =
                     assigned.first().map(|o| o.occurrence_id.clone());
                 next_session.position_ms = 0;
             }
-            next_session.queue_revision =
-                next_session.queue_revision.checked_add(1).ok_or_else(|| {
+            next_session.queue_revision = next_session
+                .queue_revision
+                .checked_add(1)
+                .filter(|n| *n <= i64::MAX as u64)
+                .ok_or_else(|| {
                     PlaybackError::invalid("INVALID_SESSION", "queue revision overflow")
                 })?;
             next_session.state = if next_session.current_occurrence_id.is_none() {
@@ -653,8 +891,11 @@ fn apply_inner(i: &mut Inner, p: &ApplySessionParams) -> PResult<ApplyResult> {
         SessionOperation::Clear => {
             next_session.current_occurrence_id = None;
             next_session.position_ms = 0;
-            next_session.queue_revision =
-                next_session.queue_revision.checked_add(1).ok_or_else(|| {
+            next_session.queue_revision = next_session
+                .queue_revision
+                .checked_add(1)
+                .filter(|n| *n <= i64::MAX as u64)
+                .ok_or_else(|| {
                     PlaybackError::invalid("INVALID_SESSION", "queue revision overflow")
                 })?;
             next_session.state = TransportState::Idle;
@@ -662,14 +903,21 @@ fn apply_inner(i: &mut Inner, p: &ApplySessionParams) -> PResult<ApplyResult> {
                 .map_err(storage)?;
         }
     }
+    let preserve_generation = matches!(p.operation, SessionOperation::AppendQueue { .. })
+        && i.session.current_occurrence_id == next_session.current_occurrence_id;
     i.session = next_session;
     i.state_sequence = next_sequence;
-    i.generation_id = Uuid::new_v4().to_string();
-    i.progress = None;
+    if !preserve_generation {
+        i.generation_id = Uuid::new_v4().to_string();
+    }
     i.dirty = false;
     i.checkpointed_position_ms = i.session.position_ms;
-    decorate_availability(&i.db, &mut assigned)?;
+    i.persistence = Status {
+        status: "ok".into(),
+        code: None,
+    };
     Ok(ApplyResult {
+        current_metadata: metadata(i),
         session_id: i.session.session_id.clone(),
         queue_revision: i.session.queue_revision.to_string(),
         state_sequence: i.state_sequence.to_string(),
@@ -702,9 +950,13 @@ fn make_occurrences(s: &[TrackSource], start: u64) -> Vec<Occurrence> {
         .collect()
 }
 fn snapshot(i: &Inner) -> PResult<SessionSnapshot> {
-    let mut rows =
+    let failed = i.restoration.status == "error";
+    let mut rows = if failed {
+        Vec::new()
+    } else {
         i.db.playback_page(&i.session.session_id, None, DEFAULT_PAGE_SIZE + 1)
-            .map_err(storage)?;
+            .map_err(storage)?
+    };
     let next = if rows.len() > DEFAULT_PAGE_SIZE {
         rows.truncate(DEFAULT_PAGE_SIZE);
         rows.last().map(|o| encode_cursor(&i.session, o.ordinal))
@@ -734,10 +986,12 @@ fn snapshot(i: &Inner) -> PResult<SessionSnapshot> {
         checkpointed_position_ms: i.checkpointed_position_ms,
         persistence: i.persistence.clone(),
         restoration: i.restoration.clone(),
-        total_occurrence_count: i
-            .db
-            .playback_count(&i.session.session_id)
-            .map_err(storage)?,
+        total_occurrence_count: if failed {
+            0
+        } else {
+            i.db.playback_count(&i.session.session_id)
+                .map_err(storage)?
+        },
         occurrences: rows,
         next_cursor: next,
     })
@@ -764,8 +1018,8 @@ fn encode_cursor(s: &PersistedSession, ordinal: u64) -> String {
 }
 fn decode_cursor(v: &str, s: &PersistedSession) -> PResult<u64> {
     let mut x = v.rsplitn(3, ':');
-    let ord = x.next().and_then(|v| v.parse().ok());
-    let rev = x.next().and_then(|v| v.parse().ok());
+    let ord = x.next().and_then(|v| parse_revision(v).ok());
+    let rev = x.next().and_then(|v| parse_revision(v).ok());
     let sid = x.next();
     if sid != Some(s.session_id.as_str()) || rev != Some(s.queue_revision) || ord.is_none() {
         return Err(PlaybackError::conflict(
@@ -819,6 +1073,332 @@ mod tests {
             operation: op,
         }
     }
+    fn queued() -> (Arc<Database>, PlaybackSession, SessionSnapshot) {
+        let db = Arc::new(Database::memory().unwrap());
+        let p = PlaybackSession::restore(db.clone(), "owner".into());
+        let s = p.snapshot().unwrap();
+        p.apply(params(
+            &s,
+            SessionOperation::ReplaceQueue {
+                sources: vec![TrackSource {
+                    server_id: "offline".into(),
+                    track_id: "track".into(),
+                }],
+            },
+        ))
+        .unwrap();
+        let s = p.snapshot().unwrap();
+        (db, p, s)
+    }
+
+    #[test]
+    fn progress_is_nonblocking_coalesced_monotonic_and_ordered() {
+        let (db, p, s) = queued();
+        let id = &s.current.as_ref().unwrap().occurrence_id;
+        let mut i = p.inner.lock().unwrap();
+        let connection = db.conn.lock().unwrap();
+        // Holding both owner/storage locks must not block the producer.
+        p.report_progress(&s.generation_id, id, 1, 1000).unwrap();
+        p.report_progress(&s.generation_id, id, 2, 2000).unwrap();
+        assert!(p.report_progress(&s.generation_id, id, 3, 1500).is_err());
+        assert!(p.report_progress(&s.generation_id, id, 2, 3000).is_err());
+        let start = Instant::now();
+        let mut last = start;
+        sample_progress_if_due(
+            &mut i,
+            &p.ingress,
+            &mut last,
+            start + Duration::from_millis(249),
+        )
+        .unwrap();
+        assert_eq!(i.session.position_ms, 0);
+        sample_progress_if_due(
+            &mut i,
+            &p.ingress,
+            &mut last,
+            start + Duration::from_millis(250),
+        )
+        .unwrap();
+        assert_eq!(i.session.position_ms, 2000);
+        assert_eq!(
+            i.state_sequence.to_string(),
+            (s.state_sequence.parse::<u64>().unwrap() + 1).to_string()
+        );
+        assert_eq!(i.session.queue_revision.to_string(), s.queue_revision);
+        p.report_progress(&s.generation_id, id, 3, 3000).unwrap();
+        sample_progress_if_due(
+            &mut i,
+            &p.ingress,
+            &mut last,
+            start + Duration::from_millis(499),
+        )
+        .unwrap();
+        assert_eq!(i.session.position_ms, 2000);
+        drop(connection);
+        drop(i);
+        p.shutdown_checkpoint().unwrap();
+        assert_eq!(p.snapshot().unwrap().position_ms, 3000);
+        assert!(p.report_progress(&s.generation_id, id, 4, 4000).is_err());
+        assert!(p.apply(params(&s, SessionOperation::Clear)).is_err());
+        p.stop_and_join().unwrap();
+        assert_eq!(
+            db.load_playback_session().unwrap().unwrap().position_ms,
+            3000
+        );
+    }
+
+    #[test]
+    fn delayed_admitted_command_cannot_commit_after_shutdown_snapshot() {
+        let (db, p, s) = queued();
+        let operations = crate::sync::SyncOperationManager::new();
+        let guard = operations.try_admit_mutation().unwrap();
+        let command = params(&s, SessionOperation::Clear);
+        p.shutdown_checkpoint().unwrap();
+        // Simulates spawn_blocking starting after the shutdown mailbox drain.
+        assert_eq!(
+            p.apply_with_guard(command, Some(guard)).unwrap_err().code,
+            "DAEMON_STOPPED"
+        );
+        assert_eq!(
+            db.load_playback_session()
+                .unwrap()
+                .unwrap()
+                .queue_revision
+                .to_string(),
+            s.queue_revision
+        );
+        p.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn invalid_stored_state_is_rejected_on_startup_and_retry_without_writes() {
+        for sql in [
+            "UPDATE playback_sessions SET transport_state='idle'",
+            "UPDATE playback_sessions SET position_ms=9007199254740992",
+            "PRAGMA ignore_check_constraints=ON; UPDATE playback_sessions SET queue_revision=-1",
+            "PRAGMA ignore_check_constraints=ON; UPDATE playback_sessions SET checkpoint_sequence=-1",
+            "UPDATE playback_sessions SET session_id='bad'; UPDATE playback_occurrences SET session_id='bad'",
+            "DELETE FROM playback_occurrences; UPDATE playback_sessions SET current_occurrence_id=NULL,position_ms=0,transport_state='playing'",
+        ] {
+            let (db, p, _) = queued();
+            p.stop_and_join().unwrap();
+            db.conn.lock().unwrap().execute_batch(sql).unwrap();
+            let before = db.conn.lock().unwrap().total_changes();
+            let restored = PlaybackSession::restore(db.clone(), "new-owner".into());
+            assert_eq!(
+                restored.snapshot().unwrap().restoration.status,
+                "error",
+                "{sql}"
+            );
+            assert!(restored.retry_restore().is_err(), "{sql}");
+            restored.final_checkpoint().unwrap();
+            assert_eq!(
+                db.conn.lock().unwrap().total_changes(),
+                before,
+                "invalid evidence changed: {sql}"
+            );
+            restored.stop_and_join().unwrap();
+        }
+    }
+
+    #[test]
+    fn unsupported_schema_without_occurrence_table_has_readable_diagnostics() {
+        let db = Arc::new(Database::memory().unwrap());
+        db.init_playback().unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("UPDATE playback_schema SET version=99; DROP TABLE playback_occurrences")
+            .unwrap();
+        let p = PlaybackSession::restore(db.clone(), "owner".into());
+        let s = p.snapshot().unwrap();
+        assert_eq!(
+            s.restoration.code.as_deref(),
+            Some("UNSUPPORTED_PLAYBACK_VERSION")
+        );
+        assert!(s.occurrences.is_empty());
+        assert_eq!(p.health().restoration.status, "error");
+        p.shutdown_checkpoint().unwrap();
+        assert_eq!(
+            db.conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT version FROM playback_schema", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            99
+        );
+        p.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn transient_initial_insert_failure_can_be_retried_but_orphans_are_preserved() {
+        let db = Arc::new(Database::memory().unwrap());
+        db.init_playback().unwrap();
+        db.conn.lock().unwrap().execute_batch("CREATE TRIGGER fail_initial BEFORE INSERT ON playback_sessions BEGIN SELECT RAISE(ABORT,'test'); END").unwrap();
+        let p = PlaybackSession::restore(db.clone(), "owner".into());
+        assert_eq!(p.snapshot().unwrap().restoration.status, "error");
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_initial")
+            .unwrap();
+        assert_eq!(p.retry_restore().unwrap().restoration.status, "ok");
+        p.stop_and_join().unwrap();
+        let (db, p, _) = queued();
+        p.stop_and_join().unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("DELETE FROM playback_sessions")
+            .unwrap();
+        let restored = PlaybackSession::restore(db.clone(), "new-owner".into());
+        assert_eq!(restored.snapshot().unwrap().restoration.status, "error");
+        assert!(restored.retry_restore().is_err());
+        assert_eq!(
+            db.conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM playback_occurrences", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        restored.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn failed_restore_response_does_not_publish_partial_live_state() {
+        let (db, p, _) = queued();
+        p.stop_and_join().unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("UPDATE playback_schema SET version=99")
+            .unwrap();
+        let restored = PlaybackSession::restore(db.clone(), "new-owner".into());
+        assert_eq!(restored.health().restoration.status, "error");
+        db.conn.lock().unwrap().execute_batch("UPDATE playback_schema SET version=1; ALTER TABLE server_config RENAME TO unavailable_servers").unwrap();
+        assert!(restored.retry_restore().is_err());
+        assert_eq!(restored.health().restoration.status, "error");
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("ALTER TABLE unavailable_servers RENAME TO server_config")
+            .unwrap();
+        let s = restored.retry_restore().unwrap();
+        restored
+            .report_progress(&s.generation_id, &s.current.unwrap().occurrence_id, 1, 1000)
+            .unwrap();
+        restored.shutdown_checkpoint().unwrap();
+        restored.stop_and_join().unwrap();
+        assert_eq!(
+            db.load_playback_session().unwrap().unwrap().position_ms,
+            1000
+        );
+    }
+
+    #[test]
+    fn failed_availability_lookup_never_reports_failure_after_committing_an_append() {
+        let (db, p, s) = queued();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("ALTER TABLE server_config RENAME TO unavailable_servers")
+            .unwrap();
+        let operation = SessionOperation::AppendQueue {
+            sources: vec![TrackSource {
+                server_id: "s".into(),
+                track_id: "t".into(),
+            }],
+        };
+        assert_eq!(
+            p.apply(params(&s, operation.clone())).unwrap_err().code,
+            "PERSISTENCE_FAILED"
+        );
+        assert_eq!(db.playback_count(&s.session_id).unwrap(), 1);
+        assert_eq!(
+            db.load_playback_session()
+                .unwrap()
+                .unwrap()
+                .queue_revision
+                .to_string(),
+            s.queue_revision
+        );
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("ALTER TABLE unavailable_servers RENAME TO server_config")
+            .unwrap();
+        p.apply(params(&s, operation)).unwrap();
+        assert_eq!(db.playback_count(&s.session_id).unwrap(), 2);
+        p.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn structural_success_clears_checkpoint_failure_and_replay_returns_current_metadata() {
+        let (db, p, s) = queued();
+        p.report_progress(
+            &s.generation_id,
+            &s.current.as_ref().unwrap().occurrence_id,
+            1,
+            1000,
+        )
+        .unwrap();
+        db.conn.lock().unwrap().execute_batch("CREATE TRIGGER fail_position BEFORE UPDATE OF position_ms ON playback_sessions BEGIN SELECT RAISE(ABORT,'test'); END").unwrap();
+        assert!(p.final_checkpoint().is_err());
+        assert!(p.retry_restore().is_err());
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_position")
+            .unwrap();
+        let command = params(&s, SessionOperation::AppendQueue { sources: vec![] });
+        let first = p.apply(command.clone()).unwrap();
+        let s = p.snapshot().unwrap();
+        assert_eq!(s.persistence.status, "ok");
+        assert_eq!(s.position_ms, 1000);
+        assert_eq!(s.checkpointed_position_ms, 1000);
+        assert_eq!(s.generation_id, first.generation_id);
+        p.apply(params(&s, SessionOperation::Clear)).unwrap();
+        let current = p.snapshot().unwrap();
+        let replay = p.apply(command).unwrap();
+        assert_eq!(replay.queue_revision, first.queue_revision);
+        assert_eq!(
+            replay.current_metadata.queue_revision,
+            current.queue_revision
+        );
+        let conflict = p.apply(params(&s, SessionOperation::Clear)).unwrap_err();
+        assert_eq!(
+            conflict.authoritative.unwrap().queue_revision,
+            current.queue_revision
+        );
+        p.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn cursor_and_revision_reject_noncanonical_or_out_of_range_values() {
+        let (_, p, s) = queued();
+        for number in [
+            "+1",
+            "01",
+            "18446744073709551615",
+            "9223372036854775808",
+            "-1",
+        ] {
+            assert!(parse_revision(number).is_err());
+            let result = p.list(ListOccurrencesParams {
+                schema_version: 1,
+                session_id: s.session_id.clone(),
+                expected_queue_revision: s.queue_revision.clone(),
+                cursor: Some(format!("{}:{}:{number}", s.session_id, s.queue_revision)),
+                limit: Some(1),
+            });
+            assert_eq!(result.unwrap_err().code, "INVALID_CURSOR");
+        }
+        p.stop_and_join().unwrap();
+    }
+
     #[test]
     fn paused_round_trip_preserves_repeats_and_identity() {
         let db = Arc::new(Database::memory().unwrap());
@@ -1203,11 +1783,15 @@ mod tests {
         let shutdown = std::thread::spawn(move || shutdown_session.shutdown_checkpoint());
         std::thread::sleep(Duration::from_millis(10));
         drop(guard);
-        assert!(executing.recv().unwrap().is_ok());
+        assert_eq!(
+            executing.recv().unwrap().unwrap_err().code,
+            "DAEMON_STOPPED"
+        );
         shutdown.join().unwrap().unwrap();
         for reply in queued {
             assert_eq!(reply.recv().unwrap().unwrap_err().code, "DAEMON_STOPPED");
         }
-        assert_eq!(playback.snapshot().unwrap().queue_revision, "1");
+        assert_eq!(playback.snapshot().unwrap().queue_revision, "0");
+        playback.stop_and_join().unwrap();
     }
 }

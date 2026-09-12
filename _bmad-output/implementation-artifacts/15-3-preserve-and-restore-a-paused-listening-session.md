@@ -4,7 +4,7 @@ baseline_commit: 9fb42946ac506f1f8b60c3649c8f99ec569e4c96
 
 # Story 15.3: Preserve and restore a paused listening session
 
-Status: review
+Status: done
 
 ## Story
 
@@ -51,6 +51,41 @@ so that I can resume deliberately without reconstructing my session or being sur
 - [x] Verify and record evidence (AC: 1–9)
   - [x] Run deterministic model, authenticated router, real-file SQLite and process-restart/fault tests from the matrix below.
   - [x] Run relevant regression suites and three-OS command-driven restoration checks; record limitations without marking unrun checks passed.
+
+### Review Findings
+
+Review date: 2026-09-12. Scope: `9fb42946ac506f1f8b60c3649c8f99ec569e4c96..0054e51`. Full review by Blind Hunter, Edge Case Hunter and Acceptance Auditor; all layers completed. Consolidated outcome: 0 decision-needed, 12 patch, 0 defer, 0 dismissed. Related observations are grouped below; priorities and source layers are recorded per item. Production code was not changed during review.
+
+- [x] [Review][Patch] **F1 [P1] Move final persistence into the committed shutdown protocol and implement checkpoint-specific recovery** [hifimule-daemon/src/main.rs:128] — AC7: `begin_shutdown_with_playback` synchronously waits for the database before `CommitShutdown` can cancel sync, then calls `fail_shutdown_fence` on checkpoint failure. A stalled save therefore prevents cancellation; failure reopens admission, offers precommit Continue/Retry Quit behavior and resets the shutdown ID/deadline on retry. The test explicitly asserts this contradictory behavior. Initiate final persistence on the committed path without delaying independent cancellation/drain, retain ownership on failure, and add the specified checkpoint substate/blocker, `PLAYBACK_CHECKPOINT_FAILED`, owner/shutdown-bound `playback.retryCheckpoint`, native proxy, tray and localized shutdown UI behavior. Sources: blind+edge+auditor.
+
+- [x] [Review][Patch] **F2 [P1] Permanently fence the owner before the final snapshot and join its worker before ownership release** [hifimule-daemon/src/playback/session.rs:367] — AC5/7: shutdown drains only commands already queued, then resumes the ordinary receive loop without storing a shutdown fence. An RPC admitted before Quit but delayed in `spawn_blocking` can enqueue and commit after the final snapshot; progress also remains accepted. Retain an execution-time fence covering late commands and progress, freeze the final state, and explicitly stop/join the worker after checkpoint/drain completion. The spawn at line 165 discards its JoinHandle, so dropping handles does not establish that persistence has finished. Sources: blind+auditor.
+
+- [x] [Review][Patch] **F3 [P1] Keep synchronous playback reads off the RPC executor and expose independent cached status** [hifimule-daemon/src/rpc.rs:534] — AC4/7 and ownership contract: `getSession` and `listOccurrences` synchronously lock the same `Inner` mutex held during SQLite writes and then issue SQL on the RPC runtime. Concurrent reads during a storage stall can occupy all runtime workers and starve authenticated health/recovery requests. Route database reads through bounded off-executor work and keep health/status independent of the database and owner lock. Sources: blind+auditor.
+
+- [x] [Review][Patch] **F4 [P1] Accept the specified camelCase current-selection payload** [hifimule-daemon/src/playback/model.rs:94] — AC5/6 and exact JSON contract: enum `rename_all` changes variant names but leaves `SelectCurrent.occurrence_id` unchanged. A conforming `{ "type": "selectCurrent", "occurrenceId": "…" }` is rejected as an unknown field. Add a field rename or `rename_all_fields` and exercise this operation through the authenticated router. Confirmed with the repository's locked serde version. Sources: blind+edge+auditor.
+
+- [x] [Review][Patch] **F5 [P1] Apply complete stored-state validation consistently at startup and restore retry** [hifimule-daemon/src/playback/session.rs:527] — AC4: validation omits transport/queue compatibility and the JavaScript-safe position bound; signed persisted fields are cast directly to unsigned values. A nonempty queue stored as idle with position `9007199254740992` is accepted as healthy idle. Retry also omits the startup UUID check: a malformed session ID rejected at startup becomes healthy immediately on retry without repair. Centralize identity, numeric, state and cross-row validation for both paths before publishing or enabling mutations; preserve invalid evidence. Sources: blind+edge+auditor.
+
+- [x] [Review][Patch] **F6 [P2] Return restoration diagnostics without querying unavailable playback tables** [hifimule-daemon/src/playback/session.rs:704] — AC4/6: `snapshot` always reads playback occurrences/count even after restoration has failed. An unsupported schema without v1 occurrence tables, or a migration failure that rolls them back, causes `getSession` to return generic `PERSISTENCE_FAILED` instead of the recorded restoration status/reason. Build the blocked error snapshot from cached metadata without querying incompatible or failed storage. Sources: blind+edge+auditor.
+
+- [x] [Review][Patch] **F7 [P2] Let restore retry recover a failed fresh-session initialization** [hifimule-daemon/src/playback/session.rs:439] — AC4: startup may fail inserting the first session, leaving no session row. After storage becomes writable, retry treats `Ok(None)` as permanently invalid rather than retrying legitimate fresh initialization. An injected insert failure followed by removal of the failure reproduces `INVALID_SESSION` until restart. Safely distinguish a fresh absent session from corrupt existing evidence and retry transactional initialization. Sources: blind+edge.
+
+- [x] [Review][Patch] **F8 [P2] Implement the specified nonblocking, coalesced and ordered progress boundary** [hifimule-daemon/src/playback/session.rs:284] — AC5/8: progress blocks on the owner mutex held across database operations, applies every sample immediately rather than sampling a coalesced slot at most once per 250 ms, accepts backward positions for increasing sample sequences and never advances `stateSequence`. A 5000→1000 ms sample pair succeeds while snapshot sequence remains unchanged. Use the bounded producer/owner boundary, reject backward movement absent an explicit seek generation, and advance checked state ordering when accepted state changes. Shutdown fencing is tracked in F2. Sources: auditor; independently reproduced.
+
+- [x] [Review][Patch] **F9 [P2] Include authoritative metadata in conflict and deduplicated responses** [hifimule-daemon/src/rpc.rs:505] — AC5/6: conflict errors contain only `code` and `retryable`, omitting the required current instance/session/revision. A retained successful command also returns only its original result, even after subsequent mutations, without separate current metadata. Preserve the original deduplicated result while supplying current authoritative metadata so clients can reconcile using the advertised contract. Sources: auditor.
+
+- [x] [Review][Patch] **F10 [P2] Do not turn a committed mutation into an error during availability decoration** [hifimule-daemon/src/playback/session.rs:671] — AC5/8: structural SQL commits and in-memory revision updates precede fallible configured-server reads. If that read fails, `applySession` returns and caches `PERSISTENCE_FAILED` even though the queue changed; retrying with another command identity can duplicate an append. An isolated failed server-table lookup produced an error while the durable occurrence count increased from 2 to 3. Resolve fallible metadata before commit or make post-commit decoration unable to invalidate committed success. Sources: blind.
+
+- [x] [Review][Patch] **F11 [P2] Clear stale persistence errors after a successful structural checkpoint** [hifimule-daemon/src/playback/session.rs:664] — AC6/7: after a failed position checkpoint, successful append/select/replace/clear persists current state and clears `dirty` but leaves `persistence.status` as error. Subsequent clean periodic checkpoints return early, so the failure remains visible indefinitely despite a successful save. Update persistence status as part of publishing the successful structural commit. Confirmed with an injected checkpoint failure followed by a successful append. Sources: blind+edge.
+
+- [x] [Review][Patch] **F12 [P2] Validate canonical, signed-range-safe revision and cursor integers** [hifimule-daemon/src/playback/session.rs:765] — AC6/8 and wire bounds: cursor ordinals parse as `u64` and are cast to `i64` in SQL without validation. A same-session/revision cursor ending in `18446744073709551615` returns ordinal 0 instead of `INVALID_CURSOR`. The revision parser at line 514 also accepts leading `+` despite the canonical decimal requirement. Reject noncanonical and out-of-range values before comparison or SQL conversion. Sources: blind+edge.
+
+Review verification: `rtk cargo test -p hifimule-daemon playback -- --test-threads=1` passed 22 tests after rerunning outside the sandbox; the initial run had localhost/macOS system-API restrictions. An isolated temporary harness imported the unchanged production playback modules with matching direct dependency versions and reproduced F4–F8 and F10–F12 boundary behavior, including accepted post-shutdown progress for F2. Its database wrapper was minimal and its fixtures used only in-memory databases; it is targeted evidence, not a replacement for daemon integration tests. No new Windows/Linux execution or full regression run is claimed by this review.
+
+
+Review resolution (2026-09-12): all 12 patch findings applied following the user's option 1 authorization; no unresolved review findings, decisions or deferrals. Final persistence now participates in committed shutdown with independent cancellation/drain, a frozen owner, explicit worker joining and a scoped retry action. Reads and restoration run off the async executor, cached health remains responsive during storage stalls, and invalid restore evidence remains blocked and observable. JSON selection, authoritative conflict/replay metadata, progress coalescing/order, retry validation, numeric bounds and post-commit status handling are corrected. A follow-up review also identified and corrected command-driven sampling bypass, partial restore publication and an unusable retry after worker-join failure.
+
+Post-fix verification on macOS ARM64: full daemon suite **688 passed**; lifecycle, native UI and localization library suites passed; frontend behavior **10 passed**; frontend production build and `cargo fmt --all --check` passed. Clippy over daemon/native UI all targets reported no errors and no diagnostics on changed lines; pre-existing repository warnings remain. The updated playback evidence runner passed all nine command groups, including the authenticated production router, real-file restart/interruption, stalled-storage cancellation, owner-bound retry and independent health fixtures. See `evidence/15-3-review-macos-arm64.json` for Darwin 25.6.0/ARM64, commit base, dirty-source fingerprint and individual outcomes. Earlier four-platform CI results remain historical; the post-review Windows/Linux/macOS x64 changes have not been rerun here and are left to the existing Build matrix. No commits or pushes were made.
 
 ## Dev Notes
 
@@ -218,6 +253,8 @@ GPT-6 (Codex)
 
 ### Debug Log References
 
+- 2026-09-12: Applied all 12 code-review patches and verified the updated shutdown/session/RPC/UI contracts. Full daemon suite 688 passed; native/lifecycle/localization suites, 10 Node tests, frontend build, formatting and clippy completed. Saved isolated macOS ARM64 post-review evidence with dirty-source fingerprint; remote post-review platform runs are not claimed.
+
 - 2026-09-12: Story preparation reviewed planning artifacts, prior story/review, production persistence/RPC/lifecycle paths and official SQLite/Tokio/rusqlite documentation. No production implementation or runtime testing performed.
 - 2026-09-12: Captured baseline `9fb42946ac506f1f8b60c3649c8f99ec569e4c96`; marked sprint story in progress.
 - 2026-09-12: Implemented the initial daemon playback contract, SQLite persistence, restoration, paging, command fencing/deduplication, progress checkpoints, authenticated RPC methods, quit-fence checkpoint participation and localized retry wording.
@@ -243,6 +280,8 @@ GPT-6 (Codex)
 
 ### Completion Notes List
 
+- Code review resolved: all 12 findings fixed and checked off; story and sprint tracking marked done. Post-review validation is macOS ARM64; the normal Build matrix retains Windows/Linux/macOS x64 coverage for the next CI run.
+
 - Ultimate context engine analysis completed - comprehensive developer guide created.
 - Scoped contract gates resolved: identities, versions, position units, serialized commands, revisions/deduplication, transactional schema, recovery, page/checkpoint limits and shutdown failure/retry.
 - Initial implementation slice is working and regression-green: paused/idle persistence, repeated occurrence identity, offline restoration metadata, unsupported-version evidence preservation, stale revisions, command reuse, position checkpointing, 10,000-entry paging and authenticated snapshot routing are covered.
@@ -266,6 +305,12 @@ GPT-6 (Codex)
 - `hifimule-daemon/src/rpc.rs`
 - `hifimule-i18n/catalog.json`
 - `scripts/playback-session-evidence.py`
+- `hifimule-daemon/src/sync.rs`
+- `hifimule-ui/src-tauri/src/lib.rs`
+- `hifimule-ui/src/main.ts`
+- `hifimule-ui/src/shutdownStatus.ts`
+- `hifimule-ui/tests/shutdownStatus.test.mjs`
+- `_bmad-output/implementation-artifacts/evidence/15-3-review-macos-arm64.json`
 
 ## Change Log
 
@@ -280,3 +325,5 @@ GPT-6 (Codex)
 - 2026-09-12: Recorded successful expanded playback evidence from Windows x64, Linux x64, macOS x64 and macOS ARM64.
 - 2026-09-12: Completed authenticated playback RPC and shutdown checkpoint failure/retry integration tests; expanded the normal Build evidence command accordingly.
 - 2026-09-12: Completed four-platform evidence and moved Story 15.3 to review.
+
+- 2026-09-12: Resolved all 12 code-review findings, recorded post-review macOS ARM64 evidence and marked story 15.3 done.
