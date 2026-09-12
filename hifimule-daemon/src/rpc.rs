@@ -7288,6 +7288,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn playback_contract_is_exact_bounded_offline_and_conflict_shaped() {
+        let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+        assert!(is_mutating_method("playback.applySession"));
+        assert!(is_mutating_method("playback.retryRestore"));
+        assert!(!is_mutating_method("playback.getSession"));
+        assert!(!is_mutating_method("playback.listOccurrences"));
+
+        let initial = handle_playback_get_session(&state, Some(json!({"schemaVersion": 1})))
+            .await
+            .unwrap();
+        let snapshot = &initial["data"];
+        assert_eq!(snapshot["schemaVersion"], 1);
+        assert!(snapshot.get("schema_version").is_none());
+        let command_id = uuid::Uuid::new_v4().to_string();
+        let applied = handle_playback_apply_session(
+            &state,
+            Some(json!({
+                "schemaVersion": 1,
+                "instanceId": snapshot["instanceId"],
+                "sessionId": snapshot["sessionId"],
+                "commandId": command_id,
+                "expectedQueueRevision": snapshot["queueRevision"],
+                "operation": {
+                    "type": "replaceQueue",
+                    "sources": [
+                        {"serverId": "offline-portable", "trackId": "same-track"},
+                        {"serverId": "offline-portable", "trackId": "same-track"}
+                    ]
+                }
+            })),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            applied["data"]["assignedOccurrences"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_ne!(
+            applied["data"]["assignedOccurrences"][0]["occurrenceId"],
+            applied["data"]["assignedOccurrences"][1]["occurrenceId"]
+        );
+
+        let refreshed = handle_playback_get_session(&state, Some(json!({"schemaVersion": 1})))
+            .await
+            .unwrap();
+        assert_eq!(
+            refreshed["data"]["occurrences"][0]["availability"],
+            "notConfigured"
+        );
+        assert!(refreshed.to_string().find("http").is_none());
+        let page = handle_playback_list_occurrences(
+            &state,
+            Some(json!({
+                "schemaVersion": 1,
+                "sessionId": refreshed["data"]["sessionId"],
+                "expectedQueueRevision": refreshed["data"]["queueRevision"],
+                "limit": 1
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(page["data"]["occurrences"].as_array().unwrap().len(), 1);
+        assert!(page["data"]["nextCursor"].is_string());
+
+        let conflict = handle_playback_apply_session(
+            &state,
+            Some(json!({
+                "schemaVersion": 1,
+                "instanceId": refreshed["data"]["instanceId"],
+                "sessionId": refreshed["data"]["sessionId"],
+                "commandId": uuid::Uuid::new_v4().to_string(),
+                "expectedQueueRevision": "0",
+                "operation": {"type": "clear"}
+            })),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(conflict.code, 409);
+        assert_eq!(conflict.data.unwrap()["code"], "QUEUE_REVISION_CONFLICT");
+
+        let unknown_field = handle_playback_apply_session(
+            &state,
+            Some(json!({
+                "schemaVersion": 1,
+                "instanceId": refreshed["data"]["instanceId"],
+                "sessionId": refreshed["data"]["sessionId"],
+                "commandId": uuid::Uuid::new_v4().to_string(),
+                "expectedQueueRevision": refreshed["data"]["queueRevision"],
+                "operation": {"type": "clear"},
+                "streamUrl": "https://credential.invalid/secret"
+            })),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unknown_field.code, ERR_INVALID_PARAMS);
+        assert_eq!(unknown_field.data.unwrap()["code"], "INVALID_SESSION");
+        assert!(state.server_manager.read().await.providers.is_empty());
+    }
+
+    #[tokio::test]
     async fn retry_quit_router_requires_authentication_and_a_completed_failed_fence() {
         let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
         let operations = Arc::clone(&state.sync_operation_manager);
@@ -11480,6 +11586,31 @@ mod tests {
             playback_json["result"]["data"]["instanceId"],
             descriptor.instance_id
         );
+        let playback_data = &playback_json["result"]["data"];
+        let apply_body = json!({
+            "jsonrpc":"2.0",
+            "method":"playback.applySession",
+            "params":{
+                "schemaVersion":1,
+                "instanceId":playback_data["instanceId"],
+                "sessionId":playback_data["sessionId"],
+                "commandId":uuid::Uuid::new_v4().to_string(),
+                "expectedQueueRevision":playback_data["queueRevision"],
+                "operation":{"type":"clear"}
+            },
+            "id":3
+        });
+        let applied: Value = client
+            .post(format!("http://127.0.0.1:{port}"))
+            .bearer_auth(&descriptor.token)
+            .json(&apply_body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(applied["result"]["data"]["queueRevision"], "1");
         shutdown.store(true, std::sync::atomic::Ordering::Release);
         task.await.unwrap().unwrap();
     }

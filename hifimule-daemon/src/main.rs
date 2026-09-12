@@ -121,6 +121,21 @@ pub struct DaemonCoreHandle {
     sync_operation_manager: Arc<sync::SyncOperationManager>,
 }
 
+async fn begin_shutdown_with_playback(
+    operations: &sync::SyncOperationManager,
+    playback: &playback::PlaybackSession,
+) -> sync::ShutdownSnapshot {
+    let mut snapshot = operations.begin_shutdown_fence();
+    if playback.shutdown_checkpoint().is_err() {
+        operations.fail_shutdown_fence();
+        snapshot = operations
+            .shutdown_snapshot()
+            .await
+            .expect("failed shutdown fence has a snapshot");
+    }
+    snapshot
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let service_mode = args.iter().any(|arg| arg == "--service");
@@ -430,14 +445,11 @@ pub fn start_daemon_core(
                 while let Ok(command) = command_rx.try_recv() {
                     match command {
                         CoreCommand::BeginShutdown(reply) => {
-                            let mut snapshot = sync_operation_manager.begin_shutdown_fence();
-                            if playback.shutdown_checkpoint().is_err() {
-                                sync_operation_manager.fail_shutdown_fence();
-                                snapshot = sync_operation_manager
-                                    .shutdown_snapshot()
-                                    .await
-                                    .expect("failed shutdown fence has a snapshot");
-                            }
+                            let snapshot = begin_shutdown_with_playback(
+                                &sync_operation_manager,
+                                &playback,
+                            )
+                            .await;
                             let _ = reply.send(snapshot);
                         }
                         CoreCommand::FenceFailed => sync_operation_manager.fail_shutdown_fence(),
@@ -1616,6 +1628,68 @@ fn load_icon(bytes: &[u8], name: &str) -> anyhow::Result<Icon> {
 #[cfg(test)]
 mod lifecycle_shutdown_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn playback_checkpoint_failure_surfaces_and_retry_preserves_shutdown_contract() {
+        let db = Arc::new(db::Database::memory().unwrap());
+        let playback = playback::PlaybackSession::restore(db.clone(), "owner".into());
+        let initial = playback.snapshot().unwrap();
+        playback
+            .apply(playback::model::ApplySessionParams {
+                schema_version: 1,
+                instance_id: initial.instance_id.clone(),
+                session_id: initial.session_id.clone(),
+                command_id: uuid::Uuid::new_v4().to_string(),
+                expected_queue_revision: initial.queue_revision.clone(),
+                operation: playback::model::SessionOperation::ReplaceQueue {
+                    sources: vec![playback::model::TrackSource {
+                        server_id: "offline".into(),
+                        track_id: "track".into(),
+                    }],
+                },
+            })
+            .unwrap();
+        let active = playback.snapshot().unwrap();
+        playback
+            .report_progress(
+                &active.generation_id,
+                &active.current.as_ref().unwrap().occurrence_id,
+                1,
+                2500,
+            )
+            .unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_shutdown_checkpoint
+                 BEFORE UPDATE OF position_ms ON playback_sessions
+                 BEGIN SELECT RAISE(ABORT, 'injected shutdown checkpoint failure'); END;",
+            )
+            .unwrap();
+
+        let operations = sync::SyncOperationManager::new();
+        let failed = begin_shutdown_with_playback(&operations, &playback).await;
+        assert_eq!(failed.phase, sync::ShutdownPhase::FenceFailed);
+        assert_eq!(
+            failed.error_code.as_deref(),
+            Some("QUIT_PERSISTENCE_FAILED")
+        );
+        let reopened_admission = operations.try_admit_mutation().unwrap();
+        drop(reopened_admission);
+        assert!(operations.request_quit_retry());
+        assert!(operations.take_quit_retry());
+
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_shutdown_checkpoint")
+            .unwrap();
+        let retried = begin_shutdown_with_playback(&operations, &playback).await;
+        assert_eq!(retried.phase, sync::ShutdownPhase::Fencing);
+        assert!(retried.error_code.is_none());
+        assert_eq!(playback.snapshot().unwrap().checkpointed_position_ms, 2500);
+    }
 
     #[test]
     fn teardown_completion_waits_for_blocking_device_work() {

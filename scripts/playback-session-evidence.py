@@ -26,6 +26,8 @@ FIXTURES = [
     "shutdown control under saturation and dropped-caller admission",
     "transactional migration rollback and checkpoint retry",
     "abrupt child-process termination during SQLite transaction",
+    "authenticated playback router and exact JSON/error contract",
+    "shutdown checkpoint failure visibility and authorized retry",
 ]
 
 
@@ -51,6 +53,21 @@ def main() -> int:
         [
             "cargo", "test", "-p", "hifimule-daemon",
             "playback::persistence::tests", "--", "--nocapture",
+        ],
+        [
+            "cargo", "test", "-p", "hifimule-daemon",
+            "playback_contract_is_exact_bounded_offline_and_conflict_shaped",
+            "--", "--nocapture",
+        ],
+        [
+            "cargo", "test", "-p", "hifimule-daemon",
+            "production_router_rejects_missing_token_before_rpc_dispatch",
+            "--", "--nocapture",
+        ],
+        [
+            "cargo", "test", "-p", "hifimule-daemon",
+            "playback_checkpoint_failure_surfaces_and_retry_preserves_shutdown_contract",
+            "--", "--nocapture",
         ],
     ]
     started = datetime.now(timezone.utc)

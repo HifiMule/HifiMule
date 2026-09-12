@@ -39,15 +39,15 @@ so that I can resume deliberately without reconstructing my session or being sur
   - [x] Restore offline before publishing playback readiness; validate all invariants with bounded scans.
   - [x] Persist structural transitions atomically; coalesce position checkpoints and preserve dirty state after failures.
   - [x] Block mutation of invalid/unsupported stored state; expose safe retry without destructive automatic reset.
-- [ ] Expose authenticated daemon commands (AC: 3, 5–6)
-  - [ ] Add the methods below to `rpc.rs`, forwarding to the shared session handle; register mutation classification and update all AppState fixtures.
-  - [ ] Add exact camelCase JSON and error-shape tests, bounded pages and no-provider-call offline tests.
-  - [ ] Document reconnect and cursor invalidation; do not add a second event transport or frontend player store.
-- [ ] Integrate lifecycle checkpoint and diagnostics (AC: 4, 7, 9)
-  - [ ] Wire session ownership into `start_daemon_core` and `run_server`; keep one owner across their separate runtimes.
-  - [ ] Add final-checkpoint participation, dedicated error/blocker state and narrowly authorized retry to committed shutdown.
-  - [ ] Preserve sync cancellation even if checkpoint blocks/fails; join persistence before core-runtime teardown and ownership release.
-  - [ ] Extend tray and existing shutdown UI with localized checkpoint failure/retry wording, owner-bound observation and accessible status.
+- [x] Expose authenticated daemon commands (AC: 3, 5–6)
+  - [x] Add the methods below to `rpc.rs`, forwarding to the shared session handle; register mutation classification and update all AppState fixtures.
+  - [x] Add exact camelCase JSON and error-shape tests, bounded pages and no-provider-call offline tests.
+  - [x] Document reconnect and cursor invalidation; do not add a second event transport or frontend player store.
+- [x] Integrate lifecycle checkpoint and diagnostics (AC: 4, 7, 9)
+  - [x] Wire session ownership into `start_daemon_core` and `run_server`; keep one owner across their separate runtimes.
+  - [x] Add final-checkpoint participation, dedicated error/blocker state and narrowly authorized retry to committed shutdown.
+  - [x] Preserve sync cancellation even if checkpoint blocks/fails; join persistence before core-runtime teardown and ownership release.
+  - [x] Extend tray and existing shutdown UI with localized checkpoint failure/retry wording, owner-bound observation and accessible status.
 - [ ] Verify and record evidence (AC: 1–9)
   - [ ] Run deterministic model, authenticated router, real-file SQLite and process-restart/fault tests from the matrix below.
   - [ ] Run relevant regression suites and three-OS command-driven restoration checks; record limitations without marking unrun checks passed.
@@ -230,6 +230,8 @@ GPT-6 (Codex)
 - 2026-09-12: Post-worker validation: focused playback 11/11, full daemon 668/668, lifecycle 13/13, evidence command passed on Darwin ARM64, formatting passed and daemon clippy reported no errors (pre-existing warnings remain).
 - 2026-09-12: Replaced whole-queue snapshot, append and current-selection reads with direct/bounded SQL operations. The 10,000-occurrence real-file fixture proves a 200-item append changes only 201 rows and selecting the last original occurrence changes one row without advancing queue revision; no unlimited playback page request remains.
 - 2026-09-12: Added deterministic SQLite fault seams and real-file recovery evidence: v0→v1 DDL/version rollback, interruption after deleting the old queue, failed checkpoint preservation/retry, and abrupt child-process termination with an open structural transaction all retain the previous coherent commit.
+- 2026-09-12: Expanded normal Build evidence passed on Windows x64, Linux x64, macOS x64 and macOS ARM64, including the 64-request owner, bounded lookup, transactional migration rollback, checkpoint retry and killed-process SQLite recovery fixtures. The per-run JSON artifacts remain authoritative for runner revisions and OS details.
+- 2026-09-12: Completed RPC/lifecycle acceptance validation: exact camelCase/error/cursor/offline contract, mutation classification, authenticated production-router apply, final-checkpoint failure visibility, reopened admission and narrowly authorized retry. Full daemon 675/675, lifecycle 13/13, Rust UI 6/6, Node UI 9/9 and frontend build passed; an initially parallel Rust UI run raced the frontend build output and passed when rerun after build completion.
 
 ### Implementation Plan
 
@@ -244,7 +246,8 @@ GPT-6 (Codex)
 - Scoped contract gates resolved: identities, versions, position units, serialized commands, revisions/deduplication, transactional schema, recovery, page/checkpoint limits and shutdown failure/retry.
 - Status ready-for-dev; implementation tasks and platform verification remain unchecked.
 - Initial implementation slice is working and regression-green: paused/idle persistence, repeated occurrence identity, offline restoration metadata, unsupported-version evidence preservation, stale revisions, command reuse, position checkpointing, 10,000-entry paging and authenticated snapshot routing are covered.
-- The bounded owner, bounded structural/current lookups and transactional migration/interruption recovery are now implemented and locally verified. The updated fault fixtures must pass the normal Build matrix before their cross-platform evidence can be claimed.
+- The bounded owner, bounded structural/current lookups and transactional migration/interruption recovery are implemented and verified across all four normal Build runners.
+- RPC and lifecycle task groups are locally definition-of-done green. The expanded normal Build matrix must pass the newly added authenticated-router and lifecycle-checkpoint fixtures before the final evidence task can be checked and the story promoted to review.
 - Cross-platform evidence is now wired into the normal build rather than the release workflow. Each artifact records OS release, architecture, source/binary revision, isolated database scope, executed fixtures, exit code and actual outcome.
 - Cross-platform playback evidence subsequently passed on all four configured native runners: Windows x64, Linux x64, macOS x64 and macOS ARM64.
 
@@ -274,3 +277,5 @@ GPT-6 (Codex)
 - 2026-09-12: Added the bounded 64-command playback owner, retryable admission overflow and shutdown-safe queued-command fencing.
 - 2026-09-12: Replaced whole-queue mutation/snapshot scans with bounded pages, indexed current lookup and targeted transactional append/select/clear operations.
 - 2026-09-12: Added transactional migration, interrupted structural write, failed checkpoint retry and killed-process SQLite rollback fixtures.
+- 2026-09-12: Recorded successful expanded playback evidence from Windows x64, Linux x64, macOS x64 and macOS ARM64.
+- 2026-09-12: Completed authenticated playback RPC and shutdown checkpoint failure/retry integration tests; expanded the normal Build evidence command accordingly.
