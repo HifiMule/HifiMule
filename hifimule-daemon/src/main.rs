@@ -117,6 +117,7 @@ pub struct DaemonCoreHandle {
     ready_rx: mpsc::Receiver<Result<(), String>>,
     command_tx: mpsc::Sender<CoreCommand>,
     completed_rx: mpsc::Receiver<()>,
+    sync_operation_manager: Arc<sync::SyncOperationManager>,
 }
 
 fn main() -> Result<()> {
@@ -167,6 +168,8 @@ pub fn start_daemon_core(
     let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
     let (command_tx, command_rx) = mpsc::channel::<CoreCommand>();
     let (completed_tx, completed_rx) = mpsc::channel::<()>();
+    let sync_operation_manager = Arc::new(sync::SyncOperationManager::new());
+    let core_operations = Arc::clone(&sync_operation_manager);
 
     // Start Tokio runtime in a background thread
     // REQUIRED for macOS: main thread MUST handle the event loop
@@ -245,7 +248,7 @@ pub fn start_daemon_core(
             > = Arc::new(tokio::sync::RwLock::new(None));
 
             // Initialize shared sync operation manager
-            let sync_operation_manager = Arc::new(sync::SyncOperationManager::new());
+            let sync_operation_manager = core_operations;
 
             // Start RPC server
             daemon_log!("Starting RPC server on port {}", descriptor.port);
@@ -352,13 +355,13 @@ pub fn start_daemon_core(
                                     let dm = Arc::clone(&device_manager);
                                     let som = Arc::clone(&som_events);
                                     let state_tx_sync = state_tx_clone.clone();
-                                    let device_path = path.clone();
+                                    let device_id = manifest_device_id.clone();
 
                                     if let Some(provider) = get_selected_provider(&db).await {
                                         tokio::spawn(async move {
                                             daemon_log!("[AutoSync] Starting auto-sync via provider");
                                             if let Err(e) = run_auto_sync_via_provider(
-                                                provider, dm, som, state_tx_sync, device_path,
+                                                provider, dm, som, state_tx_sync, device_id,
                                             ).await {
                                                 daemon_log!("[AutoSync] Provider auto-sync failed: {}", e);
                                             }
@@ -451,7 +454,18 @@ pub fn start_daemon_core(
         ready_rx,
         command_tx,
         completed_rx,
+        sync_operation_manager,
     })
+}
+
+fn shutdown_tray_message(snapshot: &sync::ShutdownSnapshot) -> &'static str {
+    match snapshot.phase {
+        sync::ShutdownPhase::FenceFailed => "lifecycle.quit_persistence_failed",
+        sync::ShutdownPhase::Fencing if snapshot.deadline_exceeded => "lifecycle.fencing_delayed",
+        sync::ShutdownPhase::Fencing => "lifecycle.fencing_waiting",
+        _ if snapshot.deadline_exceeded => "lifecycle.shutdown_delayed",
+        _ => "lifecycle.quitting_waiting",
+    }
 }
 
 fn finish_runtime_shutdown(
@@ -666,6 +680,7 @@ fn run_candidate(
     let state_rx = core.state_rx;
     let command_tx = core.command_tx;
     let completed_rx = core.completed_rx;
+    let shutdown_operations = core.sync_operation_manager;
     let mut lifecycle_owner = Some(lifecycle_owner);
     let mut quit_reply: Option<mpsc::Receiver<sync::ShutdownSnapshot>> = None;
     let mut fence_reply: Option<mpsc::Receiver<Result<u64, String>>> = None;
@@ -673,6 +688,7 @@ fn run_candidate(
     let mut shutdown_pending = false;
     let mut shutdown_started: Option<Instant> = None;
     let mut shutdown_timeout_reported = false;
+    let mut last_shutdown_tray_state = None;
 
     // 3. Setup Tray Icon and Event Loop on the main thread
     #[cfg(target_os = "macos")]
@@ -726,6 +742,20 @@ fn run_candidate(
         // WaitUntil lets the OS sleep this thread until a native event arrives or the
         // deadline expires. ControlFlow::Poll would spin at 100% CPU when idle.
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250));
+
+        if shutdown_operations.take_quit_retry()
+            && !shutdown_pending
+            && quit_reply.is_none()
+            && fence_reply.is_none()
+        {
+            let (reply_tx, reply_rx) = mpsc::channel();
+            if command_tx
+                .send(CoreCommand::BeginShutdown(reply_tx))
+                .is_ok()
+            {
+                quit_reply = Some(reply_rx);
+            }
+        }
 
         if let Some(reply) = quit_reply.as_ref() {
             match reply.try_recv() {
@@ -802,7 +832,28 @@ fn run_candidate(
         }
 
         // Handle state updates from tokio thread
+        let shutdown_snapshot = shutdown_operations.shutdown_tray_snapshot();
+        if let Some(snapshot) = shutdown_snapshot.as_ref() {
+            let tray_state = (
+                snapshot.shutdown_id.clone(),
+                snapshot.phase,
+                snapshot.deadline_exceeded,
+            );
+            if last_shutdown_tray_state.as_ref() != Some(&tray_state) {
+                if let Some(ref mut tray) = tray_icon {
+                    let key = shutdown_tray_message(snapshot);
+                    let _ = tray.set_tooltip(Some(&hifimule_i18n::t(key)));
+                    if snapshot.deadline_exceeded
+                        || snapshot.phase == sync::ShutdownPhase::FenceFailed
+                    {
+                        let _ = tray.set_icon(Some((*icon_error).clone()));
+                    }
+                }
+                last_shutdown_tray_state = Some(tray_state);
+            }
+        }
         if !shutdown_pending
+            && shutdown_snapshot.is_none()
             && let Ok(state) = state_rx.try_recv()
             && let Some(ref mut tray) = tray_icon
         {
@@ -1053,7 +1104,7 @@ async fn run_auto_sync_via_provider(
     device_manager: Arc<device::DeviceManager>,
     sync_op_manager: Arc<sync::SyncOperationManager>,
     state_tx: std::sync::mpsc::Sender<DaemonState>,
-    device_path: std::path::PathBuf,
+    device_id: String,
 ) -> anyhow::Result<()> {
     let _ = state_tx.send(DaemonState::Syncing);
 
@@ -1063,10 +1114,12 @@ async fn run_auto_sync_via_provider(
         .try_start_pipeline()
         .ok_or_else(|| anyhow::anyhow!("[AutoSync] Aborting: sync pipeline already active"))?;
 
-    let manifest = device_manager
-        .get_current_device()
+    let target: sync::SyncTarget = device_manager
+        .get_sync_target_for_device(&device_id)
         .await
-        .ok_or_else(|| anyhow::anyhow!("No device connected"))?;
+        .ok_or_else(|| anyhow::anyhow!("Auto-sync device disconnected"))?
+        .into();
+    let manifest = &target.manifest;
 
     let mut desired_items: Vec<sync::DesiredItem> = Vec::new();
     let mut playlist_sync_items: Vec<sync::PlaylistSyncItem> = Vec::new();
@@ -1098,9 +1151,9 @@ async fn run_auto_sync_via_provider(
         let total_budget = if let Some(mb) = manifest.auto_fill.legacy_max_bytes() {
             mb
         } else {
-            match device_manager.get_device_storage().await {
-                Some(info) => info.free_bytes.saturating_add(synced_bytes),
-                None => {
+            match target.io.free_space().await {
+                Ok(free_bytes) => free_bytes.saturating_add(synced_bytes),
+                Err(_) => {
                     daemon_log!("[AutoSync] Cannot determine device capacity for auto-fill");
                     let _ = state_tx.send(DaemonState::Idle);
                     return Ok(());
@@ -1158,7 +1211,7 @@ async fn run_auto_sync_via_provider(
         return Ok(());
     }
 
-    let mut delta = sync::calculate_delta(&desired_items, &manifest);
+    let mut delta = sync::calculate_delta(&desired_items, manifest);
     delta.playlists = playlist_sync_items;
     let total_files = delta.adds.len() + delta.deletes.len();
 
@@ -1172,7 +1225,7 @@ async fn run_auto_sync_via_provider(
         let _ = state_tx.send(DaemonState::Idle);
         return Ok(());
     }
-    let destructive_cleanup_count = sync::destructive_cleanup_count(&delta, &manifest);
+    let destructive_cleanup_count = sync::destructive_cleanup_count(&delta, manifest);
     if destructive_cleanup_count > sync::DESTRUCTIVE_CLEANUP_THRESHOLD {
         daemon_log!(
             "[AutoSync] Skipped: sync would delete {} managed files, exceeding threshold of {}",
@@ -1223,28 +1276,7 @@ async fn run_auto_sync_via_provider(
         return Err(error);
     }
 
-    let (current_manifest, device_io) = match device_manager.get_manifest_and_io().await {
-        Some(pair) => pair,
-        None => {
-            daemon_log!("[AutoSync] Device disconnected before sync started — aborting");
-            if let Some(mut operation) = sync_op_manager.get_operation(&operation_id).await {
-                operation.status = sync::SyncStatus::Failed;
-                operation.errors.push(sync::SyncFileError {
-                    jellyfin_id: String::new(),
-                    filename: "auto_sync_provider".into(),
-                    error_message: "Device disconnected before sync started".into(),
-                });
-                sync_op_manager
-                    .update_operation(&operation_id, operation)
-                    .await;
-            }
-            let _ = state_tx.send(DaemonState::Error);
-            return Ok(());
-        }
-    };
-
-    let transcoding_profile = if let Some(ref profile_id) = current_manifest.transcoding_profile_id
-    {
+    let transcoding_profile = if let Some(ref profile_id) = manifest.transcoding_profile_id {
         match crate::paths::get_device_profiles_path()
             .and_then(|p| crate::transcoding::find_device_profile(&p, profile_id))
         {
@@ -1264,7 +1296,7 @@ async fn run_auto_sync_via_provider(
 
     let result = sync::execute_provider_sync(
         &delta,
-        &device_path,
+        &target,
         sync::ProviderSyncSource {
             provider,
             transcoding_profile,
@@ -1273,51 +1305,22 @@ async fn run_auto_sync_via_provider(
         sync_op_manager.clone(),
         operation_id.clone(),
         device_manager.clone(),
-        device_io,
     )
     .await;
 
     match result {
         Ok((_synced_items, errors)) => {
-            let finalization = sync_op_manager.finalization_guard().await;
-            let cancelled = sync_op_manager.is_cancelled(&operation_id).await;
-            let mut final_errors = errors;
-            if !cancelled
-                && final_errors.is_empty()
-                && let Err(e) = device_manager
-                    .update_manifest_for_device(&current_manifest.device_id, |m| {
-                        m.dirty = false;
-                        m.pending_item_ids = vec![];
-                    })
-                    .await
-            {
-                final_errors.push(sync::SyncFileError {
-                    jellyfin_id: String::new(),
-                    filename: ".hifimule.json".into(),
-                    error_message: format!("Failed to commit final manifest: {e}"),
-                });
-            }
-            drop(finalization);
-
-            let already_failed = sync_op_manager
-                .get_operation(&operation_id)
-                .await
-                .is_some_and(|operation| operation.status == sync::SyncStatus::Failed);
-            if let Some(mut operation) = sync_op_manager.get_operation(&operation_id).await {
-                operation.status = if already_failed || !final_errors.is_empty() {
-                    sync::SyncStatus::Failed
-                } else if cancelled {
-                    sync::SyncStatus::Cancelled
-                } else {
-                    sync::SyncStatus::Complete
-                };
-                operation.errors.extend(final_errors.clone());
-                sync_op_manager
-                    .update_operation(&operation_id, operation)
-                    .await;
-            }
-
-            if !already_failed && !cancelled && final_errors.is_empty() {
+            let (outcome, final_errors) = sync_op_manager
+                .finalize_operation(&operation_id, errors, || async {
+                    device_manager
+                        .update_manifest_for_device(&manifest.device_id, |m| {
+                            m.dirty = false;
+                            m.pending_item_ids.clear();
+                        })
+                        .await
+                })
+                .await;
+            if outcome == sync::SyncStatus::Complete {
                 daemon_log!("[AutoSync] Sync completed successfully");
                 drop(tokio::task::spawn_blocking(|| {
                     if let Err(e) = notify_rust::Notification::new()
@@ -1329,7 +1332,7 @@ async fn run_auto_sync_via_provider(
                     }
                 }));
                 let _ = state_tx.send(DaemonState::Idle);
-            } else if !cancelled {
+            } else if outcome == sync::SyncStatus::Failed {
                 daemon_log!(
                     "[AutoSync] Sync interrupted with {} errors",
                     final_errors.len()

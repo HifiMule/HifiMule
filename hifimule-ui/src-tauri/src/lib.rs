@@ -10,6 +10,7 @@ struct StartupState {
     closed: bool,
     ticket: Option<String>,
     status: LifecycleStatus,
+    observed: Option<hifimule_lifecycle::OwnerDescriptor>,
     hydrated: Option<(u64, hifimule_lifecycle::OwnerDescriptor)>,
 }
 
@@ -48,6 +49,7 @@ impl StartupCoordinator {
         }
         state.epoch += 1;
         state.hydrated = None;
+        state.observed = None;
         state.status = status(LifecycleState::Starting, None);
         Some((state.epoch, state.ticket.take()))
     }
@@ -144,18 +146,24 @@ fn report_ui_ready(coordinator: tauri::State<'_, StartupCoordinator>) -> Result<
 }
 
 #[tauri::command]
-fn report_shutdown_rendered(shutdown_id: String) -> Result<(), String> {
+fn report_shutdown_rendered(
+    shutdown_id: String,
+    coordinator: tauri::State<'_, StartupCoordinator>,
+) -> Result<(), String> {
     let args: Vec<_> = std::env::args().collect();
     let Some(pair) = args.windows(2).find(|pair| pair[0] == "--smoke-id") else {
         return Ok(());
     };
     let path = hifimule_lifecycle::resolve_app_data_dir().map_err(|e| e.to_string())?;
-    let owner = hifimule_lifecycle::read_descriptor(&path).map_err(|e| e.to_string())?;
+    let (epoch, owner) = bound_owner(&coordinator)?;
     if hifimule_lifecycle::check_owner_health(&owner, hifimule_lifecycle::HEALTH_TIMEOUT)
         .map_err(|e| e.to_string())?
         != LifecycleState::Stopping
     {
         return Err("Daemon is not stopping".into());
+    }
+    if !coordinator.current(epoch) {
+        return Err("Observation expired".into());
     }
     hifimule_lifecycle::publish_shutdown_rendered(&path, &pair[1], &owner, &shutdown_id)
         .map_err(|e| e.to_string())
@@ -298,9 +306,20 @@ fn coordinate_daemon_at(
                             if !coordinator.current(epoch) {
                                 return Err(Code::DaemonStopped);
                             }
+                            let mut state = coordinator.0.lock().unwrap_or_else(|e| e.into_inner());
+                            if state.epoch != epoch || state.closed {
+                                return Err(Code::DaemonStopped);
+                            }
+                            state.observed = Some(descriptor.clone());
                             return Ok(descriptor);
                         }
-                        Ok(_) => return Err(Code::DaemonStopped),
+                        Ok(_) => {
+                            let mut state = coordinator.0.lock().unwrap_or_else(|e| e.into_inner());
+                            if state.epoch == epoch && !state.closed {
+                                state.observed = Some(descriptor);
+                            }
+                            return Err(Code::DaemonStopped);
+                        }
                         Err(error) if !error.is_retryable() => {
                             return Err(error.code());
                         }
@@ -511,6 +530,20 @@ async fn image_proxy(
     Ok(format!("data:{};base64,{}", content_type, b64))
 }
 
+fn bound_owner(
+    coordinator: &StartupCoordinator,
+) -> Result<(u64, hifimule_lifecycle::OwnerDescriptor), String> {
+    let state = coordinator.0.lock().unwrap_or_else(|e| e.into_inner());
+    if state.closed {
+        return Err("OWNER_CHANGED: observation closed".into());
+    }
+    state
+        .observed
+        .clone()
+        .map(|owner| (state.epoch, owner))
+        .ok_or_else(|| "OWNER_CHANGED: no verified owner".into())
+}
+
 /// Proxies JSON-RPC calls from the frontend to the daemon.
 /// This bypasses browser security restrictions (mixed content, CORS) that block
 /// fetch() from https://tauri.localhost to http://localhost:19140 in release mode.
@@ -520,17 +553,10 @@ async fn rpc_proxy(
     params: serde_json::Value,
     coordinator: tauri::State<'_, StartupCoordinator>,
 ) -> Result<serde_json::Value, serde_json::Value> {
-    let epoch = coordinator
-        .0
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .epoch;
-    let app_data = hifimule_lifecycle::resolve_app_data_dir().map_err(
-        |error| serde_json::json!({ "code": "LOCAL_ACCESS_DENIED", "message": error.to_string() }),
-    )?;
-    let descriptor = hifimule_lifecycle::read_descriptor(&app_data).map_err(
-        |error| serde_json::json!({ "code": error.code().as_str(), "message": error.to_string() }),
-    )?;
+    // Every request stays attached to the owner verified by this startup attempt.
+    // Discovery may now describe a replacement daemon; never adopt it here.
+    let (epoch, descriptor) = bound_owner(&coordinator)
+        .map_err(|message| serde_json::json!({ "code": "OWNER_CHANGED", "message": message }))?;
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -547,6 +573,11 @@ async fn rpc_proxy(
                 serde_json::json!({ "code": code, "message": message })
             })?;
     }
+    if !coordinator.current(epoch) {
+        return Err(
+            serde_json::json!({ "code": "OWNER_CHANGED", "message": "OWNER_CHANGED: observation expired" }),
+        );
+    }
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "method": method,
@@ -558,7 +589,9 @@ async fn rpc_proxy(
         .post(format!("http://127.0.0.1:{}", descriptor.port))
         .bearer_auth(&descriptor.token)
         .json(&body);
-    if method == "get_daemon_state" || method == "daemon.health" {
+    if method == "daemon.health" {
+        request = request.timeout(hifimule_lifecycle::HEALTH_TIMEOUT);
+    } else if method == "get_daemon_state" {
         request = request.timeout(std::time::Duration::from_secs(15));
     }
     let response = request
@@ -575,6 +608,28 @@ async fn rpc_proxy(
     let data: serde_json::Value = response.json().await.map_err(
         |e| serde_json::json!({ "message": format!("RPC response parse failed: {}", e) }),
     )?;
+
+    if !coordinator.current(epoch) {
+        return Err(
+            serde_json::json!({ "code": "OWNER_CHANGED", "message": "OWNER_CHANGED: observation expired" }),
+        );
+    }
+    if method == "daemon.health" {
+        let health_state = hifimule_lifecycle::validate_health_response(&data, &descriptor).map_err(|error|
+            serde_json::json!({ "code": error.code().as_str(), "message": format!("{}: health identity validation failed", error.code().as_str()) }))?;
+        let mut state = coordinator.0.lock().unwrap_or_else(|e| e.into_inner());
+        if state.epoch != epoch || state.closed {
+            return Err(
+                serde_json::json!({ "code": "OWNER_CHANGED", "message": "OWNER_CHANGED: observation expired" }),
+            );
+        }
+        state.status = LifecycleStatus {
+            state: health_state,
+            instance_id: Some(descriptor.instance_id.clone()),
+            pid: Some(descriptor.pid),
+            error_code: None,
+        };
+    }
 
     if let Some(error) = data.get("error").filter(|e| !e.is_null()) {
         // Forward the full JSON-RPC error envelope (code + message + data) so the
@@ -693,6 +748,7 @@ pub fn run() {
                 epoch: 0,
                 closed: false,
                 ticket: None,
+                observed: None,
                 hydrated: None,
                 status: status(LifecycleState::Starting, None),
             })));
@@ -739,9 +795,34 @@ mod lifecycle_tests {
             epoch: 1,
             closed: false,
             ticket: None,
+            observed: None,
             hydrated: None,
             status: status(LifecycleState::Starting, None),
         })))
+    }
+
+    #[test]
+    fn observation_remains_bound_and_is_invalidated_by_retry_or_close() {
+        let coordinator = coordinator();
+        let owner = hifimule_lifecycle::OwnerDescriptor {
+            schema_version: 1,
+            protocol_version: hifimule_lifecycle::PROTOCOL_VERSION,
+            instance_id: "original-owner".into(),
+            pid: 123,
+            port: 32123,
+            token: "private-token".into(),
+            launch_generation: "0".into(),
+        };
+        coordinator.0.lock().unwrap().observed = Some(owner.clone());
+        let (epoch, observed) = bound_owner(&coordinator).unwrap();
+        assert_eq!(observed.instance_id, owner.instance_id);
+        assert!(coordinator.current(epoch));
+        coordinator.begin_attempt().unwrap();
+        assert!(!coordinator.current(epoch));
+        assert!(bound_owner(&coordinator).is_err());
+        coordinator.0.lock().unwrap().observed = Some(owner);
+        coordinator.close();
+        assert!(bound_owner(&coordinator).is_err());
     }
 
     #[test]

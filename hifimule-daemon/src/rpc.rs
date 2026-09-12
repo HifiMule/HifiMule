@@ -372,6 +372,18 @@ async fn handler(
         "device.select" => handle_device_select(&state, payload.params).await,
         "server.probe" => handle_server_probe(payload.params).await,
         "daemon.health" => Ok(daemon_health_result(&state.sync_operation_manager).await),
+        "daemon.retryQuit" => {
+            if state.sync_operation_manager.request_quit_retry() {
+                Ok(serde_json::json!({ "data": { "accepted": true } }))
+            } else {
+                Err(JsonRpcError {
+                    code: ERR_SYNC_IN_PROGRESS,
+                    message: "Quit can only be retried after launch-fence persistence failed"
+                        .into(),
+                    data: Some(serde_json::json!({ "errorCode": "QUIT_RETRY_UNAVAILABLE" })),
+                })
+            }
+        }
         "browse.listModes" => handle_browse_list_modes(&state).await,
         "browse.listArtists" => handle_browse_list_artists(&state, payload.params).await,
         "browse.getArtist" => handle_browse_get_artist(&state, payload.params).await,
@@ -430,6 +442,7 @@ fn is_mutating_method(method: &str) -> bool {
     matches!(
         method,
         "server.connect"
+            | "daemon.retryQuit"
             | "server.logout"
             | "server.select"
             | "server.update"
@@ -2707,6 +2720,14 @@ async fn provider_sync_items_for_id(
     })
 }
 
+async fn free_bytes_for_sync_device(state: &AppState, device_id: &str) -> Option<u64> {
+    let (_, _, io) = state
+        .device_manager
+        .get_sync_target_for_device(device_id)
+        .await?;
+    io.free_space().await.ok()
+}
+
 async fn provider_calculate_delta(
     _state: &AppState,
     provider: Arc<dyn MediaProvider>,
@@ -2790,18 +2811,18 @@ async fn provider_calculate_delta(
         } else {
             let synced_bytes: u64 = manifest.synced_items.iter().map(|s| s.size_bytes).sum();
             let basket_size: u64 = desired_items.iter().map(|i| i.size_bytes).sum();
-            match _state.device_manager.get_device_storage().await {
-                Some(info) => {
+            match free_bytes_for_sync_device(_state, &manifest.device_id).await {
+                Some(free_bytes) => {
                     crate::daemon_log!(
                         "[AutoFill] no maxBytes from UI — server fallback: free={} synced={} basket_est={} -> budget={}",
-                        info.free_bytes,
+                        free_bytes,
                         synced_bytes,
                         basket_size,
-                        info.free_bytes
+                        free_bytes
                             .saturating_add(synced_bytes)
                             .saturating_sub(basket_size)
                     );
-                    info.free_bytes
+                    free_bytes
                         .saturating_add(synced_bytes)
                         .saturating_sub(basket_size)
                 }
@@ -2954,7 +2975,11 @@ async fn provider_calculate_delta(
         );
     }
 
-    if let Some((_, device_io)) = _state.device_manager.get_manifest_and_io().await {
+    if let Some((_, _, device_io)) = _state
+        .device_manager
+        .get_sync_target_for_device(&manifest.device_id)
+        .await
+    {
         crate::daemon_log!(
             "[Delta] Provider existence check starting for {} desired item(s)",
             desired_items.len()
@@ -4318,17 +4343,18 @@ async fn multi_provider_calculate_delta(
         // tolerated only for slots that supply their own `maxBytes` — matching the
         // pre-12.3 multi path, which used the UI `maxBytes` without querying storage.
         let selected_bytes: u64 = desired_items.iter().map(|i| i.size_bytes).sum();
-        let mut remaining: Option<u64> = match state.device_manager.get_device_storage().await {
-            Some(info) => {
-                let synced: u64 = manifest.synced_items.iter().map(|s| s.size_bytes).sum();
-                Some(
-                    info.free_bytes
-                        .saturating_add(synced)
-                        .saturating_sub(selected_bytes),
-                )
-            }
-            None => None,
-        };
+        let mut remaining: Option<u64> =
+            match free_bytes_for_sync_device(state, &manifest.device_id).await {
+                Some(free_bytes) => {
+                    let synced: u64 = manifest.synced_items.iter().map(|s| s.size_bytes).sum();
+                    Some(
+                        free_bytes
+                            .saturating_add(synced)
+                            .saturating_sub(selected_bytes),
+                    )
+                }
+                None => None,
+            };
 
         for desc in &descriptors {
             let af_server = match desc.server_id.clone().or_else(|| selected_id.clone()) {
@@ -4466,7 +4492,11 @@ async fn multi_provider_calculate_delta(
     patch_delta_bitrate_overrides(&mut delta, &af_bitrate_map);
     delta.pity_fired_servers = af_pity_fired;
     delta.playlists = playlist_sync_items;
-    if let Some((_, device_io)) = state.device_manager.get_manifest_and_io().await {
+    if let Some((_, _, device_io)) = state
+        .device_manager
+        .get_sync_target_for_device(&manifest.device_id)
+        .await
+    {
         crate::sync::augment_delta_with_existence_check(
             &mut delta,
             &desired_items,
@@ -4877,8 +4907,8 @@ async fn handle_sync_calculate_delta(
         let max_fill_bytes = if let Some(mb) = desc.max_bytes {
             mb
         } else {
-            match state.device_manager.get_device_storage().await {
-                Some(info) => info.free_bytes,
+            match free_bytes_for_sync_device(state, &manifest.device_id).await {
+                Some(free_bytes) => free_bytes,
                 None => {
                     return Err(JsonRpcError {
                         code: ERR_CONNECTION_FAILED,
@@ -4972,7 +5002,11 @@ async fn handle_sync_calculate_delta(
         );
     }
 
-    if let Some((_, device_io)) = state.device_manager.get_manifest_and_io().await {
+    if let Some((_, _, device_io)) = state
+        .device_manager
+        .get_sync_target_for_device(&manifest.device_id)
+        .await
+    {
         crate::daemon_log!(
             "[Sync] Checking device file existence for {} synced items",
             manifest.synced_items.len(),
@@ -5158,15 +5192,17 @@ async fn handle_sync_execute(
         .get("force")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let manifest = state
+    let target: crate::sync::SyncTarget = state
         .device_manager
-        .get_current_device()
+        .get_selected_sync_target()
         .await
         .ok_or(JsonRpcError {
             code: ERR_CONNECTION_FAILED,
             message: "No device connected".to_string(),
             data: None,
-        })?;
+        })?
+        .into();
+    let manifest = &target.manifest;
 
     // Force sync: promote all currently-synced items to adds+deletes, bypassing the delta.
     if force_sync {
@@ -5216,7 +5252,7 @@ async fn handle_sync_execute(
         delta.unchanged = 0;
     }
 
-    let destructive_cleanup_count = crate::sync::destructive_cleanup_count(&delta, &manifest);
+    let destructive_cleanup_count = crate::sync::destructive_cleanup_count(&delta, manifest);
     if destructive_cleanup_count > crate::sync::DESTRUCTIVE_CLEANUP_THRESHOLD
         && !destructive_cleanup_confirmed
     {
@@ -5242,17 +5278,6 @@ async fn handle_sync_execute(
         .map(|a| a.jellyfin_id.clone())
         .chain(delta.id_changes.iter().map(|c| c.new_jellyfin_id.clone()))
         .collect();
-
-    // Get current device path
-    let device_path = state
-        .device_manager
-        .get_current_device_path()
-        .await
-        .ok_or(JsonRpcError {
-            code: ERR_CONNECTION_FAILED,
-            message: "No device connected".to_string(),
-            data: None,
-        })?;
 
     if state
         .sync_operation_manager
@@ -5359,21 +5384,7 @@ async fn handle_sync_execute(
 
         tokio::spawn(async move {
             let _pipeline_guard = pipeline_guard;
-            let (sync_manifest, device_io) = match device_manager.get_manifest_and_io().await {
-                Some(pair) => pair,
-                None => {
-                    eprintln!("[Sync] No device available — cannot execute multi-server sync");
-                    fail_sync_operation(
-                        &op_manager,
-                        &op_id,
-                        "sync_execute",
-                        "No device".to_string(),
-                    )
-                    .await;
-                    let _ = state_tx.send(crate::DaemonState::Error);
-                    return;
-                }
-            };
+            let sync_manifest = &target.manifest;
             let transcoding_profile = match load_selected_transcoding_profile(
                 sync_manifest.transcoding_profile_id.as_deref(),
             ) {
@@ -5405,7 +5416,7 @@ async fn handle_sync_execute(
             };
             let result = crate::sync::execute_provider_sync(
                 &delta,
-                &device_path,
+                &target,
                 crate::sync::ProviderSyncSource {
                     provider: default_provider,
                     transcoding_profile,
@@ -5414,7 +5425,6 @@ async fn handle_sync_execute(
                 op_manager.clone(),
                 op_id.clone(),
                 device_manager.clone(),
-                device_io.clone(),
             )
             .await;
             let all_errors = match result {
@@ -5426,53 +5436,26 @@ async fn handle_sync_execute(
                 }],
             };
 
-            let finalization = op_manager.finalization_guard().await;
-            let cancelled = op_manager.is_cancelled(&op_id).await;
-            let mut final_errors = all_errors;
-            if !cancelled
-                && final_errors.is_empty()
-                && let Err(e) = device_manager
-                    .update_manifest_for_device(&sync_manifest.device_id, |m| {
-                        m.dirty = false;
-                        m.pending_item_ids = vec![];
-                        m.last_synced_transcoding_profile_id = m.transcoding_profile_id.clone();
-                        m.transcoding_profile_dirty = false;
-                    })
-                    .await
-            {
-                final_errors.push(crate::sync::SyncFileError {
-                    jellyfin_id: String::new(),
-                    filename: ".hifimule.json".into(),
-                    error_message: format!("Failed to commit final manifest: {e}"),
-                });
-            }
-            drop(finalization);
-            let already_failed = op_manager
-                .get_operation(&op_id)
-                .await
-                .is_some_and(|operation| operation.status == crate::sync::SyncStatus::Failed);
-            // Story 13.1: success-gated history/cursor updates.
-            if !already_failed && !cancelled && final_errors.is_empty() {
+            let (outcome, final_errors) = op_manager
+                .finalize_operation(&op_id, all_errors, || async {
+                    device_manager
+                        .update_manifest_for_device(&sync_manifest.device_id, |m| {
+                            m.dirty = false;
+                            m.pending_item_ids.clear();
+                            m.last_synced_transcoding_profile_id = m.transcoding_profile_id.clone();
+                            m.transcoding_profile_dirty = false;
+                        })
+                        .await
+                })
+                .await;
+            if outcome == crate::sync::SyncStatus::Complete {
                 record_autofill_history_after_sync(
                     &db,
-                    &sync_manifest,
+                    sync_manifest,
                     &delta,
                     &final_errors,
                     now_unix_secs(),
                 );
-            }
-            if let Some(mut operation) = op_manager.get_operation(&op_id).await {
-                operation.status = if already_failed || !final_errors.is_empty() {
-                    crate::sync::SyncStatus::Failed
-                } else if cancelled {
-                    crate::sync::SyncStatus::Cancelled
-                } else {
-                    crate::sync::SyncStatus::Complete
-                };
-                operation.errors.extend(final_errors.clone());
-                op_manager.update_operation(&op_id, operation).await;
-            }
-            if !already_failed && !cancelled && final_errors.is_empty() {
                 drop(tokio::task::spawn_blocking(send_sync_complete_notification));
             }
             let _ = state_tx.send(crate::DaemonState::Idle);
@@ -5492,19 +5475,7 @@ async fn handle_sync_execute(
 
         tokio::spawn(async move {
             let _pipeline_guard = pipeline_guard;
-            let (sync_manifest, device_io) = match device_manager.get_manifest_and_io().await {
-                Some(pair) => pair,
-                None => {
-                    eprintln!("[Sync] No device available — cannot execute sync");
-                    if let Some(mut operation) = op_manager.get_operation(&op_id).await {
-                        operation.status = crate::sync::SyncStatus::Failed;
-                        op_manager.update_operation(&op_id, operation).await;
-                    }
-                    let _ = state_tx.send(crate::DaemonState::Error);
-                    return;
-                }
-            };
-
+            let sync_manifest = &target.manifest;
             let transcoding_profile = match load_selected_transcoding_profile(
                 sync_manifest.transcoding_profile_id.as_deref(),
             ) {
@@ -5525,7 +5496,7 @@ async fn handle_sync_execute(
 
             let result = crate::sync::execute_provider_sync(
                 &delta,
-                &device_path,
+                &target,
                 crate::sync::ProviderSyncSource {
                     provider,
                     transcoding_profile,
@@ -5534,63 +5505,32 @@ async fn handle_sync_execute(
                 op_manager.clone(),
                 op_id.clone(),
                 device_manager.clone(),
-                device_io,
             )
             .await;
 
             match result {
                 Ok((_synced_items, errors)) => {
-                    let finalization = op_manager.finalization_guard().await;
-                    let cancelled = op_manager.is_cancelled(&op_id).await;
-                    let mut final_errors = errors;
-                    if !cancelled
-                        && final_errors.is_empty()
-                        && let Err(e) = device_manager
-                            .update_manifest_for_device(&sync_manifest.device_id, |m| {
-                                m.dirty = false;
-                                m.pending_item_ids = vec![];
-                                m.last_synced_transcoding_profile_id =
-                                    m.transcoding_profile_id.clone();
-                                m.transcoding_profile_dirty = false;
-                            })
-                            .await
-                    {
-                        final_errors.push(crate::sync::SyncFileError {
-                            jellyfin_id: String::new(),
-                            filename: ".hifimule.json".into(),
-                            error_message: format!("Failed to commit final manifest: {e}"),
-                        });
-                    }
-                    drop(finalization);
-                    let already_failed =
-                        op_manager
-                            .get_operation(&op_id)
-                            .await
-                            .is_some_and(|operation| {
-                                operation.status == crate::sync::SyncStatus::Failed
-                            });
-                    // Story 13.1: success-gated history/cursor updates.
-                    if !already_failed && !cancelled && final_errors.is_empty() {
+                    let (outcome, final_errors) = op_manager
+                        .finalize_operation(&op_id, errors, || async {
+                            device_manager
+                                .update_manifest_for_device(&sync_manifest.device_id, |m| {
+                                    m.dirty = false;
+                                    m.pending_item_ids.clear();
+                                    m.last_synced_transcoding_profile_id =
+                                        m.transcoding_profile_id.clone();
+                                    m.transcoding_profile_dirty = false;
+                                })
+                                .await
+                        })
+                        .await;
+                    if outcome == crate::sync::SyncStatus::Complete {
                         record_autofill_history_after_sync(
                             &db,
-                            &sync_manifest,
+                            sync_manifest,
                             &delta,
                             &final_errors,
                             now_unix_secs(),
                         );
-                    }
-                    if let Some(mut operation) = op_manager.get_operation(&op_id).await {
-                        operation.status = if already_failed || !final_errors.is_empty() {
-                            crate::sync::SyncStatus::Failed
-                        } else if cancelled {
-                            crate::sync::SyncStatus::Cancelled
-                        } else {
-                            crate::sync::SyncStatus::Complete
-                        };
-                        operation.errors.extend(final_errors.clone());
-                        op_manager.update_operation(&op_id, operation).await;
-                    }
-                    if !already_failed && !cancelled && final_errors.is_empty() {
                         drop(tokio::task::spawn_blocking(send_sync_complete_notification));
                     }
                     let _ = state_tx.send(crate::DaemonState::Idle);
@@ -7200,6 +7140,72 @@ mod tests {
             last_scrobbler_result: Arc::new(tokio::sync::RwLock::new(None)),
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
         })
+    }
+
+    #[tokio::test]
+    async fn retry_quit_router_requires_authentication_and_a_completed_failed_fence() {
+        let state = make_test_state(Arc::new(crate::db::Database::memory().unwrap()));
+        let operations = Arc::clone(&state.sync_operation_manager);
+        let app = Router::new()
+            .route("/", post(handler))
+            .layer(middleware::from_fn_with_state(
+                Arc::new("retry-test-token".to_string()),
+                authenticate_local_request,
+            ))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        let request = || {
+            client.post(&url).json(&serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "daemon.retryQuit", "params": {}
+            }))
+        };
+        operations.begin_shutdown_fence();
+        operations.fail_shutdown_fence();
+        assert_eq!(
+            request().send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert!(!operations.take_quit_retry());
+
+        let accepted: Value = request()
+            .bearer_auth("retry-test-token")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(accepted["result"]["data"]["accepted"], true, "{accepted}");
+        assert!(operations.take_quit_retry());
+        assert!(!operations.take_quit_retry());
+
+        operations.begin_shutdown_fence();
+        let pending: Value = request()
+            .bearer_auth("retry-test-token")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(pending["error"].is_object(), "{pending}");
+        assert!(!operations.take_quit_retry());
+        operations.commit_shutdown().await;
+        let committed: Value = request()
+            .bearer_auth("retry-test-token")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(committed["error"].is_object(), "{committed}");
+        assert!(!operations.take_quit_retry());
+        server.abort();
+        let _ = server.await;
     }
 
     fn manifest_for_update() -> crate::device::DeviceManifest {

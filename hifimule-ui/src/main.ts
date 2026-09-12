@@ -5,7 +5,7 @@ import { LogicalSize } from '@tauri-apps/api/dpi';
 import { Window, currentMonitor } from '@tauri-apps/api/window';
 import { t } from './i18n';
 import { withDeadline } from './lifecycleDeadline';
-import { shutdownMessageKey, ShutdownPollGate } from './shutdownStatus';
+import { shutdownMessageKey, ShutdownPoller, canRetryQuit } from './shutdownStatus';
 
 const isDev = Boolean((import.meta as any).env?.DEV);
 setBasePath(new URL(isDev
@@ -89,11 +89,12 @@ async function init() {
 
 function observeShutdown(rpcCall: (method: string, params?: any) => Promise<any>): void {
     let disposed = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const gate = new ShutdownPollGate(async () => {
+    const poller = new ShutdownPoller(async () => {
         try {
             const health = await rpcCall('daemon.health');
-            if (!disposed && health?.data?.shutdown) {
+            if (!disposed && health?.data?.shutdown
+                && !(canRetryQuit(health.data) && sessionStorage.getItem("dismissedQuit") === health.data.shutdown.shutdownId)) {
+                poller.dispose();
                 renderShutdownStatus(rpcCall, health.data);
                 if (health.data.status === 'stopping') {
                     const { invoke } = await import('@tauri-apps/api/core');
@@ -107,15 +108,10 @@ function observeShutdown(rpcCall: (method: string, params?: any) => Promise<any>
             // A transient health failure is unknown, not proof of clean exit.
         }
     });
-    const poll = async () => {
-        await gate.poll();
-        if (!disposed) timer = setTimeout(poll, 1_000);
-    };
     window.addEventListener('pagehide', () => {
         disposed = true;
-        if (timer !== undefined) clearTimeout(timer);
+        poller.dispose();
     }, { once: true });
-    timer = setTimeout(poll, 1_000);
 }
 
 type ShutdownHealth = {
@@ -135,12 +131,16 @@ function renderShutdownStatus(
     rpcCall: (method: string, params?: any) => Promise<any>,
     initial: ShutdownHealth,
 ): void {
+    activeBasketSidebar?.destroy();
+    activeBasketSidebar = null;
     document.body.innerHTML = `
         <main class="login-container" aria-labelledby="shutdown-title">
             <section class="login-card" style="padding:2rem;max-width:40rem">
                 <h2 id="shutdown-title">${t('lifecycle.quitting_waiting')}</h2>
                 <p id="shutdown-status" role="status" aria-live="polite"></p>
                 <div style="display:flex;gap:.75rem">
+                    <button id="shutdown-retry" type="button" hidden>${t('lifecycle.retry_quit')}</button>
+                    <button id="shutdown-continue" type="button" hidden>${t('lifecycle.continue_running')}</button>
                     <button id="shutdown-refresh" type="button">${t('lifecycle.refresh')}</button>
                     <button id="shutdown-close" type="button">${t('lifecycle.close')}</button>
                 </div>
@@ -149,8 +149,13 @@ function renderShutdownStatus(
     const status = document.getElementById('shutdown-status');
     const refresh = document.getElementById('shutdown-refresh') as HTMLButtonElement | null;
     let disposed = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    const retry = document.getElementById('shutdown-retry') as HTMLButtonElement;
+    const resume = document.getElementById('shutdown-continue') as HTMLButtonElement;
+    let current = initial;
     const update = (health: ShutdownHealth) => {
+        if (disposed) return;
+        current = health;
+        retry.hidden = resume.hidden = !canRetryQuit(health);
         const shutdown = health.shutdown;
         if (!status || !shutdown) return;
         const messageKey = shutdownMessageKey(shutdown, health.errorCode);
@@ -163,30 +168,44 @@ function renderShutdownStatus(
         document.body.dataset.shutdownId = shutdown.shutdownId;
         document.body.dataset.shutdownPhase = shutdown.phase;
     };
-    const gate = new ShutdownPollGate(async () => {
+    const poller = new ShutdownPoller(async () => {
         if (disposed) return;
         try {
             const result = await rpcCall('daemon.health');
             update(result.data);
         } catch {
-            if (status) status.textContent = t('lifecycle.shutdown_unreachable');
+            if (!disposed && status) status.textContent = t('lifecycle.shutdown_unreachable');
         }
     });
-    const poll = async () => {
-        await gate.poll();
-        if (!disposed) timer = setTimeout(poll, 1_000);
-    };
     update(initial);
-    refresh?.addEventListener('click', () => void poll());
+    refresh?.addEventListener('click', () => poller.refresh());
+    retry.addEventListener('click', async () => {
+        if (!canRetryQuit(current) || retry.disabled) return;
+        retry.disabled = true;
+        resume.disabled = true;
+        try {
+            await rpcCall('daemon.retryQuit');
+            retry.hidden = resume.hidden = true;
+            poller.refresh();
+        } catch {
+            if (!disposed && status) status.textContent = t('lifecycle.quit_persistence_failed');
+        } finally { retry.disabled = resume.disabled = false; }
+    });
+    resume.addEventListener('click', () => {
+        if (!canRetryQuit(current)) return;
+        sessionStorage.setItem('dismissedQuit', current.shutdown!.shutdownId);
+        disposed = true;
+        poller.dispose();
+        window.location.reload();
+    });
     refresh?.focus();
     document.getElementById('shutdown-close')?.addEventListener('click', () => {
         void import('@tauri-apps/api/core').then(({ invoke }) => invoke('close_ui'));
     });
     window.addEventListener('pagehide', () => {
         disposed = true;
-        if (timer !== undefined) clearTimeout(timer);
+        poller.dispose();
     }, { once: true });
-    timer = setTimeout(poll, 1_000);
 }
 
 async function showMainWindow(): Promise<void> {

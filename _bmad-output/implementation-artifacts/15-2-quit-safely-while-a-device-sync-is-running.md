@@ -4,7 +4,7 @@ baseline_commit: a7e887e2c8d7d7b7c9af5f39417c011a752a49d6
 
 # Story 15.2: Quit safely while a device sync is running
 
-Status: review
+Status: done
 
 ## Story
 
@@ -51,6 +51,63 @@ so that HifiMule exits without leaving my device falsely marked as successfully 
 - [x] Extend installed smoke coverage and record platform evidence (AC 8).
   - [x] Exercise real tray Quit and UI reopen against built production binaries, including a real-device transfer and interrupted recovery.
   - [x] Capture artifact hash/version, OS/architecture, owner PID/instance, shutdown identity, elapsed time, operation outcome, integrity and ownership cleanup. Mark unavailable checks unverified.
+
+### Review Findings
+
+Review date: 2026-09-12. Reviewed `a7e887e..aefe9f2` with Blind Hunter, Edge Case Hunter and Acceptance Auditor. Triage: 0 decisions, 8 patches, 1 deferred, 1 dismissed. The initial diagnostic pass did not modify production files; the eight patches below were subsequently approved and applied.
+
+- [x] [Review][Patch] F1 / P1 — Bind manifest updates to the original operation device [hifimule-daemon/src/sync.rs:2124]
+
+  Sources: blind + edge. The caller has already captured device I/O, but `execute_provider_sync` reads the selected device again after awaiting `begin_sync_job`. Selecting B while A's job starts can make the new per-file commits update B's manifest while the writer still writes to A. The RPC/auto-sync paths also re-read selection between initial dirty marking and execution. Carry one captured device identity, manifest and I/O through preparation, execution and finalization; do not infer the operation target from later UI selection. Violates AC3 and the explicit device-selection/persistence constraint. Validate with two devices and a barrier in job startup.
+
+- [x] [Review][Patch] F2 / P1 — Make failure precedence atomic with clean finalization [hifimule-daemon/src/rpc.rs:5429]
+
+  Sources: edge + auditor. All three finalizers clear dirty/pending based on cancellation and local errors before checking an independently recorded Failed status. They then sample `already_failed`, fetch another operation snapshot, and overwrite its status using the earlier sample. Device-removal bookkeeping can record failure between those steps, after which the finalizer can publish Complete and a success notification. Serialize failure recording with the clean-commit decision and preserve current Failed state atomically when publishing the terminal outcome; apply the same rule to both RPC paths and auto-sync (`main.rs:1282`). Violates AC3/5. Validate disconnect/failure before clean commit and between status observation and terminal publication.
+
+- [x] [Review][Patch] F3 / P2 — Route MTP cache-path failures through manifest rollback [hifimule-daemon/src/device/mod.rs:938]
+
+  Sources: blind + edge. `get_local_mtp_manifest_path(...)?` returns directly after mutating the in-memory manifest, bypassing the new `persist_result` rollback branch. Failure to create/resolve the cache directory can therefore leave an unpersisted clean manifest in memory even though finalization reports failure. Resolve the path before mutation or include path resolution in the captured persistence result. Violates AC3/7 and the authoritative-cache failure constraint. Validate path-resolution failure, not only failure of the eventual file write.
+
+- [x] [Review][Patch] F4 / P2 — Durably commit the authoritative MTP cache rename [hifimule-daemon/src/device/mod.rs:446]
+
+  Source: blind. The new atomic helper syncs the temporary file and renames it, but never syncs the parent directory. On filesystems requiring directory synchronization, a host crash can lose the directory update after a dirty commit reported success and device transfers began, leaving the prior clean recovery cache. Finish the durability boundary with supported-platform directory synchronization and explicit error handling, as the lifecycle atomic writer already does. Violates the durable dirty-state and authoritative-cache persistence constraints. Keep this distinct from the optional on-device MTP mirror.
+
+- [x] [Review][Patch] F5 / P2 — Recover the UI after a failed launch fence and expose Retry Quit [hifimule-ui/src/main.ts:96]
+
+  Sources: blind + edge. `observeShutdown` replaces the application whenever any shutdown snapshot exists, including retained `fenceFailed` snapshots after admission reopens, then disposes itself. The replacement screen offers only Refresh and Close and never restores the usable application or provides Retry Quit. Reopening the UI reaches the same trap. Handle precommit failure separately, provide the specified retry action, and restore normal operation when appropriate. Violates the precommit-failure contract. Validate initial failure, failure after the waiting view appears, and reopening after failure.
+
+- [x] [Review][Patch] F6 / P2 — Maintain one shutdown polling schedule across Refresh clicks [hifimule-ui/src/main.ts:175]
+
+  Sources: blind + edge + auditor. Refresh calls `poll`, which always schedules another recurring timer without cancelling the existing schedule. The in-flight gate prevents overlap but does not prevent multiple permanent timer chains. A reproduction using the actual transpiled renderer and fake timers showed two clicks leave three timers, then three requests in one scheduled second. Keep a single scheduler, bound refresh frequency, and cancel the full schedule on disposal. Violates the at-most-once-per-second observation contract.
+
+- [x] [Review][Patch] F7 / P2 — Show tray waiting and deadline states while launch fencing is pending [hifimule-daemon/src/main.rs:732]
+
+  Source: auditor. The fence worker starts without a waiting tray state; `shutdown_pending` and `shutdown_started` are set only after persistence succeeds. A blocked generation write therefore never triggers the tray's five-second warning, and ordinary Idle/Syncing messages continue to overwrite its status. Track the precommit warning from the initial request and give it tray precedence without cancelling work, reopening admission or retrying a pending write. Violates AC6 and the separate fencing deadline contract.
+
+- [x] [Review][Patch] F8 / P2 — Bind shutdown observation to its owner and the native health deadline [hifimule-ui/src/main.ts:169]
+
+  Source: auditor. The new shutdown observer uses the generic `rpc_proxy`, which re-reads discovery on each call, skips owner validation for `daemon.health`, uses a 15-second timeout, and applies epoch checks only to `get_daemon_state` (`src-tauri/src/lib.rs:524–598`). The renderer accepts the response without checking its original instance/shutdown identity. This new observation path can follow a replacement owner or apply stale responses and can remain pending beyond the five-second warning deadline. Add a narrowly scoped observation path bound to the originally observed descriptor/epoch, validate health identity, and use `HEALTH_TIMEOUT` (two seconds). Violates AC4 and the shutdown-observation contract; no owner launch/election should occur during refresh.
+
+- [x] [Review][Defer] F9 / P2 — Manual sync cancellation can race final clean-manifest persistence [hifimule-daemon/src/sync.rs:863] — deferred, pre-existing
+
+  Source: edge. Manual `request_cancel` only stores a token and does not participate in the finalization gate, so a cancellation accepted after the finalizer's token check can still end in a clean manifest and Complete outcome. This manual-cancel check/write race predates Story 15.2; the new gate serializes committed Quit only. Record it separately from this story's shutdown patches.
+
+Initial review verification: the eight focused daemon shutdown tests passed with host access; the initial restricted run passed six and failed two because local TCP listener binding returned `PermissionDenied`. The four frontend lifecycle/shutdown helper tests passed. The renderer-level timer reproduction exposed F6 despite those passing helper tests. No full suite or physical-device smoke was rerun during the initial diagnostic pass; existing user-confirmed device evidence was accepted as recorded. One proposed pre-transfer early-return resource leak was dismissed as an unproven safety defect after inspecting the Windows shell worker's RAII shutdown/join.
+
+### Review Patch Completion — 2026-09-12
+
+All eight approved patches are applied. F9 remains deferred and its manual-cancel semantics are unchanged.
+
+- F1: RPC execution captures path, manifest and I/O together; auto-sync resolves the triggering device identity. `SyncTarget` carries that destination through the worker, and preparation existence/capacity reads and playlist updates use the same identity.
+- F2: `finalize_operation` now owns the failure/cancellation/clean-commit/terminal-publication boundary for both RPC paths and auto-sync. Stale operation snapshots cannot replace an existing terminal outcome. Failure errors remain available; success-only history and notifications follow the resulting status.
+- F3–F4: cache-path errors reach rollback; Unix parent-directory synchronization follows rename. Post-rename uncertainty is reported and dirty recovery bytes are restored best-effort. The optional MTP mirror is written only after the authoritative cache succeeds, so a failed authority cannot publish a clean mirror. Windows retains atomic replacement and file synchronization; directory synchronization uses the supported Unix path.
+- F5–F6: failed fencing offers authenticated Retry Quit and Continue using HifiMule. Continuing reloads only the webview and dismisses that failed attempt. The shutdown view disposes the active sidebar; one rate-limited poll scheduler handles Refresh and disposal.
+- F7: tray status comes from the coordinator snapshot throughout fencing, including the separate five-second warning, and takes precedence over ordinary state updates. A retry is accepted only after the previous fence has failed; repeated queued requests are consumed once.
+- F8: native RPC observation uses the startup-verified owner, rejects stale epochs, validates health identity, and bounds health requests with the two-second lifecycle timeout. Refresh never elects or adopts a replacement owner.
+
+Post-patch verification on macOS arm64: daemon **657/657**, lifecycle **13/13**, native UI **6/6**, frontend lifecycle/shutdown behavior **8/8**, and smoke-evidence tests **3/3** passed. Frontend production build and formatting passed; catalog parity verified **416 keys across four locales**. Targeted all-target clippy completed without errors; pre-existing warnings remain. Regression coverage inspects actual device bytes/manifest isolation during a selection change at a job-start barrier, dirty recovery after finalization/cache failures, authenticated retry admission, delayed non-cancelling fencing, stale terminal updates, real rendered recovery actions, timer multiplication and disposal. A bounded follow-up review found no new defects in F1/F2/F7 integration.
+
+The final automated runs required host access for local HTTP fixtures and macOS APIs. Physical-device/installed-artifact smoke was not rerun for these review patches; earlier user-confirmed evidence remains recorded in the Dev Agent Record against its original artifacts. No git commit or release artifact was produced.
 
 ## Dev Notes
 
@@ -257,6 +314,7 @@ GPT-6 (Codex)
 - `_bmad-output/implementation-artifacts/15-2-quit-safely-while-a-device-sync-is-running.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
 - `hifimule-daemon/src/device/mod.rs`
+- `hifimule-daemon/src/device/tests.rs`
 - `hifimule-daemon/src/main.rs`
 - `hifimule-daemon/src/rpc.rs`
 - `hifimule-daemon/src/sync.rs`
@@ -283,3 +341,5 @@ GPT-6 (Codex)
 - 2026-09-12: Verified user-observed active-sync tray Quit and daemon exit on Windows ARM64, completing three-OS active-Quit coverage; MTP coverage remained pending at that checkpoint.
 - 2026-09-12: Verified the full follow-up recovery and integrity checklist over MSC/filesystem transport on Linux and Windows ARM64, including sentinel preservation and a successful repair sync; MTP coverage and any unperformed shutdown-UI interaction remain pending.
 - 2026-09-12: Verified physical MTP active-sync Quit on macOS arm64 with shutdown and no-daemon UI states; all Story 15.2 tasks and acceptance evidence are complete, status advanced to review.
+
+- 2026-09-12: Applied all eight approved code-review patches; automated regression suites pass, F9 remains deferred, and story status advanced to done. Physical-device smoke was not rerun for these patches.

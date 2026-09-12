@@ -1,5 +1,129 @@
 use super::*;
 
+#[tokio::test]
+async fn mtp_cache_path_failure_rolls_back_memory() {
+    let dir = tempdir().unwrap();
+    let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+    let path = PathBuf::from("mtp://cache-path-failure");
+    let mut manifest = make_manifest("cache-path-failure", "MTP");
+    manifest.dirty = true;
+    manifest.pending_item_ids = vec!["unfinished".into()];
+    write_manifest(msc(dir.path()), &manifest).await.unwrap();
+    let mirror_before = std::fs::read(dir.path().join(".hifimule.json")).unwrap();
+    manager
+        .handle_device_detected(path.clone(), manifest.clone(), msc(dir.path()))
+        .await
+        .unwrap();
+    // The fake backend supports mirror writes; the authoritative path resolver
+    // fails independently, after the in-memory clean mutation has been applied.
+    let result = manager
+        .update_manifest_for_device_with_cache_path(
+            &manifest.device_id,
+            |updated| {
+                updated.dirty = false;
+                updated.pending_item_ids.clear();
+            },
+            |_| anyhow::bail!("injected cache path resolution failure"),
+            sync_manifest_directory,
+        )
+        .await;
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("path resolution failure")
+    );
+    let restored = manager
+        .get_manifest_for_device(&manifest.device_id)
+        .await
+        .unwrap();
+    assert!(restored.dirty);
+    assert_eq!(restored.pending_item_ids, manifest.pending_item_ids);
+    assert_eq!(
+        std::fs::read(dir.path().join(".hifimule.json")).unwrap(),
+        mirror_before,
+        "failed authority must not publish a clean optional mirror"
+    );
+}
+
+#[tokio::test]
+async fn atomic_mtp_cache_replaces_complete_bytes_without_temporary_files() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("manifest.json");
+    std::fs::write(&path, b"old bytes").unwrap();
+    let mut manifest = make_manifest("atomic-cache", "MTP");
+    manifest.dirty = true;
+    manifest.pending_item_ids = vec!["pending".into()];
+    persist_local_manifest_atomic(&path, &manifest)
+        .await
+        .unwrap();
+    let persisted: DeviceManifest = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(persisted.device_id, manifest.device_id);
+    assert!(persisted.dirty);
+    assert_eq!(persisted.pending_item_ids, manifest.pending_item_ids);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[tokio::test]
+async fn atomic_mtp_cache_reports_post_rename_durability_uncertainty() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("manifest.json");
+    let manifest = make_manifest("uncertain-cache", "MTP");
+    let error = persist_local_manifest_atomic_with_sync(&path, &manifest, |_| {
+        Err(std::io::Error::other("injected directory sync failure"))
+    })
+    .await
+    .unwrap_err();
+    assert!(error.is::<ManifestCacheCommitUncertain>());
+    // The failure must not be treated as a pre-rename failure: new bytes exist.
+    let persisted: DeviceManifest = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(persisted.device_id, manifest.device_id);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[tokio::test]
+async fn mtp_cache_directory_sync_failure_restores_dirty_recovery_evidence() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+    let mut manifest = make_manifest("cache-sync-failure", "MTP");
+    manifest.dirty = true;
+    manifest.pending_item_ids = vec!["unfinished".into()];
+    persist_local_manifest_atomic(&cache, &manifest)
+        .await
+        .unwrap();
+    manager
+        .handle_device_detected(
+            PathBuf::from("mtp://cache-sync-failure"),
+            manifest.clone(),
+            msc(dir.path()),
+        )
+        .await
+        .unwrap();
+    let result = manager
+        .update_manifest_for_device_with_cache_path(
+            &manifest.device_id,
+            |updated| {
+                updated.dirty = false;
+                updated.pending_item_ids.clear();
+            },
+            |_| Ok(cache.clone()),
+            |_| Err(std::io::Error::other("injected directory sync failure")),
+        )
+        .await;
+    assert!(result.unwrap_err().is::<ManifestCacheCommitUncertain>());
+    let restored = manager
+        .get_manifest_for_device(&manifest.device_id)
+        .await
+        .unwrap();
+    let persisted: DeviceManifest =
+        serde_json::from_slice(&std::fs::read(&cache).unwrap()).unwrap();
+    for recovered in [&restored, &persisted] {
+        assert!(recovered.dirty);
+        assert_eq!(recovered.pending_item_ids, manifest.pending_item_ids);
+    }
+}
+
 #[test]
 fn auto_fill_slot_id_recognizes_legacy_and_scoped_markers_only() {
     assert!(is_auto_fill_slot_id("__auto_fill_slot__"));

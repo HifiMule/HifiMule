@@ -3,6 +3,10 @@
 Status: open
 Last updated: 2026-06-20
 
+## Deferred from: code review of 15-2-quit-safely-while-a-device-sync-is-running.md (2026-09-12)
+
+- **Manual sync cancellation can race final clean-manifest persistence** (`hifimule-daemon/src/sync.rs:863`, `hifimule-daemon/src/rpc.rs:5543`). `request_cancel` only sets the token; it does not acquire the new finalization gate. A manual cancellation accepted after the finalizer reads the token can therefore be followed by clean dirty/pending state and a Complete result. This check/write race predates Story 15.2, whose committed-Quit path now takes the gate. Follow up by defining one manual-cancel/final-commit outcome boundary and testing cancellation while final persistence is blocked. Classified deferred as pre-existing during review, not a user-approved product exception.
+
 ## Deferred from: code review of autofill-device-playlist (2026-06-20)
 
 - **Cross-server duplicate raw track IDs remain ambiguous** (`hifimule-daemon/src/rpc.rs`) -- multi-provider autofill still dedups by raw provider item id and playlist entries resolve by that same id. Fixing this properly needs a server-qualified sync identity/playlist resolution pass, not a local `Autofill.m3u` patch.

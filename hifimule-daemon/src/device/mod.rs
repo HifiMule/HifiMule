@@ -421,6 +421,38 @@ pub async fn write_manifest(
 }
 
 async fn persist_local_manifest_atomic(path: &Path, manifest: &DeviceManifest) -> Result<()> {
+    persist_local_manifest_atomic_with_sync(path, manifest, sync_manifest_directory).await
+}
+
+#[derive(Debug)]
+struct ManifestCacheCommitUncertain(std::io::Error);
+
+impl std::fmt::Display for ManifestCacheCommitUncertain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Manifest cache rename completed but directory sync failed: {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for ManifestCacheCommitUncertain {}
+
+fn sync_manifest_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    std::fs::File::open(path)?.sync_all()?;
+    // Windows does not support opening directories with std::fs::File for fsync.
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+async fn persist_local_manifest_atomic_with_sync(
+    path: &Path,
+    manifest: &DeviceManifest,
+    sync_directory: fn(&Path) -> std::io::Result<()>,
+) -> Result<()> {
     use tokio::io::AsyncWriteExt;
 
     let parent = path
@@ -451,6 +483,13 @@ async fn persist_local_manifest_atomic(path: &Path, manifest: &DeviceManifest) -
         let _ = tokio::fs::remove_file(&temporary).await;
         return Err(error.into());
     }
+    // A rename is atomic but its directory entry is not durable until the parent
+    // is synced. Distinguish this failure: the new bytes are already visible.
+    let parent = parent.to_path_buf();
+    tokio::task::spawn_blocking(move || sync_directory(&parent))
+        .await
+        .map_err(|error| ManifestCacheCommitUncertain(std::io::Error::other(error)))?
+        .map_err(ManifestCacheCommitUncertain)?;
     Ok(())
 }
 
@@ -819,25 +858,58 @@ impl DeviceManager {
             .map(|d| std::sync::Arc::clone(&d.device_io))
     }
 
-    /// Atomically returns the manifest and IO backend for the currently selected device.
-    /// Prefer this over separate `get_current_device` + `get_device_io` calls to avoid
-    /// TOCTOU races when the device disconnects between the two reads.
-    pub async fn get_manifest_and_io(
+    pub async fn get_current_device_path(&self) -> Option<PathBuf> {
+        self.state.read().await.selected_device_path.clone()
+    }
+
+    /// Capture the selected sync destination under one state read.
+    pub async fn get_selected_sync_target(
         &self,
     ) -> Option<(
+        PathBuf,
         DeviceManifest,
         std::sync::Arc<dyn crate::device_io::DeviceIO>,
     )> {
         let state = self.state.read().await;
         let path = state.selected_device_path.as_ref()?;
-        state
-            .connected_devices
-            .get(path)
-            .map(|d| (d.manifest.clone(), std::sync::Arc::clone(&d.device_io)))
+        let connected = state.connected_devices.get(path)?;
+        Some((
+            path.clone(),
+            connected.manifest.clone(),
+            std::sync::Arc::clone(&connected.device_io),
+        ))
     }
 
-    pub async fn get_current_device_path(&self) -> Option<PathBuf> {
-        self.state.read().await.selected_device_path.clone()
+    pub async fn get_sync_target_for_device(
+        &self,
+        device_id: &str,
+    ) -> Option<(
+        PathBuf,
+        DeviceManifest,
+        std::sync::Arc<dyn crate::device_io::DeviceIO>,
+    )> {
+        let state = self.state.read().await;
+        state
+            .connected_devices
+            .iter()
+            .find_map(|(path, connected)| {
+                (connected.manifest.device_id == device_id).then(|| {
+                    (
+                        path.clone(),
+                        connected.manifest.clone(),
+                        std::sync::Arc::clone(&connected.device_io),
+                    )
+                })
+            })
+    }
+
+    pub async fn get_manifest_for_device(&self, device_id: &str) -> Option<DeviceManifest> {
+        let state = self.state.read().await;
+        state
+            .connected_devices
+            .values()
+            .find(|connected| connected.manifest.device_id == device_id)
+            .map(|connected| connected.manifest.clone())
     }
 
     /// Returns a snapshot of all currently connected managed devices.
@@ -897,6 +969,26 @@ impl DeviceManager {
     where
         F: FnOnce(&mut DeviceManifest),
     {
+        self.update_manifest_for_device_with_cache_path(
+            device_id,
+            mutation,
+            crate::paths::get_local_mtp_manifest_path,
+            sync_manifest_directory,
+        )
+        .await
+    }
+
+    async fn update_manifest_for_device_with_cache_path<F, P>(
+        &self,
+        device_id: &str,
+        mutation: F,
+        cache_path: P,
+        sync_directory: fn(&Path) -> std::io::Result<()>,
+    ) -> Result<()>
+    where
+        F: FnOnce(&mut DeviceManifest),
+        P: FnOnce(&str) -> Result<PathBuf>,
+    {
         let commit_lock = {
             let mut locks = self
                 .manifest_commit_locks
@@ -921,7 +1013,7 @@ impl DeviceManager {
             .connected_devices
             .get_mut(&path)
             .ok_or_else(|| anyhow::anyhow!("Device not in connected map"))?;
-        let previous_manifest = connected.manifest.clone();
+        let mut previous_manifest = connected.manifest.clone();
         mutation(&mut connected.manifest);
         // Clone Arc and manifest so we can drop the write guard before the async I/O.
         // Serialization is still guaranteed: the in-memory state is mutated under the lock;
@@ -932,11 +1024,35 @@ impl DeviceManager {
         drop(state);
         let persist_result = if is_mtp {
             // For MTP devices the local cache is authoritative: on-device writes are
-            // best-effort only (Garmin and similar devices have unreliable MTP write support).
-            let _ = crate::device::write_manifest(device_io, &manifest_snapshot).await;
-            let local_path =
-                crate::paths::get_local_mtp_manifest_path(&manifest_snapshot.device_id)?;
-            persist_local_manifest_atomic(&local_path, &manifest_snapshot).await
+            // best-effort only. Do not publish a clean mirror before the recovery
+            // cache has committed: a failed cache path must leave the old mirror intact.
+            async {
+                let local_path = cache_path(&manifest_snapshot.device_id)?;
+                let result = persist_local_manifest_atomic_with_sync(
+                    &local_path,
+                    &manifest_snapshot,
+                    sync_directory,
+                )
+                .await;
+                if result
+                    .as_ref()
+                    .is_err_and(|error| error.is::<ManifestCacheCommitUncertain>())
+                {
+                    // The replacement is visible but durability is unknown. Restore
+                    // recovery evidence both in memory and, best-effort, on disk.
+                    previous_manifest.dirty = true;
+                    for item in &manifest_snapshot.pending_item_ids {
+                        if !previous_manifest.pending_item_ids.contains(item) {
+                            previous_manifest.pending_item_ids.push(item.clone());
+                        }
+                    }
+                    let _ = persist_local_manifest_atomic(&local_path, &previous_manifest).await;
+                }
+                result?;
+                let _ = crate::device::write_manifest(device_io, &manifest_snapshot).await;
+                Ok(())
+            }
+            .await
         } else {
             crate::device::write_manifest(device_io, &manifest_snapshot).await
         };

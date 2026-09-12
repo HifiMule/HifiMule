@@ -559,6 +559,7 @@ pub struct SyncOperationManager {
     active_mutations: Arc<AtomicUsize>,
     shutdown_committed: Arc<AtomicBool>,
     shutdown: Mutex<Option<ShutdownTracker>>,
+    quit_retry_requested: AtomicBool,
     finalization_gate: tokio::sync::Mutex<()>,
     /// Per-operation cancellation flags. Set to `true` by `request_cancel`; polled by
     /// the sync loop between files via `is_cancelled`. Never removed — old entries for
@@ -576,6 +577,7 @@ impl SyncOperationManager {
             active_mutations: Arc::new(AtomicUsize::new(0)),
             shutdown_committed: Arc::new(AtomicBool::new(false)),
             shutdown: Mutex::new(None),
+            quit_retry_requested: AtomicBool::new(false),
             finalization_gate: tokio::sync::Mutex::new(()),
             cancel_tokens: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -662,6 +664,33 @@ impl SyncOperationManager {
         }
     }
 
+    /// A retry is only meaningful after the previous persistence attempt returned
+    /// an error. A pending write must never be retried because it may still commit.
+    pub fn request_quit_retry(&self) -> bool {
+        let shutdown = self.shutdown.lock().unwrap_or_else(|e| e.into_inner());
+        if !shutdown
+            .as_ref()
+            .is_some_and(|s| s.phase == ShutdownPhase::FenceFailed)
+        {
+            return false;
+        }
+        self.quit_retry_requested.store(true, Ordering::Release);
+        true
+    }
+
+    pub fn take_quit_retry(&self) -> bool {
+        self.quit_retry_requested.swap(false, Ordering::AcqRel)
+    }
+
+    /// Synchronous tray observation never waits on operation or device locks.
+    pub fn shutdown_tray_snapshot(&self) -> Option<ShutdownSnapshot> {
+        self.shutdown
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|tracker| self.snapshot_from_tracker(tracker, 0, vec![]))
+    }
+
     pub async fn commit_shutdown(&self) {
         // Serialize the cancellation decision against the final clean-manifest
         // commit. Whichever acquires this gate first owns the outcome boundary.
@@ -696,6 +725,7 @@ impl SyncOperationManager {
         }
     }
 
+    #[cfg(test)]
     pub async fn finalization_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.finalization_gate.lock().await
     }
@@ -880,8 +910,68 @@ impl SyncOperationManager {
     }
 
     pub async fn update_operation(&self, operation_id: &str, operation: SyncOperation) {
+        let _finalization = self.finalization_gate.lock().await;
         let mut ops = self.operations.write().await;
+        // Progress and removal handlers may hold snapshots taken before a terminal
+        // outcome was published. Such snapshots cannot rewrite the outcome.
+        if ops
+            .get(operation_id)
+            .is_some_and(|current| current.status != SyncStatus::Running)
+        {
+            return;
+        }
         ops.insert(operation_id.to_string(), operation);
+    }
+
+    /// One decision boundary for failure, committed Quit and durable completion.
+    /// Device I/O never holds the operations lock, so health remains responsive.
+    pub async fn finalize_operation<F, Fut>(
+        &self,
+        operation_id: &str,
+        mut errors: Vec<SyncFileError>,
+        commit_manifest: F,
+    ) -> (SyncStatus, Vec<SyncFileError>)
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<()>>,
+    {
+        let _finalization = self.finalization_gate.lock().await;
+        let Some(existing) = self.get_operation(operation_id).await else {
+            return (SyncStatus::Failed, errors);
+        };
+        if existing.status != SyncStatus::Running {
+            errors.extend(existing.errors);
+            if existing.status == SyncStatus::Failed
+                && let Some(operation) = self.operations.write().await.get_mut(operation_id)
+            {
+                operation.errors = errors.clone();
+            }
+            return (existing.status, errors);
+        }
+        let cancelled = self.is_cancelled(operation_id).await;
+        errors.extend(existing.errors);
+        if !cancelled
+            && errors.is_empty()
+            && let Err(error) = commit_manifest().await
+        {
+            errors.push(SyncFileError {
+                jellyfin_id: String::new(),
+                filename: ".hifimule.json".into(),
+                error_message: format!("Failed to commit final manifest: {error}"),
+            });
+        }
+        let status = if !errors.is_empty() {
+            SyncStatus::Failed
+        } else if cancelled {
+            SyncStatus::Cancelled
+        } else {
+            SyncStatus::Complete
+        };
+        if let Some(operation) = self.operations.write().await.get_mut(operation_id) {
+            operation.status = status.clone();
+            operation.errors = errors.clone();
+        }
+        (status, errors)
     }
 
     pub async fn modify_operation(
@@ -1915,6 +2005,33 @@ pub struct ProviderSyncSource {
     pub providers_by_server: std::collections::HashMap<String, Arc<dyn MediaProvider>>,
 }
 
+/// Captured once at admission; subsequent UI selection cannot redirect any part
+/// of an operation to another device.
+#[derive(Clone)]
+pub struct SyncTarget {
+    pub path: std::path::PathBuf,
+    pub manifest: crate::device::DeviceManifest,
+    pub io: Arc<dyn crate::device_io::DeviceIO>,
+}
+
+impl
+    From<(
+        std::path::PathBuf,
+        crate::device::DeviceManifest,
+        Arc<dyn crate::device_io::DeviceIO>,
+    )> for SyncTarget
+{
+    fn from(
+        (path, manifest, io): (
+            std::path::PathBuf,
+            crate::device::DeviceManifest,
+            Arc<dyn crate::device_io::DeviceIO>,
+        ),
+    ) -> Self {
+        Self { path, manifest, io }
+    }
+}
+
 struct StagedByteLimiter {
     max: u64,
     used: Mutex<u64>,
@@ -2080,13 +2197,14 @@ struct ProviderProducerOutcome {
 
 pub async fn execute_provider_sync(
     delta: &SyncDelta,
-    device_path: &Path,
+    target: &SyncTarget,
     source: ProviderSyncSource,
     operation_manager: Arc<SyncOperationManager>,
     operation_id: String,
     device_manager: Arc<crate::device::DeviceManager>,
-    device_io: Arc<dyn crate::device_io::DeviceIO>,
 ) -> Result<(Vec<crate::device::SyncedItem>, Vec<SyncFileError>)> {
+    let device_path = target.path.as_path();
+    let device_io = Arc::clone(&target.io);
     let ProviderSyncSource {
         provider,
         transcoding_profile,
@@ -2121,11 +2239,8 @@ pub async fn execute_provider_sync(
 
     let completed_bytes_arc = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-    let manifest_snapshot = device_manager.get_current_device().await;
-    let operation_device_id = manifest_snapshot
-        .as_ref()
-        .map(|manifest| manifest.device_id.clone())
-        .ok_or_else(|| anyhow::anyhow!("No device manifest available for sync"))?;
+    let manifest_snapshot = Some(target.manifest.clone());
+    let operation_device_id = target.manifest.device_id.clone();
     let owned_manifest_paths: HashSet<String> = manifest_snapshot
         .as_ref()
         .map(|manifest| {
@@ -3233,8 +3348,9 @@ pub async fn execute_provider_sync(
     }
 
     if !operation_manager.is_cancelled(&operation_id).await
-        && let Some(mut manifest_snapshot) = device_manager.get_current_device().await
-        && manifest_snapshot.device_id == operation_device_id
+        && let Some(mut manifest_snapshot) = device_manager
+            .get_manifest_for_device(&operation_device_id)
+            .await
         && (!delta.playlists.is_empty() || !manifest_snapshot.playlists.is_empty())
     {
         let warnings = generate_m3u_files(
@@ -3940,6 +4056,24 @@ pub fn calculate_delta(desired_items: &[DesiredItem], manifest: &DeviceManifest)
 
 #[cfg(test)]
 mod tests {
+
+    async fn execute_test_provider_sync(
+        delta: &SyncDelta,
+        path: &Path,
+        source: ProviderSyncSource,
+        operations: Arc<SyncOperationManager>,
+        operation_id: String,
+        devices: Arc<crate::device::DeviceManager>,
+        io: Arc<dyn crate::device_io::DeviceIO>,
+    ) -> Result<(Vec<crate::device::SyncedItem>, Vec<SyncFileError>)> {
+        let target = SyncTarget {
+            path: path.to_path_buf(),
+            manifest: devices.get_current_device().await.unwrap(),
+            io,
+        };
+        execute_provider_sync(delta, &target, source, operations, operation_id, devices).await
+    }
+
     use super::*;
     use crate::device::{DeviceManifest, SyncedItem};
 
@@ -4145,7 +4279,7 @@ mod tests {
             pity_fired_servers: vec![],
         };
 
-        let (_synced, errors) = execute_provider_sync(
+        let (_synced, errors) = execute_test_provider_sync(
             &delta,
             &root,
             ProviderSyncSource {
@@ -4227,7 +4361,7 @@ mod tests {
             .create_operation(operation_id.clone(), 1)
             .await;
 
-        let (_synced, errors) = execute_provider_sync(
+        let (_synced, errors) = execute_test_provider_sync(
             &delta,
             &root,
             ProviderSyncSource {
@@ -4904,7 +5038,7 @@ mod tests {
             pity_fired_servers: vec![],
         };
 
-        let (synced, errors) = execute_provider_sync(
+        let (synced, errors) = execute_test_provider_sync(
             &delta,
             dir.path(),
             ProviderSyncSource {
@@ -4966,7 +5100,7 @@ mod tests {
             pity_fired_servers: vec![],
         };
 
-        let (synced, errors) = execute_provider_sync(
+        let (synced, errors) = execute_test_provider_sync(
             &delta,
             dir.path(),
             ProviderSyncSource {
@@ -5038,7 +5172,7 @@ mod tests {
             pity_fired_servers: vec![],
         };
 
-        let (synced, errors) = execute_provider_sync(
+        let (synced, errors) = execute_test_provider_sync(
             &delta,
             dir.path(),
             ProviderSyncSource {
@@ -5111,7 +5245,7 @@ mod tests {
             pity_fired_servers: vec![],
         };
 
-        let (synced, errors) = execute_provider_sync(
+        let (synced, errors) = execute_test_provider_sync(
             &delta,
             dir.path(),
             ProviderSyncSource {
@@ -5166,7 +5300,7 @@ mod tests {
             pity_fired_servers: vec![],
         };
 
-        let (synced, errors) = execute_provider_sync(
+        let (synced, errors) = execute_test_provider_sync(
             &delta,
             dir.path(),
             ProviderSyncSource {
@@ -5232,7 +5366,7 @@ mod tests {
             pity_fired_servers: vec![],
         };
 
-        let (synced, errors) = execute_provider_sync(
+        let (synced, errors) = execute_test_provider_sync(
             &delta,
             dir.path(),
             ProviderSyncSource {
@@ -5294,7 +5428,7 @@ mod tests {
             pity_fired_servers: vec![],
         };
 
-        let (synced, errors) = execute_provider_sync(
+        let (synced, errors) = execute_test_provider_sync(
             &delta,
             dir.path(),
             ProviderSyncSource {
@@ -5375,7 +5509,7 @@ mod tests {
             pity_fired_servers: vec![],
         };
 
-        let (synced, errors) = execute_provider_sync(
+        let (synced, errors) = execute_test_provider_sync(
             &delta,
             dir.path(),
             ProviderSyncSource {
@@ -5469,7 +5603,7 @@ mod tests {
         let operation_id_for_sync = operation_id.clone();
         let provider = subsonic_provider(server.url());
         let handle = tokio::spawn(async move {
-            execute_provider_sync(
+            execute_test_provider_sync(
                 &delta,
                 &dir_path,
                 ProviderSyncSource {
@@ -5555,7 +5689,7 @@ mod tests {
         let operation_id_for_sync = operation_id.clone();
         let provider = subsonic_provider(server.url());
         let handle = tokio::spawn(async move {
-            execute_provider_sync(
+            execute_test_provider_sync(
                 &delta,
                 &dir_path,
                 ProviderSyncSource {
@@ -5624,7 +5758,7 @@ mod tests {
             pity_fired_servers: vec![],
         };
 
-        let (synced, errors) = execute_provider_sync(
+        let (synced, errors) = execute_test_provider_sync(
             &delta,
             dir.path(),
             ProviderSyncSource {
@@ -5708,7 +5842,7 @@ mod tests {
         let operation_id_for_sync = operation_id.clone();
         let provider = subsonic_provider(server.url());
         let handle = tokio::spawn(async move {
-            execute_provider_sync(
+            execute_test_provider_sync(
                 &delta,
                 &dir_path,
                 ProviderSyncSource {
@@ -7398,5 +7532,320 @@ mod tests {
         );
         drop(pipeline);
         waiting.await.unwrap();
+    }
+
+    #[derive(Debug)]
+    struct BoundaryDeviceIo {
+        inner: Arc<dyn crate::device_io::DeviceIO>,
+        begin_started: Notify,
+        begin_release: Notify,
+        block_begin: bool,
+        reject_manifest: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::device_io::DeviceIO for BoundaryDeviceIo {
+        async fn begin_sync_job(&self) -> anyhow::Result<()> {
+            if self.block_begin {
+                self.begin_started.notify_one();
+                self.begin_release.notified().await;
+            }
+            self.inner.begin_sync_job().await
+        }
+        async fn read_file(&self, path: &str) -> anyhow::Result<Vec<u8>> {
+            self.inner.read_file(path).await
+        }
+        async fn write_file(&self, path: &str, data: &[u8]) -> anyhow::Result<()> {
+            self.inner.write_file(path, data).await
+        }
+        async fn write_with_verify(&self, path: &str, data: &[u8]) -> anyhow::Result<()> {
+            if path == ".hifimule.json" && self.reject_manifest.load(Ordering::Acquire) {
+                anyhow::bail!("injected manifest persistence failure");
+            }
+            self.inner.write_with_verify(path, data).await
+        }
+        async fn delete_file(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.delete_file(path).await
+        }
+        async fn list_files(&self, path: &str) -> anyhow::Result<Vec<crate::device_io::FileEntry>> {
+            self.inner.list_files(path).await
+        }
+        async fn free_space(&self) -> anyhow::Result<u64> {
+            self.inner.free_space().await
+        }
+        async fn ensure_dir(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.ensure_dir(path).await
+        }
+        async fn cleanup_empty_subdirs(&self, path: &str) -> anyhow::Result<()> {
+            self.inner.cleanup_empty_subdirs(path).await
+        }
+        async fn end_sync_job(&self) -> anyhow::Result<()> {
+            self.inner.end_sync_job().await
+        }
+    }
+
+    fn boundary_io(root: &Path, block_begin: bool) -> Arc<BoundaryDeviceIo> {
+        Arc::new(BoundaryDeviceIo {
+            inner: Arc::new(crate::device_io::MscBackend::new(root.to_path_buf())),
+            begin_started: Notify::new(),
+            begin_release: Notify::new(),
+            block_begin,
+            reject_manifest: AtomicBool::new(false),
+        })
+    }
+
+    fn read_persisted_manifest(root: &Path) -> DeviceManifest {
+        serde_json::from_slice(&std::fs::read(root.join(".hifimule.json")).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn regression_sync_target_survives_selection_change_during_begin_job() {
+        let mut server = mockito::Server::new_async().await;
+        let stream = server
+            .mock("GET", "/Items/fixed-target/Download")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "ApiKey".into(),
+                "token".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "audio/flac")
+            .with_body(vec![1_u8, 2, 3, 4])
+            .expect(1)
+            .create_async()
+            .await;
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let (manager, _) = setup_provider_sync_device(a.path()).await;
+        manager
+            .update_manifest(|m| {
+                m.dirty = true;
+                m.pending_item_ids = vec!["fixed-target".into()];
+                m.managed_paths = vec!["OriginalMusic".into()];
+            })
+            .await
+            .unwrap();
+        let a_manifest = manager.get_current_device().await.unwrap();
+        let io = boundary_io(a.path(), true);
+        let target = SyncTarget {
+            path: a.path().into(),
+            manifest: a_manifest.clone(),
+            io: io.clone(),
+        };
+        let mut b_manifest = empty_manifest();
+        b_manifest.device_id = "other-device".into();
+        b_manifest.managed_paths = vec!["OtherMusic".into()];
+        let b_io: Arc<dyn crate::device_io::DeviceIO> =
+            Arc::new(crate::device_io::MscBackend::new(b.path().into()));
+        crate::device::write_manifest(b_io.clone(), &b_manifest)
+            .await
+            .unwrap();
+        manager
+            .handle_device_detected(b.path().into(), b_manifest, b_io)
+            .await
+            .unwrap();
+        assert!(manager.select_device(a.path().into()).await);
+        let b_before = std::fs::read(b.path().join(".hifimule.json")).unwrap();
+        let operations = Arc::new(SyncOperationManager::new());
+        let id = unique_operation_id("fixed-target");
+        operations.create_operation(id.clone(), 1).await;
+        let task = {
+            let manager = manager.clone();
+            let url = server.url();
+            tokio::spawn(async move {
+                let delta = SyncDelta {
+                    adds: vec![add_item_with_provider_format(
+                        "fixed-target",
+                        "flac",
+                        "audio/flac",
+                        4,
+                    )],
+                    deletes: vec![],
+                    id_changes: vec![],
+                    unchanged: 0,
+                    playlists: vec![],
+                    pity_fired_servers: vec![],
+                };
+                execute_provider_sync(
+                    &delta,
+                    &target,
+                    ProviderSyncSource {
+                        provider: Arc::new(crate::providers::jellyfin::JellyfinProvider::new(
+                            crate::api::JellyfinClient::new(),
+                            url,
+                            "token",
+                            "user",
+                        )),
+                        transcoding_profile: None,
+                        providers_by_server: Default::default(),
+                    },
+                    operations,
+                    id,
+                    manager,
+                )
+                .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(2), io.begin_started.notified())
+            .await
+            .unwrap();
+        assert!(manager.select_device(b.path().into()).await);
+        io.begin_release.notify_one();
+        let (synced, errors) = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(synced.len(), 1);
+        let persisted = read_persisted_manifest(a.path());
+        assert_eq!(persisted.device_id, a_manifest.device_id);
+        assert!(persisted.dirty);
+        assert_eq!(persisted.synced_items.len(), 1);
+        let item = &persisted.synced_items[0];
+        assert!(
+            item.local_path.starts_with("OriginalMusic/"),
+            "{}",
+            item.local_path
+        );
+        assert_eq!(
+            std::fs::read(a.path().join(&item.local_path)).unwrap(),
+            vec![1, 2, 3, 4]
+        );
+        assert_eq!(
+            std::fs::read(b.path().join(".hifimule.json")).unwrap(),
+            b_before
+        );
+        assert!(!b.path().join("OtherMusic").exists());
+        assert!(!b.path().join("OriginalMusic").exists());
+        stream.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn regression_finalization_preserves_dirty_evidence_and_terminal_outcomes() {
+        for scenario in [
+            "prior-failed",
+            "cancelled-errors",
+            "commit-failed",
+            "complete",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let (devices, _) = setup_provider_sync_device(root.path()).await;
+            let io = boundary_io(root.path(), false);
+            let manifest = devices.get_current_device().await.unwrap();
+            devices
+                .handle_device_removed(&root.path().to_path_buf())
+                .await;
+            devices
+                .handle_device_detected(root.path().into(), manifest, io.clone())
+                .await
+                .unwrap();
+            devices
+                .update_manifest(|m| {
+                    m.dirty = true;
+                    m.pending_item_ids = vec!["unfinished".into()];
+                })
+                .await
+                .unwrap();
+            let operations = SyncOperationManager::new();
+            let id = scenario.to_string();
+            let stale = operations.create_operation(id.clone(), 1).await;
+            let error = || SyncFileError {
+                jellyfin_id: "unfinished".into(),
+                filename: "unfinished.flac".into(),
+                error_message: "transfer failed".into(),
+            };
+            let mut final_errors = vec![];
+            if scenario == "prior-failed" {
+                let mut failed = stale.clone();
+                failed.status = SyncStatus::Failed;
+                failed.errors.push(error());
+                operations.update_operation(&id, failed).await;
+                final_errors.push(SyncFileError {
+                    error_message: "cleanup failed".into(),
+                    ..error()
+                });
+            } else if scenario == "cancelled-errors" {
+                operations.request_cancel(&id).await;
+                final_errors.push(error());
+            } else if scenario == "commit-failed" {
+                io.reject_manifest.store(true, Ordering::Release);
+            }
+            let (status, errors) = operations
+                .finalize_operation(&id, final_errors, || async {
+                    devices
+                        .update_manifest(|m| {
+                            m.dirty = false;
+                            m.pending_item_ids.clear();
+                        })
+                        .await
+                })
+                .await;
+            let expected = if scenario == "complete" {
+                SyncStatus::Complete
+            } else {
+                SyncStatus::Failed
+            };
+            assert_eq!(status, expected, "{scenario}");
+            let persisted = read_persisted_manifest(root.path());
+            assert_eq!(persisted.dirty, scenario != "complete", "{scenario}");
+            assert_eq!(
+                persisted.pending_item_ids.is_empty(),
+                scenario == "complete",
+                "{scenario}"
+            );
+            assert_eq!(
+                devices.get_current_device().await.unwrap().dirty,
+                persisted.dirty
+            );
+            assert_eq!(errors.is_empty(), scenario == "complete");
+            operations.update_operation(&id, stale.clone()).await;
+            let mut stale_complete = stale;
+            stale_complete.status = SyncStatus::Complete;
+            operations.update_operation(&id, stale_complete).await;
+            let current = operations.get_operation(&id).await.unwrap();
+            assert_eq!(current.status, expected, "{scenario}");
+            assert_eq!(current.errors.len(), errors.len(), "{scenario}");
+            if scenario == "prior-failed" {
+                assert_eq!(current.errors.len(), 2);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn regression_pending_fence_stays_non_cancelling_and_retry_is_consumed_once() {
+        let manager = SyncOperationManager::new();
+        let _pipeline = manager.try_start_pipeline().unwrap();
+        manager.create_operation("fence-worker".into(), 1).await;
+        let first = manager.begin_shutdown_fence();
+        manager
+            .shutdown
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .requested_at = std::time::Instant::now() - Duration::from_secs(6);
+        let snapshot = manager.shutdown_tray_snapshot().unwrap();
+        assert_eq!(
+            crate::shutdown_tray_message(&snapshot),
+            "lifecycle.fencing_delayed"
+        );
+        assert_eq!(snapshot.shutdown_id, first.shutdown_id);
+        assert!(!manager.is_pipeline_cancelled());
+        assert!(!manager.is_cancelled("fence-worker").await);
+        assert!(!manager.request_quit_retry());
+        assert!(!manager.take_quit_retry());
+        assert_eq!(
+            manager.begin_shutdown_fence().shutdown_id,
+            first.shutdown_id
+        );
+        manager.fail_shutdown_fence();
+        assert!(manager.request_quit_retry());
+        assert!(manager.request_quit_retry());
+        assert!(manager.take_quit_retry());
+        assert!(!manager.take_quit_retry());
+        let second = manager.begin_shutdown_fence();
+        assert_ne!(second.shutdown_id, first.shutdown_id);
+        assert!(manager.try_admit_mutation().is_none());
+        assert!(!manager.request_quit_retry());
     }
 }
