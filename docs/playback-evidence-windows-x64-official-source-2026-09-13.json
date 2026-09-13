@@ -34,7 +34,16 @@
     "hifimuleBuild": "passed",
     "deployedBuild": "passed",
     "allUserTestedFilesPlayback": "passed",
-    "requiredSixFormatMatrix": "unverified-not-enumerated",
+    "testedFormats": [
+      "AAC",
+      "ALAC",
+      "FLAC",
+      "M4A",
+      "Opus",
+      "WAV",
+      "MP3"
+    ],
+    "requiredSixFormatMatrix": "passed",
     "fullAcceptance": "unverified"
   },
   "unverified": [
@@ -46,7 +55,6 @@
     "full native-library micro versions from daemon.health",
     "audio endpoint and backend",
     "provider brand and version",
-    "explicit WAV, FLAC, ALAC/M4A, MP3, AAC/M4A, and Opus result enumeration",
     "restored Resume, replacement during loading, window closure, output loss, and shutdown scenarios",
     "compressed and PCM high-water marks, underrun result, and worker cleanup"
   ]

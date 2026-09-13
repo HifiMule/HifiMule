@@ -249,6 +249,7 @@ GPT-6 (Codex)
 - 2026-09-13: User confirmed the Windows build produced a working installation package and that installation succeeded. Combined with the playback smoke result, the Windows build/package/install/playback path is operational; formal package identity and loaded-library evidence remain open.
 - 2026-09-13: Captured sanitized Windows x64 installed evidence: Windows 11 10.0.22631 x64, NSIS package SHA-256 `f6fafcbf8950580e9e3b8a4ab295894bbc9896fcc122a151d9935f53ddededd6`, and avcodec 63, avformat 63, avutil 61 and swresample 7 DLLs loaded from the installed `%LOCALAPPDATA%\HifiMule` directory. Unsupplied acceptance fields remain explicitly unverified.
 - 2026-09-13: Completed a user-run Windows x64 manual FFmpeg 9.0.1 official-source proof. Localized MSVC required `VSLANG=1033`, the install required `.lib` generation from `.def`, and Rust bindgen required LLVM/libclang. The final HifiMule build and deployed build succeeded and played every tested file.
+- 2026-09-13: User explicitly confirmed tested AAC, ALAC, FLAC, M4A, Opus, WAV and MP3 playback on Windows, Linux and macOS with the latest changes, closing the three-platform format smoke matrix. Per-target architecture/identity and lifecycle/resource evidence remain separate open fields.
 
 ### Completion Notes List
 
@@ -262,7 +263,7 @@ GPT-6 (Codex)
 - Runtime packaging regression validation: thirty-five Node tests covering the cross-platform daemon wrapper and explicit Cargo target selection, sanitized runtime-verification handoff, Linux receipts/ABI rejection/compiler preflight/platform gating, Windows pinned provisioning/version/architecture/hash/override/staging-name checks and non-overlapping effective Tauri platform resources; the normal Build workflow runs the complete `scripts/tests/*.test.mjs` suite. Node syntax checks, Cargo formatting/check, native macOS wrapper check and diff whitespace checks pass. Linux and Windows now have user-reported playback smoke success; full sanitized installed-package evidence capture remains pending.
 - Linux bindgen preparation now requires `clang`, `libclang-dev` and `libc6-dev`, probes native `limits.h`/`stdint.h` preprocessing for both supported Linux triples, and supplies target-specific bindgen arguments to every sidecar Cargo build. CI Build and release package lists enforce the same prerequisites.
 - Root `npm run build:daemon` now uses the supported platform-aware wrapper: Linux provisions and selects the pinned runtime plus matching Clang/libclang environment, Windows provisions a hash-pinned MSVC SDK or validates an explicit `FFMPEG_DIR`, and macOS retains ABI verification. Subsequent user runs reached working playback on Linux and Windows; complete sanitized installed-package evidence remains pending.
-- Cross-platform user smoke evidence (2026-09-13): MP3, M4A and FLAC playback is working on Windows, Linux and macOS with the latest changes. Windows x64 package identity and native loaded paths are captured separately; equivalent Linux/macOS identity, the remaining WAV/AAC-M4A/ALAC-M4A/Opus distinctions, output-loss/replacement/shutdown scenarios and buffer measurements remain unverified unless separately captured.
+- Cross-platform user smoke evidence (2026-09-13): AAC, ALAC, FLAC, M4A, Opus, WAV and MP3 playback is tested and working on Windows, Linux and macOS with the latest changes. Windows x64 package identity and native loaded paths are captured separately; equivalent Linux/macOS identity, output-loss/replacement/shutdown scenarios and buffer measurements remain unverified unless separately captured.
 - Windows x64 installed evidence (2026-09-13): the identified NSIS package installed successfully, its SHA-256 was captured, and the running daemon loaded all four required FFmpeg ABI DLLs from the private installed HifiMule directory. The sanitized JSON record preserves unknown fields as unverified rather than inferring them.
 - Windows x64 official-source feasibility evidence (2026-09-13): the manual official-source workflow reached successful HifiMule build, deployment and playback after resolving localized MSVC detection, import-library generation and LLVM/libclang discovery. This proves the replacement path on the tested host; it does not yet replace the normal BtbN provisioner or fill evidence fields that were not supplied.
 - Windows installer smoke evidence (2026-09-13): the native Windows build produced a working installation package, installation completed, and the installed application was usable. This closes the basic Windows packaging/install smoke gap; package hash, exact target identity and installed FFmpeg module paths remain to be recorded.
@@ -281,6 +282,7 @@ GPT-6 (Codex)
 - `Cargo.toml`
 - `docs/api-contracts-hifimule-daemon.md`
 - `docs/development-guide.md`
+- `docs/playback-evidence-cross-platform-formats-2026-09-13.json`
 - `docs/playback-evidence-windows-x64-2026-09-13.json`
 - `docs/playback-evidence-windows-x64-official-source-2026-09-13.json`
 - `docs/playback-installed-test-checklist.md`
@@ -339,4 +341,5 @@ GPT-6 (Codex)
 - 2026-09-13: Recorded successful user-reported MP3, M4A and FLAC playback smoke tests on Windows, Linux and macOS; retained the complete installed-evidence and Windows runtime-contract gates as in-progress.
 - 2026-09-13: Added sanitized Windows x64 installed-package evidence with OS identity, installer SHA-256 and private loaded FFmpeg DLL paths; retained unsupplied scenarios and measurements as unverified.
 - 2026-09-13: Recorded successful Windows x64 manual official-source FFmpeg build/deploy/playback evidence and documented LLVM/libclang, localized MSVC and import-library requirements; default source-build automation remains open.
+- 2026-09-13: Recorded successful AAC, ALAC, FLAC, M4A, Opus, WAV and MP3 playback tests across Windows, Linux and macOS, completing the three-platform format smoke matrix.
 - 2026-09-13: Recorded successful user-reported Windows package creation and installation, completing the basic Windows build-to-installed-playback smoke path.

@@ -6,12 +6,14 @@ hardware evidence.
 
 ## Reported smoke evidence
 
-On 2026-09-13, user testing confirmed audible MP3, M4A, and FLAC playback with
-the latest changes on Windows, Linux, and macOS. This establishes a successful
-cross-platform playback smoke result for those containers/formats. The report
-did not include package hashes, exact OS architectures, provider/server versions,
-loaded native-library paths, high-water measurements, or every scenario and
-fixture below, so it does not by itself complete the installed-evidence matrix.
+On 2026-09-13, user testing confirmed audible AAC, ALAC, FLAC, M4A, Opus, WAV,
+and MP3 playback with the latest changes on Windows, Linux, and macOS. The
+explicit three-platform format matrix is recorded in
+[`playback-evidence-cross-platform-formats-2026-09-13.json`](playback-evidence-cross-platform-formats-2026-09-13.json).
+The report did not include every target's package hash, exact architecture,
+provider/server version, loaded native-library paths, high-water measurements,
+or every lifecycle scenario below, so it does not by itself complete the full
+installed-evidence matrix.
 
 The Windows build also produced a working installation package: installation
 completed successfully and the installed application was usable. Together with
@@ -30,9 +32,9 @@ A separate manual official-source result is captured in
 After forcing English MSVC detection with `VSLANG=1033`, generating `.lib`
 import libraries from FFmpeg's installed `.def` files, and installing LLVM for
 the Clang runtime required by Rust bindgen, the HifiMule build and deployed build
-succeeded and played every file exercised by the user. The exact required
-six-format enumeration and the new package/runtime identity fields remain
-explicitly unverified because they were not included in the report.
+succeeded. Subsequent explicit format reporting confirms AAC, ALAC, FLAC, M4A,
+Opus, WAV and MP3 playback on Windows. The new package/runtime identity fields
+remain explicitly unverified because they were not included in the report.
 
 ## Setup
 

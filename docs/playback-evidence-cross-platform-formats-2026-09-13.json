@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "story": "15.4",
+  "recordedAt": "2026-09-13",
+  "evidenceSource": "User-reported playback tests with the latest changes",
+  "formats": [
+    "AAC",
+    "ALAC",
+    "FLAC",
+    "M4A",
+    "Opus",
+    "WAV",
+    "MP3"
+  ],
+  "platformResults": [
+    {
+      "platform": "Windows",
+      "result": "passed"
+    },
+    {
+      "platform": "Linux",
+      "result": "passed"
+    },
+    {
+      "platform": "macOS",
+      "result": "passed"
+    }
+  ],
+  "outcomes": {
+    "sevenFormatPlaybackMatrix": "passed-on-three-platform-families",
+    "audiblePlayback": "passed",
+    "fullInstalledAcceptance": "unverified"
+  },
+  "unverified": [
+    "exact Linux and macOS target architecture/package identity for these format runs",
+    "provider and server version per fixture",
+    "audio endpoint and backend per platform",
+    "restored Resume, replacement during loading, window closure, output loss, and shutdown scenarios per required target",
+    "compressed and PCM high-water marks, underrun result, and worker cleanup per required target"
+  ]
+}
