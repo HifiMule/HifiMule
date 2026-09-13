@@ -3,7 +3,7 @@ import { t } from '../i18n';
 
 export class PlaybackControls {
     private disposed = false;
-    private timer: number | undefined;
+    private timer: ReturnType<typeof setTimeout> | undefined;
     private lastSequence = '';
     constructor(private readonly container: HTMLElement) {
         window.addEventListener('pagehide', () => this.destroy(), { once: true });
