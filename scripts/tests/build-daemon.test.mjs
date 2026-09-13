@@ -43,7 +43,7 @@ test("daemon wrapper provisions Linux and passes controlled native environment t
   const calls = [];
   const result = runDaemonBuild([], {
     platform: "linux",
-    env: { PATH: "/controlled/bin", PKG_CONFIG_PATH: "/prior/pc", LD_LIBRARY_PATH: "/prior/lib" },
+    env: { PATH: "/controlled/bin", PKG_CONFIG_PATH: "/prior/pc", LD_LIBRARY_PATH: "/prior/lib", FFMPEG_DIR: "/old/ffmpeg8" },
     execFileSync: executor("aarch64-unknown-linux-gnu", calls),
     ensureLinuxAudioRuntime: (target) => {
       assert.equal(target, "aarch64-unknown-linux-gnu");
@@ -54,6 +54,7 @@ test("daemon wrapper provisions Linux and passes controlled native environment t
   const cargo = calls.find((call) => call.command === "cargo");
   assert.deepEqual(cargo.args, ["build", "--release", "-p", "hifimule-daemon"]);
   assert.equal(cargo.options.env.HIFIMULE_FFMPEG_PREFIX, "/controlled/ffmpeg");
+  assert.equal(cargo.options.env.FFMPEG_DIR, "/controlled/ffmpeg");
   assert.equal(cargo.options.env.PKG_CONFIG_PATH, "/controlled/ffmpeg/lib/pkgconfig:/prior/pc");
   assert.equal(cargo.options.env.LD_LIBRARY_PATH, "/controlled/ffmpeg/lib:/prior/lib");
   assert.equal(
@@ -164,7 +165,7 @@ test("root build:daemon script uses the supported native wrapper", () => {
 test("sidecar and Build workflow export auto-provisioned Windows FFMPEG_DIR", () => {
   const prepare = readFileSync(join(root, "scripts/prepare-sidecar.mjs"), "utf8");
   const ensure = prepare.indexOf("ensureWindowsAudioRuntime(targetTriple");
-  const exportPrefix = prepare.indexOf("buildEnv.FFMPEG_DIR = audioPrefix");
+  const exportPrefix = prepare.indexOf("buildEnv.FFMPEG_DIR = audioPrefix", ensure);
   const exportPath = prepare.indexOf("join(audioPrefix, \"bin\")");
   const cargo = prepare.indexOf("cargo build --release -p hifimule-daemon");
   assert.ok(ensure >= 0 && exportPrefix > ensure && exportPath > exportPrefix && cargo > exportPath);
@@ -192,4 +193,7 @@ test("Rust build gate exact-matches the shared marker and rejects unverified raw
   assert.match(build, /if !runtime_was_verified/);
   assert.doesNotMatch(build, /pkg_config::Config::new\(\)/);
   assert.match(build, /pkg_config::probe_library\("libmtp"\)/);
+  const privateSearch = build.indexOf("cargo:rustc-link-search=native=");
+  assert.ok(privateSearch >= 0 && privateSearch < build.indexOf('pkg_config::probe_library("libmtp")'));
+  assert.match(build, /cargo:rerun-if-env-changed=HIFIMULE_FFMPEG_PREFIX/);
 });

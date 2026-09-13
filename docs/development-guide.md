@@ -27,7 +27,9 @@ sudo apt-get install -y \
 
 ### Windows
 - Visual Studio Build Tools (MSVC)
-- No extra system deps — WPD is part of the Windows SDK; MTP support is via `windows-sys` crate
+- LLVM, with its Clang runtime library available to Rust bindgen (`LIBCLANG_PATH`
+  may be set to LLVM's `bin` directory when it is not discoverable through `PATH`)
+- WPD is part of the Windows SDK; MTP support is provided by the `windows-sys` crate
 
 ---
 

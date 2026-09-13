@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { acquireLinuxAudioRuntimeLock, linuxBuildEnvironment, linuxBuildPackages, preflightLinuxBuild, requiresHostAudioVerification, validateLinuxRuntimeReceipt, writeLinuxBuildEnvironment } from "../linux-audio-runtime.mjs";
+import { verifyLinuxAudioLinkage, acquireLinuxAudioRuntimeLock, linuxBuildEnvironment, linuxBuildPackages, preflightLinuxBuild, requiresHostAudioVerification, validateLinuxRuntimeReceipt, writeLinuxBuildEnvironment } from "../linux-audio-runtime.mjs";
 import { audioRuntimeVerification } from "../verify-audio-runtime.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
@@ -142,6 +142,7 @@ test("Linux CI environment writes the marker only after exact verification", () 
   writeLinuxBuildEnvironment("/controlled/ffmpeg", output, target, {
     env: {
       PKG_CONFIG_PATH: "/prior/pc",
+      FFMPEG_DIR: "/old/ffmpeg8",
       [audioRuntimeVerification.environmentVariable]: audioRuntimeVerification.value,
     },
     linuxBuildEnvironment: (_target, env) => {
@@ -162,6 +163,7 @@ test("Linux CI environment writes the marker only after exact verification", () 
   assert.deepEqual(events, ["verified"]);
   const lines = readFileSync(output, "utf8").trim().split("\n");
   assert.ok(lines.includes("PKG_CONFIG_PATH=/controlled/ffmpeg/lib/pkgconfig:/prior/pc"));
+  assert.ok(lines.includes("FFMPEG_DIR=/controlled/ffmpeg"));
   assert.ok(lines.includes("LD_LIBRARY_PATH=/controlled/ffmpeg/lib"));
   assert.equal(lines.at(-1), `${audioRuntimeVerification.environmentVariable}=${audioRuntimeVerification.value}`);
 });
@@ -200,4 +202,12 @@ test("Linux runtime lock creates a fresh parent and retains exclusive ownership"
   assert.equal(existsSync(lockPath), false);
   assert.equal(existsSync(parent), true);
   acquireLinuxAudioRuntimeLock(lockPath)();
+});
+
+test("Linux packaging rejects a daemon linked against the system FFmpeg ABI", () => {
+  const correct = ["libavcodec.so.63", "libavformat.so.63", "libavutil.so.61", "libswresample.so.7"];
+  assert.doesNotThrow(() => verifyLinuxAudioLinkage(correct));
+  for (const invalid of [correct.slice(1), ["libavcodec.so.62", ...correct.slice(1)], [...correct, "libavcodec.so.62"]]) {
+    assert.throws(() => verifyLinuxAudioLinkage(invalid), /Daemon FFmpeg linkage mismatch/);
+  }
 });

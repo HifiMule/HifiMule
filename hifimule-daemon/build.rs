@@ -20,6 +20,18 @@ fn main() {
             "the controlled FFmpeg runtime was not verified. Raw `cargo` is unsupported; use `npm run build:daemon -- <cargo arguments>` (for example `npm run build:daemon -- build -p hifimule-daemon`)"
         );
     }
+    if target_os == "linux" {
+        println!("cargo:rerun-if-env-changed=HIFIMULE_FFMPEG_PREFIX");
+        let prefix = std::env::var_os("HIFIMULE_FFMPEG_PREFIX").expect(
+            "Linux builds require the verified HIFIMULE_FFMPEG_PREFIX; use npm run build:daemon",
+        );
+        // Keep the private libraries ahead of system search directories emitted
+        // by libmtp and other native dependencies, which may also contain FFmpeg.
+        println!(
+            "cargo:rustc-link-search=native={}",
+            std::path::PathBuf::from(prefix).join("lib").display()
+        );
+    }
     if target_os == "macos" {
         // Embed Info.plist so macOS reads LSUIElement=true at process launch,
         // suppressing the Dock icon before NSApplication is even initialised.

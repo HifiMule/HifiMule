@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "story": "15.4",
+  "recordedAt": "2026-09-13",
+  "evidenceSource": "User-reported output from the installed Windows system",
+  "target": "x86_64-pc-windows-msvc",
+  "os": {
+    "caption": "Microsoft Windows 11 Professionnel",
+    "version": "10.0.22631",
+    "architecture": "64-bit"
+  },
+  "package": {
+    "type": "NSIS",
+    "filename": "HifiMule_0.14.0_x64-setup.exe",
+    "sha256": "f6fafcbf8950580e9e3b8a4ab295894bbc9896fcc122a151d9935f53ddededd6",
+    "installation": "passed"
+  },
+  "nativeLibraries": [
+    {
+      "module": "avcodec-63.dll",
+      "abiMajor": 63,
+      "loadedPath": "%LOCALAPPDATA%\\HifiMule\\avcodec-63.dll"
+    },
+    {
+      "module": "avformat-63.dll",
+      "abiMajor": 63,
+      "loadedPath": "%LOCALAPPDATA%\\HifiMule\\avformat-63.dll"
+    },
+    {
+      "module": "avutil-61.dll",
+      "abiMajor": 61,
+      "loadedPath": "%LOCALAPPDATA%\\HifiMule\\avutil-61.dll"
+    },
+    {
+      "module": "swresample-7.dll",
+      "abiMajor": 7,
+      "loadedPath": "%LOCALAPPDATA%\\HifiMule\\swresample-7.dll"
+    }
+  ],
+  "playbackSmoke": [
+    {
+      "format": "MP3",
+      "audible": true
+    },
+    {
+      "format": "M4A",
+      "codec": "unreported",
+      "audible": true
+    },
+    {
+      "format": "FLAC",
+      "audible": true
+    }
+  ],
+  "outcomes": {
+    "build": "passed",
+    "installedPackage": "passed",
+    "nativeLibraryLocation": "passed",
+    "playbackSmoke": "passed",
+    "fullAcceptance": "unverified"
+  },
+  "unverified": [
+    "source revision",
+    "FFmpeg source hash and configuration",
+    "full native-library micro versions",
+    "audio endpoint and backend",
+    "provider brand and version",
+    "WAV, distinct ALAC/M4A, distinct AAC/M4A, and Opus fixtures",
+    "restored Resume, replacement during loading, window closure, output loss, and shutdown scenarios",
+    "decoded and consumed frames",
+    "compressed and PCM high-water marks",
+    "timeout, underrun, and worker-cleanup outcomes"
+  ]
+}

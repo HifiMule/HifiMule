@@ -47,6 +47,8 @@ export function runDaemonBuild(cargoArgs = [], options = {}) {
     const prefix = dependencies.ensureLinuxAudioRuntime(target);
     env = dependencies.linuxBuildEnvironment(target, env);
     env.HIFIMULE_FFMPEG_PREFIX = prefix;
+    // ffmpeg-sys-next checks FFMPEG_DIR before pkg-config.
+    env.FFMPEG_DIR = prefix;
     env.PKG_CONFIG_PATH = [posix.join(prefix, "lib/pkgconfig"), env.PKG_CONFIG_PATH].filter(Boolean).join(":");
     env.LD_LIBRARY_PATH = [posix.join(prefix, "lib"), env.LD_LIBRARY_PATH].filter(Boolean).join(":");
     execute("node", ["scripts/verify-audio-runtime.mjs", "--prefix", prefix], { cwd: root, stdio: "inherit", env });

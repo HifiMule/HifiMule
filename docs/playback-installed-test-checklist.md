@@ -4,6 +4,36 @@ Use a clean installed package for each row: Windows x64, Linux x64, macOS x64,
 and macOS ARM64. Do not count a source-tree run or VM-only ARM64 run as installed
 hardware evidence.
 
+## Reported smoke evidence
+
+On 2026-09-13, user testing confirmed audible MP3, M4A, and FLAC playback with
+the latest changes on Windows, Linux, and macOS. This establishes a successful
+cross-platform playback smoke result for those containers/formats. The report
+did not include package hashes, exact OS architectures, provider/server versions,
+loaded native-library paths, high-water measurements, or every scenario and
+fixture below, so it does not by itself complete the installed-evidence matrix.
+
+The Windows build also produced a working installation package: installation
+completed successfully and the installed application was usable. Together with
+the playback report above, this confirms the Windows build → package → install →
+playback smoke path.
+
+The Windows x64 identity and native-module evidence is captured in
+[`playback-evidence-windows-x64-2026-09-13.json`](playback-evidence-windows-x64-2026-09-13.json):
+Windows 11 Professional 10.0.22631 x64, NSIS package SHA-256
+`f6fafcbf8950580e9e3b8a4ab295894bbc9896fcc122a151d9935f53ddededd6`, and
+all four required FFmpeg DLLs loaded from `%LOCALAPPDATA%\HifiMule`. Fields not
+present in the supplied output remain explicitly `unverified` in that record.
+
+A separate manual official-source result is captured in
+[`playback-evidence-windows-x64-official-source-2026-09-13.json`](playback-evidence-windows-x64-official-source-2026-09-13.json).
+After forcing English MSVC detection with `VSLANG=1033`, generating `.lib`
+import libraries from FFmpeg's installed `.def` files, and installing LLVM for
+the Clang runtime required by Rust bindgen, the HifiMule build and deployed build
+succeeded and played every file exercised by the user. The exact required
+six-format enumeration and the new package/runtime identity fields remain
+explicitly unverified because they were not included in the report.
+
 ## Setup
 
 1. Configure one Jellyfin server and one Subsonic/OpenSubsonic server containing

@@ -85,3 +85,9 @@ Validation: 42 Node regressions and 2 Python orchestration tests pass. Verified 
 Linux successfully built FFmpeg but rejected its libraries because the manifest expected micro version 100. Verified the pinned archive SHA-256 and read all four library version headers: avcodec=63.1.101, avformat=63.1.101, avutil=61.1.101, swresample=7.1.101. Updated the exact manifest values and verifier fixtures, retaining rejection of nonmatching versions. Also added libasound2-dev to both Linux workflows, developer prerequisites, and preflight based on the local alsa-sys build script requirement.
 
 Validation: all four source versions equal the corrected manifest; 43 Node regression tests pass; git diff --check passes. Full native Linux CI remains pending.
+
+## Follow-up: Linux daemon native linking
+
+UTM guest inspection confirmed the installed daemon requested FFmpeg 8 SONAMEs (62/62/60/6), despite FFmpeg 9 libraries being bundled. Pinning FFMPEG_DIR alone reproduced the wrong linkage in a native rebuild. The root build script must emit the controlled library directory before system directories from libmtp/native dependencies. Linux entry points now supply the verified prefix consistently, and packaging validates the daemons actual DT_NEEDED majors before accepting it. Added stale-prefix and wrong-linkage regression coverage; 44 Node tests pass. Native rebuild verification follows.
+
+Native ARM64 verification completed: the first rebuild with FFMPEG_DIR alone still linked FFmpeg 8; adding the private search path before libmtp fixed all four DT_NEEDED majors. Installed the corrected daemon in the UTM Linux guest with /usr/bin/hifimule-daemon.before-abi-fix as backup. ldd confirms all four FFmpeg libraries resolve from /usr/lib/HifiMule/bundled-libs. Existing running process was left intact pending user tray quit/reopen.

@@ -62,6 +62,8 @@ let audioPrefix;
 let buildEnv = withoutAudioRuntimeVerification(process.env);
 if (process.platform === "linux") {
   audioPrefix = ensureLinuxAudioRuntime(targetTriple);
+  buildEnv.HIFIMULE_FFMPEG_PREFIX = audioPrefix;
+  buildEnv.FFMPEG_DIR = audioPrefix;
   Object.assign(buildEnv, linuxBuildEnvironment(targetTriple, buildEnv));
   buildEnv.PKG_CONFIG_PATH = [
     join(audioPrefix, "lib", "pkgconfig"),

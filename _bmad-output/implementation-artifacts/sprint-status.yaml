@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-09-12  # Story 15.4 development started
+last_updated: 2026-09-13  # Story 15.4 cross-platform playback smoke evidence recorded
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system

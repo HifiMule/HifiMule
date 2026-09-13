@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "story": "15.4",
+  "recordedAt": "2026-09-13",
+  "evidenceSource": "User report from the manual Windows official-source build flow",
+  "target": "x86_64-pc-windows-msvc",
+  "os": {
+    "caption": "Microsoft Windows 11 Professionnel",
+    "version": "10.0.22631",
+    "architecture": "64-bit"
+  },
+  "runtimeBuild": {
+    "ffmpegRelease": "9.0.1",
+    "sourceUrl": "https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz",
+    "expectedSourceSha256": "cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635",
+    "expectedSigningKey": "DD1EC9E8DE085C629B3E1846B18E8928B3948D64",
+    "toolchain": "MSVC x64",
+    "configure": "passed",
+    "compile": "passed",
+    "install": "passed",
+    "importLibraryGeneration": "passed",
+    "observedPrerequisites": [
+      "Visual Studio C++ toolchain and Windows SDK",
+      "MSYS2 build tools",
+      "NASM",
+      "LLVM with libclang available to Rust bindgen"
+    ],
+    "workarounds": [
+      "VSLANG=1033 for FFmpeg 9.0.1 MSVC detection with a localized Visual Studio installation",
+      "Generate unversioned MSVC .lib import libraries from FFmpeg-installed .def files"
+    ]
+  },
+  "outcomes": {
+    "hifimuleBuild": "passed",
+    "deployedBuild": "passed",
+    "allUserTestedFilesPlayback": "passed",
+    "requiredSixFormatMatrix": "unverified-not-enumerated",
+    "fullAcceptance": "unverified"
+  },
+  "unverified": [
+    "captured GPG verification output for this exact source archive",
+    "captured SHA-256 output for this exact source archive",
+    "source revision beyond the FFmpeg 9.0.1 release identity",
+    "new installer filename and SHA-256",
+    "actual loaded module paths from the official-source deployed build",
+    "full native-library micro versions from daemon.health",
+    "audio endpoint and backend",
+    "provider brand and version",
+    "explicit WAV, FLAC, ALAC/M4A, MP3, AAC/M4A, and Opus result enumeration",
+    "restored Resume, replacement during loading, window closure, output loss, and shutdown scenarios",
+    "compressed and PCM high-water marks, underrun result, and worker cleanup"
+  ]
+}

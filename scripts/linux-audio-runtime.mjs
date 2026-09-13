@@ -187,7 +187,18 @@ function closure(roots, out, target, dirs) {
   return copied;
 }
 function resolved(path, env) { const output = run("ldd", [path], { env }); if (/=>\s+not found/.test(output)) throw new Error(`Unresolved dependency for ${path}:\n${output}`); }
+export function verifyLinuxAudioLinkage(needed) {
+  for (const [library, version] of Object.entries(manifest.abiVersions)) {
+    const stem = `lib${library}.so.`;
+    const expected = `${stem}${version.split(".")[0]}`;
+    const actual = needed.filter((name) => name.startsWith(stem));
+    if (actual.length !== 1 || actual[0] !== expected) {
+      throw new Error(`Daemon FFmpeg linkage mismatch: expected ${expected}, found ${actual.join(", ") || "none"}. Rebuild the daemon with the controlled FFmpeg prefix before packaging.`);
+    }
+  }
+}
 export function bundleLinuxAudioRuntime(prefix, sidecar, target) {
+  verifyLinuxAudioLinkage(assertElf(sidecar, target).needed);
   prefix = verifyLinuxAudioPrefix(prefix, target);
   const env = pcEnv(prefix), out = join(root, "hifimule-ui/src-tauri/bundled-libs"); mkdirSync(out, { recursive: true });
   for (const name of readdirSync(out)) if (/\.so(?:\.|$)/.test(name)) rmSync(join(out, name), { force: true });
@@ -204,7 +215,8 @@ function walk(dir) { return readdirSync(dir, { withFileTypes: true }).flatMap((e
 export function verifyInstalledLinuxBundle(bundleRoot, target) {
   const files = walk(bundleRoot);
   const sidecar = files.find((path) => basename(path).startsWith("hifimule-daemon"));
-  if (!sidecar) throw new Error(`No daemon sidecar under ${bundleRoot}`); assertElf(sidecar, target);
+  if (!sidecar) throw new Error(`No daemon sidecar under ${bundleRoot}`);
+  verifyLinuxAudioLinkage(assertElf(sidecar, target).needed);
   const codec = files.find((path) => basename(path) === `libavcodec.so.${manifest.abiVersions.avcodec.split(".")[0]}`);
   if (!codec) throw new Error("Controlled FFmpeg library missing"); const libdir = dirname(codec);
   const libs = files.filter((path) => dirname(path) === libdir && /\.so(?:\.|$)/.test(basename(path)));
@@ -235,6 +247,7 @@ export function writeLinuxBuildEnvironment(prefix, path, target, options = {}) {
   const normalizedKey = `BINDGEN_EXTRA_CLANG_ARGS_${target.replaceAll("-", "_")}`;
   const values = {
     HIFIMULE_FFMPEG_PREFIX: prefix,
+    FFMPEG_DIR: prefix,
     PKG_CONFIG_PATH: [posix.join(prefix, "lib/pkgconfig"), baseEnv.PKG_CONFIG_PATH].filter(Boolean).join(":"),
     LD_LIBRARY_PATH: [posix.join(prefix, "lib"), baseEnv.LD_LIBRARY_PATH].filter(Boolean).join(":"),
     LIBCLANG_PATH: native.LIBCLANG_PATH,
