@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { resolve } from 'node:path';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(import.meta.dirname, '..');
@@ -91,7 +91,8 @@ export function verifyAudioRuntime(options = {}) {
         encoding: 'utf8',
         env: pkgConfigEnv,
       }).trim());
-      if (libdir !== prefix && !libdir.startsWith(`${prefix}/`)) {
+      const relativeLibdir = relative(prefix, libdir);
+      if (relativeLibdir === '..' || relativeLibdir.startsWith(`..${sep}`) || isAbsolute(relativeLibdir)) {
         throw new Error(`${packageName} resolved outside controlled prefix ${prefix}: ${libdir}`);
       }
     }

@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   audioRuntimeVerification,
@@ -80,7 +80,7 @@ export function preflightLinuxBuild(target, options = {}) {
   if (spawn("pkg-config", ["--exists", "libmtp"], { env: probeEnv }).status !== 0) throw new Error(`libmtp development files are missing.\nInstall with: sudo apt-get install ${packages}`);
   if (!fileExists("/usr/include/limits.h")) throw new Error(`glibc development headers are missing (/usr/include/limits.h).\nInstall with: sudo apt-get install ${packages}`);
   const resourceDir = execute("clang", ["-print-resource-dir"], { env: probeEnv }).trim();
-  if (!resourceDir || !fileExists(join(resourceDir, "include/limits.h"))) {
+  if (!resourceDir || !fileExists(posix.join(resourceDir, "include/limits.h"))) {
     throw new Error(`Clang resource headers are missing (expected <resource-dir>/include/limits.h).\nInstall with: sudo apt-get install ${packages}`);
   }
   const headerProbe = spawn("clang", [`--target=${target}`, `-resource-dir=${resourceDir}`, "-fsyntax-only", "-x", "c", "-"], { input: "#include <limits.h>\n#include <stdint.h>\n", encoding: "utf8", env: probeEnv });
@@ -88,7 +88,7 @@ export function preflightLinuxBuild(target, options = {}) {
     const detail = headerProbe.stderr?.toString().trim();
     throw new Error(`Clang cannot compile against the native ${target} libc headers${detail ? `: ${detail}` : "."}\nInstall with: sudo apt-get install ${packages}`);
   }
-  const libclangDir = resolve(resourceDir, "../..");
+  const libclangDir = posix.resolve(resourceDir, "../..");
   if (!containsLibclang(libclangDir, list)) {
     throw new Error(`The libclang matching ${resourceDir} is missing from ${libclangDir}.\nInstall the matching Ubuntu toolchain with: sudo apt-get install ${packages}`);
   }
@@ -107,7 +107,8 @@ export function linuxBuildEnvironment(target, baseEnv = process.env, options = {
   return result;
 }
 function sha(path) { return createHash("sha256").update(readFileSync(path)).digest("hex"); }
-function lock(path) {
+export function acquireLinuxAudioRuntimeLock(path) {
+  mkdirSync(dirname(path), { recursive: true });
   const deadline = Date.now() + 30 * 60_000;
   while (true) {
     try { mkdirSync(path); writeFileSync(join(path, "owner.json"), JSON.stringify({ pid: process.pid, at: new Date().toISOString() })); return () => rmSync(path, { recursive: true, force: true }); }
@@ -141,7 +142,7 @@ export function ensureLinuxAudioRuntime(target) {
   const override = process.env.HIFIMULE_FFMPEG_PREFIX;
   const prefix = resolve(override || join(root, "target/audio-runtime", `ffmpeg-${manifest.ffmpegRelease}-${target}`));
   if (override) return verifyLinuxAudioPrefix(prefix, target);
-  const unlock = lock(`${prefix}.lock`);
+  const unlock = acquireLinuxAudioRuntimeLock(`${prefix}.lock`);
   try {
     if (existsSync(prefix)) { try { return verifyLinuxAudioPrefix(prefix, target); } catch { rmSync(prefix, { recursive: true, force: true }); } }
     const cache = join(root, "target/audio-runtime/sources");
@@ -231,8 +232,8 @@ export function writeLinuxBuildEnvironment(prefix, path, target, options = {}) {
   const normalizedKey = `BINDGEN_EXTRA_CLANG_ARGS_${target.replaceAll("-", "_")}`;
   const values = {
     HIFIMULE_FFMPEG_PREFIX: prefix,
-    PKG_CONFIG_PATH: [join(prefix, "lib/pkgconfig"), baseEnv.PKG_CONFIG_PATH].filter(Boolean).join(":"),
-    LD_LIBRARY_PATH: [join(prefix, "lib"), baseEnv.LD_LIBRARY_PATH].filter(Boolean).join(":"),
+    PKG_CONFIG_PATH: [posix.join(prefix, "lib/pkgconfig"), baseEnv.PKG_CONFIG_PATH].filter(Boolean).join(":"),
+    LD_LIBRARY_PATH: [posix.join(prefix, "lib"), baseEnv.LD_LIBRARY_PATH].filter(Boolean).join(":"),
     LIBCLANG_PATH: native.LIBCLANG_PATH,
     [exactKey]: native[exactKey],
     [normalizedKey]: native[normalizedKey],

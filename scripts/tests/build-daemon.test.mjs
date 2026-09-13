@@ -1,11 +1,35 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { runDaemonBuild } from "../build-daemon.mjs";
 import { audioRuntimeVerification } from "../verify-audio-runtime.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
+
+test("daemon CLI preserves a failing Cargo subprocess exit code", (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "hifimule-daemon-exit-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const preload = join(scratch, "preload.mjs");
+  writeFileSync(preload, `
+    import childProcess from "node:child_process";
+    import { syncBuiltinESMExports } from "node:module";
+    Object.defineProperty(process, "platform", { value: "darwin" });
+    childProcess.execFileSync = (command) => {
+      if (command === "rustc") return "host: aarch64-apple-darwin\\n";
+      if (command === "node") return "";
+      if (command === "cargo") throw Object.assign(new Error("fixture Cargo failure"), { status: 101 });
+      throw new Error("Unexpected subprocess: " + command);
+    };
+    syncBuiltinESMExports();
+  `);
+  const result = spawnSync(process.execPath, ["--import", pathToFileURL(preload).href, join(root, "scripts/build-daemon.mjs"), "test", "-p", "hifimule-daemon"], { encoding: "utf8" });
+  assert.equal(result.status, 101, result.stderr);
+  assert.match(result.stderr, /fixture Cargo failure/);
+});
 
 function executor(target, calls) {
   return (command, args, options) => {

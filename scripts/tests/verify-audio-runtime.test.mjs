@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { join, resolve } from "node:path";
 import {
   audioRuntimeVerification,
   verifyAudioRuntime,
@@ -14,12 +15,12 @@ const exactVersions = {
   libswresample: "7.1.100",
 };
 
-function pkgConfigFixture(overrides = {}) {
+function pkgConfigFixture(overrides = {}, libdir = join(resolve("/controlled/ffmpeg"), "lib")) {
   const versions = { ...exactVersions, ...overrides };
   return (_command, args, options) => {
     assert.equal(options.env[audioRuntimeVerification.environmentVariable], undefined);
     if (args[0] === "--modversion") return `${versions[args[1]]}\n`;
-    if (args[0] === "--variable=libdir") return "/controlled/ffmpeg/lib\n";
+    if (args[0] === "--variable=libdir") return `${libdir}\n`;
     throw new Error(`Unexpected pkg-config arguments: ${args.join(" ")}`);
   };
 }
@@ -74,4 +75,21 @@ test("verification marker helpers sanitize before granting authority", () => {
     KEEP: "yes",
     [audioRuntimeVerification.environmentVariable]: audioRuntimeVerification.value,
   });
+});
+
+test("controlled-prefix verifier rejects parent and similarly named sibling directories", () => {
+  const prefix = resolve("/controlled/ffmpeg");
+  for (const libdir of [resolve(prefix, ".."), resolve(prefix, "../ffmpeg-other/lib"), resolve(prefix, "../unrelated/lib")]) {
+    assert.throws(
+      () => verifyAudioRuntime({ prefix, execFileSync: pkgConfigFixture({}, libdir) }),
+      /resolved outside controlled prefix/,
+    );
+  }
+});
+
+test("controlled-prefix verifier accepts the prefix itself and nested native paths", () => {
+  const prefix = resolve("/controlled/ffmpeg");
+  for (const libdir of [prefix, join(prefix, "lib", "nested")]) {
+    assert.deepEqual(verifyAudioRuntime({ prefix, execFileSync: pkgConfigFixture({}, libdir) }).versions, exactVersions);
+  }
 });

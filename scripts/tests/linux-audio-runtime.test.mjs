@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { linuxBuildEnvironment, linuxBuildPackages, preflightLinuxBuild, requiresHostAudioVerification, validateLinuxRuntimeReceipt, writeLinuxBuildEnvironment } from "../linux-audio-runtime.mjs";
+import { acquireLinuxAudioRuntimeLock, linuxBuildEnvironment, linuxBuildPackages, preflightLinuxBuild, requiresHostAudioVerification, validateLinuxRuntimeReceipt, writeLinuxBuildEnvironment } from "../linux-audio-runtime.mjs";
 import { audioRuntimeVerification } from "../verify-audio-runtime.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
@@ -139,6 +139,8 @@ test("Linux CI environment writes the marker only after exact verification", () 
   });
   assert.deepEqual(events, ["verified"]);
   const lines = readFileSync(output, "utf8").trim().split("\n");
+  assert.ok(lines.includes("PKG_CONFIG_PATH=/controlled/ffmpeg/lib/pkgconfig:/prior/pc"));
+  assert.ok(lines.includes("LD_LIBRARY_PATH=/controlled/ffmpeg/lib"));
   assert.equal(lines.at(-1), `${audioRuntimeVerification.environmentVariable}=${audioRuntimeVerification.value}`);
 });
 
@@ -158,4 +160,22 @@ test("Linux CI environment accepts no marker when exact verification fails", () 
     /verification rejected/,
   );
   assert.equal(readFileSync(output, { encoding: "utf8", flag: "a+" }), "");
+});
+
+test("Linux runtime lock creates a fresh parent and retains exclusive ownership", (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "hifimule-linux-lock-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const parent = join(scratch, "target", "audio-runtime");
+  const lockPath = join(parent, "ffmpeg.lock");
+  assert.equal(existsSync(parent), false);
+  const unlock = acquireLinuxAudioRuntimeLock(lockPath);
+  try {
+    assert.equal(JSON.parse(readFileSync(join(lockPath, "owner.json"), "utf8")).pid, process.pid);
+    assert.throws(() => mkdirSync(lockPath), { code: "EEXIST" });
+  } finally {
+    unlock();
+  }
+  assert.equal(existsSync(lockPath), false);
+  assert.equal(existsSync(parent), true);
+  acquireLinuxAudioRuntimeLock(lockPath)();
 });

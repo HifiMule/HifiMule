@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { join, resolve } from "node:path";
+import { join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureLinuxAudioRuntime, linuxBuildEnvironment } from "./linux-audio-runtime.mjs";
 import { ensureWindowsAudioRuntime } from "./windows-audio-runtime.mjs";
@@ -47,8 +47,8 @@ export function runDaemonBuild(cargoArgs = [], options = {}) {
     const prefix = dependencies.ensureLinuxAudioRuntime(target);
     env = dependencies.linuxBuildEnvironment(target, env);
     env.HIFIMULE_FFMPEG_PREFIX = prefix;
-    env.PKG_CONFIG_PATH = [join(prefix, "lib/pkgconfig"), env.PKG_CONFIG_PATH].filter(Boolean).join(":");
-    env.LD_LIBRARY_PATH = [join(prefix, "lib"), env.LD_LIBRARY_PATH].filter(Boolean).join(":");
+    env.PKG_CONFIG_PATH = [posix.join(prefix, "lib/pkgconfig"), env.PKG_CONFIG_PATH].filter(Boolean).join(":");
+    env.LD_LIBRARY_PATH = [posix.join(prefix, "lib"), env.LD_LIBRARY_PATH].filter(Boolean).join(":");
     execute("node", ["scripts/verify-audio-runtime.mjs", "--prefix", prefix], { cwd: root, stdio: "inherit", env });
     env = withAudioRuntimeVerification(env);
   } else if (platform === "win32") {
@@ -70,5 +70,11 @@ export function runDaemonBuild(cargoArgs = [], options = {}) {
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
   const args = process.argv.slice(2);
   if (args.length === 1 && ["-h", "--help"].includes(args[0])) console.log(buildDaemonUsage);
-  else runDaemonBuild(args);
+  else {
+    try { runDaemonBuild(args); }
+    catch (error) {
+      console.error(error);
+      process.exitCode = Number.isInteger(error.status) && error.status > 0 ? error.status : 1;
+    }
+  }
 }

@@ -41,7 +41,9 @@ jobs:
 
       - name: Run packaging and runtime script regressions
         shell: bash
-        run: node --test scripts/tests/*.test.mjs
+        run: |
+          node --test scripts/tests/*.test.mjs
+          python -m unittest discover -s scripts/tests -p 'test_playback_session_evidence.py'
 
       - name: Install Rust 1.93.0
         uses: dtolnay/rust-toolchain@1.93.0

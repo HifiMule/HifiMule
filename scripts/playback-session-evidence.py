@@ -82,6 +82,7 @@ def main() -> int:
     ]:
         commands.append(["cargo", "test", "-p", "hifimule-daemon", fixture, "--", "--nocapture"])
     started = datetime.now(timezone.utc)
+    commands = [["node", "scripts/build-daemon.mjs", *command[1:]] for command in commands]
     results = [subprocess.run(command, text=True) for command in commands]
     exit_code = next((result.returncode for result in results if result.returncode), 0)
     source_diff = subprocess.run(
