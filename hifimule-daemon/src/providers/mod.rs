@@ -112,6 +112,7 @@ fn representation_is_supported(representation: &PlaybackRepresentation) -> bool 
             | "mp3"
             | "aac"
             | "m4a"
+            | "m4r"
             | "mp4"
             | "wav"
             | "opus"
@@ -1470,6 +1471,32 @@ mod tests {
         .expect("a WAV container is playable by the production decoder");
 
         assert_eq!(selected.codec.as_deref(), Some("wav"));
+    }
+
+    #[test]
+    fn m4r_original_representation_is_supported() {
+        for codec in ["m4r", "M4R"] {
+            let selected = select_playback_representation(vec![
+                representation(
+                    "flac",
+                    PlaybackProvenance::Alternative,
+                    None,
+                    Some(96_000),
+                    Some(24),
+                ),
+                representation(
+                    codec,
+                    PlaybackProvenance::Original,
+                    Some(256),
+                    Some(44_100),
+                    None,
+                ),
+            ])
+            .expect("an original M4R container is playable by the production decoder");
+
+            assert_eq!(selected.codec.as_deref(), Some(codec));
+            assert_eq!(selected.provenance, PlaybackProvenance::Original);
+        }
     }
 
     #[test]

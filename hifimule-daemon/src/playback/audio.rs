@@ -942,6 +942,9 @@ mod tests {
 
         let wrapped = representation(Some("ogg"), Some("flac"), route);
         assert_eq!(decoder_hint(&wrapped), "stream.ogg");
+
+        let m4r = representation(Some(".M4R"), Some("aac"), route);
+        assert_eq!(decoder_hint(&m4r), "stream.m4r");
     }
 
     #[test]

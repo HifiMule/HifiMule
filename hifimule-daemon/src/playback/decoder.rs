@@ -338,6 +338,15 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "uses HIFIMULE_DIAGNOSTIC_M4R; never committed as a fixture"]
+    fn diagnostic_external_m4r() {
+        let path = std::env::var("HIFIMULE_DIAGNOSTIC_M4R").unwrap();
+        let (result, samples) = decode_test_file_at(std::path::Path::new(&path), 0).unwrap();
+        assert!(result.frames > 0, "decoded no frames");
+        assert!(samples > 0, "decoded no PCM samples");
+    }
+
+    #[test]
     #[ignore = "uses HIFIMULE_DIAGNOSTIC_AUDIO; never committed as a fixture"]
     fn diagnostic_external_audio_decodes_beyond_the_compressed_window() {
         let path = std::env::var("HIFIMULE_DIAGNOSTIC_AUDIO").unwrap();
