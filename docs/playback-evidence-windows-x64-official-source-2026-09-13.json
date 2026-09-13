@@ -31,9 +31,12 @@
     ]
   },
   "outcomes": {
+    "automatedRepositorySourceBuild": "passed (user-confirmed 2026-09-14)",
     "hifimuleBuild": "passed",
+    "installerPackageCreation": "passed (user-confirmed 2026-09-14)",
+    "installerInstallation": "passed (user-confirmed 2026-09-14)",
     "deployedBuild": "passed",
-    "allUserTestedFilesPlayback": "passed",
+    "allUserTestedFilesPlayback": "passed (reconfirmed from installed automated build 2026-09-14)",
     "testedFormats": [
       "AAC",
       "ALAC",
@@ -50,7 +53,7 @@
     "captured GPG verification output for this exact source archive",
     "captured SHA-256 output for this exact source archive",
     "source revision beyond the FFmpeg 9.0.1 release identity",
-    "new installer filename and SHA-256",
+    "automated-build installer filename and SHA-256",
     "actual loaded module paths from the official-source deployed build",
     "full native-library micro versions from daemon.health",
     "audio endpoint and backend",

@@ -48,6 +48,20 @@ jobs:
       - name: Install Rust 1.93.0
         uses: dtolnay/rust-toolchain@1.93.0
 
+      - name: Install Windows FFmpeg source-build tools
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          install: >-
+            make
+            sed
+            grep
+            gawk
+            diffutils
+            pkgconf
+            gnupg
+          path-type: inherit
+
       - name: Install Linux daemon dependencies
         if: runner.os == 'Linux'
         run: |

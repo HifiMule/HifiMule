@@ -27,6 +27,12 @@ sudo apt-get install -y \
 
 ### Windows
 - Visual Studio Build Tools (MSVC)
+- MSYS2 with `make`, `sed`, `grep`, `gawk`, `diffutils`, `pkgconf`, and `gnupg` (the controlled
+  audio-only FFmpeg build disables optional x86 assembly, so NASM is not required)
+  - The default location is `C:\msys64`. For another location, set
+    `MSYS2_ROOT` to the directory containing `usr\bin\bash.exe`.
+  - Install the required packages from an MSYS2 shell with
+    `pacman -S --needed make sed grep gawk diffutils pkgconf gnupg`.
 - LLVM, with its Clang runtime library available to Rust bindgen (`LIBCLANG_PATH`
   may be set to LLVM's `bin` directory when it is not discoverable through `PATH`)
 - WPD is part of the Windows SDK; MTP support is provided by the `windows-sys` crate
@@ -68,9 +74,10 @@ rtk npm run build:daemon -- clippy -p hifimule-daemon
 Do not invoke raw `cargo build` for the daemon. FFmpeg's dependency build
 scripts run before `hifimule-daemon/build.rs`, so only the wrapper can prepare
 and export the controlled native runtime in time. On Linux it builds and caches
-the pinned runtime; on Windows it downloads and verifies the matching pinned
-MSVC development archive unless `FFMPEG_DIR` explicitly selects a verified
-override.
+the pinned runtime. On Windows it downloads, hashes, verifies and builds the
+official signed FFmpeg 9.0.1 source with MSVC, then generates the import
+libraries needed by Cargo. `FFMPEG_DIR` may explicitly select a previously
+verified override.
 
 Binary output: `target/debug/hifimule-daemon` or `target/release/hifimule-daemon`.
 

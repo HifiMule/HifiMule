@@ -51,6 +51,20 @@ jobs:
         with:
           targets: ${{ matrix.rust-targets }}
 
+      - name: Install Windows FFmpeg source-build tools
+        if: matrix.platform == 'windows-latest'
+        uses: msys2/setup-msys2@v2
+        with:
+          install: >-
+            make
+            sed
+            grep
+            gawk
+            diffutils
+            pkgconf
+            gnupg
+          path-type: inherit
+
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
