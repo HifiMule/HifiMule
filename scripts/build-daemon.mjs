@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureLinuxAudioRuntime, linuxBuildEnvironment } from "./linux-audio-runtime.mjs";
-import { ensureWindowsAudioRuntime } from "./windows-audio-runtime.mjs";
+import { ensureWindowsAudioRuntime, prependWindowsPath } from "./windows-audio-runtime.mjs";
 import {
   withAudioRuntimeVerification,
   withoutAudioRuntimeVerification,
@@ -53,7 +53,7 @@ export function runDaemonBuild(cargoArgs = [], options = {}) {
     env = withAudioRuntimeVerification(env);
   } else if (platform === "win32") {
     env.FFMPEG_DIR = dependencies.ensureWindowsAudioRuntime(target, { env });
-    env.PATH = [join(env.FFMPEG_DIR, "bin"), env.PATH].filter(Boolean).join(";");
+    env = prependWindowsPath(env, join(env.FFMPEG_DIR, "bin"));
     env = withAudioRuntimeVerification(env);
   } else if (platform === "darwin") {
     execute("node", ["scripts/verify-audio-runtime.mjs"], { cwd: root, stdio: "inherit", env });

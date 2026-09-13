@@ -3,7 +3,16 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { ensureWindowsAudioRuntime, verifyWindowsAudioRuntime, windowsRuntimeDllNames } from "../windows-audio-runtime.mjs";
+import { ensureWindowsAudioRuntime, prependWindowsPath, verifyWindowsAudioRuntime, windowsRuntimeDllNames } from "../windows-audio-runtime.mjs";
+
+test("Windows PATH normalization retains entries from competing case aliases", () => {
+  const source = { Path: "C:\\Rust\\bin", PATH: "C:\\Windows", path: "C:\\Rust\\bin", KEEP: "yes" };
+  assert.deepEqual(prependWindowsPath(source, "C:\\ffmpeg\\bin"), {
+    PATH: "C:\\ffmpeg\\bin;C:\\Rust\\bin;C:\\Windows", KEEP: "yes",
+  });
+  assert.equal(source.Path, "C:\\Rust\\bin");
+  assert.deepEqual(prependWindowsPath({}, "C:\\ffmpeg\\bin"), { PATH: "C:\\ffmpeg\\bin" });
+});
 
 const root = resolve(import.meta.dirname, "../..");
 const manifest = JSON.parse(readFileSync(join(root, "hifimule-daemon/audio-runtime.json"), "utf8"));

@@ -7,7 +7,7 @@
   "configureFlags": [
     "--enable-shared", "--disable-static", "--disable-programs", "--disable-doc",
     "--disable-network", "--disable-avdevice", "--disable-avfilter", "--disable-swscale",
-    "--disable-postproc", "--disable-everything", "--enable-avcodec", "--enable-avformat",
+    "--disable-everything", "--enable-avcodec", "--enable-avformat",
     "--enable-avutil", "--enable-swresample", "--enable-protocol=file",
     "--enable-demuxer=wav,flac,mov,mp3,aac,ogg", "--enable-decoder=pcm_s16le,pcm_s24le,pcm_s32le,flac,alac,mp3,aac,opus"
   ],

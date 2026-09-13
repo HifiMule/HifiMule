@@ -19,7 +19,7 @@ import {
   linuxBuildEnvironment,
   requiresHostAudioVerification,
 } from "./linux-audio-runtime.mjs";
-import { ensureWindowsAudioRuntime, stageWindowsAudioRuntime } from "./windows-audio-runtime.mjs";
+import { ensureWindowsAudioRuntime, prependWindowsPath, stageWindowsAudioRuntime } from "./windows-audio-runtime.mjs";
 import {
   withAudioRuntimeVerification,
   withoutAudioRuntimeVerification,
@@ -74,7 +74,7 @@ if (process.platform === "linux") {
 if (process.platform === "win32") {
   audioPrefix = ensureWindowsAudioRuntime(targetTriple, { env: buildEnv });
   buildEnv.FFMPEG_DIR = audioPrefix;
-  buildEnv.PATH = [join(audioPrefix, "bin"), buildEnv.PATH].filter(Boolean).join(";");
+  buildEnv = prependWindowsPath(buildEnv, join(audioPrefix, "bin"));
   stageWindowsAudioRuntime(audioPrefix, targetTriple);
   buildEnv = withAudioRuntimeVerification(buildEnv);
 }

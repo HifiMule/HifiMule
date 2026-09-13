@@ -79,12 +79,20 @@ test("Linux preflight turns a broken native header chain into setup guidance", (
   );
 });
 
+test("Linux x64 preflight requires NASM before configuring FFmpeg", () => {
+  assert.throws(
+    () => preflightLinuxBuild("x86_64-unknown-linux-gnu", { commandExists: (tool) => tool !== "nasm" }),
+    (error) => error.message.includes("Missing Linux build tools: nasm") && error.message.includes("apt-get install"),
+  );
+  assert.ok(linuxBuildPackages.includes("nasm"));
+});
+
 test("Linux bindgen uses matching Clang resource headers for native ARM64", () => {
   const resourceDir = "/opt/llvm/lib/clang/18";
   const libclangDir = "/opt/llvm/lib";
   const probeEnvironments = [];
   const options = {
-    commandExists: () => true,
+    commandExists: (tool) => tool !== "nasm",
     spawn: (_command, _args, spawnOptions) => { probeEnvironments.push(spawnOptions.env); return { status: 0 }; },
     run: (command, _args, runOptions) => { probeEnvironments.push(runOptions.env); return command === "clang" ? `${resourceDir}\n` : "aarch64-linux-gnu\n"; },
     exists: (path) => path === "/usr/include/limits.h" || path === `${resourceDir}/include/limits.h`,
@@ -102,7 +110,7 @@ test("Linux bindgen uses matching Clang resource headers for native ARM64", () =
 test("Build and release jobs install bindgen's Linux header toolchain", () => {
   for (const path of [".github/workflows/build.yml", ".github/workflows/release.yml"]) {
     const workflow = readFileSync(join(root, path), "utf8");
-    for (const name of ["clang", "libclang-dev", "libc6-dev"]) assert.match(workflow, new RegExp(`\\b${name}\\b`), `${path} must install ${name}`);
+    for (const name of ["clang", "libclang-dev", "libc6-dev", "nasm"]) assert.match(workflow, new RegExp(`\\b${name}\\b`), `${path} must install ${name}`);
   }
 });
 

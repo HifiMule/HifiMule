@@ -94,6 +94,24 @@ test("daemon wrapper ensures Windows FFmpeg and exports FFMPEG_DIR before Cargo"
   assert.equal(cargoEnv[audioRuntimeVerification.environmentVariable], audioRuntimeVerification.value);
 });
 
+test("Windows wrapper preserves Cargo search paths for every environment key casing", () => {
+  for (const key of ["Path", "PATH", "path"]) {
+    const calls = [];
+    const original = { [key]: "C:\\Rust\\bin;C:\\Windows\\System32", KEEP: "yes" };
+    runDaemonBuild(["test", "-p", "hifimule-daemon"], {
+      platform: "win32",
+      env: original,
+      execFileSync: executor("x86_64-pc-windows-msvc", calls),
+      ensureWindowsAudioRuntime: () => "C:\\ffmpeg",
+    });
+    const cargoEnv = calls.find((call) => call.command === "cargo").options.env;
+    assert.deepEqual(Object.keys(cargoEnv).filter((name) => name.toUpperCase() === "PATH"), ["PATH"]);
+    assert.equal(cargoEnv.PATH, `${join("C:\\ffmpeg", "bin")};${original[key]}`);
+    assert.equal(cargoEnv.KEEP, "yes");
+    assert.deepEqual(original, { [key]: "C:\\Rust\\bin;C:\\Windows\\System32", KEEP: "yes" });
+  }
+});
+
 test("daemon wrapper provisions the explicit Cargo target instead of the host", () => {
   const calls = [];
   let ensuredTarget;

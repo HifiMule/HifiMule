@@ -73,3 +73,9 @@ Review fixed Cargo exit-code propagation through the Node CLI; a real child-proc
 
 - Run orchestration regressions in CI
   [build.yml:41](../../.github/workflows/build.yml#L41)
+
+## Follow-up: Linux and Windows provisioning
+
+The next CI run passed macOS but exposed an unsupported FFmpeg 9 configure flag and loss of the Windows Path value when spreading process.env into a plain object. Removed --disable-postproc, added NASM to Linux x64 preflight and CI/developer prerequisites, and consolidated Windows path aliases before prepending FFmpeg for daemon, sidecar, and CI environment exports.
+
+Validation: 42 Node regressions and 2 Python orchestration tests pass. Verified the cached FFmpeg archive against the manifest SHA-256 and successfully ran its configure script with the corrected manifest flags on macOS ARM64; the enabled libraries and decoders match the intended subset. Native Linux and Windows builds still require CI confirmation.

@@ -21,7 +21,7 @@ brew install pkg-config libmtp ffmpeg
 ```bash
 sudo apt-get install -y \
   libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
-  libxdo-dev libmtp-dev build-essential clang libclang-dev libc6-dev curl \
+  libxdo-dev libmtp-dev build-essential clang libclang-dev libc6-dev nasm curl \
   xz-utils pkg-config binutils patchelf
 ```
 

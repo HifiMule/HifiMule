@@ -13,6 +13,17 @@ const targets = {
   "x86_64-pc-windows-msvc": { machine: 0x8664, libdir: "amd64" },
 };
 
+export function prependWindowsPath(env, directory) {
+  const result = { ...env };
+  const pathKeys = Object.keys(result).filter((key) => key.toUpperCase() === "PATH");
+  // Spreading process.env loses Windows' case-insensitive property lookup.
+  // Emit one key so Node cannot choose an alias that omits Cargo or the DLLs.
+  const paths = pathKeys.map((key) => result[key]).filter(Boolean);
+  for (const key of pathKeys) delete result[key];
+  result.PATH = [directory, ...new Set(paths)].join(";");
+  return result;
+}
+
 function fail(message) {
   throw new Error(`${message}\n\nWindows playback automatically provisions the pinned ${manifest.windowsDistribution.provider} ` +
     `${manifest.windowsDistribution.revision} ${manifest.windowsDistribution.variant} SDK. Set FFMPEG_DIR only to override it with a ` +
@@ -187,7 +198,7 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import
     if (mode === "env") {
       if (!output) fail("The `env` command requires an output environment file path");
       appendFileSync(output, `FFMPEG_DIR=${prefix}\n`);
-      appendFileSync(output, `PATH=${join(prefix, "bin")};${process.env.PATH || ""}\n`);
+      appendFileSync(output, `PATH=${prependWindowsPath(process.env, join(prefix, "bin")).PATH}\n`);
       appendFileSync(output, `${audioRuntimeVerification.environmentVariable}=${audioRuntimeVerification.value}\n`);
       console.log(prefix);
     } else console.log(JSON.stringify(mode === "verify" ? stageWindowsAudioRuntime(prefix, target) : { prefix }));
