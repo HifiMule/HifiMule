@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
@@ -91,6 +91,7 @@ pub struct BoundedHttpReader {
     cancel: Arc<AtomicBool>,
     high_water: Arc<AtomicU64>,
     failure: StreamFailureState,
+    seek_history: Option<std::fs::File>,
 }
 
 impl BoundedHttpReader {
@@ -124,8 +125,16 @@ impl BoundedHttpReader {
                 cancel,
                 high_water,
                 failure: StreamFailureState::default(),
+                seek_history: None,
             },
         )
+    }
+
+    pub fn enable_seek_history(&mut self) -> io::Result<()> {
+        if self.seek_history.is_none() {
+            self.seek_history = Some(tempfile::tempfile()?);
+        }
+        Ok(())
     }
 
     pub fn failure_state(&self) -> StreamFailureState {
@@ -155,6 +164,10 @@ impl BoundedHttpReader {
                                 io::ErrorKind::Unsupported,
                                 "random-access source exceeds bounded compressed window",
                             ));
+                        }
+                        if let Some(history) = self.seek_history.as_mut() {
+                            history.seek(SeekFrom::Start(self.base))?;
+                            history.write_all(&self.buffer[..overflow])?;
                         }
                         self.buffer.drain(..overflow);
                         self.base += overflow as u64;
@@ -198,6 +211,17 @@ impl BoundedHttpReader {
 
 impl Read for BoundedHttpReader {
     fn read(&mut self, target: &mut [u8]) -> io::Result<usize> {
+        if self.position < self.base {
+            let history = self.seek_history.as_mut().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::Unsupported, "seek history is unavailable")
+            })?;
+            history.seek(SeekFrom::Start(self.position))?;
+            let available = usize::try_from(self.base - self.position).unwrap_or(usize::MAX);
+            let requested = target.len().min(available);
+            let count = history.read(&mut target[..requested])?;
+            self.position += count as u64;
+            return Ok(count);
+        }
         while self.position == self.base + self.buffer.len() as u64 && !self.eof {
             self.receive_next()?;
         }
@@ -227,7 +251,12 @@ impl Seek for BoundedHttpReader {
             SeekFrom::Current(delta) => i128::from(self.position) + i128::from(delta),
             SeekFrom::End(delta) => i128::from(end) + i128::from(delta),
         };
-        if target < i128::from(self.base) || target > i128::from(end) {
+        let earliest = if self.seek_history.is_some() {
+            0
+        } else {
+            self.base
+        };
+        if target < i128::from(earliest) || target > i128::from(end) {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "seek outside bounded compressed window",
@@ -296,6 +325,35 @@ mod tests {
             reader.seek(SeekFrom::Start(0)).unwrap_err().kind(),
             io::ErrorKind::Unsupported
         );
+    }
+
+    #[test]
+    fn seek_history_restores_evicted_bytes_without_growing_memory_window() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let high_water = Arc::new(AtomicU64::new(0));
+        let (tx, mut reader) =
+            BoundedHttpReader::channel_with_high_water(cancel, high_water.clone());
+        reader.enable_seek_history().unwrap();
+        let chunks = COMPRESSED_CAPACITY_BYTES / COMPRESSED_CHUNK_BYTES + 2;
+        let producer = std::thread::spawn(move || {
+            for index in 0..chunks {
+                tx.blocking_send(Ok(Bytes::from(vec![index as u8; COMPRESSED_CHUNK_BYTES])))
+                    .unwrap();
+            }
+            drop(tx);
+        });
+
+        let mut scratch = vec![0; COMPRESSED_CHUNK_BYTES];
+        for _ in 0..chunks {
+            reader.read_exact(&mut scratch).unwrap();
+        }
+        reader.seek(SeekFrom::Start(0)).unwrap();
+        reader.read_exact(&mut scratch).unwrap();
+
+        producer.join().unwrap();
+        assert!(scratch.iter().all(|byte| *byte == 0));
+        assert!(reader.buffer.len() <= COMPRESSED_CAPACITY_BYTES);
+        assert!(high_water.load(Ordering::Acquire) <= COMPRESSED_CAPACITY_BYTES as u64);
     }
 
     #[test]

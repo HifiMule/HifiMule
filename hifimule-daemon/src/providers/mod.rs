@@ -113,6 +113,7 @@ fn representation_is_supported(representation: &PlaybackRepresentation) -> bool 
             | "aac"
             | "m4a"
             | "mp4"
+            | "wav"
             | "opus"
     )
 }
@@ -1455,6 +1456,20 @@ mod tests {
                 range_supported: false,
             },
         }
+    }
+
+    #[test]
+    fn wav_original_representation_is_supported() {
+        let selected = select_playback_representation(vec![representation(
+            "wav",
+            PlaybackProvenance::Original,
+            Some(1_536),
+            Some(48_000),
+            Some(16),
+        )])
+        .expect("a WAV container is playable by the production decoder");
+
+        assert_eq!(selected.codec.as_deref(), Some("wav"));
     }
 
     #[test]

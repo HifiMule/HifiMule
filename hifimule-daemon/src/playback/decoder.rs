@@ -102,6 +102,7 @@ pub fn decode_stream(
     let io = if sequential_stream {
         ffmpeg::format::context::StreamIo::from_read_with_capacity(reader, 32 * 1024)?
     } else {
+        reader.enable_seek_history()?;
         ffmpeg::format::context::StreamIo::from_read_seek_with_capacity(reader, 32 * 1024)?
     };
     let token = cancel.clone();
@@ -337,6 +338,24 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "uses HIFIMULE_DIAGNOSTIC_AUDIO; never committed as a fixture"]
+    fn diagnostic_external_audio_decodes_beyond_the_compressed_window() {
+        let path = std::env::var("HIFIMULE_DIAGNOSTIC_AUDIO").unwrap();
+        assert!(
+            std::fs::metadata(&path).unwrap().len() > COMPRESSED_CAPACITY_BYTES as u64,
+            "diagnostic must exercise eviction beyond the compressed window"
+        );
+        let (result, _, compressed_high_water) =
+            decode_test_file_at_with_compressed_high_water(std::path::Path::new(&path), 0).unwrap();
+        assert!(
+            result.frames > 2_000_000,
+            "decoded only {} frames",
+            result.frames
+        );
+        assert!(compressed_high_water <= COMPRESSED_CAPACITY_BYTES as u64);
+    }
+
+    #[test]
     #[ignore = "uses HIFIMULE_DIAGNOSTIC_MP3; never committed as a fixture"]
     fn oversized_mp3_decodes_complete_stream_with_bounded_memory() {
         let path = std::env::var("HIFIMULE_DIAGNOSTIC_MP3").unwrap();
@@ -447,6 +466,45 @@ mod tests {
             assert!(result.frames > 0, "{name}");
             assert!(!pcm.is_empty(), "{name}");
         }
+    }
+
+    #[test]
+    fn alac_mp4_with_tail_metadata_beyond_window_decodes_completely() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../experiments/playback-probe/fixtures/track-1.m4a");
+        let source = std::fs::read(fixture).unwrap();
+        let mut offset = 0usize;
+        let mut moov_offset = None;
+        while offset + 8 <= source.len() {
+            let size = u32::from_be_bytes(source[offset..offset + 4].try_into().unwrap()) as usize;
+            assert!(size >= 8 && offset + size <= source.len());
+            if &source[offset + 4..offset + 8] == b"moov" {
+                moov_offset = Some(offset);
+                break;
+            }
+            offset += size;
+        }
+        let moov_offset = moov_offset.expect("fixture must keep MP4 metadata after media data");
+        assert!(source[..moov_offset].windows(4).any(|atom| atom == b"mdat"));
+
+        let free_payload = COMPRESSED_CAPACITY_BYTES + 1024;
+        let free_size = free_payload + 8;
+        let mut expanded = Vec::with_capacity(source.len() + free_size);
+        expanded.extend_from_slice(&source[..moov_offset]);
+        expanded.extend_from_slice(&(free_size as u32).to_be_bytes());
+        expanded.extend_from_slice(b"free");
+        expanded.resize(expanded.len() + free_payload, 0);
+        expanded.extend_from_slice(&source[moov_offset..]);
+
+        let mut file = tempfile::Builder::new().suffix(".m4a").tempfile().unwrap();
+        file.write_all(&expanded).unwrap();
+        file.flush().unwrap();
+        let (result, samples, compressed_high_water) =
+            decode_test_file_at_with_compressed_high_water(file.path(), 0).unwrap();
+
+        assert_eq!(result.frames, 96_017);
+        assert_eq!(samples, 96_017 * 2);
+        assert!(compressed_high_water <= COMPRESSED_CAPACITY_BYTES as u64);
     }
 
     #[test]
