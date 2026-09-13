@@ -61,6 +61,7 @@ jobs:
             libappindicator3-dev \
             librsvg2-dev \
             patchelf \
+            libasound2-dev \
             build-essential \
             nasm \
             clang \

@@ -9,10 +9,10 @@ import {
 } from "../verify-audio-runtime.mjs";
 
 const exactVersions = {
-  libavcodec: "63.1.100",
-  libavformat: "63.1.100",
-  libavutil: "61.1.100",
-  libswresample: "7.1.100",
+  libavcodec: "63.1.101",
+  libavformat: "63.1.101",
+  libavutil: "61.1.101",
+  libswresample: "7.1.101",
 };
 
 function pkgConfigFixture(overrides = {}, libdir = join(resolve("/controlled/ffmpeg"), "lib")) {
@@ -38,9 +38,9 @@ test("controlled-prefix verifier rejects same-major but non-manifest ABI version
   assert.throws(
     () => verifyAudioRuntime({
       prefix: "/controlled/ffmpeg",
-      execFileSync: pkgConfigFixture({ libavcodec: "63.1.101" }),
+      execFileSync: pkgConfigFixture({ libavcodec: "63.1.102" }),
     }),
-    /libavcodec ABI mismatch: expected exact ABI 63\.1\.100, found 63\.1\.101/,
+    /libavcodec ABI mismatch: expected exact ABI 63\.1\.101, found 63\.1\.102/,
   );
 });
 
@@ -61,7 +61,7 @@ test("host verifier rejects an older version even when the ABI major matches", (
     () => verifyAudioRuntime({
       execFileSync: pkgConfigFixture({ libavcodec: "63.0.99" }),
     }),
-    /expected ABI 63\.1\.100 or newer within major 63, found 63\.0\.99/,
+    /expected ABI 63\.1\.101 or newer within major 63, found 63\.0\.99/,
   );
 });
 

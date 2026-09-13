@@ -79,3 +79,9 @@ Review fixed Cargo exit-code propagation through the Node CLI; a real child-proc
 The next CI run passed macOS but exposed an unsupported FFmpeg 9 configure flag and loss of the Windows Path value when spreading process.env into a plain object. Removed --disable-postproc, added NASM to Linux x64 preflight and CI/developer prerequisites, and consolidated Windows path aliases before prepending FFmpeg for daemon, sidecar, and CI environment exports.
 
 Validation: 42 Node regressions and 2 Python orchestration tests pass. Verified the cached FFmpeg archive against the manifest SHA-256 and successfully ran its configure script with the corrected manifest flags on macOS ARM64; the enabled libraries and decoders match the intended subset. Native Linux and Windows builds still require CI confirmation.
+
+## Follow-up: exact source ABI metadata
+
+Linux successfully built FFmpeg but rejected its libraries because the manifest expected micro version 100. Verified the pinned archive SHA-256 and read all four library version headers: avcodec=63.1.101, avformat=63.1.101, avutil=61.1.101, swresample=7.1.101. Updated the exact manifest values and verifier fixtures, retaining rejection of nonmatching versions. Also added libasound2-dev to both Linux workflows, developer prerequisites, and preflight based on the local alsa-sys build script requirement.
+
+Validation: all four source versions equal the corrected manifest; 43 Node regression tests pass; git diff --check passes. Full native Linux CI remains pending.

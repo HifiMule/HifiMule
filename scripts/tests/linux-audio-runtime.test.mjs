@@ -43,7 +43,7 @@ test("standalone verifier rejects Ubuntu FFmpeg 8 from the selected prefix", { s
   chmodSync(pkgConfig, 0o755);
   assert.throws(
     () => execFileSync("node", [join(root, "scripts/verify-audio-runtime.mjs"), "--prefix", prefix], { env: { ...process.env, PATH: `${bin}:${process.env.PATH || ""}`, HIFIMULE_TEST_LIBDIR: join(prefix, "lib"), PKG_CONFIG_PATH: join(prefix, "lib/pkgconfig") }, stdio: "pipe" }),
-    (error) => error.stderr?.toString().includes("libavcodec ABI mismatch: expected exact ABI 63.1.100, found 62.11.100") === true,
+    (error) => error.stderr?.toString().includes("libavcodec ABI mismatch: expected exact ABI 63.1.101, found 62.11.100") === true,
   );
 });
 test("Windows skips Unix pkg-config verification while macOS retains it", () => {
@@ -85,6 +85,20 @@ test("Linux x64 preflight requires NASM before configuring FFmpeg", () => {
     (error) => error.message.includes("Missing Linux build tools: nasm") && error.message.includes("apt-get install"),
   );
   assert.ok(linuxBuildPackages.includes("nasm"));
+});
+
+test("Linux preflight reports missing ALSA development metadata before building", () => {
+  assert.throws(
+    () => preflightLinuxBuild(target, {
+      commandExists: () => true,
+      spawn: (_command, args) => ({ status: args.includes("alsa") ? 1 : 0 }),
+    }),
+    (error) => error.message.includes("ALSA development files are missing") && error.message.includes("libasound2-dev"),
+  );
+  assert.ok(linuxBuildPackages.includes("libasound2-dev"));
+  for (const file of [".github/workflows/build.yml", ".github/workflows/release.yml"]) {
+    assert.match(readFileSync(join(root, file), "utf8"), /\blibasound2-dev\b/);
+  }
 });
 
 test("Linux bindgen uses matching Clang resource headers for native ARM64", () => {

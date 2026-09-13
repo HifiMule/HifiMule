@@ -16,7 +16,7 @@ const manifest = JSON.parse(readFileSync(join(root, "hifimule-daemon/audio-runti
 const receiptName = ".hifimule-audio-runtime.json";
 const machines = { "aarch64-unknown-linux-gnu": "AArch64", "x86_64-unknown-linux-gnu": "Advanced Micro Devices X86-64" };
 const baseline = new Set(["libc.so.6", "libm.so.6", "libpthread.so.0", "libdl.so.2", "librt.so.1", "libgcc_s.so.1", "libstdc++.so.6"]);
-export const linuxBuildPackages = Object.freeze(["build-essential", "clang", "libclang-dev", "libc6-dev", "nasm", "curl", "xz-utils", "pkg-config", "binutils", "patchelf", "libmtp-dev"]);
+export const linuxBuildPackages = Object.freeze(["build-essential", "clang", "libclang-dev", "libc6-dev", "nasm", "curl", "xz-utils", "pkg-config", "binutils", "patchelf", "libmtp-dev", "libasound2-dev"]);
 export function requiresHostAudioVerification(platform) { return platform !== "win32"; }
 
 function run(command, args, options = {}) {
@@ -80,6 +80,7 @@ export function preflightLinuxBuild(target, options = {}) {
   const missing = tools.filter((tool) => !commandExists(tool));
   if (missing.length) throw new Error(`Missing Linux build tools: ${missing.join(", ")}\nInstall with: sudo apt-get install ${packages}`);
   if (spawn("pkg-config", ["--exists", "libmtp"], { env: probeEnv }).status !== 0) throw new Error(`libmtp development files are missing.\nInstall with: sudo apt-get install ${packages}`);
+  if (spawn("pkg-config", ["--exists", "alsa"], { env: probeEnv }).status !== 0) throw new Error(`ALSA development files are missing.\nInstall with: sudo apt-get install ${packages}`);
   if (!fileExists("/usr/include/limits.h")) throw new Error(`glibc development headers are missing (/usr/include/limits.h).\nInstall with: sudo apt-get install ${packages}`);
   const resourceDir = execute("clang", ["-print-resource-dir"], { env: probeEnv }).trim();
   if (!resourceDir || !fileExists(posix.join(resourceDir, "include/limits.h"))) {

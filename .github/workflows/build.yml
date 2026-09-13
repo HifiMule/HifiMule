@@ -52,7 +52,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libappindicator3-dev libmtp-dev libxdo-dev pkgconf build-essential clang libclang-dev libc6-dev nasm curl xz-utils binutils patchelf
+          sudo apt-get install -y libgtk-3-dev libappindicator3-dev libmtp-dev libasound2-dev libxdo-dev pkgconf build-essential clang libclang-dev libc6-dev nasm curl xz-utils binutils patchelf
 
       - name: Provision controlled Linux audio runtime
         if: runner.os == 'Linux'
