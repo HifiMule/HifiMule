@@ -325,6 +325,18 @@ impl PlaybackSession {
         Some((self.generation_serial.clone(), serial))
     }
 
+    pub(crate) fn with_current_generation<R>(
+        &self,
+        generation_id: &str,
+        action: impl FnOnce() -> R,
+    ) -> Option<R> {
+        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        if inner.generation_id != generation_id || self.fenced.load(Ordering::Acquire) {
+            return None;
+        }
+        Some(action())
+    }
+
     #[allow(dead_code)]
     pub fn retry_restore(&self) -> PResult<SessionSnapshot> {
         self.retry_restore_with_guard(None)

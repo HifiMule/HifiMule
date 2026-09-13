@@ -1,6 +1,9 @@
 use super::decoder::decode_stream;
 use super::model::{PlaybackEvent, PlaybackTrackMetadata};
-use super::streaming::{BoundedHttpReader, COMPRESSED_CHUNK_BYTES};
+use super::streaming::{
+    BoundedHttpReader, COMPRESSED_CHUNK_BYTES, StreamFailureKind, StreamFailureState,
+    StreamReadError,
+};
 use crate::providers::{PlaybackDescription, PlaybackRequest, select_playback_representation};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SizedSample};
@@ -8,6 +11,258 @@ use crossbeam_queue::ArrayQueue;
 use futures::StreamExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaybackPipelineStage {
+    Cancelled,
+    Provider,
+    Timeout,
+    Decode,
+    OutputOpen,
+    OutputLost,
+}
+
+impl PlaybackPipelineStage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Cancelled => "cancelled",
+            Self::Provider => "provider",
+            Self::Timeout => "timeout",
+            Self::Decode => "decode",
+            Self::OutputOpen => "output-open",
+            Self::OutputLost => "output-lost",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct PlaybackPipelineError {
+    stage: PlaybackPipelineStage,
+    code: &'static str,
+    retryable: bool,
+    representation: String,
+    source: anyhow::Error,
+}
+
+impl PlaybackPipelineError {
+    pub(crate) fn from_provider_error(error: crate::providers::ProviderError) -> Self {
+        use crate::providers::ProviderError;
+        match error {
+            ProviderError::UnsupportedCapability(_) => {
+                Self::unsupported(anyhow::anyhow!("provider playback is unsupported"))
+            }
+            ProviderError::Http { status, .. } => {
+                Self::source(anyhow::anyhow!("provider HTTP failure status={status:?}"))
+            }
+            ProviderError::Auth(_) => {
+                Self::source(anyhow::anyhow!("provider authentication failed"))
+            }
+            ProviderError::NotFound { .. } => {
+                Self::source(anyhow::anyhow!("provider playback item was not found"))
+            }
+            ProviderError::Deserialization(_) => Self::source(anyhow::anyhow!(
+                "provider playback response deserialization failed"
+            )),
+            ProviderError::Other(_) => {
+                Self::source(anyhow::anyhow!("provider playback operation failed"))
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn from_decode_error(source: anyhow::Error) -> Self {
+        let stream_failure = source.chain().find_map(|cause| {
+            cause
+                .downcast_ref::<super::streaming::StreamReadError>()
+                .or_else(|| {
+                    cause
+                        .downcast_ref::<std::io::Error>()
+                        .and_then(std::io::Error::get_ref)
+                        .and_then(|inner| inner.downcast_ref::<super::streaming::StreamReadError>())
+                })
+                .map(|error| match error {
+                    super::streaming::StreamReadError::Timeout => StreamFailureKind::Timeout,
+                    super::streaming::StreamReadError::Source(_) => StreamFailureKind::Source,
+                })
+        });
+        Self::from_decode_error_and_stream_failure(source, stream_failure)
+    }
+
+    fn from_decode_error_and_stream_failure(
+        source: anyhow::Error,
+        stream_failure: Option<StreamFailureKind>,
+    ) -> Self {
+        match stream_failure {
+            Some(StreamFailureKind::Timeout) => Self::timeout(source),
+            Some(StreamFailureKind::Source) => Self::source(source),
+            None => Self::decode(source),
+        }
+    }
+
+    fn from_decode_error_and_stream_state(
+        source: anyhow::Error,
+        stream_failure: &StreamFailureState,
+    ) -> Self {
+        let Some(error) = stream_failure.error() else {
+            return Self::decode(source);
+        };
+        let kind = match &error {
+            StreamReadError::Timeout => StreamFailureKind::Timeout,
+            StreamReadError::Source(_) => StreamFailureKind::Source,
+        };
+        let source = anyhow::Error::new(error).context(format!("decoder failed: {source:#}"));
+        Self::from_decode_error_and_stream_failure(source, Some(kind))
+    }
+
+    fn cancelled(source: anyhow::Error) -> Self {
+        Self {
+            stage: PlaybackPipelineStage::Cancelled,
+            code: "DECODE_FAILED",
+            retryable: false,
+            representation: "unknown".into(),
+            source,
+        }
+    }
+
+    fn source(source: anyhow::Error) -> Self {
+        Self {
+            stage: PlaybackPipelineStage::Provider,
+            code: "SOURCE_UNAVAILABLE",
+            retryable: true,
+            representation: "unknown".into(),
+            source,
+        }
+    }
+
+    fn unsupported(source: anyhow::Error) -> Self {
+        Self {
+            stage: PlaybackPipelineStage::Provider,
+            code: "PLAYBACK_UNSUPPORTED",
+            retryable: false,
+            representation: "unknown".into(),
+            source,
+        }
+    }
+
+    fn timeout(source: anyhow::Error) -> Self {
+        Self {
+            stage: PlaybackPipelineStage::Timeout,
+            code: "PLAYBACK_TIMEOUT",
+            retryable: true,
+            representation: "unknown".into(),
+            source,
+        }
+    }
+
+    fn decode(source: anyhow::Error) -> Self {
+        Self {
+            stage: PlaybackPipelineStage::Decode,
+            code: "DECODE_FAILED",
+            retryable: true,
+            representation: "unknown".into(),
+            source,
+        }
+    }
+
+    fn output_open(source: anyhow::Error) -> Self {
+        Self {
+            stage: PlaybackPipelineStage::OutputOpen,
+            code: "OUTPUT_UNAVAILABLE",
+            retryable: true,
+            representation: "unknown".into(),
+            source,
+        }
+    }
+
+    fn output_lost(source: anyhow::Error) -> Self {
+        Self {
+            stage: PlaybackPipelineStage::OutputLost,
+            code: "OUTPUT_LOST",
+            retryable: true,
+            representation: "unknown".into(),
+            source,
+        }
+    }
+
+    fn stage(&self) -> &'static str {
+        self.stage.as_str()
+    }
+
+    pub(crate) fn code(&self) -> &'static str {
+        self.code
+    }
+
+    pub(crate) fn retryable(&self) -> bool {
+        self.retryable
+    }
+
+    pub(crate) fn is_publishable(&self) -> bool {
+        self.stage != PlaybackPipelineStage::Cancelled
+    }
+
+    fn with_representation(mut self, representation: &str) -> Self {
+        self.representation = diagnostic_representation(representation);
+        self
+    }
+
+    fn diagnostic_chain(&self) -> String {
+        self.source
+            .chain()
+            .map(|cause| crate::providers::sanitize_secret_message(&cause.to_string()))
+            .collect::<Vec<_>>()
+            .join(": ")
+    }
+}
+
+impl std::fmt::Display for PlaybackPipelineError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl std::error::Error for PlaybackPipelineError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+pub(crate) fn log_pipeline_failure(
+    session: &super::PlaybackSession,
+    generation: &str,
+    error: &PlaybackPipelineError,
+) -> bool {
+    if !error.is_publishable() {
+        return false;
+    }
+    session
+        .with_current_generation(generation, || {
+            crate::daemon_log!(
+                "[Playback] failure stage={} code={} representation={} chain={}",
+                error.stage(),
+                error.code(),
+                error.representation,
+                error.diagnostic_chain()
+            );
+        })
+        .is_some()
+}
+
+pub(crate) fn publish_pipeline_failure(
+    session: &super::PlaybackSession,
+    generation: String,
+    error: PlaybackPipelineError,
+) {
+    if !log_pipeline_failure(session, &generation, &error) {
+        return;
+    }
+    session.publish_event(
+        generation,
+        PlaybackEvent::Failed {
+            code: error.code().into(),
+            retryable: error.retryable(),
+        },
+    );
+}
 
 struct Pipeline {
     cancel: Arc<AtomicBool>,
@@ -58,6 +313,32 @@ fn representation_name(representation: &crate::providers::PlaybackRepresentation
                 .map(str::to_ascii_lowercase)
         })
         .unwrap_or_else(|| "unknown".into())
+}
+
+fn diagnostic_representation(value: &str) -> String {
+    let value = normalize_container(value).unwrap_or_default();
+    if matches!(
+        value.as_str(),
+        "wav"
+            | "wave"
+            | "flac"
+            | "mp3"
+            | "mpeg"
+            | "m4a"
+            | "mp4"
+            | "aac"
+            | "alac"
+            | "opus"
+            | "ogg"
+            | "oga"
+            | "pcm_s16le"
+            | "pcm_s24le"
+            | "pcm_s32le"
+    ) {
+        value
+    } else {
+        "unknown".into()
+    }
 }
 
 pub struct AudioEngine {
@@ -131,12 +412,15 @@ impl AudioEngine {
         start_ms: u64,
         generation: String,
         session: super::PlaybackSession,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), PlaybackPipelineError> {
         let _start_guard = self.starts.lock().await;
-        let (generation_serial, expected_serial) = session
-            .generation_guard(&generation)
-            .ok_or_else(|| anyhow::anyhow!("playback generation was superseded"))?;
-        verify_runtime()?;
+        let (generation_serial, expected_serial) =
+            session.generation_guard(&generation).ok_or_else(|| {
+                PlaybackPipelineError::cancelled(anyhow::anyhow!(
+                    "playback generation was superseded"
+                ))
+            })?;
+        verify_runtime().map_err(PlaybackPipelineError::decode)?;
         let old = {
             self.current
                 .lock()
@@ -149,17 +433,29 @@ impl AudioEngine {
             old.producer.abort();
             tokio::task::spawn_blocking(move || old.worker.join())
                 .await
-                .map_err(|_| anyhow::anyhow!("retiring audio worker join failed"))?
-                .map_err(|_| anyhow::anyhow!("retiring audio worker panicked"))?;
+                .map_err(|_| {
+                    PlaybackPipelineError::output_open(anyhow::anyhow!(
+                        "retiring audio worker join failed"
+                    ))
+                })?
+                .map_err(|_| {
+                    PlaybackPipelineError::output_open(anyhow::anyhow!(
+                        "retiring audio worker panicked"
+                    ))
+                })?;
         }
         let representation = select_playback_representation(description.representations)
-            .map_err(|_| anyhow::anyhow!("no supported representation"))?;
+            .map_err(PlaybackPipelineError::from_provider_error)?;
         let representation_name = representation_name(&representation);
         let decoder_hint = decoder_hint(&representation);
         let request = representation.request;
-        let response = fetch(&request).await?;
+        let response = fetch(&request)
+            .await
+            .map_err(|error| error.with_representation(&representation_name))?;
         if generation_serial.load(Ordering::Acquire) != expected_serial {
-            anyhow::bail!("playback generation was superseded");
+            return Err(PlaybackPipelineError::cancelled(anyhow::anyhow!(
+                "playback generation was superseded"
+            )));
         }
         let cancel = Arc::new(AtomicBool::new(false));
         let gate = Arc::new(AtomicBool::new(true));
@@ -181,9 +477,7 @@ impl AudioEngine {
                         Ok(Some(item)) => item,
                         Ok(None) => break,
                         Err(_) => {
-                            let _ = tx
-                                .send(Err("source made no byte progress for 15 seconds".into()))
-                                .await;
+                            let _ = tx.send(Err(StreamReadError::Timeout)).await;
                             break;
                         }
                     };
@@ -203,7 +497,11 @@ impl AudioEngine {
                         }
                     }
                     Err(error) => {
-                        let _ = tx.send(Err(format!("source read failed: {error}"))).await;
+                        let _ = tx
+                            .send(Err(StreamReadError::Source(format!(
+                                "source read failed: {error}"
+                            ))))
+                            .await;
                         return;
                     }
                 }
@@ -220,7 +518,7 @@ impl AudioEngine {
             PlaybackEvent::Resolved {
                 metadata,
                 duration_ms: Some(u64::from(description.song.duration_seconds) * 1000),
-                representation: representation_name,
+                representation: representation_name.clone(),
             },
         );
         let worker_cancel = cancel.clone();
@@ -230,6 +528,7 @@ impl AudioEngine {
         let pipeline_generation = generation.clone();
         let worker_pcm_high_water = pcm_high_water.clone();
         let worker_endpoint = endpoint.clone();
+        let worker_representation = representation_name.clone();
         let worker = std::thread::Builder::new()
             .name("hifimule-audio".into())
             .spawn(move || {
@@ -245,32 +544,21 @@ impl AudioEngine {
                     start_ms,
                     worker_pcm_high_water,
                     worker_endpoint,
-                );
+                )
+                .map_err(|error| error.with_representation(&worker_representation));
                 match result {
                     Err(error) if !worker_cancel.load(Ordering::Acquire) => {
-                        let message = error.to_string();
-                        session.publish_event(
-                            generation,
-                            PlaybackEvent::Failed {
-                                code: if message.contains("output lost") {
-                                    "OUTPUT_LOST"
-                                } else if message.contains("output") {
-                                    "OUTPUT_UNAVAILABLE"
-                                } else if message.contains("no byte progress") {
-                                    "PLAYBACK_TIMEOUT"
-                                } else if message.contains("source read failed") {
-                                    "SOURCE_UNAVAILABLE"
-                                } else {
-                                    "DECODE_FAILED"
-                                }
-                                .into(),
-                                retryable: true,
-                            },
-                        );
+                        publish_pipeline_failure(&session, generation, error);
                     }
                     _ => {}
                 }
                 worker_alive.store(false, Ordering::Release);
+            })
+            .map_err(|error| {
+                PlaybackPipelineError::output_open(
+                    anyhow::Error::new(error).context("spawn audio worker"),
+                )
+                .with_representation(&representation_name)
             })?;
         *self.current.lock().unwrap_or_else(|e| e.into_inner()) = Some(Pipeline {
             cancel,
@@ -287,11 +575,16 @@ impl AudioEngine {
     }
 }
 
-async fn fetch(request: &PlaybackRequest) -> anyhow::Result<reqwest::Response> {
+async fn fetch(request: &PlaybackRequest) -> Result<reqwest::Response, PlaybackPipelineError> {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(std::time::Duration::from_secs(10))
-        .build()?;
+        .build()
+        .map_err(|error| {
+            PlaybackPipelineError::source(
+                anyhow::Error::new(error).context("build playback HTTP client"),
+            )
+        })?;
     let response = tokio::time::timeout(
         std::time::Duration::from_secs(60),
         client
@@ -300,19 +593,32 @@ async fn fetch(request: &PlaybackRequest) -> anyhow::Result<reqwest::Response> {
             .send(),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("playback preparation timeout"))??;
+    .map_err(|_| PlaybackPipelineError::timeout(anyhow::anyhow!("playback preparation timeout")))?
+    .map_err(|error| {
+        PlaybackPipelineError::source(anyhow::Error::new(error).context("request playback source"))
+    })?;
     if !response.status().is_success() {
-        anyhow::bail!("source unavailable ({})", response.status());
+        return Err(PlaybackPipelineError::source(anyhow::anyhow!(
+            "source unavailable ({})",
+            response.status()
+        )));
     }
     if response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.contains("json") || value.contains("xml"))
+        .is_some_and(content_type_is_non_audio)
     {
-        anyhow::bail!("provider returned a non-audio response");
+        return Err(PlaybackPipelineError::source(anyhow::anyhow!(
+            "provider returned a non-audio response"
+        )));
     }
     Ok(response)
+}
+
+fn content_type_is_non_audio(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.contains("json") || value.contains("xml")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -328,16 +634,23 @@ fn run_output(
     start_ms: u64,
     pcm_high_water: Arc<AtomicU64>,
     endpoint: Arc<Mutex<Option<String>>>,
-) -> anyhow::Result<()> {
+) -> Result<(), PlaybackPipelineError> {
+    let stream_failure = reader.failure_state();
     let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or_else(|| anyhow::anyhow!("output device unavailable"))?;
+    let device = host.default_output_device().ok_or_else(|| {
+        PlaybackPipelineError::output_open(anyhow::anyhow!("output device unavailable"))
+    })?;
     *endpoint.lock().unwrap_or_else(|error| error.into_inner()) = device.name().ok();
-    let supported = device.default_output_config()?;
+    let supported = device.default_output_config().map_err(|error| {
+        PlaybackPipelineError::output_open(
+            anyhow::Error::new(error).context("read default output configuration"),
+        )
+    })?;
     let config: cpal::StreamConfig = supported.clone().into();
     if !matches!(config.channels, 1 | 2) {
-        anyhow::bail!("unsupported output layout");
+        return Err(PlaybackPipelineError::output_open(anyhow::anyhow!(
+            "unsupported output layout"
+        )));
     }
     let capacity = ((config.sample_rate.0 as usize * config.channels as usize) / 2)
         .min(1024 * 1024 / std::mem::size_of::<f32>());
@@ -354,7 +667,7 @@ fn run_output(
             output_lost.clone(),
             generation_serial.clone(),
             expected_serial,
-        )?,
+        ),
         cpal::SampleFormat::I16 => build_stream::<i16>(
             &device,
             &config,
@@ -364,7 +677,7 @@ fn run_output(
             output_lost.clone(),
             generation_serial.clone(),
             expected_serial,
-        )?,
+        ),
         cpal::SampleFormat::U16 => build_stream::<u16>(
             &device,
             &config,
@@ -374,9 +687,10 @@ fn run_output(
             output_lost.clone(),
             generation_serial.clone(),
             expected_serial,
-        )?,
-        _ => anyhow::bail!("unsupported output sample format"),
-    };
+        ),
+        _ => Err(anyhow::anyhow!("unsupported output sample format")),
+    }
+    .map_err(PlaybackPipelineError::output_open)?;
     let decoder_pcm = pcm.clone();
     let decoder_cancel = cancel.clone();
     let rate = config.sample_rate.0;
@@ -400,10 +714,24 @@ fn run_output(
         pcm_high_water.fetch_max(pcm.len() as u64, Ordering::AcqRel);
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    stream.play()?;
-    let occurrence = session
-        .snapshot()
-        .map_err(|error| anyhow::anyhow!(error.message))?
+    if let Err(error) = stream.play() {
+        cancel.store(true, Ordering::Release);
+        let _ = decoder.join();
+        return Err(PlaybackPipelineError::output_open(
+            anyhow::Error::new(error).context("start output stream"),
+        ));
+    }
+    let snapshot = match session.snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            cancel.store(true, Ordering::Release);
+            let _ = decoder.join();
+            return Err(PlaybackPipelineError::decode(anyhow::anyhow!(
+                error.message
+            )));
+        }
+    };
+    let occurrence = snapshot
         .current
         .map(|value| value.occurrence_id)
         .unwrap_or_default();
@@ -418,7 +746,11 @@ fn run_output(
             break;
         }
         if output_lost.load(Ordering::Acquire) {
-            anyhow::bail!("output lost");
+            cancel.store(true, Ordering::Release);
+            let _ = decoder.join();
+            return Err(PlaybackPipelineError::output_lost(anyhow::anyhow!(
+                "output stream callback reported loss"
+            )));
         }
         let samples = consumed.load(Ordering::Acquire);
         if samples > last_samples && !active {
@@ -441,7 +773,15 @@ fn run_output(
         if decoder.is_finished() && pcm.is_empty() {
             let result = decoder
                 .join()
-                .map_err(|_| anyhow::anyhow!("decoder worker panicked"))??;
+                .map_err(|_| {
+                    PlaybackPipelineError::decode(anyhow::anyhow!("decoder worker panicked"))
+                })?
+                .map_err(|error| {
+                    PlaybackPipelineError::from_decode_error_and_stream_state(
+                        error,
+                        &stream_failure,
+                    )
+                })?;
             session.publish_event(
                 generation,
                 PlaybackEvent::Completed {
@@ -561,7 +901,7 @@ fn verify_runtime() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::{PlaybackProvenance, PlaybackRepresentation};
+    use crate::providers::{PlaybackProvenance, PlaybackRepresentation, ProviderError};
 
     fn request(url: &str) -> PlaybackRequest {
         PlaybackRequest {
@@ -602,6 +942,155 @@ mod tests {
 
         let wrapped = representation(Some("ogg"), Some("flac"), route);
         assert_eq!(decoder_hint(&wrapped), "stream.ogg");
+    }
+
+    #[test]
+    fn decode_error_text_containing_output_stays_decode_failed() {
+        let error = PlaybackPipelineError::decode(anyhow::anyhow!(
+            "decoder rejected unsupported output layout"
+        ));
+        assert_eq!(error.stage(), "decode");
+        assert_eq!(error.code(), "DECODE_FAILED");
+        assert!(error.retryable());
+    }
+
+    #[test]
+    fn output_open_error_maps_to_output_unavailable() {
+        let error = PlaybackPipelineError::output_open(anyhow::anyhow!("device open failed"));
+        assert_eq!(error.stage(), "output-open");
+        assert_eq!(error.code(), "OUTPUT_UNAVAILABLE");
+        assert!(error.retryable());
+    }
+
+    #[test]
+    fn output_loss_maps_to_output_lost() {
+        let error = PlaybackPipelineError::output_lost(anyhow::anyhow!("stream callback failed"));
+        assert_eq!(error.stage(), "output-lost");
+        assert_eq!(error.code(), "OUTPUT_LOST");
+        assert!(error.retryable());
+    }
+
+    #[test]
+    fn source_failure_maps_to_source_unavailable() {
+        let error = PlaybackPipelineError::source(anyhow::anyhow!("provider read failed"));
+        assert_eq!(error.stage(), "provider");
+        assert_eq!(error.code(), "SOURCE_UNAVAILABLE");
+        assert!(error.retryable());
+    }
+
+    #[test]
+    fn stalled_source_maps_to_playback_timeout() {
+        let error = PlaybackPipelineError::timeout(anyhow::anyhow!("source stalled"));
+        assert_eq!(error.stage(), "timeout");
+        assert_eq!(error.code(), "PLAYBACK_TIMEOUT");
+        assert!(error.retryable());
+    }
+
+    #[test]
+    fn unsupported_representation_maps_to_non_retryable_public_failure() {
+        let error = PlaybackPipelineError::unsupported(anyhow::anyhow!("unsupported codec"));
+        assert_eq!(error.stage(), "provider");
+        assert_eq!(error.code(), "PLAYBACK_UNSUPPORTED");
+        assert!(!error.retryable());
+    }
+
+    #[test]
+    fn superseded_generation_error_is_not_publishable() {
+        let error = PlaybackPipelineError::cancelled(anyhow::anyhow!("generation superseded"));
+        assert!(!error.is_publishable());
+    }
+
+    #[test]
+    fn diagnostic_chain_redacts_urls_credentials_titles_and_ids() {
+        let source = anyhow::anyhow!(
+            "GET https://music.example/Items/private-id?token=private-token title=private-title trackId=private-id"
+        )
+        .context("while decoding response");
+        let diagnostic = PlaybackPipelineError::decode(source).diagnostic_chain();
+        assert!(diagnostic.contains("while decoding response"));
+        assert!(diagnostic.contains("[redacted-url]"));
+        for private in [
+            "https://",
+            "music.example",
+            "private-token",
+            "private-title",
+            "private-id",
+        ] {
+            assert!(
+                !diagnostic.contains(private),
+                "leaked {private}: {diagnostic}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_not_found_diagnostic_omits_item_id() {
+        let error = PlaybackPipelineError::from_provider_error(ProviderError::NotFound {
+            item_type: "track".into(),
+            id: "private-track-id".into(),
+        });
+        assert_eq!(error.stage(), "provider");
+        assert_eq!(error.code(), "SOURCE_UNAVAILABLE");
+        assert!(!error.diagnostic_chain().contains("private-track-id"));
+    }
+
+    #[test]
+    fn typed_stream_timeout_survives_decoder_context() {
+        let source = anyhow::Error::new(std::io::Error::other(
+            super::super::streaming::StreamReadError::Timeout,
+        ))
+        .context("decode input");
+        let error = PlaybackPipelineError::from_decode_error(source);
+        assert_eq!(error.stage(), "timeout");
+        assert_eq!(error.code(), "PLAYBACK_TIMEOUT");
+    }
+
+    #[test]
+    fn diagnostic_representation_rejects_arbitrary_provider_text() {
+        assert_eq!(diagnostic_representation("private album title"), "unknown");
+        assert_eq!(diagnostic_representation("audio/MP4"), "mp4");
+    }
+
+    #[test]
+    fn non_audio_content_type_detection_is_case_insensitive() {
+        assert!(content_type_is_non_audio("Application/JSON; Charset=UTF-8"));
+        assert!(content_type_is_non_audio("APPLICATION/XML"));
+        assert!(!content_type_is_non_audio("audio/mp4"));
+    }
+
+    #[test]
+    fn ffmpeg_error_uses_shared_stream_timeout_stage() {
+        let error = PlaybackPipelineError::from_decode_error_and_stream_failure(
+            anyhow::anyhow!("ffmpeg input/output error"),
+            Some(super::super::streaming::StreamFailureKind::Timeout),
+        );
+        assert_eq!(error.stage(), "timeout");
+        assert_eq!(error.code(), "PLAYBACK_TIMEOUT");
+    }
+
+    #[test]
+    fn shared_stream_source_detail_is_preserved_in_sanitized_diagnostic() {
+        use std::io::Read as _;
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, mut reader) = BoundedHttpReader::channel(cancel);
+        let failure = reader.failure_state();
+        tx.blocking_send(Err(StreamReadError::Source(
+            "GET https://music.example/private?token=secret reset".into(),
+        )))
+        .unwrap();
+        let _ = reader.read(&mut [0u8; 1]);
+
+        let error = PlaybackPipelineError::from_decode_error_and_stream_state(
+            anyhow::anyhow!("ffmpeg input/output error"),
+            &failure,
+        );
+        let diagnostic = error.diagnostic_chain();
+        assert_eq!(error.stage(), "provider");
+        assert!(diagnostic.contains("ffmpeg input/output error"));
+        assert!(diagnostic.contains("[redacted-url]"));
+        assert!(!diagnostic.contains("music.example"));
+        assert!(!diagnostic.contains("secret"));
     }
 
     #[tokio::test]

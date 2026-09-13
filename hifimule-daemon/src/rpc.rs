@@ -683,46 +683,18 @@ async fn handle_playback_apply_session(
                 Ok(provider) => provider.resolve_playback(&source.track_id).await,
                 Err(error) => Err(error),
             };
-            match resolved {
+            let outcome = match resolved {
                 Ok(description) => {
-                    if let Err(error) = crate::playback::audio::global()
+                    crate::playback::audio::global()
                         .start(description, source, 0, generation.clone(), playback.clone())
                         .await
-                    {
-                        let message = error.to_string();
-                        playback.publish_event(
-                            generation,
-                            crate::playback::model::PlaybackEvent::Failed {
-                                code: if message.contains("timeout") {
-                                    "PLAYBACK_TIMEOUT"
-                                } else if message.contains("source")
-                                    || message.contains("non-audio")
-                                {
-                                    "SOURCE_UNAVAILABLE"
-                                } else {
-                                    "OUTPUT_UNAVAILABLE"
-                                }
-                                .into(),
-                                retryable: true,
-                            },
-                        );
-                    }
                 }
-                Err(crate::providers::ProviderError::UnsupportedCapability(_)) => playback
-                    .publish_event(
-                        generation,
-                        crate::playback::model::PlaybackEvent::Failed {
-                            code: "PLAYBACK_UNSUPPORTED".into(),
-                            retryable: false,
-                        },
-                    ),
-                Err(_) => playback.publish_event(
-                    generation,
-                    crate::playback::model::PlaybackEvent::Failed {
-                        code: "SOURCE_UNAVAILABLE".into(),
-                        retryable: true,
-                    },
-                ),
+                Err(error) => {
+                    Err(crate::playback::audio::PlaybackPipelineError::from_provider_error(error))
+                }
+            };
+            if let Err(error) = outcome {
+                crate::playback::audio::publish_pipeline_failure(&playback, generation, error);
             }
         });
     }
@@ -772,35 +744,37 @@ async fn handle_playback_control(
                         Ok(provider) => provider.resolve_playback(&current.source.track_id).await,
                         Err(error) => Err(error),
                     };
-                    match resolved {
-                        Ok(description) => {
-                            if crate::playback::audio::global()
-                                .start(
-                                    description,
-                                    current.source,
-                                    position_ms,
-                                    generation.clone(),
-                                    playback.clone(),
-                                )
-                                .await
-                                .is_err()
-                            {
-                                playback.publish_event(
-                                    generation,
-                                    crate::playback::model::PlaybackEvent::Failed {
-                                        code: "RESUME_UNAVAILABLE".into(),
-                                        retryable: true,
-                                    },
-                                );
-                            }
-                        }
-                        Err(_) => playback.publish_event(
+                    let failure = match resolved {
+                        Ok(description) => crate::playback::audio::global()
+                            .start(
+                                description,
+                                current.source,
+                                position_ms,
+                                generation.clone(),
+                                playback.clone(),
+                            )
+                            .await
+                            .err(),
+                        Err(error) => Some(
+                            crate::playback::audio::PlaybackPipelineError::from_provider_error(
+                                error,
+                            ),
+                        ),
+                    };
+                    if let Some(error) = failure
+                        && crate::playback::audio::log_pipeline_failure(
+                            &playback,
+                            &generation,
+                            &error,
+                        )
+                    {
+                        playback.publish_event(
                             generation,
                             crate::playback::model::PlaybackEvent::Failed {
                                 code: "RESUME_UNAVAILABLE".into(),
                                 retryable: true,
                             },
-                        ),
+                        );
                     }
                 });
             }

@@ -1,33 +1,116 @@
 use bytes::Bytes;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 pub const COMPRESSED_CHUNK_BYTES: usize = 64 * 1024;
 pub const COMPRESSED_CAPACITY_BYTES: usize = 8 * 1024 * 1024;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamReadError {
+    Timeout,
+    Source(String),
+}
+
+impl StreamReadError {
+    fn kind(&self) -> StreamFailureKind {
+        match self {
+            Self::Timeout => StreamFailureKind::Timeout,
+            Self::Source(_) => StreamFailureKind::Source,
+        }
+    }
+}
+
+impl From<String> for StreamReadError {
+    fn from(message: String) -> Self {
+        Self::Source(message)
+    }
+}
+
+impl From<&str> for StreamReadError {
+    fn from(message: &str) -> Self {
+        Self::Source(message.to_owned())
+    }
+}
+
+impl std::fmt::Display for StreamReadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Timeout => write!(formatter, "source made no byte progress"),
+            Self::Source(message) => message.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for StreamReadError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamFailureKind {
+    Timeout = 1,
+    Source = 2,
+}
+
+#[derive(Clone, Default)]
+pub struct StreamFailureState {
+    kind: Arc<AtomicU8>,
+    error: Arc<std::sync::Mutex<Option<StreamReadError>>>,
+}
+
+impl StreamFailureState {
+    fn record(&self, error: &StreamReadError) {
+        *self
+            .error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.clone());
+        self.kind.store(error.kind() as u8, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub fn kind(&self) -> Option<StreamFailureKind> {
+        match self.kind.load(Ordering::Acquire) {
+            1 => Some(StreamFailureKind::Timeout),
+            2 => Some(StreamFailureKind::Source),
+            _ => None,
+        }
+    }
+
+    pub fn error(&self) -> Option<StreamReadError> {
+        self.error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
 pub struct BoundedHttpReader {
-    rx: tokio::sync::mpsc::Receiver<Result<Bytes, String>>,
+    rx: tokio::sync::mpsc::Receiver<Result<Bytes, StreamReadError>>,
     buffer: Vec<u8>,
     base: u64,
     position: u64,
     eof: bool,
     cancel: Arc<AtomicBool>,
     high_water: Arc<AtomicU64>,
+    failure: StreamFailureState,
 }
 
 impl BoundedHttpReader {
     #[cfg(test)]
     pub fn channel(
         cancel: Arc<AtomicBool>,
-    ) -> (tokio::sync::mpsc::Sender<Result<Bytes, String>>, Self) {
+    ) -> (
+        tokio::sync::mpsc::Sender<Result<Bytes, StreamReadError>>,
+        Self,
+    ) {
         Self::channel_with_high_water(cancel, Arc::new(AtomicU64::new(0)))
     }
 
     pub fn channel_with_high_water(
         cancel: Arc<AtomicBool>,
         high_water: Arc<AtomicU64>,
-    ) -> (tokio::sync::mpsc::Sender<Result<Bytes, String>>, Self) {
+    ) -> (
+        tokio::sync::mpsc::Sender<Result<Bytes, StreamReadError>>,
+        Self,
+    ) {
         let (tx, rx) =
             tokio::sync::mpsc::channel(COMPRESSED_CAPACITY_BYTES / COMPRESSED_CHUNK_BYTES);
         (
@@ -40,8 +123,13 @@ impl BoundedHttpReader {
                 eof: false,
                 cancel,
                 high_water,
+                failure: StreamFailureState::default(),
             },
         )
+    }
+
+    pub fn failure_state(&self) -> StreamFailureState {
+        self.failure.clone()
     }
 
     fn receive_next(&mut self) -> io::Result<()> {
@@ -76,7 +164,10 @@ impl BoundedHttpReader {
                         .fetch_max(self.buffer.len() as u64, Ordering::AcqRel);
                     return Ok(());
                 }
-                Ok(Err(message)) => return Err(io::Error::other(message)),
+                Ok(Err(error)) => {
+                    self.failure.record(&error);
+                    return Err(io::Error::other(error));
+                }
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                     self.eof = true;
                     return Ok(());
@@ -204,6 +295,49 @@ mod tests {
         assert_eq!(
             reader.seek(SeekFrom::Start(0)).unwrap_err().kind(),
             io::ErrorKind::Unsupported
+        );
+    }
+
+    #[test]
+    fn source_timeout_is_preserved_as_a_typed_reader_error() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, mut reader) = BoundedHttpReader::channel(cancel);
+        tx.blocking_send(Err(StreamReadError::Timeout)).unwrap();
+        let mut byte = [0u8; 1];
+        let error = reader.read(&mut byte).unwrap_err();
+        assert!(matches!(
+            error
+                .get_ref()
+                .and_then(|source| source.downcast_ref::<StreamReadError>()),
+            Some(StreamReadError::Timeout)
+        ));
+    }
+
+    #[test]
+    fn source_timeout_updates_shared_failure_state() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, mut reader) = BoundedHttpReader::channel(cancel);
+        let failure = reader.failure_state();
+        tx.blocking_send(Err(StreamReadError::Timeout)).unwrap();
+        let mut byte = [0u8; 1];
+        let _ = reader.read(&mut byte);
+        assert_eq!(failure.kind(), Some(StreamFailureKind::Timeout));
+    }
+
+    #[test]
+    fn source_failure_state_retains_native_error_detail() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, mut reader) = BoundedHttpReader::channel(cancel);
+        let failure = reader.failure_state();
+        tx.blocking_send(Err(StreamReadError::Source(
+            "native transport reset".into(),
+        )))
+        .unwrap();
+        let mut byte = [0u8; 1];
+        let _ = reader.read(&mut byte);
+        assert_eq!(
+            failure.error(),
+            Some(StreamReadError::Source("native transport reset".into()))
         );
     }
 }

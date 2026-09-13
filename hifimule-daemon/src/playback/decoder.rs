@@ -8,6 +8,77 @@ pub struct DecodeSummary {
     pub frames: u64,
 }
 
+fn hint_is_mp3(filename_hint: Option<&str>) -> bool {
+    filename_hint.is_some_and(|hint| {
+        let hint = hint
+            .split(['?', '#', ';'])
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        let tail = hint.rsplit(['/', '\\']).next().unwrap_or_default();
+        matches!(tail.rsplit('.').next(), Some("mp3"))
+    })
+}
+
+fn prefix_is_mp3(prefix: &[u8]) -> bool {
+    if mpeg_audio_header(prefix) {
+        return true;
+    }
+    let Some(audio_offset) = id3_audio_offset(prefix) else {
+        return false;
+    };
+    prefix.get(audio_offset..).is_some_and(mpeg_audio_header)
+}
+
+fn id3_audio_offset(prefix: &[u8]) -> Option<usize> {
+    if prefix.len() < 10 || !prefix.starts_with(b"ID3") {
+        return None;
+    }
+    let size_bytes = &prefix[6..10];
+    if size_bytes.iter().any(|byte| byte & 0x80 != 0) {
+        return None;
+    }
+    let tag_size = size_bytes
+        .iter()
+        .fold(0usize, |size, byte| (size << 7) | usize::from(*byte));
+    let footer_size = usize::from(prefix[5] & 0x10 != 0) * 10;
+    Some(10usize.saturating_add(tag_size).saturating_add(footer_size))
+}
+
+fn mpeg_audio_header(prefix: &[u8]) -> bool {
+    if prefix.len() < 3 || prefix[0] != 0xff || prefix[1] & 0xe0 != 0xe0 {
+        return false;
+    }
+    let version = (prefix[1] >> 3) & 0x03;
+    let layer = (prefix[1] >> 1) & 0x03;
+    let bitrate = (prefix[2] >> 4) & 0x0f;
+    let sample_rate = (prefix[2] >> 2) & 0x03;
+    version != 0x01 && layer != 0 && !matches!(bitrate, 0 | 0x0f) && sample_rate != 0x03
+}
+
+fn reader_is_mp3(
+    reader: &mut super::streaming::BoundedHttpReader,
+    filename_hint: Option<&str>,
+) -> std::io::Result<bool> {
+    if hint_is_mp3(filename_hint) {
+        return Ok(true);
+    }
+    let header = reader.peek_prefix(10)?;
+    if prefix_is_mp3(&header) {
+        return Ok(true);
+    }
+    let Some(audio_offset) = id3_audio_offset(&header) else {
+        return Ok(false);
+    };
+    const MAX_ID3_PROBE_BYTES: usize = super::streaming::COMPRESSED_CAPACITY_BYTES;
+    if audio_offset.saturating_add(4) > MAX_ID3_PROBE_BYTES {
+        return Ok(false);
+    }
+    let prefix = reader.peek_prefix(audio_offset + 4)?;
+    Ok(prefix_is_mp3(&prefix))
+}
+
 pub fn decode_stream(
     mut reader: super::streaming::BoundedHttpReader,
     filename_hint: Option<&str>,
@@ -27,7 +98,8 @@ pub fn decode_stream(
     // the truthful non-seekable contract for that demuxer. Containers such as
     // MP4 still need bounded seeking to locate their metadata.
     let flac_stream = reader.peek_prefix(4)? == b"fLaC";
-    let io = if flac_stream {
+    let sequential_stream = flac_stream || reader_is_mp3(&mut reader, filename_hint)?;
+    let io = if sequential_stream {
         ffmpeg::format::context::StreamIo::from_read_with_capacity(reader, 32 * 1024)?
     } else {
         ffmpeg::format::context::StreamIo::from_read_seek_with_capacity(reader, 32 * 1024)?
@@ -181,8 +253,32 @@ mod tests {
         path: &std::path::Path,
         start_frame: u64,
     ) -> anyhow::Result<(DecodeSummary, u64)> {
+        decode_test_file_at_with_compressed_high_water(path, start_frame)
+            .map(|(summary, samples, _)| (summary, samples))
+    }
+
+    fn decode_test_file_at_with_compressed_high_water(
+        path: &std::path::Path,
+        start_frame: u64,
+    ) -> anyhow::Result<(DecodeSummary, u64, u64)> {
+        decode_test_file_at_with_hint_and_high_water(
+            path,
+            start_frame,
+            path.file_name().and_then(|name| name.to_str()),
+        )
+    }
+
+    fn decode_test_file_at_with_hint_and_high_water(
+        path: &std::path::Path,
+        start_frame: u64,
+        hint: Option<&str>,
+    ) -> anyhow::Result<(DecodeSummary, u64, u64)> {
         let cancel = Arc::new(AtomicBool::new(false));
-        let (tx, reader) = BoundedHttpReader::channel(cancel.clone());
+        let compressed_high_water = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (tx, reader) = BoundedHttpReader::channel_with_high_water(
+            cancel.clone(),
+            compressed_high_water.clone(),
+        );
         let mut bytes = Vec::new();
         std::fs::File::open(path)?.read_to_end(&mut bytes)?;
         let producer = std::thread::spawn(move || -> Result<(), String> {
@@ -207,15 +303,7 @@ mod tests {
                 }
             }
         });
-        let result = decode_stream(
-            reader,
-            path.file_name().and_then(|name| name.to_str()),
-            48_000,
-            2,
-            start_frame,
-            pcm,
-            cancel,
-        );
+        let result = decode_stream(reader, hint, 48_000, 2, start_frame, pcm, cancel);
         done.store(true, Ordering::Release);
         consumer.join().expect("PCM consumer panicked");
         let producer = producer.join().expect("compressed producer panicked");
@@ -223,7 +311,11 @@ mod tests {
             Err(error) => Err(error),
             Ok(summary) => {
                 producer.map_err(anyhow::Error::msg)?;
-                Ok((summary, drained.load(Ordering::Relaxed)))
+                Ok((
+                    summary,
+                    drained.load(Ordering::Relaxed),
+                    compressed_high_water.load(Ordering::Relaxed),
+                ))
             }
         }
     }
@@ -242,6 +334,85 @@ mod tests {
             "decoded only {} frames",
             result.frames
         );
+    }
+
+    #[test]
+    #[ignore = "uses HIFIMULE_DIAGNOSTIC_MP3; never committed as a fixture"]
+    fn oversized_mp3_decodes_complete_stream_with_bounded_memory() {
+        let path = std::env::var("HIFIMULE_DIAGNOSTIC_MP3").unwrap();
+        let (result, _, compressed_high_water) =
+            decode_test_file_at_with_compressed_high_water(std::path::Path::new(&path), 0).unwrap();
+        assert!(
+            result.frames > 17_000_000,
+            "decoded only {} frames",
+            result.frames
+        );
+        assert!(compressed_high_water <= COMPRESSED_CAPACITY_BYTES as u64);
+    }
+
+    #[test]
+    #[ignore = "uses HIFIMULE_DIAGNOSTIC_MP3; never committed as a fixture"]
+    fn oversized_id3_mp3_without_filename_hint_decodes_complete_stream() {
+        let path = std::env::var("HIFIMULE_DIAGNOSTIC_MP3").unwrap();
+        let (result, _, _) =
+            decode_test_file_at_with_hint_and_high_water(std::path::Path::new(&path), 0, None)
+                .unwrap();
+        assert!(
+            result.frames > 17_000_000,
+            "decoded only {} frames",
+            result.frames
+        );
+    }
+
+    #[test]
+    fn valid_mpeg_audio_frame_header_is_recognized_as_mp3() {
+        assert!(prefix_is_mp3(&[0xff, 0xfb, 0x90, 0x64]));
+    }
+
+    #[test]
+    fn ambiguous_mpeg_hint_is_not_treated_as_mp3() {
+        assert!(!hint_is_mp3(Some("movie.mpeg")));
+        assert!(!hint_is_mp3(Some("mpeg")));
+    }
+
+    #[test]
+    fn extensionless_mp3_with_large_id3_tag_is_recognized_within_bounded_window() {
+        let tag_size = 300 * 1024usize;
+        let mut header = vec![0u8; 10];
+        header[..3].copy_from_slice(b"ID3");
+        header[6] = ((tag_size >> 21) & 0x7f) as u8;
+        header[7] = ((tag_size >> 14) & 0x7f) as u8;
+        header[8] = ((tag_size >> 7) & 0x7f) as u8;
+        header[9] = (tag_size & 0x7f) as u8;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, mut reader) = BoundedHttpReader::channel(cancel);
+        let producer = std::thread::spawn(move || {
+            tx.blocking_send(Ok(bytes::Bytes::from(header))).unwrap();
+            for _ in 0..(tag_size / COMPRESSED_CHUNK_BYTES) {
+                tx.blocking_send(Ok(bytes::Bytes::from(vec![0; COMPRESSED_CHUNK_BYTES])))
+                    .unwrap();
+            }
+            let remainder = tag_size % COMPRESSED_CHUNK_BYTES;
+            tx.blocking_send(Ok(bytes::Bytes::from(vec![0; remainder])))
+                .unwrap();
+            tx.blocking_send(Ok(bytes::Bytes::from_static(&[0xff, 0xfb, 0x90, 0x64])))
+                .unwrap();
+        });
+        assert!(reader_is_mp3(&mut reader, None).unwrap());
+        producer.join().unwrap();
+    }
+
+    #[test]
+    fn adts_aac_header_is_not_recognized_as_mp3() {
+        assert!(!prefix_is_mp3(&[0xff, 0xf1, 0x50, 0x80]));
+    }
+
+    #[test]
+    fn id3_tag_followed_by_mpeg_audio_frame_is_recognized_as_mp3() {
+        let bytes = [
+            b'I', b'D', b'3', 4, 0, 0, 0, 0, 0, 0, 0xff, 0xfb, 0x90, 0x64,
+        ];
+        assert!(prefix_is_mp3(&bytes));
     }
 
     #[test]

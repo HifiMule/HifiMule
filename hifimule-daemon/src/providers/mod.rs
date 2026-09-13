@@ -104,7 +104,16 @@ fn representation_is_supported(representation: &PlaybackRepresentation) -> bool 
     };
     matches!(
         codec.to_ascii_lowercase().as_str(),
-        "pcm_s16le" | "pcm_s24le" | "pcm_s32le" | "flac" | "alac" | "mp3" | "aac" | "opus"
+        "pcm_s16le"
+            | "pcm_s24le"
+            | "pcm_s32le"
+            | "flac"
+            | "alac"
+            | "mp3"
+            | "aac"
+            | "m4a"
+            | "mp4"
+            | "opus"
     )
 }
 
@@ -654,10 +663,47 @@ async fn connect_jellyfin(
     Ok(Arc::new(provider))
 }
 
-fn sanitize_secret_message(message: &str) -> String {
-    let mut sanitized = message.to_string();
+pub(crate) fn sanitize_secret_message(message: &str) -> String {
+    let mut sanitized = String::with_capacity(message.len());
+    let mut remainder = message;
+    loop {
+        let lowercase_remainder = remainder.to_ascii_lowercase();
+        let next_url = ["https://", "http://"]
+            .into_iter()
+            .filter_map(|scheme| lowercase_remainder.find(scheme))
+            .min();
+        let Some(start) = next_url else {
+            sanitized.push_str(remainder);
+            break;
+        };
+        sanitized.push_str(&remainder[..start]);
+        sanitized.push_str("[redacted-url]");
+        let url_end = remainder[start..]
+            .find(char::is_whitespace)
+            .map(|offset| start + offset)
+            .unwrap_or(remainder.len());
+        remainder = &remainder[url_end..];
+    }
     for key in [
-        "password", "pw", "token", "api_key", "ApiKey", "u", "p", "t", "s",
+        "password",
+        "pw",
+        "token",
+        "api_key",
+        "ApiKey",
+        "title",
+        "trackId",
+        "track_id",
+        "serverId",
+        "server_id",
+        "songId",
+        "song_id",
+        "itemId",
+        "item_id",
+        "id",
+        "u",
+        "p",
+        "t",
+        "s",
     ] {
         let needle = format!("{key}=");
         let mut rebuilt = String::with_capacity(sanitized.len());
@@ -1036,6 +1082,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sanitize_secret_message_removes_urls_titles_and_playback_identifiers() {
+        let sanitized = sanitize_secret_message(
+            "GET https://music.example/Items/server-secret?token=credential title=private-title trackId=track-secret serverId=server-secret",
+        );
+        assert!(sanitized.contains("[redacted-url]"));
+        for private in [
+            "https://",
+            "music.example",
+            "credential",
+            "private-title",
+            "track-secret",
+            "server-secret",
+        ] {
+            assert!(
+                !sanitized.contains(private),
+                "leaked {private}: {sanitized}"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_secret_message_removes_mixed_case_urls() {
+        let sanitized = sanitize_secret_message("GET HTTPS://music.example/private?token=secret");
+        assert_eq!(sanitized, "GET [redacted-url]");
+    }
+
     #[tokio::test]
     async fn factory_jellyfin_auth_failure_does_not_leak_password() {
         let mut server = Server::new_async().await;
@@ -1386,6 +1459,16 @@ mod tests {
 
     #[test]
     fn playback_representation_ranking_is_bounded_and_deterministic() {
+        let selected = select_playback_representation(vec![representation(
+            "m4a",
+            PlaybackProvenance::Original,
+            Some(256),
+            Some(44_100),
+            None,
+        )])
+        .expect("an original M4A container is playable by the production decoder");
+        assert_eq!(selected.codec.as_deref(), Some("m4a"));
+
         let selected = select_playback_representation(vec![
             representation(
                 "aac",
