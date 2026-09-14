@@ -305,6 +305,7 @@ GPT-6 (Codex)
 - The second macOS ARM64 evidence record proved every installed check except the authoritative output-loss state transition. Corrected that record to `failed` rather than accepting its contradictory pass flag. Added a regression proving `OUTPUT_LOST` remains publishable after the worker internally cancels decode; 733 daemon tests pass serially (5 ignored), along with 6 collector and 56 Node script tests, formatting, diff checks and ordinary clippy. The first parallel daemon run hit the repository's shared-vault test race; the isolated initiating test and complete serial suite pass.
 - Fixed Pause → Resume status reconciliation without falsely claiming activity before audio: closing the callback gate resets only the worker's transient activity observation, and the next consumed sample republishes `Active`. The focused Resume/session tests pass; the full serial daemon suite passes with 734 tests and 5 ignored, plus 6 collector tests, 56 Node script tests, formatting, diff checks and ordinary clippy with existing warnings only.
 - macOS ARM64 installed acceptance evidence now passes in full and validates independently. The four-target evidence task remains open because Windows x64, Linux x64 and macOS x64 complete collector records are still missing; macOS ARM64 evidence is not used to infer those architectures.
+- Windows x64 installed acceptance evidence now passes in full and validates independently. The record covers all six required formats and all eight lifecycle/resource scenarios, loads the four FFmpeg 9.0.1 ABI DLLs from the private installed directory, and reports bounded 8 MiB compressed and 48,000-sample PCM high-water marks. The four-target evidence task remains open because Linux x64 and macOS x64 complete collector records are still missing.
 
 ### File List
 
@@ -322,6 +323,7 @@ GPT-6 (Codex)
 - `docs/playback-evidence-windows-x64-2026-09-13.json`
 - `docs/playback-evidence-windows-x64-official-source-2026-09-13.json`
 - `docs/playback-evidence/macos-arm64.json`
+- `docs/playback-evidence/windows-x64.json`
 - `docs/playback-installed-test-checklist.md`
 - `_bmad-output/implementation-artifacts/investigations/windows-ffmpeg-msvc-compiler-test-investigation.md`
 - `hifimule-daemon/Cargo.toml`
@@ -400,3 +402,4 @@ GPT-6 (Codex)
 - 2026-09-14: Preserved the second macOS ARM64 run as failed after its note exposed stale `playing` state, and fixed internal decoder cancellation from suppressing the typed `OUTPUT_LOST` state event; installed rerun evidence remains pending.
 - 2026-09-14: Fixed Pause → Resume remaining `loading` during audible playback by resetting worker activity while gated and republishing `Active` on resumed sample consumption.
 - 2026-09-14: Validated the final installed macOS ARM64 evidence record with all formats, lifecycle scenarios, private native-library paths and bounded high-water measurements passing; retained the three untested target records as open.
+- 2026-09-14: Validated the final installed Windows x64 evidence record with all formats, lifecycle scenarios, private native-library paths and bounded high-water measurements passing; retained Linux x64 and macOS x64 records as open.

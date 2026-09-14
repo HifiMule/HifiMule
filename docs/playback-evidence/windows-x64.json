@@ -1,0 +1,132 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-09-14T18:35:26.183505+00:00",
+  "target": "windows-x64",
+  "os": {
+    "name": "Windows",
+    "release": "11",
+    "architecture": "AMD64"
+  },
+  "package": {
+    "path": "HifiMule_0.14.0_x64-setup.exe",
+    "sha256": "2bb32b1ee0e8f1b2bbb38f199fe5df71de2fa3c5e9d53b8c44840a7b46327246"
+  },
+  "sourceRevision": "f1080175eed9de9980bc114a208c1fa3351e6ea8",
+  "installRoot": "%LOCALAPPDATA%\\HifiMule",
+  "provider": {
+    "kind": "subsonic",
+    "version": "0.63.2"
+  },
+  "audioRuntime": {
+    "binding": "ffmpeg-next-9.0.0",
+    "avcodec": "63.1.101",
+    "avformat": "63.1.101",
+    "avutil": "61.1.101",
+    "swresample": "7.1.101",
+    "sharedEndpoint": "Main Output (Komplete Audio 6 WDM Audio)",
+    "compressedHighWaterBytes": 8388608,
+    "pcmHighWaterSamples": 48000,
+    "manifest": {
+      "schemaVersion": 1,
+      "ffmpegRelease": "9.0.1",
+      "configureFlags": [
+        "--enable-shared",
+        "--disable-static",
+        "--disable-programs",
+        "--disable-doc",
+        "--disable-network",
+        "--disable-avdevice",
+        "--disable-avfilter",
+        "--disable-swscale",
+        "--disable-everything",
+        "--enable-avcodec",
+        "--enable-avformat",
+        "--enable-avutil",
+        "--enable-swresample",
+        "--enable-protocol=file",
+        "--enable-demuxer=wav,flac,mov,mp3,aac,ogg,aiff,asf",
+        "--enable-decoder=pcm_s16le,pcm_s24le,pcm_s32le,pcm_s16be,pcm_s24be,pcm_s32be,flac,alac,mp3,aac,opus,vorbis,wmav1,wmav2,wmapro,wmalossless"
+      ],
+      "windowsConfigureFlags": [
+        "--disable-x86asm"
+      ],
+      "requiredLibraries": [
+        "avcodec",
+        "avformat",
+        "avutil",
+        "swresample"
+      ],
+      "abiVersions": {
+        "avcodec": "63.1.101",
+        "avformat": "63.1.101",
+        "avutil": "61.1.101",
+        "swresample": "7.1.101"
+      },
+      "bindingVersions": {
+        "cpal": "0.16.0",
+        "ffmpeg-next": "9.0.0",
+        "ffmpeg-sys-next": "9.0.0"
+      },
+      "bufferPolicy": {
+        "compressedCapacityBytes": 8388608,
+        "compressedChunkBytes": 65536,
+        "pcmCapacityMaxBytes": 1048576,
+        "pcmTargetMilliseconds": 500,
+        "startupFillMilliseconds": 100
+      },
+      "licenses": [
+        "LGPL-2.1-or-later"
+      ],
+      "sourceSha256": "cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635"
+    }
+  },
+  "loadedLibraries": [
+    "%LOCALAPPDATA%\\HifiMule\\avcodec-63.dll",
+    "%LOCALAPPDATA%\\HifiMule\\avformat-63.dll",
+    "%LOCALAPPDATA%\\HifiMule\\avutil-61.dll",
+    "%LOCALAPPDATA%\\HifiMule\\swresample-7.dll"
+  ],
+  "fixtures": {
+    "wav": "passed",
+    "flac": "passed",
+    "alac-m4a": "passed",
+    "mp3": "passed",
+    "aac-m4a": "passed",
+    "opus": "passed"
+  },
+  "scenarios": {
+    "play-pause-resume-stop": {
+      "outcome": "passed",
+      "notes": ""
+    },
+    "restored-resume": {
+      "outcome": "passed",
+      "notes": ""
+    },
+    "replacement-during-loading": {
+      "outcome": "passed",
+      "notes": ""
+    },
+    "window-closure": {
+      "outcome": "passed",
+      "notes": ""
+    },
+    "output-loss": {
+      "outcome": "passed",
+      "notes": ""
+    },
+    "quit-while-playing": {
+      "outcome": "passed",
+      "notes": ""
+    },
+    "quit-while-loading": {
+      "outcome": "passed",
+      "notes": ""
+    },
+    "long-slow-stream-bounds": {
+      "outcome": "passed",
+      "notes": ""
+    }
+  },
+  "outcome": "passed"
+}
