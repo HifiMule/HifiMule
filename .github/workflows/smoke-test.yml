@@ -26,7 +26,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Download MSI artifact
         shell: pwsh
@@ -44,7 +44,7 @@ jobs:
 
       - name: Upload sanitized lifecycle evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: smoke-log-windows
           path: ./installers/smoke.log
@@ -54,7 +54,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install runtime dependencies
         run: |
@@ -76,7 +76,7 @@ jobs:
 
       - name: Upload sanitized lifecycle evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: smoke-log-linux
           path: ./installers/smoke.log
@@ -96,7 +96,7 @@ jobs:
     runs-on: ${{ matrix.platform }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Download DMG artifact
         shell: pwsh
@@ -113,7 +113,7 @@ jobs:
 
       - name: Upload sanitized lifecycle evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: smoke-log-${{ matrix.log-suffix }}
           path: ./installers/smoke.log

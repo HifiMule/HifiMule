@@ -32,12 +32,12 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - name: Install Node.js 20
-        uses: actions/setup-node@v4
+      - name: Install Node.js 24
+        uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Run packaging and runtime script regressions
         shell: bash
@@ -101,7 +101,7 @@ jobs:
 
       - name: Upload playback evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: playback-evidence-${{ matrix.label }}
           path: playback-evidence/${{ matrix.label }}.json
