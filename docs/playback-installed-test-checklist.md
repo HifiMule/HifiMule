@@ -39,7 +39,7 @@ remain explicitly unverified because they were not included in the report.
 ## Setup
 
 1. Configure one Jellyfin server and one Subsonic/OpenSubsonic server containing
-   WAV, FLAC, ALAC/M4A, MP3, AAC/M4A, and Opus tracks.
+   WAV, FLAC, ALAC/M4A, MP3, AAC/M4A, Opus, AIF/AIFF, OGG/OGA, and WMA tracks.
 2. Record package SHA-256, source revision, OS version/architecture, audio endpoint,
    server brand/version, and whether the machine has any system FFmpeg installed.
 3. Start HifiMule and retain only the sanitized `audioRuntime` object returned by
@@ -143,3 +143,27 @@ versions and loaded paths, endpoint/backend, provider/version, fixture, observed
 transitions, audible outcome, decoded/consumed frames, compressed/PCM high-water,
 timeout/underrun result, worker cleanup, and `passed` or `failed`. Keep unavailable
 provider/hardware combinations as `unverified`; never infer them from another row.
+
+## AIF, OGG, and WMA validation
+
+The new format matrix must be checked separately on each installed target and
+provider. The earlier 2026-09-13 smoke evidence does not cover these additions.
+
+| Container / suffix | Audio variants | Local automated evidence | Installed evidence |
+| --- | --- | --- | --- |
+| AIF / AIFF | Big-endian PCM 16/24/32-bit | Synthetic decode, finite PCM, full duration, resume, >8 MiB metadata | Pending |
+| OGG / OGA | Vorbis and Opus | Synthetic decode, finite PCM, full duration, resume, >8 MiB metadata | Pending |
+| WMA / ASF | WMA v1 and v2, unencrypted | Synthetic decode, finite PCM, duration within one codec block, exact resume, >8 MiB metadata | Pending |
+| WMA / ASF | WMA Pro and Lossless, unencrypted | Native decoders enabled; fixture validation pending | Pending |
+
+Local evidence uses macOS ARM64 Homebrew FFmpeg 9.0.1 with the required ABI,
+through the production bounded reader. It does not prove the reduced runtime
+built for Windows/Linux: rebuild those runtimes from the updated manifest and
+record configure flags, loaded libraries, and audible playback. No FFmpeg release
+or dependency version changed. The native decoders add no external codec libraries.
+
+Include uppercase suffixes, original-versus-alternative selection, restored
+position, and long tracks beyond the 8 MiB retained window. Test malformed files
+through the existing typed failure path; encrypted/DRM WMA is unsupported.
+Fixture provenance and regeneration commands live in
+[`generated-audio.source.md`](../hifimule-daemon/tests/fixtures/generated-audio.source.md).

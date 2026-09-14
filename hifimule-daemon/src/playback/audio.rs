@@ -340,6 +340,18 @@ fn diagnostic_representation(value: &str) -> String {
             | "opus"
             | "ogg"
             | "oga"
+            | "aif"
+            | "aiff"
+            | "vorbis"
+            | "wma"
+            | "asf"
+            | "wmav1"
+            | "wmav2"
+            | "wmapro"
+            | "wmalossless"
+            | "pcm_s16be"
+            | "pcm_s24be"
+            | "pcm_s32be"
             | "pcm_s16le"
             | "pcm_s24le"
             | "pcm_s32le"
@@ -978,6 +990,36 @@ mod tests {
             provenance: PlaybackProvenance::Original,
             request: request(url),
         }
+    }
+
+    #[test]
+    fn new_format_hints_and_diagnostics_are_normalized() {
+        for label in ["aif", "aiff", "ogg", "oga", "wma", "asf"] {
+            let container = format!(".{}", label.to_ascii_uppercase());
+            let source = representation(
+                Some(&container),
+                None,
+                "https://music.example/Items/id/Download",
+            );
+            assert_eq!(decoder_hint(&source), format!("stream.{label}"));
+            assert_eq!(diagnostic_representation(&container), label);
+        }
+        for codec in [
+            "vorbis",
+            "wmav1",
+            "wmav2",
+            "wmapro",
+            "wmalossless",
+            "pcm_s16be",
+            "pcm_s24be",
+            "pcm_s32be",
+        ] {
+            assert_eq!(
+                diagnostic_representation(&codec.to_ascii_uppercase()),
+                codec
+            );
+        }
+        assert_eq!(diagnostic_representation("private-title-secret"), "unknown");
     }
 
     #[test]

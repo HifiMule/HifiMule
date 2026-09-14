@@ -89,7 +89,17 @@ fn representation_group(representation: &PlaybackRepresentation) -> u8 {
     if representation.codec.as_deref().is_some_and(|codec| {
         matches!(
             codec.to_ascii_lowercase().as_str(),
-            "flac" | "alac" | "pcm_s16le" | "pcm_s24le" | "pcm_s32le"
+            "flac"
+                | "alac"
+                | "wmalossless"
+                | "pcm_s16le"
+                | "pcm_s24le"
+                | "pcm_s32le"
+                | "pcm_s16be"
+                | "pcm_s24be"
+                | "pcm_s32be"
+                | "aif"
+                | "aiff"
         )
     }) {
         1
@@ -116,6 +126,20 @@ fn representation_is_supported(representation: &PlaybackRepresentation) -> bool 
             | "mp4"
             | "wav"
             | "opus"
+            | "aif"
+            | "aiff"
+            | "ogg"
+            | "oga"
+            | "vorbis"
+            | "wma"
+            | "asf"
+            | "wmav1"
+            | "wmav2"
+            | "wmapro"
+            | "wmalossless"
+            | "pcm_s16be"
+            | "pcm_s24be"
+            | "pcm_s32be"
     )
 }
 
@@ -1456,6 +1480,92 @@ mod tests {
                 headers: reqwest::header::HeaderMap::new(),
                 range_supported: false,
             },
+        }
+    }
+
+    #[test]
+    fn new_audio_labels_preserve_original_preference() {
+        for label in [
+            "aif",
+            "aiff",
+            "ogg",
+            "oga",
+            "vorbis",
+            "opus",
+            "wma",
+            "asf",
+            "wmav1",
+            "wmav2",
+            "wmapro",
+            "wmalossless",
+            "pcm_s16be",
+            "pcm_s24be",
+            "pcm_s32be",
+        ] {
+            for codec in [label.to_owned(), label.to_ascii_uppercase()] {
+                let selected = select_playback_representation(vec![
+                    representation(
+                        "flac",
+                        PlaybackProvenance::Alternative,
+                        None,
+                        Some(96_000),
+                        Some(24),
+                    ),
+                    representation(&codec, PlaybackProvenance::Original, None, None, None),
+                ])
+                .unwrap();
+                assert_eq!(selected.codec.as_deref(), Some(codec.as_str()));
+                assert_eq!(selected.provenance, PlaybackProvenance::Original);
+            }
+        }
+        assert!(
+            select_playback_representation(vec![representation(
+                "h264",
+                PlaybackProvenance::Original,
+                None,
+                None,
+                None
+            )])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn big_endian_pcm_alternatives_use_lossless_quality_ranking() {
+        for codec in [
+            "pcm_s16be",
+            "pcm_s24be",
+            "pcm_s32be",
+            "AIFF",
+            "AIF",
+            "wmalossless",
+            "WMALOSSLESS",
+        ] {
+            let selected = select_playback_representation(vec![
+                representation(
+                    "aac",
+                    PlaybackProvenance::Alternative,
+                    Some(320),
+                    None,
+                    None,
+                ),
+                representation(
+                    codec,
+                    PlaybackProvenance::Alternative,
+                    None,
+                    Some(96_000),
+                    Some(24),
+                ),
+                representation(
+                    "flac",
+                    PlaybackProvenance::Alternative,
+                    None,
+                    Some(48_000),
+                    Some(24),
+                ),
+            ])
+            .unwrap();
+            assert_eq!(selected.codec.as_deref(), Some(codec));
         }
     }
 

@@ -10,7 +10,7 @@
     "--disable-network", "--disable-avdevice", "--disable-avfilter", "--disable-swscale",
     "--disable-everything", "--enable-avcodec", "--enable-avformat",
     "--enable-avutil", "--enable-swresample", "--enable-protocol=file",
-    "--enable-demuxer=wav,flac,mov,mp3,aac,ogg", "--enable-decoder=pcm_s16le,pcm_s24le,pcm_s32le,flac,alac,mp3,aac,opus"
+    "--enable-demuxer=wav,flac,mov,mp3,aac,ogg,aiff,asf", "--enable-decoder=pcm_s16le,pcm_s24le,pcm_s32le,pcm_s16be,pcm_s24be,pcm_s32be,flac,alac,mp3,aac,opus,vorbis,wmav1,wmav2,wmapro,wmalossless"
   ],
   "windowsConfigureFlags": ["--disable-x86asm"],
   "requiredLibraries": ["avcodec", "avformat", "avutil", "swresample"],

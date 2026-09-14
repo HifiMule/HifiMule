@@ -289,7 +289,9 @@ mod tests {
             }
             Ok(())
         });
-        let pcm = Arc::new(ArrayQueue::new(64 * 1024));
+        let pcm = Arc::new(ArrayQueue::<f32>::new(64 * 1024));
+        let invalid_pcm = Arc::new(AtomicBool::new(false));
+        let consumer_invalid_pcm = invalid_pcm.clone();
         let done = Arc::new(AtomicBool::new(false));
         let drained = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let drain_pcm = pcm.clone();
@@ -297,7 +299,10 @@ mod tests {
         let drain_count = drained.clone();
         let consumer = std::thread::spawn(move || {
             while !drain_done.load(Ordering::Acquire) || !drain_pcm.is_empty() {
-                if drain_pcm.pop().is_some() {
+                if let Some(sample) = drain_pcm.pop() {
+                    if !sample.is_finite() {
+                        consumer_invalid_pcm.store(true, Ordering::Relaxed);
+                    }
                     drain_count.fetch_add(1, Ordering::Relaxed);
                 } else {
                     std::thread::yield_now();
@@ -308,6 +313,10 @@ mod tests {
         done.store(true, Ordering::Release);
         consumer.join().expect("PCM consumer panicked");
         let producer = producer.join().expect("compressed producer panicked");
+        assert!(
+            !invalid_pcm.load(Ordering::Relaxed),
+            "non-finite decoded PCM"
+        );
         match result {
             Err(error) => Err(error),
             Ok(summary) => {
@@ -441,6 +450,207 @@ mod tests {
             b'I', b'D', b'3', 4, 0, 0, 0, 0, 0, 0, 0xff, 0xfb, 0x90, 0x64,
         ];
         assert!(prefix_is_mp3(&bytes));
+    }
+
+    const NEW_FORMAT_FIXTURES: &[(&str, u64)] = &[
+        ("generated-pcm16.aif", 96_000),
+        ("generated-pcm24.aiff", 96_000),
+        ("generated-pcm32.aiff", 96_000),
+        ("generated-vorbis.ogg", 96_000),
+        ("generated-opus.oga", 96_000),
+        ("generated-wmav1.wma", 96_000),
+        ("generated-wmav2.wma", 96_000),
+    ];
+
+    // Expand metadata at runtime so eviction coverage does not require huge binary fixtures.
+    fn with_large_metadata(source: &[u8], name: &str) -> Vec<u8> {
+        let padding = COMPRESSED_CAPACITY_BYTES + 1024;
+        if source.starts_with(b"FORM") {
+            let mut expanded = source[..12].to_vec();
+            expanded.extend_from_slice(b"ANNO");
+            expanded.extend_from_slice(&(padding as u32).to_be_bytes());
+            expanded.resize(expanded.len() + padding, b' ');
+            expanded.extend_from_slice(&source[12..]);
+            let size = (expanded.len() - 8) as u32;
+            expanded[4..8].copy_from_slice(&size.to_be_bytes());
+            return expanded;
+        }
+        if name.ends_with(".wma") {
+            let header_size = u64::from_le_bytes(source[16..24].try_into().unwrap()) as usize;
+            let mut expanded = source[..header_size].to_vec();
+            // ASF Padding Object GUID, followed by its 64-bit object size.
+            expanded.extend_from_slice(&[
+                0x74, 0xd4, 0x06, 0x18, 0xdf, 0xca, 0x09, 0x45, 0xa4, 0xba, 0x9a, 0xab, 0xcb, 0x96,
+                0xaa, 0xe8,
+            ]);
+            expanded.extend_from_slice(&((padding + 24) as u64).to_le_bytes());
+            expanded.resize(expanded.len() + padding, 0);
+            let new_header_size = expanded.len() as u64;
+            expanded[16..24].copy_from_slice(&new_header_size.to_le_bytes());
+            let objects = u32::from_le_bytes(source[24..28].try_into().unwrap());
+            expanded[24..28].copy_from_slice(&(objects + 1).to_le_bytes());
+            expanded.extend_from_slice(&source[header_size..]);
+            // The generated fixtures start with the standard File Properties Object.
+            let file_size = expanded.len() as u64;
+            expanded[70..78].copy_from_slice(&file_size.to_le_bytes());
+            return expanded;
+        }
+        assert!(source.starts_with(b"OggS"));
+        let mut expanded = Vec::new();
+        let mut offset = 0;
+        let mut sequence = 0u32;
+        while offset < source.len() {
+            let segments = source[offset + 26] as usize;
+            let payload_offset = offset + 27 + segments;
+            let lacing = &source[offset + 27..payload_offset];
+            let payload_size: usize = lacing.iter().map(|&v| v as usize).sum();
+            let end = payload_offset + payload_size;
+            if offset > 0 && expanded.len() < 128 {
+                // The second page starts with Vorbis comments or OpusTags. Replace
+                // only its vendor string, preserving comment entries and setup data.
+                let prefix_size = if name.ends_with(".ogg") { 7 } else { 8 };
+                let vendor_size = u32::from_le_bytes(
+                    source[payload_offset + prefix_size..payload_offset + prefix_size + 4]
+                        .try_into()
+                        .unwrap(),
+                ) as usize;
+                let first_packet_size: usize = lacing
+                    .iter()
+                    .take_while(|&&v| v == 255)
+                    .map(|&v| v as usize)
+                    .sum::<usize>()
+                    + usize::from(*lacing.iter().find(|&&v| v < 255).unwrap());
+                let mut packet = source[payload_offset..payload_offset + prefix_size].to_vec();
+                packet.extend_from_slice(&(padding as u32).to_le_bytes());
+                packet.resize(packet.len() + padding, b'v');
+                packet.extend_from_slice(
+                    &source[payload_offset + prefix_size + 4 + vendor_size
+                        ..payload_offset + first_packet_size],
+                );
+                let mut packet_offset = 0;
+                while packet_offset < packet.len() {
+                    let length = (packet.len() - packet_offset).min(255 * 255);
+                    let mut page_lacing = vec![255; length / 255];
+                    if length < 255 * 255 {
+                        page_lacing.push((length % 255) as u8);
+                    }
+                    let continued = u8::from(packet_offset > 0);
+                    append_ogg_page(
+                        &mut expanded,
+                        &source[offset..offset + 27],
+                        continued,
+                        sequence,
+                        &page_lacing,
+                        &packet[packet_offset..packet_offset + length],
+                    );
+                    packet_offset += length;
+                    sequence += 1;
+                }
+                let first_segments = first_packet_size / 255 + 1;
+                if first_segments < segments {
+                    append_ogg_page(
+                        &mut expanded,
+                        &source[offset..offset + 27],
+                        0,
+                        sequence,
+                        &lacing[first_segments..],
+                        &source[payload_offset + first_packet_size..end],
+                    );
+                    sequence += 1;
+                }
+            } else {
+                append_ogg_page(
+                    &mut expanded,
+                    &source[offset..offset + 27],
+                    source[offset + 5],
+                    sequence,
+                    lacing,
+                    &source[payload_offset..end],
+                );
+                sequence += 1;
+            }
+            offset = end;
+        }
+        expanded
+    }
+
+    fn append_ogg_page(
+        output: &mut Vec<u8>,
+        header: &[u8],
+        flags: u8,
+        sequence: u32,
+        lacing: &[u8],
+        payload: &[u8],
+    ) {
+        let mut page = header.to_vec();
+        page[5] = flags;
+        page[18..22].copy_from_slice(&sequence.to_le_bytes());
+        page[22..26].fill(0);
+        page[26] = lacing.len() as u8;
+        page.extend_from_slice(lacing);
+        page.extend_from_slice(payload);
+        let mut crc = 0u32;
+        for &byte in &page {
+            crc ^= u32::from(byte) << 24;
+            for _ in 0..8 {
+                crc = if crc & 0x8000_0000 != 0 {
+                    (crc << 1) ^ 0x04c1_1db7
+                } else {
+                    crc << 1
+                };
+            }
+        }
+        page[22..26].copy_from_slice(&crc.to_le_bytes());
+        output.extend_from_slice(&page);
+    }
+
+    #[test]
+    fn new_formats_with_metadata_beyond_window_decode_completely_and_resume() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        for &(name, _) in NEW_FORMAT_FIXTURES {
+            let source = std::fs::read(root.join(name)).unwrap();
+            let (baseline, _) = decode_test_file_at(&root.join(name), 0).unwrap();
+            let expanded = with_large_metadata(&source, name);
+            assert!(expanded.len() > COMPRESSED_CAPACITY_BYTES);
+            let suffix = format!(".{}", name.rsplit('.').next().unwrap());
+            let mut file = tempfile::Builder::new().suffix(&suffix).tempfile().unwrap();
+            file.write_all(&expanded).unwrap();
+            file.flush().unwrap();
+            for start in [0, 48_000] {
+                let (summary, samples, high_water) =
+                    decode_test_file_at_with_compressed_high_water(file.path(), start)
+                        .unwrap_or_else(|error| panic!("{name}, start {start}: {error:#}"));
+                assert_eq!(summary.frames, baseline.frames, "{name}");
+                assert_eq!(samples, (baseline.frames - start) * 2, "{name}");
+                assert!(high_water <= COMPRESSED_CAPACITY_BYTES as u64, "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn new_formats_decode_complete_finite_pcm_and_resume() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        for &(name, expected_frames) in NEW_FORMAT_FIXTURES {
+            let path = root.join(name);
+            let (summary, samples, high_water) =
+                decode_test_file_at_with_compressed_high_water(&path, 0)
+                    .unwrap_or_else(|error| panic!("{name}: {error:#}"));
+            eprintln!("{name}: {} frames", summary.frames);
+            // WMA encoders can pad or trim up to one 2048-sample frame.
+            let tolerance = if name.ends_with(".wma") { 2048 } else { 0 };
+            assert!(
+                summary.frames.abs_diff(expected_frames) <= tolerance,
+                "{name}: {} frames",
+                summary.frames
+            );
+            assert_eq!(samples, summary.frames * 2, "{name}");
+            assert!(high_water <= COMPRESSED_CAPACITY_BYTES as u64);
+            let (resumed, samples, high_water) =
+                decode_test_file_at_with_compressed_high_water(&path, 48_000).unwrap();
+            assert_eq!(resumed.frames, summary.frames, "{name}");
+            assert_eq!(samples, (summary.frames - 48_000) * 2, "{name}");
+            assert!(high_water <= COMPRESSED_CAPACITY_BYTES as u64);
+        }
     }
 
     #[test]
