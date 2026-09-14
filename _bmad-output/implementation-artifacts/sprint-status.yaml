@@ -187,7 +187,7 @@ development_status:
   15-1-close-and-reopen-the-ui-without-restarting-the-daemon: done
   15-2-quit-safely-while-a-device-sync-is-running: done
   15-3-preserve-and-restore-a-paused-listening-session: done
-  15-4-play-a-selected-library-track-through-the-daemon: in-progress
+  15-4-play-a-selected-library-track-through-the-daemon: review
   15-5-choose-an-audio-output-and-recover-safely-from-disconnection: backlog
   15-6-control-playback-through-the-operating-system-with-the-window-closed: backlog
   15-7-seek-within-a-track-and-see-the-actual-playback-position: backlog

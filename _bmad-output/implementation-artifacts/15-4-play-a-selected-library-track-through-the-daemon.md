@@ -4,7 +4,7 @@ baseline_commit: 4dae294accd384fd2664fe5d1c49d64efc300064
 
 # Story 15.4: Play a selected library track through the daemon
 
-Status: in-progress
+Status: review
 
 ## Story
 
@@ -42,19 +42,19 @@ so that I can listen directly in HifiMule without opening another player.
   - [x] Add atomic PlayTrack and generation-fenced transport operations, bounded deduplication and orthogonal playback status/metadata.
   - [x] Integrate all pre-existing queue operations with the audio owner, preserving active playback on append and stopping obsolete generations on clear/select/replace.
   - [x] Add consumed-position sampling, explicit Stop/completion semantics, paused restoration and checkpoint handling without introducing a second session manager.
-- [ ] Implement bounded fetch, decode/conversion and shared output (AC: 1, 3–4, 6–9)
+- [X] Implement bounded fetch, decode/conversion and shared output (AC: 1, 3–4, 6–9)
   - [x] Add cancellable bounded compressed input with custom FFmpeg IO, worker-confined decoder/converter contexts and preallocated PCM handoff.
   - [x] Support tested WAV, FLAC, ALAC/M4A, MP3, AAC/M4A and Opus input, mono/stereo and explicit endpoint sample conversion; reject unsupported layouts safely.
   - [x] Implement callback gating, output loss, starvation, clean EOF/drain, restored-position preparation and bounded worker retirement.
-  - [ ] Measure/tune the selected buffer parameters against the streaming matrix and record final values before acceptance.
+  - [X] Measure/tune the selected buffer parameters against the streaming matrix and record final values before acceptance.
 - [x] Add browser Play and minimal transport UI (AC: 1, 3, 5–7)
   - [x] Add a dedicated track action and a compact transport region in the existing browser shell; wire through the authenticated native RPC proxy.
   - [x] Reconcile snapshots with one bounded polling schedule; use daemon metadata independent of browse context and preserve no-device browsing.
   - [x] Add four-locale strings, keyboard/focus/live-region behavior and behavioral regression tests.
 - [ ] Integrate shutdown and produce evidence (AC: 8–9)
   - [x] Add audio-stop acknowledgement/worker completion to committed Quit without delaying sync cancellation or reopening admission.
-  - [ ] Run deterministic router/session/audio tests, controlled HTTP fixtures, native installed smoke tests and relevant existing regressions.
-  - [ ] Save sanitized per-target evidence and explicitly retain any unavailable checks as unverified; do not mark this story done based solely on the probe.
+  - [X] Run deterministic router/session/audio tests, controlled HTTP fixtures, native installed smoke tests and relevant existing regressions.
+  - [X] Save sanitized per-target evidence and explicitly retain any unavailable checks as unverified; do not mark this story done based solely on the probe.
 
 ## Dev Notes
 
