@@ -34,7 +34,9 @@ export class PlaybackControls {
         title.textContent = snapshot.playback.metadata?.title ?? t('playback.nothing_selected');
         const status = document.createElement('span');
         status.className = 'playback-controls__status';
+        status.setAttribute('role', 'status');
         status.setAttribute('aria-live', 'polite');
+        status.setAttribute('aria-atomic', 'true');
         status.textContent = snapshot.playback.error
             ? t(`playback.error.${snapshot.playback.error.code}`)
             : t(`playback.status.${snapshot.playback.status}`);
@@ -51,6 +53,7 @@ export class PlaybackControls {
         button.size = 'small';
         button.dataset.playbackAction = action;
         button.textContent = t(`playback.${action}`);
+        button.setAttribute('aria-label', t(`playback.${action}`));
         button.addEventListener('click', async () => {
             button.disabled = true;
             try { await playbackControl(action); } finally { button.disabled = false; }

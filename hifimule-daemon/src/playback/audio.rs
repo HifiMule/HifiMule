@@ -10,6 +10,10 @@ use cpal::{FromSample, Sample, SizedSample};
 use crossbeam_queue::ArrayQueue;
 use futures::StreamExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+const PCM_TARGET_MILLISECONDS: usize = 500;
+const PCM_CAPACITY_MAX_BYTES: usize = 1024 * 1024;
+const STARTUP_FILL_MILLISECONDS: usize = 100;
 use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -652,8 +656,9 @@ fn run_output(
             "unsupported output layout"
         )));
     }
-    let capacity = ((config.sample_rate.0 as usize * config.channels as usize) / 2)
-        .min(1024 * 1024 / std::mem::size_of::<f32>());
+    let samples_per_second = config.sample_rate.0 as usize * config.channels as usize;
+    let capacity = (samples_per_second * PCM_TARGET_MILLISECONDS / 1000)
+        .min(PCM_CAPACITY_MAX_BYTES / std::mem::size_of::<f32>());
     let pcm = Arc::new(ArrayQueue::new(capacity));
     let consumed = Arc::new(AtomicU64::new(0));
     let output_lost = Arc::new(AtomicBool::new(false));
@@ -707,7 +712,7 @@ fn run_output(
             decoder_cancel,
         )
     });
-    while pcm.len() < (rate as usize * channels as usize / 10)
+    while pcm.len() < (rate as usize * channels as usize * STARTUP_FILL_MILLISECONDS / 1000)
         && !decoder.is_finished()
         && !cancel.load(Ordering::Acquire)
     {

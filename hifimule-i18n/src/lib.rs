@@ -130,4 +130,29 @@ mod tests {
             "3 von 10 Dateien"
         );
     }
+
+    #[test]
+    fn playback_controls_are_complete_in_every_supported_locale() {
+        let catalog = CATALOG.as_object().expect("catalog must be an object");
+        let english = catalog[DEFAULT_LANGUAGE]
+            .as_object()
+            .expect("English catalog must be an object");
+        let playback_keys: Vec<_> = english
+            .keys()
+            .filter(|key| key.starts_with("playback."))
+            .collect();
+
+        for language in ["en", "fr", "es", "de"] {
+            let translations = catalog[language]
+                .as_object()
+                .expect("supported locale must be an object");
+            for key in &playback_keys {
+                let value = translations
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| panic!("{language} is missing {key}"));
+                assert!(!value.trim().is_empty(), "{language} has an empty {key}");
+            }
+        }
+    }
 }

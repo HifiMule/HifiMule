@@ -30,9 +30,9 @@ so that I can listen directly in HifiMule without opening another player.
 
 ## Tasks / Subtasks
 
-- [ ] Establish controlled audio build and runtime identity (AC: 1, 7, 9)
-  - [ ] Pin dependencies/build recipe below, bundle private native libraries and record verified source/archive hashes, build flags and notices in a runtime manifest.
-  - [ ] Add runtime-version/ABI checks and clean-install dependency checks to normal Build and release packaging for all existing targets.
+- [x] Establish controlled audio build and runtime identity (AC: 1, 7, 9)
+  - [x] Pin dependencies/build recipe below, bundle private native libraries and record verified source/archive hashes, build flags and notices in a runtime manifest.
+  - [x] Add runtime-version/ABI checks and clean-install dependency checks to normal Build and release packaging for all existing targets.
   - [x] Reproduce the six-format native fixture matrix using the production decoder before connecting live provider streams.
 - [x] Extend provider-neutral playback resolution (AC: 1–2, 6)
   - [x] Add typed private representation/request description and default unsupported trait behavior; implement Jellyfin and Subsonic original streaming separately from sync download/transcoding.
@@ -47,10 +47,10 @@ so that I can listen directly in HifiMule without opening another player.
   - [x] Support tested WAV, FLAC, ALAC/M4A, MP3, AAC/M4A and Opus input, mono/stereo and explicit endpoint sample conversion; reject unsupported layouts safely.
   - [x] Implement callback gating, output loss, starvation, clean EOF/drain, restored-position preparation and bounded worker retirement.
   - [ ] Measure/tune the selected buffer parameters against the streaming matrix and record final values before acceptance.
-- [ ] Add browser Play and minimal transport UI (AC: 1, 3, 5–7)
+- [x] Add browser Play and minimal transport UI (AC: 1, 3, 5–7)
   - [x] Add a dedicated track action and a compact transport region in the existing browser shell; wire through the authenticated native RPC proxy.
   - [x] Reconcile snapshots with one bounded polling schedule; use daemon metadata independent of browse context and preserve no-device browsing.
-  - [ ] Add four-locale strings, keyboard/focus/live-region behavior and behavioral regression tests.
+  - [x] Add four-locale strings, keyboard/focus/live-region behavior and behavioral regression tests.
 - [ ] Integrate shutdown and produce evidence (AC: 8–9)
   - [x] Add audio-stop acknowledgement/worker completion to committed Quit without delaying sync cancellation or reopening admission.
   - [ ] Run deterministic router/session/audio tests, controlled HTTP fixtures, native installed smoke tests and relevant existing regressions.
@@ -260,6 +260,7 @@ GPT-6 (Codex)
 - 2026-09-13: The next retry imported the release key but direct MSYS2 GPG invocation could not launch `/usr/bin/gpg-agent` and exited 2. MSYS2 GPG is now invoked through its sibling Bash runtime while native Windows GPG remains direct. Verified from `hifimule-ui` that the real isolated import returns status 0 with no agent error.
 - 2026-09-13: A further real run showed the agent still failed only for the production keyring path. The adjacent `target/audio-runtime/...gnupg-UUID` path exceeded MSYS2 GPG agent socket limits; the shorter `%TEMP%` reproduction had passed. Isolated verification homes now use short `%TEMP%\hm-gpg-*` directories with guaranteed cleanup. Full verification of the actual cached 9.0.1 archive/signature/key succeeds from `hifimule-ui`.
 - 2026-09-14: User confirmed the final repository-automated Windows x64 official-source flow completed successfully: FFmpeg/source verification and build, HifiMule package creation, package installation, and playback of every supported file format tested. Installer identity/hash and the remaining lifecycle/resource measurements were not supplied and remain unverified.
+- 2026-09-14: Resumed Story 15.4 and closed the controlled-runtime and minimal-transport implementation tasks. Recorded the exact bounded buffer policy in the runtime manifest; added four-locale playback parity and transport accessibility regression coverage; full daemon (731 passing, 5 ignored), script, formatting and frontend build gates pass. Installed high-water/lifecycle evidence remains open.
 
 ### Completion Notes List
 
@@ -289,6 +290,9 @@ GPT-6 (Codex)
 - MSYS2 GPG now runs inside MSYS2 Bash so its agent/process environment is valid; native GPG behavior remains unchanged.
 - GPG verification homes use bounded short temporary paths, avoiding MSYS2 agent socket-length failures while remaining isolated and automatically removed.
 - Windows x64 official-source automation now has end-to-end user evidence through installed-package supported-format playback, superseding the earlier manual-only feasibility status. Unsupplied installer identity and lifecycle/resource evidence remain explicitly open.
+- Controlled runtime packaging is now complete in source: the signed FFmpeg 9.0.1 recipe, hashes, ABI versions, flags, notices and bounded buffer policy are manifest-owned, while normal Build/Release exercise the target-specific provisioning and package checks.
+- Minimal transport accessibility is complete: playback strings are parity-checked across English, French, Spanish and German; controls expose explicit localized accessible names, retain keyboard focus across authoritative snapshots, show visible focus, and publish status through an atomic polite live region.
+- Validation on 2026-09-14: 731 daemon tests passed (5 diagnostic-only tests ignored), all Node script tests passed, the UI production build and Cargo formatting passed, and ordinary clippy completed with only pre-existing warnings outside the touched Story 15.4 code. Strict all-target clippy remains blocked by the repository's existing warning backlog.
 
 ### File List
 
@@ -344,6 +348,7 @@ GPT-6 (Codex)
 - `scripts/tests/linux-audio-runtime.test.mjs`
 - `scripts/tests/build-daemon.test.mjs`
 - `scripts/tests/tauri-platform-config.test.mjs`
+- `scripts/tests/playback-ui.test.mjs`
 - `scripts/tests/windows-audio-runtime.test.mjs`
 - `scripts/verify-audio-runtime.mjs`
 - `scripts/windows-audio-runtime.mjs`
@@ -373,3 +378,4 @@ GPT-6 (Codex)
 - 2026-09-13: Fixed MSYS2 `gpg-agent` startup by routing MSYS2 GPG through its Bash runtime; isolated real-key import verified without agent errors.
 - 2026-09-13: Fixed the remaining MSYS2 agent socket-length failure by moving isolated GPG homes to short system-temporary paths; actual FFmpeg archive signature verification passed.
 - 2026-09-14: Recorded successful user-run automated Windows x64 official-source build, package creation, installation, and all-supported-format playback evidence.
+- 2026-09-14: Recorded the final bounded buffer policy and added localized accessible transport regression coverage; closed the controlled-runtime and minimal-transport implementation tasks after full local validation.

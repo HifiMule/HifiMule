@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { join, resolve } from "node:path";
 import {
@@ -92,4 +93,18 @@ test("controlled-prefix verifier accepts the prefix itself and nested native pat
   for (const libdir of [prefix, join(prefix, "lib", "nested")]) {
     assert.deepEqual(verifyAudioRuntime({ prefix, execFileSync: pkgConfigFixture({}, libdir) }).versions, exactVersions);
   }
+});
+
+test("runtime manifest records the bounded production buffering policy", () => {
+  const manifest = JSON.parse(readFileSync(
+    new URL("../../hifimule-daemon/audio-runtime.json", import.meta.url),
+    "utf8",
+  ));
+  assert.deepEqual(manifest.bufferPolicy, {
+    compressedChunkBytes: 65536,
+    compressedCapacityBytes: 8388608,
+    pcmTargetMilliseconds: 500,
+    pcmCapacityMaxBytes: 1048576,
+    startupFillMilliseconds: 100,
+  });
 });

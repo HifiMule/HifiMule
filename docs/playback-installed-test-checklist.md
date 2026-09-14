@@ -48,6 +48,11 @@ remain explicitly unverified because they were not included in the report.
 
 ## Required runs
 
+The production policy under test is recorded in `hifimule-daemon/audio-runtime.json`:
+64 KiB compressed chunks retained within an 8 MiB compressed window, a 500 ms
+PCM target capped at 1 MiB, and a 100 ms startup fill. These are configured
+bounds, not substitutes for the per-target observed high-water values below.
+
 - Play every format from each applicable provider; record loading → active and
   audible output, then Pause, Resume, and Stop.
 - Pause after measurable progress, quit normally, relaunch, confirm the session

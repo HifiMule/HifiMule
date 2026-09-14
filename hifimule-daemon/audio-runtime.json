@@ -16,6 +16,13 @@
   "requiredLibraries": ["avcodec", "avformat", "avutil", "swresample"],
   "abiVersions": { "avcodec": "63.1.101", "avformat": "63.1.101", "avutil": "61.1.101", "swresample": "7.1.101" },
   "bindingVersions": { "ffmpeg-next": "9.0.0", "ffmpeg-sys-next": "9.0.0", "cpal": "0.16.0" },
+  "bufferPolicy": {
+    "compressedChunkBytes": 65536,
+    "compressedCapacityBytes": 8388608,
+    "pcmTargetMilliseconds": 500,
+    "pcmCapacityMaxBytes": 1048576,
+    "startupFillMilliseconds": 100
+  },
   "licenses": ["LGPL-2.1-or-later"],
   "sourceSha256": "cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635",
   "verification": { "macosArm64": "local-pending", "macosX64": "user", "linuxArm64": "user", "linuxX64": "user", "windowsX64": "user" }
