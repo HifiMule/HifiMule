@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, join, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { audioRuntimeVerification } from "./verify-audio-runtime.mjs";
 
@@ -127,7 +127,7 @@ export function windowsBuildEnvironment(target, env = process.env, options = {})
   if (!existsSync(vswhere) && !options.vswhere) fail("Visual Studio locator is missing; install Visual Studio Build Tools with Desktop development with C++");
   const installation = String(execute(vswhere, ["-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"], { encoding: "utf8", env })).trim();
   if (!installation) fail("Visual Studio C++ Build Tools are missing; install Desktop development with C++");
-  const vcvars = join(installation, "VC", "Auxiliary", "Build", "vcvarsall.bat");
+  const vcvars = win32.join(installation, "VC", "Auxiliary", "Build", "vcvarsall.bat");
   if (!existsSync(vcvars) && !options.vswhere) fail(`Visual Studio developer environment script is missing: ${vcvars}`);
   const architecture = target.startsWith("aarch64") ? "amd64_arm64" : "amd64";
   const output = String(execute("cmd.exe", ["/d", "/s", "/c", `""${vcvars}" ${architecture} >nul && set"`], { encoding: "utf8", env, windowsVerbatimArguments: true }));
@@ -155,7 +155,7 @@ export function pathForGpg(gpg, value, env = process.env) {
   const command = String(gpg);
   const effective = command.includes("\\") || command.includes("/")
     ? command
-    : join(String(env.PATH ?? "").split(";").find(Boolean) ?? "", command);
+    : win32.join(String(env.PATH ?? "").split(";").find(Boolean) ?? "", command);
   const normalizedExecutable = effective.replaceAll("\\", "/").toLowerCase();
   return normalizedExecutable.includes("/msys") && normalizedExecutable.endsWith("/usr/bin/gpg.exe") ? toMsysPath(value) : value;
 }
@@ -167,7 +167,7 @@ function isMsys2Gpg(gpg) {
 
 export function gpgInvocation(gpg, args) {
   if (!isMsys2Gpg(gpg)) return { command: gpg, args };
-  const bash = join(dirname(gpg), "bash.exe");
+  const bash = win32.join(win32.dirname(gpg), "bash.exe");
   return { command: bash, args: ["--noprofile", "--norc", "-c", `exec ${[toMsysPath(gpg), ...args].map(shellQuote).join(" ")}`] };
 }
 
@@ -177,13 +177,13 @@ export function createGpgHome(temporaryRoot = tmpdir()) {
 
 export function findMsys2Bash(env = process.env, pathExists = existsSync) {
   const roots = [env.MSYS2_ROOT, "C:\\msys64", "C:\\tools\\msys64"].filter(Boolean);
-  return roots.map((rootPath) => join(rootPath, "usr", "bin", "bash.exe")).find(pathExists);
+  return roots.map((rootPath) => win32.join(rootPath, "usr", "bin", "bash.exe")).find(pathExists);
 }
 
 export function validateMsys2Toolchain(bash, pathExists = existsSync) {
-  const bin = dirname(bash);
+  const bin = win32.dirname(bash);
   for (const tool of ["make", "sed", "grep", "awk"]) {
-    if (!pathExists(join(bin, `${tool}.exe`))) fail(`MSYS2 ${tool} is missing; install it with: pacman -S --needed make sed grep gawk`);
+    if (!pathExists(win32.join(bin, `${tool}.exe`))) fail(`MSYS2 ${tool} is missing; install it with: pacman -S --needed make sed grep gawk`);
   }
   return bin;
 }

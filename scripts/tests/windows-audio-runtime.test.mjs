@@ -44,6 +44,18 @@ test("selects MSYS2 bash without falling back to WSL bash.exe", () => {
   assert.equal(findMsys2Bash({}, (path) => existing.has(path)), undefined);
 });
 
+test("prefers the action-installed MSYS2 over a preinstalled runner copy", () => {
+  const selectedBin = "D:\\a\\_temp\\msys64\\usr\\bin";
+  const existing = new Set([
+    "C:\\msys64\\usr\\bin\\bash.exe",
+    ...["bash", "make", "sed", "grep", "awk"].map((tool) => `${selectedBin}\\${tool}.exe`),
+  ]);
+  const pathExists = (path) => existing.has(path);
+  const bash = findMsys2Bash({ MSYS2_ROOT: "D:/a/_temp/msys64" }, pathExists);
+  assert.equal(bash, `${selectedBin}\\bash.exe`);
+  assert.equal(validateMsys2Toolchain(bash, pathExists), selectedBin);
+});
+
 test("rejects an MSYS2 toolchain without sed before FFmpeg configure", () => {
   const bash = "C:\\Tools\\msys64\\usr\\bin\\bash.exe";
   const existing = new Set([bash, "C:\\Tools\\msys64\\usr\\bin\\make.exe"]);

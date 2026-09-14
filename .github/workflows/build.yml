@@ -50,6 +50,7 @@ jobs:
 
       - name: Install Windows FFmpeg source-build tools
         if: runner.os == 'Windows'
+        id: msys2
         uses: msys2/setup-msys2@v2
         with:
           install: >-
@@ -61,6 +62,13 @@ jobs:
             pkgconf
             gnupg
           path-type: inherit
+
+      - name: Select installed MSYS2 toolchain
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        run: '"MSYS2_ROOT=$env:MSYS2_LOCATION" >> $env:GITHUB_ENV'
 
       - name: Install Linux daemon dependencies
         if: runner.os == 'Linux'
