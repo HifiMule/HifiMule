@@ -46,6 +46,56 @@ remain explicitly unverified because they were not included in the report.
    authenticated `daemon.health`. Never retain the owner token, request headers,
    authenticated URLs, or provider error bodies.
 
+## Evidence collector
+
+Run the collector from the matching source revision while the installed HifiMule
+application and daemon are open. The package argument is the installer/package
+that was installed; the install root is the application-owned directory that
+contains the loaded private FFmpeg libraries. The tool reads the private daemon
+descriptor only in memory, redacts home/profile prefixes, rejects secret-like
+notes and remote URLs, and never writes the owner token.
+
+macOS/Linux:
+
+```bash
+python3 scripts/playback-installed-evidence.py collect \
+  --target macos-arm64 \
+  --package <path-to-dmg> \
+  --install-root /Applications/HifiMule.app \
+  --provider-kind jellyfin \
+  --provider-version <server-version> \
+  --output docs/playback-evidence/macos-arm64.json
+```
+
+Windows PowerShell:
+
+```powershell
+py -3 scripts/playback-installed-evidence.py collect `
+  --target windows-x64 `
+  --package <path-to-installer.exe> `
+  --install-root "$env:LOCALAPPDATA\HifiMule" `
+  --provider-kind jellyfin `
+  --provider-version <server-version> `
+  --output docs/playback-evidence/windows-x64.json
+```
+
+Use `linux-x64`, `macos-x64`, or `macos-arm64` as appropriate. For Linux,
+provide the actual application-owned root shown by the installed daemon's
+loaded module paths. The collector pauses before destructive scenarios so it
+can retain buffer counters before Quit rotates the daemon instance. Relaunch
+HifiMule when prompted; the tool reloads the new descriptor automatically.
+
+Validate one result or the complete four-target directory:
+
+```bash
+python3 scripts/playback-installed-evidence.py validate docs/playback-evidence/macos-arm64.json
+python3 scripts/playback-installed-evidence.py validate docs/playback-evidence
+```
+
+The directory validation succeeds only when Windows x64, Linux x64, macOS x64
+and macOS ARM64 records are complete and passed. Failed or unavailable checks
+remain explicit and keep the command non-zero.
+
 ## Required runs
 
 The production policy under test is recorded in `hifimule-daemon/audio-runtime.json`:

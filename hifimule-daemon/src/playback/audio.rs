@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 const PCM_TARGET_MILLISECONDS: usize = 500;
 const PCM_CAPACITY_MAX_BYTES: usize = 1024 * 1024;
 const STARTUP_FILL_MILLISECONDS: usize = 100;
+const ENDPOINT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,6 +267,10 @@ pub(crate) fn publish_pipeline_failure(
             retryable: error.retryable(),
         },
     );
+}
+
+fn should_publish_worker_failure(error: &PlaybackPipelineError, _worker_cancelled: bool) -> bool {
+    error.is_publishable()
 }
 
 struct Pipeline {
@@ -551,7 +556,12 @@ impl AudioEngine {
                 )
                 .map_err(|error| error.with_representation(&worker_representation));
                 match result {
-                    Err(error) if !worker_cancel.load(Ordering::Acquire) => {
+                    Err(error)
+                        if should_publish_worker_failure(
+                            &error,
+                            worker_cancel.load(Ordering::Acquire),
+                        ) =>
+                    {
                         publish_pipeline_failure(&session, generation, error);
                     }
                     _ => {}
@@ -644,7 +654,12 @@ fn run_output(
     let device = host.default_output_device().ok_or_else(|| {
         PlaybackPipelineError::output_open(anyhow::anyhow!("output device unavailable"))
     })?;
-    *endpoint.lock().unwrap_or_else(|error| error.into_inner()) = device.name().ok();
+    let opened_endpoint = device.name().map_err(|error| {
+        PlaybackPipelineError::output_open(
+            anyhow::Error::new(error).context("read active output endpoint identity"),
+        )
+    })?;
+    *endpoint.lock().unwrap_or_else(|error| error.into_inner()) = Some(opened_endpoint.clone());
     let supported = device.default_output_config().map_err(|error| {
         PlaybackPipelineError::output_open(
             anyhow::Error::new(error).context("read default output configuration"),
@@ -744,6 +759,7 @@ fn run_output(
     let mut buffering = false;
     let mut last_samples = 0;
     let mut seq = 0;
+    let mut last_endpoint_check = std::time::Instant::now();
     while !cancel.load(Ordering::Acquire) {
         pcm_high_water.fetch_max(pcm.len() as u64, Ordering::AcqRel);
         if generation_serial.load(Ordering::Acquire) != expected_serial {
@@ -757,9 +773,24 @@ fn run_output(
                 "output stream callback reported loss"
             )));
         }
+        if last_endpoint_check.elapsed() >= ENDPOINT_POLL_INTERVAL {
+            last_endpoint_check = std::time::Instant::now();
+            let current_endpoint = host
+                .default_output_device()
+                .and_then(|device| device.name().ok());
+            if !endpoint_is_current(Some(&opened_endpoint), current_endpoint.as_deref()) {
+                cancel.store(true, Ordering::Release);
+                let _ = decoder.join();
+                return Err(PlaybackPipelineError::output_lost(anyhow::anyhow!(
+                    "active output endpoint changed or disappeared"
+                )));
+            }
+        }
         let samples = consumed.load(Ordering::Acquire);
-        if samples > last_samples && !active {
-            active = true;
+        let (next_active, became_active) =
+            activity_transition(gate.load(Ordering::Acquire), samples, last_samples, active);
+        active = next_active;
+        if became_active {
             buffering = false;
             session.publish_event(generation.clone(), PlaybackEvent::Active);
         }
@@ -798,6 +829,23 @@ fn run_output(
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
     Ok(())
+}
+
+fn endpoint_is_current(opened: Option<&str>, current: Option<&str>) -> bool {
+    matches!((opened, current), (Some(opened), Some(current)) if opened == current)
+}
+
+fn activity_transition(
+    gate_open: bool,
+    samples: u64,
+    last_samples: u64,
+    active: bool,
+) -> (bool, bool) {
+    if !gate_open {
+        return (false, false);
+    }
+    let became_active = samples > last_samples && !active;
+    (active || became_active, became_active)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -976,6 +1024,40 @@ mod tests {
         assert_eq!(error.stage(), "output-lost");
         assert_eq!(error.code(), "OUTPUT_LOST");
         assert!(error.retryable());
+    }
+
+    #[test]
+    fn output_loss_remains_publishable_after_worker_cancels_decode() {
+        let error = PlaybackPipelineError::output_lost(anyhow::anyhow!("endpoint disappeared"));
+        assert!(should_publish_worker_failure(&error, true));
+
+        let cancelled = PlaybackPipelineError::cancelled(anyhow::anyhow!("explicit stop"));
+        assert!(!should_publish_worker_failure(&cancelled, true));
+    }
+
+    #[test]
+    fn active_endpoint_change_or_disappearance_is_output_loss() {
+        assert!(endpoint_is_current(
+            Some("Jabra Link 390"),
+            Some("Jabra Link 390")
+        ));
+        assert!(!endpoint_is_current(
+            Some("Jabra Link 390"),
+            Some("MacBook Speakers")
+        ));
+        assert!(!endpoint_is_current(Some("Jabra Link 390"), None));
+        assert!(!endpoint_is_current(None, Some("MacBook Speakers")));
+    }
+
+    #[test]
+    fn resumed_consumption_republishes_active_after_pause() {
+        let (active, publish) = activity_transition(false, 100, 100, true);
+        assert!(!active);
+        assert!(!publish);
+
+        let (active, publish) = activity_transition(true, 101, 100, active);
+        assert!(active);
+        assert!(publish);
     }
 
     #[test]

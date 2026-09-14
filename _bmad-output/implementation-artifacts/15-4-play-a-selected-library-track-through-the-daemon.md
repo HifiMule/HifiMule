@@ -261,6 +261,12 @@ GPT-6 (Codex)
 - 2026-09-13: A further real run showed the agent still failed only for the production keyring path. The adjacent `target/audio-runtime/...gnupg-UUID` path exceeded MSYS2 GPG agent socket limits; the shorter `%TEMP%` reproduction had passed. Isolated verification homes now use short `%TEMP%\hm-gpg-*` directories with guaranteed cleanup. Full verification of the actual cached 9.0.1 archive/signature/key succeeds from `hifimule-ui`.
 - 2026-09-14: User confirmed the final repository-automated Windows x64 official-source flow completed successfully: FFmpeg/source verification and build, HifiMule package creation, package installation, and playback of every supported file format tested. Installer identity/hash and the remaining lifecycle/resource measurements were not supplied and remain unverified.
 - 2026-09-14: Resumed Story 15.4 and closed the controlled-runtime and minimal-transport implementation tasks. Recorded the exact bounded buffer policy in the runtime manifest; added four-locale playback parity and transport accessibility regression coverage; full daemon (731 passing, 5 ignored), script, formatting and frontend build gates pass. Installed high-water/lifecycle evidence remains open.
+- 2026-09-14: Added a dependency-free interactive installed-evidence collector and strict single-record/four-target validator. It authenticates from the private lifecycle descriptor without persisting its token, projects daemon health onto a public allowlist, redacts local profile paths, captures peak counters across daemon restarts, inventories private native modules, and preserves failed/unverified checks explicitly.
+- 2026-09-14: The first macOS ARM64 collector run exposed the daemon's successful JSON-RPC compatibility envelope containing `error: null`. The parser now treats only a non-null error as failure, reports malformed envelopes explicitly, and has an exact-shape regression test.
+- 2026-09-14: The first macOS ARM64 output-loss exercise showed CoreAudio automatically migrating the live stream from a disconnected Jabra endpoint to MacBook Speakers without invoking the stream error callback. The output worker now polls the default endpoint identity every 100 ms and maps a change or disappearance to retryable `OUTPUT_LOST`, preserving the paused occurrence instead of silently changing outputs.
+- 2026-09-14: The rebuilt macOS ARM64 installed run passed package identity, private-library resolution, six formats, buffer bounds and seven lifecycle scenarios. Its output-loss note reported that sound stopped and did not resume after reconnection, but the UI remained `playing`; the record was retained as failed. Root cause was the endpoint-loss path setting the decoder cancellation flag before worker completion, causing the publishable `OUTPUT_LOST` event to be suppressed as if it were an explicit stop. Worker failures now use their typed publishability rather than the internal cancellation flag.
+- 2026-09-14: Installed testing exposed Pause → Resume producing audible sound while remaining `loading`. Resume correctly set authoritative state to loading, but the long-lived audio worker retained its local `active` flag across Pause, so resumed sample consumption did not republish `Active`. The worker now clears local activity whenever its output gate is closed and publishes `Active` on the first newly consumed resumed sample.
+- 2026-09-14: User reran the rebuilt installed macOS ARM64 matrix after the output-loss and Pause → Resume fixes. The strict validator accepts the record: all six formats and all eight lifecycle scenarios pass, including output loss and play/pause/resume/stop; the 8 MiB compressed and 48,000-sample PCM high-water marks remain within manifest bounds; all four FFmpeg dylibs resolve under `/Applications/HifiMule.app`; package SHA-256 is `b79a324dc51f0fd05c6424dc25066a7602df110cc70a24f91c1642f3ecdd6c33` against Subsonic 0.63.2.
 
 ### Completion Notes List
 
@@ -293,6 +299,12 @@ GPT-6 (Codex)
 - Controlled runtime packaging is now complete in source: the signed FFmpeg 9.0.1 recipe, hashes, ABI versions, flags, notices and bounded buffer policy are manifest-owned, while normal Build/Release exercise the target-specific provisioning and package checks.
 - Minimal transport accessibility is complete: playback strings are parity-checked across English, French, Spanish and German; controls expose explicit localized accessible names, retain keyboard focus across authoritative snapshots, show visible focus, and publish status through an atomic polite live region.
 - Validation on 2026-09-14: 731 daemon tests passed (5 diagnostic-only tests ignored), all Node script tests passed, the UI production build and Cargo formatting passed, and ordinary clippy completed with only pre-existing warnings outside the touched Story 15.4 code. Strict all-target clippy remains blocked by the repository's existing warning backlog.
+- Installed evidence collection is now reproducible with `scripts/playback-installed-evidence.py collect`; validation rejects target/host mismatches, incomplete format or lifecycle coverage, missing signed-source identity, out-of-package native modules, zero/over-limit buffer counters, secrets and URLs. The story remains in progress until real installed target runs produce passing records.
+- Fixed collector compatibility with the production RPC envelope: successful responses may include `error: null`; non-null structured errors remain sanitized to their numeric code, and missing result/error envelopes fail explicitly.
+- Active endpoint loss is now detected even when CoreAudio silently reroutes an existing stream: the worker compares the opened endpoint with the current default endpoint outside the real-time callback, cancels decode, and returns the existing retryable output-loss failure. Validation on 2026-09-14: 732 daemon tests passed (5 diagnostic-only tests ignored), 6 collector tests and 56 Node script tests passed, formatting passed, and ordinary daemon clippy completed with only the existing repository warnings.
+- The second macOS ARM64 evidence record proved every installed check except the authoritative output-loss state transition. Corrected that record to `failed` rather than accepting its contradictory pass flag. Added a regression proving `OUTPUT_LOST` remains publishable after the worker internally cancels decode; 733 daemon tests pass serially (5 ignored), along with 6 collector and 56 Node script tests, formatting, diff checks and ordinary clippy. The first parallel daemon run hit the repository's shared-vault test race; the isolated initiating test and complete serial suite pass.
+- Fixed Pause → Resume status reconciliation without falsely claiming activity before audio: closing the callback gate resets only the worker's transient activity observation, and the next consumed sample republishes `Active`. The focused Resume/session tests pass; the full serial daemon suite passes with 734 tests and 5 ignored, plus 6 collector tests, 56 Node script tests, formatting, diff checks and ordinary clippy with existing warnings only.
+- macOS ARM64 installed acceptance evidence now passes in full and validates independently. The four-target evidence task remains open because Windows x64, Linux x64 and macOS x64 complete collector records are still missing; macOS ARM64 evidence is not used to infer those architectures.
 
 ### File List
 
@@ -309,6 +321,7 @@ GPT-6 (Codex)
 - `docs/playback-evidence-cross-platform-formats-2026-09-13.json`
 - `docs/playback-evidence-windows-x64-2026-09-13.json`
 - `docs/playback-evidence-windows-x64-official-source-2026-09-13.json`
+- `docs/playback-evidence/macos-arm64.json`
 - `docs/playback-installed-test-checklist.md`
 - `_bmad-output/implementation-artifacts/investigations/windows-ffmpeg-msvc-compiler-test-investigation.md`
 - `hifimule-daemon/Cargo.toml`
@@ -345,10 +358,12 @@ GPT-6 (Codex)
 - `scripts/bundle-macos-libs.mjs`
 - `scripts/linux-audio-runtime.mjs`
 - `scripts/prepare-sidecar.mjs`
+- `scripts/playback-installed-evidence.py`
 - `scripts/tests/linux-audio-runtime.test.mjs`
 - `scripts/tests/build-daemon.test.mjs`
 - `scripts/tests/tauri-platform-config.test.mjs`
 - `scripts/tests/playback-ui.test.mjs`
+- `scripts/tests/test_playback_installed_evidence.py`
 - `scripts/tests/windows-audio-runtime.test.mjs`
 - `scripts/verify-audio-runtime.mjs`
 - `scripts/windows-audio-runtime.mjs`
@@ -379,3 +394,9 @@ GPT-6 (Codex)
 - 2026-09-13: Fixed the remaining MSYS2 agent socket-length failure by moving isolated GPG homes to short system-temporary paths; actual FFmpeg archive signature verification passed.
 - 2026-09-14: Recorded successful user-run automated Windows x64 official-source build, package creation, installation, and all-supported-format playback evidence.
 - 2026-09-14: Recorded the final bounded buffer policy and added localized accessible transport regression coverage; closed the controlled-runtime and minimal-transport implementation tasks after full local validation.
+- 2026-09-14: Added the cross-platform installed-playback evidence collector, sanitization controls and strict four-target validation workflow.
+- 2026-09-14: Fixed installed-evidence collection for successful daemon RPC envelopes that include a null error member.
+- 2026-09-14: Fixed macOS silent output migration by monitoring the opened endpoint identity and converting default-device change/disappearance into retryable `OUTPUT_LOST`; installed rerun evidence remains pending.
+- 2026-09-14: Preserved the second macOS ARM64 run as failed after its note exposed stale `playing` state, and fixed internal decoder cancellation from suppressing the typed `OUTPUT_LOST` state event; installed rerun evidence remains pending.
+- 2026-09-14: Fixed Pause → Resume remaining `loading` during audible playback by resetting worker activity while gated and republishing `Active` on resumed sample consumption.
+- 2026-09-14: Validated the final installed macOS ARM64 evidence record with all formats, lifecycle scenarios, private native-library paths and bounded high-water measurements passing; retained the three untested target records as open.
