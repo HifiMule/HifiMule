@@ -233,8 +233,8 @@ export async function playbackPlayTrack(serverId: string, trackId: string): Prom
     });
 }
 
-export async function playbackControl(action: 'pause' | 'resume' | 'stop'): Promise<void> {
-    const current = await playbackGetSession();
+export async function playbackControl(action: 'pause' | 'resume' | 'stop', observed?: PlaybackSessionSnapshot): Promise<void> {
+    const current = observed ?? await playbackGetSession();
     if (!current.current) return;
     await rpcCall('playback.control', {
         schemaVersion: 1, instanceId: current.instanceId, sessionId: current.sessionId,

@@ -62,6 +62,9 @@ pub struct Status {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSnapshot {
+    /// Private admission disposition, excluded from the wire contract.
+    #[serde(skip)]
+    pub(crate) resume_audio: bool,
     pub schema_version: u32,
     pub instance_id: String,
     pub session_id: String,
@@ -215,6 +218,8 @@ pub struct OccurrencePage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyResult {
+    #[serde(skip)]
+    pub(crate) start_audio: bool,
     pub session_id: String,
     pub queue_revision: String,
     pub state_sequence: String,

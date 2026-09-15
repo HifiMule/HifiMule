@@ -32,6 +32,9 @@ class PlaybackEvidenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "nested" / "evidence.json"
             with patch.dict(os.environ, {"HIFIMULE_EVIDENCE_PATH": str(output), "GITHUB_SHA": "test-revision"}), \
+                    patch.object(evidence.platform, "system", return_value="Windows"), \
+                    patch.object(evidence.platform, "machine", return_value="AMD64"), \
+                    patch.object(evidence.platform, "release", return_value="test-release"), \
                     patch.object(evidence.subprocess, "run", side_effect=run), \
                     patch("builtins.print"):
                 code = evidence.main()

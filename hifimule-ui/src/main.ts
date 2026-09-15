@@ -6,6 +6,7 @@ import { Window, currentMonitor } from '@tauri-apps/api/window';
 import { t } from './i18n';
 import { withDeadline } from './lifecycleDeadline';
 import { shutdownMessageKey, ShutdownPoller, canRetryQuit, canRetryCheckpoint } from './shutdownStatus';
+import { PlaybackControls } from './components/PlaybackControls';
 
 const isDev = Boolean((import.meta as any).env?.DEV);
 setBasePath(new URL(isDev
@@ -16,6 +17,11 @@ setBasePath(new URL(isDev
 // Coordinates splash screen and main window lifecycle.
 
 let activeBasketSidebar: any = null;
+let activePlaybackControls: PlaybackControls | null = null;
+function disposePlaybackControls(): void {
+    activePlaybackControls?.destroy();
+    activePlaybackControls = null;
+}
 
 const IDEAL_MAIN_WIDTH = 1280;
 const IDEAL_MAIN_HEIGHT = 860;
@@ -133,6 +139,7 @@ function renderShutdownStatus(
     rpcCall: (method: string, params?: any) => Promise<any>,
     initial: ShutdownHealth,
 ): void {
+    disposePlaybackControls();
     activeBasketSidebar?.destroy();
     activeBasketSidebar = null;
     document.body.innerHTML = `
@@ -246,6 +253,7 @@ async function waitForDaemonState(rpcCall: (method: string, params?: any) => Pro
 }
 
 function renderLifecycleFailure(error: unknown): void {
+    disposePlaybackControls();
     const raw = error instanceof Error ? error.message : String(error);
     const code = raw.split(':', 1)[0];
     const knownCodes = ['LEGACY_DAEMON_RUNNING', 'LEGACY_ENDPOINT_OCCUPIED', 'LOCAL_ACCESS_DENIED',
@@ -298,6 +306,7 @@ async function routeFromDaemonState(state: any): Promise<void> {
     const selectedServerPortableId: string | null = state?.selectedServerPortableId ?? null;
 
     if (servers.length === 0) {
+        disposePlaybackControls();
         const { initLoginView } = await import('./login');
         initLoginView(() => { reloadFromDaemon(); });
         return;
@@ -455,10 +464,9 @@ function renderMainLayout(_state: any = null) {
         }
     });
 
-    import('./components/PlaybackControls').then(({ PlaybackControls }) => {
-        const container = document.getElementById('playback-controls-container');
-        if (container) new PlaybackControls(container);
-    });
+    disposePlaybackControls();
+    const playbackContainer = document.getElementById('playback-controls-container');
+    if (playbackContainer) activePlaybackControls = new PlaybackControls(playbackContainer);
 
     // Initialize Basket Sidebar
     import('./components/BasketSidebar').then(({ BasketSidebar }) => {

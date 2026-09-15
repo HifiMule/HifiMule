@@ -1,14 +1,10 @@
 use super::decoder::decode_stream;
 use super::model::{PlaybackEvent, PlaybackTrackMetadata};
-use super::streaming::{
-    BoundedHttpReader, COMPRESSED_CHUNK_BYTES, StreamFailureKind, StreamFailureState,
-    StreamReadError,
-};
+use super::streaming::{BoundedHttpReader, StreamFailureKind, StreamFailureState, StreamReadError};
 use crate::providers::{PlaybackDescription, PlaybackRequest, select_playback_representation};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SizedSample};
 use crossbeam_queue::ArrayQueue;
-use futures::StreamExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const PCM_TARGET_MILLISECONDS: usize = 500;
@@ -87,6 +83,9 @@ impl PlaybackPipelineError {
                 })
                 .map(|error| match error {
                     super::streaming::StreamReadError::Timeout => StreamFailureKind::Timeout,
+                    super::streaming::StreamReadError::Unsupported => {
+                        StreamFailureKind::Unsupported
+                    }
                     super::streaming::StreamReadError::Source(_) => StreamFailureKind::Source,
                 })
         });
@@ -99,6 +98,7 @@ impl PlaybackPipelineError {
     ) -> Self {
         match stream_failure {
             Some(StreamFailureKind::Timeout) => Self::timeout(source),
+            Some(StreamFailureKind::Unsupported) => Self::unsupported(source),
             Some(StreamFailureKind::Source) => Self::source(source),
             None => Self::decode(source),
         }
@@ -113,6 +113,7 @@ impl PlaybackPipelineError {
         };
         let kind = match &error {
             StreamReadError::Timeout => StreamFailureKind::Timeout,
+            StreamReadError::Unsupported => StreamFailureKind::Unsupported,
             StreamReadError::Source(_) => StreamFailureKind::Source,
         };
         let source = anyhow::Error::new(error).context(format!("decoder failed: {source:#}"));
@@ -278,7 +279,6 @@ struct Pipeline {
     gate: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
     generation: String,
-    producer: tokio::task::JoinHandle<()>,
     worker: std::thread::JoinHandle<()>,
     compressed_high_water: Arc<AtomicU64>,
     pcm_high_water: Arc<AtomicU64>,
@@ -388,7 +388,6 @@ impl AudioEngine {
                 super::model::ControlAction::Stop => {
                     pipeline.gate.store(false, Ordering::Release);
                     pipeline.cancel.store(true, Ordering::Release);
-                    pipeline.producer.abort();
                 }
             }
         }
@@ -396,19 +395,17 @@ impl AudioEngine {
 
     pub fn resume_existing(&self, generation: &str) -> bool {
         let current = self.current.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(pipeline) = current.as_ref().filter(|pipeline| {
+        current.as_ref().is_some_and(|pipeline| {
             pipeline.generation == generation
                 && pipeline.alive.load(Ordering::Acquire)
                 && !pipeline.cancel.load(Ordering::Acquire)
-        }) {
-            pipeline.gate.store(true, Ordering::Release);
-            true
-        } else {
-            false
-        }
+        })
     }
 
     pub fn stop_and_join(&self) -> anyhow::Result<()> {
+        // Shutdown runs this on a blocking worker and must also retire a start
+        // that was admitted before the session fence but is still fetching.
+        let _start_guard = self.starts.blocking_lock();
         if let Some(pipeline) = self
             .current
             .lock()
@@ -417,7 +414,6 @@ impl AudioEngine {
         {
             pipeline.gate.store(false, Ordering::Release);
             pipeline.cancel.store(true, Ordering::Release);
-            pipeline.producer.abort();
             pipeline
                 .worker
                 .join()
@@ -433,8 +429,14 @@ impl AudioEngine {
         start_ms: u64,
         generation: String,
         session: super::PlaybackSession,
+        deadline: std::time::Instant,
     ) -> Result<(), PlaybackPipelineError> {
         let _start_guard = self.starts.lock().await;
+        // A Resume admitted while the first start was preparing shares that
+        // generation. Once preparation finishes, reuse it instead of restarting.
+        if self.resume_existing(&generation) {
+            return Ok(());
+        }
         let (generation_serial, expected_serial) =
             session.generation_guard(&generation).ok_or_else(|| {
                 PlaybackPipelineError::cancelled(anyhow::anyhow!(
@@ -449,9 +451,7 @@ impl AudioEngine {
                 .take()
         };
         if let Some(old) = old {
-            old.gate.store(false, Ordering::Release);
             old.cancel.store(true, Ordering::Release);
-            old.producer.abort();
             tokio::task::spawn_blocking(move || old.worker.join())
                 .await
                 .map_err(|_| {
@@ -470,64 +470,36 @@ impl AudioEngine {
         let representation_name = representation_name(&representation);
         let decoder_hint = decoder_hint(&representation);
         let request = representation.request;
-        let response = fetch(&request)
-            .await
+        let response = tokio::select! {
+            result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), fetch(&request)) => result,
+            _ = async {
+                while generation_serial.load(Ordering::Acquire) == expected_serial {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            } => return Err(PlaybackPipelineError::cancelled(anyhow::anyhow!("playback generation was superseded"))),
+        }
+            .map_err(|_| PlaybackPipelineError::timeout(anyhow::anyhow!("playback preparation timed out")))?
             .map_err(|error| error.with_representation(&representation_name))?;
-        if generation_serial.load(Ordering::Acquire) != expected_serial {
+        if generation_serial.load(Ordering::Acquire) != expected_serial
+            || session.generation_guard(&generation).is_none()
+        {
             return Err(PlaybackPipelineError::cancelled(anyhow::anyhow!(
                 "playback generation was superseded"
             )));
         }
         let cancel = Arc::new(AtomicBool::new(false));
-        let gate = Arc::new(AtomicBool::new(true));
+        let gate = session.output_gate();
         let compressed_high_water = Arc::new(AtomicU64::new(0));
         let pcm_high_water = Arc::new(AtomicU64::new(0));
         let endpoint = Arc::new(Mutex::new(None));
-        let (tx, reader) = BoundedHttpReader::channel_with_high_water(
+        let preparation = super::http_source::Preparation::new(deadline, cancel.clone());
+        let source_reader =
+            super::http_source::HttpSource::new(request, response, preparation.clone());
+        let reader = BoundedHttpReader::from_source(
+            source_reader,
             cancel.clone(),
             compressed_high_water.clone(),
         );
-        let producer_cancel = cancel.clone();
-        let producer = tokio::spawn(async move {
-            let mut body = response.bytes_stream();
-            loop {
-                let item =
-                    match tokio::time::timeout(std::time::Duration::from_secs(15), body.next())
-                        .await
-                    {
-                        Ok(Some(item)) => item,
-                        Ok(None) => break,
-                        Err(_) => {
-                            let _ = tx.send(Err(StreamReadError::Timeout)).await;
-                            break;
-                        }
-                    };
-                if producer_cancel.load(Ordering::Acquire) {
-                    break;
-                }
-                match item {
-                    Ok(bytes) => {
-                        for part in bytes.chunks(COMPRESSED_CHUNK_BYTES) {
-                            if tx
-                                .send(Ok(bytes::Bytes::copy_from_slice(part)))
-                                .await
-                                .is_err()
-                            {
-                                return;
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        let _ = tx
-                            .send(Err(StreamReadError::Source(format!(
-                                "source read failed: {error}"
-                            ))))
-                            .await;
-                        return;
-                    }
-                }
-            }
-        });
         let metadata = PlaybackTrackMetadata {
             source,
             title: description.song.title.clone(),
@@ -565,6 +537,7 @@ impl AudioEngine {
                     start_ms,
                     worker_pcm_high_water,
                     worker_endpoint,
+                    preparation,
                 )
                 .map_err(|error| error.with_representation(&worker_representation));
                 match result {
@@ -591,7 +564,6 @@ impl AudioEngine {
             gate,
             alive,
             generation: pipeline_generation,
-            producer,
             worker,
             compressed_high_water,
             pcm_high_water,
@@ -660,6 +632,7 @@ fn run_output(
     start_ms: u64,
     pcm_high_water: Arc<AtomicU64>,
     endpoint: Arc<Mutex<Option<String>>>,
+    preparation: super::http_source::Preparation,
 ) -> Result<(), PlaybackPipelineError> {
     let stream_failure = reader.failure_state();
     let host = cpal::default_host();
@@ -689,46 +662,12 @@ fn run_output(
     let pcm = Arc::new(ArrayQueue::new(capacity));
     let consumed = Arc::new(AtomicU64::new(0));
     let output_lost = Arc::new(AtomicBool::new(false));
-    let stream = match supported.sample_format() {
-        cpal::SampleFormat::F32 => build_stream::<f32>(
-            &device,
-            &config,
-            pcm.clone(),
-            gate.clone(),
-            consumed.clone(),
-            output_lost.clone(),
-            generation_serial.clone(),
-            expected_serial,
-        ),
-        cpal::SampleFormat::I16 => build_stream::<i16>(
-            &device,
-            &config,
-            pcm.clone(),
-            gate.clone(),
-            consumed.clone(),
-            output_lost.clone(),
-            generation_serial.clone(),
-            expected_serial,
-        ),
-        cpal::SampleFormat::U16 => build_stream::<u16>(
-            &device,
-            &config,
-            pcm.clone(),
-            gate.clone(),
-            consumed.clone(),
-            output_lost.clone(),
-            generation_serial.clone(),
-            expected_serial,
-        ),
-        _ => Err(anyhow::anyhow!("unsupported output sample format")),
-    }
-    .map_err(PlaybackPipelineError::output_open)?;
     let decoder_pcm = pcm.clone();
     let decoder_cancel = cancel.clone();
     let rate = config.sample_rate.0;
     let channels = config.channels;
     let hint = hint.to_string();
-    let decoder = std::thread::spawn(move || {
+    let decoder = super::output::DecoderWorker::spawn(cancel.clone(), move || {
         decode_stream(
             reader,
             Some(&hint),
@@ -739,13 +678,64 @@ fn run_output(
             decoder_cancel,
         )
     });
+    let presentation = Arc::new(super::output::PresentationClock::new());
+    let stream = match supported.sample_format() {
+        cpal::SampleFormat::F32 => build_stream::<f32>(
+            &device,
+            &config,
+            pcm.clone(),
+            gate.clone(),
+            consumed.clone(),
+            output_lost.clone(),
+            generation_serial.clone(),
+            expected_serial,
+            cancel.clone(),
+            decoder.finished.clone(),
+            presentation.clone(),
+        ),
+        cpal::SampleFormat::I16 => build_stream::<i16>(
+            &device,
+            &config,
+            pcm.clone(),
+            gate.clone(),
+            consumed.clone(),
+            output_lost.clone(),
+            generation_serial.clone(),
+            expected_serial,
+            cancel.clone(),
+            decoder.finished.clone(),
+            presentation.clone(),
+        ),
+        cpal::SampleFormat::U16 => build_stream::<u16>(
+            &device,
+            &config,
+            pcm.clone(),
+            gate.clone(),
+            consumed.clone(),
+            output_lost.clone(),
+            generation_serial.clone(),
+            expected_serial,
+            cancel.clone(),
+            decoder.finished.clone(),
+            presentation.clone(),
+        ),
+        _ => Err(anyhow::anyhow!("unsupported output sample format")),
+    }
+    .map_err(PlaybackPipelineError::output_open)?;
     while pcm.len() < (rate as usize * channels as usize * STARTUP_FILL_MILLISECONDS / 1000)
         && !decoder.is_finished()
         && !cancel.load(Ordering::Acquire)
     {
+        if let Err(error) = preparation.check() {
+            return Err(PlaybackPipelineError::timeout(anyhow::Error::new(error)));
+        }
         pcm_high_water.fetch_max(pcm.len() as u64, Ordering::AcqRel);
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
+    preparation
+        .check()
+        .map_err(|error| PlaybackPipelineError::timeout(anyhow::Error::new(error)))?;
+    preparation.ready();
     if let Err(error) = stream.play() {
         cancel.store(true, Ordering::Release);
         let _ = decoder.join();
@@ -768,6 +758,7 @@ fn run_output(
         .map(|value| value.occurrence_id)
         .unwrap_or_default();
     let mut active = false;
+    let mut control_epoch = session.control_epoch();
     let mut buffering = false;
     let mut last_samples = 0;
     let mut seq = 0;
@@ -799,17 +790,30 @@ fn run_output(
             }
         }
         let samples = consumed.load(Ordering::Acquire);
+        let next_epoch = session.control_epoch();
+        if next_epoch != control_epoch {
+            active = false;
+            control_epoch = next_epoch;
+        }
         let (next_active, became_active) =
             activity_transition(gate.load(Ordering::Acquire), samples, last_samples, active);
         active = next_active;
         if became_active {
             buffering = false;
-            session.publish_event(generation.clone(), PlaybackEvent::Active);
+            session.publish_event_at_epoch(
+                generation.clone(),
+                PlaybackEvent::Active,
+                control_epoch,
+            );
         }
         if active && pcm.is_empty() && !decoder.is_finished() && !buffering {
             buffering = true;
             active = false;
-            session.publish_event(generation.clone(), PlaybackEvent::Buffering);
+            session.publish_event_at_epoch(
+                generation.clone(),
+                PlaybackEvent::Buffering,
+                control_epoch,
+            );
         }
         seq += 1;
         let position = start_ms
@@ -818,7 +822,7 @@ fn run_output(
             let _ = session.report_progress(&generation, &occurrence, seq, position);
         }
         last_samples = samples;
-        if decoder.is_finished() && pcm.is_empty() {
+        if decoder.is_finished() && presentation.drained_when(|| pcm.is_empty()) {
             let result = decoder
                 .join()
                 .map_err(|_| {
@@ -870,31 +874,36 @@ fn build_stream<T>(
     lost: Arc<AtomicBool>,
     generation_serial: Arc<AtomicU64>,
     expected_serial: u64,
+    cancel: Arc<AtomicBool>,
+    decoded: Arc<AtomicBool>,
+    presentation: Arc<super::output::PresentationClock>,
 ) -> anyhow::Result<cpal::Stream>
 where
     T: SizedSample + FromSample<f32> + Sample,
 {
+    let rate = config.sample_rate.0;
+    let mut consumer = super::output::PcmConsumer::new(
+        config.channels as usize,
+        rate as usize * config.channels as usize * STARTUP_FILL_MILLISECONDS / 1000,
+    );
     Ok(device.build_output_stream(
         config,
-        move |output: &mut [T], _| {
+        move |output: &mut [T], info| {
+            presentation.begin_callback();
             let enabled = gate.load(Ordering::Acquire)
+                && !cancel.load(Ordering::Acquire)
                 && generation_serial.load(Ordering::Acquire) == expected_serial;
-            let mut count = 0u64;
-            for target in output {
-                let value = if enabled {
-                    match pcm.pop() {
-                        Some(sample) => {
-                            count += 1;
-                            sample
-                        }
-                        None => 0.0,
-                    }
-                } else {
-                    0.0
-                };
-                *target = T::from_sample(value);
+            let rendered = consumer.render(output, &pcm, enabled, decoded.load(Ordering::Acquire));
+            if let Some(frame_end) = rendered.last_audio_frame {
+                let timestamps = info.timestamp();
+                let latency = timestamps
+                    .playback
+                    .duration_since(&timestamps.callback)
+                    .unwrap_or_default();
+                presentation.submit(presentation.now_ns(), latency, frame_end, rate);
             }
-            consumed.fetch_add(count, Ordering::Release);
+            consumed.fetch_add(rendered.samples, Ordering::Release);
+            presentation.end_callback();
         },
         move |_| {
             lost.store(true, Ordering::Release);

@@ -39,6 +39,9 @@ jobs:
         with:
           node-version: "24"
 
+      - name: Install UI test compiler
+        run: npm ci --prefix hifimule-ui --ignore-scripts
+
       - name: Run packaging and runtime script regressions
         shell: bash
         run: |

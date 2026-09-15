@@ -668,25 +668,50 @@ async fn handle_playback_apply_session(
             data: Some(serde_json::json!({"code":"PERSISTENCE_FAILED"})),
         })?
         .map_err(playback_error)?;
-    if let Some(source) = source {
+    if let Some(source) = source.filter(|_| result.start_audio) {
         let manager = state.server_manager.clone();
         let db = state.db.clone();
         let generation = result.generation_id.clone();
         tokio::spawn(async move {
-            let resolved = match crate::server_manager::get_provider_by_server_id(
-                &manager,
-                &db,
-                &source.server_id,
-            )
-            .await
-            {
-                Ok(provider) => provider.resolve_playback(&source.track_id).await,
-                Err(error) => Err(error),
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let resolved =
+                tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
+                    match crate::server_manager::get_provider_by_server_id(
+                        &manager,
+                        &db,
+                        &source.server_id,
+                    )
+                    .await
+                    {
+                        Ok(provider) => provider.resolve_playback(&source.track_id).await,
+                        Err(error) => Err(error),
+                    }
+                })
+                .await;
+            let resolved = match resolved {
+                Ok(result) => result,
+                Err(_) => {
+                    playback.publish_event(
+                        generation,
+                        crate::playback::model::PlaybackEvent::Failed {
+                            code: "PLAYBACK_TIMEOUT".into(),
+                            retryable: true,
+                        },
+                    );
+                    return;
+                }
             };
             let outcome = match resolved {
                 Ok(description) => {
                     crate::playback::audio::global()
-                        .start(description, source, 0, generation.clone(), playback.clone())
+                        .start(
+                            description,
+                            source,
+                            0,
+                            generation.clone(),
+                            playback.clone(),
+                            deadline,
+                        )
                         .await
                 }
                 Err(error) => {
@@ -725,7 +750,8 @@ async fn handle_playback_control(
         crate::playback::model::ControlAction::Pause
         | crate::playback::model::ControlAction::Stop => {}
         crate::playback::model::ControlAction::Resume => {
-            if !crate::playback::audio::global().resume_existing(&result.generation_id)
+            if result.resume_audio
+                && !crate::playback::audio::global().resume_existing(&result.generation_id)
                 && let Some(current) = result.current.clone()
             {
                 let manager = state.server_manager.clone();
@@ -734,15 +760,35 @@ async fn handle_playback_control(
                 let generation = result.generation_id.clone();
                 let position_ms = result.position_ms;
                 tokio::spawn(async move {
-                    let resolved = match crate::server_manager::get_provider_by_server_id(
-                        &manager,
-                        &db,
-                        &current.source.server_id,
-                    )
-                    .await
-                    {
-                        Ok(provider) => provider.resolve_playback(&current.source.track_id).await,
-                        Err(error) => Err(error),
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                    let resolved =
+                        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
+                            match crate::server_manager::get_provider_by_server_id(
+                                &manager,
+                                &db,
+                                &current.source.server_id,
+                            )
+                            .await
+                            {
+                                Ok(provider) => {
+                                    provider.resolve_playback(&current.source.track_id).await
+                                }
+                                Err(error) => Err(error),
+                            }
+                        })
+                        .await;
+                    let resolved = match resolved {
+                        Ok(result) => result,
+                        Err(_) => {
+                            playback.publish_event(
+                                generation,
+                                crate::playback::model::PlaybackEvent::Failed {
+                                    code: "RESUME_UNAVAILABLE".into(),
+                                    retryable: true,
+                                },
+                            );
+                            return;
+                        }
                     };
                     let failure = match resolved {
                         Ok(description) => crate::playback::audio::global()
@@ -752,6 +798,7 @@ async fn handle_playback_control(
                                 position_ms,
                                 generation.clone(),
                                 playback.clone(),
+                                deadline,
                             )
                             .await
                             .err(),

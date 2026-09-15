@@ -103,6 +103,10 @@ test("runtime manifest records the bounded production buffering policy", () => {
   assert.deepEqual(manifest.bufferPolicy, {
     compressedChunkBytes: 65536,
     compressedCapacityBytes: 8388608,
+    networkChunkCapacityBytes: 1048576,
+    compressedWindowBytes: 7274496,
+    preparationDeadlineMilliseconds: 60000,
+    refillMilliseconds: 100,
     pcmTargetMilliseconds: 500,
     pcmCapacityMaxBytes: 1048576,
     startupFillMilliseconds: 100,

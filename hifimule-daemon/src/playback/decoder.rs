@@ -88,6 +88,8 @@ pub fn decode_stream(
     pcm: Arc<ArrayQueue<f32>>,
     cancel: Arc<AtomicBool>,
 ) -> anyhow::Result<DecodeSummary> {
+    let source_failure = reader.failure_state();
+    let preparation = reader.preparation();
     ffmpeg::init()?;
     ffmpeg::util::log::set_level(ffmpeg::util::log::Level::Quiet);
     // The HTTP reader only retains a bounded sliding window. Advertising FLAC as
@@ -102,13 +104,15 @@ pub fn decode_stream(
     let io = if sequential_stream {
         ffmpeg::format::context::StreamIo::from_read_with_capacity(reader, 32 * 1024)?
     } else {
-        reader.enable_seek_history()?;
         ffmpeg::format::context::StreamIo::from_read_seek_with_capacity(reader, 32 * 1024)?
     };
     let token = cancel.clone();
     let mut input =
         ffmpeg::format::input_from_stream_with_interrupt(io, filename_hint, None, move || {
             token.load(Ordering::Acquire)
+                || preparation
+                    .as_ref()
+                    .is_some_and(|preparation| preparation.check().is_err())
         })?;
     let stream = input
         .streams()
@@ -186,11 +190,17 @@ pub fn decode_stream(
         Ok(())
     };
     let mut packet_count = 0u64;
-    for (stream, packet) in input.packets() {
+    loop {
         if cancel.load(Ordering::Acquire) {
             anyhow::bail!("cancelled");
         }
-        if stream.index() != stream_index {
+        let mut packet = ffmpeg::Packet::empty();
+        match packet.read(&mut input) {
+            Ok(()) => {}
+            Err(ffmpeg::Error::Eof) => break,
+            Err(error) => return Err(anyhow::Error::new(error).context("read audio packet")),
+        }
+        if packet.stream() != stream_index {
             continue;
         }
         packet_count += 1;
@@ -198,6 +208,9 @@ pub fn decode_stream(
             format!("send audio packet {packet_count} ({} bytes)", packet.size())
         })?;
         receive(&mut decoder, false).context("receive audio frame")?;
+    }
+    if let Some(error) = source_failure.error() {
+        return Err(error.into());
     }
     decoder.send_eof().context("send decoder EOF")?;
     receive(&mut decoder, true).context("drain audio decoder")?;
@@ -250,6 +263,33 @@ mod tests {
     };
     use std::io::{Read, Write};
 
+    #[test]
+    fn review_source_error_cannot_be_clean_decoder_eof() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, reader) = BoundedHttpReader::channel(cancel.clone());
+        let bytes = include_bytes!("../../tests/fixtures/generated-pcm16.aif");
+        for part in bytes.chunks(COMPRESSED_CHUNK_BYTES) {
+            tx.blocking_send(Ok(bytes::Bytes::copy_from_slice(part)))
+                .unwrap();
+        }
+        tx.blocking_send(Err(super::super::streaming::StreamReadError::Timeout))
+            .unwrap();
+        drop(tx);
+        let result = decode_stream(
+            reader,
+            Some("stream.aif"),
+            48_000,
+            2,
+            0,
+            Arc::new(ArrayQueue::new(1_000_000)),
+            cancel,
+        );
+        assert!(
+            result.is_err(),
+            "terminal source error was accepted as clean EOF"
+        );
+    }
+
     fn decode_test_file_at(
         path: &std::path::Path,
         start_frame: u64,
@@ -276,19 +316,11 @@ mod tests {
     ) -> anyhow::Result<(DecodeSummary, u64, u64)> {
         let cancel = Arc::new(AtomicBool::new(false));
         let compressed_high_water = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let (tx, reader) = BoundedHttpReader::channel_with_high_water(
+        let reader = BoundedHttpReader::from_source(
+            std::fs::File::open(path)?,
             cancel.clone(),
             compressed_high_water.clone(),
         );
-        let mut bytes = Vec::new();
-        std::fs::File::open(path)?.read_to_end(&mut bytes)?;
-        let producer = std::thread::spawn(move || -> Result<(), String> {
-            for chunk in bytes.chunks(COMPRESSED_CHUNK_BYTES) {
-                tx.blocking_send(Ok(bytes::Bytes::copy_from_slice(chunk)))
-                    .map_err(|_| "decoder closed compressed input".to_string())?;
-            }
-            Ok(())
-        });
         let pcm = Arc::new(ArrayQueue::<f32>::new(64 * 1024));
         let invalid_pcm = Arc::new(AtomicBool::new(false));
         let consumer_invalid_pcm = invalid_pcm.clone();
@@ -312,21 +344,17 @@ mod tests {
         let result = decode_stream(reader, hint, 48_000, 2, start_frame, pcm, cancel);
         done.store(true, Ordering::Release);
         consumer.join().expect("PCM consumer panicked");
-        let producer = producer.join().expect("compressed producer panicked");
         assert!(
             !invalid_pcm.load(Ordering::Relaxed),
             "non-finite decoded PCM"
         );
         match result {
             Err(error) => Err(error),
-            Ok(summary) => {
-                producer.map_err(anyhow::Error::msg)?;
-                Ok((
-                    summary,
-                    drained.load(Ordering::Relaxed),
-                    compressed_high_water.load(Ordering::Relaxed),
-                ))
-            }
+            Ok(summary) => Ok((
+                summary,
+                drained.load(Ordering::Relaxed),
+                compressed_high_water.load(Ordering::Relaxed),
+            )),
         }
     }
 

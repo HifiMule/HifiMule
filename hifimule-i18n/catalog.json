@@ -1,5 +1,8 @@
 {
   "en": {
+    "playback.resume_default_output": "Resume on current default output",
+    "playback.command_error": "The playback action failed. Check the current state and try again.",
+    "playback.command_error.persistence": "The playback position could not be saved. Check storage and try again.",
     "app.name": "HifiMule",
     "server.default": "Server",
     "tray.quit": "Quit",
@@ -428,6 +431,9 @@
     "lifecycle.playback_owner_failed": "Your session was saved, but HifiMule could not confirm that its playback worker stopped. Quit remains blocked."
   },
   "fr": {
+    "playback.resume_default_output": "Reprendre sur la sortie par défaut actuelle",
+    "playback.command_error": "La commande de lecture a échoué. Vérifiez l’état actuel et réessayez.",
+    "playback.command_error.persistence": "La position de lecture n’a pas pu être enregistrée. Vérifiez le stockage et réessayez.",
     "app.name": "HifiMule",
     "server.default": "Serveur",
     "tray.quit": "Quitter",
@@ -851,6 +857,9 @@
     "lifecycle.playback_owner_failed": "Votre session est enregistrée, mais HifiMule n’a pas pu confirmer l’arrêt du service de lecture. La fermeture reste bloquée."
   },
   "es": {
+    "playback.resume_default_output": "Reanudar en la salida predeterminada actual",
+    "playback.command_error": "La acción de reproducción falló. Comprueba el estado actual e inténtalo de nuevo.",
+    "playback.command_error.persistence": "No se pudo guardar la posición. Comprueba el almacenamiento e inténtalo de nuevo.",
     "app.name": "HifiMule",
     "server.default": "Servidor",
     "tray.quit": "Salir",
@@ -1274,6 +1283,9 @@
     "lifecycle.playback_owner_failed": "La sesión se ha guardado, pero HifiMule no pudo confirmar que el servicio de reproducción se detuvo. El cierre sigue bloqueado."
   },
   "de": {
+    "playback.resume_default_output": "Auf der aktuellen Standardausgabe fortsetzen",
+    "playback.command_error": "Die Wiedergabeaktion ist fehlgeschlagen. Prüfen Sie den aktuellen Zustand und versuchen Sie es erneut.",
+    "playback.command_error.persistence": "Die Wiedergabeposition konnte nicht gespeichert werden. Prüfen Sie den Speicher und versuchen Sie es erneut.",
     "app.name": "HifiMule",
     "server.default": "Server",
     "tray.quit": "Beenden",
