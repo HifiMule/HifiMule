@@ -4,7 +4,7 @@ baseline_commit: 4dae294accd384fd2664fe5d1c49d64efc300064
 
 # Story 15.4: Play a selected library track through the daemon
 
-Status: in-progress
+Status: done
 
 ## Story
 
