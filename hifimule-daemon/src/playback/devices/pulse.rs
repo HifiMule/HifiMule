@@ -14,20 +14,23 @@ use std::{
 };
 
 pub fn discover() -> Discovery {
-    discover_inner().unwrap_or_else(|code| Discovery {
+    discover_until(Instant::now() + Duration::from_secs(5))
+}
+
+pub(super) fn discover_until(deadline: Instant) -> Discovery {
+    discover_inner(deadline).unwrap_or_else(|code| Discovery {
         outputs: vec![],
         error: Some(code),
     })
 }
 
-fn discover_inner() -> Result<Discovery, &'static str> {
+fn discover_inner(deadline: Instant) -> Result<Discovery, &'static str> {
     let mut mainloop = Mainloop::new().ok_or("OUTPUT_UNAVAILABLE")?;
     let mut context =
         Context::new(&mainloop, "HifiMule output discovery").ok_or("OUTPUT_UNAVAILABLE")?;
     context
         .connect(None, FlagSet::NOAUTOSPAWN, None)
         .map_err(|_| "OUTPUT_UNAVAILABLE")?;
-    let deadline = Instant::now() + Duration::from_secs(5);
     while context.get_state() != State::Ready {
         step(&mut mainloop, &context, deadline)?;
     }
@@ -85,18 +88,19 @@ fn discover_inner() -> Result<Discovery, &'static str> {
                     }
                 }
                 let virtual_output = !info.flags.contains(pulse::def::SinkFlagSet::HARDWARE);
+                let active_port_known = info
+                    .active_port
+                    .as_ref()
+                    .and_then(|port| port.name.as_deref())
+                    .is_some_and(|active| {
+                        info.ports
+                            .iter()
+                            .any(|port| port.name.as_deref() == Some(active))
+                    });
                 let route_supported = super::pulse_route::supported(
                     virtual_output,
                     info.ports.len(),
-                    info.ports
-                        .first()
-                        .and_then(|port| port.name.as_deref())
-                        .is_some_and(|name| {
-                            info.active_port
-                                .as_ref()
-                                .and_then(|port| port.name.as_deref())
-                                == Some(name)
-                        }),
+                    active_port_known,
                 );
                 let confident = virtual_output
                     || ["device.serial", "device.bus_path", "device.string"]
@@ -133,10 +137,16 @@ fn discover_inner() -> Result<Discovery, &'static str> {
                     backend: "pulse".into(),
                     available: confident && route_supported,
                     is_default: false,
-                    identity_confidence: if !route_supported {
-                        "unsupported"
-                    } else if confident {
+                    identity_confidence: if route_supported && confident {
                         "stable"
+                    } else if !virtual_output
+                        && info.ports.len() > 1
+                        && active_port_known
+                        && confident
+                    {
+                        "fallback-candidate"
+                    } else if !route_supported {
+                        "unsupported"
                     } else {
                         "ambiguous"
                     }
@@ -159,11 +169,32 @@ fn discover_inner() -> Result<Discovery, &'static str> {
         }
     }
     let mut result = inventory.borrow().clone();
+    let has_certified_output = result.outputs.iter().any(|output| output.available);
     for output in &mut result.outputs {
         output.is_default = output
             .preference
             .as_ref()
             .is_some_and(|p| Some(&p.stable_id) == default.borrow().as_ref());
+        if output.identity_confidence == "fallback-candidate" {
+            output.available = matches!(
+                super::pulse_route::eligibility(
+                    false,
+                    2,
+                    true,
+                    output.is_default,
+                    true,
+                    has_certified_output,
+                    result.error.is_none(),
+                ),
+                super::pulse_route::Eligibility::LastResort
+            );
+            output.identity_confidence = if output.available {
+                "fallback"
+            } else {
+                "unsupported"
+            }
+            .into();
+        }
     }
     context.disconnect();
     Ok(result)

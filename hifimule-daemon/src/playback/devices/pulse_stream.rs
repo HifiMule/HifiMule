@@ -109,7 +109,9 @@ impl PinnedStream {
         // Validate the concrete sink actually opened, while it is still corked.
         // This targeted query shares the stream's connection and does not start
         // another inventory enumeration alongside the owned discovery worker.
-        result.verify_identity(preference, deadline)?;
+        if result.verify_identity(preference, deadline)? {
+            result.verify_discovery_admission(preference, deadline)?;
+        }
         let actual = result
             .stream
             .get_buffer_attr()
@@ -130,9 +132,9 @@ impl PinnedStream {
         &mut self,
         preference: &super::OutputPreference,
         deadline: Instant,
-    ) -> Result<(), &'static str> {
+    ) -> Result<bool, &'static str> {
         use pulse::callbacks::ListResult;
-        let matches = Rc::new(Cell::new(false));
+        let matches = Rc::new(Cell::new(None));
         let found = matches.clone();
         let expected = preference.clone();
         let mut operation =
@@ -140,21 +142,7 @@ impl PinnedStream {
                 .introspect()
                 .get_sink_info_by_name(&self.name, move |item| {
                     if let ListResult::Item(info) = item {
-                        let route_supported = super::pulse_route::supported(
-                            !info.flags.contains(pulse::def::SinkFlagSet::HARDWARE),
-                            info.ports.len(),
-                            info.ports
-                                .first()
-                                .and_then(|port| port.name.as_deref())
-                                .is_some_and(|name| {
-                                    info.active_port
-                                        .as_ref()
-                                        .and_then(|port| port.name.as_deref())
-                                        == Some(name)
-                                }),
-                        );
-                        let same = route_supported
-                            && info.name.as_deref() == Some(expected.stable_id.as_str())
+                        let same = info.name.as_deref() == Some(expected.stable_id.as_str())
                             && expected.identity_properties.iter().all(|(key, value)| {
                                 if key == "port" {
                                     info.active_port
@@ -165,7 +153,22 @@ impl PinnedStream {
                                     info.proplist.get_str(key).as_deref() == Some(value.as_str())
                                 }
                             });
-                        found.set(same);
+                        if same {
+                            let active_port_known = info
+                                .active_port
+                                .as_ref()
+                                .and_then(|port| port.name.as_deref())
+                                .is_some_and(|active| {
+                                    info.ports
+                                        .iter()
+                                        .any(|port| port.name.as_deref() == Some(active))
+                                });
+                            found.set(Some(
+                                info.flags.contains(pulse::def::SinkFlagSet::HARDWARE)
+                                    && info.ports.len() > 1
+                                    && active_port_known,
+                            ));
+                        }
                     }
                 });
         while operation.get_state() == pulse::operation::State::Running {
@@ -176,11 +179,24 @@ impl PinnedStream {
             self.pump()?;
             std::thread::sleep(Duration::from_millis(2));
         }
-        if matches.get() {
-            Ok(())
-        } else {
-            Err("OUTPUT_IDENTITY_AMBIGUOUS")
+        matches.get().ok_or("OUTPUT_IDENTITY_AMBIGUOUS")
+    }
+
+    fn verify_discovery_admission(
+        &self,
+        preference: &super::OutputPreference,
+        deadline: Instant,
+    ) -> Result<(), &'static str> {
+        let discovery = super::pulse::discover_until(deadline);
+        let output = discovery
+            .outputs
+            .iter()
+            .find(|output| output.output_id == super::output_id(preference) && output.available)
+            .ok_or("OUTPUT_SHARED_UNSUPPORTED")?;
+        if output.identity_confidence != "fallback" || discovery.error.is_some() {
+            return Err("OUTPUT_SHARED_UNSUPPORTED");
         }
+        Ok(())
     }
 
     fn verify(&self) -> Result<(), &'static str> {

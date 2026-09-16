@@ -141,6 +141,7 @@ export class PlaybackControls {
                     output.isDefault ? t('playback.output.default') : '',
                     !output.available ? t('playback.output.unavailable') : '',
                     output.identityConfidence === 'unsupported' ? t('playback.error.OUTPUT_SHARED_UNSUPPORTED') : '',
+                    output.identityConfidence === 'fallback' ? t('playback.output.fallback') : '',
                     output.isVirtual ? t('playback.output.virtual') : ''].filter(Boolean).join(' · ');
                 option.disabled = !output.available;
                 return option;

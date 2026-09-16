@@ -186,6 +186,16 @@ test('unavailable output disables Resume while keeping output choice available w
   h.component.destroy();
 });
 
+test('last-resort output remains selectable and warns that routing is best effort', async () => {
+  const fallback = { outputId: 'fallback', displayName: 'Built-in Audio', detail: 'Analog', available: true, isDefault: true, identityConfidence: 'fallback', isVirtual: false };
+  const h = harness(snapshot(), async () => {}, { list: async () => ({ instanceId: 'instance', outputs: [fallback] }) });
+  await h.tick();
+  const option = h.container.querySelector('select').children.find(child => child.value === 'fallback');
+  assert.equal(option.disabled, false);
+  assert.match(text(option), /playback\.output\.fallback/);
+  h.component.destroy();
+});
+
 test('output strings have four-locale parity and no current-default recovery instruction', () => {
   const catalog = JSON.parse(readFileSync(new URL('../../hifimule-i18n/catalog.json', import.meta.url), 'utf8'));
   const keys = Object.keys(catalog.en).filter(key => key.startsWith('playback.output.') || key.startsWith('playback.error.OUTPUT_'));
