@@ -2275,9 +2275,12 @@ mod tests {
     #[test]
     fn mailbox_admits_64_pending_commands_and_rejects_the_next() {
         let db = Arc::new(Database::memory().unwrap());
-        let playback = PlaybackSession::restore(db, "owner".into());
+        let playback = PlaybackSession::restore(db.clone(), "owner".into());
         let snapshot = playback.snapshot().unwrap();
-        let guard = playback.inner.lock().unwrap();
+        // Block Clear's database write, not the owner's pre-command maintenance.
+        // Holding inner here can prevent the owner from reaching command receive,
+        // so executing would never become true even though the command is queued.
+        let guard = db.conn.lock().unwrap();
 
         let first = playback
             .admit_apply(params(&snapshot, SessionOperation::Clear), None)
