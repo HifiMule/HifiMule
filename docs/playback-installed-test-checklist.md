@@ -230,6 +230,37 @@ does not deliver it, record `outcome: limitation`, `delivery: not-delivered`, an
 a specific sanitized limitation; do not install a global keyboard hook or claim
 API success as physical-key evidence.
 
+### Native observation record fields
+
+Every `before` and `after` state requires `pid` (positive integer), `instanceId`,
+`generationId` (UUID), `stateSequence` and `queueRevision` (decimal strings),
+`playbackStatus`, `positionMs` (nonnegative integer), and `occurrenceId` (a
+consistent anonymous occurrence label, or null for an empty session). Use actual
+snapshot values; keep labels consistent across each comparison. Never copy
+example values as observations. The collector rejects malformed JSON, non-object
+input, unsafe fields and invalid state shapes, then asks for the same entry again
+without losing previously entered observations.
+
+Capture before and after snapshots during each action. API and menu transport
+commands must advance the state sequence and preserve the occurrence and queue.
+Stop must reach `stopped`, reset position to zero and rotate the generation.
+For these additional observations, supply a `facts` object with the following
+measured or directly observed fields (boolean values are JSON `true`/`false`):
+
+| Observation | Required procedure and facts for a pass |
+| --- | --- |
+| `menu-resume-ui-closed` | Begin paused at a nonzero position; Resume to active and observe increasing position. `windowStayedClosed: true`, `audibleProgress: true`. |
+| `ui-reopen-authoritative` | Pause natively before opening the UI so exact comparison is possible. State, position, generation and sequence remain unchanged. `commandReplayed: false`; `uiPositionMs` and `uiPlaybackStatus` match the daemon snapshot. |
+| `metadata-cleared` | Observe rich metadata, replace with sparse metadata, then clear the session. `richFieldsObserved: true`, `sparseMissingFieldsCleared: true`, `emptySessionFieldsCleared: true`. Do not include private titles or artwork addresses. |
+| `output-loss-rejected` | Capture paused/error state after output loss, attempt Play and verify frozen position. `playRejected: true`, `outputRerouted: false`, `audible: false`; `selectedOutputBefore` and `selectedOutputAfter` contain the same SHA-256 hash of the selected output ID. |
+| `quit-deregistered-before-relaunch` | Retain the last snapshot before exit as `after` (there is no live RPC after exit). Separately observe OS state before relaunch: `registrationReleased: true`, `metadataCleared: true`, `observedBeforeRelaunch: true`, `processExited: true`. |
+| `new-instance-reregistered` | Compare the old instance with the relaunched, paused instance; instance IDs must differ (OS PIDs can be reused). `registrationCount: 1` from the OS registration observation. |
+
+Enter actual values for failed checks; the validator will retain them as failed
+evidence. Use `{}` for facts on observations without additional required fields.
+A physical-key routing limitation still requires before/after state evidence and
+an explicit explanation; it never counts as API delivery or a physical-key pass.
+
 ### Optional native endpoint binding smoke
 
 On macOS or Windows, this explicit test enumerates concrete native endpoints, opens and releases unstarted silent streams, and verifies an absent stable ID cannot fall back:

@@ -3,7 +3,7 @@ baseline_commit: 0ff836482119940cccd3808d9b1deefb907b72ea
 ---
 # Story 15.6: Control playback through the operating system with the window closed
 
-Status: review
+Status: in-progress
 
 ## Story
 
@@ -46,6 +46,38 @@ so that I can pause and resume music while working without reopening HifiMule.
   - [x] Add deterministic command, effect, metadata, registration and shutdown-race tests using production seams.
   - [x] Extend the existing installed checklist/collector to distinguish API, UI reopen and physical-key observations, with strict evidence validation.
   - [x] Run applicable daemon, lifecycle, i18n, UI, dependency/build and evidence checks; record installed target results and outstanding environments honestly.
+
+### Review Findings
+
+Review date: 2026-09-16. Full review of `0ff836482119940cccd3808d9b1deefb907b72ea..5cc87b1` using Blind Hunter, Edge Case Hunter and Acceptance Auditor. Eight patch findings, zero decisions, zero deferrals; three candidates dismissed after triage (disabled-command semantics already revalidated by the owner, an unverified Windows timeline failure, and already-disclosed outstanding installed evidence).
+
+- [x] [Review][Patch] **[P1] Fix both Linux D-Bus compilation errors.** `OpenUri` returns only `Err`, leaving the callback output type ambiguous (E0284); the `Seek` callback captures borrowed `state` instead of cloning its Arc, violating the callback's `'static` requirement (E0521). Specify the unit result and give the Seek closure owned state. Both errors were reproduced in an isolated host type-check of the copied D-Bus backend against the locked dependencies; this was not a Linux link/runtime test. [third_party/souvlaki/src/platform/mpris/dbus/interfaces.rs:62] [third_party/souvlaki/src/platform/mpris/dbus/interfaces.rs:129]
+- [x] [Review][Patch] **[P1] Bound/coalesce Linux publications and prioritize teardown.** Every changed native view sends capabilities, metadata and playback, including progress updates sampled every 250 ms. The D-Bus worker consumes one publication before waiting up to one second for bus traffic, so a quiet bus accumulates stale publications in an unbounded queue. Quit enqueues Kill behind that backlog and joins the worker on the Tao thread before committing shutdown. Coalesce the latest state, avoid resending unchanged fields, and ensure teardown cannot wait behind accumulated progress. [third_party/souvlaki/src/platform/mpris/dbus/controls.rs:266] [hifimule-daemon/src/playback/native.rs:263]
+- [x] [Review][Patch] **[P2] Persist and correlate background command failures.** An owner rejection writes only `latest.failure_code`; the next 250 ms snapshot refresh overwrites it. The equally frequent tray poll can miss an output/admission failure completely. Conversely, a retry can consume a previous error before its newly queued intent executes. Keep acknowledged command outcomes associated with the pending attempt and retain accessible failure status until an explicit success or dismissal. [hifimule-daemon/src/playback/native.rs:185] [hifimule-daemon/src/main.rs:1007]
+- [x] [Review][Patch] **[P2] Release macOS metadata strings after publication.** `ns_string` returns an owned alloc/init NSString that is never released after the dictionary retains it. Republishing title/artist/album for progress changes leaks allocations continuously during daemon playback. Balance ownership and publish metadata only when it changes. [third_party/souvlaki/src/platform/macos/mod.rs:357]
+- [x] [Review][Patch] **[P2] Treat hidden Windows media-window creation failure as nonfatal registration failure.** Window construction propagates `?` out of `run_candidate`, bypassing the native-controls-unavailable fallback and terminating otherwise usable playback. Preserve the daemon/UI and expose the localized unavailable state when this native prerequisite fails. [hifimule-daemon/src/main.rs:804]
+- [x] [Review][Patch] **[P2] Require native evidence that demonstrates each named outcome.** Native records need no position, and only API status transitions are checked. The validator accepts paused-to-paused menu Resume, unchanged instance identity after relaunch, and metadata/output-loss/deregistration claims without corresponding observed fields. Require authoritative position and action-specific outcome evidence, including pre-relaunch registration absence, and reject contradictory/no-op records. Reproduced: the existing fixture passes native validation with no positions and no-op menu Resume/relaunch. [scripts/playback-installed-evidence.py:327] [scripts/playback-installed-evidence.py:373]
+- [x] [Review][Patch] **[P2] Add the specified production integration and lifecycle regression tests.** Current additions test projections, an isolated channel and direct owner operations; no tests exercise `start_ingress`, `PlaybackCommandService` effects or `NativeMediaOwner` lifecycle. Add deterministic slow Resume followed by Pause/Stop through the real worker, RPC/native effect parity, and registration/cleanup failure and shutdown-race coverage. The completed testing subtask currently overstates this coverage. [hifimule-daemon/src/playback/native.rs:162] [hifimule-daemon/src/playback/commands.rs:18]
+- [x] [Review][Patch] **[P3] Recover from malformed native evidence JSON input.** Both manual state prompts call `json.loads` without handling decode errors. A typo terminates the collector before it saves the preceding fixture/observation work. Validate and reprompt, preserving the accumulated record. [scripts/playback-installed-evidence.py:601]
+
+Review validation: 13 installed-evidence unit tests passed. An additional read-only validator probe demonstrated the false-positive evidence acceptance above. An isolated temporary Rust harness reproduced E0284, then E0521 after correcting only the first error in the temporary copy. No production implementation was changed. Installed platform/API/physical-key runs remain outstanding as already disclosed; no full platform build or hardware acceptance is claimed by this review.
+
+
+### Review Resolution
+
+All eight code-review patches were applied on 2026-09-16. Linux publication now uses bounded latest-value slots with priority teardown; native metadata is republished only when changed, with elapsed position restored after replacement. Registration failures preserve the player, and partial initialization/teardown attempts handler removal even when a property operation fails. macOS temporary string ownership is balanced.
+
+Background Resume uses request-specific completion receipts and persistent accessible errors. Duplicate Play joins the existing attempt; control epochs distinguish same-generation retries, and later successful playback clears stale menu errors. Production transport tests exposed a same-generation Pause/Resume race: owner-captured epochs now fence provider preparation and audio installation, and only an admitted Resume can authorize an installed pipeline to publish in a newer epoch. CPAL and Pulse use the same event fencing.
+
+Added 16 daemon regressions covering the real ingress worker, shared RPC/native effects, duplicate Resume, stopped/completed replay, missing output, pending-source cancellation on Pause/Stop/Quit, stale audio startup, receipt correlation, metadata/progress replacement, and native registration/cleanup failures. The evidence collector now validates positions and action-specific outcomes and retries invalid JSON without discarding prior observations.
+
+Validation after fixes:
+- Full daemon suite: **821 passed, 6 opt-in diagnostics ignored**; final playback rerun after cleanup: **147 passed, 6 ignored**. Local mock-server tests passed with the required socket access after sandbox-only bind failures.
+- Lifecycle: **13 passed**; i18n: **7 passed**; JavaScript: **67 passed**; Python playback evidence: **19 passed**; UI production build passed.
+- Clippy passed with existing repository warnings and no diagnostics in the changed playback/main code; workspace formatting and diff checks passed.
+- Patched native dependency: macOS ARM64 check passed; Windows ARM64 GNU LLVM check passed using the installed rustup target; two portable production-mailbox tests passed. The Linux D-Bus backend and three actual Crossroads contract tests type-check against the locked dependencies in an isolated host harness. Linux execution/linking and installed platform/media-key acceptance remain unverified.
+
+**Remaining acceptance gate:** AC8 installed Windows x64, Linux x64, macOS x64 and ARM64 API/physical-key observations are still outstanding. Story and sprint status remain `in-progress` for that existing acceptance requirement; no installed or physical-key success is inferred from these deterministic tests.
 
 ## Dev Notes
 
@@ -235,7 +267,11 @@ GPT-6 (story implementation).
 - `docs/playback-installed-test-checklist.md`
 - `hifimule-daemon/Cargo.toml`
 - `hifimule-daemon/src/main.rs`
+- `hifimule-daemon/src/playback/audio.rs`
+- `hifimule-daemon/src/playback/audio/pulse_output.rs`
 - `hifimule-daemon/src/playback/commands.rs`
+- `hifimule-daemon/src/playback/commands_tests.rs`
+- `hifimule-daemon/src/playback/model.rs`
 - `hifimule-daemon/src/playback/mod.rs`
 - `hifimule-daemon/src/playback/native.rs`
 - `hifimule-daemon/src/playback/session.rs`
@@ -259,6 +295,7 @@ GPT-6 (story implementation).
 - `third_party/souvlaki/rustfmt.toml`
 - `third_party/souvlaki/src/config.rs`
 - `third_party/souvlaki/src/lib.rs`
+- `third_party/souvlaki/src/publication.rs`
 - `third_party/souvlaki/src/platform/empty/mod.rs`
 - `third_party/souvlaki/src/platform/macos/mod.rs`
 - `third_party/souvlaki/src/platform/mod.rs`
@@ -273,3 +310,5 @@ GPT-6 (story implementation).
 ## Change Log
 
 - 2026-09-16: Implemented Story 15.6 native playback controls, daemon tray Resume, native backend corrections, lifecycle cleanup, localization, build prerequisites and strict installed evidence validation; moved story to review with installed platform observations explicitly outstanding.
+
+- 2026-09-16: Applied all eight review patches, added 16 production-path/lifecycle regressions and native backend tests, strengthened evidence validation, and retained in-progress status pending installed AC8 evidence.

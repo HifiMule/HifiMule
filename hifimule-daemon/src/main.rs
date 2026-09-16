@@ -564,6 +564,16 @@ fn finish_runtime_shutdown(
     }
 }
 
+fn playback_failure_message(code: &str) -> String {
+    let key = format!("playback.error.{code}");
+    let translated = hifimule_i18n::t(&key);
+    if translated == key {
+        hifimule_i18n::t("playback.background_resume_failed")
+    } else {
+        translated
+    }
+}
+
 fn send_playback_failure_notification(body: String) {
     thread::spawn(move || {
         if let Err(error) = notify_rust::Notification::new()
@@ -804,15 +814,14 @@ fn run_candidate(
     #[cfg(windows)]
     let native_window = {
         use tao::window::WindowBuilder;
-        Some(
-            WindowBuilder::new()
-                .with_visible(false)
-                .with_title("HifiMule media controls")
-                .build(&event_loop)
-                .map_err(|error| {
-                    anyhow::anyhow!("Failed to create native media window: {error}")
-                })?,
-        )
+        WindowBuilder::new()
+            .with_visible(false)
+            .with_title("HifiMule media controls")
+            .build(&event_loop)
+            .map_err(|error| {
+                daemon_log!("NATIVE_CONTROLS_UNAVAILABLE: native media window failed: {error}");
+            })
+            .ok()
     };
     #[cfg(windows)]
     let native_hwnd = {
@@ -885,7 +894,8 @@ fn run_candidate(
     );
 
     let menu_channel = MenuEvent::receiver();
-    let mut menu_resume_pending = false;
+    let mut menu_resume_pending: Option<playback::native::NativeCommandReceipt> = None;
+    let mut menu_resume_failure: Option<String> = None;
 
     // 4. Run the event loop
     // This will block the main thread
@@ -990,27 +1000,44 @@ fn run_candidate(
         } else {
             false
         };
+        if let Some(receipt) = menu_resume_pending.as_mut() {
+            match receipt.try_recv() {
+                Ok(result) => {
+                    menu_resume_pending = None;
+                    match result {
+                        Ok(()) => menu_resume_failure = None,
+                        Err(code) => {
+                            send_playback_failure_notification(playback_failure_message(&code));
+                            menu_resume_failure = Some(code);
+                        }
+                    }
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    menu_resume_pending = None;
+                    menu_resume_failure = Some("DAEMON_STOPPED".into());
+                    send_playback_failure_notification(playback_failure_message("DAEMON_STOPPED"));
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+            }
+        }
         if let Some(ingress) = native_ingress.as_ref() {
             let view = ingress.latest();
-            resume_item.set_enabled(!shutdown_pending && view.commands.play);
-            if let Some(code) = view.failure_code.as_deref() {
-                let key = format!("playback.error.{code}");
-                let translated = hifimule_i18n::t(&key);
-                let message = if translated == key {
-                    hifimule_i18n::t("playback.background_resume_failed")
-                } else {
-                    translated
-                };
-                native_status_item.set_text(&message);
-                if menu_resume_pending {
-                    send_playback_failure_notification(message);
-                    menu_resume_pending = false;
-                }
+            if menu_resume_pending.is_none()
+                && view.status == playback::model::PlaybackStatus::Active
+                && view.failure_code.is_none()
+            {
+                menu_resume_failure = None;
+            }
+            resume_item.set_enabled(
+                !shutdown_pending && view.commands.play && menu_resume_pending.is_none(),
+            );
+            if let Some(code) = menu_resume_failure
+                .as_deref()
+                .or(view.failure_code.as_deref())
+            {
+                native_status_item.set_text(playback_failure_message(code));
             } else if native_owner.is_some() && !native_publication_failed {
                 native_status_item.set_text(hifimule_i18n::t("playback.native_controls_ready"));
-                if matches!(view.status, playback::model::PlaybackStatus::Active) {
-                    menu_resume_pending = false;
-                }
             } else {
                 native_status_item
                     .set_text(hifimule_i18n::t("playback.native_controls_unavailable"));
@@ -1118,16 +1145,18 @@ fn run_candidate(
                     shutdown_operations.request_checkpoint_retry(&snapshot.shutdown_id);
                 }
             } else if event.id == resume_item.id() {
-                if let Some(ingress) = native_ingress.as_ref() {
-                    if ingress
-                        .try_send(playback::NativeControlIntent::Play)
-                        .is_ok()
-                    {
-                        menu_resume_pending = true;
-                    } else {
-                        let message = hifimule_i18n::t("playback.background_resume_failed");
-                        native_status_item.set_text(&message);
-                        send_playback_failure_notification(message);
+                if menu_resume_pending.is_none()
+                    && let Some(ingress) = native_ingress.as_ref()
+                {
+                    match ingress.try_send_tracked(playback::NativeControlIntent::Play) {
+                        Ok(receipt) => menu_resume_pending = Some(receipt),
+                        Err(_) => {
+                            let code = "RESUME_UNAVAILABLE";
+                            menu_resume_failure = Some(code.into());
+                            let message = playback_failure_message(code);
+                            native_status_item.set_text(&message);
+                            send_playback_failure_notification(message);
+                        }
                     }
                 }
             } else if event.id == open_ui_item.id() {

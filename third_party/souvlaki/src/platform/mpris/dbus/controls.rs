@@ -5,13 +5,12 @@ use dbus::ffidisp::stdintf::org_freedesktop_dbus::PropertiesPropertiesChanged;
 use dbus::message::SignalArgs;
 use dbus::Path;
 use std::collections::HashMap;
-use std::convert::From;
-use std::convert::TryInto;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use super::super::Error;
+use crate::publication::{InternalEvent, OwnedMetadata, PendingUpdates};
 use crate::{
     MediaControlCapabilities, MediaControlEvent, MediaMetadata, MediaPlayback, PlatformConfig,
 };
@@ -25,17 +24,8 @@ pub struct MediaControls {
 }
 
 struct ServiceThreadHandle {
-    event_channel: mpsc::Sender<InternalEvent>,
+    pending: Arc<Mutex<PendingUpdates>>,
     thread: JoinHandle<Result<(), Error>>,
-}
-
-#[derive(Clone, PartialEq, Debug)]
-enum InternalEvent {
-    ChangeMetadata(OwnedMetadata),
-    ChangePlayback(MediaPlayback),
-    ChangeVolume(f64),
-    ChangeCapabilities(MediaControlCapabilities),
-    Kill,
 }
 
 #[derive(Debug)]
@@ -102,28 +92,6 @@ pub fn create_metadata_dict(metadata: &OwnedMetadata) -> HashMap<String, Variant
     dict
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
-pub struct OwnedMetadata {
-    pub title: Option<String>,
-    pub album: Option<String>,
-    pub artist: Option<String>,
-    pub cover_url: Option<String>,
-    pub duration: Option<i64>,
-}
-
-impl From<MediaMetadata<'_>> for OwnedMetadata {
-    fn from(other: MediaMetadata) -> Self {
-        OwnedMetadata {
-            title: other.title.map(|s| s.to_string()),
-            artist: other.artist.map(|s| s.to_string()),
-            album: other.album.map(|s| s.to_string()),
-            cover_url: other.cover_url.map(|s| s.to_string()),
-            // TODO: This should probably not have an unwrap
-            duration: other.duration.map(|d| d.as_micros().try_into().unwrap()),
-        }
-    }
-}
-
 impl MediaControls {
     /// Create media controls with the specified config.
     pub fn new(config: PlatformConfig) -> Result<Self, Error> {
@@ -160,7 +128,8 @@ impl MediaControls {
 
         let dbus_name = self.dbus_name.clone();
         let friendly_name = self.friendly_name.clone();
-        let (event_channel, rx) = mpsc::channel();
+        let pending = Arc::new(Mutex::new(PendingUpdates::default()));
+        let worker_pending = pending.clone();
 
         // Check if the connection can be created BEFORE spawning the new thread
         let conn = Connection::new_session()?;
@@ -169,9 +138,20 @@ impl MediaControls {
 
         let capabilities = self.capabilities;
         self.thread = Some(ServiceThreadHandle {
-            event_channel,
+            pending,
             thread: thread::spawn(move || {
-                run_service(conn, friendly_name, capabilities, event_handler, rx)
+                let result = run_service(
+                    conn,
+                    friendly_name,
+                    capabilities,
+                    event_handler,
+                    &worker_pending,
+                );
+                worker_pending
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(InternalEvent::Kill);
+                result
             }),
         });
         Ok(())
@@ -190,14 +170,12 @@ impl MediaControls {
 
     /// Detach the event handler.
     pub fn detach(&mut self) -> Result<(), Error> {
-        if let Some(ServiceThreadHandle {
-            event_channel,
-            thread,
-        }) = self.thread.take()
-        {
-            // We don't care about the result of this event, since we immedieately
-            // check if the thread has panicked on the next line.
-            event_channel.send(InternalEvent::Kill).ok();
+        if let Some(ServiceThreadHandle { pending, thread }) = self.thread.take() {
+            // The terminal flag discards queued publications before joining.
+            pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(InternalEvent::Kill);
             // One error in case the thread panics, and the other one in case the
             // thread has returned an error.
             thread.join().map_err(|_| Error::ThreadPanicked)??;
@@ -222,10 +200,19 @@ impl MediaControls {
 
     fn send_internal_event(&mut self, event: InternalEvent) -> Result<(), Error> {
         let thread = &self.thread.as_ref().ok_or(Error::ThreadNotRunning)?;
-        thread
-            .event_channel
-            .send(event)
-            .map_err(|_| Error::ThreadPanicked)
+        if thread.thread.is_finished() {
+            return Err(Error::ThreadPanicked);
+        }
+        if thread
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(event)
+        {
+            Ok(())
+        } else {
+            Err(Error::ThreadNotRunning)
+        }
     }
 }
 
@@ -234,7 +221,7 @@ fn run_service<F>(
     friendly_name: String,
     capabilities: MediaControlCapabilities,
     event_handler: F,
-    event_channel: mpsc::Receiver<InternalEvent>,
+    pending: &Arc<Mutex<PendingUpdates>>,
 ) -> Result<(), Error>
 where
     F: Fn(MediaControlEvent) -> bool + Send + 'static,
@@ -261,67 +248,66 @@ where
     );
 
     loop {
-        if let Ok(event) = event_channel.recv_timeout(Duration::from_millis(10)) {
-            if event == InternalEvent::Kill {
-                break;
-            }
-
-            let mut changed_properties = HashMap::new();
-
-            match event {
-                InternalEvent::ChangeMetadata(metadata) => {
-                    let mut state = state.lock().unwrap();
-                    state.set_metadata(metadata);
-                    changed_properties.insert(
-                        "Metadata".to_owned(),
-                        Variant(state.metadata_dict.box_clone()),
-                    );
-                }
-                InternalEvent::ChangePlayback(playback) => {
-                    let mut state = state.lock().unwrap();
-                    state.playback_status = playback;
-                    changed_properties.insert(
-                        "PlaybackStatus".to_owned(),
-                        Variant(Box::new(state.get_playback_status().to_string())),
-                    );
-                }
-                InternalEvent::ChangeVolume(volume) => {
-                    let mut state = state.lock().unwrap();
-                    state.volume = volume;
-                    changed_properties.insert("Volume".to_owned(), Variant(Box::new(volume)));
-                }
-                InternalEvent::ChangeCapabilities(capabilities) => {
-                    let mut state = state.lock().unwrap();
-                    state.capabilities = capabilities;
-                    for property in [
-                        "CanGoNext",
-                        "CanGoPrevious",
-                        "CanPlay",
-                        "CanPause",
-                        "CanSeek",
-                        "CanControl",
-                    ] {
+        let Some(events) = pending.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+            break;
+        };
+        if !events.is_empty() {
+            let mut changed_properties: HashMap<String, Variant<Box<dyn RefArg>>> = HashMap::new();
+            for event in events {
+                match event {
+                    InternalEvent::ChangeMetadata(metadata) => {
+                        let mut state = state.lock().unwrap();
+                        state.set_metadata(metadata);
                         changed_properties.insert(
-                            property.to_owned(),
-                            Variant(Box::new(match property {
-                                "CanGoNext" => capabilities.next,
-                                "CanGoPrevious" => capabilities.previous,
-                                "CanPlay" => capabilities.play,
-                                "CanPause" => capabilities.pause,
-                                "CanSeek" => capabilities.seek,
-                                _ => {
-                                    capabilities.play
-                                        || capabilities.pause
-                                        || capabilities.toggle
-                                        || capabilities.stop
-                                }
-                            })),
+                            "Metadata".to_owned(),
+                            Variant(state.metadata_dict.box_clone()),
                         );
                     }
+                    InternalEvent::ChangePlayback(playback) => {
+                        let mut state = state.lock().unwrap();
+                        state.playback_status = playback;
+                        changed_properties.insert(
+                            "PlaybackStatus".to_owned(),
+                            Variant(Box::new(state.get_playback_status().to_string())),
+                        );
+                    }
+                    InternalEvent::ChangeVolume(volume) => {
+                        let mut state = state.lock().unwrap();
+                        state.volume = volume;
+                        changed_properties.insert("Volume".to_owned(), Variant(Box::new(volume)));
+                    }
+                    InternalEvent::ChangeCapabilities(capabilities) => {
+                        let mut state = state.lock().unwrap();
+                        state.capabilities = capabilities;
+                        for property in [
+                            "CanGoNext",
+                            "CanGoPrevious",
+                            "CanPlay",
+                            "CanPause",
+                            "CanSeek",
+                            "CanControl",
+                        ] {
+                            changed_properties.insert(
+                                property.to_owned(),
+                                Variant(Box::new(match property {
+                                    "CanGoNext" => capabilities.next,
+                                    "CanGoPrevious" => capabilities.previous,
+                                    "CanPlay" => capabilities.play,
+                                    "CanPause" => capabilities.pause,
+                                    "CanSeek" => capabilities.seek,
+                                    _ => {
+                                        capabilities.play
+                                            || capabilities.pause
+                                            || capabilities.toggle
+                                            || capabilities.stop
+                                    }
+                                })),
+                            );
+                        }
+                    }
+                    _ => (),
                 }
-                _ => (),
             }
-
             let properties_changed = PropertiesPropertiesChanged {
                 interface_name: "org.mpris.MediaPlayer2.Player".to_owned(),
                 changed_properties,
@@ -333,7 +319,9 @@ where
             )
             .ok();
         }
-        conn.process(Duration::from_millis(1000))?;
+        // Bound both publication latency and detach's join independently of
+        // whether another process happens to send D-Bus traffic.
+        conn.process(Duration::from_millis(20))?;
     }
 
     Ok(())

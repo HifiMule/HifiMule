@@ -332,8 +332,68 @@ def valid_native_state(state) -> bool:
             and re.fullmatch(r"[0-9a-fA-F-]{36}", state["generationId"]) is not None
             and isinstance(state.get("stateSequence"), str)
             and re.fullmatch(r"0|[1-9][0-9]*", state["stateSequence"]) is not None
+            and type(state.get("positionMs")) is int and state["positionMs"] >= 0
+            and "occurrenceId" in state and (state["occurrenceId"] is None
+                or isinstance(state["occurrenceId"], str) and bool(state["occurrenceId"]))
+            and isinstance(state.get("queueRevision"), str)
+            and re.fullmatch(r"0|[1-9][0-9]*", state["queueRevision"]) is not None
             and state.get("playbackStatus") in
                 ("idle", "loading", "active", "paused", "stopped", "completed", "error"))
+
+
+# Observations are explicit OS/UI facts, never inferred from a successful RPC.
+NATIVE_FACTS = {
+    "menu-resume-ui-closed": {"windowStayedClosed": True, "audibleProgress": True},
+    "ui-reopen-authoritative": {"commandReplayed": False},
+    "metadata-cleared": {"richFieldsObserved": True, "sparseMissingFieldsCleared": True,
+                         "emptySessionFieldsCleared": True},
+    "output-loss-rejected": {"playRejected": True, "outputRerouted": False, "audible": False},
+    "quit-deregistered-before-relaunch": {"registrationReleased": True, "metadataCleared": True,
+                                           "observedBeforeRelaunch": True, "processExited": True},
+    "new-instance-reregistered": {"registrationCount": 1},
+}
+
+
+def native_outcome_errors(name: str, item: dict) -> list[str]:
+    errors = []
+    facts = item.get("facts", {})
+    if not isinstance(facts, dict):
+        facts = {}
+    for key, expected in NATIVE_FACTS.get(name, {}).items():
+        if type(facts.get(key)) is not type(expected) or facts[key] != expected:
+            errors.append(f"native observation {name} does not prove {key}")
+    before, after = item.get("before"), item.get("after")
+    if not valid_native_state(before) or not valid_native_state(after):
+        return errors
+    if name != "new-instance-reregistered" and int(after["stateSequence"]) < int(before["stateSequence"]):
+        errors.append(f"native observation {name} regresses state sequence")
+    if name.startswith("api-") or name in {"menu-resume-ui-closed", "ui-reopen-authoritative", "output-loss-rejected"}:
+        if (before["occurrenceId"], before["queueRevision"]) != (after["occurrenceId"], after["queueRevision"]):
+            errors.append(f"native observation {name} changes the current occurrence or queue")
+    if name.startswith("api-") or name == "menu-resume-ui-closed":
+        if int(after["stateSequence"]) <= int(before["stateSequence"]):
+            errors.append(f"native observation {name} does not advance state sequence")
+    if name.startswith("api-stop-") and (after["positionMs"] != 0 or before["generationId"] == after["generationId"]):
+        errors.append(f"native observation {name} does not prove Stop position reset and generation rotation")
+    if name == "menu-resume-ui-closed" and (before["playbackStatus"] != "paused" or after["playbackStatus"] != "active"
+            or before["positionMs"] <= 0 or after["positionMs"] <= before["positionMs"]):
+        errors.append(f"native observation {name} does not prove Resume from preserved position")
+    if name == "ui-reopen-authoritative":
+        # Pause through native controls before reopening, making exact comparison possible.
+        if before["playbackStatus"] != "paused" or any(before[key] != after[key] for key in
+                ("playbackStatus", "positionMs", "generationId", "stateSequence")):
+            errors.append(f"native observation {name} does not prove unchanged paused state on reopen")
+        if facts.get("uiPositionMs") != after["positionMs"] or type(facts.get("uiPositionMs")) is not int or facts.get("uiPlaybackStatus") != after["playbackStatus"]:
+            errors.append(f"native observation {name} does not prove UI state and position agreement")
+    if name == "output-loss-rejected":
+        if before["playbackStatus"] not in {"paused", "error"} or after["playbackStatus"] not in {"paused", "error"} or before["positionMs"] != after["positionMs"]:
+            errors.append(f"native observation {name} does not prove frozen playback after rejected Play")
+        identities = [facts.get(key) for key in ("selectedOutputBefore", "selectedOutputAfter")]
+        if any(not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None for value in identities) or identities[0] != identities[1]:
+            errors.append(f"native observation {name} does not prove preserved selected output")
+    if name == "new-instance-reregistered" and (before["instanceId"] == after["instanceId"] or after["playbackStatus"] != "paused"):
+        errors.append(f"native observation {name} does not prove a new paused daemon instance")
+    return errors
 
 
 def validate_native_evidence(record: dict) -> list[str]:
@@ -369,6 +429,7 @@ def validate_native_evidence(record: dict) -> list[str]:
         for phase in ("before", "after"):
             if not valid_native_state(item.get(phase)):
                 errors.append(f"native observation {name} has invalid {phase} identity/state evidence")
+        errors.extend(native_outcome_errors(name, item))
         before, after = item.get("before"), item.get("after")
         if valid_native_state(before) and valid_native_state(after):
             if name not in {"quit-deregistered-before-relaunch", "new-instance-reregistered"} \
@@ -542,6 +603,20 @@ def ask_outcome(prompt: str) -> tuple[str, str]:
     return {"p": "passed", "f": "failed", "u": "unverified"}[answer], notes
 
 
+def ask_json_object(prompt: str, validator=None) -> dict:
+    while True:
+        try:
+            value = json.loads(input(prompt))
+            if not isinstance(value, dict):
+                raise ValueError("enter a JSON object")
+            sanitize(value)
+            if validator is not None and not validator(value):
+                raise ValueError("required fields are missing or invalid")
+            return value
+        except (json.JSONDecodeError, ValueError) as error:
+            print(f"Entry rejected: {error}. Previous observations are retained; retry this entry.")
+
+
 def collect(args) -> int:
     actual_target = detected_target()
     if actual_target != args.target:
@@ -595,11 +670,30 @@ def collect(args) -> int:
             print("Quit, observe registration release and metadata clearing, and record the after state before relaunching HifiMule.")
         elif name == "new-instance-reregistered":
             print("Relaunch HifiMule now and verify that the new daemon instance registers once.")
+        print("State fields: pid, instanceId, generationId, stateSequence, playbackStatus, positionMs, occurrenceId, queueRevision.")
+        print("Use anonymous consistent occurrence/instance IDs; no media metadata. Read actual daemon snapshots.")
+        if name == "menu-resume-ui-closed":
+            print("Start paused at a nonzero position; Resume and wait for audible progress with UI closed.")
+        elif name == "ui-reopen-authoritative":
+            print("Pause natively before reopening. Compare frozen daemon state/position with the reopened UI.")
+        elif name == "output-loss-rejected":
+            print("Capture paused/error state after output loss, then attempt Play; compare frozen position and selected output hashes.")
+        elif name == "metadata-cleared":
+            print("Observe rich metadata, replace with sparse metadata, then empty session; record each clearing check.")
+        elif name == "quit-deregistered-before-relaunch":
+            print("For after, retain the final pre-exit snapshot of the old daemon; facts record OS observations after exit, before relaunch.")
         outcome, notes = ask_outcome("Perform the named native observation and record only what was observed.")
         delivery = input("Delivery [observed/not-delivered]: ").strip()
         limitation = input("Explicit routing/platform limitation (required for physical non-delivery): ").strip()
-        before = json.loads(input("Sanitized before state JSON (pid, instanceId, generationId, stateSequence, playbackStatus): "))
-        after = json.loads(input("Sanitized after state JSON (same fields): "))
+        before = ask_json_object("Sanitized before state JSON: ", valid_native_state)
+        after = ask_json_object("Sanitized after state JSON: ", valid_native_state)
+        required_facts = NATIVE_FACTS.get(name, {})
+        print(f"Facts to observe (required passing values, never copy without verification): {json.dumps(required_facts)}")
+        if name == "ui-reopen-authoritative":
+            print("Also include uiPositionMs and uiPlaybackStatus read from reopened UI.")
+        elif name == "output-loss-rejected":
+            print("Also include selectedOutputBefore and selectedOutputAfter: SHA-256 hashes of selected output IDs.")
+        facts = ask_json_object("Observed facts JSON ({} if none; record false/actual values for failures): ")
         record["native"]["observations"][name] = {
             "commandPath": command_path,
             "uiState": ui_state,
@@ -609,6 +703,7 @@ def collect(args) -> int:
             "notes": notes,
             "before": before,
             "after": after,
+            "facts": facts,
         }
     for scenario in SCENARIOS:
         print(f"\n{SCENARIO_GUIDANCE[scenario]}")

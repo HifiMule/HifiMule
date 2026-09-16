@@ -15,6 +15,7 @@ pub(super) fn run_output(
     gate: Arc<AtomicBool>,
     generation_serial: Arc<AtomicU64>,
     expected_serial: u64,
+    event_epoch: Arc<AtomicU64>,
     start_ms: u64,
     pcm_high_water: Arc<AtomicU64>,
     endpoint: Arc<Mutex<Option<String>>>,
@@ -69,12 +70,13 @@ pub(super) fn run_output(
     let mut activity = PresentationActivity::default();
     let activity_clock = std::time::Instant::now();
     let mut report_stall = || {
-        session.publish_event(
+        session.publish_event_at_epoch(
             generation.clone(),
             PlaybackEvent::Failed {
                 code: "OUTPUT_RETIREMENT_PENDING".into(),
                 retryable: true,
             },
+            event_epoch.load(Ordering::Acquire),
         )
     };
     let result = (|| {
@@ -107,8 +109,8 @@ pub(super) fn run_output(
                     ready = true;
                 }
             }
-            let epoch = session.control_epoch();
             let enabled = ready && gate.load(Ordering::Acquire);
+            let epoch = event_epoch.load(Ordering::Acquire);
             output
                 .set_paused(!enabled, &mut report_stall)
                 .map_err(PlaybackPipelineError::output_policy)?;
@@ -194,11 +196,12 @@ pub(super) fn run_output(
         .map_err(|e| {
             PlaybackPipelineError::from_decode_error_and_stream_state(e, &stream_failure)
         })?;
-    session.publish_event(
+    session.publish_event_at_epoch(
         generation,
         PlaybackEvent::Completed {
             position_ms: decoded.frames.saturating_mul(1000) / u64::from(rate),
         },
+        event_epoch.load(Ordering::Acquire),
     );
     Ok(())
 }

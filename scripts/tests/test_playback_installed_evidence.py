@@ -28,12 +28,13 @@ def output_snapshot(identity="a", available=True):
 def native_state(pid=123, instance="instance-a", status="paused"):
     return {"pid": pid, "instanceId": instance,
             "generationId": "12345678-1234-1234-1234-123456789abc",
-            "stateSequence": "7", "playbackStatus": status}
+            "stateSequence": "7", "playbackStatus": status, "positionMs": 100,
+            "occurrenceId": "anonymous-occurrence", "queueRevision": "1"}
 
 
 def native_observation(name, path, ui_state):
     before_status, after_status = "paused", "paused"
-    if name.startswith("api-play-"):
+    if name.startswith("api-play-") or name == "menu-resume-ui-closed":
         before_status, after_status = "paused", "active"
     elif name.startswith("api-pause-"):
         before_status, after_status = "active", "paused"
@@ -41,10 +42,25 @@ def native_observation(name, path, ui_state):
         before_status, after_status = "paused", "active"
     elif name.startswith("api-stop-"):
         before_status, after_status = "active", "stopped"
-    return {"commandPath": path, "uiState": ui_state,
+    item = {"commandPath": path, "uiState": ui_state,
             "outcome": "passed", "delivery": "observed", "limitation": "",
             "before": native_state(status=before_status),
-            "after": native_state(status=after_status)}
+            "after": native_state(status=after_status),
+            "facts": dict(evidence.NATIVE_FACTS.get(name, {}))}
+    if name.startswith("api-") or name == "menu-resume-ui-closed":
+        item["after"]["stateSequence"] = "8"
+    if name.startswith("api-stop-"):
+        item["after"].update(positionMs=0, generationId="22345678-1234-1234-1234-123456789abc")
+    if name == "menu-resume-ui-closed":
+        item["after"]["positionMs"] = 200
+    if name == "ui-reopen-authoritative":
+        item["facts"].update(uiPositionMs=100, uiPlaybackStatus="paused")
+    if name == "output-loss-rejected":
+        item["facts"].update(selectedOutputBefore="a" * 64, selectedOutputAfter="a" * 64)
+    if name == "new-instance-reregistered":
+        item["after"].update(instanceId="instance-b", pid=456)
+    return item
+
 
 
 class InstalledEvidenceTests(unittest.TestCase):
@@ -246,6 +262,57 @@ class InstalledEvidenceTests(unittest.TestCase):
             record["native"]["observations"][name]["after"]["playbackStatus"] = "error"
             self.assertTrue(any(f"{name} does not prove" in error
                                 for error in evidence.validate_record(record)))
+
+    def test_native_position_and_action_facts_are_required(self):
+        for name, _, _ in evidence.NATIVE_OBSERVATIONS:
+            with self.subTest(name=name):
+                record = self.complete_record()
+                del record["native"]["observations"][name]["after"]["positionMs"]
+                self.assertTrue(evidence.validate_native_evidence(record))
+        for name, fields in evidence.NATIVE_FACTS.items():
+            for key in fields:
+                with self.subTest(name=name, key=key):
+                    record = self.complete_record()
+                    del record["native"]["observations"][name]["facts"][key]
+                    self.assertTrue(evidence.validate_native_evidence(record))
+
+    def test_native_outcomes_reject_false_success(self):
+        cases = [
+            ("api-stop-ui-open", "after", "positionMs", 123),
+            ("api-stop-ui-open", "after", "generationId", native_state()["generationId"]),
+            ("api-play-ui-open", "after", "stateSequence", "7"),
+            ("menu-resume-ui-closed", "after", "playbackStatus", "paused"),
+            ("menu-resume-ui-closed", "after", "positionMs", 0),
+            ("menu-resume-ui-closed", "after", "occurrenceId", "replacement"),
+            ("ui-reopen-authoritative", "after", "positionMs", 101),
+            ("ui-reopen-authoritative", "facts", "uiPositionMs", 101),
+            ("ui-reopen-authoritative", "facts", "commandReplayed", True),
+            ("metadata-cleared", "facts", "sparseMissingFieldsCleared", False),
+            ("output-loss-rejected", "after", "playbackStatus", "active"),
+            ("output-loss-rejected", "facts", "selectedOutputAfter", "b" * 64),
+            ("quit-deregistered-before-relaunch", "facts", "observedBeforeRelaunch", False),
+            ("new-instance-reregistered", "after", "instanceId", "instance-a"),
+            ("new-instance-reregistered", "facts", "registrationCount", True),
+        ]
+        for name, section, field, value in cases:
+            with self.subTest(name=name, field=field):
+                record = self.complete_record()
+                record["native"]["observations"][name][section][field] = value
+                self.assertTrue(evidence.validate_native_evidence(record))
+
+    def test_json_entry_retries_without_losing_previous_observation(self):
+        previous = {"before": native_state()}
+        with patch("builtins.input", side_effect=["{bad", "[]", '{"token":"private"}', '{}', json.dumps(native_state())]), patch("builtins.print") as printed:
+            previous["after"] = evidence.ask_json_object("state: ", evidence.valid_native_state)
+        self.assertEqual(previous, {"before": native_state(), "after": native_state()})
+        self.assertEqual(printed.call_count, 4)
+
+    def test_native_empty_session_state_allows_null_occurrence(self):
+        state = native_state(status="idle")
+        state["occurrenceId"] = None
+        self.assertTrue(evidence.valid_native_state(state))
+        state["positionMs"] = True
+        self.assertFalse(evidence.valid_native_state(state))
 
 
 if __name__ == "__main__":

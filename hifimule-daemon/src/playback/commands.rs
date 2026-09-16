@@ -65,10 +65,14 @@ impl PlaybackCommandService {
     }
 
     fn dispatch_effect(&self, snapshot: &super::model::SessionSnapshot) {
-        if !snapshot.resume_audio {
+        if !snapshot.resume_audio || self.playback.control_epoch() != snapshot.resume_epoch {
             return;
         }
-        if super::audio::global().resume_existing(&snapshot.generation_id) {
+        if super::audio::global().resume_existing(
+            &snapshot.generation_id,
+            &self.playback,
+            snapshot.resume_epoch,
+        ) {
             return;
         }
         let Some(current) = snapshot.current.clone() else {
@@ -79,6 +83,7 @@ impl PlaybackCommandService {
         let playback = self.playback.clone();
         let generation = snapshot.generation_id.clone();
         let position_ms = snapshot.position_ms;
+        let resume_epoch = snapshot.resume_epoch;
         tokio::spawn(async move {
             let deadline = std::time::Instant::now() + PREPARATION_TIMEOUT;
             let resolve = async {
@@ -93,20 +98,26 @@ impl PlaybackCommandService {
             let resolved = tokio::select! {
                 result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), resolve) => Some(result),
                 _ = async {
-                    while playback.generation_guard(&generation).is_some() {
+                    while playback.generation_guard(&generation).is_some()
+                        && playback.control_epoch() == resume_epoch
+                    {
                         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                     }
                 } => None,
             };
+            if playback.control_epoch() != resume_epoch {
+                return;
+            }
             let failure = match resolved {
                 Some(Ok(Ok(description))) => super::audio::global()
-                    .start(
+                    .start_at_epoch(
                         description,
                         current.source,
                         position_ms,
                         generation.clone(),
                         playback.clone(),
                         deadline,
+                        resume_epoch,
                     )
                     .await
                     .err(),
@@ -114,12 +125,13 @@ impl PlaybackCommandService {
                     super::audio::PlaybackPipelineError::from_provider_error(error),
                 ),
                 Some(Err(_)) => {
-                    playback.publish_event(
+                    playback.publish_event_at_epoch(
                         generation,
                         super::model::PlaybackEvent::Failed {
                             code: "RESUME_UNAVAILABLE".into(),
                             retryable: true,
                         },
+                        resume_epoch,
                     );
                     return;
                 }
@@ -128,7 +140,7 @@ impl PlaybackCommandService {
             if let Some(error) = failure
                 && super::audio::log_pipeline_failure(&playback, &generation, &error)
             {
-                playback.publish_event(
+                playback.publish_event_at_epoch(
                     generation,
                     super::model::PlaybackEvent::Failed {
                         code: if error.code().starts_with("OUTPUT_") {
@@ -139,6 +151,7 @@ impl PlaybackCommandService {
                         .into(),
                         retryable: true,
                     },
+                    resume_epoch,
                 );
             }
         });
@@ -162,3 +175,7 @@ fn stopped() -> super::session::PlaybackError {
         authoritative: None,
     }
 }
+
+#[cfg(test)]
+#[path = "commands_tests.rs"]
+mod tests;

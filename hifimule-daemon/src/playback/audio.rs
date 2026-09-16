@@ -290,6 +290,7 @@ struct Pipeline {
     gate: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
     generation: String,
+    event_epoch: Arc<AtomicU64>,
     worker: std::thread::JoinHandle<()>,
     compressed_high_water: Arc<AtomicU64>,
     pcm_high_water: Arc<AtomicU64>,
@@ -391,6 +392,7 @@ impl AudioEngine {
         old: Pipeline,
         session: &super::PlaybackSession,
         generation: &str,
+        expected_epoch: u64,
     ) -> Result<(), PlaybackPipelineError> {
         old.gate.store(false, Ordering::Release);
         old.cancel.store(true, Ordering::Release);
@@ -398,9 +400,9 @@ impl AudioEngine {
         let result = tokio::select! {
             result = &mut retirement => result,
             _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
-                session.publish_event(generation.to_owned(), PlaybackEvent::Failed {
+                session.publish_event_at_epoch(generation.to_owned(), PlaybackEvent::Failed {
                     code: "OUTPUT_RETIREMENT_PENDING".into(), retryable: true,
-                });
+                }, expected_epoch);
                 // Keep ownership and the serialized-start guard. A timeout is
                 // not evidence that the old native stream has stopped.
                 retirement.await
@@ -436,7 +438,7 @@ impl AudioEngine {
             .unwrap_or_else(|e| e.into_inner())
             .take();
         if let Some(old) = old {
-            Self::retire(old, &session, &generation).await?;
+            Self::retire(old, &session, &generation, session.control_epoch()).await?;
         }
         let preference = session
             .selected_output(&generation)
@@ -507,13 +509,31 @@ impl AudioEngine {
         }
     }
 
-    pub fn resume_existing(&self, generation: &str) -> bool {
-        let current = self.current.lock().unwrap_or_else(|e| e.into_inner());
-        current.as_ref().is_some_and(|pipeline| {
-            pipeline.generation == generation
-                && pipeline.alive.load(Ordering::Acquire)
-                && !pipeline.cancel.load(Ordering::Acquire)
-        })
+    pub fn resume_existing(
+        &self,
+        generation: &str,
+        session: &super::PlaybackSession,
+        expected_epoch: u64,
+    ) -> bool {
+        session.with_current_generation(generation, || {
+            if session.control_epoch() != expected_epoch {
+                return false;
+            }
+            let current = self.current.lock().unwrap_or_else(|e| e.into_inner());
+            current.as_ref().is_some_and(|pipeline| {
+                let reusable = pipeline.generation == generation
+                    && pipeline.alive.load(Ordering::Acquire)
+                    && !pipeline.cancel.load(Ordering::Acquire);
+                if reusable {
+                    // Only a newly admitted Resume may authorize an installed
+                    // pipeline to report preparation failures in a newer epoch.
+                    pipeline
+                        .event_epoch
+                        .store(expected_epoch, Ordering::Release);
+                }
+                reusable
+            })
+        }) == Some(true)
     }
 
     pub fn stop_and_join(&self) -> anyhow::Result<()> {
@@ -546,13 +566,40 @@ impl AudioEngine {
         session: super::PlaybackSession,
         deadline: std::time::Instant,
     ) -> Result<(), PlaybackPipelineError> {
+        let epoch = session.control_epoch();
+        self.start_at_epoch(
+            description,
+            source,
+            start_ms,
+            generation,
+            session,
+            deadline,
+            epoch,
+        )
+        .await
+    }
+
+    /// Start only work belonging to the transport command that admitted it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn start_at_epoch(
+        &self,
+        description: PlaybackDescription,
+        source: super::model::TrackSource,
+        start_ms: u64,
+        generation: String,
+        session: super::PlaybackSession,
+        deadline: std::time::Instant,
+        expected_epoch: u64,
+    ) -> Result<(), PlaybackPipelineError> {
+        require_preparation_epoch(&session, expected_epoch)?;
         let _start_guard = self.starts.lock().await;
+        require_preparation_epoch(&session, expected_epoch)?;
         session
             .selected_output(&generation)
             .map_err(PlaybackPipelineError::output_policy)?;
         // A Resume admitted while the first start was preparing shares that
         // generation. Once preparation finishes, reuse it instead of restarting.
-        if self.resume_existing(&generation) {
+        if self.resume_existing(&generation, &session, expected_epoch) {
             return Ok(());
         }
         let (generation_serial, expected_serial) =
@@ -569,8 +616,9 @@ impl AudioEngine {
                 .take()
         };
         if let Some(old) = old {
-            Self::retire(old, &session, &generation).await?;
+            Self::retire(old, &session, &generation, expected_epoch).await?;
         }
+        require_preparation_epoch(&session, expected_epoch)?;
         let representation = select_playback_representation(description.representations)
             .map_err(PlaybackPipelineError::from_provider_error)?;
         let representation_name = representation_name(&representation);
@@ -579,7 +627,9 @@ impl AudioEngine {
         let response = tokio::select! {
             result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), fetch(&request)) => result,
             _ = async {
-                while generation_serial.load(Ordering::Acquire) == expected_serial {
+                while generation_serial.load(Ordering::Acquire) == expected_serial
+                    && session.control_epoch() == expected_epoch
+                {
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
             } => return Err(PlaybackPipelineError::cancelled(anyhow::anyhow!("playback generation was superseded"))),
@@ -587,6 +637,7 @@ impl AudioEngine {
             .map_err(|_| PlaybackPipelineError::timeout(anyhow::anyhow!("playback preparation timed out")))?
             .map_err(|error| error.with_representation(&representation_name))?;
         if generation_serial.load(Ordering::Acquire) != expected_serial
+            || session.control_epoch() != expected_epoch
             || session.generation_guard(&generation).is_none()
         {
             return Err(PlaybackPipelineError::cancelled(anyhow::anyhow!(
@@ -614,13 +665,14 @@ impl AudioEngine {
             artist: description.song.artist_name.clone(),
             album: description.song.album_title.clone(),
         };
-        session.publish_event(
+        session.publish_event_at_epoch(
             generation.clone(),
             PlaybackEvent::Resolved {
                 metadata,
                 duration_ms: Some(u64::from(description.song.duration_seconds) * 1000),
                 representation: representation_name.clone(),
             },
+            expected_epoch,
         );
         let worker_cancel = cancel.clone();
         let worker_gate = gate.clone();
@@ -630,9 +682,20 @@ impl AudioEngine {
         let worker_pcm_high_water = pcm_high_water.clone();
         let worker_endpoint = endpoint.clone();
         let worker_representation = representation_name.clone();
+        let event_epoch = Arc::new(AtomicU64::new(expected_epoch));
+        let pipeline_event_epoch = event_epoch.clone();
+        let install_session = session.clone();
+        let install_generation = generation.clone();
+        // A worker cannot open native output until installation has passed the
+        // owner's generation and command-epoch fence under the owner lock.
+        let (installed_tx, installed_rx) = std::sync::mpsc::sync_channel::<()>(1);
         let worker = std::thread::Builder::new()
             .name("hifimule-audio".into())
             .spawn(move || {
+                if installed_rx.recv().is_err() {
+                    worker_alive.store(false, Ordering::Release);
+                    return;
+                }
                 let result = run_output(
                     reader,
                     &decoder_hint,
@@ -642,6 +705,7 @@ impl AudioEngine {
                     worker_gate,
                     generation_serial.clone(),
                     expected_serial,
+                    event_epoch.clone(),
                     start_ms,
                     worker_pcm_high_water,
                     worker_endpoint,
@@ -655,9 +719,16 @@ impl AudioEngine {
                         if should_publish_worker_failure(
                             &error,
                             worker_cancel.load(Ordering::Acquire),
-                        ) =>
+                        ) && log_pipeline_failure(&session, &generation, &error) =>
                     {
-                        publish_pipeline_failure(&session, generation, error);
+                        session.publish_event_at_epoch(
+                            generation,
+                            PlaybackEvent::Failed {
+                                code: error.code().into(),
+                                retryable: error.retryable(),
+                            },
+                            event_epoch.load(Ordering::Acquire),
+                        );
                     }
                     _ => {}
                 }
@@ -669,19 +740,51 @@ impl AudioEngine {
                 )
                 .with_representation(&representation_name)
             })?;
-        *self.current.lock().unwrap_or_else(|e| e.into_inner()) = Some(Pipeline {
+        let mut pipeline = Some(Pipeline {
             cancel,
             gate,
             alive,
             generation: pipeline_generation,
+            event_epoch: pipeline_event_epoch,
             position_ms,
             worker,
             compressed_high_water,
             pcm_high_water,
             endpoint,
         });
+        let installed = install_session.with_current_generation(&install_generation, || {
+            if install_session.control_epoch() != expected_epoch {
+                return false;
+            }
+            *self.current.lock().unwrap_or_else(|e| e.into_inner()) = pipeline.take();
+            let _ = installed_tx.send(());
+            true
+        }) == Some(true);
+        if !installed {
+            drop(installed_tx);
+            if let Some(pipeline) = pipeline {
+                pipeline.cancel.store(true, Ordering::Release);
+                // The worker has not opened output or entered decoder work.
+                let _ = pipeline.worker.join();
+            }
+            return Err(PlaybackPipelineError::cancelled(anyhow::anyhow!(
+                "playback preparation was superseded"
+            )));
+        }
         Ok(())
     }
+}
+
+fn require_preparation_epoch(
+    session: &super::PlaybackSession,
+    expected_epoch: u64,
+) -> Result<(), PlaybackPipelineError> {
+    if session.control_epoch() != expected_epoch || session.is_fenced() {
+        return Err(PlaybackPipelineError::cancelled(anyhow::anyhow!(
+            "playback preparation was superseded"
+        )));
+    }
+    Ok(())
 }
 
 async fn fetch(request: &PlaybackRequest) -> Result<reqwest::Response, PlaybackPipelineError> {
@@ -741,6 +844,7 @@ fn run_output(
     gate: Arc<AtomicBool>,
     generation_serial: Arc<AtomicU64>,
     expected_serial: u64,
+    event_epoch: Arc<AtomicU64>,
     start_ms: u64,
     pcm_high_water: Arc<AtomicU64>,
     endpoint: Arc<Mutex<Option<String>>>,
@@ -921,7 +1025,7 @@ fn run_output(
         .map(|value| value.occurrence_id)
         .unwrap_or_default();
     let mut active = false;
-    let mut control_epoch = session.control_epoch();
+    let mut control_epoch = event_epoch.load(Ordering::Acquire);
     let mut buffering = false;
     let mut last_samples = 0;
     let mut seq = 0;
@@ -939,7 +1043,7 @@ fn run_output(
             )));
         }
         let samples = consumed.load(Ordering::Acquire);
-        let next_epoch = session.control_epoch();
+        let next_epoch = event_epoch.load(Ordering::Acquire);
         if next_epoch != control_epoch {
             active = false;
             control_epoch = next_epoch;
@@ -983,11 +1087,12 @@ fn run_output(
                         &stream_failure,
                     )
                 })?;
-            session.publish_event(
+            session.publish_event_at_epoch(
                 generation,
                 PlaybackEvent::Completed {
                     position_ms: result.frames.saturating_mul(1000) / u64::from(rate),
                 },
+                event_epoch.load(Ordering::Acquire),
             );
             return Ok(());
         }
@@ -1186,6 +1291,129 @@ mod tests {
     use super::*;
     use crate::providers::{PlaybackProvenance, PlaybackRepresentation, ProviderError};
 
+    fn queued_session() -> crate::playback::PlaybackSession {
+        use crate::playback::model::*;
+        let session = crate::playback::PlaybackSession::restore(
+            Arc::new(crate::db::Database::memory().unwrap()),
+            uuid::Uuid::new_v4().to_string(),
+        );
+        let initial = session.snapshot().unwrap();
+        session
+            .apply(ApplySessionParams {
+                schema_version: 1,
+                instance_id: initial.instance_id,
+                session_id: initial.session_id,
+                command_id: uuid::Uuid::new_v4().to_string(),
+                expected_queue_revision: initial.queue_revision,
+                operation: SessionOperation::ReplaceQueue {
+                    sources: vec![TrackSource {
+                        server_id: "fixture".into(),
+                        track_id: "track".into(),
+                    }],
+                },
+            })
+            .unwrap();
+        session
+    }
+
+    fn unused_description() -> PlaybackDescription {
+        PlaybackDescription {
+            song: serde_json::from_value(serde_json::json!({
+                "id": "track", "title": "Track", "duration": 1
+            }))
+            .unwrap(),
+            representations: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_resume_epoch_is_rejected_before_setup_and_after_waiting_for_start_lock() {
+        use crate::playback::NativeControlIntent;
+        for pause_while_waiting in [false, true] {
+            let session = queued_session();
+            let admitted = session
+                .native_control(NativeControlIntent::Play, None)
+                .unwrap();
+            let engine = AudioEngine {
+                current: Mutex::new(None),
+                starts: tokio::sync::Mutex::new(()),
+            };
+            let held = engine.starts.lock().await;
+            let start = engine.start_at_epoch(
+                unused_description(),
+                admitted.current.as_ref().unwrap().source.clone(),
+                0,
+                admitted.generation_id.clone(),
+                session.clone(),
+                std::time::Instant::now() + std::time::Duration::from_secs(1),
+                admitted.resume_epoch,
+            );
+            tokio::pin!(start);
+            if pause_while_waiting {
+                // Poll the real start until it is pending on the held start lock.
+                tokio::select! {
+                    biased;
+                    _ = &mut start => panic!("start bypassed its serialized lock"),
+                    _ = std::future::ready(()) => {},
+                }
+            }
+            session
+                .native_control(NativeControlIntent::Pause, None)
+                .unwrap();
+            drop(held);
+            let error = start.await.unwrap_err();
+            assert!(
+                !error.is_publishable(),
+                "stale work must cancel before output setup"
+            );
+            assert!(engine.current.lock().unwrap().is_none());
+            assert_eq!(
+                session.snapshot().unwrap().generation_id,
+                admitted.generation_id
+            );
+            assert!(!session.output_gate().load(Ordering::Acquire));
+            session.stop_and_join().unwrap();
+        }
+    }
+
+    #[test]
+    fn installed_pipeline_epoch_advances_only_for_a_current_admitted_resume() {
+        use crate::playback::NativeControlIntent;
+        let session = queued_session();
+        let admitted = session
+            .native_control(NativeControlIntent::Play, None)
+            .unwrap();
+        let authorized = Arc::new(AtomicU64::new(admitted.resume_epoch));
+        let engine = AudioEngine {
+            starts: tokio::sync::Mutex::new(()),
+            current: Mutex::new(Some(Pipeline {
+                cancel: Arc::new(AtomicBool::new(false)),
+                gate: session.output_gate(),
+                alive: Arc::new(AtomicBool::new(true)),
+                generation: admitted.generation_id.clone(),
+                event_epoch: authorized.clone(),
+                worker: std::thread::spawn(|| {}),
+                compressed_high_water: Arc::new(AtomicU64::new(0)),
+                pcm_high_water: Arc::new(AtomicU64::new(0)),
+                endpoint: Arc::new(Mutex::new(None)),
+                position_ms: Arc::new(AtomicU64::new(0)),
+            })),
+        };
+        session
+            .native_control(NativeControlIntent::Pause, None)
+            .unwrap();
+        assert!(!engine.resume_existing(&admitted.generation_id, &session, admitted.resume_epoch));
+        assert_eq!(authorized.load(Ordering::Acquire), admitted.resume_epoch);
+        let resumed = session
+            .native_control(NativeControlIntent::Play, None)
+            .unwrap();
+        assert!(engine.resume_existing(&resumed.generation_id, &session, resumed.resume_epoch));
+        assert_eq!(authorized.load(Ordering::Acquire), resumed.resume_epoch);
+        assert!(engine.current.lock().unwrap().is_some());
+        engine.stop_and_join().unwrap();
+        session.stop_and_join().unwrap();
+    }
+
     #[tokio::test]
     async fn stalled_retirement_keeps_start_owned_and_shutdown_owner_responsive() {
         use crate::playback::{
@@ -1257,6 +1485,7 @@ mod tests {
                 cancel: cancel.clone(),
                 alive: Arc::new(AtomicBool::new(true)),
                 generation: generation.clone(),
+                event_epoch: Arc::new(AtomicU64::new(session.control_epoch())),
                 worker,
                 compressed_high_water: Arc::new(AtomicU64::new(0)),
                 pcm_high_water: Arc::new(AtomicU64::new(0)),
@@ -1341,6 +1570,7 @@ mod tests {
                 cancel: cancel.clone(),
                 alive: Arc::new(AtomicBool::new(true)),
                 generation,
+                event_epoch: Arc::new(AtomicU64::new(session.control_epoch())),
                 worker,
                 position_ms: Arc::new(AtomicU64::new(1234)),
                 compressed_high_water: Arc::new(AtomicU64::new(0)),

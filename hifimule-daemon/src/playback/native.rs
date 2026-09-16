@@ -2,10 +2,112 @@ use super::model::{PlaybackStatus, SessionSnapshot, TransportState};
 use super::{NativeControlIntent, commands::PlaybackCommandService};
 use std::sync::{
     Arc, Mutex, OnceLock,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 pub const NATIVE_INGRESS_CAPACITY: usize = 64;
+
+type CommandResult = Result<(), String>;
+pub type NativeCommandReceipt = tokio::sync::oneshot::Receiver<CommandResult>;
+
+struct NativeRequest {
+    intent: NativeControlIntent,
+    reply: Option<tokio::sync::oneshot::Sender<CommandResult>>,
+}
+
+struct PendingResume {
+    generation_id: String,
+    control_epoch: u64,
+    replies: Vec<tokio::sync::oneshot::Sender<CommandResult>>,
+}
+
+impl PendingResume {
+    fn finish(self, result: CommandResult) {
+        for reply in self.replies {
+            let _ = reply.send(result.clone());
+        }
+    }
+}
+
+/// Command errors have their own lifetime: sampling transport must not erase
+/// a rejection before the desktop loop can announce it.
+#[derive(Default)]
+struct CommandFeedback {
+    failure: Option<String>,
+    pending: Option<PendingResume>,
+}
+
+impl CommandFeedback {
+    fn admitted(&mut self, snapshot: &SessionSnapshot, request: NativeRequest) {
+        if let Some(pending) = self.pending.as_mut()
+            && pending.generation_id == snapshot.generation_id
+            && pending.control_epoch == snapshot.resume_epoch
+            && snapshot.playback.status == PlaybackStatus::Loading
+        {
+            // An idempotent Play joins the existing attempt; it must not
+            // complete the original menu receipt before preparation finishes.
+            if let Some(reply) = request.reply {
+                if pending.replies.len() < NATIVE_INGRESS_CAPACITY {
+                    pending.replies.push(reply);
+                } else {
+                    let _ = reply.send(Err("PLAYBACK_BUSY".into()));
+                }
+            }
+            return;
+        }
+        if let Some(previous) = self.pending.take() {
+            // A later admitted intent supersedes this attempt. It is not a failure.
+            previous.finish(Ok(()));
+        }
+        self.failure = None;
+        let pending = PendingResume {
+            generation_id: snapshot.generation_id.clone(),
+            control_epoch: snapshot.resume_epoch,
+            replies: request.reply.into_iter().collect(),
+        };
+        if snapshot.playback.status == PlaybackStatus::Loading {
+            self.pending = Some(pending);
+        } else {
+            pending.finish(Ok(()));
+        }
+    }
+
+    fn rejected(&mut self, request: NativeRequest, code: &str) {
+        self.failure = Some(code.to_owned());
+        if let Some(reply) = request.reply {
+            let _ = reply.send(Err(code.to_owned()));
+        }
+    }
+
+    fn project(&mut self, mut view: NativePlaybackView) -> NativePlaybackView {
+        if let Some(pending) = self.pending.as_ref() {
+            let result = if view.generation_id != pending.generation_id
+                || view.control_epoch != pending.control_epoch
+            {
+                Some(Ok(())) // A replacement/Stop superseded the attempt.
+            } else if let Some(code) = view.failure_code.as_ref() {
+                Some(Err(code.clone()))
+            } else if view.status != PlaybackStatus::Loading {
+                Some(Ok(())) // Active, or explicitly paused/stopped in the meantime.
+            } else {
+                None
+            };
+            if let Some(result) = result {
+                if let Err(code) = &result {
+                    self.failure = Some(code.clone());
+                }
+                self.pending.take().unwrap().finish(result);
+            }
+        }
+        if view.status == PlaybackStatus::Active && view.failure_code.is_none() {
+            self.failure = None;
+        }
+        if let Some(code) = self.failure.as_ref() {
+            view.failure_code = Some(code.clone());
+        }
+        view
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct NativeCommandMask {
@@ -21,6 +123,7 @@ pub struct NativePlaybackView {
     pub session_id: String,
     pub generation_id: String,
     pub state_sequence: String,
+    pub control_epoch: u64,
     pub status: PlaybackStatus,
     pub title: Option<String>,
     pub artist: Option<String>,
@@ -38,6 +141,7 @@ impl Default for NativePlaybackView {
             session_id: String::new(),
             generation_id: String::new(),
             state_sequence: "0".into(),
+            control_epoch: 0,
             status: PlaybackStatus::Idle,
             title: None,
             artist: None,
@@ -95,6 +199,7 @@ impl NativePlaybackView {
             session_id: snapshot.session_id.clone(),
             generation_id: snapshot.generation_id.clone(),
             state_sequence: snapshot.state_sequence.clone(),
+            control_epoch: snapshot.resume_epoch,
             status,
             title: metadata.map(|value| value.title.clone()),
             artist: metadata.and_then(|value| value.artist.clone()),
@@ -111,6 +216,7 @@ impl NativePlaybackView {
                 .playback
                 .error
                 .as_ref()
+                .or(snapshot.output.error.as_ref())
                 .map(|value| value.code.clone()),
         }
     }
@@ -118,13 +224,32 @@ impl NativePlaybackView {
 
 #[derive(Clone)]
 pub struct NativeIngress {
-    tx: tokio::sync::mpsc::Sender<NativeControlIntent>,
+    tx: tokio::sync::mpsc::Sender<NativeRequest>,
     latest: Arc<Mutex<NativePlaybackView>>,
 }
 
 impl NativeIngress {
     pub fn try_send(&self, intent: NativeControlIntent) -> Result<(), NativeIngressError> {
-        self.tx.try_send(intent).map_err(|error| match error {
+        self.enqueue(NativeRequest {
+            intent,
+            reply: None,
+        })
+    }
+
+    pub fn try_send_tracked(
+        &self,
+        intent: NativeControlIntent,
+    ) -> Result<NativeCommandReceipt, NativeIngressError> {
+        let (reply, receipt) = tokio::sync::oneshot::channel();
+        self.enqueue(NativeRequest {
+            intent,
+            reply: Some(reply),
+        })?;
+        Ok(receipt)
+    }
+
+    fn enqueue(&self, request: NativeRequest) -> Result<(), NativeIngressError> {
+        self.tx.try_send(request).map_err(|error| match error {
             tokio::sync::mpsc::error::TrySendError::Full(_) => NativeIngressError::Full,
             tokio::sync::mpsc::error::TrySendError::Closed(_) => NativeIngressError::Stopped,
         })
@@ -160,7 +285,7 @@ impl NativeBridge {
 }
 
 pub fn start_ingress(service: PlaybackCommandService) -> NativeIngress {
-    let (tx, mut rx) = tokio::sync::mpsc::channel(NATIVE_INGRESS_CAPACITY);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<NativeRequest>(NATIVE_INGRESS_CAPACITY);
     let latest = Arc::new(Mutex::new(
         service
             .playback()
@@ -170,29 +295,33 @@ pub fn start_ingress(service: PlaybackCommandService) -> NativeIngress {
     ));
     let worker_latest = latest.clone();
     tokio::spawn(async move {
+        let mut feedback = CommandFeedback::default();
         let mut refresh = tokio::time::interval(std::time::Duration::from_millis(250));
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
-                intent = rx.recv() => {
-                    let Some(intent) = intent else { break; };
-                    match service.native_control(intent).await {
+                request = rx.recv() => {
+                    let Some(request) = request else { break; };
+                    match service.native_control(request.intent).await {
                         Ok(snapshot) => {
+                            feedback.admitted(&snapshot, request);
                             *worker_latest.lock().unwrap_or_else(|e| e.into_inner()) =
-                                NativePlaybackView::from_snapshot(&snapshot, false);
+                                feedback.project(NativePlaybackView::from_snapshot(&snapshot, false));
                         }
                         Err(error) => {
+                            feedback.rejected(request, error.code);
                             let mut view = worker_latest.lock().unwrap_or_else(|e| e.into_inner());
-                            view.failure_code = Some(error.code.into());
+                            view.failure_code = feedback.failure.clone();
                         }
                     }
                 }
                 _ = refresh.tick() => {
                     if let Ok(snapshot) = service.playback().snapshot() {
                         *worker_latest.lock().unwrap_or_else(|e| e.into_inner()) =
-                            NativePlaybackView::from_snapshot(
+                            feedback.project(NativePlaybackView::from_snapshot(
                                 &snapshot,
                                 service.playback().is_fenced(),
-                            );
+                            ));
                     }
                 }
             }
@@ -203,11 +332,52 @@ pub fn start_ingress(service: PlaybackCommandService) -> NativeIngress {
     NativeIngress { tx, latest }
 }
 
-pub struct NativeMediaOwner {
-    controls: souvlaki::MediaControls,
+/// The adapter boundary is injectable so lifecycle tests exercise the same
+/// registration/publication/teardown owner used by the desktop loop.
+pub trait NativeBackend {
+    fn set_capabilities(&mut self, value: souvlaki::MediaControlCapabilities)
+    -> Result<(), String>;
+    fn attach(
+        &mut self,
+        callback: Box<dyn Fn(souvlaki::MediaControlEvent) -> bool + Send>,
+    ) -> Result<(), String>;
+    fn set_metadata(&mut self, value: souvlaki::MediaMetadata<'_>) -> Result<(), String>;
+    fn set_playback(&mut self, value: souvlaki::MediaPlayback) -> Result<(), String>;
+    fn detach(&mut self) -> Result<(), String>;
+}
+
+impl NativeBackend for souvlaki::MediaControls {
+    fn set_capabilities(
+        &mut self,
+        value: souvlaki::MediaControlCapabilities,
+    ) -> Result<(), String> {
+        self.set_capabilities(value)
+            .map_err(|error| error.to_string())
+    }
+    fn attach(
+        &mut self,
+        callback: Box<dyn Fn(souvlaki::MediaControlEvent) -> bool + Send>,
+    ) -> Result<(), String> {
+        self.attach_checked(callback)
+            .map_err(|error| error.to_string())
+    }
+    fn set_metadata(&mut self, value: souvlaki::MediaMetadata<'_>) -> Result<(), String> {
+        self.set_metadata(value).map_err(|error| error.to_string())
+    }
+    fn set_playback(&mut self, value: souvlaki::MediaPlayback) -> Result<(), String> {
+        self.set_playback(value).map_err(|error| error.to_string())
+    }
+    fn detach(&mut self) -> Result<(), String> {
+        self.detach().map_err(|error| error.to_string())
+    }
+}
+
+pub struct NativeMediaOwner<B: NativeBackend = souvlaki::MediaControls> {
+    controls: Option<B>,
     ingress: NativeIngress,
     last: Option<NativePlaybackView>,
     rejected: Arc<AtomicU64>,
+    accepting: Arc<AtomicBool>,
 }
 
 impl NativeMediaOwner {
@@ -215,41 +385,65 @@ impl NativeMediaOwner {
         ingress: NativeIngress,
         hwnd: Option<*mut std::ffi::c_void>,
     ) -> Result<Self, String> {
-        let mut controls = souvlaki::MediaControls::new(souvlaki::PlatformConfig {
-            dbus_name: "hifimule",
-            display_name: "HifiMule",
-            hwnd,
+        // A failed hidden-window prerequisite must not reach Souvlaki's HWND
+        // assertion or terminate an otherwise functional daemon.
+        #[cfg(windows)]
+        if hwnd.is_none() {
+            return Err("native media window is unavailable".into());
+        }
+        Self::register_with(ingress, || {
+            souvlaki::MediaControls::new(souvlaki::PlatformConfig {
+                dbus_name: "hifimule",
+                display_name: "HifiMule",
+                hwnd,
+            })
+            .map_err(|error| format!("native registration failed: {error}"))
         })
-        .map_err(|error| format!("native registration failed: {error}"))?;
-        let initial = ingress.latest();
-        controls
-            .set_capabilities(capabilities(initial.commands))
-            .map_err(|error| format!("native capabilities failed: {error}"))?;
-        let callback_ingress = ingress.clone();
-        let rejected = Arc::new(AtomicU64::new(0));
-        let callback_rejected = rejected.clone();
-        controls
-            .attach_checked(move |event| {
-                let intent = event_to_intent(event);
-                let accepted =
-                    intent.is_some_and(|intent| callback_ingress.try_send(intent).is_ok());
+    }
+}
+
+impl<B: NativeBackend> NativeMediaOwner<B> {
+    fn register_with(
+        ingress: NativeIngress,
+        create: impl FnOnce() -> Result<B, String>,
+    ) -> Result<Self, String> {
+        let mut owner = Self {
+            controls: Some(create()?),
+            ingress,
+            last: None,
+            rejected: Arc::new(AtomicU64::new(0)),
+            accepting: Arc::new(AtomicBool::new(true)),
+        };
+        let result = (|| {
+            let controls = owner.controls.as_mut().unwrap();
+            controls.set_capabilities(capabilities(owner.ingress.latest().commands))?;
+            let callback_ingress = owner.ingress.clone();
+            let callback_rejected = owner.rejected.clone();
+            let accepting = owner.accepting.clone();
+            controls.attach(Box::new(move |event| {
+                let accepted = accepting.load(Ordering::Acquire)
+                    && event_to_intent(event)
+                        .is_some_and(|intent| callback_ingress.try_send(intent).is_ok());
                 if !accepted {
                     callback_rejected.fetch_add(1, Ordering::Relaxed);
                 }
                 accepted
-            })
-            .map_err(|error| format!("native attachment failed: {error}"))?;
-        let mut owner = Self {
-            controls,
-            ingress,
-            last: None,
-            rejected,
-        };
-        owner.refresh()?;
+            }))?;
+            owner.refresh()
+        })();
+        if let Err(error) = result {
+            return match owner.detach() {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(format!("{error}; cleanup: {cleanup}")),
+            };
+        }
         Ok(owner)
     }
 
     pub fn refresh(&mut self) -> Result<(), String> {
+        let Some(controls) = self.controls.as_mut() else {
+            return Ok(());
+        };
         let view = self.ingress.latest();
         let rejected = self.rejected.swap(0, Ordering::AcqRel);
         if rejected > 0 {
@@ -257,53 +451,88 @@ impl NativeMediaOwner {
                 "Native controls rejected {rejected} unsupported, full, or stopping command(s)"
             );
         }
-        if self.last.as_ref() == Some(&view) {
-            return Ok(());
+        let last = self.last.as_ref();
+        if last.is_none_or(|last| last.commands != view.commands) {
+            controls
+                .set_capabilities(capabilities(view.commands))
+                .map_err(|error| format!("native capabilities update failed: {error}"))?;
         }
-        self.controls
-            .set_capabilities(capabilities(view.commands))
-            .map_err(|error| format!("native capabilities update failed: {error}"))?;
-        self.controls
-            .set_metadata(souvlaki::MediaMetadata {
-                title: view.title.as_deref(),
-                artist: view.artist.as_deref(),
-                album: view.album.as_deref(),
-                cover_url: None,
-                duration: view.duration_ms.map(std::time::Duration::from_millis),
+        let metadata_changed = last.is_none_or(|last| {
+            last.session_id != view.session_id
+                || last.generation_id != view.generation_id
+                || last.title != view.title
+                || last.artist != view.artist
+                || last.album != view.album
+                || last.duration_ms != view.duration_ms
+        });
+        if metadata_changed {
+            controls
+                .set_metadata(souvlaki::MediaMetadata {
+                    title: view.title.as_deref(),
+                    artist: view.artist.as_deref(),
+                    album: view.album.as_deref(),
+                    cover_url: None,
+                    duration: view.duration_ms.map(std::time::Duration::from_millis),
+                })
+                .map_err(|error| format!("native metadata update failed: {error}"))?;
+        }
+        // macOS replaces the entire metadata dictionary, including elapsed time.
+        if metadata_changed
+            || last.is_none_or(|last| {
+                last.status != view.status || last.position_ms != view.position_ms
             })
-            .map_err(|error| format!("native metadata update failed: {error}"))?;
-        let progress = Some(souvlaki::MediaPosition(std::time::Duration::from_millis(
-            view.position_ms,
-        )));
-        let playback = match view.status {
-            PlaybackStatus::Active => souvlaki::MediaPlayback::Playing { progress },
-            PlaybackStatus::Loading | PlaybackStatus::Paused | PlaybackStatus::Error => {
-                souvlaki::MediaPlayback::Paused { progress }
-            }
-            PlaybackStatus::Idle | PlaybackStatus::Stopped | PlaybackStatus::Completed => {
-                souvlaki::MediaPlayback::Stopped
-            }
-        };
-        self.controls
-            .set_playback(playback)
-            .map_err(|error| format!("native playback update failed: {error}"))?;
+        {
+            let progress = Some(souvlaki::MediaPosition(std::time::Duration::from_millis(
+                view.position_ms,
+            )));
+            let playback = match view.status {
+                PlaybackStatus::Active => souvlaki::MediaPlayback::Playing { progress },
+                PlaybackStatus::Loading | PlaybackStatus::Paused | PlaybackStatus::Error => {
+                    souvlaki::MediaPlayback::Paused { progress }
+                }
+                PlaybackStatus::Idle | PlaybackStatus::Stopped | PlaybackStatus::Completed => {
+                    souvlaki::MediaPlayback::Stopped
+                }
+            };
+            controls
+                .set_playback(playback)
+                .map_err(|error| format!("native playback update failed: {error}"))?;
+        }
         self.last = Some(view);
         Ok(())
     }
 
     pub fn detach(&mut self) -> Result<(), String> {
-        self.controls
-            .set_capabilities(souvlaki::MediaControlCapabilities::default())
-            .map_err(|error| format!("native disable failed: {error}"))?;
-        self.controls
-            .set_metadata(souvlaki::MediaMetadata::default())
-            .map_err(|error| format!("native metadata clear failed: {error}"))?;
-        self.controls
-            .set_playback(souvlaki::MediaPlayback::Stopped)
-            .map_err(|error| format!("native stop publication failed: {error}"))?;
-        self.controls
-            .detach()
-            .map_err(|error| format!("native detach failed: {error}"))
+        self.accepting.store(false, Ordering::Release);
+        let Some(mut controls) = self.controls.take() else {
+            return Ok(());
+        };
+        // Cleanup must attempt handler removal even if clearing one property
+        // fails (for example, when the desktop service has disappeared).
+        let mut failures = Vec::new();
+        for result in [
+            controls.set_capabilities(souvlaki::MediaControlCapabilities::default()),
+            controls.set_metadata(souvlaki::MediaMetadata::default()),
+            controls.set_playback(souvlaki::MediaPlayback::Stopped),
+            controls.detach(),
+        ] {
+            if let Err(error) = result {
+                failures.push(error);
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
+    }
+}
+
+impl<B: NativeBackend> Drop for NativeMediaOwner<B> {
+    fn drop(&mut self) {
+        if let Err(error) = self.detach() {
+            crate::daemon_log!("Native controls teardown failed: {error}");
+        }
     }
 }
 
@@ -340,6 +569,7 @@ mod tests {
     fn snapshot(status: PlaybackStatus, state: TransportState) -> SessionSnapshot {
         SessionSnapshot {
             resume_audio: false,
+            resume_epoch: 0,
             schema_version: 1,
             instance_id: "instance".into(),
             session_id: "session".into(),
@@ -512,5 +742,408 @@ mod tests {
             )),
             None
         );
+    }
+
+    #[test]
+    fn request_receipts_never_consume_a_previous_failure() {
+        let mut feedback = CommandFeedback::default();
+        let (reply, mut rejected) = tokio::sync::oneshot::channel();
+        feedback.rejected(
+            NativeRequest {
+                intent: NativeControlIntent::Play,
+                reply: Some(reply),
+            },
+            "OUTPUT_UNAVAILABLE",
+        );
+        let paused = snapshot(PlaybackStatus::Paused, TransportState::Paused);
+        for _ in 0..10 {
+            assert_eq!(
+                feedback
+                    .project(NativePlaybackView::from_snapshot(&paused, false))
+                    .failure_code
+                    .as_deref(),
+                Some("OUTPUT_UNAVAILABLE")
+            );
+        }
+        assert_eq!(
+            rejected.try_recv().unwrap(),
+            Err("OUTPUT_UNAVAILABLE".into())
+        );
+
+        let (reply, mut retry) = tokio::sync::oneshot::channel();
+        let mut loading = snapshot(PlaybackStatus::Loading, TransportState::Buffering);
+        feedback.admitted(
+            &loading,
+            NativeRequest {
+                intent: NativeControlIntent::Play,
+                reply: Some(reply),
+            },
+        );
+        assert_eq!(
+            feedback
+                .project(NativePlaybackView::from_snapshot(&loading, false))
+                .failure_code,
+            None
+        );
+        assert_eq!(
+            retry.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        );
+        loading.playback.status = PlaybackStatus::Error;
+        loading.playback.error = Some(PlaybackFailure {
+            code: "RESUME_UNAVAILABLE".into(),
+            retryable: true,
+        });
+        feedback.project(NativePlaybackView::from_snapshot(&loading, false));
+        assert_eq!(retry.try_recv().unwrap(), Err("RESUME_UNAVAILABLE".into()));
+        assert_eq!(
+            feedback
+                .project(NativePlaybackView::from_snapshot(&paused, false))
+                .failure_code
+                .as_deref(),
+            Some("RESUME_UNAVAILABLE")
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_preserves_rejection_across_refresh_until_a_successful_command() {
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let playback = super::super::PlaybackSession::restore(db.clone(), "feedback-owner".into());
+        let ingress = start_ingress(PlaybackCommandService::new(
+            playback.clone(),
+            Arc::new(tokio::sync::RwLock::new(
+                crate::server_manager::ServerManager::new(),
+            )),
+            db,
+            Arc::new(crate::sync::SyncOperationManager::new()),
+        ));
+        let receipt = ingress.try_send_tracked(NativeControlIntent::Play).unwrap();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), receipt)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err("RESUME_UNAVAILABLE".into())
+        );
+        // Several real worker refreshes occur before the desktop reads its status.
+        tokio::time::sleep(std::time::Duration::from_millis(550)).await;
+        assert_eq!(
+            ingress.latest().failure_code.as_deref(),
+            Some("RESUME_UNAVAILABLE")
+        );
+        let current = playback.snapshot().unwrap();
+        playback
+            .apply(ApplySessionParams {
+                schema_version: 1,
+                instance_id: current.instance_id,
+                session_id: current.session_id,
+                command_id: uuid::Uuid::new_v4().to_string(),
+                expected_queue_revision: current.queue_revision,
+                operation: SessionOperation::ReplaceQueue {
+                    sources: vec![TrackSource {
+                        server_id: "offline".into(),
+                        track_id: "track".into(),
+                    }],
+                },
+            })
+            .unwrap();
+        let receipt = ingress.try_send_tracked(NativeControlIntent::Stop).unwrap();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), receipt)
+                .await
+                .unwrap()
+                .unwrap(),
+            Ok(())
+        );
+        // The receipt and projection are published in the same worker iteration.
+        tokio::task::yield_now().await;
+        assert_eq!(ingress.latest().failure_code, None);
+        drop(ingress);
+        playback.stop_and_join().unwrap();
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum Call {
+        Capabilities(souvlaki::MediaControlCapabilities),
+        Attach,
+        Metadata(
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<std::time::Duration>,
+        ),
+        Playback(souvlaki::MediaPlayback),
+        Detach,
+        Drop,
+    }
+
+    #[derive(Default)]
+    struct AdapterState {
+        calls: Vec<Call>,
+        callback: Option<Box<dyn Fn(souvlaki::MediaControlEvent) -> bool + Send>>,
+        fail_attach: bool,
+        fail_metadata: bool,
+        fail_detach: bool,
+    }
+
+    struct TestBackend(Arc<Mutex<AdapterState>>);
+    impl NativeBackend for TestBackend {
+        fn set_capabilities(
+            &mut self,
+            value: souvlaki::MediaControlCapabilities,
+        ) -> Result<(), String> {
+            self.0.lock().unwrap().calls.push(Call::Capabilities(value));
+            Ok(())
+        }
+        fn attach(
+            &mut self,
+            callback: Box<dyn Fn(souvlaki::MediaControlEvent) -> bool + Send>,
+        ) -> Result<(), String> {
+            let mut state = self.0.lock().unwrap();
+            state.calls.push(Call::Attach);
+            state.callback = Some(callback);
+            if state.fail_attach {
+                Err("partial attach".into())
+            } else {
+                Ok(())
+            }
+        }
+        fn set_metadata(&mut self, value: souvlaki::MediaMetadata<'_>) -> Result<(), String> {
+            let mut state = self.0.lock().unwrap();
+            state.calls.push(Call::Metadata(
+                value.title.map(str::to_owned),
+                value.artist.map(str::to_owned),
+                value.album.map(str::to_owned),
+                value.duration,
+            ));
+            if state.fail_metadata {
+                Err("metadata unavailable".into())
+            } else {
+                Ok(())
+            }
+        }
+        fn set_playback(&mut self, value: souvlaki::MediaPlayback) -> Result<(), String> {
+            self.0.lock().unwrap().calls.push(Call::Playback(value));
+            Ok(())
+        }
+        fn detach(&mut self) -> Result<(), String> {
+            let mut state = self.0.lock().unwrap();
+            state.calls.push(Call::Detach);
+            if state.fail_detach {
+                Err("detach unavailable".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+    impl Drop for TestBackend {
+        fn drop(&mut self) {
+            self.0.lock().unwrap().calls.push(Call::Drop);
+        }
+    }
+
+    fn test_ingress() -> (NativeIngress, tokio::sync::mpsc::Receiver<NativeRequest>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(NATIVE_INGRESS_CAPACITY);
+        (
+            NativeIngress {
+                tx,
+                latest: Arc::new(Mutex::new(NativePlaybackView::from_snapshot(
+                    &snapshot(PlaybackStatus::Active, TransportState::Playing),
+                    false,
+                ))),
+            },
+            rx,
+        )
+    }
+
+    #[test]
+    fn native_owner_registers_once_coalesces_fields_and_rejects_late_callbacks() {
+        let (ingress, mut rx) = test_ingress();
+        let state = Arc::new(Mutex::new(AdapterState::default()));
+        let mut owner =
+            NativeMediaOwner::register_with(ingress.clone(), || Ok(TestBackend(state.clone())))
+                .unwrap();
+        assert!((state.lock().unwrap().callback.as_ref().unwrap())(
+            souvlaki::MediaControlEvent::Pause
+        ));
+        assert_eq!(rx.try_recv().unwrap().intent, NativeControlIntent::Pause);
+        assert!(!(state.lock().unwrap().callback.as_ref().unwrap())(
+            souvlaki::MediaControlEvent::Next
+        ));
+        let initial_calls = state.lock().unwrap().calls.len();
+        // UI open/close has no native registration effect; unchanged owner refreshes do no work.
+        for _ in 0..5 {
+            owner.refresh().unwrap();
+        }
+        assert_eq!(state.lock().unwrap().calls.len(), initial_calls);
+        ingress.latest.lock().unwrap().position_ms += 250;
+        owner.refresh().unwrap();
+        assert_eq!(state.lock().unwrap().calls.len(), initial_calls + 1);
+        assert!(matches!(
+            state.lock().unwrap().calls.last(),
+            Some(Call::Playback(_))
+        ));
+        {
+            let mut view = ingress.latest.lock().unwrap();
+            view.title = Some("Rich track".into());
+            view.artist = Some("Artist".into());
+            view.album = Some("Album".into());
+            view.duration_ms = Some(10_000);
+        }
+        owner.refresh().unwrap();
+        {
+            let mut view = ingress.latest.lock().unwrap();
+            view.generation_id = "replacement".into();
+            view.title = Some("Poor track".into());
+            view.artist = None;
+            view.album = None;
+            view.duration_ms = None;
+        }
+        owner.refresh().unwrap();
+        assert!(state.lock().unwrap().calls.contains(&Call::Metadata(
+            Some("Poor track".into()),
+            None,
+            None,
+            None
+        )));
+        {
+            let state = state.lock().unwrap();
+            assert!(matches!(
+                state.calls[state.calls.len() - 2],
+                Call::Metadata(_, _, _, _)
+            ));
+            assert!(matches!(state.calls.last(), Some(Call::Playback(_))));
+        }
+        owner.detach().unwrap();
+        let detached_calls = state.lock().unwrap().calls.len();
+        owner.detach().unwrap();
+        owner.refresh().unwrap();
+        drop(owner);
+        assert_eq!(state.lock().unwrap().calls.len(), detached_calls);
+        assert!(!(state.lock().unwrap().callback.as_ref().unwrap())(
+            souvlaki::MediaControlEvent::Play
+        ));
+        assert!(rx.try_recv().is_err());
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state
+                .calls
+                .iter()
+                .filter(|call| matches!(call, Call::Attach))
+                .count(),
+            1
+        );
+        assert_eq!(
+            &state.calls[state.calls.len() - 5..],
+            &[
+                Call::Capabilities(souvlaki::MediaControlCapabilities::default()),
+                Call::Metadata(None, None, None, None),
+                Call::Playback(souvlaki::MediaPlayback::Stopped),
+                Call::Detach,
+                Call::Drop,
+            ]
+        );
+    }
+
+    #[test]
+    fn native_registration_and_cleanup_failures_still_remove_handlers_before_drop() {
+        let (ingress, mut rx) = test_ingress();
+        assert!(
+            NativeMediaOwner::<TestBackend>::register_with(ingress.clone(), || Err(
+                "window creation failed".into()
+            ))
+            .is_err()
+        );
+        // Native creation failure leaves the command bridge usable by the menu.
+        ingress.try_send(NativeControlIntent::Stop).unwrap();
+        assert_eq!(rx.try_recv().unwrap().intent, NativeControlIntent::Stop);
+        let state = Arc::new(Mutex::new(AdapterState {
+            fail_attach: true,
+            fail_metadata: true,
+            fail_detach: true,
+            ..Default::default()
+        }));
+        let result = NativeMediaOwner::register_with(ingress, || Ok(TestBackend(state.clone())));
+        let error = result.err().unwrap();
+        assert!(error.contains("partial attach"));
+        assert!(error.contains("detach unavailable"));
+        let state = state.lock().unwrap();
+        assert_eq!(
+            &state.calls[state.calls.len() - 2..],
+            &[Call::Detach, Call::Drop]
+        );
+        assert!(!(state.callback.as_ref().unwrap())(
+            souvlaki::MediaControlEvent::Play
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn duplicate_play_keeps_receipts_until_the_same_attempt_finishes() {
+        let mut feedback = CommandFeedback::default();
+        let loading = snapshot(PlaybackStatus::Loading, TransportState::Buffering);
+        let (first, mut first_receipt) = tokio::sync::oneshot::channel();
+        feedback.admitted(
+            &loading,
+            NativeRequest {
+                intent: NativeControlIntent::Play,
+                reply: Some(first),
+            },
+        );
+        feedback.admitted(
+            &loading,
+            NativeRequest {
+                intent: NativeControlIntent::Play,
+                reply: None,
+            },
+        );
+        let (second, mut second_receipt) = tokio::sync::oneshot::channel();
+        feedback.admitted(
+            &loading,
+            NativeRequest {
+                intent: NativeControlIntent::Play,
+                reply: Some(second),
+            },
+        );
+        assert_eq!(
+            first_receipt.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        );
+        assert_eq!(
+            second_receipt.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        );
+        let mut failed = NativePlaybackView::from_snapshot(&loading, false);
+        failed.status = PlaybackStatus::Error;
+        failed.failure_code = Some("RESUME_UNAVAILABLE".into());
+        feedback.project(failed);
+        assert_eq!(
+            first_receipt.try_recv().unwrap(),
+            Err("RESUME_UNAVAILABLE".into())
+        );
+        assert_eq!(
+            second_receipt.try_recv().unwrap(),
+            Err("RESUME_UNAVAILABLE".into())
+        );
+    }
+
+    #[test]
+    fn receipt_does_not_report_a_newer_rpc_attempts_failure() {
+        let mut feedback = CommandFeedback::default();
+        let loading = snapshot(PlaybackStatus::Loading, TransportState::Buffering);
+        let (reply, mut receipt) = tokio::sync::oneshot::channel();
+        feedback.admitted(
+            &loading,
+            NativeRequest {
+                intent: NativeControlIntent::Play,
+                reply: Some(reply),
+            },
+        );
+        let mut failed = NativePlaybackView::from_snapshot(&loading, false);
+        failed.control_epoch += 2; // RPC Pause then Resume, same generation.
+        failed.status = PlaybackStatus::Error;
+        failed.failure_code = Some("RESUME_UNAVAILABLE".into());
+        feedback.project(failed);
+        assert_eq!(receipt.try_recv().unwrap(), Ok(()));
     }
 }

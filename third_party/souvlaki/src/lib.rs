@@ -3,6 +3,15 @@
 
 mod config;
 mod platform;
+#[cfg(any(
+    test,
+    all(
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android")),
+        feature = "dbus"
+    )
+))]
+mod publication;
 
 use std::{fmt::Debug, time::Duration};
 

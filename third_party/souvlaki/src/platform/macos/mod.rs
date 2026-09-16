@@ -20,7 +20,7 @@ use cocoa::{
 use core_graphics::geometry::CGSize;
 
 use dispatch::{Queue, QueuePriority};
-use objc::{class, msg_send, sel, sel_impl};
+use objc::{class, msg_send, rc::StrongPtr, sel, sel_impl};
 
 use crate::{
     MediaControlCapabilities, MediaControlEvent, MediaMetadata, MediaPlayback, MediaPosition,
@@ -153,15 +153,18 @@ unsafe fn set_playback_metadata(metadata: MediaMetadata) {
     let media_center: id = msg_send!(class!(MPNowPlayingInfoCenter), defaultCenter);
     let now_playing: id = msg_send!(class!(NSMutableDictionary), dictionary);
     if let Some(title) = metadata.title {
-        let _: () = msg_send!(now_playing, setObject: ns_string(title)
+        let title = ns_string(title);
+        let _: () = msg_send!(now_playing, setObject: *title
                                               forKey: MPMediaItemPropertyTitle);
     }
     if let Some(artist) = metadata.artist {
-        let _: () = msg_send!(now_playing, setObject: ns_string(artist)
+        let artist = ns_string(artist);
+        let _: () = msg_send!(now_playing, setObject: *artist
                                               forKey: MPMediaItemPropertyArtist);
     }
     if let Some(album) = metadata.album {
-        let _: () = msg_send!(now_playing, setObject: ns_string(album)
+        let album = ns_string(album);
+        let _: () = msg_send!(now_playing, setObject: *album
                                               forKey: MPMediaItemPropertyAlbumTitle);
     }
     if let Some(duration) = metadata.duration {
@@ -354,8 +357,10 @@ unsafe fn clear_now_playing() {
     let _: () = msg_send!(media_center, setPlaybackState: MPNowPlayingPlaybackStateStopped);
 }
 
-unsafe fn ns_string(value: &str) -> id {
-    NSString::alloc(nil).init_str(value)
+// Own the +1 allocation until the receiving Cocoa API has retained/copied it.
+// This also works on threads without an autorelease pool.
+unsafe fn ns_string(value: &str) -> StrongPtr {
+    StrongPtr::new(NSString::alloc(nil).init_str(value))
 }
 
 unsafe fn ns_number(value: f64) -> id {
@@ -364,7 +369,8 @@ unsafe fn ns_number(value: f64) -> id {
 }
 
 unsafe fn ns_url(value: &str) -> id {
-    let url: id = msg_send!(class!(NSURL), URLWithString: ns_string(value));
+    let value = ns_string(value);
+    let url: id = msg_send!(class!(NSURL), URLWithString: *value);
     url
 }
 
@@ -375,7 +381,7 @@ unsafe fn load_image_from_url(url: &str) -> (id, CGSize) {
     let base64_ns_string = ns_string(&base64_data);
 
     let ns_data: id = msg_send!(class!(NSData), alloc);
-    let ns_data: id = msg_send!(ns_data, initWithBase64EncodedString: base64_ns_string
+    let ns_data: id = msg_send!(ns_data, initWithBase64EncodedString: *base64_ns_string
                                           options: 0);
     if ns_data == nil {
         return (nil, CGSize::new(0.0, 0.0));

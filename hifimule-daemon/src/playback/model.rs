@@ -65,6 +65,9 @@ pub struct SessionSnapshot {
     /// Private admission disposition, excluded from the wire contract.
     #[serde(skip)]
     pub(crate) resume_audio: bool,
+    /// Owner-captured epoch fencing asynchronous Resume preparation.
+    #[serde(skip)]
+    pub(crate) resume_epoch: u64,
     pub schema_version: u32,
     pub instance_id: String,
     pub session_id: String,

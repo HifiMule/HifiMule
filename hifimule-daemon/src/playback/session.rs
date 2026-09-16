@@ -1368,6 +1368,7 @@ fn snapshot(i: &Inner) -> PResult<SessionSnapshot> {
     }
     Ok(SessionSnapshot {
         resume_audio: false,
+        resume_epoch: i.control_epoch.load(Ordering::Acquire),
         schema_version: SCHEMA_VERSION,
         instance_id: i.instance_id.clone(),
         session_id: i.session.session_id.clone(),
@@ -1479,6 +1480,7 @@ fn control_inner(
     }
     snapshot(i).map(|mut snapshot| {
         snapshot.resume_audio = p.action == ControlAction::Resume;
+        snapshot.resume_epoch = i.control_epoch.load(Ordering::Acquire);
         snapshot
     })
 }

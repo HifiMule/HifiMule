@@ -27,8 +27,6 @@ where
 {
     let mut cr = Crossroads::new();
     let app_interface = cr.register("org.mpris.MediaPlayer2", {
-        let event_handler = event_handler.clone();
-
         move |b| {
             b.property("Identity")
                 .get(move |_, _| Ok(friendly_name.clone()));
@@ -60,6 +58,7 @@ where
         register_method(b, event_handler, "Play", MediaControlEvent::Play);
 
         b.method("Seek", ("Offset",), (), {
+            let state = state.clone();
             let event_handler = event_handler.clone();
 
             move |ctx, _, (offset,): (i64,)| {
@@ -122,11 +121,9 @@ where
         });
 
         b.method("OpenUri", ("Uri",), (), {
-            let event_handler = event_handler.clone();
-
             move |_, _, (uri,): (String,)| {
                 let _ = uri;
-                Err(dbus::MethodErr::failed("open URI is unsupported"))
+                Err::<(), _>(dbus::MethodErr::failed("open URI is unsupported"))
             }
         });
 
@@ -266,4 +263,143 @@ fn register_method<F>(
             Err(dbus::MethodErr::failed("command was rejected"))
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::publication::OwnedMetadata;
+    use crate::MediaControlCapabilities;
+    use dbus::{
+        arg::{PropMap, Variant},
+        Message, MessageType,
+    };
+    use std::cell::RefCell;
+
+    fn dispatch(cr: &mut Crossroads, mut message: Message) -> Message {
+        message.set_serial(1);
+        let replies = RefCell::new(Vec::new());
+        cr.handle_message(message, &replies).unwrap();
+        let mut replies = replies.into_inner();
+        assert_eq!(replies.len(), 1);
+        replies.remove(0)
+    }
+
+    fn call(method: &str) -> Message {
+        Message::new_method_call(
+            "org.mpris.MediaPlayer2.hifimule",
+            "/org/mpris/MediaPlayer2",
+            "org.mpris.MediaPlayer2.Player",
+            method,
+        )
+        .unwrap()
+    }
+
+    fn property(name: &str) -> Message {
+        Message::new_method_call(
+            "org.mpris.MediaPlayer2.hifimule",
+            "/org/mpris/MediaPlayer2",
+            "org.freedesktop.DBus.Properties",
+            "Get",
+        )
+        .unwrap()
+        .append2("org.mpris.MediaPlayer2.Player", name)
+    }
+
+    fn fixture<F: Fn(MediaControlEvent) -> bool + Send + 'static>(
+        handler: F,
+    ) -> (Arc<Mutex<ServiceState>>, Crossroads) {
+        let state = Arc::new(Mutex::new(ServiceState {
+            metadata: Default::default(),
+            metadata_dict: Default::default(),
+            playback_status: MediaPlayback::Stopped,
+            volume: 1.0,
+            capabilities: MediaControlCapabilities::default(),
+        }));
+        let cr = register_methods(
+            &state,
+            &Arc::new(Mutex::new(handler)),
+            "HifiMule".into(),
+            Arc::new(Mutex::new(None)),
+        );
+        (state, cr)
+    }
+
+    #[test]
+    fn transport_calls_preserve_callback_admission_results() {
+        for accepted in [true, false] {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let captured = events.clone();
+            let (_, mut cr) = fixture(move |event| {
+                captured.lock().unwrap().push(event);
+                accepted
+            });
+            let commands = [
+                ("Play", MediaControlEvent::Play),
+                ("Pause", MediaControlEvent::Pause),
+                ("PlayPause", MediaControlEvent::Toggle),
+                ("Stop", MediaControlEvent::Stop),
+            ];
+            for (name, expected) in commands {
+                let reply = dispatch(&mut cr, call(name));
+                assert_eq!(
+                    reply.msg_type(),
+                    if accepted {
+                        MessageType::MethodReturn
+                    } else {
+                        MessageType::Error
+                    }
+                );
+                assert_eq!(events.lock().unwrap().pop(), Some(expected));
+            }
+        }
+    }
+
+    #[test]
+    fn properties_follow_capabilities_and_replace_metadata() {
+        let (state, mut cr) = fixture(|_| true);
+        let initial: Variant<bool> = dispatch(&mut cr, property("CanPlay")).read1().unwrap();
+        assert!(!initial.0);
+        {
+            let mut state = state.lock().unwrap();
+            state.capabilities.play = true;
+            state.set_metadata(OwnedMetadata {
+                title: Some("first".into()),
+                artist: Some("artist".into()),
+                duration: Some(9_000_000),
+                ..Default::default()
+            });
+        }
+        let ready: Variant<bool> = dispatch(&mut cr, property("CanPlay")).read1().unwrap();
+        assert!(ready.0);
+        let rich: Variant<PropMap> = dispatch(&mut cr, property("Metadata")).read1().unwrap();
+        assert!(rich.0.contains_key("xesam:artist"));
+        assert!(rich.0.contains_key("mpris:length"));
+        state.lock().unwrap().set_metadata(OwnedMetadata::default());
+        let cleared: Variant<PropMap> = dispatch(&mut cr, property("Metadata")).read1().unwrap();
+        assert!(!cleared.0.contains_key("xesam:title"));
+        assert!(!cleared.0.contains_key("xesam:artist"));
+        assert!(!cleared.0.contains_key("mpris:length"));
+    }
+
+    #[test]
+    fn unsupported_seek_and_open_uri_do_not_reach_callback() {
+        let (_, mut cr) = fixture(|_| panic!("unsupported event reached callback"));
+        assert_eq!(
+            dispatch(&mut cr, call("Seek").append1(1_000_i64)).msg_type(),
+            MessageType::Error
+        );
+        assert_eq!(
+            dispatch(
+                &mut cr,
+                call("SetPosition").append2(Path::new("/").unwrap(), 1_000_i64)
+            )
+            .msg_type(),
+            MessageType::Error
+        );
+        assert_eq!(
+            dispatch(&mut cr, call("OpenUri").append1("file:///unused")).msg_type(),
+            MessageType::Error
+        );
+    }
 }
