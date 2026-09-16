@@ -119,6 +119,7 @@ pub struct DaemonCoreHandle {
     command_tx: mpsc::Sender<CoreCommand>,
     completed_rx: mpsc::Receiver<()>,
     sync_operation_manager: Arc<sync::SyncOperationManager>,
+    native_bridge: playback::native::NativeBridge,
 }
 
 async fn finish_shutdown_with_playback(
@@ -223,6 +224,8 @@ pub fn start_daemon_core(
     let (completed_tx, completed_rx) = mpsc::channel::<()>();
     let sync_operation_manager = Arc::new(sync::SyncOperationManager::new());
     let core_operations = Arc::clone(&sync_operation_manager);
+    let native_bridge = playback::native::NativeBridge::default();
+    let core_native_bridge = native_bridge.clone();
 
     // Start Tokio runtime in a background thread
     // REQUIRED for macOS: main thread MUST handle the event loop
@@ -326,6 +329,7 @@ pub fn start_daemon_core(
             let playback_rpc = playback.clone();
             let rpc_shutdown = Arc::new(AtomicBool::new(false));
             let rpc_shutdown_server = Arc::clone(&rpc_shutdown);
+            let rpc_native_bridge = core_native_bridge.clone();
             // Keep authenticated health on a separate runtime until the device/core
             // runtime (including blocking MTP calls) has actually shut down.
             let rpc_thread = thread::spawn(move || {
@@ -336,6 +340,7 @@ pub fn start_daemon_core(
                 if let Err(error) = rpc_runtime.block_on(rpc::run_server(
                     rpc::RpcServerConfig { listener, descriptor, ready_tx, shutdown: rpc_shutdown_server },
                     db_clone, dm_clone, scrobbler_result_rpc, state_tx_rpc, som_rpc, playback_rpc,
+                    rpc_native_bridge,
                 )) { daemon_log!("RPC server stopped with error: {}", error); }
             });
 
@@ -522,6 +527,7 @@ pub fn start_daemon_core(
         command_tx,
         completed_rx,
         sync_operation_manager,
+        native_bridge,
     })
 }
 
@@ -556,6 +562,18 @@ fn finish_runtime_shutdown(
             daemon_log!("RPC runtime panicked during shutdown");
         }
     }
+}
+
+fn send_playback_failure_notification(body: String) {
+    thread::spawn(move || {
+        if let Err(error) = notify_rust::Notification::new()
+            .summary(&hifimule_i18n::t("app.name"))
+            .body(&body)
+            .show()
+        {
+            daemon_log!("Playback notification failed: {error}");
+        }
+    });
 }
 
 fn daemon_worker_threads() -> usize {
@@ -757,6 +775,7 @@ fn run_candidate(
     let command_tx = core.command_tx;
     let completed_rx = core.completed_rx;
     let shutdown_operations = core.sync_operation_manager;
+    let native_bridge = core.native_bridge;
     let mut lifecycle_owner = Some(lifecycle_owner);
     let mut quit_reply: Option<mpsc::Receiver<sync::ShutdownSnapshot>> = None;
     let mut fence_reply: Option<mpsc::Receiver<Result<u64, String>>> = None;
@@ -782,6 +801,40 @@ fn run_candidate(
         let _ = mac_notification_sys::set_application("hifimule.github.io");
     }
 
+    #[cfg(windows)]
+    let native_window = {
+        use tao::window::WindowBuilder;
+        Some(
+            WindowBuilder::new()
+                .with_visible(false)
+                .with_title("HifiMule media controls")
+                .build(&event_loop)
+                .map_err(|error| {
+                    anyhow::anyhow!("Failed to create native media window: {error}")
+                })?,
+        )
+    };
+    #[cfg(windows)]
+    let native_hwnd = {
+        use tao::platform::windows::WindowExtWindows;
+        native_window
+            .as_ref()
+            .map(|window| window.hwnd() as *mut std::ffi::c_void)
+    };
+    #[cfg(not(windows))]
+    let native_hwnd = None;
+    let native_ingress = native_bridge.ingress();
+    let mut native_owner =
+        native_ingress.clone().and_then(
+            |ingress| match playback::native::NativeMediaOwner::register(ingress, native_hwnd) {
+                Ok(owner) => Some(owner),
+                Err(error) => {
+                    daemon_log!("NATIVE_CONTROLS_UNAVAILABLE: {error}");
+                    None
+                }
+            },
+        );
+
     // Load icons from assets (embedded using include_bytes!)
     // Use Arc to avoid cloning large icon data in the event loop
     let icon_idle = Arc::new(load_icon(include_bytes!("../assets/icon.png"), "idle")?);
@@ -798,13 +851,29 @@ fn run_candidate(
     let tray_menu = Menu::new();
     let quit_item = MenuItem::new(hifimule_i18n::t("tray.quit"), true, None);
     let open_ui_item = MenuItem::new(hifimule_i18n::t("tray.open_ui"), true, None);
+    let resume_item = MenuItem::new(hifimule_i18n::t("tray.resume_playback"), false, None);
+    let native_status_item = MenuItem::new(
+        hifimule_i18n::t(if native_owner.is_some() {
+            "playback.native_controls_ready"
+        } else {
+            "playback.native_controls_unavailable"
+        }),
+        false,
+        None,
+    );
     let retry_session_item = MenuItem::new(
         hifimule_i18n::t("lifecycle.retry_saving_session"),
         false,
         None,
     );
     tray_menu
-        .append_items(&[&open_ui_item, &retry_session_item, &quit_item])
+        .append_items(&[
+            &open_ui_item,
+            &resume_item,
+            &native_status_item,
+            &retry_session_item,
+            &quit_item,
+        ])
         .map_err(|e| anyhow::anyhow!("Failed to create tray menu: {}", e))?;
 
     let mut tray_icon = Some(
@@ -816,6 +885,7 @@ fn run_candidate(
     );
 
     let menu_channel = MenuEvent::receiver();
+    let mut menu_resume_pending = false;
 
     // 4. Run the event loop
     // This will block the main thread
@@ -863,6 +933,12 @@ fn run_candidate(
             match reply.try_recv() {
                 Ok(Ok(_generation)) => {
                     fence_reply = None;
+                    if let Some(owner) = native_owner.as_mut()
+                        && let Err(error) = owner.detach()
+                    {
+                        daemon_log!("Native controls teardown failed: {error}");
+                    }
+                    native_owner.take();
                     let _ = command_tx.send(CoreCommand::CommitShutdown);
                     shutdown_pending = true;
                     shutdown_started = Some(Instant::now());
@@ -892,10 +968,55 @@ fn run_candidate(
         }
 
         if shutdown_pending && completed_rx.try_recv().is_ok() {
+            if let Some(owner) = native_owner.as_mut()
+                && let Err(error) = owner.detach()
+            {
+                daemon_log!("Native controls teardown failed: {error}");
+            }
+            native_owner.take();
+            #[cfg(windows)]
+            let _ = &native_window;
             lifecycle_owner.take();
             tray_icon.take();
             *control_flow = ControlFlow::Exit;
             return;
+        }
+
+        let native_publication_failed = if let Some(owner) = native_owner.as_mut()
+            && let Err(error) = owner.refresh()
+        {
+            daemon_log!("Native controls publication failed: {error}");
+            true
+        } else {
+            false
+        };
+        if let Some(ingress) = native_ingress.as_ref() {
+            let view = ingress.latest();
+            resume_item.set_enabled(!shutdown_pending && view.commands.play);
+            if let Some(code) = view.failure_code.as_deref() {
+                let key = format!("playback.error.{code}");
+                let translated = hifimule_i18n::t(&key);
+                let message = if translated == key {
+                    hifimule_i18n::t("playback.background_resume_failed")
+                } else {
+                    translated
+                };
+                native_status_item.set_text(&message);
+                if menu_resume_pending {
+                    send_playback_failure_notification(message);
+                    menu_resume_pending = false;
+                }
+            } else if native_owner.is_some() && !native_publication_failed {
+                native_status_item.set_text(hifimule_i18n::t("playback.native_controls_ready"));
+                if matches!(view.status, playback::model::PlaybackStatus::Active) {
+                    menu_resume_pending = false;
+                }
+            } else {
+                native_status_item
+                    .set_text(hifimule_i18n::t("playback.native_controls_unavailable"));
+            }
+        } else {
+            resume_item.set_enabled(false);
         }
         if shutdown_pending
             && !shutdown_timeout_reported
@@ -995,6 +1116,19 @@ fn run_candidate(
             } else if event.id == retry_session_item.id() {
                 if let Some(snapshot) = shutdown_operations.shutdown_tray_snapshot() {
                     shutdown_operations.request_checkpoint_retry(&snapshot.shutdown_id);
+                }
+            } else if event.id == resume_item.id() {
+                if let Some(ingress) = native_ingress.as_ref() {
+                    if ingress
+                        .try_send(playback::NativeControlIntent::Play)
+                        .is_ok()
+                    {
+                        menu_resume_pending = true;
+                    } else {
+                        let message = hifimule_i18n::t("playback.background_resume_failed");
+                        native_status_item.set_text(&message);
+                        send_playback_failure_notification(message);
+                    }
                 }
             } else if event.id == open_ui_item.id() {
                 println!("'Open UI' clicked - Launching Tauri UI...");

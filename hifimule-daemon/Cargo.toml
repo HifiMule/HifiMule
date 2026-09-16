@@ -50,6 +50,7 @@ cpal.workspace = true
 ffmpeg-next.workspace = true
 ffmpeg-sys-next.workspace = true
 crossbeam-queue.workspace = true
+souvlaki.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # Required by windows 0.58 notification-interface implementation macros.

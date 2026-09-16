@@ -206,6 +206,7 @@ pub struct RpcServerConfig {
     pub shutdown: Arc<std::sync::atomic::AtomicBool>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_server(
     config: RpcServerConfig,
     db: Arc<crate::db::Database>,
@@ -214,14 +215,22 @@ pub async fn run_server(
     state_tx: std::sync::mpsc::Sender<crate::DaemonState>,
     sync_operation_manager: Arc<crate::sync::SyncOperationManager>,
     playback: crate::playback::PlaybackSession,
+    native_bridge: crate::playback::native::NativeBridge,
 ) -> Result<(), String> {
     let token = Arc::new(config.descriptor.token.clone());
     let _ = LIFECYCLE_IDENTITY.set(config.descriptor);
+    let server_manager = Arc::new(tokio::sync::RwLock::new(
+        crate::server_manager::ServerManager::new(),
+    ));
+    let playback_commands = crate::playback::commands::PlaybackCommandService::new(
+        playback.clone(),
+        server_manager.clone(),
+        db.clone(),
+        sync_operation_manager.clone(),
+    );
     let state = Arc::new(AppState {
         jellyfin_client: JellyfinClient::new(),
-        server_manager: Arc::new(tokio::sync::RwLock::new(
-            crate::server_manager::ServerManager::new(),
-        )),
+        server_manager,
         db,
         device_manager,
         last_connection_check: Arc::new(tokio::sync::Mutex::new(None)),
@@ -238,6 +247,9 @@ pub async fn run_server(
         eprintln!("[Startup] Vault migration failed: {}", e);
     }
     state.server_manager.write().await.load_from_db(&state.db);
+    native_bridge
+        .publish(crate::playback::native::start_ingress(playback_commands))
+        .map_err(|_| "native playback ingress was initialized twice".to_string())?;
 
     let output_state = state.clone();
     let output_shutdown = config.shutdown.clone();
@@ -858,99 +870,15 @@ async fn handle_playback_control(
         message: "Invalid playback.control parameters".into(),
         data: Some(serde_json::json!({"code":"INVALID_SESSION"})),
     })?;
-    let playback = state.playback.clone();
-    let action = p.action;
-    let result =
-        tokio::task::spawn_blocking(move || playback.control_with_guard(p, mutation_guard))
-            .await
-            .map_err(playback_task_error)?
-            .map_err(playback_error)?;
-    match action {
-        crate::playback::model::ControlAction::Pause
-        | crate::playback::model::ControlAction::Stop => {}
-        crate::playback::model::ControlAction::Resume => {
-            if result.resume_audio
-                && !crate::playback::audio::global().resume_existing(&result.generation_id)
-                && let Some(current) = result.current.clone()
-            {
-                let manager = state.server_manager.clone();
-                let db = state.db.clone();
-                let playback = state.playback.clone();
-                let generation = result.generation_id.clone();
-                let position_ms = result.position_ms;
-                tokio::spawn(async move {
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-                    let resolved =
-                        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
-                            match crate::server_manager::get_provider_by_server_id(
-                                &manager,
-                                &db,
-                                &current.source.server_id,
-                            )
-                            .await
-                            {
-                                Ok(provider) => {
-                                    provider.resolve_playback(&current.source.track_id).await
-                                }
-                                Err(error) => Err(error),
-                            }
-                        })
-                        .await;
-                    let resolved = match resolved {
-                        Ok(result) => result,
-                        Err(_) => {
-                            playback.publish_event(
-                                generation,
-                                crate::playback::model::PlaybackEvent::Failed {
-                                    code: "RESUME_UNAVAILABLE".into(),
-                                    retryable: true,
-                                },
-                            );
-                            return;
-                        }
-                    };
-                    let failure = match resolved {
-                        Ok(description) => crate::playback::audio::global()
-                            .start(
-                                description,
-                                current.source,
-                                position_ms,
-                                generation.clone(),
-                                playback.clone(),
-                                deadline,
-                            )
-                            .await
-                            .err(),
-                        Err(error) => Some(
-                            crate::playback::audio::PlaybackPipelineError::from_provider_error(
-                                error,
-                            ),
-                        ),
-                    };
-                    if let Some(error) = failure
-                        && crate::playback::audio::log_pipeline_failure(
-                            &playback,
-                            &generation,
-                            &error,
-                        )
-                    {
-                        playback.publish_event(
-                            generation,
-                            crate::playback::model::PlaybackEvent::Failed {
-                                code: if error.code().starts_with("OUTPUT_") {
-                                    error.code()
-                                } else {
-                                    "RESUME_UNAVAILABLE"
-                                }
-                                .into(),
-                                retryable: true,
-                            },
-                        );
-                    }
-                });
-            }
-        }
-    }
+    let result = crate::playback::commands::PlaybackCommandService::new(
+        state.playback.clone(),
+        state.server_manager.clone(),
+        state.db.clone(),
+        state.sync_operation_manager.clone(),
+    )
+    .rpc_control(p, mutation_guard)
+    .await
+    .map_err(playback_error)?;
     Ok(serde_json::json!({"data":result}))
 }
 
@@ -12216,6 +12144,7 @@ mod tests {
             std::sync::mpsc::channel::<crate::DaemonState>().0,
             Arc::new(crate::sync::SyncOperationManager::new()),
             playback,
+            crate::playback::native::NativeBridge::default(),
         ));
         tokio::task::spawn_blocking(move || {
             ready_rx.recv_timeout(std::time::Duration::from_secs(2))

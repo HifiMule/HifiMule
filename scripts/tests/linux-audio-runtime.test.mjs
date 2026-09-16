@@ -220,3 +220,11 @@ test("Linux preflight requires Pulse shared-output development metadata", () => 
   }), /PulseAudio development files are missing/);
   assert.ok(linuxBuildPackages.includes("libpulse-dev"));
 });
+
+test("Linux preflight requires D-Bus native-controls development metadata", () => {
+  assert.throws(() => preflightLinuxBuild(target, {
+    commandExists: () => true,
+    spawn: (_command, args) => ({ status: args.includes("dbus-1") ? 1 : 0 }),
+  }), /D-Bus development files are missing/);
+  assert.ok(linuxBuildPackages.includes("libdbus-1-dev"));
+});

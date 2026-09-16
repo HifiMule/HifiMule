@@ -848,3 +848,19 @@ system-default changes do not resume playback or change the saved preference.
 Failures report sanitized output codes independently of the queue and transport.
 Installed platform verification remains required; source checks are not evidence
 of physical routing, latency or shared-mode behavior.
+
+# Native playback controls (Story 15.6)
+
+Native Play, Pause, Toggle and Stop are private daemon ingress, not public RPC.
+They enter the same bounded serialized playback owner as `playback.control`.
+Toggle and current occurrence resolve at owner execution; Resume uses the same
+provider resolution, selected-output policy, preparation deadline, audio effect,
+generation fencing and failure publication as RPC Resume. Unsupported actions
+(Next, Previous, Seek, SetPosition, OpenUri, Raise and Quit) are not advertised
+and are rejected without mutation.
+
+The daemon owns one SMTC, MPRemoteCommandCenter or MPRIS registration for its
+lifetime. UI close/reopen does not register controls. Now-playing metadata is a
+replacement projection from authoritative playback state and never triggers a
+provider listening report. Explicit Quit disables commands, clears metadata and
+detaches registration before the native owner is dropped.

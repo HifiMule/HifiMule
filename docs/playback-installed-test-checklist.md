@@ -1,4 +1,4 @@
-# Stories 15.4 and 15.5 installed playback checklist
+# Stories 15.4–15.6 installed playback checklist
 
 Use a clean installed package for each row: Windows x64, Linux x64, macOS x64,
 and macOS ARM64. Do not count a source-tree run or VM-only ARM64 run as installed
@@ -63,6 +63,7 @@ python3 scripts/playback-installed-evidence.py collect \
   --package <path-to-dmg> \
   --install-root /Applications/HifiMule.app \
   --output-device-kind physical \
+  --desktop-session "macOS Aqua" \
   --provider-kind jellyfin \
   --provider-version <server-version> \
   --output docs/playback-evidence/macos-arm64.json
@@ -76,6 +77,7 @@ py -3 scripts/playback-installed-evidence.py collect `
   --package <path-to-installer.exe> `
   --install-root "$env:LOCALAPPDATA\HifiMule" `
   --output-device-kind physical `
+  --desktop-session "Windows 11 Explorer" `
   --provider-kind jellyfin `
   --provider-version <server-version> `
   --output docs/playback-evidence/windows-x64.json
@@ -205,6 +207,28 @@ For each target:
 All four target rows remain unverified until installed physical evidence is
 collected. A source-tree macOS build and a Pulse type-check probe cannot replace
 those records.
+
+## Story 15.6 native-control evidence
+
+Collect `nativeEvidenceVersion: 1` independently from output evidence. Record the
+OS, architecture, desktop session, command path, UI-open/closed state, actual
+delivery, authoritative before/after playback state, daemon PID/instance,
+generation, and state sequence. Never label an API command as a physical-key
+observation.
+
+For each installed target, exercise Play, Pause, Toggle and Stop through the
+native API with the UI open and closed; use the tray Resume action while closed;
+reopen the UI and verify it reflects the resulting state without replaying a
+command. Replace a metadata-rich track with a sparse track and then clear the
+session, confirming old fields disappear. Verify output-loss Play is rejected
+without rerouting. Observe registration and metadata removal after Quit *before*
+relaunch, then verify the new daemon instance registers once.
+
+Physical media keys must be attempted separately with the UI open and closed.
+Record observed delivery as a pass. If the desktop routes the key elsewhere or
+does not deliver it, record `outcome: limitation`, `delivery: not-delivered`, and
+a specific sanitized limitation; do not install a global keyboard hook or claim
+API success as physical-key evidence.
 
 ### Optional native endpoint binding smoke
 

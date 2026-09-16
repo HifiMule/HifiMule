@@ -83,7 +83,7 @@ jobs:
             libappindicator3-dev \
             librsvg2-dev \
             patchelf \
-            libpulse-dev libasound2-dev \
+            libpulse-dev libasound2-dev libdbus-1-dev \
             build-essential \
             nasm \
             clang \

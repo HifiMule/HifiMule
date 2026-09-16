@@ -25,6 +25,28 @@ def output_snapshot(identity="a", available=True):
     }}
 
 
+def native_state(pid=123, instance="instance-a", status="paused"):
+    return {"pid": pid, "instanceId": instance,
+            "generationId": "12345678-1234-1234-1234-123456789abc",
+            "stateSequence": "7", "playbackStatus": status}
+
+
+def native_observation(name, path, ui_state):
+    before_status, after_status = "paused", "paused"
+    if name.startswith("api-play-"):
+        before_status, after_status = "paused", "active"
+    elif name.startswith("api-pause-"):
+        before_status, after_status = "active", "paused"
+    elif name.startswith("api-toggle-"):
+        before_status, after_status = "paused", "active"
+    elif name.startswith("api-stop-"):
+        before_status, after_status = "active", "stopped"
+    return {"commandPath": path, "uiState": ui_state,
+            "outcome": "passed", "delivery": "observed", "limitation": "",
+            "before": native_state(status=before_status),
+            "after": native_state(status=after_status)}
+
+
 class InstalledEvidenceTests(unittest.TestCase):
     def test_rpc_keeps_owner_token_out_of_returned_data(self):
         descriptor = {"port": 32123, "token": "top-secret", "instanceId": "owner"}
@@ -132,6 +154,10 @@ class InstalledEvidenceTests(unittest.TestCase):
                                   "after": output_snapshot("b" if name == "output-switch-playing-paused" else "a", name != "output-absent-startup"),
                                   "observedLatencyMs": 20, "audibleDestination": "A"}
                           for name in evidence.SCENARIOS},
+            "native": {"desktopSession": "Windows 11 Explorer", "observations": {
+                name: native_observation(name, path, ui_state)
+                for name, path, ui_state in evidence.NATIVE_OBSERVATIONS
+            }},
         })
         record["outcome"] = "passed"
         return record
@@ -194,6 +220,32 @@ class InstalledEvidenceTests(unittest.TestCase):
             errors = evidence.validate_matrix(root)
         self.assertTrue(any(evidence.REQUIRED_TARGETS[-1] in error for error in errors))
         self.assertTrue(any("invalid" in error for error in errors))
+
+    def test_native_evidence_rejects_output_only_and_mislabeled_physical_success(self):
+        record = self.complete_record()
+        record.pop("nativeEvidenceVersion")
+        self.assertTrue(any("native evidence is missing" in error
+                            for error in evidence.validate_record(record)))
+        record = self.complete_record()
+        item = record["native"]["observations"]["physical-keys-ui-closed"]
+        item["delivery"] = "api-observed"
+        self.assertTrue(any("physical-key success" in error
+                            for error in evidence.validate_record(record)))
+
+    def test_native_physical_routing_limitation_is_explicit_and_accepted(self):
+        record = self.complete_record()
+        item = record["native"]["observations"]["physical-keys-ui-closed"]
+        item.update({"outcome": "limitation", "delivery": "not-delivered",
+                     "limitation": "Desktop routed the key to another player."})
+        self.assertEqual(evidence.validate_record(record), [])
+
+    def test_native_api_observations_prove_each_transport_transition(self):
+        for name in ("api-play-ui-open", "api-pause-ui-closed",
+                     "api-toggle-ui-open", "api-stop-ui-closed"):
+            record = self.complete_record()
+            record["native"]["observations"][name]["after"]["playbackStatus"] = "error"
+            self.assertTrue(any(f"{name} does not prove" in error
+                                for error in evidence.validate_record(record)))
 
 
 if __name__ == "__main__":

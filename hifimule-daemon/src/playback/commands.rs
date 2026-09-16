@@ -1,0 +1,164 @@
+use super::{NativeControlIntent, PlaybackSession};
+use crate::{db::Database, server_manager::ServerManager, sync::SyncOperationManager};
+use std::sync::Arc;
+
+const PREPARATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Shared transport service for RPC, native controls, and daemon menu actions.
+/// Owner admission remains synchronous and ordered; potentially slow source
+/// preparation is detached and generation-fenced so later Pause/Stop can win.
+#[derive(Clone)]
+pub struct PlaybackCommandService {
+    playback: PlaybackSession,
+    server_manager: Arc<tokio::sync::RwLock<ServerManager>>,
+    db: Arc<Database>,
+    operations: Arc<SyncOperationManager>,
+}
+
+impl PlaybackCommandService {
+    pub fn new(
+        playback: PlaybackSession,
+        server_manager: Arc<tokio::sync::RwLock<ServerManager>>,
+        db: Arc<Database>,
+        operations: Arc<SyncOperationManager>,
+    ) -> Self {
+        Self {
+            playback,
+            server_manager,
+            db,
+            operations,
+        }
+    }
+
+    pub async fn rpc_control(
+        &self,
+        params: super::model::ControlParams,
+        guard: Option<crate::sync::MutationGuard>,
+    ) -> Result<super::model::SessionSnapshot, super::session::PlaybackError> {
+        let playback = self.playback.clone();
+        let snapshot =
+            tokio::task::spawn_blocking(move || playback.control_with_guard(params, guard))
+                .await
+                .map_err(|_| task_failed())??;
+        self.dispatch_effect(&snapshot);
+        Ok(snapshot)
+    }
+
+    pub async fn native_control(
+        &self,
+        intent: NativeControlIntent,
+    ) -> Result<super::model::SessionSnapshot, super::session::PlaybackError> {
+        let Some(guard) = self.operations.try_admit_mutation() else {
+            return Err(stopped());
+        };
+        let playback = self.playback.clone();
+        let snapshot =
+            tokio::task::spawn_blocking(move || playback.native_control(intent, Some(guard)))
+                .await
+                .map_err(|_| task_failed())??;
+        self.dispatch_effect(&snapshot);
+        Ok(snapshot)
+    }
+
+    pub fn playback(&self) -> &PlaybackSession {
+        &self.playback
+    }
+
+    fn dispatch_effect(&self, snapshot: &super::model::SessionSnapshot) {
+        if !snapshot.resume_audio {
+            return;
+        }
+        if super::audio::global().resume_existing(&snapshot.generation_id) {
+            return;
+        }
+        let Some(current) = snapshot.current.clone() else {
+            return;
+        };
+        let manager = self.server_manager.clone();
+        let db = self.db.clone();
+        let playback = self.playback.clone();
+        let generation = snapshot.generation_id.clone();
+        let position_ms = snapshot.position_ms;
+        tokio::spawn(async move {
+            let deadline = std::time::Instant::now() + PREPARATION_TIMEOUT;
+            let resolve = async {
+                let provider = crate::server_manager::get_provider_by_server_id(
+                    &manager,
+                    &db,
+                    &current.source.server_id,
+                )
+                .await?;
+                provider.resolve_playback(&current.source.track_id).await
+            };
+            let resolved = tokio::select! {
+                result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), resolve) => Some(result),
+                _ = async {
+                    while playback.generation_guard(&generation).is_some() {
+                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    }
+                } => None,
+            };
+            let failure = match resolved {
+                Some(Ok(Ok(description))) => super::audio::global()
+                    .start(
+                        description,
+                        current.source,
+                        position_ms,
+                        generation.clone(),
+                        playback.clone(),
+                        deadline,
+                    )
+                    .await
+                    .err(),
+                Some(Ok(Err(error))) => Some(
+                    super::audio::PlaybackPipelineError::from_provider_error(error),
+                ),
+                Some(Err(_)) => {
+                    playback.publish_event(
+                        generation,
+                        super::model::PlaybackEvent::Failed {
+                            code: "RESUME_UNAVAILABLE".into(),
+                            retryable: true,
+                        },
+                    );
+                    return;
+                }
+                None => return,
+            };
+            if let Some(error) = failure
+                && super::audio::log_pipeline_failure(&playback, &generation, &error)
+            {
+                playback.publish_event(
+                    generation,
+                    super::model::PlaybackEvent::Failed {
+                        code: if error.code().starts_with("OUTPUT_") {
+                            error.code()
+                        } else {
+                            "RESUME_UNAVAILABLE"
+                        }
+                        .into(),
+                        retryable: true,
+                    },
+                );
+            }
+        });
+    }
+}
+
+fn task_failed() -> super::session::PlaybackError {
+    super::session::PlaybackError {
+        code: "PLAYBACK_BUSY",
+        message: "playback command task failed",
+        conflict: true,
+        authoritative: None,
+    }
+}
+
+fn stopped() -> super::session::PlaybackError {
+    super::session::PlaybackError {
+        code: "DAEMON_STOPPED",
+        message: "daemon shutdown rejected playback work",
+        conflict: true,
+        authoritative: None,
+    }
+}

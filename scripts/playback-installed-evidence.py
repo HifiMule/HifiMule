@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect and validate sanitized Stories 15.4/15.5 installed-playback evidence."""
+"""Collect and validate sanitized Stories 15.4–15.6 installed-playback evidence."""
 
 from __future__ import annotations
 
@@ -50,6 +50,24 @@ SCENARIO_GUIDANCE = {
     "output-failed-open-duplicate-names": "Use duplicate friendly names and provoke a failed open. Verify identity distinction, truthful active/unavailable state and safe Pause/Stop during rapid selection.",
     "output-sleep-wake-shared-audio": "Sleep/wake during playback, then verify safe paused recovery, explicit Resume and simultaneous audio from another application.",
 }
+NATIVE_OBSERVATIONS = (
+    ("api-play-ui-open", "api", "open"),
+    ("api-pause-ui-open", "api", "open"),
+    ("api-toggle-ui-open", "api", "open"),
+    ("api-stop-ui-open", "api", "open"),
+    ("api-play-ui-closed", "api", "closed"),
+    ("api-pause-ui-closed", "api", "closed"),
+    ("api-toggle-ui-closed", "api", "closed"),
+    ("api-stop-ui-closed", "api", "closed"),
+    ("menu-resume-ui-closed", "desktop-menu", "closed"),
+    ("ui-reopen-authoritative", "ui-reopen", "open"),
+    ("physical-keys-ui-open", "physical-key", "open"),
+    ("physical-keys-ui-closed", "physical-key", "closed"),
+    ("metadata-cleared", "api", "closed"),
+    ("output-loss-rejected", "api", "closed"),
+    ("quit-deregistered-before-relaunch", "lifecycle", "closed"),
+    ("new-instance-reregistered", "lifecycle", "closed"),
+)
 SECRET_KEY = re.compile(r"token|password|authorization|cookie|secret|url|header", re.I)
 REMOTE_URL = re.compile(r"https?://", re.I)
 SECRET_VALUE = re.compile(r"(?:bearer\s+|api[_-]?key\s*[=:]|token\s*[=:]|password\s*[=:])", re.I)
@@ -64,6 +82,7 @@ def empty_record(target: str) -> dict:
     return {
         "schemaVersion": 1,
         "outputEvidenceVersion": 1,
+        "nativeEvidenceVersion": 1,
         "outputDeviceKind": "unverified",
         "recordedAt": now(),
         "target": target,
@@ -76,6 +95,13 @@ def empty_record(target: str) -> dict:
         "loadedLibraries": "unverified",
         "fixtures": {name: "unverified" for name in FIXTURES},
         "scenarios": {name: {"outcome": "unverified", "notes": ""} for name in SCENARIOS},
+        "native": {
+            "desktopSession": "unverified",
+            "observations": {
+                name: {"commandPath": path, "uiState": ui_state, "outcome": "unverified"}
+                for name, path, ui_state in NATIVE_OBSERVATIONS
+            },
+        },
         "outcome": "unverified",
     }
 
@@ -298,8 +324,78 @@ def valid_output_snapshot(snapshot) -> bool:
     return True
 
 
+def valid_native_state(state) -> bool:
+    return (isinstance(state, dict)
+            and type(state.get("pid")) is int and state["pid"] > 0
+            and isinstance(state.get("instanceId"), str) and bool(state["instanceId"])
+            and isinstance(state.get("generationId"), str)
+            and re.fullmatch(r"[0-9a-fA-F-]{36}", state["generationId"]) is not None
+            and isinstance(state.get("stateSequence"), str)
+            and re.fullmatch(r"0|[1-9][0-9]*", state["stateSequence"]) is not None
+            and state.get("playbackStatus") in
+                ("idle", "loading", "active", "paused", "stopped", "completed", "error"))
+
+
+def validate_native_evidence(record: dict) -> list[str]:
+    errors = []
+    if record.get("nativeEvidenceVersion") != 1:
+        return ["Story 15.6 native evidence is missing; output-only results are insufficient"]
+    native = record.get("native")
+    if not isinstance(native, dict) or not str(native.get("desktopSession", "")).strip() \
+            or native.get("desktopSession") == "unverified":
+        errors.append("native desktop session is unverified")
+        observations = {}
+    else:
+        observations = native.get("observations", {})
+    for name, expected_path, expected_ui in NATIVE_OBSERVATIONS:
+        item = observations.get(name) if isinstance(observations, dict) else None
+        if not isinstance(item, dict):
+            errors.append(f"native observation {name} is missing")
+            continue
+        if item.get("commandPath") != expected_path or item.get("uiState") != expected_ui:
+            errors.append(f"native observation {name} has an invalid command path or UI state")
+        outcome = item.get("outcome")
+        delivery = item.get("delivery")
+        limitation = item.get("limitation")
+        if expected_path == "physical-key":
+            if outcome == "passed" and delivery != "observed":
+                errors.append(f"native observation {name} claims physical-key success without observed delivery")
+            elif outcome == "limitation" and (delivery != "not-delivered" or not str(limitation or "").strip()):
+                errors.append(f"native observation {name} lacks an explicit routing limitation")
+            elif outcome not in {"passed", "limitation"}:
+                errors.append(f"native observation {name} is unverified")
+        elif outcome != "passed" or delivery != "observed":
+            errors.append(f"native observation {name} is not a delivered pass")
+        for phase in ("before", "after"):
+            if not valid_native_state(item.get(phase)):
+                errors.append(f"native observation {name} has invalid {phase} identity/state evidence")
+        before, after = item.get("before"), item.get("after")
+        if valid_native_state(before) and valid_native_state(after):
+            if name not in {"quit-deregistered-before-relaunch", "new-instance-reregistered"} \
+                    and (before["pid"], before["instanceId"]) != (after["pid"], after["instanceId"]):
+                errors.append(f"native observation {name} does not preserve daemon continuity")
+            before_status = before["playbackStatus"]
+            after_status = after["playbackStatus"]
+            if name.startswith("api-play-") \
+                    and (before_status not in {"paused", "stopped", "completed"}
+                         or after_status != "active"):
+                errors.append(f"native observation {name} does not prove Play")
+            elif name.startswith("api-pause-") \
+                    and (before_status not in {"active", "loading"} or after_status != "paused"):
+                errors.append(f"native observation {name} does not prove Pause")
+            elif name.startswith("api-toggle-") \
+                    and {before_status, after_status} != {"active", "paused"}:
+                errors.append(f"native observation {name} does not prove Toggle")
+            elif name.startswith("api-stop-") \
+                    and (before_status not in {"active", "loading", "paused"}
+                         or after_status != "stopped"):
+                errors.append(f"native observation {name} does not prove Stop")
+    return errors
+
+
 def validate_record(record: dict) -> list[str]:
     errors = []
+    errors.extend(validate_native_evidence(record))
     if record.get("outputEvidenceVersion") != 1:
         errors.append("Story 15.5 output evidence is missing; older playback results are insufficient")
     if record.get("outputDeviceKind") != "physical":
@@ -469,6 +565,7 @@ def collect(args) -> int:
         "loadedLibraries": [redact_path(path) for path in loaded_libraries(int(health["pid"]))],
         "outputDeviceKind": args.output_device_kind,
     })
+    record["native"]["desktopSession"] = args.desktop_session
 
     def capture_runtime() -> None:
         current_descriptor = read_descriptor(app_root)
@@ -491,6 +588,28 @@ def collect(args) -> int:
         if notes:
             record.setdefault("fixtureNotes", {})[fixture] = notes
         capture_runtime()
+    print("\nRecord native observations. API delivery is distinct from physical-key routing.")
+    for name, command_path, ui_state in NATIVE_OBSERVATIONS:
+        print(f"\n{name}: path={command_path}, UI={ui_state}")
+        if name == "quit-deregistered-before-relaunch":
+            print("Quit, observe registration release and metadata clearing, and record the after state before relaunching HifiMule.")
+        elif name == "new-instance-reregistered":
+            print("Relaunch HifiMule now and verify that the new daemon instance registers once.")
+        outcome, notes = ask_outcome("Perform the named native observation and record only what was observed.")
+        delivery = input("Delivery [observed/not-delivered]: ").strip()
+        limitation = input("Explicit routing/platform limitation (required for physical non-delivery): ").strip()
+        before = json.loads(input("Sanitized before state JSON (pid, instanceId, generationId, stateSequence, playbackStatus): "))
+        after = json.loads(input("Sanitized after state JSON (same fields): "))
+        record["native"]["observations"][name] = {
+            "commandPath": command_path,
+            "uiState": ui_state,
+            "outcome": "limitation" if command_path == "physical-key" and outcome != "passed" else outcome,
+            "delivery": delivery,
+            "limitation": limitation,
+            "notes": notes,
+            "before": before,
+            "after": after,
+        }
     for scenario in SCENARIOS:
         print(f"\n{SCENARIO_GUIDANCE[scenario]}")
         input("Prepare the playing/loading precondition, then press Enter to capture runtime counters before the action: ")
@@ -531,6 +650,8 @@ def main(argv=None) -> int:
     collect_parser.add_argument("--provider-version", required=True)
     collect_parser.add_argument("--app-data")
     collect_parser.add_argument("--output-device-kind", choices=("physical", "virtual"), required=True)
+    collect_parser.add_argument("--desktop-session", required=True,
+                                help="Desktop/session route, for example macOS Aqua, Windows 11 Explorer, GNOME Wayland")
     collect_parser.add_argument("--output", required=True)
     validate_parser = subparsers.add_parser("validate", help="validate one record or a four-target directory")
     validate_parser.add_argument("path")

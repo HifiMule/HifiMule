@@ -55,6 +55,17 @@ pub struct PlaybackSession {
     worker: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 
+/// A transport intent from an operating-system control or daemon-owned menu.
+/// It deliberately carries no session snapshot: the owner resolves the current
+/// occurrence and Toggle action when this command reaches serialized execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeControlIntent {
+    Play,
+    Pause,
+    Toggle,
+    Stop,
+}
+
 enum OwnerCommand {
     ListOutputs(ListOutputsParams, mpsc::Sender<PResult<OutputList>>),
     SelectOutput(
@@ -75,6 +86,11 @@ enum OwnerCommand {
     ),
     Control(
         ControlParams,
+        Option<crate::sync::MutationGuard>,
+        mpsc::Sender<PResult<SessionSnapshot>>,
+    ),
+    NativeControl(
+        NativeControlIntent,
         Option<crate::sync::MutationGuard>,
         mpsc::Sender<PResult<SessionSnapshot>>,
     ),
@@ -342,6 +358,21 @@ impl PlaybackSession {
         rx.recv().unwrap_or_else(|_| Err(owner_stopped()))
     }
 
+    pub fn native_control(
+        &self,
+        intent: NativeControlIntent,
+        guard: Option<crate::sync::MutationGuard>,
+    ) -> PResult<SessionSnapshot> {
+        if self.fenced.load(Ordering::Acquire) {
+            return Err(owner_stopped());
+        }
+        let (tx, rx) = mpsc::channel();
+        self.command_tx
+            .try_send(OwnerCommand::NativeControl(intent, guard, tx))
+            .map_err(admission_error)?;
+        rx.recv().unwrap_or_else(|_| Err(owner_stopped()))
+    }
+
     pub fn publish_event(&self, generation_id: String, event: PlaybackEvent) {
         self.publish_event_at_epoch(generation_id, event, self.control_epoch());
     }
@@ -374,6 +405,10 @@ impl PlaybackSession {
     }
     pub(crate) fn control_epoch(&self) -> u64 {
         self.control_epoch.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn is_fenced(&self) -> bool {
+        self.fenced.load(Ordering::Acquire)
     }
 
     pub(crate) fn generation_guard(&self, generation_id: &str) -> Option<(Arc<AtomicU64>, u64)> {
@@ -780,6 +815,22 @@ fn owner_loop(
                 let _ = reply.send(with_metadata(result, &i));
                 executing.store(false, Ordering::Release);
             }
+            Ok(OwnerCommand::NativeControl(intent, _mutation_guard, reply)) => {
+                executing.store(true, Ordering::Release);
+                let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
+                let result = if fenced.load(Ordering::Acquire) {
+                    Err(owner_stopped())
+                } else {
+                    sample_progress(&mut i, &ingress)
+                        .and_then(|()| native_control_inner(&mut i, intent, &generation_serial))
+                };
+                if result.is_ok() {
+                    refresh_ingress(&i, &ingress);
+                }
+                publish_health(&i, &health);
+                let _ = reply.send(with_metadata(result, &i));
+                executing.store(false, Ordering::Release);
+            }
             Ok(OwnerCommand::RetryRestore(_mutation_guard, reply)) => {
                 executing.store(true, Ordering::Release);
                 let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -899,6 +950,9 @@ fn reject_unstarted(command: OwnerCommand) {
             let _ = reply.send(Err(owner_stopped()));
         }
         OwnerCommand::Control(_, _guard, reply) => {
+            let _ = reply.send(Err(owner_stopped()));
+        }
+        OwnerCommand::NativeControl(_, _guard, reply) => {
             let _ = reply.send(Err(owner_stopped()));
         }
     }
@@ -1427,6 +1481,47 @@ fn control_inner(
         snapshot.resume_audio = p.action == ControlAction::Resume;
         snapshot
     })
+}
+
+fn native_control_inner(
+    i: &mut Inner,
+    intent: NativeControlIntent,
+    generation_serial: &AtomicU64,
+) -> PResult<SessionSnapshot> {
+    let Some(occurrence_id) = i.session.current_occurrence_id.clone() else {
+        return Err(PlaybackError::invalid(
+            "RESUME_UNAVAILABLE",
+            "there is no current track to control",
+        ));
+    };
+    let action = match intent {
+        NativeControlIntent::Play => ControlAction::Resume,
+        NativeControlIntent::Pause => ControlAction::Pause,
+        NativeControlIntent::Stop => ControlAction::Stop,
+        NativeControlIntent::Toggle => {
+            if matches!(
+                i.session.state,
+                TransportState::Playing | TransportState::Buffering
+            ) || matches!(
+                i.playback.status,
+                PlaybackStatus::Active | PlaybackStatus::Loading
+            ) {
+                ControlAction::Pause
+            } else {
+                ControlAction::Resume
+            }
+        }
+    };
+    let params = ControlParams {
+        schema_version: 1,
+        instance_id: i.instance_id.clone(),
+        session_id: i.session.session_id.clone(),
+        command_id: Uuid::new_v4().to_string(),
+        expected_generation_id: i.generation_id.clone(),
+        occurrence_id,
+        action,
+    };
+    control_inner(i, &params, generation_serial)
 }
 fn availability(db: &Database, server_id: &str) -> PResult<SourceAvailability> {
     db.has_portable_server(server_id)
@@ -2562,6 +2657,58 @@ mod tests {
         assert_eq!(
             playback.control_with_guard(changed, None).unwrap_err().code,
             "COMMAND_ID_REUSED"
+        );
+        playback.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn native_toggle_is_resolved_in_owner_order() {
+        let (_db, playback, selected) = queued();
+        let first = playback
+            .native_control(NativeControlIntent::Toggle, None)
+            .unwrap();
+        assert_eq!(first.playback.status, PlaybackStatus::Loading);
+        let second = playback
+            .native_control(NativeControlIntent::Toggle, None)
+            .unwrap();
+        assert_eq!(second.playback.status, PlaybackStatus::Paused);
+        assert_eq!(second.current, selected.current);
+        playback.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn native_controls_use_current_identity_and_preserve_queue() {
+        let (_db, playback, selected) = queued();
+        let occurrence = selected.current.as_ref().unwrap().occurrence_id.clone();
+        let stopped = playback
+            .native_control(NativeControlIntent::Stop, None)
+            .unwrap();
+        assert_eq!(stopped.playback.status, PlaybackStatus::Stopped);
+        assert_eq!(stopped.position_ms, 0);
+        assert_eq!(stopped.current.unwrap().occurrence_id, occurrence);
+        assert_eq!(stopped.total_occurrence_count, 1);
+        playback.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn native_control_rejects_empty_and_fenced_sessions() {
+        let db = Arc::new(Database::memory().unwrap());
+        let playback = PlaybackSession::restore(db, "owner".into());
+        assert_eq!(
+            playback
+                .native_control(NativeControlIntent::Play, None)
+                .unwrap_err()
+                .code,
+            "RESUME_UNAVAILABLE"
+        );
+        let shutdown = playback.begin_shutdown_checkpoint().unwrap();
+        shutdown.recv().unwrap().unwrap();
+        assert_eq!(
+            playback
+                .native_control(NativeControlIntent::Pause, None)
+                .unwrap_err()
+                .code,
+            "DAEMON_STOPPED"
         );
         playback.stop_and_join().unwrap();
     }

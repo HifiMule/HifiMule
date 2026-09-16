@@ -3,7 +3,7 @@ baseline_commit: 0ff836482119940cccd3808d9b1deefb907b72ea
 ---
 # Story 15.6: Control playback through the operating system with the window closed
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -30,22 +30,22 @@ so that I can pause and resume music while working without reopening HifiMule.
 
 ## Tasks / Subtasks
 
-- [ ] Extract the shared transport command/effect path (AC: 1–3, 5–6)
-  - [ ] Move the existing RPC Resume backend effect into a playback-owned service used by RPC, native controls and menu actions.
-  - [ ] Add bounded native ingress; resolve Toggle and current target inside the serialized owner; retain lifecycle admission and generation fencing.
-  - [ ] Preserve explicit RPC identities, deduplication, selected-output policy, provider routing, bounded preparation and error handling.
-- [ ] Implement the native adapter and dependency patch (AC: 1, 4–7)
-  - [ ] Integrate the proven Souvlaki baseline into Tao ownership with the command mask, replacement metadata and cleanup corrections below.
-  - [ ] Implement and test Windows SMTC, macOS remote commands/now-playing and Linux MPRIS mappings, including actual Stop support and disabled future controls.
-  - [ ] Publish bounded authoritative projections without blocking the native loop or audio callback; reject stale publication and handle registration failures explicitly.
-- [ ] Add desktop-menu Resume and accessible failure feedback (AC: 2–3, 5–7)
-  - [ ] Add daemon tray/app-menu Resume, projected availability and localized explanation; preserve Open UI, retry-saving-session and Quit.
-  - [ ] Surface asynchronous source/output failures without opening or focusing a window. Keep restored sessions paused until an explicit command.
-  - [ ] Add English, French, Spanish and German messages and locale coverage.
-- [ ] Validate production integration and document evidence (AC: 1–8)
-  - [ ] Add deterministic command, effect, metadata, registration and shutdown-race tests using production seams.
-  - [ ] Extend the existing installed checklist/collector to distinguish API, UI reopen and physical-key observations, with strict evidence validation.
-  - [ ] Run applicable daemon, lifecycle, i18n, UI, dependency/build and evidence checks; record installed target results and outstanding environments honestly.
+- [x] Extract the shared transport command/effect path (AC: 1–3, 5–6)
+  - [x] Move the existing RPC Resume backend effect into a playback-owned service used by RPC, native controls and menu actions.
+  - [x] Add bounded native ingress; resolve Toggle and current target inside the serialized owner; retain lifecycle admission and generation fencing.
+  - [x] Preserve explicit RPC identities, deduplication, selected-output policy, provider routing, bounded preparation and error handling.
+- [x] Implement the native adapter and dependency patch (AC: 1, 4–7)
+  - [x] Integrate the proven Souvlaki baseline into Tao ownership with the command mask, replacement metadata and cleanup corrections below.
+  - [x] Implement and test Windows SMTC, macOS remote commands/now-playing and Linux MPRIS mappings, including actual Stop support and disabled future controls.
+  - [x] Publish bounded authoritative projections without blocking the native loop or audio callback; reject stale publication and handle registration failures explicitly.
+- [x] Add desktop-menu Resume and accessible failure feedback (AC: 2–3, 5–7)
+  - [x] Add daemon tray/app-menu Resume, projected availability and localized explanation; preserve Open UI, retry-saving-session and Quit.
+  - [x] Surface asynchronous source/output failures without opening or focusing a window. Keep restored sessions paused until an explicit command.
+  - [x] Add English, French, Spanish and German messages and locale coverage.
+- [x] Validate production integration and document evidence (AC: 1–8)
+  - [x] Add deterministic command, effect, metadata, registration and shutdown-race tests using production seams.
+  - [x] Extend the existing installed checklist/collector to distinguish API, UI reopen and physical-key observations, with strict evidence validation.
+  - [x] Run applicable daemon, lifecycle, i18n, UI, dependency/build and evidence checks; record installed target results and outstanding environments honestly.
 
 ## Dev Notes
 
@@ -198,19 +198,78 @@ Run native patch tests and platform build/link checks for each supported target 
 
 ### Agent Model Used
 
-GPT-6 (story preparation).
+GPT-6 (story implementation).
+
+### Implementation Plan
+
+- Extract the existing admitted Resume effect into one playback command service and add ordered native intents to the serialized session owner.
+- Own a bounded native command bridge and authoritative now-playing projection for the daemon lifetime, with explicit shutdown cleanup.
+- Patch pinned Souvlaki 0.8.3 narrowly for truthful capabilities, replacement metadata, Stop support and checked teardown.
+- Add desktop-menu Resume, localized status/failure feedback, strict installed evidence, and platform prerequisite coverage.
 
 ### Debug Log References
 
 - 2026-09-16: Resolved create-story customization; no prepend/append steps. Loaded config/project context, sprint tracking, planning sources, prior story and production/native-proof code with parallel read-only analysis. Reviewed the story against the create-story checklist and incorporated command-effect reuse, adapter capability/metadata corrections, source/output safeguards and evidence distinctions.
-- Documentation-only preparation; no implementation or production test pass is claimed.
+- 2026-09-16: Resolved dev-story customization; no prepend/append workflow steps. Implemented the shared command service, native owner/bridge, tray Resume, lifecycle cleanup, four-locale copy, patched native backends, prerequisites and strict installed-evidence flow.
+- Validation: daemon playback suite 128 passed/6 ignored; full daemon suite 805 passed/6 ignored; lifecycle 13 passed; i18n 7 passed; Node 67 passed; Python playback evidence 15 passed; UI production build passed; clippy passed with pre-existing warnings; formatting and diff checks passed.
+- Native dependency checks: patched Souvlaki compiled on macOS ARM64 and cross-compiled for Windows ARM64 GNU. Linux backend source and prerequisite closure are covered, but no Linux Rust target/session bus is installed in this environment.
 
 ### Completion Notes List
 
-- Ultimate context engine analysis completed - comprehensive developer guide created.
-- Story 15.6 is ready-for-dev. Implementation tasks and installed acceptance remain unchecked; this artifact specifies the implementation gate rather than claiming it is already built.
+- Added one bounded, ordered native transport ingress that reuses the authoritative session owner and the same Resume audio/provider effect as RPC.
+- Added truthful Play/Pause/Toggle/Stop capability, metadata and position projection; missing/stale metadata clears, unavailable output cannot advertise Resume, and unsupported native actions reject without mutation.
+- Added daemon-lifetime SMTC/MPRemoteCommandCenter/MPRIS ownership, explicit pre-exit cleanup, nonfatal registration diagnostics, and a localized tray Resume action that never opens the UI.
+- Vendored exact Souvlaki 0.8.3 with documented capability, Stop, metadata replacement and teardown fixes; preserved the default D-Bus backend and added its Linux build prerequisite.
+- Extended installed evidence to require each native API transition with UI open/closed, menu/UI-reopen/metadata/output-loss/lifecycle observations, and separately labeled physical-key delivery or explicit routing limitations.
+- Installed Windows x64, Linux x64, macOS x64 and macOS ARM64 package/media-key runs remain outstanding. No physical-key or installed-build success is claimed from source tests or cross-compilation.
 
 ### File List
 
 - `_bmad-output/implementation-artifacts/15-6-control-playback-through-the-operating-system-with-the-window-closed.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `.github/workflows/build.yml`
+- `.github/workflows/release.yml`
+- `Cargo.lock`
+- `Cargo.toml`
+- `docs/api-contracts-hifimule-daemon.md`
+- `docs/playback-installed-test-checklist.md`
+- `hifimule-daemon/Cargo.toml`
+- `hifimule-daemon/src/main.rs`
+- `hifimule-daemon/src/playback/commands.rs`
+- `hifimule-daemon/src/playback/mod.rs`
+- `hifimule-daemon/src/playback/native.rs`
+- `hifimule-daemon/src/playback/session.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-i18n/catalog.json`
+- `scripts/linux-audio-runtime.mjs`
+- `scripts/playback-installed-evidence.py`
+- `scripts/tests/linux-audio-runtime.test.mjs`
+- `scripts/tests/test_playback_installed_evidence.py`
+- `third_party/souvlaki/CHANGELOG.md`
+- `third_party/souvlaki/Cargo.toml`
+- `third_party/souvlaki/Cargo.toml.orig`
+- `third_party/souvlaki/HIFIMULE_PATCH.md`
+- `third_party/souvlaki/LICENSE`
+- `third_party/souvlaki/README.md`
+- `third_party/souvlaki/build.rs`
+- `third_party/souvlaki/examples/detach_on_drop.rs`
+- `third_party/souvlaki/examples/print_events.rs`
+- `third_party/souvlaki/examples/window.rs`
+- `third_party/souvlaki/rust-toolchain.toml`
+- `third_party/souvlaki/rustfmt.toml`
+- `third_party/souvlaki/src/config.rs`
+- `third_party/souvlaki/src/lib.rs`
+- `third_party/souvlaki/src/platform/empty/mod.rs`
+- `third_party/souvlaki/src/platform/macos/mod.rs`
+- `third_party/souvlaki/src/platform/mod.rs`
+- `third_party/souvlaki/src/platform/mpris/dbus/controls.rs`
+- `third_party/souvlaki/src/platform/mpris/dbus/interfaces.rs`
+- `third_party/souvlaki/src/platform/mpris/dbus/mod.rs`
+- `third_party/souvlaki/src/platform/mpris/mod.rs`
+- `third_party/souvlaki/src/platform/mpris/zbus.rs`
+- `third_party/souvlaki/src/platform/windows/mod.rs`
+- `third_party/souvlaki/tests/playerctl_script.sh`
+
+## Change Log
+
+- 2026-09-16: Implemented Story 15.6 native playback controls, daemon tray Resume, native backend corrections, lifecycle cleanup, localization, build prerequisites and strict installed evidence validation; moved story to review with installed platform observations explicitly outstanding.
