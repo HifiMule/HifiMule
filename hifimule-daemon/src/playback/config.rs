@@ -44,9 +44,16 @@ pub enum ConfigError {
 }
 
 pub fn load(path: &Path) -> Result<PlaybackConfig, ConfigError> {
+    Ok(load_optional(path)?.unwrap_or_default())
+}
+
+/// Reads the versioned preference while preserving whether its file existed.
+/// Callers that initialize first-run state must not confuse a missing file with
+/// an explicit `{ output: null }` preference.
+pub fn load_optional(path: &Path) -> Result<Option<PlaybackConfig>, ConfigError> {
     let file = match File::open(path) {
         Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(PlaybackConfig::default()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(ConfigError::Invalid),
     };
     let mut bytes = Vec::new();
@@ -65,7 +72,7 @@ pub fn load(path: &Path) -> Result<PlaybackConfig, ConfigError> {
     let config: PlaybackConfig =
         serde_json::from_slice(&bytes).map_err(|_| ConfigError::Invalid)?;
     validate(&config)?;
-    Ok(config)
+    Ok(Some(config))
 }
 
 fn validate(config: &PlaybackConfig) -> Result<(), ConfigError> {
@@ -222,6 +229,15 @@ mod tests {
         let path = dir.path().join("playback.json");
         assert_eq!(load(&path), Ok(PlaybackConfig::default()));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn optional_load_distinguishes_missing_from_explicit_null_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("playback.json");
+        assert_eq!(load_optional(&path), Ok(None));
+        save(&path, &PlaybackConfig::default(), false).unwrap();
+        assert_eq!(load_optional(&path), Ok(Some(PlaybackConfig::default())));
     }
 
     #[test]

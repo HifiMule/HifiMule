@@ -835,8 +835,10 @@ without an active stream is valid. Status is `unselected`, `available`,
 `switching`, `unavailable` or `error`. UI must render these fields rather than
 assuming the last clicked choice is active.
 
-Missing configuration is unselected. Invalid or future configuration is retained
-and requires an explicit reset action followed by selection with
+On first launch only, missing configuration selects and persists the one available
+concrete system-default endpoint after discovery completes. An explicit null
+configuration remains unselected. Invalid or future configuration is retained and
+requires an explicit reset action followed by selection with
 `replaceInvalidConfig: true`; the original is archived before atomic replacement.
 Startup never opens a stream or resumes. Play retains its queue selection when no
 output is selected; Resume requires an available concrete selected output.

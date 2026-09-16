@@ -12,6 +12,7 @@ pub(super) struct OutputRuntime {
     discovery: DiscoveryWorker,
     preferences: PreferenceWorker,
     invalid_config: bool,
+    initialize_missing_default: bool,
     discovery_sequence: u64,
     switch_generation: Option<String>,
     effect: Option<String>,
@@ -50,12 +51,14 @@ impl PlaybackSession {
         path: PathBuf,
         discover: impl Fn() -> Discovery + Send + 'static,
     ) {
-        let loaded = config::load(&path);
+        let loaded = config::load_optional(&path);
+        let initialize_missing_default = matches!(&loaded, Ok(None));
         let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         assert!(i.outputs.is_none(), "output services initialized twice");
         i.output.selected = loaded
             .as_ref()
             .ok()
+            .and_then(|config| config.as_ref())
             .and_then(|c| c.output.clone())
             .map(saved_descriptor);
         i.output.status = if loaded.is_err() {
@@ -74,6 +77,7 @@ impl PlaybackSession {
             discovery: DiscoveryWorker::start(discover),
             preferences: PreferenceWorker::start(path),
             invalid_config: loaded.is_err(),
+            initialize_missing_default,
             discovery_sequence: 0,
             switch_generation: None,
             effect: None,
@@ -378,6 +382,41 @@ pub(super) fn reconcile_outputs(
     };
     let before = i.output.clone();
     let inventory = runtime.discovery.inventory(false);
+    if !fenced
+        && runtime.initialize_missing_default
+        && i.output.selected.is_none()
+        && i.output.pending.is_none()
+        && inventory.discovery.error.is_none()
+    {
+        let mut defaults = inventory
+            .discovery
+            .outputs
+            .iter()
+            .filter(|output| output.available && output.is_default);
+        let default = match (defaults.next(), defaults.next()) {
+            (Some(selected), None) => Some(selected),
+            _ => None,
+        };
+        runtime.initialize_missing_default = false;
+        if let Some(selected) = default {
+            let revision = parse_revision(&i.output.revision)
+                .expect("output revision is always valid")
+                .checked_add(1)
+                .filter(|revision| *revision <= i64::MAX as u64)
+                .expect("initial output revision cannot overflow");
+            i.output.revision = revision.to_string();
+            i.output.pending = Some(selected.clone());
+            i.output.status = "switching".into();
+            runtime.preferences.submit(SaveRequest {
+                revision,
+                config: PlaybackConfig {
+                    schema_version: 1,
+                    output: selected.preference.clone(),
+                },
+                replace_invalid: false,
+            });
+        }
+    }
     if let Some(result) = runtime.preferences.take_result() {
         runtime.invalid_config = result.committed.is_err();
         i.output.selected = result
@@ -524,6 +563,48 @@ mod tests {
             output_id: endpoint.output_id.clone(),
             replace_invalid_config: false,
         }
+    }
+
+    #[test]
+    fn missing_configuration_selects_and_saves_the_concrete_default_without_an_audio_effect() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = PlaybackSession::restore(
+            Arc::new(Database::memory().unwrap()),
+            Uuid::new_v4().to_string(),
+        );
+        let preference = OutputPreference {
+            backend: "wasapi".into(),
+            stable_id: "default-endpoint".into(),
+            display_name: "Built-in Speakers".into(),
+            identity_properties: BTreeMap::new(),
+        };
+        let mut endpoint = saved_descriptor(preference.clone());
+        endpoint.available = true;
+        endpoint.is_default = true;
+        let discovered = endpoint.clone();
+        let path = dir.path().join("playback.json");
+        session.enable_outputs_with(path.clone(), move || Discovery {
+            outputs: vec![discovered.clone()],
+            error: None,
+        });
+
+        let selected = wait_for(&session, |snapshot| {
+            snapshot.output.pending.is_none()
+                && snapshot.output.selected.as_ref().is_some_and(|output| {
+                    output.output_id == endpoint.output_id && output.available
+                })
+        });
+
+        assert_eq!(selected.state, TransportState::Idle);
+        assert!(selected.current.is_none());
+        assert_eq!(
+            config::load(&path).unwrap().output,
+            Some(preference),
+            "the concrete default, not a floating default route, is durable"
+        );
+        assert!(session.take_output_effect().is_none());
+        assert!(!session.output_gate.load(Ordering::Acquire));
+        session.stop_and_join().unwrap();
     }
 
     #[test]
