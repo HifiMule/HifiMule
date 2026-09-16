@@ -425,6 +425,11 @@ impl AudioEngine {
         generation: String,
     ) -> Result<(), PlaybackPipelineError> {
         let _guard = self.starts.lock().await;
+        // An idle-selection effect may have waited behind a newer PlayTrack.
+        // Reject it before taking ownership of that generation's pipeline.
+        session
+            .selected_output(&generation)
+            .map_err(PlaybackPipelineError::output_policy)?;
         let old = self
             .current
             .lock()
@@ -1183,10 +1188,57 @@ mod tests {
 
     #[tokio::test]
     async fn stalled_retirement_keeps_start_owned_and_shutdown_owner_responsive() {
+        use crate::playback::{
+            config::{OutputPreference, PlaybackConfig},
+            devices::{Discovery, OutputDescriptor},
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let preference = OutputPreference {
+            backend: "coreaudio".into(),
+            stable_id: "test".into(),
+            display_name: "Test".into(),
+            identity_properties: Default::default(),
+        };
+        let path = directory.path().join("playback.json");
+        crate::playback::config::save(
+            &path,
+            &PlaybackConfig {
+                schema_version: 1,
+                output: Some(preference.clone()),
+            },
+            false,
+        )
+        .unwrap();
         let session = crate::playback::PlaybackSession::restore(
             Arc::new(crate::db::Database::memory().unwrap()),
             uuid::Uuid::new_v4().to_string(),
         );
+        session.enable_outputs_with(path, move || Discovery {
+            outputs: vec![OutputDescriptor {
+                output_id: crate::playback::devices::output_id(&preference),
+                display_name: preference.display_name.clone(),
+                detail: String::new(),
+                backend: preference.backend.clone(),
+                available: true,
+                is_default: false,
+                identity_confidence: "stable".into(),
+                is_virtual: false,
+                preference: Some(preference.clone()),
+            }],
+            error: None,
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !session
+            .snapshot()
+            .unwrap()
+            .output
+            .selected
+            .unwrap()
+            .available
+        {
+            assert!(std::time::Instant::now() < deadline);
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
         let generation = session.snapshot().unwrap().generation_id;
         let gate = Arc::new(AtomicBool::new(true));
         let cancel = Arc::new(AtomicBool::new(false));
@@ -1264,6 +1316,53 @@ mod tests {
         );
         assert!(exited.load(Ordering::Acquire));
         assert!(engine.starts.try_lock().is_ok());
+        session.stop_and_join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_idle_validation_does_not_retire_newer_playtrack_pipeline() {
+        let session = crate::playback::PlaybackSession::restore(
+            Arc::new(crate::db::Database::memory().unwrap()),
+            uuid::Uuid::new_v4().to_string(),
+        );
+        let generation = session.snapshot().unwrap().generation_id;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let worker = std::thread::spawn(move || {
+            while !worker_cancel.load(Ordering::Acquire) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        });
+        let gate = Arc::new(AtomicBool::new(true));
+        let engine = AudioEngine {
+            starts: tokio::sync::Mutex::new(()),
+            current: Mutex::new(Some(Pipeline {
+                gate: gate.clone(),
+                cancel: cancel.clone(),
+                alive: Arc::new(AtomicBool::new(true)),
+                generation,
+                worker,
+                position_ms: Arc::new(AtomicU64::new(1234)),
+                compressed_high_water: Arc::new(AtomicU64::new(0)),
+                pcm_high_water: Arc::new(AtomicU64::new(0)),
+                endpoint: Arc::new(Mutex::new(None)),
+            })),
+        };
+        let result = engine
+            .validate_selected_output(session.clone(), uuid::Uuid::new_v4().to_string())
+            .await;
+        let untouched = !cancel.load(Ordering::Acquire)
+            && gate.load(Ordering::Acquire)
+            && engine.current.lock().unwrap().is_some();
+        cancel.store(true, Ordering::Release);
+        if let Some(pipeline) = engine.current.lock().unwrap().take() {
+            pipeline.worker.join().unwrap();
+        }
+        assert_eq!(result.unwrap_err().code(), "GENERATION_CONFLICT");
+        assert!(
+            untouched,
+            "stale validation must not gate, cancel or remove newer playback"
+        );
         session.stop_and_join().unwrap();
     }
 

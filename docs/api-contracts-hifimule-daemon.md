@@ -798,6 +798,15 @@ Descriptors expose `outputId` (opaque identity digest), `displayName`, `detail`,
 Names and default annotations are presentation metadata. They never identify a
 restored endpoint. Virtual outputs cannot certify downstream physical routing.
 
+Linux physical sinks are selectable only when exactly one reported port matches
+the active port. Multi-port or unknown physical routes have `available: false`
+and `identityConfidence: "unsupported"`: pinning a sink cannot prevent its server
+from switching headphone audio to a speaker port. This policy is rechecked on
+the opened sink before it is uncorked. Virtual endpoints remain explicitly labeled.
+`OUTPUT_DISCOVERY_PARTIAL` and `OUTPUT_ENUMERATION_TRUNCATED` report incomplete
+inventories without invalidating independently resolved endpoints. Duplicate IDs
+invalidate their matching descriptors; total discovery failure still gates playback.
+
 `playback.selectOutput` accepts exactly:
 
 ```json

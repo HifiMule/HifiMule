@@ -8,6 +8,7 @@ export class PlaybackControls {
     private busy = false;
     private outputBusy = false;
     private discovering = false;
+    private lastDiscoveryAt = 0;
     private resetOutput = false;
     private outputs: PlaybackOutput[] = [];
     private optionsSignature = '';
@@ -81,7 +82,12 @@ export class PlaybackControls {
                 }
             }
         } catch { /* daemon lifecycle UI owns connection errors */ }
-        if (!this.disposed) this.timer = globalThis.setTimeout(() => void this.poll(), 500);
+        if (!this.disposed) {
+            // listOutputs returns the owned worker's cached inventory. Pick up
+            // its completed refresh through the existing polling lifecycle.
+            if (this.snapshot) void this.refreshOutputs(false);
+            this.timer = globalThis.setTimeout(() => void this.poll(), 500);
+        }
     }
     private render(snapshot: PlaybackSessionSnapshot): void {
         this.title.textContent = snapshot.playback.metadata?.title ?? t('playback.nothing_selected');
@@ -114,34 +120,46 @@ export class PlaybackControls {
     }
 
     private renderOptions(): void {
-        if (document.activeElement === this.outputSelect) return;
+        const focusedValue = document.activeElement === this.outputSelect ? this.outputSelect.value : undefined;
         const selected = this.snapshot?.output?.selected;
         const pending = this.snapshot?.output?.pending;
         const choices = [...this.outputs];
         if (selected && !choices.some(o => o.outputId === selected.outputId)) choices.push({ ...selected, available: false });
         const signature = JSON.stringify(choices);
         if (signature !== this.optionsSignature) {
-            const placeholder = document.createElement('option');
+            const existing = new Map(Array.from(this.outputSelect.children).map(child => {
+                const option = child as HTMLOptionElement;
+                return [option.value, option] as const;
+            }));
+            const placeholder = existing.get('') ?? document.createElement('option');
             placeholder.value = ''; placeholder.textContent = t('playback.output.choose');
             placeholder.disabled = true;
             const options = choices.map(output => {
-                const option = document.createElement('option');
+                const option = existing.get(output.outputId) ?? document.createElement('option');
                 option.value = output.outputId;
                 option.textContent = [output.displayName, output.detail,
                     output.isDefault ? t('playback.output.default') : '',
                     !output.available ? t('playback.output.unavailable') : '',
+                    output.identityConfidence === 'unsupported' ? t('playback.error.OUTPUT_SHARED_UNSUPPORTED') : '',
                     output.isVirtual ? t('playback.output.virtual') : ''].filter(Boolean).join(' · ');
                 option.disabled = !output.available;
                 return option;
             });
-            this.outputSelect.replaceChildren(placeholder, ...options);
+            const retained = new Set([placeholder, ...options]);
+            for (const option of existing.values()) if (!retained.has(option)) option.remove();
+            // Retain the select and existing option nodes while reconciling a
+            // focus-triggered inventory response, including newly attached devices.
+            for (const option of retained) this.outputSelect.append(option);
             this.optionsSignature = signature;
         }
-        this.outputSelect.value = pending?.outputId ?? selected?.outputId ?? '';
+        this.outputSelect.value = focusedValue && choices.some(o => o.outputId === focusedValue)
+            ? focusedValue : pending?.outputId ?? selected?.outputId ?? '';
     }
 
-    private async refreshOutputs(): Promise<void> {
+    private async refreshOutputs(force = true): Promise<void> {
         if (this.disposed || this.discovering) return;
+        if (!force && Date.now() - this.lastDiscoveryAt < 1000) return;
+        this.lastDiscoveryAt = Date.now();
         this.discovering = true;
         const instance = this.snapshot?.instanceId;
         try {

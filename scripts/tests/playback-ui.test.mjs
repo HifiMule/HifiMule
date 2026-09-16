@@ -13,7 +13,8 @@ function harness(initial, control = async () => {}, outputRpc = {}) {
     textContent = ''; value = ''; hidden = false; disabled = false; isConnected = true;
     constructor(tag) { this.tagName = tag; }
     setAttribute(key, value) { this.attributes[key] = value; }
-    append(...children) { this.children.push(...children); }
+    append(...children) { for (const child of children) { child.remove(); child.parent = this; this.children.push(child); } }
+    remove() { if (this.parent) { this.parent.children = this.parent.children.filter(child => child !== this); this.parent = null; } }
     appendChild(child) { this.append(child); return child; }
     contains(node) { return this === node || this.children.some(child => child.contains(node)); }
     replaceChildren(...children) {
@@ -41,12 +42,13 @@ function harness(initial, control = async () => {}, outputRpc = {}) {
     addEventListener: (type, callback) => listeners.set(callback, type),
     removeEventListener: (_type, callback) => listeners.delete(callback),
   };
+  let now = 10000;
   const exports = {};
   const source = ts.transpileModule(readFileSync(new URL('../../hifimule-ui/src/components/PlaybackControls.ts', import.meta.url), 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText;
   vm.runInNewContext(source, {
-    exports, document, window, console,
+    exports, document, window, console, Date: class extends Date { static now() { return now; } },
     setTimeout: callback => { timers.set(++timerId, callback); return timerId; },
     clearTimeout: id => timers.delete(id),
     require: name => name === '../rpc'
@@ -60,7 +62,7 @@ function harness(initial, control = async () => {}, outputRpc = {}) {
   const component = new exports.PlaybackControls(container);
   return {
     container, component, document, timers, listeners,
-    setSnapshot: value => { snapshot = value; }, calls: () => calls,
+    setSnapshot: value => { snapshot = value; }, calls: () => calls, advance: ms => { now += ms; },
     async tick() {
       for (let turn = 0; turn < 12; turn++) await Promise.resolve();
       const entry = timers.entries().next().value;
@@ -148,6 +150,30 @@ test('selector stays mounted and focused across polling and duplicate-name disco
   h.setSnapshot(snapshot('paused', '2')); await h.tick();
   assert.equal(h.document.activeElement, select);
   assert.equal(h.container.querySelector('select'), select);
+  h.component.destroy();
+});
+
+test('focus discovery updates option nodes without requiring blur or restarting playback', async () => {
+  const one = { outputId: 'headphones', displayName: 'Headphones', detail: 'USB', available: true };
+  const two = { outputId: 'second', displayName: 'New output', detail: 'USB', available: true };
+  let outputs = [one];
+  const h = harness(snapshot(), async () => { assert.fail('discovery cannot start transport'); }, {
+    list: async () => ({ instanceId: 'instance', outputs }),
+  });
+  await h.tick();
+  const select = h.container.querySelector('select');
+  const original = select.children.find(option => option.value === one.outputId);
+  select.focus();
+  outputs = [{ ...one, displayName: 'Renamed' }, two];
+  await select.listeners.get('focus')(); await h.tick();
+  assert.equal(h.document.activeElement, select);
+  assert.equal(select.children.find(option => option.value === one.outputId), original);
+  assert.match(text(select), /Renamed/);
+  assert.match(text(select), /New output/);
+  outputs = [one];
+  h.advance(1000); await h.tick(); // Pick up the asynchronous worker without another focus event.
+  assert.equal(select.children.some(option => option.value === two.outputId), false);
+  assert.equal(h.document.activeElement, select);
   h.component.destroy();
 });
 

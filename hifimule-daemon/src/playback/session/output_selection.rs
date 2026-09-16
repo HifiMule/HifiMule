@@ -137,7 +137,11 @@ impl PlaybackSession {
                 .selected
                 .as_ref()
                 .and_then(|o| o.preference.as_ref())
-                != Some(preference)
+                .is_none_or(|selected| {
+                    selected.backend != preference.backend
+                        || selected.stable_id != preference.stable_id
+                        || selected.identity_properties != preference.identity_properties
+                })
         {
             return false;
         }
@@ -196,6 +200,13 @@ pub(super) fn output_policy(i: &Inner) -> Result<(), &'static str> {
         return Err("OUTPUT_UNAVAILABLE");
     }
     Ok(())
+}
+
+pub(super) fn finish_output_preparation(i: &mut Inner) {
+    if let Some(runtime) = i.outputs.as_mut() {
+        runtime.opening_generation = None;
+        runtime.effect = None;
+    }
 }
 
 pub(super) fn list_outputs(i: &Inner, params: ListOutputsParams) -> PResult<OutputList> {
@@ -301,7 +312,9 @@ fn select_inner(
         ));
     }
     let inventory = runtime.discovery.inventory(false);
-    if let Some(code) = inventory.discovery.error {
+    if let Some(code) = inventory.discovery.error
+        && !inventory.discovery.can_resolve()
+    {
         return Err(PlaybackError::invalid(code, "output discovery unavailable"));
     }
     let selected = inventory
@@ -393,7 +406,7 @@ pub(super) fn reconcile_outputs(
         && let Some(preference) = selected.preference.as_ref()
     {
         match devices::resolve(preference, &inventory.discovery.outputs) {
-            Ok(found) if inventory.discovery.error.is_none() => *selected = found.clone(),
+            Ok(found) if inventory.discovery.can_resolve() => *selected = found.clone(),
             _ => selected.available = false,
         }
     }
@@ -407,7 +420,7 @@ pub(super) fn reconcile_outputs(
     // The durable selection may already name the replacement while the old
     // stream is retiring. Check the identity of that actual stream separately.
     let lost = i.output.active.as_ref().is_some_and(|active| {
-        inventory.discovery.error.is_some()
+        !inventory.discovery.can_resolve()
             || active.preference.as_ref().is_none_or(|preference| {
                 devices::resolve(preference, &inventory.discovery.outputs).is_err()
             })
@@ -423,7 +436,8 @@ pub(super) fn reconcile_outputs(
         super::super::audio::global().control(ControlAction::Stop);
         serial.fetch_add(1, Ordering::AcqRel);
         i.generation_id = Uuid::new_v4().to_string();
-        i.output.active = None;
+        // The generation-tagged worker still owns the stream until output_closed.
+        // Requesting Stop is not a native retirement acknowledgment.
         i.output.error = Some(failure("OUTPUT_LOST"));
         i.output.status = "unavailable".into();
         if i.session.current_occurrence_id.is_some() {
@@ -590,6 +604,136 @@ mod tests {
             }
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn wait_for(
+        session: &PlaybackSession,
+        predicate: impl Fn(&SessionSnapshot) -> bool,
+    ) -> SessionSnapshot {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            session
+                .list_outputs(ListOutputsParams { schema_version: 1 })
+                .unwrap();
+            let snapshot = session.snapshot().unwrap();
+            if predicate(&snapshot) {
+                return snapshot;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn rename_and_unrelated_discovery_errors_preserve_current_endpoint() {
+        let (dir, original, endpoint) = fixture();
+        original.stop_and_join().unwrap();
+        let inventory = Arc::new(Mutex::new(Discovery {
+            outputs: vec![endpoint.clone()],
+            error: None,
+        }));
+        let discovered = inventory.clone();
+        let session = PlaybackSession::restore(
+            Arc::new(Database::memory().unwrap()),
+            Uuid::new_v4().to_string(),
+        );
+        session.enable_outputs_with(dir.path().join("playback.json"), move || {
+            discovered.lock().unwrap().clone()
+        });
+        wait_for(&session, |_| {
+            session
+                .list_outputs(ListOutputsParams { schema_version: 1 })
+                .unwrap()
+                .outputs
+                .len()
+                == 1
+        });
+        session
+            .select_output(params(&session.snapshot().unwrap(), &endpoint), None)
+            .unwrap();
+        let saved = committed(&session);
+        session.take_output_effect();
+        {
+            let mut inventory = inventory.lock().unwrap();
+            inventory.outputs[0].display_name = "Renamed headphones".into();
+            inventory.outputs[0]
+                .preference
+                .as_mut()
+                .unwrap()
+                .display_name = "Renamed headphones".into();
+        }
+        wait_for(&session, |s| {
+            s.output.selected.as_ref().unwrap().display_name == "Renamed headphones"
+        });
+        // The opening worker captured the previous label, but the same identity.
+        assert!(session.output_opened(&saved.generation_id, endpoint.preference.as_ref().unwrap()));
+        assert_eq!(
+            session
+                .snapshot()
+                .unwrap()
+                .output
+                .active
+                .unwrap()
+                .display_name,
+            "Renamed headphones"
+        );
+        for code in [
+            "OUTPUT_DISCOVERY_PARTIAL",
+            "OUTPUT_ENUMERATION_TRUNCATED",
+            "OUTPUT_IDENTITY_AMBIGUOUS",
+        ] {
+            {
+                let mut inventory = inventory.lock().unwrap();
+                inventory.error = Some(code);
+                inventory.outputs[0].detail = code.into();
+            }
+            let snapshot = wait_for(&session, |s| {
+                s.output.selected.as_ref().unwrap().detail == code
+            });
+            assert_eq!(snapshot.generation_id, saved.generation_id);
+            assert!(snapshot.output.selected.as_ref().unwrap().available);
+            assert!(snapshot.output.active.is_some());
+            assert!(snapshot.output.error.is_none());
+            // A valid endpoint is also selectable despite an incomplete inventory.
+            assert!(
+                session
+                    .select_output(params(&snapshot, &endpoint), None)
+                    .is_ok()
+            );
+        }
+        session.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn terminal_source_failures_finish_output_switch_but_stale_failures_do_not() {
+        for code in ["SOURCE_UNAVAILABLE", "PLAYBACK_TIMEOUT", "DECODE_FAILED"] {
+            let (_dir, session, endpoint) = fixture();
+            session
+                .select_output(params(&session.snapshot().unwrap(), &endpoint), None)
+                .unwrap();
+            let saved = committed(&session);
+            session.take_output_effect();
+            session.publish_event(
+                Uuid::new_v4().to_string(),
+                PlaybackEvent::Failed {
+                    code: code.into(),
+                    retryable: true,
+                },
+            );
+            assert_eq!(session.snapshot().unwrap().output.status, "switching");
+            session.publish_event(
+                saved.generation_id,
+                PlaybackEvent::Failed {
+                    code: code.into(),
+                    retryable: true,
+                },
+            );
+            let failed = wait_for(&session, |s| s.output.status != "switching");
+            assert_eq!(failed.output.status, "available");
+            assert_eq!(failed.playback.error.unwrap().code, code);
+            assert!(!session.output_gate.load(Ordering::Acquire));
+            session.stop_and_join().unwrap();
         }
     }
 
@@ -874,6 +1018,14 @@ mod tests {
         assert_eq!(lost.position_ms, 1234);
         assert_eq!(lost.queue_revision, playing.queue_revision);
         assert_ne!(lost.generation_id, playing.generation_id);
+        assert!(
+            lost.output.active.is_some(),
+            "loss does not acknowledge native retirement"
+        );
+        session.output_closed(&lost.generation_id); // Wrong generation cannot clear the old handle.
+        assert!(session.snapshot().unwrap().output.active.is_some());
+        session.output_closed(&playing.generation_id);
+        assert!(session.snapshot().unwrap().output.active.is_none());
         assert!(!session.output_gate.load(Ordering::Acquire));
         session.publish_event(playing.generation_id.clone(), PlaybackEvent::Active);
         assert!(

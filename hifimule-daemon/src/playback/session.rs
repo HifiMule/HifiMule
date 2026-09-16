@@ -1527,6 +1527,11 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
             i.dirty = true;
         }
         PlaybackEvent::Failed { code, retryable } => {
+            // This event has already passed the owner's generation fence. A
+            // retirement warning is not terminal: the worker is still owned.
+            if code != "OUTPUT_RETIREMENT_PENDING" {
+                output_selection::finish_output_preparation(i);
+            }
             if code.starts_with("OUTPUT_") {
                 // A warning or failed replacement does not prove the old
                 // native handle retired. Only its close acknowledgement clears active.

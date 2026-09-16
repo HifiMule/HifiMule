@@ -140,7 +140,21 @@ impl PinnedStream {
                 .introspect()
                 .get_sink_info_by_name(&self.name, move |item| {
                     if let ListResult::Item(info) = item {
-                        let same = info.name.as_deref() == Some(expected.stable_id.as_str())
+                        let route_supported = super::pulse_route::supported(
+                            !info.flags.contains(pulse::def::SinkFlagSet::HARDWARE),
+                            info.ports.len(),
+                            info.ports
+                                .first()
+                                .and_then(|port| port.name.as_deref())
+                                .is_some_and(|name| {
+                                    info.active_port
+                                        .as_ref()
+                                        .and_then(|port| port.name.as_deref())
+                                        == Some(name)
+                                }),
+                        );
+                        let same = route_supported
+                            && info.name.as_deref() == Some(expected.stable_id.as_str())
                             && expected.identity_properties.iter().all(|(key, value)| {
                                 if key == "port" {
                                     info.active_port

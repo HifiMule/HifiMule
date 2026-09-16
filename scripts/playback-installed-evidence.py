@@ -18,6 +18,7 @@ import urllib.request
 
 
 REQUIRED_TARGETS = ("windows-x64", "linux-x64", "macos-x64", "macos-arm64")
+PULSE_MAX_BUFFER_BYTES = 48_000 * 2 * 4 // 10  # 100 ms, stereo float32
 FIXTURES = ("wav", "flac", "alac-m4a", "mp3", "aac-m4a", "opus")
 SCENARIOS = (
     "play-pause-resume-stop",
@@ -142,7 +143,8 @@ def safe_output_snapshot(snapshot: dict) -> dict:
     for role in ("selected", "pending", "active"):
         descriptor = output.get(role)
         result["output"][role] = None if not isinstance(descriptor, dict) else {
-            "identityHash": hashlib.sha256(str(descriptor.get("outputId", "")).encode()).hexdigest(),
+            "identityHash": hashlib.sha256(descriptor["outputId"].encode()).hexdigest()
+                if isinstance(descriptor.get("outputId"), str) and descriptor["outputId"] else None,
             **{key: descriptor.get(key) for key in ("backend", "available", "isVirtual", "identityConfidence")},
         }
     return result
@@ -257,6 +259,45 @@ def is_within(path: str, root: str, target: str) -> bool:
     return child == parent or parent in child.parents
 
 
+def valid_output_snapshot(snapshot) -> bool:
+    if not isinstance(snapshot, dict):
+        return False
+    position = snapshot.get("positionMs")
+    revision = lambda value: isinstance(value, str) and re.fullmatch(r"0|[1-9][0-9]*", value) is not None
+    if (type(position) is not int or position < 0
+            or snapshot.get("state") not in ("idle", "paused", "playing", "buffering")
+            or not revision(snapshot.get("queueRevision"))):
+        return False
+    output = snapshot.get("output")
+    if (not isinstance(output, dict) or not revision(output.get("revision"))
+            or output.get("status") not in ("unselected", "available", "switching", "unavailable", "error")
+            or not {"selected", "pending", "active", "error"}.issubset(output)):
+        return False
+    error = output["error"]
+    if error is not None and (not isinstance(error, dict)
+            or not isinstance(error.get("code"), str) or not error["code"]
+            or type(error.get("retryable")) is not bool):
+        return False
+    for role in ("selected", "pending", "active"):
+        descriptor = output[role]
+        if descriptor is None:
+            continue  # No active stream is valid during restoration or retirement.
+        if (not isinstance(descriptor, dict)
+                or not isinstance(descriptor.get("identityHash"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", descriptor["identityHash"])
+                or descriptor["identityHash"] == hashlib.sha256(b"").hexdigest()
+                or descriptor.get("backend") not in ("coreaudio", "wasapi", "pulse")
+                or type(descriptor.get("available")) is not bool
+                or type(descriptor.get("isVirtual")) is not bool
+                or descriptor.get("identityConfidence") not in ("stable", "unverified", "ambiguous", "unsupported")):
+            return False
+    if output["status"] == "unselected" and output["selected"] is not None:
+        return False
+    if output["status"] in {"available", "unavailable"} and output["selected"] is None:
+        return False
+    return True
+
+
 def validate_record(record: dict) -> list[str]:
     errors = []
     if record.get("outputEvidenceVersion") != 1:
@@ -309,7 +350,7 @@ def validate_record(record: dict) -> list[str]:
         errors.append("loaded Pulse runtime version is unverified")
     if target == "linux-x64" and isinstance(runtime, dict):
         server_buffer = runtime.get("pulseServerBufferMaxBytes")
-        if not isinstance(server_buffer, int) or not 0 < server_buffer <= 19200:
+        if type(server_buffer) is not int or not 0 < server_buffer <= PULSE_MAX_BUFFER_BYTES:
             errors.append("negotiated Pulse buffer is absent or exceeds 100 ms at 48 kHz stereo float32")
     libraries = record.get("loadedLibraries")
     install_root = record.get("installRoot")
@@ -336,8 +377,24 @@ def validate_record(record: dict) -> list[str]:
         scenario = scenarios[name]
         for phase in ("before", "after"):
             snapshot = scenario.get(phase, {})
-            if not isinstance(snapshot, dict) or not isinstance(snapshot.get("positionMs"), int) or not isinstance(snapshot.get("output"), dict):
-                errors.append(f"scenario {name} has no {phase} output/position evidence")
+            if not valid_output_snapshot(snapshot):
+                errors.append(f"scenario {name} has invalid or missing {phase} output/position evidence")
+        before, after = scenario.get("before"), scenario.get("after")
+        if valid_output_snapshot(before) and valid_output_snapshot(after):
+            selections = [snapshot["output"]["selected"] for snapshot in (before, after)]
+            if not any(selections):
+                errors.append(f"scenario {name} has no selected output identity evidence")
+            for snapshot in (before, after):
+                if any(snapshot["output"][role] and snapshot["output"][role]["isVirtual"]
+                       for role in ("selected", "active")):
+                    errors.append(f"scenario {name} contains virtual rather than physical-output evidence")
+            if name == "output-switch-playing-paused" and (
+                    not all(selections) or selections[0]["identityHash"] == selections[1]["identityHash"]):
+                errors.append(f"scenario {name} does not demonstrate two distinct selected outputs")
+            if name == "output-absent-startup" and (
+                    selections[1] is None or selections[1]["available"]
+                    or after["output"]["active"] is not None or after["state"] not in {"paused", "idle"}):
+                errors.append(f"scenario {name} does not demonstrate paused unavailable restoration")
         latency = scenario.get("observedLatencyMs")
         if not isinstance(latency, (int, float)) or isinstance(latency, bool) or latency < 0 or not math.isfinite(latency):
             errors.append(f"scenario {name} has no measured switch/stop latency")
@@ -418,9 +475,9 @@ def collect(args) -> int:
         current_health = rpc(current_descriptor, "daemon.health")["data"]
         current_runtime = safe_audio_runtime(current_health["audioRuntime"])
         recorded_runtime = record["audioRuntime"]
-        for key in ("compressedHighWaterBytes", "pcmHighWaterSamples"):
+        for key in ("compressedHighWaterBytes", "pcmHighWaterSamples", "pulseServerBufferMaxBytes"):
             recorded_runtime[key] = max(
-                int(recorded_runtime.get(key, 0)), int(current_runtime.get(key, 0))
+                int(recorded_runtime.get(key) or 0), int(current_runtime.get(key) or 0)
             )
         if not recorded_runtime.get("sharedEndpoint") and current_runtime.get("sharedEndpoint"):
             recorded_runtime["sharedEndpoint"] = current_runtime["sharedEndpoint"]

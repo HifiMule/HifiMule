@@ -15,6 +15,8 @@ pub const MAX_OUTPUTS: usize = 256;
 
 #[cfg(target_os = "linux")]
 mod pulse;
+#[cfg(any(target_os = "linux", test))]
+mod pulse_route;
 #[cfg(target_os = "linux")]
 pub(crate) mod pulse_stream;
 
@@ -57,11 +59,11 @@ fn discover_cpal() -> Discovery {
             break;
         }
         let (Ok(id), Ok(description)) = (device.id(), device.description()) else {
-            result.error = Some("OUTPUT_UNAVAILABLE");
+            result.error = Some("OUTPUT_DISCOVERY_PARTIAL");
             continue;
         };
         if id.id().len() > 4096 || description.name().len() > 4096 {
-            result.error = Some("OUTPUT_IDENTITY_AMBIGUOUS");
+            result.error = Some("OUTPUT_DISCOVERY_PARTIAL");
             continue;
         }
         let backend = if cfg!(target_os = "macos") {
@@ -150,6 +152,21 @@ pub struct Discovery {
     pub error: Option<&'static str>,
 }
 
+impl Discovery {
+    /// Partial enumeration does not invalidate endpoints that were identified.
+    /// Missing, duplicate or unsupported selections still fail resolve().
+    pub fn can_resolve(&self) -> bool {
+        matches!(
+            self.error,
+            None | Some(
+                "OUTPUT_DISCOVERY_PARTIAL"
+                    | "OUTPUT_ENUMERATION_TRUNCATED"
+                    | "OUTPUT_IDENTITY_AMBIGUOUS"
+            )
+        )
+    }
+}
+
 #[derive(Default)]
 pub struct Labels {
     ordinals: BTreeMap<String, usize>,
@@ -177,12 +194,14 @@ impl Labels {
             .collect();
         let mut counts = BTreeMap::new();
         let mut ids = BTreeSet::new();
+        let mut duplicate_ids = BTreeSet::new();
         for output in &discovery.outputs {
             *counts.entry(output.display_name.clone()).or_insert(0) += 1;
         }
         for output in &mut discovery.outputs {
             if !ids.insert(output.output_id.clone()) {
                 discovery.error = Some("OUTPUT_IDENTITY_AMBIGUOUS");
+                duplicate_ids.insert(output.output_id.clone());
             }
             if !self.ordinals.contains_key(&output.output_id)
                 && self.ordinals.len() == MAX_OUTPUTS
@@ -206,8 +225,8 @@ impl Labels {
                 output.detail = format!("{} · {ordinal}", output.detail);
             }
         }
-        if discovery.error == Some("OUTPUT_IDENTITY_AMBIGUOUS") {
-            for output in &mut discovery.outputs {
+        for output in &mut discovery.outputs {
+            if duplicate_ids.contains(&output.output_id) {
                 output.available = false;
                 output.identity_confidence = "ambiguous".into();
             }
@@ -385,6 +404,27 @@ mod tests {
         });
         assert_eq!(inventory.error, Some("OUTPUT_IDENTITY_AMBIGUOUS"));
         assert!(inventory.outputs.iter().all(|o| !o.available));
+    }
+
+    #[test]
+    fn duplicate_ids_do_not_invalidate_an_unrelated_stable_output() {
+        let healthy = endpoint("healthy", "Headphones");
+        let duplicate = endpoint("duplicate", "Other device");
+        let inventory = Labels::default().reconcile(Discovery {
+            outputs: vec![duplicate.clone(), healthy.clone(), duplicate],
+            error: None,
+        });
+        assert!(inventory.can_resolve());
+        assert!(resolve(healthy.preference.as_ref().unwrap(), &inventory.outputs).is_ok());
+        assert!(!inventory.outputs[0].available);
+        assert!(!inventory.outputs[2].available);
+        assert!(
+            !Discovery {
+                outputs: vec![healthy],
+                error: Some("OUTPUT_DISCOVERY_TIMEOUT")
+            }
+            .can_resolve()
+        );
     }
 
     #[test]

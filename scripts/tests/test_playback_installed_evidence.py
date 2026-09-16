@@ -16,6 +16,15 @@ evidence = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(evidence)
 
 
+def output_snapshot(identity="a", available=True):
+    selected = {"identityHash": identity * 64, "backend": "wasapi", "available": available,
+                "isVirtual": False, "identityConfidence": "stable" if available else "unverified"}
+    return {"state": "paused", "positionMs": 100, "queueRevision": "1", "output": {
+        "revision": "1", "status": "available" if available else "unavailable", "error": None,
+        "selected": selected, "pending": None, "active": None,
+    }}
+
+
 class InstalledEvidenceTests(unittest.TestCase):
     def test_rpc_keeps_owner_token_out_of_returned_data(self):
         descriptor = {"port": 32123, "token": "top-secret", "instanceId": "owner"}
@@ -91,7 +100,7 @@ class InstalledEvidenceTests(unittest.TestCase):
         self.assertEqual(root, "%LOCALAPPDATA%\\HifiMule")
         self.assertTrue(evidence.is_within(library, root, "windows-x64"))
 
-    def test_validate_record_accepts_complete_bounded_installed_result(self):
+    def complete_record(self):
         record = evidence.empty_record("windows-x64")
         record.update({
             "outputDeviceKind": "physical",
@@ -119,12 +128,16 @@ class InstalledEvidenceTests(unittest.TestCase):
             ],
             "fixtures": {name: "passed" for name in evidence.FIXTURES},
             "scenarios": {name: {"outcome": "passed", "notes": "",
-                                  "before": {"positionMs": 100, "output": {}},
-                                  "after": {"positionMs": 100, "output": {}},
+                                  "before": output_snapshot(),
+                                  "after": output_snapshot("b" if name == "output-switch-playing-paused" else "a", name != "output-absent-startup"),
                                   "observedLatencyMs": 20, "audibleDestination": "A"}
                           for name in evidence.SCENARIOS},
         })
         record["outcome"] = "passed"
+        return record
+
+    def test_validate_record_accepts_complete_bounded_installed_result(self):
+        record = self.complete_record()
         self.assertEqual(evidence.validate_record(record), [])
 
         record["os"]["architecture"] = "arm64"
@@ -135,6 +148,43 @@ class InstalledEvidenceTests(unittest.TestCase):
             "C:/Users/test/AppData/Local/HifiMule/avcodec-copy.dll"
         ]
         self.assertTrue(any("four required" in error for error in evidence.validate_record(record)))
+
+    def test_output_evidence_rejects_empty_incomplete_and_virtual_descriptors(self):
+        for output in ({}, {"revision": "1", "status": "available"},
+                       {**output_snapshot()["output"], "selected": {}},
+                       {**output_snapshot()["output"], "selected": {**output_snapshot()["output"]["selected"], "identityHash": ""}}):
+            record = self.complete_record()
+            record["scenarios"]["output-loss"]["before"]["output"] = output
+            self.assertTrue(any("before output/position evidence" in error for error in evidence.validate_record(record)))
+        record = self.complete_record()
+        record["scenarios"]["output-loss"]["before"]["output"]["selected"]["isVirtual"] = True
+        self.assertTrue(any("virtual" in error for error in evidence.validate_record(record)))
+        missing_id = evidence.safe_output_snapshot({"output": {"selected": {}}})
+        self.assertIsNone(missing_id["output"]["selected"]["identityHash"])
+
+    def test_output_evidence_checks_switch_identity_and_absent_startup(self):
+        record = self.complete_record()
+        record["scenarios"]["output-switch-playing-paused"]["after"] = output_snapshot()
+        self.assertTrue(any("two distinct" in error for error in evidence.validate_record(record)))
+        record = self.complete_record()
+        record["scenarios"]["output-absent-startup"]["after"] = output_snapshot()
+        self.assertTrue(any("unavailable restoration" in error for error in evidence.validate_record(record)))
+        snapshot = output_snapshot(available=False)
+        self.assertTrue(evidence.valid_output_snapshot(snapshot)) # Explicit null active is valid.
+        snapshot["positionMs"] = True
+        self.assertFalse(evidence.valid_output_snapshot(snapshot))
+
+    def test_linux_negotiated_buffer_accepts_100_ms_and_rejects_overflow(self):
+        record = self.complete_record()
+        record.update({"target": "linux-x64", "os": {"name": "Linux", "architecture": "x86_64"},
+                       "installRoot": "/opt/hifimule", "loadedLibraries": [
+                           "/opt/hifimule/lib" + library + ".so" for library in
+                           ("avcodec", "avformat", "avutil", "swresample", "pulse")]})
+        record["audioRuntime"].update({"sharedBackend": "pulse", "pulseVersion": "17.0", "pulseServerBufferMaxBytes": 38400})
+        self.assertEqual(evidence.validate_record(record), [])
+        for value in (38401, 0, None, True):
+            record["audioRuntime"]["pulseServerBufferMaxBytes"] = value
+            self.assertTrue(any("Pulse buffer" in error for error in evidence.validate_record(record)))
 
     def test_matrix_requires_every_native_target_and_rejects_unverified(self):
         with tempfile.TemporaryDirectory() as directory:

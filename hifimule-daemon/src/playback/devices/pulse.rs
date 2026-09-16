@@ -54,7 +54,7 @@ fn discover_inner() -> Result<Discovery, &'static str> {
                     .as_deref()
                     .filter(|s| !s.is_empty() && s.len() <= 4096)
                 else {
-                    result.error = Some("OUTPUT_IDENTITY_AMBIGUOUS");
+                    result.error = Some("OUTPUT_DISCOVERY_PARTIAL");
                     return;
                 };
                 let mut properties = BTreeMap::new();
@@ -69,7 +69,7 @@ fn discover_inner() -> Result<Discovery, &'static str> {
                 ] {
                     if let Some(value) = info.proplist.get_str(key) {
                         if value.len() > 4096 {
-                            result.error = Some("OUTPUT_IDENTITY_AMBIGUOUS");
+                            result.error = Some("OUTPUT_DISCOVERY_PARTIAL");
                             return;
                         }
                         properties.insert(key.into(), value);
@@ -78,13 +78,26 @@ fn discover_inner() -> Result<Discovery, &'static str> {
                 if let Some(port) = &info.active_port {
                     if let Some(name) = &port.name {
                         if name.len() > 4096 {
-                            result.error = Some("OUTPUT_IDENTITY_AMBIGUOUS");
+                            result.error = Some("OUTPUT_DISCOVERY_PARTIAL");
                             return;
                         }
                         properties.insert("port".into(), name.to_string());
                     }
                 }
                 let virtual_output = !info.flags.contains(pulse::def::SinkFlagSet::HARDWARE);
+                let route_supported = super::pulse_route::supported(
+                    virtual_output,
+                    info.ports.len(),
+                    info.ports
+                        .first()
+                        .and_then(|port| port.name.as_deref())
+                        .is_some_and(|name| {
+                            info.active_port
+                                .as_ref()
+                                .and_then(|port| port.name.as_deref())
+                                == Some(name)
+                        }),
+                );
                 let confident = virtual_output
                     || ["device.serial", "device.bus_path", "device.string"]
                         .iter()
@@ -118,9 +131,16 @@ fn discover_inner() -> Result<Discovery, &'static str> {
                     display_name: display,
                     detail,
                     backend: "pulse".into(),
-                    available: confident,
+                    available: confident && route_supported,
                     is_default: false,
-                    identity_confidence: if confident { "stable" } else { "ambiguous" }.into(),
+                    identity_confidence: if !route_supported {
+                        "unsupported"
+                    } else if confident {
+                        "stable"
+                    } else {
+                        "ambiguous"
+                    }
+                    .into(),
                     is_virtual: virtual_output,
                     preference: Some(preference),
                 });
