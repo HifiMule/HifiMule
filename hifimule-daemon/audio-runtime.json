@@ -15,7 +15,7 @@
   "windowsConfigureFlags": ["--disable-x86asm"],
   "requiredLibraries": ["avcodec", "avformat", "avutil", "swresample"],
   "abiVersions": { "avcodec": "63.1.101", "avformat": "63.1.101", "avutil": "61.1.101", "swresample": "7.1.101" },
-  "bindingVersions": { "ffmpeg-next": "9.0.0", "ffmpeg-sys-next": "9.0.0", "cpal": "0.16.0" },
+  "bindingVersions": { "ffmpeg-next": "9.0.0", "ffmpeg-sys-next": "9.0.0", "cpal": "0.18.2", "libpulse-binding": "2.30.1" },
   "bufferPolicy": {
     "compressedChunkBytes": 65536,
     "compressedCapacityBytes": 8388608,

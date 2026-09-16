@@ -81,6 +81,61 @@ pub struct SessionSnapshot {
     pub occurrences: Vec<Occurrence>,
     pub next_cursor: Option<String>,
     pub playback: PlaybackState,
+    pub output: OutputState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputState {
+    pub revision: String,
+    pub selected: Option<super::devices::OutputDescriptor>,
+    pub pending: Option<super::devices::OutputDescriptor>,
+    pub active: Option<super::devices::OutputDescriptor>,
+    pub status: String,
+    pub error: Option<PlaybackFailure>,
+}
+
+impl Default for OutputState {
+    fn default() -> Self {
+        Self {
+            revision: "0".into(),
+            selected: None,
+            pending: None,
+            active: None,
+            status: "unselected".into(),
+            error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ListOutputsParams {
+    pub schema_version: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SelectOutputParams {
+    pub schema_version: u32,
+    pub instance_id: String,
+    pub session_id: String,
+    pub command_id: String,
+    pub expected_output_revision: String,
+    pub expected_generation_id: String,
+    pub output_id: String,
+    #[serde(default)]
+    pub replace_invalid_config: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputList {
+    pub instance_id: String,
+    pub output_revision: String,
+    pub outputs: Vec<super::devices::OutputDescriptor>,
+    pub output: OutputState,
+    pub error: Option<PlaybackFailure>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

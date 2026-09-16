@@ -16,7 +16,7 @@ const manifest = JSON.parse(readFileSync(join(root, "hifimule-daemon/audio-runti
 const receiptName = ".hifimule-audio-runtime.json";
 const machines = { "aarch64-unknown-linux-gnu": "AArch64", "x86_64-unknown-linux-gnu": "Advanced Micro Devices X86-64" };
 const baseline = new Set(["libc.so.6", "libm.so.6", "libpthread.so.0", "libdl.so.2", "librt.so.1", "libgcc_s.so.1", "libstdc++.so.6"]);
-export const linuxBuildPackages = Object.freeze(["build-essential", "clang", "libclang-dev", "libc6-dev", "nasm", "curl", "xz-utils", "pkg-config", "binutils", "patchelf", "libmtp-dev", "libasound2-dev"]);
+export const linuxBuildPackages = Object.freeze(["build-essential", "clang", "libclang-dev", "libc6-dev", "nasm", "curl", "xz-utils", "pkg-config", "binutils", "patchelf", "libmtp-dev", "libasound2-dev", "libpulse-dev"]);
 export function requiresHostAudioVerification(platform) { return platform !== "win32"; }
 
 function run(command, args, options = {}) {
@@ -81,6 +81,7 @@ export function preflightLinuxBuild(target, options = {}) {
   if (missing.length) throw new Error(`Missing Linux build tools: ${missing.join(", ")}\nInstall with: sudo apt-get install ${packages}`);
   if (spawn("pkg-config", ["--exists", "libmtp"], { env: probeEnv }).status !== 0) throw new Error(`libmtp development files are missing.\nInstall with: sudo apt-get install ${packages}`);
   if (spawn("pkg-config", ["--exists", "alsa"], { env: probeEnv }).status !== 0) throw new Error(`ALSA development files are missing.\nInstall with: sudo apt-get install ${packages}`);
+  if (spawn("pkg-config", ["--exists", "libpulse"], { env: probeEnv }).status !== 0) throw new Error(`PulseAudio development files are missing.\nInstall with: sudo apt-get install ${packages}`);
   if (!fileExists("/usr/include/limits.h")) throw new Error(`glibc development headers are missing (/usr/include/limits.h).\nInstall with: sudo apt-get install ${packages}`);
   const resourceDir = execute("clang", ["-print-resource-dir"], { env: probeEnv }).trim();
   if (!resourceDir || !fileExists(posix.join(resourceDir, "include/limits.h"))) {
@@ -205,6 +206,7 @@ export function bundleLinuxAudioRuntime(prefix, sidecar, target) {
   const roots = [], dirs = [join(prefix, "lib")];
   for (const library of Object.keys(manifest.abiVersions)) { const dir = run("pkg-config", ["--variable=libdir", `lib${library}`], { env }).trim(); roots.push(realpathSync(join(dir, `lib${library}.so`))); }
   const mtpDir = run("pkg-config", ["--variable=libdir", "libmtp"], { env }).trim(); dirs.push(mtpDir); roots.push(realpathSync(join(mtpDir, "libmtp.so")));
+  const pulseDir = run("pkg-config", ["--variable=libdir", "libpulse"], { env }).trim(); dirs.push(pulseDir); roots.push(realpathSync(join(pulseDir, "libpulse.so")));
   const copied = closure(roots, out, target, dirs);
   for (const name of copied.keys()) { const path = join(out, name); run("patchelf", ["--set-rpath", "$ORIGIN", path]); if (run("patchelf", ["--print-rpath", path]).trim() !== "$ORIGIN") throw new Error(`Invalid RUNPATH: ${path}`); }
   const sidecarPath = ["$ORIGIN/../bundled-libs", "$ORIGIN/bundled-libs", "$ORIGIN/../lib/HifiMule/bundled-libs", "$ORIGIN/../lib/hifimule/bundled-libs"].join(":");
@@ -226,6 +228,7 @@ export function verifyInstalledLinuxBundle(bundleRoot, target) {
     if (!names.has(required)) throw new Error(`Required controlled library is missing: ${required}`);
   }
   if (!names.has("libmtp.so.9")) throw new Error("Required controlled library is missing: libmtp.so.9");
+  if (!names.has("libpulse.so.0")) throw new Error("Required controlled library is missing: libpulse.so.0");
   for (const path of libs) { assertElf(path, target, basename(path)); if (run("patchelf", ["--print-rpath", path]).trim() !== "$ORIGIN") throw new Error(`Invalid installed RUNPATH: ${path}`); }
   for (const path of libs) {
     for (const needed of elf(path).needed) {

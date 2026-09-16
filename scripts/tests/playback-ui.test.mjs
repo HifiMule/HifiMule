@@ -6,11 +6,11 @@ import ts from '../../hifimule-ui/node_modules/typescript/lib/typescript.js';
 
 // Exercise the real component; replace only the native RPC, clock and browser
 // boundary. Removing a DOM node also removes its focus in this test boundary.
-function harness(initial, control = async () => {}) {
+function harness(initial, control = async () => {}, outputRpc = {}) {
   const document = { activeElement: null };
   class Element {
     children = []; dataset = {}; attributes = {}; listeners = new Map();
-    textContent = ''; hidden = false; disabled = false; isConnected = true;
+    textContent = ''; value = ''; hidden = false; disabled = false; isConnected = true;
     constructor(tag) { this.tagName = tag; }
     setAttribute(key, value) { this.attributes[key] = value; }
     append(...children) { this.children.push(...children); }
@@ -25,12 +25,14 @@ function harness(initial, control = async () => {}) {
       const action = selector.match(/data-playback-action="(.*?)"/)?.[1];
       for (const child of this.children) {
         if (action && child.dataset.playbackAction === action) return child;
+        if (selector === child.tagName) return child;
         const nested = child.querySelector(selector); if (nested) return nested;
       }
       return null;
     }
     focus() { document.activeElement = this; }
     async click() { if (!this.disabled) await this.listeners.get('click')?.(); }
+    async change(value) { this.value = value; await this.listeners.get('change')?.(); }
   }
   document.createElement = tag => new Element(tag);
   const timers = new Map(); let timerId = 0; let calls = 0; let snapshot = initial;
@@ -48,7 +50,10 @@ function harness(initial, control = async () => {}) {
     setTimeout: callback => { timers.set(++timerId, callback); return timerId; },
     clearTimeout: id => timers.delete(id),
     require: name => name === '../rpc'
-      ? { playbackGetSession: async () => { calls++; return snapshot; }, playbackControl: control }
+      ? { playbackGetSession: async () => { calls++; return snapshot; }, playbackControl: control,
+          playbackListOutputs: outputRpc.list ?? (async () => ({ instanceId: snapshot.instanceId, outputs: snapshot.output?.selected ? [snapshot.output.selected] : [], output: snapshot.output })),
+          playbackSelectOutput: outputRpc.select ?? (async () => snapshot),
+        }
       : { t: key => key },
   });
   const container = new Element('section');
@@ -57,10 +62,10 @@ function harness(initial, control = async () => {}) {
     container, component, document, timers, listeners,
     setSnapshot: value => { snapshot = value; }, calls: () => calls,
     async tick() {
-      await Promise.resolve(); await Promise.resolve();
+      for (let turn = 0; turn < 12; turn++) await Promise.resolve();
       const entry = timers.entries().next().value;
       if (entry) { timers.delete(entry[0]); entry[1](); }
-      await Promise.resolve(); await Promise.resolve();
+      for (let turn = 0; turn < 12; turn++) await Promise.resolve();
     },
   };
 }
@@ -69,6 +74,7 @@ function snapshot(state = 'buffering', sequence = '1', error = null) {
     schemaVersion: 1, instanceId: 'instance', sessionId: 'session', queueRevision: '1',
     stateSequence: sequence, generationId: 'generation', state, positionMs: 0,
     current: { occurrenceId: 'occurrence', source: { serverId: 'server', trackId: 'track' } },
+    output: { revision: '1', selected: { outputId: 'headphones', displayName: 'Headphones', detail: 'USB', available: true, isDefault: false }, pending: null, active: null, status: 'available', error },
     playback: { status: error ? 'error' : ({ playing: 'active', buffering: 'loading', paused: 'paused' })[state], metadata: { title: 'Track' }, error },
   };
 }
@@ -88,9 +94,9 @@ test('primary transport retains keyboard focus when Pause becomes Resume', async
   assert.ok(h.document.activeElement);
   h.component.destroy();
 });
-test('output loss explains that retry opens the current default output', async () => {
+test('output loss resumes only the selected output', async () => {
   const h = harness(snapshot('paused', '1', { code: 'OUTPUT_LOST', retryable: true })); await h.tick();
-  assert.match(text(h.container), /playback.resume_default_output/);
+  assert.match(text(h.container), /playback.resume_selected_output/);
   h.component.destroy();
 });
 test('transport rejection is caught and shown without exposing raw diagnostics', async () => {
@@ -109,4 +115,57 @@ test('detached control stops its polling lifecycle', async () => {
   const h = harness(snapshot()); await h.tick(); h.container.isConnected = false;
   await h.tick(); const before = h.calls(); await h.tick();
   assert.equal(h.calls(), before); assert.equal(h.listeners.size, 0);
+});
+
+
+test('output selection leaves Pause and Stop usable and never calls Resume', async () => {
+  let finish; const pending = new Promise(resolve => { finish = resolve; });
+  const actions = []; const choices = [];
+  const h = harness(snapshot('playing'), async action => actions.push(action), {
+    select: async (...args) => { choices.push(args); return pending; },
+  });
+  await h.tick();
+  const select = h.container.querySelector('select'); select.focus();
+  await select.change('replacement');
+  assert.equal(choices[0][0], 'replacement');
+  assert.equal(h.container.querySelector('[data-playback-action="pause"]').disabled, false);
+  assert.equal(h.container.querySelector('[data-playback-action="stop"]').disabled, false);
+  await h.container.querySelector('[data-playback-action="stop"]').click();
+  assert.deepEqual(actions, ['stop']);
+  finish(snapshot('paused', '2')); await h.tick();
+  assert.deepEqual(actions, ['stop']);
+  h.component.destroy();
+});
+
+test('selector stays mounted and focused across polling and duplicate-name discovery', async () => {
+  const one = { outputId: 'one', displayName: 'USB audio', detail: 'USB · 1', available: true };
+  const two = { outputId: 'two', displayName: 'USB audio', detail: 'USB · 2', available: true };
+  const h = harness(snapshot(), async () => {}, { list: async () => ({ instanceId: 'instance', outputs: [one, two] }) });
+  await h.tick();
+  const select = h.container.querySelector('select');
+  assert.match(text(select), /USB · 1/); assert.match(text(select), /USB · 2/);
+  select.focus();
+  h.setSnapshot(snapshot('paused', '2')); await h.tick();
+  assert.equal(h.document.activeElement, select);
+  assert.equal(h.container.querySelector('select'), select);
+  h.component.destroy();
+});
+
+test('unavailable output disables Resume while keeping output choice available without a track', async () => {
+  const unavailable = snapshot('paused'); unavailable.output.selected.available = false;
+  const h = harness(unavailable); await h.tick();
+  assert.equal(h.container.querySelector('[data-playback-action="resume"]').disabled, true);
+  unavailable.current = null; unavailable.stateSequence = '2'; h.setSnapshot(unavailable); await h.tick();
+  assert.equal(h.container.querySelector('select').hidden, false);
+  h.component.destroy();
+});
+
+test('output strings have four-locale parity and no current-default recovery instruction', () => {
+  const catalog = JSON.parse(readFileSync(new URL('../../hifimule-i18n/catalog.json', import.meta.url), 'utf8'));
+  const keys = Object.keys(catalog.en).filter(key => key.startsWith('playback.output.') || key.startsWith('playback.error.OUTPUT_'));
+  for (const language of ['en', 'fr', 'es', 'de']) {
+    for (const key of keys) assert.ok(catalog[language][key], `${language}: ${key}`);
+    assert.equal(catalog[language]['playback.resume_default_output'], undefined);
+    assert.ok(catalog[language]['playback.resume_selected_output'].includes('{name}'));
+  }
 });

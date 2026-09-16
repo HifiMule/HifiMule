@@ -16,6 +16,10 @@ pub(crate) struct Preparation {
     cancel: Arc<AtomicBool>,
 }
 impl Preparation {
+    #[cfg(target_os = "linux")]
+    pub fn deadline(&self) -> Instant {
+        self.deadline
+    }
     pub fn new(deadline: Instant, cancel: Arc<AtomicBool>) -> Self {
         Self {
             deadline,

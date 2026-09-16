@@ -239,6 +239,76 @@ pub async fn run_server(
     }
     state.server_manager.write().await.load_from_db(&state.db);
 
+    let output_state = state.clone();
+    let output_shutdown = config.shutdown.clone();
+    let output_stop = config.shutdown.clone();
+    let output_dispatcher = tokio::spawn(async move {
+        while !output_shutdown.load(AtomicOrdering::Acquire) {
+            if let Some(snapshot) = output_state.playback.take_output_effect() {
+                let playback = output_state.playback.clone();
+                let generation = snapshot.generation_id;
+                let result = if let Some(current) = snapshot.current {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                    let resolve = async {
+                        let provider = crate::server_manager::get_provider_by_server_id(
+                            &output_state.server_manager,
+                            &output_state.db,
+                            &current.source.server_id,
+                        )
+                        .await?;
+                        provider.resolve_playback(&current.source.track_id).await
+                    };
+                    let resolved = tokio::select! {
+                        result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), resolve) => Some(result),
+                        _ = async {
+                            while playback.generation_guard(&generation).is_some() {
+                                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                            }
+                        } => None,
+                    };
+                    match resolved {
+                        Some(Ok(Ok(description))) => {
+                            crate::playback::audio::global()
+                                .start(
+                                    description,
+                                    current.source,
+                                    snapshot.position_ms,
+                                    generation.clone(),
+                                    playback.clone(),
+                                    deadline,
+                                )
+                                .await
+                        }
+                        Some(Ok(Err(error))) => Err(
+                            crate::playback::audio::PlaybackPipelineError::from_provider_error(
+                                error,
+                            ),
+                        ),
+                        Some(Err(_)) => {
+                            playback.publish_event(
+                                generation.clone(),
+                                crate::playback::model::PlaybackEvent::Failed {
+                                    code: "PLAYBACK_TIMEOUT".into(),
+                                    retryable: true,
+                                },
+                            );
+                            continue;
+                        }
+                        None => continue,
+                    }
+                } else {
+                    crate::playback::audio::global()
+                        .validate_selected_output(playback.clone(), generation.clone())
+                        .await
+                };
+                if let Err(error) = result {
+                    crate::playback::audio::publish_pipeline_failure(&playback, generation, error);
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    });
+
     let app = Router::new()
         .route("/", post(handler))
         .route("/jellyfin/image/{*id}", get(handle_proxy_image))
@@ -279,7 +349,7 @@ pub async fn run_server(
         tokio::net::TcpListener::from_std(config.listener).map_err(|error| error.to_string())?;
     LIFECYCLE_STATE.store(1, AtomicOrdering::Release);
     let _ = config.ready_tx.send(Ok(()));
-    axum::serve(listener, app)
+    let result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             while !config.shutdown.load(std::sync::atomic::Ordering::Acquire)
                 || ACTIVE_LOCAL_REQUESTS.load(AtomicOrdering::Acquire) != 0
@@ -288,7 +358,10 @@ pub async fn run_server(
             }
         })
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string());
+    output_stop.store(true, AtomicOrdering::Release);
+    let _ = output_dispatcher.await;
+    result
 }
 
 async fn handler(
@@ -396,6 +469,10 @@ async fn handler(
         "playback.applySession" => {
             handle_playback_apply_session(&state, payload.params, mutation_guard.take()).await
         }
+        "playback.listOutputs" => handle_playback_list_outputs(&state, payload.params).await,
+        "playback.selectOutput" => {
+            handle_playback_select_output(&state, payload.params, mutation_guard.take()).await
+        }
         "playback.control" => {
             handle_playback_control(&state, payload.params, mutation_guard.take()).await
         }
@@ -500,6 +577,7 @@ fn is_mutating_method(method: &str) -> bool {
             | "playlist.create"
             | "playback.applySession"
             | "playback.control"
+            | "playback.selectOutput"
             | "playback.retryRestore"
             | "playlist.addItems"
             | "playlist.addTracks"
@@ -635,6 +713,47 @@ async fn handle_playback_list_occurrences(
     })?;
     let playback = state.playback.clone();
     tokio::task::spawn_blocking(move || playback.list(p))
+        .await
+        .map_err(playback_task_error)?
+        .map(|data| serde_json::json!({"data":data}))
+        .map_err(playback_error)
+}
+
+async fn handle_playback_list_outputs(
+    state: &AppState,
+    params: Option<Value>,
+) -> Result<Value, JsonRpcError> {
+    let params = serde_json::from_value::<crate::playback::model::ListOutputsParams>(
+        params.unwrap_or(Value::Null),
+    )
+    .map_err(|_| JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Invalid playback.listOutputs parameters".into(),
+        data: None,
+    })?;
+    let playback = state.playback.clone();
+    tokio::task::spawn_blocking(move || playback.list_outputs(params))
+        .await
+        .map_err(playback_task_error)?
+        .map(|data| serde_json::json!({"data":data}))
+        .map_err(playback_error)
+}
+
+async fn handle_playback_select_output(
+    state: &AppState,
+    params: Option<Value>,
+    guard: Option<crate::sync::MutationGuard>,
+) -> Result<Value, JsonRpcError> {
+    let params = serde_json::from_value::<crate::playback::model::SelectOutputParams>(
+        params.unwrap_or(Value::Null),
+    )
+    .map_err(|_| JsonRpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "Invalid playback.selectOutput parameters".into(),
+        data: None,
+    })?;
+    let playback = state.playback.clone();
+    tokio::task::spawn_blocking(move || playback.select_output(params, guard))
         .await
         .map_err(playback_task_error)?
         .map(|data| serde_json::json!({"data":data}))
@@ -818,7 +937,12 @@ async fn handle_playback_control(
                         playback.publish_event(
                             generation,
                             crate::playback::model::PlaybackEvent::Failed {
-                                code: "RESUME_UNAVAILABLE".into(),
+                                code: if error.code().starts_with("OUTPUT_") {
+                                    error.code()
+                                } else {
+                                    "RESUME_UNAVAILABLE"
+                                }
+                                .into(),
                                 retryable: true,
                             },
                         );
@@ -7580,6 +7704,109 @@ mod tests {
             state_tx: std::sync::mpsc::channel::<crate::DaemonState>().0,
             playback,
         })
+    }
+
+    #[tokio::test]
+    async fn output_rpc_routes_strict_selection_replay_conflict_and_shutdown_admission() {
+        use crate::playback::{
+            config::OutputPreference,
+            devices::{Discovery, OutputDescriptor},
+        };
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let mut state = make_test_state(db.clone());
+        Arc::get_mut(&mut state).unwrap().playback =
+            crate::playback::PlaybackSession::restore(db, uuid::Uuid::new_v4().to_string());
+        let directory = tempfile::tempdir().unwrap();
+        let preference = OutputPreference {
+            backend: "coreaudio".into(),
+            stable_id: "rpc-device-id".into(),
+            display_name: "Headphones".into(),
+            identity_properties: Default::default(),
+        };
+        let endpoint = OutputDescriptor {
+            output_id: crate::playback::devices::output_id(&preference),
+            display_name: preference.display_name.clone(),
+            detail: "USB".into(),
+            backend: preference.backend.clone(),
+            available: true,
+            is_default: true,
+            identity_confidence: "stable".into(),
+            is_virtual: false,
+            preference: Some(preference),
+        };
+        let output_id = endpoint.output_id.clone();
+        state
+            .playback
+            .enable_outputs_with(directory.path().join("playback.json"), move || Discovery {
+                outputs: vec![endpoint.clone()],
+                error: None,
+            });
+        assert!(is_mutating_method("playback.selectOutput"));
+        assert!(!is_mutating_method("playback.listOutputs"));
+        let bad_list = handle_playback_list_outputs(
+            &state,
+            Some(json!({"schemaVersion":1,"unexpected":true})),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(bad_list.code, ERR_INVALID_PARAMS);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let list = handle_playback_list_outputs(&state, Some(json!({"schemaVersion":1})))
+                .await
+                .unwrap();
+            if !list["data"]["outputs"].as_array().unwrap().is_empty() {
+                assert!(!list.to_string().contains("rpc-device-id"));
+                assert!(list["data"]["output"].is_object());
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let before = state.playback.snapshot().unwrap();
+        let params = json!({"schemaVersion":1,"instanceId":before.instance_id,"sessionId":before.session_id,
+            "commandId":uuid::Uuid::new_v4().to_string(),"expectedOutputRevision":before.output.revision,
+            "expectedGenerationId":before.generation_id,"outputId":output_id});
+        let request = |params: Value| {
+            serde_json::from_value(
+                json!({"jsonrpc":"2.0","method":"playback.selectOutput","params":params,"id":1}),
+            )
+            .unwrap()
+        };
+        let Json(accepted) = handler(
+            axum::extract::State(state.clone()),
+            Json(request(params.clone())),
+        )
+        .await;
+        assert!(accepted.error.is_none());
+        let Json(replayed) = handler(
+            axum::extract::State(state.clone()),
+            Json(request(params.clone())),
+        )
+        .await;
+        assert!(replayed.error.is_none());
+        assert_eq!(state.playback.snapshot().unwrap().output.revision, "1");
+        let mut changed = params.clone();
+        changed["replaceInvalidConfig"] = json!(true);
+        let Json(conflict) =
+            handler(axum::extract::State(state.clone()), Json(request(changed))).await;
+        assert_eq!(conflict.error.unwrap().code, 409);
+        let mut unknown = params.clone();
+        unknown["unknown"] = json!(1);
+        let Json(invalid) =
+            handler(axum::extract::State(state.clone()), Json(request(unknown))).await;
+        assert_eq!(invalid.error.unwrap().code, ERR_INVALID_PARAMS);
+        state
+            .playback
+            .begin_shutdown_checkpoint()
+            .unwrap()
+            .recv()
+            .unwrap()
+            .unwrap();
+        let Json(rejected) =
+            handler(axum::extract::State(state.clone()), Json(request(params))).await;
+        assert!(rejected.error.is_some());
+        state.playback.stop_and_join().unwrap();
     }
 
     #[tokio::test]

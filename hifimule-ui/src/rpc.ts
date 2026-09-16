@@ -212,11 +212,32 @@ export interface BrowseTrack {
 }
 
 export type PlaybackStatus = 'idle' | 'loading' | 'active' | 'paused' | 'stopped' | 'completed' | 'error';
+export interface PlaybackOutput {
+    outputId: string; displayName: string; detail: string; backend: string;
+    available: boolean; isDefault: boolean; identityConfidence: string; isVirtual: boolean;
+}
+export interface PlaybackOutputState {
+    revision: string; selected: PlaybackOutput | null; pending: PlaybackOutput | null;
+    active: PlaybackOutput | null; status: string; error?: { code: string; retryable: boolean } | null;
+}
 export interface PlaybackSessionSnapshot {
     schemaVersion: number; instanceId: string; sessionId: string; queueRevision: string;
     stateSequence: string; generationId: string; state: string; positionMs: number;
     current: { occurrenceId: string; source: { serverId: string; trackId: string } } | null;
     playback: { status: PlaybackStatus; metadata: { title: string; artist?: string | null; source: { serverId: string; trackId: string } } | null; durationMs?: number | null; error?: { code: string; retryable: boolean } | null };
+    output: PlaybackOutputState;
+}
+
+export async function playbackListOutputs(): Promise<{ instanceId: string; outputRevision: string; outputs: PlaybackOutput[]; output: PlaybackOutputState; error?: { code: string; retryable: boolean } | null }> {
+    return (await rpcCall('playback.listOutputs', { schemaVersion: 1 })).data;
+}
+
+export async function playbackSelectOutput(outputId: string, observed: PlaybackSessionSnapshot, replaceInvalidConfig = false): Promise<PlaybackSessionSnapshot> {
+    return (await rpcCall('playback.selectOutput', {
+        schemaVersion: 1, instanceId: observed.instanceId, sessionId: observed.sessionId,
+        commandId: crypto.randomUUID(), expectedOutputRevision: observed.output.revision,
+        expectedGenerationId: observed.generationId, outputId, replaceInvalidConfig,
+    })).data;
 }
 
 export async function playbackGetSession(): Promise<PlaybackSessionSnapshot> {

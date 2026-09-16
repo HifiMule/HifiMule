@@ -1,4 +1,4 @@
-# Story 15.4 installed playback checklist
+# Stories 15.4 and 15.5 installed playback checklist
 
 Use a clean installed package for each row: Windows x64, Linux x64, macOS x64,
 and macOS ARM64. Do not count a source-tree run or VM-only ARM64 run as installed
@@ -62,6 +62,7 @@ python3 scripts/playback-installed-evidence.py collect \
   --target macos-arm64 \
   --package <path-to-dmg> \
   --install-root /Applications/HifiMule.app \
+  --output-device-kind physical \
   --provider-kind jellyfin \
   --provider-version <server-version> \
   --output docs/playback-evidence/macos-arm64.json
@@ -74,6 +75,7 @@ py -3 scripts/playback-installed-evidence.py collect `
   --target windows-x64 `
   --package <path-to-installer.exe> `
   --install-root "$env:LOCALAPPDATA\HifiMule" `
+  --output-device-kind physical `
   --provider-kind jellyfin `
   --provider-version <server-version> `
   --output docs/playback-evidence/windows-x64.json
@@ -113,7 +115,7 @@ bounds, not substitutes for the per-target observed high-water values below.
   without another Play command.
 - Remove/invalidate the active endpoint. Confirm silence plus `OUTPUT_LOST`, no
   automatic endpoint migration, then explicitly Resume after selecting a valid
-  shared default.
+  selected endpoint.
 - Quit while playing and while loading. Confirm audio stops before exit, sync
   cancellation is not delayed, no worker remains, and relaunch is paused.
 - Repeat rapid replacement and a long/slow stream. Record
@@ -167,3 +169,57 @@ position, and long tracks beyond the 8 MiB retained window. Test malformed files
 through the existing typed failure path; encrypted/DRM WMA is unsupported.
 Fixture provenance and regeneration commands live in
 [`generated-audio.source.md`](../hifimule-daemon/tests/fixtures/generated-audio.source.md).
+
+
+## Story 15.5 output safety matrix
+
+The earlier 2026-09-13 results do not validate this implementation. Collect fresh
+Windows x64, Linux x64, macOS x64 and macOS ARM64 installed package records. Pass
+`--output-device-kind physical` for hardware, or `virtual` for an explicitly
+labeled virtual-device run. Virtual evidence does not satisfy physical speaker
+safety. The collector records sanitized selected/pending/active identity hashes
+and transport position before and after every scenario; it omits device names,
+raw endpoint identifiers and media source metadata.
+
+For each target:
+
+- Switch between two outputs while playing, loading, buffering, paused, stopped,
+  completed and idle. Verify occurrence/queue preservation and measure position
+  delta, audible interruption and stop latency. Check differing rates/formats.
+- Physically unplug headphones with built-in speakers available. Listen for any
+  unexpected speaker playback. Replug and change the system default; playback
+  must stay paused until explicit Resume. A healthy selected endpoint must stay
+  selected when only the default changes.
+- Restart with the saved endpoint absent. Verify unavailable state without name
+  matching or fallback. Test duplicate friendly names, rename, a recreated device
+  with a different identity, and a failed open.
+- Exercise rapid A→B→C selection with Pause, Stop, a new track and Quit. Confirm
+  only the latest admitted operation opens output, with no overlap or revived
+  audio. A delayed retirement must block new audio while status/Stop/Quit remain
+  responsive; retain and inspect shutdown blockers.
+- Test sleep/wake, Linux server restart, and other-application audio concurrently.
+  Record backend/library versions, server buffering, compressed/PCM high-water,
+  measured physical destination and worker cleanup. Do not infer silent or shared
+  behavior from compilation or mock adapters.
+
+All four target rows remain unverified until installed physical evidence is
+collected. A source-tree macOS build and a Pulse type-check probe cannot replace
+those records.
+
+### Optional native endpoint binding smoke
+
+On macOS or Windows, this explicit test enumerates concrete native endpoints, opens and releases unstarted silent streams, and verifies an absent stable ID cannot fall back:
+
+```sh
+rtk proxy node scripts/build-daemon.mjs test -p hifimule-daemon native_concrete_endpoints -- --ignored --nocapture --test-threads=1
+```
+
+This source-build smoke is not an installed-package test and does not prove audible destination, unplug safety, coexistence or sleep/wake behavior. On 2026-09-16 it passed for two outputs on the macOS ARM64 development host; all installed physical matrix requirements above remain unverified.
+
+### User-reported switching result
+
+On 2026-09-16 the user reported that switching between physical devices works and requested continuing implementation. This is a passed manual switching observation; architecture, package hash, device pair and additional scenario details were not supplied. It does not certify the full installed matrix. Linux evidence additionally requires `pulseServerBufferMaxBytes` from daemon health, bounded to 19,200 bytes for the configured 48 kHz stereo float32 stream.
+
+### Platform validation confirmation
+
+All implementation and locally runnable automated checks are complete for story 15.5. The selected-endpoint WASAPI notification adapter also cross-compiles against the Windows ARM64 GNU Rust target; this does not substitute for a complete Windows package/runtime test. On 2026-09-16, the user confirmed that all remaining tests were complete and requested moving story 15.5 to review. This records user-reported completion of the platform validation; no additional per-target logs, package hashes or measurements were supplied in that confirmation. The optional Windows silent binding smoke now includes notification registration/unregistration.

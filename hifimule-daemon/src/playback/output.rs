@@ -6,6 +6,85 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+/// Bounded presentation ledger for backends whose write callback precedes
+/// physical playback. Silence and gaps never contribute to logical position.
+#[cfg(any(target_os = "linux", test))]
+pub struct PresentationLedger {
+    pending: std::collections::VecDeque<(u64, u64)>,
+    presented: u64,
+}
+#[cfg(any(target_os = "linux", test))]
+impl PresentationLedger {
+    pub fn new() -> Self {
+        Self {
+            pending: std::collections::VecDeque::new(),
+            presented: 0,
+        }
+    }
+    pub fn record(&mut self, start: u64, frames: u64) -> bool {
+        if frames == 0 {
+            return true;
+        }
+        if self.pending.len() == 256 {
+            return false;
+        }
+        self.pending
+            .push_back((start, start.saturating_add(frames)));
+        true
+    }
+    pub fn advance(&mut self, played: u64) -> u64 {
+        while let Some((start, end)) = self.pending.front_mut() {
+            if played <= *start {
+                break;
+            }
+            let next = played.min(*end);
+            self.presented = self.presented.saturating_add(next - *start);
+            *start = next;
+            if next == *end {
+                self.pending.pop_front();
+            } else {
+                break;
+            }
+        }
+        self.presented
+    }
+}
+
+/// Emit meaningful server-presentation transitions, never one event per tick.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Default)]
+pub struct PresentationActivity {
+    frames: u64,
+    last_progress_ms: u64,
+    state: Option<bool>,
+}
+#[cfg(any(target_os = "linux", test))]
+impl PresentationActivity {
+    pub fn observe(&mut self, enabled: bool, frames: u64, now_ms: u64) -> Option<bool> {
+        let advanced = frames > self.frames;
+        self.frames = frames;
+        if !enabled {
+            self.state = None;
+            self.last_progress_ms = now_ms;
+            return None;
+        }
+        let next = if advanced {
+            self.last_progress_ms = now_ms;
+            Some(true)
+        } else if now_ms.saturating_sub(self.last_progress_ms) >= 100 {
+            Some(false)
+        } else {
+            None
+        };
+        if next.is_some() && next != self.state {
+            self.state = next;
+            next
+        } else {
+            None
+        }
+    }
+}
+
 pub struct Rendered {
     pub samples: u64,
     pub last_audio_frame: Option<usize>,
@@ -153,6 +232,37 @@ impl<T> Drop for DecoderWorker<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn server_activity_coalesces_ticks_and_reports_refill_without_reviving_paused_audio() {
+        let mut state = PresentationActivity::default();
+        assert_eq!(state.observe(true, 0, 0), None);
+        assert_eq!(state.observe(true, 480, 10), Some(true));
+        assert_eq!(state.observe(true, 960, 20), None);
+        assert_eq!(state.observe(true, 960, 119), None);
+        assert_eq!(state.observe(true, 960, 120), Some(false));
+        assert_eq!(state.observe(true, 960, 130), None);
+        assert_eq!(state.observe(true, 1440, 140), Some(true));
+        assert_eq!(state.observe(false, 1920, 150), None);
+        assert_eq!(state.observe(false, 1920, 500), None);
+        assert_eq!(state.observe(true, 1920, 501), None);
+        assert_eq!(state.observe(true, 2400, 510), Some(true));
+    }
+
+    #[test]
+    fn server_clock_excludes_queued_frames_and_silence_and_remains_bounded() {
+        let mut ledger = PresentationLedger::new();
+        assert!(ledger.record(100, 100));
+        assert!(ledger.record(300, 100));
+        assert_eq!(ledger.advance(150), 50);
+        assert_eq!(ledger.advance(250), 100);
+        assert_eq!(ledger.advance(350), 150);
+        assert_eq!(ledger.advance(100), 150);
+        assert_eq!(ledger.advance(1000), 200);
+        for n in 0..256 {
+            assert!(ledger.record(1000 + n, 1));
+        }
+        assert!(!ledger.record(2000, 1));
+    }
     #[test]
     fn completion_waits_for_callback_to_publish_final_deadline() {
         let clock = PresentationClock::new();

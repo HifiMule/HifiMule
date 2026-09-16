@@ -1,5 +1,7 @@
 use super::model::*;
+mod output_selection;
 use crate::db::Database;
+use output_selection::*;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -54,6 +56,12 @@ pub struct PlaybackSession {
 }
 
 enum OwnerCommand {
+    ListOutputs(ListOutputsParams, mpsc::Sender<PResult<OutputList>>),
+    SelectOutput(
+        SelectOutputParams,
+        Option<crate::sync::MutationGuard>,
+        mpsc::Sender<PResult<SessionSnapshot>>,
+    ),
     Snapshot(mpsc::Sender<PResult<SessionSnapshot>>),
     List(ListOccurrencesParams, mpsc::Sender<PResult<OccurrencePage>>),
     Apply(
@@ -80,6 +88,10 @@ enum OwnerControl {
 }
 
 struct Inner {
+    output: OutputState,
+    outputs: Option<OutputRuntime>,
+    output_dedup: HashMap<String, (SelectOutputParams, PResult<SessionSnapshot>)>,
+    output_dedup_order: VecDeque<String>,
     output_gate: Arc<AtomicBool>,
     control_epoch: Arc<AtomicU64>,
     db: Arc<Database>,
@@ -189,6 +201,10 @@ impl PlaybackSession {
         let output_gate = Arc::new(AtomicBool::new(false));
         let control_epoch = Arc::new(AtomicU64::new(0));
         let inner = Arc::new(Mutex::new(Inner {
+            output: OutputState::default(),
+            outputs: None,
+            output_dedup: HashMap::new(),
+            output_dedup_order: VecDeque::new(),
             output_gate: output_gate.clone(),
             control_epoch: control_epoch.clone(),
             db,
@@ -469,6 +485,9 @@ impl PlaybackSession {
     }
 
     pub fn stop_and_join(&self) -> PResult<()> {
+        self.fenced.store(true, Ordering::Release);
+        self.output_gate.store(false, Ordering::Release);
+        self.stop_output_workers();
         self.output_gate.store(false, Ordering::Release);
         self.generation_serial.fetch_add(1, Ordering::AcqRel);
         let mut worker = self.worker.lock().unwrap_or_else(|e| e.into_inner());
@@ -599,6 +618,15 @@ fn owner_loop(
                 }
             }
         }
+        {
+            let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
+            reconcile_outputs(
+                &mut i,
+                &ingress,
+                &generation_serial,
+                fenced.load(Ordering::Acquire),
+            );
+        }
         let command = command_rx.recv_timeout(Duration::from_millis(25));
         let pending: Vec<_> = events
             .lock()
@@ -612,12 +640,44 @@ fn owner_loop(
                     continue;
                 }
                 if !fenced.load(Ordering::Acquire) && i.generation_id == generation_id {
+                    let output_lost = matches!(&event, PlaybackEvent::Failed { code, .. } if code == "OUTPUT_LOST");
+                    if output_lost {
+                        i.output_gate.store(false, Ordering::Release);
+                        let _ = sample_progress(&mut i, &ingress);
+                        if let Some(position) =
+                            super::audio::global().captured_position(&generation_id)
+                        {
+                            i.session.position_ms = i.session.position_ms.max(position);
+                        }
+                        generation_serial.fetch_add(1, Ordering::AcqRel);
+                        super::audio::global().control(ControlAction::Stop);
+                        i.generation_id = Uuid::new_v4().to_string();
+                        i.dirty = true;
+                    }
                     apply_playback_event(&mut i, event);
                     refresh_ingress(&i, &ingress);
+                    if output_lost {
+                        let _ = checkpoint_inner(&mut i);
+                    }
                 }
             }
         }
         match command {
+            Ok(OwnerCommand::ListOutputs(params, reply)) => {
+                let i = inner.lock().unwrap_or_else(|e| e.into_inner());
+                let result = list_outputs(&i, params);
+                let _ = reply.send(with_metadata(result, &i));
+            }
+            Ok(OwnerCommand::SelectOutput(params, _guard, reply)) => {
+                let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
+                let result = if fenced.load(Ordering::Acquire) {
+                    Err(owner_stopped())
+                } else {
+                    select_output(&mut i, params, &ingress, &generation_serial)
+                };
+                refresh_ingress(&i, &ingress);
+                let _ = reply.send(with_metadata(result, &i));
+            }
             Ok(OwnerCommand::Snapshot(reply)) => {
                 let i = inner.lock().unwrap_or_else(|e| e.into_inner());
                 let _ = reply.send(with_metadata(snapshot(&i), &i));
@@ -633,7 +693,9 @@ fn owner_loop(
                     Err(owner_stopped())
                 } else {
                     prune_dedup(&mut i);
-                    if i.control_dedup.contains_key(&params.command_id) {
+                    if i.control_dedup.contains_key(&params.command_id)
+                        || i.output_dedup.contains_key(&params.command_id)
+                    {
                         Err(PlaybackError::conflict(
                             "COMMAND_ID_REUSED",
                             "command identity was reused with another payload",
@@ -679,7 +741,9 @@ fn owner_loop(
                 prune_dedup(&mut i);
                 let result = if fenced.load(Ordering::Acquire) {
                     Err(owner_stopped())
-                } else if i.dedup.contains_key(&params.command_id) {
+                } else if i.dedup.contains_key(&params.command_id)
+                    || i.output_dedup.contains_key(&params.command_id)
+                {
                     Err(PlaybackError::conflict(
                         "COMMAND_ID_REUSED",
                         "command identity was reused with another payload",
@@ -816,6 +880,12 @@ fn with_metadata<T>(result: PResult<T>, i: &Inner) -> PResult<T> {
 }
 fn reject_unstarted(command: OwnerCommand) {
     match command {
+        OwnerCommand::ListOutputs(_, reply) => {
+            let _ = reply.send(Err(owner_stopped()));
+        }
+        OwnerCommand::SelectOutput(_, _guard, reply) => {
+            let _ = reply.send(Err(owner_stopped()));
+        }
         OwnerCommand::Apply(_, _guard, reply) => {
             let _ = reply.send(Err(owner_stopped()));
         }
@@ -873,6 +943,10 @@ fn retry_restore_inner(
         PlaybackStatus::Idle
     };
     let candidate = Inner {
+        output: inner.output.clone(),
+        outputs: None,
+        output_dedup: HashMap::new(),
+        output_dedup_order: VecDeque::new(),
         output_gate: inner.output_gate.clone(),
         control_epoch: inner.control_epoch.clone(),
         db: inner.db.clone(),
@@ -1167,8 +1241,21 @@ fn apply_inner(
             ..Default::default()
         },
     };
+    if matches!(p.operation, SessionOperation::PlayTrack { .. })
+        && i.outputs.is_some()
+        && let Err(code) = output_policy(i)
+    {
+        i.output_gate.store(false, Ordering::Release);
+        i.session.state = TransportState::Paused;
+        i.playback.status = PlaybackStatus::Paused;
+        i.output.error = Some(PlaybackFailure {
+            code: code.into(),
+            retryable: true,
+        });
+    }
     Ok(ApplyResult {
-        start_audio: matches!(p.operation, SessionOperation::PlayTrack { .. }),
+        start_audio: matches!(p.operation, SessionOperation::PlayTrack { .. })
+            && (i.outputs.is_none() || output_policy(i).is_ok()),
         current_metadata: metadata(i),
         session_id: i.session.session_id.clone(),
         queue_revision: i.session.queue_revision.to_string(),
@@ -1248,6 +1335,7 @@ fn snapshot(i: &Inner) -> PResult<SessionSnapshot> {
         occurrences: rows,
         next_cursor: next,
         playback: i.playback.clone(),
+        output: i.output.clone(),
     })
 }
 
@@ -1277,6 +1365,11 @@ fn control_inner(
             "playback generation is stale",
         ));
     }
+    if p.action == ControlAction::Resume && i.outputs.is_some() {
+        output_policy(i).map_err(|code| {
+            PlaybackError::invalid(code, "choose an available output before resuming")
+        })?;
+    }
     if p.action == ControlAction::Resume && i.output_gate.load(Ordering::Acquire) {
         return snapshot(i);
     }
@@ -1296,7 +1389,8 @@ fn control_inner(
             if matches!(
                 i.playback.status,
                 PlaybackStatus::Completed | PlaybackStatus::Error
-            ) {
+            ) || i.playback.error.is_some()
+            {
                 generation_serial.fetch_add(1, Ordering::AcqRel);
                 super::audio::global().control(ControlAction::Stop);
                 if i.playback.status == PlaybackStatus::Completed {
@@ -1433,6 +1527,15 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
             i.dirty = true;
         }
         PlaybackEvent::Failed { code, retryable } => {
+            if code.starts_with("OUTPUT_") {
+                // A warning or failed replacement does not prove the old
+                // native handle retired. Only its close acknowledgement clears active.
+                i.output.status = "error".into();
+                i.output.error = Some(PlaybackFailure {
+                    code: code.clone(),
+                    retryable,
+                });
+            }
             i.output_gate.store(false, Ordering::Release);
             i.session.state = TransportState::Paused;
             i.playback.status = PlaybackStatus::Error;

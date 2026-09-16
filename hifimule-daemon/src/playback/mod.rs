@@ -1,5 +1,7 @@
 pub mod audio;
+pub mod config;
 pub mod decoder;
+pub mod devices;
 mod http_source;
 pub mod model;
 mod output;

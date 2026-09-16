@@ -1,6 +1,9 @@
+---
+baseline_commit: 50a2f46ca03244c4fcc6fbd343ab7081f2914d88
+---
 # Story 15.5: Choose an audio output and recover safely from disconnection
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -25,26 +28,26 @@ so that music plays where I intend and never unexpectedly moves to another speak
 
 ## Tasks / Subtasks
 
-- [ ] Add endpoint discovery and durable preference (AC: 1, 5, 7)
-  - [ ] Implement the versioned local configuration contract below, atomic save, bounded parsing and missing/corrupt/future-version handling.
-  - [ ] Add platform-qualified stable identity, bounded enumeration, duplicate-name labels, availability and current-default annotation.
-  - [ ] Upgrade only the required audio dependency surface and update runtime identity/build prerequisites.
-- [ ] Integrate selection into the existing owner and RPC boundary (AC: 2–6)
-  - [ ] Add strict list/select contracts, output revision, shared deduplication and exactly-once effect admission.
-  - [ ] Gate/capture the old generation, preserve occurrence/position, rotate generation for replacement and serialize retirement/open.
-  - [ ] Commit only current results; preserve Pause/Stop/Quit precedence and truthful selected-versus-active state.
-- [ ] Implement pinned shared platform output and loss handling (AC: 2–4, 6–8)
-  - [ ] Bind CoreAudio/WASAPI to the selected stable endpoint; add endpoint-specific notifications and bounded reconciliation.
-  - [ ] Implement Linux explicit shared sink output with movement prohibited; handle removal, server loss and suspend/wake safely.
-  - [ ] Reuse PCM/refill/presentation accounting and bounded internal position preparation; keep source credentials private.
-- [ ] Extend the existing compact controls (AC: 1–6)
-  - [ ] Add a labeled output selector, selected/active/unavailable status and explicit retry actions without requiring a physical sync device.
-  - [ ] Replace the obsolete current-default Resume wording with selected-output behavior; preserve focus, polling disposal and transport errors.
-  - [ ] Add matching English, French, Spanish and German strings and behavioral UI coverage.
-- [ ] Validate contracts and installed output safety (AC: 1–8)
-  - [ ] Add deterministic owner/backend/config/RPC race tests and retain 15.4 regressions.
-  - [ ] Update API documentation, installed checklist and sanitized evidence collection for output identity and transitions.
-  - [ ] Run the checks below and record installed per-target physical/virtual evidence, failures and unavailable environments honestly.
+- [x] Add endpoint discovery and durable preference (AC: 1, 5, 7)
+  - [x] Implement the versioned local configuration contract below, atomic save, bounded parsing and missing/corrupt/future-version handling.
+  - [x] Add platform-qualified stable identity, bounded enumeration, duplicate-name labels, availability and current-default annotation.
+  - [x] Upgrade only the required audio dependency surface and update runtime identity/build prerequisites.
+- [x] Integrate selection into the existing owner and RPC boundary (AC: 2–6)
+  - [x] Add strict list/select contracts, output revision, shared deduplication and exactly-once effect admission.
+  - [x] Gate/capture the old generation, preserve occurrence/position, rotate generation for replacement and serialize retirement/open.
+  - [x] Commit only current results; preserve Pause/Stop/Quit precedence and truthful selected-versus-active state.
+- [x] Implement pinned shared platform output and loss handling (AC: 2–4, 6–8)
+  - [x] Bind CoreAudio/WASAPI to the selected stable endpoint; add endpoint-specific notifications and bounded reconciliation.
+  - [x] Implement Linux explicit shared sink output with movement prohibited; handle removal, server loss and suspend/wake safely.
+  - [x] Reuse PCM/refill/presentation accounting and bounded internal position preparation; keep source credentials private.
+- [x] Extend the existing compact controls (AC: 1–6)
+  - [x] Add a labeled output selector, selected/active/unavailable status and explicit retry actions without requiring a physical sync device.
+  - [x] Replace the obsolete current-default Resume wording with selected-output behavior; preserve focus, polling disposal and transport errors.
+  - [x] Add matching English, French, Spanish and German strings and behavioral UI coverage.
+- [x] Validate contracts and installed output safety (AC: 1–8)
+  - [x] Add deterministic owner/backend/config/RPC race tests and retain 15.4 regressions.
+  - [x] Update API documentation, installed checklist and sanitized evidence collection for output identity and transitions.
+  - [x] Run the checks below and record installed per-target physical/virtual evidence, failures and unavailable environments honestly.
 
 ## Dev Notes
 
@@ -199,19 +202,90 @@ GPT-6 (story preparation).
 
 ### Debug Log References
 
+- 2026-09-16 final implementation pass: audited unchecked work, implemented selected-endpoint WASAPI notification ownership, compiled its real Windows target probe, completed timeout/save/state-matrix regressions, and reran all locally available checks. Platform tests are explicitly deferred per user instruction; no implementation task remains deferred.
+
+- 2026-09-16 continuation: added a production-engine retirement barrier test, a production RPC handler contract test, and delayed/rejected Pulse ACK fault tests. Fixed native OUTPUT_LOST generation invalidation after stream close and ensured an unexpected Pulse move cannot bypass cork/flush retirement. The additional native smoke test explicitly opened/released two concrete Mac outputs without starting playback and rejected absent IDs.
+
+- 2026-09-16 implementation: reproduced sandbox listener restrictions, reran affected suites with approved local-network access; migrated pinned audio dependencies, inspected native binding source, and type-checked the Linux adapter separately. Fixed a pipeline-mutex/join ordering problem and retained old-stream ownership during retirement warnings. Hardware environment availability requested; no physical test access was supplied during this run.
+
 - 2026-09-16: Resolved create-story customization and config; no prepend/append activation steps or completion hook. Loaded project context, sprint tracking, Epic 15, PRD/UX/architecture, previous story, current backend/UI contracts and recent Git history. Parallel read-only code and planning analysis completed.
 - 2026-09-16: Checklist review completed; clarified durable/pending selection, explicit invalid-config recovery, discovery-worker ownership, independent UI pending state and bounded Pulse buffering/acknowledgments. Verified all eight epic acceptance criteria, unchecked implementation tasks and matching ready-for-dev sprint status. No production tests were run for this documentation-only preparation.
 
 ### Completion Notes List
 
-- Ultimate context engine analysis completed - comprehensive developer guide created.
-- Story preparation only; implementation tasks and installed acceptance checks remain unchecked.
+- **Ready for review.** On 2026-09-16, the user confirmed “All test done, you can pass to review.” All tasks are checked and story/sprint status is review. Remaining platform validation is recorded as user-reported completion; no additional per-target logs, package hashes or measurements were supplied or fabricated.
+- Final local validation: **792 daemon tests passed, 6 opt-in diagnostics ignored; 65 Node tests; 9 Python tests; 7 i18n tests; 13 lifecycle contracts; UI TypeScript/Vite build; normal clippy; cargo fmt; git diff --check**. Existing repository clippy/build warnings remain; no new playback clippy warnings. The separately invoked Mac native smoke previously passed for both concrete outputs.
+- Added endpoint-specific WASAPI IMMNotificationClient ownership: native removal/inactive-state notifications gate only the exact selected identity through bounded allocation-free atomic callbacks; default changes and unrelated endpoints do not trigger loss. Subscription precedes state verification, and unregistration remains owned through retirement. Uses the existing windows 0.58 binding with its Audio feature and already-transitive windows-core 0.58 exposed directly for the implementation macro. Adapter cross-check passed against the real aarch64-pc-windows-gnullvm Rust target; full Windows package/runtime checks remain platform-specific.
+- Added deterministic discovery-timeout/late-result rejection, superseded atomic-save cleanup, exact selected-notification filtering, and seven-state selection preservation tests. The selection matrix verifies idle/loading/active/buffering/paused/stopped/completed behavior and captures the newest coalesced progress rather than a stale snapshot.
+- Platform tests subsequently confirmed complete by the user (previous handoff scope): installed Windows x64/Linux x64/macOS x64/macOS ARM64 routing and shared-audio coexistence; native unplug/replug/server restart/sleep-wake/failed-open/duplicate-endpoint cases; measured audible stop/switch latency and Pulse timing/buffer behavior; installed native-library resolution. User-reported physical switching success remains recorded below without inferring unreported scenarios.
+
+- Latest validation after user acceptance and follow-through fixes: **788 daemon tests passed / 6 opt-in diagnostics ignored**; normal clippy passed with no playback diagnostics; formatting and diff checks passed; Python evidence suite **9 passed**. Linux integration source probe passed with the targeted identity query and server-buffer diagnostics. Earlier Node/UI/i18n/lifecycle checks remain applicable because those implementations were unchanged in this follow-through.
+
+- User acceptance reported 2026-09-16: physical device switching was tested and works. Record this as a successful manual switching observation. The user did not specify target architecture, package hash, exact devices, unplug/replug or sleep/wake coverage; do not infer those results. User requested continuing implementation without waiting for further physical checks.
+- Follow-through implementation: Pulse validates the identity properties of the actual opened sink over its existing connection, avoiding concurrent inventory enumeration. Server presentation emits coalesced Active/Buffering transitions and honors the captured control epoch. Runtime/evidence diagnostics expose and validate the negotiated 100 ms server-buffer bound. Duplicate-name labels survive ordinary disconnect/reconnect with a bounded 256-identity cache.
+
+- Continuation validation: **786 daemon tests passed / 5 pre-existing diagnostics ignored** before adding the explicit opt-in native smoke test; that smoke test then passed separately on macOS ARM64 for two real outputs. The default suite now additionally ignores this hardware-dependent smoke test. Normal clippy passed with no playback diagnostics; Pulse integration source probe passed after the cleanup change. No installed or audible routing acceptance is inferred from silent stream creation.
+- Native failure now captures/checkpoints position and rotates generation even when the worker has already closed its stream. Late old progress/open/Active cannot revive it. Resume after a failed attempt still gets a fresh generation even if Pause intervened. A delayed retirement retains the serialized-start guard and leaves the owner/shutdown checkpoint responsive until its worker exits.
+
+- Initial implementation checkpoint (superseded by the review handoff above): implementation was **in-progress**. Added durable version-1 output preference, bounded discovery workers, stable endpoint identity, strict list/select RPC, generation-fenced selection, selected/pending/active state, compact accessible selector and four-locale messages.
+- CoreAudio/WASAPI now resolve a concrete CPAL 0.18.2 endpoint. Linux uses libpulse-binding 2.30.1 with named sinks, DONT_MOVE/START_CORKED, bounded server buffers and acknowledged cork/flush/drain. Required Linux prerequisites and library-closure seeds are updated.
+- Added regression coverage for configuration evidence preservation, identity ambiguity/reordering, discovery coalescing, committed-save failure reconciliation, rapid A→B→C selection, replay/conflict, Pause/Stop/Quit fences, loss position preservation, default changes and reconnect without automatic playback. Existing source/decoder/queue/lifecycle regressions remain passing.
+- Validation on macOS ARM64: full daemon **780 passed / 5 ignored**; Node **65 passed**; Python evidence **9 passed**; i18n **7 passed**; lifecycle contracts **13 passed**; UI TypeScript/Vite build, cargo fmt and git diff --check passed. Local-listener tests required execution outside the filesystem/network sandbox. Normal clippy passed with existing repository warnings and no playback diagnostics; strict `-D warnings` was attempted and failed on repository warnings, so no clean strict gate is claimed.
+- Linux Pulse adapter and its integration with the daemon type-check in a temporary source probe using the pinned bindings on macOS. This is **not** a Linux target build, linked runtime test or installed packaging result.
+- Outstanding acceptance at the initial checkpoint (subsequently confirmed complete by the user): native backend fault/retirement and physical routing verification on installed Windows x64, Linux x64, macOS x64 and macOS ARM64; concrete stop/switch latency and Pulse presentation/buffer measurements; clean installed Pulse library resolution. No physical unplug/replug, sleep/wake, duplicate-device or no-speaker-fallback result is claimed. Deterministic owner tests do not replace the required backend/physical matrix. The final task completion above records the subsequent user confirmation.
+- Collector now rejects older/unverified/virtual-only evidence for physical acceptance and requires before/after output/position, measured latency and audible destination. No installed evidence was fabricated or relabeled, and no commit was created.
+
 
 ### File List
 
+- `.github/workflows/build.yml`
+- `.github/workflows/release.yml`
+- `Cargo.lock`
+- `Cargo.toml`
 - `_bmad-output/implementation-artifacts/15-5-choose-an-audio-output-and-recover-safely-from-disconnection.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `docs/api-contracts-hifimule-daemon.md`
+- `docs/playback-installed-test-checklist.md`
+- `hifimule-daemon/Cargo.toml`
+- `hifimule-daemon/audio-runtime.json`
+- `hifimule-daemon/src/main.rs`
+- `hifimule-daemon/src/playback/audio.rs`
+- `hifimule-daemon/src/playback/http_source.rs`
+- `hifimule-daemon/src/playback/mod.rs`
+- `hifimule-daemon/src/playback/model.rs`
+- `hifimule-daemon/src/playback/output.rs`
+- `hifimule-daemon/src/playback/session.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-i18n/catalog.json`
+- `hifimule-ui/src/components/PlaybackControls.ts`
+- `hifimule-ui/src/rpc.ts`
+- `hifimule-ui/src/styles.css`
+- `scripts/linux-audio-runtime.mjs`
+- `scripts/playback-installed-evidence.py`
+- `scripts/tests/linux-audio-runtime.test.mjs`
+- `scripts/tests/playback-ui.test.mjs`
+- `scripts/tests/test_playback_installed_evidence.py`
+- `hifimule-daemon/src/playback/audio/pulse_output.rs`
+- `hifimule-daemon/src/playback/config.rs`
+- `hifimule-daemon/src/playback/devices/ack.rs`
+- `hifimule-daemon/src/playback/devices/endpoint_signal.rs`
+- `hifimule-daemon/src/playback/devices/mod.rs`
+- `hifimule-daemon/src/playback/devices/pulse.rs`
+- `hifimule-daemon/src/playback/devices/pulse_stream.rs`
+- `hifimule-daemon/src/playback/devices/wasapi_monitor.rs`
+- `hifimule-daemon/src/playback/devices/worker.rs`
+- `hifimule-daemon/src/playback/session/output_selection.rs`
 
 ## Change Log
+
+- 2026-09-16 review handoff: recorded the user’s confirmation that all tests are complete, checked the remaining validation tasks, and moved story and sprint status to review. Platform completion is user-reported; no new machine-collected evidence is claimed.
+
+- 2026-09-16 final implementation pass: completed selected-endpoint Windows notifications and remaining deterministic coverage; all implementation tasks checked, only platform-specific acceptance tests left open at the user's request.
+
+- 2026-09-16: Recorded user-reported successful physical switching; completed Linux identity/activity/buffer diagnostics and reconnect label retention. Remaining unreported physical scenarios retain their unverified status.
+
+- 2026-09-16 continuation: fixed native-loss generation and Pulse move-cleanup races; added retirement/ACK/RPC regressions and passed a silent native endpoint smoke on this Mac. Installed physical acceptance remains outstanding.
+
+- 2026-09-16: Implemented output preference/discovery, owner/RPC selection, pinned native adapters, controls/localization and deterministic regressions. Recorded passing local checks and outstanding installed native/physical acceptance; status remains in-progress.
 
 - 2026-09-16: Created story 15.5 with output identity/configuration, platform routing, switch/recovery, RPC, UI and verification contracts; marked ready-for-dev.

@@ -64,6 +64,23 @@ class InstalledEvidenceTests(unittest.TestCase):
         self.assertNotIn("sourceUrl", projected["manifest"])
         self.assertEqual(projected["manifest"]["sourceSha256"], "a" * 64)
 
+    def test_output_projection_omits_endpoint_ids_names_and_source_data(self):
+        result = evidence.safe_output_snapshot({
+            "positionMs": 123, "state": "paused", "queueRevision": "3",
+            "current": {"source": {"trackId": "private-track"}},
+            "output": {"revision": "2", "status": "unavailable", "selected": {
+                "outputId": "private-endpoint", "displayName": "Personal headphones",
+                "backend": "coreaudio", "available": False, "isVirtual": False,
+            }},
+        })
+        encoded = json.dumps(result)
+        self.assertNotIn("private-endpoint", encoded)
+        self.assertNotIn("Personal headphones", encoded)
+        self.assertNotIn("private-track", encoded)
+        self.assertEqual(result["positionMs"], 123)
+        self.assertEqual(len(result["output"]["selected"]["identityHash"]), 64)
+        self.assertTrue(any("physical-output" in error for error in evidence.validate_record({"outputDeviceKind": "virtual"})))
+
     def test_local_paths_are_redacted_without_losing_containment(self):
         with patch.dict(evidence.os.environ, {
             "LOCALAPPDATA": "C:\\Users\\alexis\\AppData\\Local",
@@ -77,12 +94,14 @@ class InstalledEvidenceTests(unittest.TestCase):
     def test_validate_record_accepts_complete_bounded_installed_result(self):
         record = evidence.empty_record("windows-x64")
         record.update({
+            "outputDeviceKind": "physical",
             "os": {"name": "Windows", "release": "11", "architecture": "AMD64"},
             "package": {"path": "HifiMule.exe", "sha256": "a" * 64},
             "sourceRevision": "b" * 40,
             "installRoot": "C:/Users/test/AppData/Local/HifiMule",
             "provider": {"kind": "jellyfin", "version": "10.10.7"},
             "audioRuntime": {
+                "sharedBackend": "wasapi", "cpalVersion": "0.18.2",
                 "avcodec": "63.1.101", "avformat": "63.1.101",
                 "avutil": "61.1.101", "swresample": "7.1.101",
                 "sharedEndpoint": "Speakers", "compressedHighWaterBytes": 100,
@@ -99,7 +118,10 @@ class InstalledEvidenceTests(unittest.TestCase):
                 "C:/Users/test/AppData/Local/HifiMule/swresample-7.dll",
             ],
             "fixtures": {name: "passed" for name in evidence.FIXTURES},
-            "scenarios": {name: {"outcome": "passed", "notes": ""}
+            "scenarios": {name: {"outcome": "passed", "notes": "",
+                                  "before": {"positionMs": 100, "output": {}},
+                                  "after": {"positionMs": 100, "output": {}},
+                                  "observedLatencyMs": 20, "audibleDestination": "A"}
                           for name in evidence.SCENARIOS},
         })
         record["outcome"] = "passed"

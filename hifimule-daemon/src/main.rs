@@ -264,7 +264,11 @@ pub fn start_daemon_core(
             };
             let playback_db = Arc::clone(&db);
             let playback_instance = descriptor.instance_id.clone();
-            let playback = match tokio::task::spawn_blocking(move || playback::PlaybackSession::restore(playback_db, playback_instance)).await {
+            let playback = match tokio::task::spawn_blocking(move || {
+                let session = playback::PlaybackSession::restore(playback_db, playback_instance);
+                if let Ok(path) = paths::get_app_data_dir() {session.enable_outputs(path.join("playback.json"));}
+                session
+            }).await {
                 Ok(playback) => playback,
                 Err(_) => {
                     let _ = ready_tx.send(Err("Playback owner initialization failed".into()));

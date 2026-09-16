@@ -783,3 +783,59 @@ The playback worker is joined after successful preservation and sync drain. A jo
 `playback.control` accepts `{ schemaVersion, instanceId, sessionId, commandId, expectedGenerationId, occurrenceId, action }`, where action is `pause`, `resume`, or `stop`. Stale generation/occurrence controls return a conflict with authoritative session metadata. Command IDs are bounded and idempotent; reuse with another payload is rejected.
 
 `playback.getSession` includes an additive `playback` object with safe metadata, representation, duration, status (`idle`, `loading`, `active`, `paused`, `stopped`, `completed`, `error`) and a sanitized `{ code, retryable }` failure. It never includes provider requests or credentials.
+
+
+# Explicit playback outputs (schema v1, Story 15.5)
+
+`playback.listOutputs` accepts exactly `{ "schemaVersion": 1 }`. Its `data`
+contains `instanceId`, canonical decimal `outputRevision`, up to 256 `outputs`,
+`output`, and a sanitized discovery `error`. Discovery runs on one owned worker;
+refreshes coalesce. A stalled enumeration is reported after five seconds and
+remains owned until it returns. An incomplete inventory reports truncation.
+
+Descriptors expose `outputId` (opaque identity digest), `displayName`, `detail`,
+`backend`, `available`, `isDefault`, `identityConfidence`, and `isVirtual`.
+Names and default annotations are presentation metadata. They never identify a
+restored endpoint. Virtual outputs cannot certify downstream physical routing.
+
+`playback.selectOutput` accepts exactly:
+
+```json
+{
+  "schemaVersion": 1,
+  "instanceId": "<owner UUID>",
+  "sessionId": "<session UUID>",
+  "commandId": "<new UUID>",
+  "expectedOutputRevision": "0",
+  "expectedGenerationId": "<observed generation UUID>",
+  "outputId": "<opaque output ID from listOutputs>",
+  "replaceInvalidConfig": false
+}
+```
+
+The response `data` is the authoritative session snapshot. Acceptance does not
+promise audible success. Replays share the Apply/Control command namespace and
+do not repeat persistence or audio effects. Changed payloads and stale identity,
+output revision or generation conflict. Output selection never changes queue
+revision, session identity or current occurrence and works with an empty queue.
+
+Every snapshot adds `output: { revision, selected, pending, active, status, error }`.
+`selected` projects the committed `playback.json` preference; `pending` represents
+an accepted save/switch; `active` describes the opened stream. Available output
+without an active stream is valid. Status is `unselected`, `available`,
+`switching`, `unavailable` or `error`. UI must render these fields rather than
+assuming the last clicked choice is active.
+
+Missing configuration is unselected. Invalid or future configuration is retained
+and requires an explicit reset action followed by selection with
+`replaceInvalidConfig: true`; the original is archived before atomic replacement.
+Startup never opens a stream or resumes. Play retains its queue selection when no
+output is selected; Resume requires an available concrete selected output.
+
+Windows/macOS use exact CPAL 0.18.2 endpoint identity; CoreAudio opens enumerated
+concrete devices rather than default-following units. Linux uses a named Pulse
+sink with movement prohibited and bounded server buffering. Reconnection and
+system-default changes do not resume playback or change the saved preference.
+Failures report sanitized output codes independently of the queue and transport.
+Installed platform verification remains required; source checks are not evidence
+of physical routing, latency or shared-mode behavior.

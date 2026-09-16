@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect and validate sanitized Story 15.4 installed-playback evidence."""
+"""Collect and validate sanitized Stories 15.4/15.5 installed-playback evidence."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import platform
@@ -27,6 +28,11 @@ SCENARIOS = (
     "quit-while-playing",
     "quit-while-loading",
     "long-slow-stream-bounds",
+    "output-switch-playing-paused",
+    "output-replug-default-change",
+    "output-absent-startup",
+    "output-failed-open-duplicate-names",
+    "output-sleep-wake-shared-audio",
 )
 SCENARIO_GUIDANCE = {
     "play-pause-resume-stop": "Play a configured-server track, then Pause, Resume and Stop.",
@@ -37,11 +43,16 @@ SCENARIO_GUIDANCE = {
     "quit-while-playing": "Quit while playing; verify immediate silence, complete exit, no worker, and paused relaunch.",
     "quit-while-loading": "Quit while loading; verify cancellation, complete exit, no worker, and paused relaunch.",
     "long-slow-stream-bounds": "Play a long/slow stream; exercise starvation and replacements, then verify recovery and cleanup.",
+    "output-switch-playing-paused": "Switch between two explicit outputs while playing and paused; retain occurrence/position, measure interruption, and verify no overlapping audible output.",
+    "output-replug-default-change": "Physically unplug selected headphones with built-in speakers present; verify no speaker playback, paused replug, and no route change when changing the system default.",
+    "output-absent-startup": "Restart with the saved endpoint absent; verify unavailable selection, retained queue/position, no default/name substitution and no automatic Resume.",
+    "output-failed-open-duplicate-names": "Use duplicate friendly names and provoke a failed open. Verify identity distinction, truthful active/unavailable state and safe Pause/Stop during rapid selection.",
+    "output-sleep-wake-shared-audio": "Sleep/wake during playback, then verify safe paused recovery, explicit Resume and simultaneous audio from another application.",
 }
 SECRET_KEY = re.compile(r"token|password|authorization|cookie|secret|url|header", re.I)
 REMOTE_URL = re.compile(r"https?://", re.I)
 SECRET_VALUE = re.compile(r"(?:bearer\s+|api[_-]?key\s*[=:]|token\s*[=:]|password\s*[=:])", re.I)
-NATIVE_LIBRARY = re.compile(r"(?:lib)?(?:avcodec|avformat|avutil|swresample)[^/\\]*\.(?:dll|dylib|so(?:\.\d+)*)$", re.I)
+NATIVE_LIBRARY = re.compile(r"(?:lib)?(?:avcodec|avformat|avutil|swresample|pulse)[^/\\]*\.(?:dll|dylib|so(?:\.\d+)*)$", re.I)
 
 
 def now() -> str:
@@ -51,6 +62,8 @@ def now() -> str:
 def empty_record(target: str) -> dict:
     return {
         "schemaVersion": 1,
+        "outputEvidenceVersion": 1,
+        "outputDeviceKind": "unverified",
         "recordedAt": now(),
         "target": target,
         "os": {"name": platform.system(), "release": platform.release(), "architecture": platform.machine()},
@@ -103,7 +116,7 @@ def safe_audio_runtime(runtime: dict) -> dict:
         key: runtime[key]
         for key in (
             "binding", "avcodec", "avformat", "avutil", "swresample",
-            "sharedEndpoint", "compressedHighWaterBytes", "pcmHighWaterSamples",
+            "sharedEndpoint", "sharedBackend", "cpalVersion", "pulseVersion", "pulseServerBufferMaxBytes", "compressedHighWaterBytes", "pcmHighWaterSamples",
         )
         if key in runtime
     }
@@ -119,6 +132,20 @@ def safe_audio_runtime(runtime: dict) -> dict:
             if key in manifest
         }
     return public_runtime
+
+
+def safe_output_snapshot(snapshot: dict) -> dict:
+    """Record identity distinction without endpoint names, IDs or media metadata."""
+    output = snapshot.get("output", {})
+    result = {key: snapshot.get(key) for key in ("state", "positionMs", "queueRevision")}
+    result["output"] = {key: output.get(key) for key in ("revision", "status", "error")}
+    for role in ("selected", "pending", "active"):
+        descriptor = output.get(role)
+        result["output"][role] = None if not isinstance(descriptor, dict) else {
+            "identityHash": hashlib.sha256(str(descriptor.get("outputId", "")).encode()).hexdigest(),
+            **{key: descriptor.get(key) for key in ("backend", "available", "isVirtual", "identityConfidence")},
+        }
+    return result
 
 
 def app_data_dir() -> Path:
@@ -232,6 +259,10 @@ def is_within(path: str, root: str, target: str) -> bool:
 
 def validate_record(record: dict) -> list[str]:
     errors = []
+    if record.get("outputEvidenceVersion") != 1:
+        errors.append("Story 15.5 output evidence is missing; older playback results are insufficient")
+    if record.get("outputDeviceKind") != "physical":
+        errors.append("physical-output evidence is required; virtual/unverified routing cannot certify speaker safety")
     target = record.get("target")
     if target not in REQUIRED_TARGETS:
         errors.append(f"unsupported target: {target}")
@@ -256,7 +287,7 @@ def validate_record(record: dict) -> list[str]:
     if not isinstance(provider, dict) or provider.get("kind") not in ("jellyfin", "subsonic") or not provider.get("version"):
         errors.append("provider kind/version is unverified")
     runtime = record.get("audioRuntime")
-    required_versions = ("avcodec", "avformat", "avutil", "swresample")
+    required_versions = ("avcodec", "avformat", "avutil", "swresample", "sharedBackend", "cpalVersion")
     if not isinstance(runtime, dict) or any(not runtime.get(key) for key in required_versions):
         errors.append("audio runtime versions are unverified")
     elif not runtime.get("sharedEndpoint"):
@@ -274,6 +305,12 @@ def validate_record(record: dict) -> list[str]:
             errors.append("compressed high-water is absent, zero, or over policy")
         if not isinstance(pcm, int) or pcm <= 0 or pcm * 4 > policy.get("pcmCapacityMaxBytes", -1):
             errors.append("PCM high-water is absent, zero, or over policy")
+    if target == "linux-x64" and isinstance(runtime, dict) and not runtime.get("pulseVersion"):
+        errors.append("loaded Pulse runtime version is unverified")
+    if target == "linux-x64" and isinstance(runtime, dict):
+        server_buffer = runtime.get("pulseServerBufferMaxBytes")
+        if not isinstance(server_buffer, int) or not 0 < server_buffer <= 19200:
+            errors.append("negotiated Pulse buffer is absent or exceeds 100 ms at 48 kHz stereo float32")
     libraries = record.get("loadedLibraries")
     install_root = record.get("installRoot")
     if not isinstance(libraries, list) or len(libraries) < 4 or not isinstance(install_root, str):
@@ -281,6 +318,8 @@ def validate_record(record: dict) -> list[str]:
     else:
         library_names = {name for name in ("avcodec", "avformat", "avutil", "swresample")
                          if any(name in Path(path).name.lower() for path in libraries)}
+        if target == "linux-x64" and not any("libpulse.so" in Path(path).name for path in libraries):
+            errors.append("installed Pulse library resolution is unverified")
         if len(library_names) != 4:
             errors.append("loaded paths do not cover all four required native libraries")
         if any(not is_within(path, install_root, str(target)) for path in libraries):
@@ -293,6 +332,17 @@ def validate_record(record: dict) -> list[str]:
     for name in SCENARIOS:
         if not isinstance(scenarios.get(name), dict) or scenarios[name].get("outcome") != "passed":
             errors.append(f"scenario {name} is not passed")
+            continue
+        scenario = scenarios[name]
+        for phase in ("before", "after"):
+            snapshot = scenario.get(phase, {})
+            if not isinstance(snapshot, dict) or not isinstance(snapshot.get("positionMs"), int) or not isinstance(snapshot.get("output"), dict):
+                errors.append(f"scenario {name} has no {phase} output/position evidence")
+        latency = scenario.get("observedLatencyMs")
+        if not isinstance(latency, (int, float)) or isinstance(latency, bool) or latency < 0 or not math.isfinite(latency):
+            errors.append(f"scenario {name} has no measured switch/stop latency")
+        if not scenario.get("audibleDestination"):
+            errors.append(f"scenario {name} has no observed audible destination")
     try:
         sanitize(record)
     except ValueError as error:
@@ -360,6 +410,7 @@ def collect(args) -> int:
         "provider": {"kind": args.provider_kind, "version": args.provider_version},
         "audioRuntime": safe_audio_runtime(health["audioRuntime"]),
         "loadedLibraries": [redact_path(path) for path in loaded_libraries(int(health["pid"]))],
+        "outputDeviceKind": args.output_device_kind,
     })
 
     def capture_runtime() -> None:
@@ -387,8 +438,16 @@ def collect(args) -> int:
         print(f"\n{SCENARIO_GUIDANCE[scenario]}")
         input("Prepare the playing/loading precondition, then press Enter to capture runtime counters before the action: ")
         capture_runtime()
+        before = safe_output_snapshot(rpc(read_descriptor(app_root), "playback.getSession", {"schemaVersion": 1})["data"])
         outcome, notes = ask_outcome("Perform the action now. Relaunch HifiMule before answering if the scenario quits it.")
-        record["scenarios"][scenario] = {"outcome": outcome, "notes": notes}
+        after = safe_output_snapshot(rpc(read_descriptor(app_root), "playback.getSession", {"schemaVersion": 1})["data"])
+        latency = input("Observed switch/stop latency in milliseconds (leave blank if unmeasured): ").strip()
+        destination = input("Observed audible destination (use anonymous labels A/B/silent, no personal device names): ").strip()
+        record["scenarios"][scenario] = {
+            "outcome": outcome, "notes": notes, "before": before, "after": after,
+            "observedLatencyMs": float(latency) if latency else None,
+            "audibleDestination": destination,
+        }
         capture_runtime()
     errors = validate_record(record)
     record["outcome"] = "passed" if not errors else "failed"
@@ -414,6 +473,7 @@ def main(argv=None) -> int:
     collect_parser.add_argument("--provider-kind", choices=("jellyfin", "subsonic"), required=True)
     collect_parser.add_argument("--provider-version", required=True)
     collect_parser.add_argument("--app-data")
+    collect_parser.add_argument("--output-device-kind", choices=("physical", "virtual"), required=True)
     collect_parser.add_argument("--output", required=True)
     validate_parser = subparsers.add_parser("validate", help="validate one record or a four-target directory")
     validate_parser.add_argument("path")

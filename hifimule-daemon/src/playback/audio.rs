@@ -1,16 +1,19 @@
+#[cfg(target_os = "linux")]
+mod pulse_output;
 use super::decoder::decode_stream;
 use super::model::{PlaybackEvent, PlaybackTrackMetadata};
 use super::streaming::{BoundedHttpReader, StreamFailureKind, StreamFailureState, StreamReadError};
 use crate::providers::{PlaybackDescription, PlaybackRequest, select_playback_representation};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{FromSample, Sample, SizedSample};
 use crossbeam_queue::ArrayQueue;
+#[cfg(target_os = "linux")]
+use pulse_output::run_output;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const PCM_TARGET_MILLISECONDS: usize = 500;
 const PCM_CAPACITY_MAX_BYTES: usize = 1024 * 1024;
 const STARTUP_FILL_MILLISECONDS: usize = 100;
-const ENDPOINT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +49,14 @@ pub(crate) struct PlaybackPipelineError {
 }
 
 impl PlaybackPipelineError {
+    fn output_policy(code: &'static str) -> Self {
+        let mut error = Self::output_open(anyhow::anyhow!("selected output is unavailable"));
+        error.code = code;
+        if code == "GENERATION_CONFLICT" {
+            error.stage = PlaybackPipelineStage::Cancelled;
+        }
+        error
+    }
     pub(crate) fn from_provider_error(error: crate::providers::ProviderError) -> Self {
         use crate::providers::ProviderError;
         match error {
@@ -283,6 +294,7 @@ struct Pipeline {
     compressed_high_water: Arc<AtomicU64>,
     pcm_high_water: Arc<AtomicU64>,
     endpoint: Arc<Mutex<Option<String>>>,
+    position_ms: Arc<AtomicU64>,
 }
 
 fn decoder_hint(representation: &crate::providers::PlaybackRepresentation) -> String {
@@ -375,6 +387,103 @@ pub fn global() -> &'static AudioEngine {
 }
 
 impl AudioEngine {
+    async fn retire(
+        old: Pipeline,
+        session: &super::PlaybackSession,
+        generation: &str,
+    ) -> Result<(), PlaybackPipelineError> {
+        old.gate.store(false, Ordering::Release);
+        old.cancel.store(true, Ordering::Release);
+        let mut retirement = tokio::task::spawn_blocking(move || old.worker.join());
+        let result = tokio::select! {
+            result = &mut retirement => result,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
+                session.publish_event(generation.to_owned(), PlaybackEvent::Failed {
+                    code: "OUTPUT_RETIREMENT_PENDING".into(), retryable: true,
+                });
+                // Keep ownership and the serialized-start guard. A timeout is
+                // not evidence that the old native stream has stopped.
+                retirement.await
+            }
+        };
+        result
+            .map_err(|_| PlaybackPipelineError::output_policy("OUTPUT_SWITCH_FAILED"))?
+            .map_err(|_| PlaybackPipelineError::output_policy("OUTPUT_SWITCH_FAILED"))
+    }
+
+    pub fn captured_position(&self, generation: &str) -> Option<u64> {
+        self.current
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .filter(|p| p.generation == generation)
+            .map(|p| p.position_ms.load(Ordering::Acquire))
+    }
+    pub async fn validate_selected_output(
+        &self,
+        session: super::PlaybackSession,
+        generation: String,
+    ) -> Result<(), PlaybackPipelineError> {
+        let _guard = self.starts.lock().await;
+        let old = self
+            .current
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(old) = old {
+            Self::retire(old, &session, &generation).await?;
+        }
+        let preference = session
+            .selected_output(&generation)
+            .map_err(PlaybackPipelineError::output_policy)?;
+        tokio::task::spawn_blocking(move || {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            {
+                let device = super::devices::open_device(&preference)
+                    .map_err(PlaybackPipelineError::output_policy)?;
+                let config = device
+                    .default_output_config()
+                    .map_err(|_| PlaybackPipelineError::output_policy("OUTPUT_UNAVAILABLE"))?;
+                let _stream = device
+                    .build_output_stream_raw(
+                        config.config(),
+                        config.sample_format(),
+                        |data, _| {
+                            // This stream is never started. No source or queue is created.
+                            data.bytes_mut().fill(0);
+                        },
+                        |_| {},
+                        None,
+                    )
+                    .map_err(|_| PlaybackPipelineError::output_policy("OUTPUT_SWITCH_FAILED"))?;
+                if !session.output_opened(&generation, &preference) {
+                    return Err(PlaybackPipelineError::output_policy("GENERATION_CONFLICT"));
+                }
+                drop(_stream);
+                session.output_closed(&generation);
+                Ok(())
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let mut stream = super::devices::pulse_stream::PinnedStream::open(
+                    &preference,
+                    std::time::Instant::now() + std::time::Duration::from_secs(5),
+                )
+                .map_err(PlaybackPipelineError::output_policy)?;
+                if !session.output_opened(&generation, &preference) {
+                    return Err(PlaybackPipelineError::output_policy("GENERATION_CONFLICT"));
+                }
+                stream
+                    .retire(&mut || {})
+                    .map_err(PlaybackPipelineError::output_policy)?;
+                session.output_closed(&generation);
+                Ok(())
+            }
+        })
+        .await
+        .map_err(|_| PlaybackPipelineError::output_policy("OUTPUT_SWITCH_FAILED"))?
+    }
+
     pub fn control(&self, action: super::model::ControlAction) {
         if let Some(pipeline) = self
             .current
@@ -406,12 +515,13 @@ impl AudioEngine {
         // Shutdown runs this on a blocking worker and must also retire a start
         // that was admitted before the session fence but is still fetching.
         let _start_guard = self.starts.blocking_lock();
-        if let Some(pipeline) = self
-            .current
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-        {
+        let pipeline = {
+            self.current
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+        };
+        if let Some(pipeline) = pipeline {
             pipeline.gate.store(false, Ordering::Release);
             pipeline.cancel.store(true, Ordering::Release);
             pipeline
@@ -432,6 +542,9 @@ impl AudioEngine {
         deadline: std::time::Instant,
     ) -> Result<(), PlaybackPipelineError> {
         let _start_guard = self.starts.lock().await;
+        session
+            .selected_output(&generation)
+            .map_err(PlaybackPipelineError::output_policy)?;
         // A Resume admitted while the first start was preparing shares that
         // generation. Once preparation finishes, reuse it instead of restarting.
         if self.resume_existing(&generation) {
@@ -451,19 +564,7 @@ impl AudioEngine {
                 .take()
         };
         if let Some(old) = old {
-            old.cancel.store(true, Ordering::Release);
-            tokio::task::spawn_blocking(move || old.worker.join())
-                .await
-                .map_err(|_| {
-                    PlaybackPipelineError::output_open(anyhow::anyhow!(
-                        "retiring audio worker join failed"
-                    ))
-                })?
-                .map_err(|_| {
-                    PlaybackPipelineError::output_open(anyhow::anyhow!(
-                        "retiring audio worker panicked"
-                    ))
-                })?;
+            Self::retire(old, &session, &generation).await?;
         }
         let representation = select_playback_representation(description.representations)
             .map_err(PlaybackPipelineError::from_provider_error)?;
@@ -492,6 +593,8 @@ impl AudioEngine {
         let compressed_high_water = Arc::new(AtomicU64::new(0));
         let pcm_high_water = Arc::new(AtomicU64::new(0));
         let endpoint = Arc::new(Mutex::new(None));
+        let position_ms = Arc::new(AtomicU64::new(start_ms));
+        let worker_position = position_ms.clone();
         let preparation = super::http_source::Preparation::new(deadline, cancel.clone());
         let source_reader =
             super::http_source::HttpSource::new(request, response, preparation.clone());
@@ -537,9 +640,11 @@ impl AudioEngine {
                     start_ms,
                     worker_pcm_high_water,
                     worker_endpoint,
+                    worker_position,
                     preparation,
                 )
                 .map_err(|error| error.with_representation(&worker_representation));
+                session.output_closed(&generation);
                 match result {
                     Err(error)
                         if should_publish_worker_failure(
@@ -564,6 +669,7 @@ impl AudioEngine {
             gate,
             alive,
             generation: pipeline_generation,
+            position_ms,
             worker,
             compressed_high_water,
             pcm_high_water,
@@ -619,6 +725,7 @@ fn content_type_is_non_audio(value: &str) -> bool {
     value.contains("json") || value.contains("xml")
 }
 
+#[cfg(not(target_os = "linux"))]
 #[allow(clippy::too_many_arguments)]
 fn run_output(
     reader: BoundedHttpReader,
@@ -632,39 +739,49 @@ fn run_output(
     start_ms: u64,
     pcm_high_water: Arc<AtomicU64>,
     endpoint: Arc<Mutex<Option<String>>>,
+    position_ms: Arc<AtomicU64>,
     preparation: super::http_source::Preparation,
 ) -> Result<(), PlaybackPipelineError> {
     let stream_failure = reader.failure_state();
-    let host = cpal::default_host();
-    let device = host.default_output_device().ok_or_else(|| {
-        PlaybackPipelineError::output_open(anyhow::anyhow!("output device unavailable"))
-    })?;
-    let opened_endpoint = device.name().map_err(|error| {
-        PlaybackPipelineError::output_open(
-            anyhow::Error::new(error).context("read active output endpoint identity"),
-        )
-    })?;
-    *endpoint.lock().unwrap_or_else(|error| error.into_inner()) = Some(opened_endpoint.clone());
+    let preference = session
+        .selected_output(&generation)
+        .map_err(PlaybackPipelineError::output_policy)?;
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let device =
+        super::devices::open_device(&preference).map_err(PlaybackPipelineError::output_policy)?;
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let device = return Err(PlaybackPipelineError::output_policy(
+        "OUTPUT_SHARED_UNSUPPORTED",
+    ));
+    *endpoint.lock().unwrap_or_else(|error| error.into_inner()) =
+        Some(preference.display_name.clone());
     let supported = device.default_output_config().map_err(|error| {
         PlaybackPipelineError::output_open(
             anyhow::Error::new(error).context("read default output configuration"),
         )
     })?;
-    let config: cpal::StreamConfig = supported.clone().into();
+    let config: cpal::StreamConfig = supported.into();
     if !matches!(config.channels, 1 | 2) {
         return Err(PlaybackPipelineError::output_open(anyhow::anyhow!(
             "unsupported output layout"
         )));
     }
-    let samples_per_second = config.sample_rate.0 as usize * config.channels as usize;
+    let samples_per_second = config.sample_rate as usize * config.channels as usize;
     let capacity = (samples_per_second * PCM_TARGET_MILLISECONDS / 1000)
         .min(PCM_CAPACITY_MAX_BYTES / std::mem::size_of::<f32>());
     let pcm = Arc::new(ArrayQueue::new(capacity));
     let consumed = Arc::new(AtomicU64::new(0));
     let output_lost = Arc::new(AtomicBool::new(false));
+    #[cfg(target_os = "windows")]
+    let _endpoint_monitor = super::devices::wasapi_monitor::SelectedEndpointMonitor::new(
+        &preference.stable_id,
+        gate.clone(),
+        output_lost.clone(),
+    )
+    .map_err(PlaybackPipelineError::output_policy)?;
     let decoder_pcm = pcm.clone();
     let decoder_cancel = cancel.clone();
-    let rate = config.sample_rate.0;
+    let rate = config.sample_rate;
     let channels = config.channels;
     let hint = hint.to_string();
     let decoder = super::output::DecoderWorker::spawn(cancel.clone(), move || {
@@ -692,6 +809,38 @@ fn run_output(
             cancel.clone(),
             decoder.finished.clone(),
             presentation.clone(),
+            position_ms.clone(),
+            start_ms,
+        ),
+        cpal::SampleFormat::I32 => build_stream::<i32>(
+            &device,
+            &config,
+            pcm.clone(),
+            gate.clone(),
+            consumed.clone(),
+            output_lost.clone(),
+            generation_serial.clone(),
+            expected_serial,
+            cancel.clone(),
+            decoder.finished.clone(),
+            presentation.clone(),
+            position_ms.clone(),
+            start_ms,
+        ),
+        cpal::SampleFormat::F64 => build_stream::<f64>(
+            &device,
+            &config,
+            pcm.clone(),
+            gate.clone(),
+            consumed.clone(),
+            output_lost.clone(),
+            generation_serial.clone(),
+            expected_serial,
+            cancel.clone(),
+            decoder.finished.clone(),
+            presentation.clone(),
+            position_ms.clone(),
+            start_ms,
         ),
         cpal::SampleFormat::I16 => build_stream::<i16>(
             &device,
@@ -705,6 +854,8 @@ fn run_output(
             cancel.clone(),
             decoder.finished.clone(),
             presentation.clone(),
+            position_ms.clone(),
+            start_ms,
         ),
         cpal::SampleFormat::U16 => build_stream::<u16>(
             &device,
@@ -718,6 +869,8 @@ fn run_output(
             cancel.clone(),
             decoder.finished.clone(),
             presentation.clone(),
+            position_ms.clone(),
+            start_ms,
         ),
         _ => Err(anyhow::anyhow!("unsupported output sample format")),
     }
@@ -736,6 +889,11 @@ fn run_output(
         .check()
         .map_err(|error| PlaybackPipelineError::timeout(anyhow::Error::new(error)))?;
     preparation.ready();
+    if !session.output_opened(&generation, &preference) {
+        return Err(PlaybackPipelineError::cancelled(anyhow::anyhow!(
+            "output selection superseded"
+        )));
+    }
     if let Err(error) = stream.play() {
         cancel.store(true, Ordering::Release);
         let _ = decoder.join();
@@ -762,7 +920,6 @@ fn run_output(
     let mut buffering = false;
     let mut last_samples = 0;
     let mut seq = 0;
-    let mut last_endpoint_check = std::time::Instant::now();
     while !cancel.load(Ordering::Acquire) {
         pcm_high_water.fetch_max(pcm.len() as u64, Ordering::AcqRel);
         if generation_serial.load(Ordering::Acquire) != expected_serial {
@@ -775,19 +932,6 @@ fn run_output(
             return Err(PlaybackPipelineError::output_lost(anyhow::anyhow!(
                 "output stream callback reported loss"
             )));
-        }
-        if last_endpoint_check.elapsed() >= ENDPOINT_POLL_INTERVAL {
-            last_endpoint_check = std::time::Instant::now();
-            let current_endpoint = host
-                .default_output_device()
-                .and_then(|device| device.name().ok());
-            if !endpoint_is_current(Some(&opened_endpoint), current_endpoint.as_deref()) {
-                cancel.store(true, Ordering::Release);
-                let _ = decoder.join();
-                return Err(PlaybackPipelineError::output_lost(anyhow::anyhow!(
-                    "active output endpoint changed or disappeared"
-                )));
-            }
         }
         let samples = consumed.load(Ordering::Acquire);
         let next_epoch = session.control_epoch();
@@ -847,6 +991,7 @@ fn run_output(
     Ok(())
 }
 
+#[cfg(test)]
 fn endpoint_is_current(opened: Option<&str>, current: Option<&str>) -> bool {
     matches!((opened, current), (Some(opened), Some(current)) if opened == current)
 }
@@ -877,39 +1022,94 @@ fn build_stream<T>(
     cancel: Arc<AtomicBool>,
     decoded: Arc<AtomicBool>,
     presentation: Arc<super::output::PresentationClock>,
+    position_ms: Arc<AtomicU64>,
+    start_ms: u64,
 ) -> anyhow::Result<cpal::Stream>
 where
     T: SizedSample + FromSample<f32> + Sample,
 {
-    let rate = config.sample_rate.0;
+    let rate = config.sample_rate;
+    let channels = config.channels;
     let mut consumer = super::output::PcmConsumer::new(
         config.channels as usize,
         rate as usize * config.channels as usize * STARTUP_FILL_MILLISECONDS / 1000,
     );
+    let callback_lost = lost.clone();
+    let mut previous_callback: Option<std::time::SystemTime> = None;
+    let error_gate = gate.clone();
     Ok(device.build_output_stream(
-        config,
+        *config,
         move |output: &mut [T], info| {
             presentation.begin_callback();
-            let enabled = gate.load(Ordering::Acquire)
+            let now = std::time::SystemTime::now();
+            if previous_callback.is_some_and(|last| {
+                now.duration_since(last)
+                    .map_or(true, |gap| gap > std::time::Duration::from_secs(2))
+            }) {
+                gate.store(false, Ordering::Release);
+                callback_lost.store(true, Ordering::Release);
+            }
+            previous_callback = Some(now);
+            let enabled = !callback_lost.load(Ordering::Acquire)
+                && gate.load(Ordering::Acquire)
                 && !cancel.load(Ordering::Acquire)
                 && generation_serial.load(Ordering::Acquire) == expected_serial;
             let rendered = consumer.render(output, &pcm, enabled, decoded.load(Ordering::Acquire));
             if let Some(frame_end) = rendered.last_audio_frame {
                 let timestamps = info.timestamp();
-                let latency = timestamps
-                    .playback
-                    .duration_since(&timestamps.callback)
-                    .unwrap_or_default();
+                let latency = timestamps.playback.duration_since(timestamps.callback);
                 presentation.submit(presentation.now_ns(), latency, frame_end, rate);
             }
-            consumed.fetch_add(rendered.samples, Ordering::Release);
+            let total = consumed.fetch_add(rendered.samples, Ordering::Release) + rendered.samples;
+            position_ms.store(
+                start_ms.saturating_add(
+                    total.saturating_mul(1000) / u64::from(channels) / u64::from(rate),
+                ),
+                Ordering::Release,
+            );
             presentation.end_callback();
         },
-        move |_| {
+        move |error| {
+            if matches!(
+                error.kind(),
+                cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied
+            ) {
+                return;
+            }
+            error_gate.store(false, Ordering::Release);
             lost.store(true, Ordering::Release);
         },
         None,
     )?)
+}
+
+fn pulse_runtime_version() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        Some(
+            libpulse_binding::version::get_library_version()
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+static SERVER_BUFFER_MAX_BYTES: AtomicU64 = AtomicU64::new(0);
+
+fn server_buffer_max_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        Some(SERVER_BUFFER_MAX_BYTES.load(Ordering::Acquire))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
 }
 
 pub fn runtime_identity() -> serde_json::Value {
@@ -940,6 +1140,10 @@ pub fn runtime_identity() -> serde_json::Value {
         .unwrap_or((None, 0, 0));
     serde_json::json!({
         "binding": "ffmpeg-next-9.0.0",
+        "sharedBackend": if cfg!(target_os="linux") {"pulse"} else if cfg!(target_os="macos") {"coreaudio"} else {"wasapi"},
+        "cpalVersion": "0.18.2",
+        "pulseVersion": pulse_runtime_version(),
+        "pulseServerBufferMaxBytes": server_buffer_max_bytes(),
         "avcodec": version(ffmpeg_next::codec::version()),
         "avformat": version(ffmpeg_next::format::version()),
         "avutil": version(ffmpeg_next::util::version()),
@@ -976,6 +1180,92 @@ fn verify_runtime() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::providers::{PlaybackProvenance, PlaybackRepresentation, ProviderError};
+
+    #[tokio::test]
+    async fn stalled_retirement_keeps_start_owned_and_shutdown_owner_responsive() {
+        let session = crate::playback::PlaybackSession::restore(
+            Arc::new(crate::db::Database::memory().unwrap()),
+            uuid::Uuid::new_v4().to_string(),
+        );
+        let generation = session.snapshot().unwrap().generation_id;
+        let gate = Arc::new(AtomicBool::new(true));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let exited = Arc::new(AtomicBool::new(false));
+        let worker_exited = exited.clone();
+        let (release, wait) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            wait.recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            worker_exited.store(true, Ordering::Release);
+        });
+        let engine = Arc::new(AudioEngine {
+            starts: tokio::sync::Mutex::new(()),
+            current: Mutex::new(Some(Pipeline {
+                gate: gate.clone(),
+                cancel: cancel.clone(),
+                alive: Arc::new(AtomicBool::new(true)),
+                generation: generation.clone(),
+                worker,
+                compressed_high_water: Arc::new(AtomicU64::new(0)),
+                pcm_high_water: Arc::new(AtomicU64::new(0)),
+                endpoint: Arc::new(Mutex::new(None)),
+                position_ms: Arc::new(AtomicU64::new(0)),
+            })),
+        });
+        let starting = engine.clone();
+        let owner = session.clone();
+        let replacement =
+            tokio::spawn(async move { starting.validate_selected_output(owner, generation).await });
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if session
+                .snapshot()
+                .unwrap()
+                .output
+                .error
+                .as_ref()
+                .is_some_and(|e| e.code == "OUTPUT_RETIREMENT_PENDING")
+            {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(!gate.load(Ordering::Acquire));
+        assert!(cancel.load(Ordering::Acquire));
+        assert!(!replacement.is_finished());
+        assert!(!exited.load(Ordering::Acquire));
+        assert!(
+            engine.starts.try_lock().is_err(),
+            "new output cannot bypass retirement"
+        );
+        assert!(
+            engine.current.try_lock().is_ok(),
+            "join does not retain pipeline mutex"
+        );
+        session
+            .begin_shutdown_checkpoint()
+            .unwrap()
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        assert!(
+            !replacement.is_finished(),
+            "shutdown fence does not abandon native retirement"
+        );
+        release.send(()).unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), replacement)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            result.is_err(),
+            "shutdown prevents replacement open after retirement"
+        );
+        assert!(exited.load(Ordering::Acquire));
+        assert!(engine.starts.try_lock().is_ok());
+        session.stop_and_join().unwrap();
+    }
 
     fn request(url: &str) -> PlaybackRequest {
         PlaybackRequest {

@@ -211,3 +211,12 @@ test("Linux packaging rejects a daemon linked against the system FFmpeg ABI", ()
     assert.throws(() => verifyLinuxAudioLinkage(invalid), /Daemon FFmpeg linkage mismatch/);
   }
 });
+
+
+test("Linux preflight requires Pulse shared-output development metadata", () => {
+  assert.throws(() => preflightLinuxBuild(target, {
+    commandExists: () => true,
+    spawn: (_command, args) => ({ status: args.includes("libpulse") ? 1 : 0 }),
+  }), /PulseAudio development files are missing/);
+  assert.ok(linuxBuildPackages.includes("libpulse-dev"));
+});
