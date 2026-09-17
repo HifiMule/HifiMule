@@ -2308,17 +2308,28 @@ fn get_mounts() -> Vec<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-fn is_readonly_mount(path: &Path) -> bool {
+fn mount_flags(path: &Path) -> Option<u32> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
-    let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
-        return false;
-    };
-    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
-        return false;
+    let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: c_path is NUL-terminated and stat points to writable statfs storage.
+    if unsafe { libc::statfs(c_path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return None;
     }
-    (stat.f_flag & libc::ST_RDONLY) != 0
+    // SAFETY: a successful statfs call initialized stat.
+    Some(unsafe { stat.assume_init() }.f_flags)
+}
+
+#[cfg(target_os = "macos")]
+fn mount_flags_allow_discovery(flags: u32) -> bool {
+    flags & (libc::MNT_RDONLY | libc::MNT_DONTBROWSE) as u32 == 0
+}
+
+#[cfg(target_os = "macos")]
+fn is_discoverable_mount(path: &Path) -> bool {
+    // Unavailable metadata skips this candidate until a subsequent scan.
+    mount_flags(path).is_some_and(mount_flags_allow_discovery)
 }
 
 #[cfg(target_os = "macos")]
@@ -2343,9 +2354,9 @@ fn get_mounts() -> Vec<PathBuf> {
                 continue;
             }
             if is_mount_point(&path) {
-                // Skip read-only volumes (e.g., mounted DMG files) — they cannot
-                // be initialized and would trigger a spurious "unrecognized device" prompt.
-                if is_readonly_mount(&path) {
+                // Skip read-only and hidden volumes (including macOS Recovery)
+                // before manifest probing or an unrecognized-device prompt.
+                if !is_discoverable_mount(&path) {
                     continue;
                 }
                 mounts.push(path);

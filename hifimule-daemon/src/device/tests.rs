@@ -2348,6 +2348,65 @@ fn test_boot_volume_device_metadata_error_is_fail_safe_skip() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn test_mount_discovery_flags() {
+    for flags in [0, libc::MNT_LOCAL, libc::MNT_LOCAL | libc::MNT_JOURNALED] {
+        assert!(
+            mount_flags_allow_discovery(flags as u32),
+            "allowed flags: {flags:#x}"
+        );
+    }
+    for flags in [
+        libc::MNT_RDONLY,
+        libc::MNT_DONTBROWSE,
+        libc::MNT_RDONLY | libc::MNT_DONTBROWSE,
+        libc::MNT_DONTBROWSE | libc::MNT_LOCAL | libc::MNT_JOURNALED,
+    ] {
+        assert!(
+            !mount_flags_allow_discovery(flags as u32),
+            "excluded flags: {flags:#x}"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn test_mount_discovery_metadata_errors_skip_candidate() {
+    let dir = tempdir().unwrap();
+    assert!(!is_discoverable_mount(&dir.path().join("missing")));
+    assert!(!is_discoverable_mount(Path::new("/Volumes/invalid\0path")));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn test_mount_discovery_uses_flags_regardless_of_name_or_manifest() {
+    let dir = tempdir().unwrap();
+    let expected = mount_flags_allow_discovery(mount_flags(dir.path()).unwrap());
+    for name in ["Music Player", "Recovery"] {
+        let path = dir.path().join(name);
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(is_discoverable_mount(&path), expected);
+        std::fs::write(path.join(".hifimule.json"), b"{}").unwrap();
+        assert_eq!(is_discoverable_mount(&path), expected);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn test_mount_discovery_excludes_local_hidden_recovery_when_present() {
+    let recovery = Path::new("/Volumes/Recovery");
+    if !recovery.exists() || !is_mount_point(recovery) {
+        return;
+    }
+    let flags = mount_flags(recovery).expect("read existing Recovery mount metadata");
+    if flags & libc::MNT_DONTBROWSE as u32 == 0 {
+        return;
+    }
+    assert!(!is_discoverable_mount(recovery));
+    assert!(!get_mounts().iter().any(|path| path == recovery));
+}
+
 #[tokio::test]
 async fn test_cleanup_tmp_files_at_device_root() {
     // T8: root-level .tmp files must be swept even with empty managed_paths.
