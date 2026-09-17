@@ -2317,11 +2317,13 @@ mod tests {
     #[tokio::test]
     async fn dropped_caller_keeps_mutation_admitted_until_owner_finishes() {
         let db = Arc::new(Database::memory().unwrap());
-        let playback = PlaybackSession::restore(db, "owner".into());
+        let playback = PlaybackSession::restore(db.clone(), "owner".into());
         let snapshot = playback.snapshot().unwrap();
         let operations = Arc::new(crate::sync::SyncOperationManager::new());
         let mutation_guard = operations.try_admit_mutation().unwrap();
-        let inner_guard = playback.inner.lock().unwrap();
+        // Block Clear's database write only after the owner has dequeued it.
+        // Locking inner would also block the owner's pre-command maintenance.
+        let db_guard = db.conn.lock().unwrap();
         let reply = playback
             .admit_apply(
                 params(&snapshot, SessionOperation::Clear),
@@ -2336,7 +2338,7 @@ mod tests {
         drop(reply);
         let fencing = operations.begin_shutdown_fence();
         assert_eq!(fencing.pending_mutation_count, 1);
-        drop(inner_guard);
+        drop(db_guard);
 
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {

@@ -280,3 +280,9 @@ If future review findings need follow-up, add them as new story scope or reopen 
 
 - No test asserts the base-unit pass survives stacked spotlight+album reserves (pipeline.rs). By-design: each reserve is capped by the global `selector.ceiling`, the combined-reserve test already asserts total ≤ ceiling + no double-count, and spillover to later passes is automatic. A dedicated "base pass still reachable under two large reserves" assertion would harden against a future regression.
 - No test covers coherence reorder combined with an atomic-album fill or duration-target truncation (pipeline.rs). Low value: the selected id-set and byte total are byte-identical to the un-clustered run by construction (coherence only permutes output order), but an explicit coherence×atomic-album / coherence×duration case would document the invariant.
+- source_spec: `_bmad-output/implementation-artifacts/spec-fix-playback-mutation-owner-test.md`
+  summary: Audit playback session tests for explicit owner-thread teardown.
+  evidence: The dropped-caller test leaves its `PlaybackSession` owner thread running; this predates the synchronization-only test fix and needs a consistent lifecycle decision across the suite.
+- source_spec: `_bmad-output/implementation-artifacts/spec-fix-playback-mutation-owner-test.md`
+  summary: Consider separately asserting successful `Clear` completion in the dropped-caller mutation-guard test.
+  evidence: The current test proves mutation-guard retention and release, not the command result; adding result validation would expand its scope beyond the reported synchronization failure.
