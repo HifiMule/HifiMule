@@ -88,6 +88,21 @@ test('loading playback exposes Pause rather than a second Resume', async () => {
   assert.equal(h.container.querySelector('[data-playback-action="resume"]'), null);
   h.component.destroy();
 });
+test('audio output selection is tucked behind a compact icon control', async () => {
+  const h = harness(snapshot()); await h.tick();
+  const dropdown = h.container.querySelector('sl-dropdown');
+  const outputButton = h.container.querySelector('sl-icon-button');
+  assert.ok(dropdown);
+  assert.ok(outputButton);
+  assert.equal(outputButton.attributes.label, 'playback.output.label');
+  assert.ok(dropdown.contains(h.container.querySelector('select')));
+  h.component.destroy();
+});
+test('audio output panel expands left from its right-aligned trigger', () => {
+  const styles = readFileSync(new URL('../../hifimule-ui/src/styles.css', import.meta.url), 'utf8');
+  assert.match(styles, /\.playback-controls__output-dropdown::part\(panel\)\s*\{[\s\S]*width: min\(42rem, calc\(100vw - 2rem\)\)/);
+  assert.match(styles, /\.playback-controls__output-dropdown::part\(panel\)\s*\{[\s\S]*max-width: calc\(100vw - 2rem\)/);
+});
 test('primary transport retains keyboard focus when Pause becomes Resume', async () => {
   const h = harness(snapshot('playing')); await h.tick();
   const primary = h.container.querySelector('[data-playback-action="pause"]'); primary.focus();

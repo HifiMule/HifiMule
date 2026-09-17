@@ -15,6 +15,8 @@ export class PlaybackControls {
     private readonly outputSelect = document.createElement('select');
     private readonly outputStatus = document.createElement('span');
     private readonly outputReset = document.createElement('button');
+    private readonly outputDropdown = document.createElement('sl-dropdown');
+    private readonly outputToggle = document.createElement('sl-icon-button');
     private commandError = '';
     private readonly onPageHide = () => this.destroy();
     private readonly title = document.createElement('strong');
@@ -35,6 +37,12 @@ export class PlaybackControls {
         info.append(this.title, this.status, this.error);
         const outputGroup = document.createElement('div');
         outputGroup.className = 'playback-controls__output';
+        this.outputDropdown.className = 'playback-controls__output-dropdown';
+        this.outputDropdown.setAttribute('placement', 'bottom-end');
+        this.outputDropdown.setAttribute('hoist', '');
+        this.outputToggle.setAttribute('slot', 'trigger');
+        this.outputToggle.setAttribute('name', 'speaker');
+        this.outputToggle.setAttribute('label', t('playback.output.label'));
         const outputLabel = document.createElement('label');
         outputLabel.textContent = t('playback.output.label');
         this.outputSelect.setAttribute('aria-label', t('playback.output.label'));
@@ -55,7 +63,8 @@ export class PlaybackControls {
         this.outputSelect.addEventListener('blur', () => this.renderOptions());
         this.outputSelect.addEventListener('change', () => void this.chooseOutput());
         outputGroup.append(outputLabel, refresh, this.outputReset, this.outputStatus);
-        container.replaceChildren(info, this.primary, this.stop, outputGroup);
+        this.outputDropdown.append(this.outputToggle, outputGroup);
+        container.replaceChildren(info, this.primary, this.stop, this.outputDropdown);
         this.primary.hidden = this.stop.hidden = true;
         window.addEventListener('pagehide', this.onPageHide, { once: true });
         void this.poll();

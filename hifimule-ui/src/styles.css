@@ -2185,9 +2185,20 @@ h2 {
 .playback-controls__status { font-size: .75rem; opacity: .72; }
 .playback-controls sl-button:focus-visible { outline: 2px solid var(--sl-color-primary-500); outline-offset: 2px; }
 
+.playback-controls__output-dropdown::part(panel) {
+    /* `bottom-end` keeps this edge beside the trigger, so the wider panel grows
+       into the library rather than crossing the split-panel divider. */
+    width: min(42rem, calc(100vw - 2rem));
+    max-width: calc(100vw - 2rem);
+    padding: var(--space-sm);
+    background: var(--surface-bg);
+    border: 1px solid var(--surface-border);
+    border-radius: var(--radius);
+    box-shadow: 0 10px 26px rgba(0, 0, 0, .35);
+}
 .playback-controls__output { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
-.playback-controls__output label { display: flex; align-items: center; gap: .5rem; }
-.playback-controls__output select { max-width: min(24rem, 60vw); padding: .35rem; color: inherit; background: var(--sl-input-background-color); border: 1px solid var(--sl-input-border-color); border-radius: .25rem; }
+.playback-controls__output label { display: flex; flex: 1 1 100%; align-items: center; gap: .5rem; }
+.playback-controls__output select { flex: 1; min-width: 0; padding: .35rem; color: inherit; background: var(--sl-input-background-color); border: 1px solid var(--sl-input-border-color); border-radius: .25rem; }
 .playback-controls__output button { padding: .35rem .5rem; cursor: pointer; }
 .playback-controls__output :focus-visible { outline: 2px solid var(--sl-color-primary-500); outline-offset: 2px; }
 .playback-controls__output [role="status"] { font-size: .8rem; }
