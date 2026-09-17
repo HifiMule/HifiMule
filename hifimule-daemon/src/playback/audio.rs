@@ -307,16 +307,6 @@ fn decoder_hint(representation: &crate::providers::PlaybackRepresentation) -> St
         .unwrap_or_else(|| representation.request.url.path().to_owned())
 }
 
-fn is_mp4_representation(representation: &crate::providers::PlaybackRepresentation) -> bool {
-    representation
-        .container
-        .as_deref()
-        .and_then(normalize_container)
-        .is_some_and(|container| {
-            matches!(container.as_str(), "m4a" | "m4b" | "m4r" | "mp4" | "x-m4a" | "x-m4b")
-        })
-}
-
 fn normalize_container(value: &str) -> Option<String> {
     let value = value
         .split(';')
@@ -633,7 +623,6 @@ impl AudioEngine {
             .map_err(PlaybackPipelineError::from_provider_error)?;
         let representation_name = representation_name(&representation);
         let decoder_hint = decoder_hint(&representation);
-        let mp4_startup = is_mp4_representation(&representation);
         let request = representation.request;
         let response = tokio::select! {
             result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), fetch(&request)) => result,
@@ -710,7 +699,6 @@ impl AudioEngine {
                 let result = run_output(
                     reader,
                     &decoder_hint,
-                    mp4_startup,
                     generation.clone(),
                     session.clone(),
                     worker_cancel.clone(),
@@ -850,7 +838,6 @@ fn content_type_is_non_audio(value: &str) -> bool {
 fn run_output(
     reader: BoundedHttpReader,
     hint: &str,
-    _mp4_startup: bool,
     generation: String,
     session: super::PlaybackSession,
     cancel: Arc<AtomicBool>,
