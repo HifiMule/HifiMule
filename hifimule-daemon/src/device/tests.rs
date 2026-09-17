@@ -157,11 +157,81 @@ fn dummy_mtp_device_info(id: &str) -> mtp::MtpDeviceInfo {
 }
 use std::fs;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 use tempfile::tempdir;
 use tokio::time::{Duration, timeout};
 
 fn msc(dir: &std::path::Path) -> Arc<dyn crate::device_io::DeviceIO> {
     Arc::new(crate::device_io::MscBackend::new(dir.to_path_buf()))
+}
+
+#[tokio::test]
+async fn passive_mtp_enumeration_retries_after_an_error_at_the_poll_cadence() {
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let invocation_times = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let calls_for_enumerator = Arc::clone(&calls);
+    let invocation_times_for_enumerator = Arc::clone(&invocation_times);
+    let poll_interval = Duration::from_millis(20);
+    let observer = tokio::spawn(run_mtp_observer_with_enumerator(
+        tx,
+        Arc::new(move || {
+            invocation_times_for_enumerator
+                .lock()
+                .unwrap()
+                .push(Instant::now());
+            let call = calls_for_enumerator.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                Err(anyhow::anyhow!("injected passive scan failure"))
+            } else {
+                Ok(Vec::new())
+            }
+        }),
+        poll_interval,
+    ));
+
+    timeout(Duration::from_secs(1), async {
+        while calls.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("observer should retry a failed passive scan");
+    let invocation_times = invocation_times.lock().unwrap();
+    assert!(
+        invocation_times[1].duration_since(invocation_times[0]) >= poll_interval,
+        "the observer must wait for the configured poll interval before retrying"
+    );
+    observer.abort();
+}
+
+#[tokio::test]
+async fn aborted_mtp_observer_discards_a_late_passive_scan_result() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+    let release_for_enumerator = Arc::clone(&release_rx);
+    let observer = tokio::spawn(run_mtp_observer_with_enumerator(
+        tx,
+        Arc::new(move || {
+            started_tx.send(()).unwrap();
+            release_for_enumerator.lock().unwrap().recv().unwrap();
+            Ok(vec![dummy_mtp_device_info("late-device")])
+        }),
+        Duration::from_millis(5),
+    ));
+
+    tokio::task::spawn_blocking(move || started_rx.recv_timeout(std::time::Duration::from_secs(1)))
+        .await
+        .unwrap()
+        .unwrap();
+    observer.abort();
+    observer.await.unwrap_err();
+    release_tx.send(()).unwrap();
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(rx.try_recv().is_err(), "a late scan must not emit device work");
 }
 
 #[cfg(target_os = "windows")]

@@ -2098,6 +2098,44 @@ mod lifecycle_shutdown_tests {
     }
 
     #[test]
+    fn teardown_completion_does_not_wait_for_passive_mtp_discovery() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+        let (complete_tx, complete_rx) = mpsc::channel();
+        let thread = thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
+            let (event_tx, _event_rx) = tokio::sync::mpsc::channel(1);
+            let release_for_enumerator = Arc::clone(&release_rx);
+            let observer = runtime.spawn(device::run_mtp_observer_with_enumerator(
+                event_tx,
+                std::sync::Arc::new(move || {
+                    started_tx.send(()).unwrap();
+                    release_for_enumerator.lock().unwrap().recv().unwrap();
+                    Ok(Vec::new())
+                }),
+                Duration::from_secs(2),
+            ));
+            started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            // This mirrors core shutdown: abort the observer while it awaits a
+            // non-cancellable passive scan, then drop the core runtime.
+            observer.abort();
+            let _ = runtime.block_on(observer);
+            finish_runtime_shutdown(runtime, None);
+            complete_tx.send(()).unwrap();
+        });
+        complete_rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("core teardown must not join passive MTP discovery");
+        release_tx.send(()).unwrap();
+        thread.join().unwrap();
+    }
+
+    #[test]
     fn duplicate_launch_cannot_succeed_from_stale_descriptor() {
         let temp = tempfile::tempdir().unwrap();
         let mut owner = hifimule_lifecycle::OwnerGuard::acquire(temp.path()).unwrap();

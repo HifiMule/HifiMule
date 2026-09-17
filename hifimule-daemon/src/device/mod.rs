@@ -2026,14 +2026,70 @@ pub async fn run_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
     }
 }
 
+/// Starts one passive MTP enumeration outside Tokio's blocking pool.
+///
+/// `LIBMTP_Detect_Raw_Devices` is synchronous and cannot be cancelled safely.  In
+/// particular, dropping the daemon's Tokio runtime waits for its blocking pool,
+/// so scheduling discovery there makes an otherwise idle quit wait on a USB
+/// library call.  This deliberately detached thread is only for observational
+/// discovery; active MTP I/O continues to use the core runtime's blocking pool
+/// and therefore retains its orderly shutdown drain.
+pub(crate) fn spawn_passive_mtp_enumeration<F>(
+    enumerate: F,
+) -> std::io::Result<tokio::sync::oneshot::Receiver<Result<Vec<mtp::MtpDeviceInfo>>>>
+where
+    F: FnOnce() -> Result<Vec<mtp::MtpDeviceInfo>> + Send + 'static,
+{
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("hifimule-mtp-discovery".into())
+        .spawn(move || {
+            // The receiver can disappear when the observer is aborted for shutdown.
+            // In that case the late discovery result must not re-enter the core.
+            let _ = result_tx.send(enumerate());
+        })?;
+    Ok(result_rx)
+}
+
+type MtpEnumerator =
+    std::sync::Arc<dyn Fn() -> Result<Vec<mtp::MtpDeviceInfo>> + Send + Sync>;
+
 pub async fn run_mtp_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
+    run_mtp_observer_with_enumerator(
+        tx,
+        std::sync::Arc::new(|| Ok(mtp::enumerate_mtp_devices())),
+        Duration::from_secs(2),
+    )
+    .await;
+}
+
+pub(crate) async fn run_mtp_observer_with_enumerator(
+    tx: tokio::sync::mpsc::Sender<DeviceEvent>,
+    enumerate: MtpEnumerator,
+    poll_interval: Duration,
+) {
     let mut known_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut liveness_tick: u32 = 0;
 
     loop {
-        let devices = tokio::task::spawn_blocking(mtp::enumerate_mtp_devices)
-            .await
-            .unwrap_or_default();
+        let enumerator = std::sync::Arc::clone(&enumerate);
+        let devices = match spawn_passive_mtp_enumeration(move || enumerator()) {
+            Ok(result_rx) => match result_rx.await {
+                Ok(Ok(devices)) => devices,
+                Ok(Err(error)) => {
+                    daemon_log!("[MTP] Passive device enumeration failed: {}", error);
+                    Vec::new()
+                }
+                Err(_) => {
+                    daemon_log!("[MTP] Passive device enumeration task ended unexpectedly");
+                    Vec::new()
+                }
+            },
+            Err(error) => {
+                daemon_log!("[MTP] Could not start passive device enumeration: {}", error);
+                Vec::new()
+            }
+        };
 
         for dev in &devices {
             if !known_ids.contains(&dev.device_id) {
@@ -2120,7 +2176,7 @@ pub async fn run_mtp_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
             }
         }
 
-        sleep(Duration::from_secs(2)).await;
+        sleep(poll_interval).await;
     }
 }
 
