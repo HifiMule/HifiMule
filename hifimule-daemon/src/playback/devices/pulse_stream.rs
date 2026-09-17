@@ -23,6 +23,7 @@ pub struct PinnedStream {
     pub rate: u32,
     pub channels: u16,
     pub max_bytes: usize,
+    pub target_bytes: usize,
     corked: bool,
 }
 
@@ -96,6 +97,7 @@ impl PinnedStream {
             rate,
             channels,
             max_bytes,
+            target_bytes: max_bytes,
             corked: true,
         };
         while result.stream.get_state() != State::Ready {
@@ -125,6 +127,7 @@ impl PinnedStream {
             return Err("OUTPUT_SHARED_UNSUPPORTED");
         }
         result.max_bytes = actual.maxlength as usize;
+        result.target_bytes = actual.tlength as usize;
         Ok(result)
     }
 
