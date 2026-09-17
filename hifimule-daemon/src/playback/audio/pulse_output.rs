@@ -6,6 +6,8 @@ use crate::playback::{
 use std::time::Duration;
 
 const STARTUP_LOCAL_RESERVE_MILLISECONDS: usize = 200;
+const MP4_STARTUP_LOCAL_RESERVE_MILLISECONDS: usize = 1_200;
+const MP4_PCM_TARGET_MILLISECONDS: usize = 1_500;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct StartupPlan {
@@ -71,11 +73,17 @@ impl StartupPrimer {
     }
 }
 
-fn startup_plan(rate: u32, channels: u16, max_bytes: usize) -> StartupPlan {
+fn startup_plan(
+    rate: u32,
+    channels: u16,
+    max_bytes: usize,
+    local_reserve_milliseconds: usize,
+) -> StartupPlan {
     let channels = channels as usize;
     let server_samples = (max_bytes / std::mem::size_of::<f32>()) / channels * channels;
-    let local_reserve_samples =
-        rate as usize * channels * STARTUP_LOCAL_RESERVE_MILLISECONDS / 1000;
+    let requested_local_reserve = rate as usize * channels * local_reserve_milliseconds / 1000;
+    let max_samples = PCM_CAPACITY_MAX_BYTES / std::mem::size_of::<f32>();
+    let local_reserve_samples = requested_local_reserve.min(max_samples.saturating_sub(server_samples));
     StartupPlan {
         server_samples,
         local_reserve_samples,
@@ -83,10 +91,16 @@ fn startup_plan(rate: u32, channels: u16, max_bytes: usize) -> StartupPlan {
     }
 }
 
+fn is_mp4_hint(hint: &str) -> bool {
+    hint.rsplit_once('.')
+        .is_some_and(|(_, extension)| matches!(extension.to_ascii_lowercase().as_str(), "m4a" | "mp4"))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_output(
     reader: BoundedHttpReader,
     hint: &str,
+    mp4_startup: bool,
     generation: String,
     session: crate::playback::PlaybackSession,
     cancel: Arc<AtomicBool>,
@@ -113,10 +127,28 @@ pub(super) fn run_output(
     SERVER_BUFFER_MAX_BYTES.store(output.max_bytes as u64, Ordering::Release);
     let rate = output.rate;
     let channels = output.channels;
-    let startup = startup_plan(rate, channels, output.target_bytes);
+    let mp4_startup = mp4_startup || is_mp4_hint(hint);
+    let startup = startup_plan(
+        rate,
+        channels,
+        output.target_bytes,
+        if mp4_startup {
+            MP4_STARTUP_LOCAL_RESERVE_MILLISECONDS
+        } else {
+            STARTUP_LOCAL_RESERVE_MILLISECONDS
+        },
+    );
     *endpoint.lock().unwrap_or_else(|e| e.into_inner()) = Some(preference.display_name.clone());
-    let capacity = (rate as usize * channels as usize * PCM_TARGET_MILLISECONDS / 1000)
-        .min(PCM_CAPACITY_MAX_BYTES / 4);
+    let capacity = (rate as usize
+        * channels as usize
+        * if mp4_startup {
+            MP4_PCM_TARGET_MILLISECONDS
+        } else {
+            PCM_TARGET_MILLISECONDS
+        }
+        / 1000)
+        .min(PCM_CAPACITY_MAX_BYTES / 4)
+        .max(startup.initial_samples);
     let pcm = Arc::new(ArrayQueue::new(capacity));
     let decoder_pcm = pcm.clone();
     let decoder_cancel = cancel.clone();
@@ -310,7 +342,7 @@ mod tests {
 
     #[test]
     fn startup_plan_primes_the_server_and_retains_a_local_reserve() {
-        let plan = startup_plan(48_000, 2, 38_400);
+        let plan = startup_plan(48_000, 2, 38_400, STARTUP_LOCAL_RESERVE_MILLISECONDS);
         assert_eq!(plan.server_samples, 9_600);
         assert_eq!(plan.local_reserve_samples, 19_200);
         assert_eq!(plan.initial_samples, 28_800);
@@ -318,7 +350,7 @@ mod tests {
 
     #[test]
     fn startup_plan_keeps_pcm_frame_aligned() {
-        let plan = startup_plan(48_000, 2, 38_401);
+        let plan = startup_plan(48_000, 2, 38_401, STARTUP_LOCAL_RESERVE_MILLISECONDS);
         assert_eq!(plan.server_samples % 2, 0);
         assert_eq!(plan.initial_samples - plan.server_samples, plan.local_reserve_samples);
     }
@@ -352,5 +384,15 @@ mod tests {
         assert!(cursor.record(None, 960, 2, &rendered, &mut ledger));
         assert!(cursor.record(Some(480), 960, 2, &rendered, &mut ledger));
         assert_eq!(ledger.advance(960), 960);
+    }
+
+    #[test]
+    fn mp4_startup_profile_keeps_a_larger_local_reserve() {
+        let plan = startup_plan(48_000, 2, 38_400, MP4_STARTUP_LOCAL_RESERVE_MILLISECONDS);
+        assert_eq!(plan.local_reserve_samples, 115_200);
+        assert_eq!(plan.initial_samples, 124_800);
+        assert!(is_mp4_hint("Je dis aime.m4a"));
+        assert!(is_mp4_hint("track.MP4"));
+        assert!(!is_mp4_hint("track.flac"));
     }
 }
