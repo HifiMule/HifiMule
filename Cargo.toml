@@ -43,7 +43,9 @@ souvlaki = { path = "third_party/souvlaki" }
 lto = true
 codegen-units = 1
 panic = "abort"
-strip = true
+# Tauri patches __TAURI_BUNDLE_TYPE after linking, so release symbols must be
+# retained until the bundler has produced each package format.
+strip = false
 opt-level = "z"
 
 [profile.no-opt]

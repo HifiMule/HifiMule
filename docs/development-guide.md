@@ -1,6 +1,6 @@
 # HifiMule — Development Guide
 
-**Generated:** 2026-05-23 | **Last Updated:** 2026-06-17 | **Scan depth:** Deep
+**Generated:** 2026-05-23 | **Last Updated:** 2026-09-17 | **Scan depth:** Deep
 
 ---
 
@@ -20,10 +20,14 @@ brew install pkg-config libmtp ffmpeg
 ### Ubuntu / Linux
 ```bash
 sudo apt-get install -y \
-  libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
-  libxdo-dev libmtp-dev libasound2-dev build-essential clang libclang-dev libc6-dev nasm curl \
-  xz-utils pkg-config binutils patchelf
+  libgtk-3-dev libxdo-dev libsoup-3.0-dev libwebkit2gtk-4.1-dev \
+  libappindicator3-dev librsvg2-dev libfuse2 libmtp-dev libasound2-dev \
+  libpulse-dev libdbus-1-dev build-essential clang libclang-dev libc6-dev \
+  nasm curl xz-utils pkg-config binutils patchelf
 ```
+
+The development packages provide the `pkg-config` metadata used by Rust and
+`linuxdeploy`. `libfuse2` is required by the AppImage tooling/runtime on Ubuntu.
 
 ### Windows
 - Visual Studio Build Tools (MSVC)
@@ -340,6 +344,14 @@ sudo apt-get install libmtp-dev
 # macOS
 brew install libmtp
 ```
+
+### `failed to run linuxdeploy` (AppImage build error on Ubuntu)
+
+Install the complete desktop/AppImage dependency set from the Ubuntu/Linux
+prerequisites above. In particular, `linuxdeploy-plugin-gtk` needs the GTK,
+WebKitGTK, libsoup, xdo, and librsvg development metadata, while the AppImage
+tooling may require the FUSE 2 runtime. The Tauri wrapper checks the metadata
+before starting a long release build and prints the exact missing modules.
 
 ### Daemon port 19140 already in use
 
