@@ -20,6 +20,31 @@ struct StartupPrimer {
     written_samples: usize,
 }
 
+#[derive(Default)]
+struct SubmissionCursor {
+    next_frame: u64,
+}
+
+impl SubmissionCursor {
+    fn record(
+        &mut self,
+        cursor: Option<u64>,
+        submitted_samples: usize,
+        channels: u16,
+        rendered: &crate::playback::output::Rendered,
+        ledger: &mut PresentationLedger,
+    ) -> bool {
+        let channels = u64::from(channels);
+        let start = cursor.unwrap_or(self.next_frame).max(self.next_frame);
+        self.next_frame = start.saturating_add(submitted_samples as u64 / channels);
+        let Some(end) = rendered.last_audio_frame else {
+            return true;
+        };
+        let frames = rendered.samples / channels;
+        ledger.record(start + end as u64 - frames, frames)
+    }
+}
+
 impl StartupPrimer {
     fn new(target_samples: usize) -> Self {
         Self {
@@ -122,6 +147,7 @@ pub(super) fn run_output(
     let mut last_tick = std::time::SystemTime::now();
     let mut ready = false;
     let mut startup_primer = StartupPrimer::new(startup.server_samples);
+    let mut submission_cursor = SubmissionCursor::default();
     let mut activity = PresentationActivity::default();
     let activity_clock = std::time::Instant::now();
     let mut report_stall = || {
@@ -173,13 +199,10 @@ pub(super) fn run_output(
                     let cursor = output.write_cursor_frames();
                     let rendered =
                         consumer.render(&mut scratch[..len], &pcm, true, decoder.is_finished());
-                    if let (Some(cursor), Some(end)) = (cursor, rendered.last_audio_frame) {
-                        let frames = rendered.samples / u64::from(channels);
-                        if !ledger.record(cursor + end as u64 - frames, frames) {
-                            return Err(PlaybackPipelineError::output_policy(
-                                "OUTPUT_SWITCH_FAILED",
-                            ));
-                        }
+                    if !submission_cursor.record(cursor, len, channels, &rendered, &mut ledger) {
+                        return Err(PlaybackPipelineError::output_policy(
+                            "OUTPUT_SWITCH_FAILED",
+                        ));
                     }
                     output
                         .write(&scratch[..len])
@@ -196,21 +219,17 @@ pub(super) fn run_output(
             if enabled {
                 let len = output.writable_samples().min(scratch.len());
                 if len > 0 {
-                    if let Some(cursor) = output.write_cursor_frames() {
-                        let rendered =
-                            consumer.render(&mut scratch[..len], &pcm, true, decoder.is_finished());
-                        if let Some(end) = rendered.last_audio_frame {
-                            let frames = rendered.samples / u64::from(channels);
-                            if !ledger.record(cursor + end as u64 - frames, frames) {
-                                return Err(PlaybackPipelineError::output_policy(
-                                    "OUTPUT_SWITCH_FAILED",
-                                ));
-                            }
-                        }
-                        output
-                            .write(&scratch[..len])
-                            .map_err(PlaybackPipelineError::output_policy)?;
+                    let cursor = output.write_cursor_frames();
+                    let rendered =
+                        consumer.render(&mut scratch[..len], &pcm, true, decoder.is_finished());
+                    if !submission_cursor.record(cursor, len, channels, &rendered, &mut ledger) {
+                        return Err(PlaybackPipelineError::output_policy(
+                            "OUTPUT_SWITCH_FAILED",
+                        ));
                     }
+                    output
+                        .write(&scratch[..len])
+                        .map_err(PlaybackPipelineError::output_policy)?;
                 }
             }
             if let Some(played) = output.played_frames() {
@@ -320,5 +339,18 @@ mod tests {
         primer.record_write(480);
         assert!(!primer.is_ready(true, false));
         assert!(primer.is_ready(true, true));
+    }
+
+    #[test]
+    fn submission_cursor_accounts_for_pcm_without_timing_metadata() {
+        let mut ledger = PresentationLedger::new();
+        let mut cursor = SubmissionCursor::default();
+        let rendered = crate::playback::output::Rendered {
+            samples: 960,
+            last_audio_frame: Some(480),
+        };
+        assert!(cursor.record(None, 960, 2, &rendered, &mut ledger));
+        assert!(cursor.record(Some(480), 960, 2, &rendered, &mut ledger));
+        assert_eq!(ledger.advance(960), 960);
     }
 }
