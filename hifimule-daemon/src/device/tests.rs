@@ -259,6 +259,58 @@ struct FailingReadDeviceIo {
     inner: crate::device_io::MscBackend,
 }
 
+#[derive(Debug)]
+struct FailingMirrorDeviceIo {
+    inner: crate::device_io::MscBackend,
+}
+
+impl FailingMirrorDeviceIo {
+    fn new(root: &std::path::Path) -> Arc<dyn crate::device_io::DeviceIO> {
+        Arc::new(Self {
+            inner: crate::device_io::MscBackend::new(root.to_path_buf()),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::device_io::DeviceIO for FailingMirrorDeviceIo {
+    async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
+        self.inner.read_file(path).await
+    }
+
+    async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
+        self.inner.write_file(path, data).await
+    }
+
+    async fn write_with_verify(&self, _path: &str, _data: &[u8]) -> Result<()> {
+        Err(anyhow::anyhow!("injected MTP mirror failure"))
+    }
+
+    async fn delete_file(&self, path: &str) -> Result<()> {
+        self.inner.delete_file(path).await
+    }
+
+    async fn list_files(&self, path: &str) -> Result<Vec<crate::device_io::FileEntry>> {
+        self.inner.list_files(path).await
+    }
+
+    async fn free_space(&self) -> Result<u64> {
+        self.inner.free_space().await
+    }
+
+    async fn storage_id(&self) -> Result<Option<String>> {
+        Ok(Some("mtp-storage".to_string()))
+    }
+
+    async fn ensure_dir(&self, path: &str) -> Result<()> {
+        self.inner.ensure_dir(path).await
+    }
+
+    async fn cleanup_empty_subdirs(&self, path: &str) -> Result<()> {
+        self.inner.cleanup_empty_subdirs(path).await
+    }
+}
+
 impl FailingReadDeviceIo {
     fn new(root: &std::path::Path) -> Arc<dyn crate::device_io::DeviceIO> {
         Arc::new(Self {
@@ -1436,6 +1488,69 @@ async fn test_initialize_device_root() {
 }
 
 #[tokio::test]
+async fn initialize_mtp_keeps_authoritative_cache_when_device_mirror_fails() {
+    let dir = tempdir().unwrap();
+    let cache_dir = tempdir().unwrap();
+    let db = Arc::new(crate::db::Database::memory().unwrap());
+    let cache_root = cache_dir.path().to_path_buf();
+    let manager = DeviceManager::new_with_mtp_manifest_cache_path(
+        db,
+        Arc::new(move |device_id| Ok(cache_root.join(format!("{device_id}.json")))),
+    );
+    let device_io = FailingMirrorDeviceIo::new(dir.path());
+    manager
+        .handle_device_unrecognized(
+            PathBuf::from("mtp://mirror-failure"),
+            Arc::clone(&device_io),
+            Some("Garmin Watch".to_string()),
+        )
+        .await;
+
+    let manifest = manager
+        .initialize_device("", None, None, "Garmin Watch".to_string(), None, device_io)
+        .await
+        .expect("a failed best-effort MTP mirror must not abort initialization");
+
+    assert!(manager.get_current_device().await.is_some());
+    let cache = cache_dir.path().join(format!("{}.json", manifest.device_id));
+    let cached: DeviceManifest = serde_json::from_slice(&std::fs::read(&cache).unwrap()).unwrap();
+    assert_eq!(cached.device_id, manifest.device_id);
+}
+
+#[tokio::test]
+async fn initialize_mtp_cache_failure_does_not_register_the_device() {
+    let dir = tempdir().unwrap();
+    let manager = DeviceManager::new_with_mtp_manifest_cache_path(
+        Arc::new(crate::db::Database::memory().unwrap()),
+        Arc::new(|_| anyhow::bail!("injected cache commit failure")),
+    );
+    let device_io = StorageIdDeviceIo::new(dir.path(), Some("mtp-storage".to_string()));
+    manager
+        .handle_device_unrecognized(
+            PathBuf::from("mtp://cache-failure"),
+            Arc::clone(&device_io),
+            Some("Garmin Watch".to_string()),
+        )
+        .await;
+
+    let result = manager
+        .initialize_device("", None, None, "Garmin Watch".to_string(), None, device_io)
+        .await;
+
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("cache commit failure")
+    );
+    assert!(manager.get_current_device().await.is_none());
+    assert_eq!(
+        manager.get_unrecognized_device_path().await,
+        Some(PathBuf::from("mtp://cache-failure"))
+    );
+}
+
+#[tokio::test]
 async fn test_initialize_device_subfolder() {
     let dir = tempdir().unwrap();
     let db = Arc::new(crate::db::Database::memory().unwrap());
@@ -1623,6 +1738,56 @@ async fn test_handle_device_unrecognized_preserves_recognized_device() {
         devices.iter().all(|(p, _, _)| p != dir2.path()),
         "Unrecognized device path must not be in connected_devices"
     );
+}
+
+#[tokio::test]
+async fn pending_mtp_device_is_not_replaced_by_a_removable_candidate() {
+    let watch = tempdir().unwrap();
+    let reader = tempdir().unwrap();
+    let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+    let mtp_path = PathBuf::from("mtp://garmin-watch");
+
+    manager
+        .handle_device_unrecognized(
+            mtp_path.clone(),
+            StorageIdDeviceIo::new(watch.path(), Some("watch-storage".to_string())),
+            Some("Garmin Watch".to_string()),
+        )
+        .await;
+    manager
+        .handle_device_unrecognized(reader.path().to_path_buf(), msc(reader.path()), None)
+        .await;
+
+    assert_eq!(manager.get_unrecognized_device_path().await, Some(mtp_path));
+}
+
+#[tokio::test]
+async fn pending_mtp_device_replaces_an_earlier_removable_candidate() {
+    let watch = tempdir().unwrap();
+    let reader = tempdir().unwrap();
+    let manager = DeviceManager::new(Arc::new(crate::db::Database::memory().unwrap()));
+    let mtp_path = PathBuf::from("mtp://garmin-watch");
+
+    manager
+        .handle_device_unrecognized(reader.path().to_path_buf(), msc(reader.path()), None)
+        .await;
+    manager
+        .handle_device_unrecognized(
+            mtp_path.clone(),
+            StorageIdDeviceIo::new(watch.path(), Some("watch-storage".to_string())),
+            Some("Garmin Watch".to_string()),
+        )
+        .await;
+
+    assert_eq!(manager.get_unrecognized_device_path().await, Some(mtp_path));
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn removable_drive_requires_present_media() {
+    assert!(!is_usable_removable_drive(2, false));
+    assert!(is_usable_removable_drive(2, true));
+    assert!(!is_usable_removable_drive(3, true));
 }
 
 // ===== Story 2.6 MTP Task Tests =====

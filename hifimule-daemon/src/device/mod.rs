@@ -584,6 +584,7 @@ impl DeviceProber {
 
 pub struct DeviceManager {
     db: std::sync::Arc<crate::db::Database>,
+    mtp_manifest_cache_path: std::sync::Arc<dyn Fn(&str) -> Result<PathBuf> + Send + Sync>,
     /// Connected-device map and selection are guarded together to avoid torn reads and lock inversion.
     state: std::sync::Arc<tokio::sync::RwLock<DeviceManagerState>>,
     /// Pending initialization state is stored as one coherent snapshot.
@@ -598,6 +599,24 @@ impl DeviceManager {
     pub fn new(db: std::sync::Arc<crate::db::Database>) -> Self {
         Self {
             db,
+            mtp_manifest_cache_path: std::sync::Arc::new(crate::paths::get_local_mtp_manifest_path),
+            state: std::sync::Arc::new(tokio::sync::RwLock::new(DeviceManagerState {
+                connected_devices: std::collections::HashMap::new(),
+                selected_device_path: None,
+            })),
+            unrecognized_device: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            manifest_commit_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    #[cfg(test)]
+    fn new_with_mtp_manifest_cache_path(
+        db: std::sync::Arc<crate::db::Database>,
+        mtp_manifest_cache_path: std::sync::Arc<dyn Fn(&str) -> Result<PathBuf> + Send + Sync>,
+    ) -> Self {
+        Self {
+            db,
+            mtp_manifest_cache_path,
             state: std::sync::Arc::new(tokio::sync::RwLock::new(DeviceManagerState {
                 connected_devices: std::collections::HashMap::new(),
                 selected_device_path: None,
@@ -775,9 +794,21 @@ impl DeviceManager {
             let mut state = self.state.write().await;
             state.connected_devices.remove(&path);
             let mut unrecognized = self.unrecognized_device.write().await;
+            let new_is_mtp = device_class_from_path(&path) == DeviceClass::Mtp;
+            let existing_is_mtp = unrecognized
+                .as_ref()
+                .is_some_and(|state| device_class_from_path(&state.path) == DeviceClass::Mtp);
+            if existing_is_mtp && !new_is_mtp {
+                daemon_log!(
+                    "[Device] Keeping pending MTP device {:?}; ignoring lower-priority removable candidate {:?}",
+                    unrecognized.as_ref().map(|state| &state.path),
+                    path
+                );
+                return crate::DaemonState::DeviceFound(path_str);
+            }
             if unrecognized.is_some() {
                 daemon_log!(
-                    "[Device] Warning: overwriting pending unrecognized device {:?} with {:?}",
+                    "[Device] Replacing pending unrecognized device {:?} with {:?}",
                     unrecognized.as_ref().map(|state| &state.path),
                     path
                 );
@@ -1238,7 +1269,22 @@ impl DeviceManager {
             manifest.storage_id,
             manifest_bytes.len()
         );
-        if let Err(e) = device_io
+        if device_class == DeviceClass::Mtp {
+            let cache_path = (self.mtp_manifest_cache_path)(&manifest.device_id)?;
+            persist_local_manifest_atomic(&cache_path, &manifest).await?;
+            if let Err(e) = device_io
+                .write_with_verify(".hifimule.json", manifest_bytes.as_bytes())
+                .await
+            {
+                daemon_log!(
+                    "[DeviceInit] Manifest mirror failed after authoritative local cache commit path=.hifimule.json device_path={} class={:?} storage_id={:?} error={:#}",
+                    device_path,
+                    device_class,
+                    manifest.storage_id,
+                    e
+                );
+            }
+        } else if let Err(e) = device_io
             .write_with_verify(".hifimule.json", manifest_bytes.as_bytes())
             .await
         {
@@ -1762,6 +1808,11 @@ pub fn get_storage_info_free_bytes(path: &std::path::Path) -> anyhow::Result<u64
 }
 
 #[cfg(target_os = "windows")]
+fn is_usable_removable_drive(drive_type: u32, media_present: bool) -> bool {
+    drive_type == 2 && media_present // DRIVE_REMOVABLE
+}
+
+#[cfg(target_os = "windows")]
 fn is_removable_drive(path: &Path) -> bool {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
@@ -1770,7 +1821,10 @@ fn is_removable_drive(path: &Path) -> bool {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    unsafe { GetDriveTypeW(wide.as_ptr()) == 2 } // DRIVE_REMOVABLE
+    is_usable_removable_drive(
+        unsafe { GetDriveTypeW(wide.as_ptr()) },
+        get_volume_label(&path.to_string_lossy()).is_some(),
+    )
 }
 
 #[cfg(not(target_os = "windows"))]

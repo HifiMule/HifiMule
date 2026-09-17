@@ -73,7 +73,7 @@ pub mod windows_wpd {
     use windows::Win32::UI::Shell::{
         FILEOPERATION_FLAGS, FileOperation, IEnumIDList, IFileOperation, IShellFolder, IShellItem,
         KF_FLAG_DEFAULT, SHCONTF_FOLDERS, SHCONTF_NONFOLDERS, SHCreateItemFromParsingName,
-        SHCreateItemWithParent, SHGDN_NORMAL, SHGetKnownFolderItem, StrRetToStrW,
+        SHCreateItemWithParent, SHGDN_FORPARSING, SHGDN_NORMAL, SHGetKnownFolderItem, StrRetToStrW,
     };
     use windows::core::{HSTRING, Interface, PCWSTR, PWSTR};
 
@@ -470,8 +470,20 @@ pub mod windows_wpd {
 
     // ── Shell helpers (used only by write_file) ───────────────────────────────
 
-    // Finds the first child of `parent` whose Shell display name equals `name`.
-    fn find_shell_child_by_name(parent: &IShellItem, name: &str) -> Result<IShellItem> {
+    #[derive(Clone, Copy)]
+    enum ShellChildNameKind {
+        Display,
+        Parsing,
+    }
+
+    // Finds the first child of `parent` whose requested Shell name equals `name`.
+    // Display names are only for finding the device under This PC. Filesystem paths
+    // must use parsing names so Explorer's hidden-extension setting cannot alter identity.
+    fn find_shell_child_by_name(
+        parent: &IShellItem,
+        name: &str,
+        name_kind: ShellChildNameKind,
+    ) -> Result<IShellItem> {
         unsafe {
             let folder: IShellFolder = parent.BindToHandler(None, &BHID_SFObject)?;
             let mut enum_opt: Option<IEnumIDList> = None;
@@ -497,8 +509,12 @@ pub mod windows_wpd {
                     ));
                 }
                 let mut strret: STRRET = std::mem::zeroed();
+                let flags = match name_kind {
+                    ShellChildNameKind::Display => SHGDN_NORMAL,
+                    ShellChildNameKind::Parsing => SHGDN_FORPARSING,
+                };
                 let matches = if folder
-                    .GetDisplayNameOf(pidl, SHGDN_NORMAL, &mut strret as *mut _)
+                    .GetDisplayNameOf(pidl, flags, &mut strret as *mut _)
                     .is_ok()
                 {
                     let mut str_ptr = PWSTR::null();
@@ -578,7 +594,8 @@ pub mod windows_wpd {
     }
 
     fn delete_shell_child_if_exists(parent: &IShellItem, name: &str) -> Result<()> {
-        let Ok(existing) = find_shell_child_by_name(parent, name) else {
+        let Ok(existing) = find_shell_child_by_name(parent, name, ShellChildNameKind::Parsing)
+        else {
             return Ok(());
         };
 
@@ -619,7 +636,11 @@ pub mod windows_wpd {
                 let computer_item: IShellItem = unsafe {
                     SHGetKnownFolderItem(&FOLDERID_ComputerFolder, KF_FLAG_DEFAULT, None)?
                 };
-                let device_item = find_shell_child_by_name(&computer_item, &friendly_name)?;
+                let device_item = find_shell_child_by_name(
+                    &computer_item,
+                    &friendly_name,
+                    ShellChildNameKind::Display,
+                )?;
                 let storage_item = first_shell_folder_child(&device_item)?;
                 shell_copy_in_session(
                     storage_item,
@@ -662,7 +683,11 @@ pub mod windows_wpd {
                     let computer_item: IShellItem = unsafe {
                         SHGetKnownFolderItem(&FOLDERID_ComputerFolder, KF_FLAG_DEFAULT, None)?
                     };
-                    let device_item = find_shell_child_by_name(&computer_item, &friendly_name)?;
+                    let device_item = find_shell_child_by_name(
+                        &computer_item,
+                        &friendly_name,
+                        ShellChildNameKind::Display,
+                    )?;
                     let storage_item = first_shell_folder_child(&device_item)?;
                     Ok((com, storage_item))
                 })();
@@ -768,21 +793,20 @@ pub mod windows_wpd {
                 return Err(anyhow::anyhow!("WPD shell copy aborted for '{}'", filename));
             }
 
-            for attempt in 1..=10 {
-                if find_shell_child_by_name(&dest_folder, filename).is_ok() {
-                    crate::daemon_log!(
-                        "[WPD] shell_copy_to_device: verified destination after {} attempt(s)",
-                        attempt
-                    );
-                    return Ok(());
-                }
-                std::thread::sleep(std::time::Duration::from_millis(200));
+            if find_shell_child_by_name(&dest_folder, filename, ShellChildNameKind::Parsing)
+                .is_ok()
+            {
+                crate::daemon_log!("[WPD] shell_copy_to_device: verified destination");
+            } else {
+                // Garmin's Shell/MTP provider can complete a non-aborted CopyItem while
+                // immediately hiding the new media object from enumeration. The operation
+                // result is authoritative; enumeration is diagnostic only.
+                crate::daemon_log!(
+                    "[WPD] shell_copy_to_device: copy succeeded but '{}' is not yet enumerable; accepting Shell result",
+                    filename
+                );
             }
-
-            Err(anyhow::anyhow!(
-                "WPD shell copy reported success but '{}' was not visible on device",
-                filename
-            ))
+            Ok(())
         }
     }
 
