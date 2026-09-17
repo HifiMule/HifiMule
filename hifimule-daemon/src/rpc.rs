@@ -7657,7 +7657,8 @@ mod tests {
             detail: "USB".into(),
             backend: preference.backend.clone(),
             available: true,
-            is_default: true,
+            // Keep automatic default initialization out of this explicit-selection test.
+            is_default: false,
             identity_confidence: "stable".into(),
             is_virtual: false,
             preference: Some(preference),
@@ -7707,13 +7708,21 @@ mod tests {
         )
         .await;
         assert!(accepted.error.is_none());
+        let accepted_revision = state.playback.snapshot().unwrap().output.revision;
+        assert_eq!(
+            accepted_revision.parse::<u64>().unwrap(),
+            before.output.revision.parse::<u64>().unwrap() + 1
+        );
         let Json(replayed) = handler(
             axum::extract::State(state.clone()),
             Json(request(params.clone())),
         )
         .await;
         assert!(replayed.error.is_none());
-        assert_eq!(state.playback.snapshot().unwrap().output.revision, "1");
+        assert_eq!(
+            state.playback.snapshot().unwrap().output.revision,
+            accepted_revision
+        );
         let mut changed = params.clone();
         changed["replaceInvalidConfig"] = json!(true);
         let Json(conflict) =
