@@ -1651,6 +1651,19 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct OwnerThreadCleanup(PlaybackSession);
+
+    impl Drop for OwnerThreadCleanup {
+        fn drop(&mut self) {
+            if let Err(error) = self.0.stop_and_join() {
+                if !std::thread::panicking() {
+                    panic!("test playback owner did not stop: {error:?}");
+                }
+            }
+        }
+    }
+
     fn params(s: &SessionSnapshot, op: SessionOperation) -> ApplySessionParams {
         ApplySessionParams {
             schema_version: 1,
@@ -2276,6 +2289,7 @@ mod tests {
     fn mailbox_admits_64_pending_commands_and_rejects_the_next() {
         let db = Arc::new(Database::memory().unwrap());
         let playback = PlaybackSession::restore(db.clone(), "owner".into());
+        let _cleanup = OwnerThreadCleanup(playback.clone());
         let snapshot = playback.snapshot().unwrap();
         // Block Clear's database write, not the owner's pre-command maintenance.
         // Holding inner here can prevent the owner from reaching command receive,
@@ -2318,6 +2332,20 @@ mod tests {
     async fn dropped_caller_keeps_mutation_admitted_until_owner_finishes() {
         let db = Arc::new(Database::memory().unwrap());
         let playback = PlaybackSession::restore(db.clone(), "owner".into());
+        // Declare cleanup before locks so their guards drop before joining the owner.
+        let _cleanup = OwnerThreadCleanup(playback.clone());
+        let initial = playback.snapshot().unwrap();
+        playback
+            .apply(params(
+                &initial,
+                SessionOperation::ReplaceQueue {
+                    sources: vec![TrackSource {
+                        server_id: "offline".into(),
+                        track_id: "track".into(),
+                    }],
+                },
+            ))
+            .unwrap();
         let snapshot = playback.snapshot().unwrap();
         let operations = Arc::new(crate::sync::SyncOperationManager::new());
         let mutation_guard = operations.try_admit_mutation().unwrap();
@@ -2349,6 +2377,12 @@ mod tests {
             assert!(Instant::now() < deadline, "mutation guard was not released");
             tokio::task::yield_now().await;
         }
+
+        let completed = playback.snapshot().unwrap();
+        assert_eq!(completed.queue_revision, "2");
+        assert_eq!(completed.state, TransportState::Idle);
+        assert!(completed.current.is_none());
+        assert!(completed.occurrences.is_empty());
     }
 
     #[test]

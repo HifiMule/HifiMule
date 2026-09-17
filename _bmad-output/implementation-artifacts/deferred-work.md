@@ -286,3 +286,6 @@ If future review findings need follow-up, add them as new story scope or reopen 
 - source_spec: `_bmad-output/implementation-artifacts/spec-fix-playback-mutation-owner-test.md`
   summary: Consider separately asserting successful `Clear` completion in the dropped-caller mutation-guard test.
   evidence: The current test proves mutation-guard retention and release, not the command result; adding result validation would expand its scope beyond the reported synchronization failure.
+- source_spec: `_bmad-output/implementation-artifacts/spec-harden-playback-mutation-owner-test.md`
+  summary: Provide deterministic playback-owner command-start synchronization for tests.
+  evidence: The affected tests poll `executing` for up to one second; a test-only start notification would eliminate scheduler-sensitive busy waiting, but requires a broader owner-loop test seam.
