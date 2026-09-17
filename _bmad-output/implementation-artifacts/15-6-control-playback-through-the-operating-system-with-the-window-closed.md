@@ -3,7 +3,7 @@ baseline_commit: 0ff836482119940cccd3808d9b1deefb907b72ea
 ---
 # Story 15.6: Control playback through the operating system with the window closed
 
-Status: in-progress
+Status: done
 
 ## Story
 

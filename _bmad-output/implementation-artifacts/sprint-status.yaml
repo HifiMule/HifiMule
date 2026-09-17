@@ -189,7 +189,7 @@ development_status:
   15-3-preserve-and-restore-a-paused-listening-session: done
   15-4-play-a-selected-library-track-through-the-daemon: done
   15-5-choose-an-audio-output-and-recover-safely-from-disconnection: done
-  15-6-control-playback-through-the-operating-system-with-the-window-closed: in-progress  # Eight review patches applied; installed native/API/media-key acceptance pending
+  15-6-control-playback-through-the-operating-system-with-the-window-closed: done
   15-7-seek-within-a-track-and-see-the-actual-playback-position: backlog
   15-8-play-an-album-in-order-and-advance-through-its-tracks: backlog
   15-9-preserve-album-continuity-across-prepared-track-boundaries: backlog
