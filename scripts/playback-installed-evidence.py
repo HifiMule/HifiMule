@@ -685,7 +685,7 @@ def validate_record(record: dict) -> list[str]:
 
 
 def validate_album_playback_evidence(record: dict) -> list[str]:
-    if record.get("albumPlaybackEvidenceVersion") != 1:
+    if type(record.get("albumPlaybackEvidenceVersion")) is not int or record.get("albumPlaybackEvidenceVersion") != 1:
         return ["Story 15.8 album playback evidence is missing or has an unsupported version"]
     album = record.get("albumPlayback")
     observations = album.get("observations") if isinstance(album, dict) else None
@@ -693,29 +693,116 @@ def validate_album_playback_evidence(record: dict) -> list[str]:
         return ["Story 15.8 album playback evidence has no observations"]
     errors = []
     causes = set()
+    repeated_fixture = False
+    required = {"naturalCompletion", "next", "pausedNext", "technicalFailure", "retry", "finalCompletion", "offlineRestore"}
+    def identity(value):
+        return isinstance(value, str) and bool(value.strip()) and len(value) <= 1024
+
+    def nonnegative(value):
+        return type(value) is int and value >= 0
+
     for index, item in enumerate(observations):
         label = f"album observation {index}"
+        def reject(message):
+            errors.append(f"{label} {message}")
+
         if not isinstance(item, dict):
-            errors.append(f"{label} is invalid"); continue
-        cause = item.get("cause"); causes.add(cause)
+            reject("is invalid")
+            continue
+        cause = item.get("cause")
+        if not isinstance(cause, str) or cause not in required:
+            reject("has an invalid cause")
+            continue
+        causes.add(cause)
         sequence = item.get("ordinalSequence")
-        if not isinstance(sequence, list) or not sequence or any(type(value) is not int or value < 0 for value in sequence):
-            errors.append(f"{label} has an invalid or empty ordinal sequence")
-        if item.get("totalCount") != len(sequence or []):
-            errors.append(f"{label} truncates the album sequence")
-        if cause in {"naturalCompletion", "next"}:
-            before, after = item.get("beforeOrdinal"), item.get("afterOrdinal")
-            if type(before) is not int or type(after) is not int or after <= before:
-                errors.append(f"{label} does not prove forward advancement")
-        if cause == "pausedNext" and item.get("audioActivated") is not False:
-            errors.append(f"{label} activated audio for paused Next")
-        if cause == "technicalFailure" and item.get("failedOccurrenceRetained") is not True:
-            errors.append(f"{label} drops the failed occurrence")
-        if item.get("duplicateTerminalDeliveries", 0) > 0 and item.get("advanceCount") != 1:
-            errors.append(f"{label} advances more than once for duplicate completion")
-    required = {"naturalCompletion", "next", "pausedNext", "technicalFailure", "retry", "finalCompletion", "offlineRestore"}
+        count = item.get("totalCount")
+        if (not isinstance(sequence, list) or not sequence
+                or not all(nonnegative(value) for value in sequence)
+                or not nonnegative(count) or not 1 <= count <= 10_000
+                or sequence != list(range(count))):
+            reject("has an invalid, unordered or truncated ordinal sequence")
+            continue
+        # The oracle comes from the complete provider fixture, independently of
+        # the observed queue. Repeated source identities must stay repeated.
+        sources = item.get("sourceSequence")
+        expected = item.get("expectedSourceSequence")
+        occurrences = item.get("occurrenceSequence")
+        lists = (sources, expected, occurrences)
+        if not all(isinstance(values, list) and len(values) == count
+                   and all(identity(value) for value in values) for values in lists):
+            reject("requires complete source, expected-source and occurrence sequences")
+            continue
+        if sources != expected or len(set(occurrences)) != count:
+            reject("changes fixture order or collapses repeated occurrences")
+        if len(set(expected)) < count:
+            repeated_fixture = True
+        before, after = item.get("before"), item.get("after")
+        valid_states = True
+        for name, state in (("before", before), ("after", after)):
+            if (not isinstance(state, dict)
+                    or not all(identity(state.get(key)) for key in
+                               ("instanceId", "sessionId", "generationId", "occurrenceId", "sourceId", "queueRevision"))
+                    or not nonnegative(state.get("ordinal")) or state["ordinal"] >= count
+                    or not nonnegative(state.get("positionMs"))
+                    or state.get("transport") not in ("active", "paused", "error", "completed", "stopped")):
+                reject(f"has invalid {name} identity, ordinal, cursor or transport")
+                valid_states = False
+                continue
+            if (state["occurrenceId"] != occurrences[state["ordinal"]]
+                    or state["sourceId"] != sources[state["ordinal"]]):
+                reject(f"has inconsistent {name} occurrence/source identity")
+        if not valid_states:
+            continue
+        for key in ("sessionId", "queueRevision"):
+            if before[key] != after[key]:
+                reject(f"changes {key} during an album transition")
+        if cause != "offlineRestore" and before["instanceId"] != after["instanceId"]:
+            reject("changes owner instance during a live transition")
+        advancing = cause in {"naturalCompletion", "next", "pausedNext"}
+        if after["ordinal"] != before["ordinal"] + int(advancing):
+            reject("does not select the exact successor or retain the current occurrence")
+        if not nonnegative(item.get("duplicateTerminalDeliveries")):
+            reject("has an invalid duplicate terminal count")
+        if type(item.get("advanceCount")) is not int or item["advanceCount"] != int(advancing):
+            reject("has an incorrect advance count, including duplicate delivery")
+        audio = cause in {"naturalCompletion", "next", "retry"}
+        if type(item.get("audioActivated")) is not bool or item["audioActivated"] != audio:
+            reject("has an incorrect actual audio activation outcome")
+        dispositions = {"naturalCompletion": "naturalCompletion", "next": "explicitSkip",
+                        "pausedNext": "explicitSkip", "technicalFailure": "technicalFailure",
+                        "retry": None, "finalCompletion": "naturalCompletion"}
+        if cause in dispositions and ("disposition" not in item or item["disposition"] != dispositions[cause]):
+            reject("has a contradictory or missing disposition")
+        transitions = {"naturalCompletion": ("active", "active"), "next": ("active", "active"),
+                       "pausedNext": ("paused", "paused"), "technicalFailure": ("active", "error"),
+                       "retry": ("error", "active"), "finalCompletion": ("active", "completed")}
+        if cause in transitions and (before["transport"], after["transport"]) != transitions[cause]:
+            reject("has contradictory before/after transport")
+        if advancing and after["positionMs"] != 0:
+            reject("does not start the successor at zero")
+        if (advancing or cause == "retry") and before["generationId"] == after["generationId"]:
+            reject("does not fence the new playback attempt with a new generation")
+        if cause in {"technicalFailure", "retry", "offlineRestore"} and before["positionMs"] != after["positionMs"]:
+            reject("does not retain the committed cursor")
+        if cause == "finalCompletion":
+            terminal = item.get("terminalPositionMs")
+            if (after["ordinal"] != count - 1 or not nonnegative(terminal)
+                    or terminal != after["positionMs"] or terminal < before["positionMs"]):
+                reject("does not retain the final occurrence and actual terminal cursor")
+        if cause == "offlineRestore":
+            outcomes = item.get("outcomeSequenceBefore")
+            if (before["instanceId"] == after["instanceId"] or before["generationId"] == after["generationId"]
+                    or after["transport"] != "paused" or item.get("offline") is not True
+                    or not isinstance(outcomes, list) or len(outcomes) != count
+                    or any(value not in (None, "naturalCompletion", "explicitSkip", "technicalFailure") for value in outcomes)
+                    or outcomes != item.get("outcomeSequenceAfter")
+                    or item.get("occurrenceSequenceAfter") != occurrences
+                    or item.get("sourceSequenceAfter") != sources):
+                reject("does not prove silent offline restoration of the complete queue and outcomes")
     for cause in sorted(required - causes):
         errors.append(f"album playback observation {cause} is missing")
+    if not repeated_fixture:
+        errors.append("album playback evidence needs a fixture with repeated source occurrences")
     return errors
 
 
@@ -880,7 +967,7 @@ def collect(args) -> int:
         capture_runtime()
     print("\nRecord Story 15.8 ordered-album observations using anonymous identities and ordinals only.")
     for cause in ("naturalCompletion", "next", "pausedNext", "technicalFailure", "retry", "finalCompletion", "offlineRestore"):
-        print(f"\n{cause}: include ordinalSequence, totalCount, beforeOrdinal/afterOrdinal where applicable, audioActivated, failedOccurrenceRetained, duplicateTerminalDeliveries and advanceCount.")
+        print(f"\n{cause}: use the Story 15.8 schema in docs/playback-installed-test-checklist.md. Include complete ordinalSequence, totalCount, expectedSourceSequence (independent fixture oracle), sourceSequence and unique occurrenceSequence; before/after identity, ordinal, cursor and transport objects; disposition, actual audioActivated, duplicateTerminalDeliveries and advanceCount. Final completion also needs terminalPositionMs; offlineRestore needs offline and the complete restored sequences/outcomes. Include a repeated-source fixture. Do not substitute the old beforeOrdinal/afterOrdinal or failedOccurrenceRetained claims for observed identities.")
         observation = ask_json_object("Sanitized album observation JSON: ")
         observation["cause"] = cause
         record["albumPlayback"]["observations"].append(observation)

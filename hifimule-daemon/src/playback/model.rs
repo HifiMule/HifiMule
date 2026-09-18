@@ -341,12 +341,23 @@ pub struct PlayAlbumParams {
     deny_unknown_fields
 )]
 pub enum SessionOperation {
-    ReplaceQueue { sources: Vec<TrackSource> },
-    AppendQueue { sources: Vec<TrackSource> },
-    SelectCurrent { occurrence_id: String },
+    ReplaceQueue {
+        sources: Vec<TrackSource>,
+    },
+    AppendQueue {
+        sources: Vec<TrackSource>,
+    },
+    SelectCurrent {
+        occurrence_id: String,
+    },
     Clear,
-    PlayTrack { source: TrackSource },
-    PlayAlbum { sources: Vec<TrackSource> },
+    PlayTrack {
+        source: TrackSource,
+    },
+    #[serde(skip_deserializing)]
+    PlayAlbum {
+        sources: Vec<TrackSource>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

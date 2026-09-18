@@ -92,6 +92,46 @@ def seek_row_for(container, codec):
     return row
 
 
+def album_observation(cause):
+    advancing = cause in {"naturalCompletion", "next", "pausedNext"}
+    ordinal = 2 if cause == "finalCompletion" else 0
+    sources = ["source-a", "source-b", "source-a"]
+    occurrences = ["occurrence-a", "occurrence-b", "occurrence-c"]
+    before = {"instanceId": "instance-a", "sessionId": "session-a",
+              "generationId": "generation-a", "queueRevision": "1",
+              "ordinal": ordinal, "occurrenceId": occurrences[ordinal],
+              "sourceId": sources[ordinal], "positionMs": 123, "transport": "active"}
+    if cause == "pausedNext":
+        before["transport"] = "paused"
+    if cause == "retry":
+        before["transport"] = "error"
+    after = dict(before)
+    if advancing:
+        after.update(ordinal=1, occurrenceId=occurrences[1], sourceId=sources[1], positionMs=0)
+    if advancing or cause in {"retry", "offlineRestore"}:
+        after["generationId"] = "generation-b"
+    if cause == "retry":
+        after["transport"] = "active"
+    if cause == "technicalFailure":
+        after["transport"] = "error"
+    if cause == "finalCompletion":
+        after.update(transport="completed", positionMs=456)
+    if cause == "offlineRestore":
+        after.update(instanceId="instance-b", transport="paused")
+    return {"cause": cause, "ordinalSequence": [0, 1, 2], "totalCount": 3,
+            "expectedSourceSequence": sources[:], "sourceSequence": sources[:],
+            "occurrenceSequence": occurrences[:], "before": before, "after": after,
+            "duplicateTerminalDeliveries": 1, "advanceCount": int(advancing),
+            "audioActivated": cause in {"naturalCompletion", "next", "retry"},
+            "disposition": {"naturalCompletion": "naturalCompletion", "next": "explicitSkip",
+                            "pausedNext": "explicitSkip", "technicalFailure": "technicalFailure",
+                            "finalCompletion": "naturalCompletion"}.get(cause),
+            "terminalPositionMs": 456, "offline": True,
+            "outcomeSequenceBefore": [None, "explicitSkip", "technicalFailure"],
+            "outcomeSequenceAfter": [None, "explicitSkip", "technicalFailure"],
+            "occurrenceSequenceAfter": occurrences[:], "sourceSequenceAfter": sources[:]}
+
+
 
 class InstalledEvidenceTests(unittest.TestCase):
     def test_rpc_keeps_owner_token_out_of_returned_data(self):
@@ -206,16 +246,98 @@ class InstalledEvidenceTests(unittest.TestCase):
             }},
             "seek": {"rows": [seek_row()]},
             "albumPlayback": {"observations": [
-                {"cause": cause, "ordinalSequence": [0, 1], "totalCount": 2,
-                 "beforeOrdinal": 0, "afterOrdinal": 1, "audioActivated": cause != "pausedNext",
-                 "failedOccurrenceRetained": True, "duplicateTerminalDeliveries": 1,
-                 "advanceCount": 1}
+                album_observation(cause)
                 for cause in ("naturalCompletion", "next", "pausedNext", "technicalFailure",
                               "retry", "finalCompletion", "offlineRestore")
             ]},
         })
         record["outcome"] = "passed"
         return record
+
+    def test_album_evidence_rejects_incorrect_order_identity_and_transport(self):
+        def invalid(cause, change):
+            record = self.complete_record()
+            item = next(item for item in record["albumPlayback"]["observations"] if item["cause"] == cause)
+            change(item)
+            self.assertTrue(evidence.validate_album_playback_evidence(record), (cause, item))
+
+        cases = [
+            ("naturalCompletion", lambda row: row.update(ordinalSequence=[1, 0, 2])),
+            ("naturalCompletion", lambda row: row["after"].update(ordinal=9)),
+            ("naturalCompletion", lambda row: row["after"].update(ordinal=2, occurrenceId="occurrence-c", sourceId="source-a")),
+            ("naturalCompletion", lambda row: row["after"].update(sessionId="different")),
+            ("naturalCompletion", lambda row: row["after"].update(occurrenceId="occurrence-a")),
+            ("naturalCompletion", lambda row: row.update(sourceSequence=["source-a", "source-a", "source-b"])),
+            ("naturalCompletion", lambda row: row.update(occurrenceSequence=["occurrence-a", "occurrence-b", "occurrence-a"])),
+            ("naturalCompletion", lambda row: row.update(advanceCount=2)),
+            ("next", lambda row: row.update(disposition="naturalCompletion")),
+            ("pausedNext", lambda row: row.update(audioActivated=True)),
+            ("retry", lambda row: row["after"].update(positionMs=0)),
+            ("retry", lambda row: row["after"].update(generationId="generation-a")),
+            ("retry", lambda row: row.update(audioActivated=False)),
+            ("technicalFailure", lambda row: row["after"].update(transport="active")),
+            ("finalCompletion", lambda row: row.update(terminalPositionMs=999)),
+            ("finalCompletion", lambda row: row["after"].update(transport="active")),
+            ("offlineRestore", lambda row: row.update(offline=False)),
+            ("offlineRestore", lambda row: row.update(outcomeSequenceAfter=[None, None, None])),
+            ("offlineRestore", lambda row: row.update(occurrenceSequenceAfter=["occurrence-a"])),
+            ("offlineRestore", lambda row: row["after"].update(instanceId="instance-a")),
+        ]
+        for cause, change in cases:
+            with self.subTest(cause=cause, change=change):
+                invalid(cause, change)
+
+    def test_album_malformed_json_values_return_errors_without_exceptions(self):
+        malformed = [None, True, False, 7, -1, 1.5, "invalid", [], {}, [1], {"x": 1}]
+        fields = ["cause", "ordinalSequence", "totalCount", "sourceSequence", "expectedSourceSequence",
+                  "occurrenceSequence", "before", "after", "duplicateTerminalDeliveries", "advanceCount",
+                  "audioActivated", "disposition"]
+        for field in fields:
+            for value in malformed:
+                if (field == "duplicateTerminalDeliveries" and type(value) is int and value >= 0) or (field == "audioActivated" and value is True):
+                    continue
+                with self.subTest(field=field, value=value):
+                    record = self.complete_record()
+                    record["albumPlayback"]["observations"][0][field] = value
+                    self.assertTrue(evidence.validate_album_playback_evidence(record))
+        for version in (None, True, "1", 2, [], {}):
+            record = self.complete_record()
+            record["albumPlaybackEvidenceVersion"] = version
+            self.assertTrue(evidence.validate_album_playback_evidence(record))
+
+    def test_album_malformed_nested_states_return_errors(self):
+        for key in ("instanceId", "sessionId", "generationId", "occurrenceId", "sourceId", "queueRevision", "ordinal", "positionMs", "transport"):
+            for value in (None, True, [], {}, 7.5):
+                with self.subTest(key=key, value=value):
+                    record = self.complete_record()
+                    record["albumPlayback"]["observations"][0]["after"][key] = value
+                    self.assertTrue(evidence.validate_album_playback_evidence(record))
+
+    def test_album_evidence_requires_complete_observations_and_repeated_fixture(self):
+        for missing in ("before", "after", "expectedSourceSequence", "occurrenceSequence", "disposition", "audioActivated"):
+            record = self.complete_record()
+            del record["albumPlayback"]["observations"][0][missing]
+            self.assertTrue(evidence.validate_album_playback_evidence(record))
+        record = self.complete_record()
+        for row in record["albumPlayback"]["observations"]:
+            row["expectedSourceSequence"][2] = "source-c"
+            row["sourceSequence"][2] = "source-c"
+            row["sourceSequenceAfter"][2] = "source-c"
+            for state in (row["before"], row["after"]):
+                if state["ordinal"] == 2:
+                    state["sourceId"] = "source-c"
+        self.assertTrue(any("repeated source" in error for error in evidence.validate_album_playback_evidence(record)))
+
+    def test_album_offline_and_final_malformed_values_are_rejected(self):
+        for cause, fields in (("offlineRestore", ("offline", "outcomeSequenceBefore", "outcomeSequenceAfter", "occurrenceSequenceAfter", "sourceSequenceAfter")),
+                              ("finalCompletion", ("terminalPositionMs",))):
+            for field in fields:
+                for value in (None, [], {}, "invalid", -1, False):
+                    with self.subTest(cause=cause, field=field, value=value):
+                        record = self.complete_record()
+                        row = next(row for row in record["albumPlayback"]["observations"] if row["cause"] == cause)
+                        row[field] = value
+                        self.assertTrue(evidence.validate_album_playback_evidence(record))
 
     def test_validate_record_accepts_complete_bounded_installed_result(self):
         record = self.complete_record()

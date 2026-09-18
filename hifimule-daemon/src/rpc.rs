@@ -19,7 +19,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering as AtomicOrdering};
 
 // JSON-RPC 2.0 Error Codes
 const ERR_METHOD_NOT_FOUND: i32 = -32601;
@@ -107,17 +107,10 @@ pub struct AppState {
 static LIFECYCLE_IDENTITY: OnceLock<hifimule_lifecycle::OwnerDescriptor> = OnceLock::new();
 static LIFECYCLE_STATE: AtomicU8 = AtomicU8::new(0);
 static ACTIVE_LOCAL_REQUESTS: AtomicUsize = AtomicUsize::new(0);
-static ALBUM_RESOLUTION_BUSY: AtomicBool = AtomicBool::new(false);
 struct LocalRequestGuard;
 impl Drop for LocalRequestGuard {
     fn drop(&mut self) {
         ACTIVE_LOCAL_REQUESTS.fetch_sub(1, AtomicOrdering::AcqRel);
-    }
-}
-struct AlbumResolutionGuard;
-impl Drop for AlbumResolutionGuard {
-    fn drop(&mut self) {
-        ALBUM_RESOLUTION_BUSY.store(false, AtomicOrdering::Release);
     }
 }
 pub fn set_shutdown_timeout() {
@@ -879,9 +872,8 @@ async fn handle_playback_play_album(
     mutation_guard: Option<crate::sync::MutationGuard>,
 ) -> Result<Value, JsonRpcError> {
     use crate::playback::album::{AlbumValidationError, order_album_tracks};
-    use crate::playback::model::{
-        ApplySessionParams, PlayAlbumParams, SCHEMA_VERSION, SessionOperation, TrackSource,
-    };
+    use crate::playback::model::{PlayAlbumParams, TrackSource};
+    use crate::playback::session::AlbumAdmission;
 
     let p =
         serde_json::from_value::<PlayAlbumParams>(params.unwrap_or(Value::Null)).map_err(|_| {
@@ -891,63 +883,18 @@ async fn handle_playback_play_album(
                 data: Some(serde_json::json!({"code":"ALBUM_INVALID"})),
             }
         })?;
-    if p.schema_version != SCHEMA_VERSION
-        || p.source.validate().is_err()
-        || uuid::Uuid::parse_str(&p.command_id).is_err()
-    {
-        return Err(JsonRpcError {
-            code: ERR_INVALID_PARAMS,
-            message: "Invalid album playback request".into(),
-            data: Some(serde_json::json!({"code":"ALBUM_INVALID"})),
-        });
-    }
-    if ALBUM_RESOLUTION_BUSY
-        .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
-        .is_err()
-    {
-        return Err(JsonRpcError {
-            code: 409,
-            message: "Another album is being resolved".into(),
-            data: Some(serde_json::json!({"code":"PLAYBACK_BUSY","retryable":true})),
-        });
-    }
-    let _resolution_guard = AlbumResolutionGuard;
-    let before = {
-        let playback = state.playback.clone();
-        tokio::task::spawn_blocking(move || playback.snapshot())
+    let playback = state.playback.clone();
+    let request = p.clone();
+    let admission =
+        tokio::task::spawn_blocking(move || playback.reserve_album(request, mutation_guard))
             .await
             .map_err(playback_task_error)?
-            .map_err(playback_error)?
+            .map_err(playback_error)?;
+    let reservation = match admission {
+        AlbumAdmission::Replay(snapshot) => return Ok(serde_json::json!({"data":snapshot})),
+        AlbumAdmission::Resolve(reservation) => reservation,
     };
-    if before.instance_id != p.instance_id
-        || before.session_id != p.session_id
-        || before.queue_revision != p.expected_queue_revision
-        || before.generation_id != p.expected_generation_id
-    {
-        return Err(JsonRpcError {
-            code: 409,
-            message: "Album playback admission is stale".into(),
-            data: Some(serde_json::json!({"code":"GENERATION_CONFLICT"})),
-        });
-    }
-    let provider = crate::server_manager::get_provider_by_server_id(
-        &state.server_manager,
-        &state.db,
-        &p.source.server_id,
-    )
-    .await
-    .map_err(provider_error_to_rpc)?;
-    let album = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        provider.get_album(&p.source.album_id),
-    )
-    .await
-    .map_err(|_| JsonRpcError {
-        code: ERR_CONNECTION_FAILED,
-        message: "Album resolution timed out".into(),
-        data: Some(serde_json::json!({"code":"PLAYBACK_TIMEOUT"})),
-    })?
-    .map_err(provider_error_to_rpc)?;
+    let album = resolve_playback_album(state, &p.source, &reservation).await?;
     let tracks = order_album_tracks(album.tracks).map_err(|error| {
         let code = match error {
             AlbumValidationError::Empty => "ALBUM_EMPTY",
@@ -960,22 +907,6 @@ async fn handle_playback_play_album(
             data: Some(serde_json::json!({"code":code})),
         }
     })?;
-    let after = {
-        let playback = state.playback.clone();
-        tokio::task::spawn_blocking(move || playback.snapshot())
-            .await
-            .map_err(playback_task_error)?
-            .map_err(playback_error)?
-    };
-    if after.queue_revision != p.expected_queue_revision
-        || after.generation_id != p.expected_generation_id
-    {
-        return Err(JsonRpcError {
-            code: 409,
-            message: "Album playback was superseded".into(),
-            data: Some(serde_json::json!({"code":"GENERATION_CONFLICT"})),
-        });
-    }
     let sources = tracks
         .into_iter()
         .map(|track| TrackSource {
@@ -983,29 +914,56 @@ async fn handle_playback_play_album(
             track_id: track.id,
         })
         .collect();
-    handle_playback_apply_session(
-        state,
-        Some(
-            serde_json::to_value(ApplySessionParams {
-                schema_version: p.schema_version,
-                instance_id: p.instance_id,
-                session_id: p.session_id,
-                command_id: p.command_id,
-                expected_queue_revision: p.expected_queue_revision,
-                operation: SessionOperation::PlayAlbum { sources },
-            })
-            .expect("album apply serialization"),
-        ),
-        mutation_guard,
-    )
-    .await?;
-    let playback = state.playback.clone();
-    let snapshot = tokio::task::spawn_blocking(move || playback.snapshot())
-        .await
-        .map_err(playback_task_error)?
-        .map_err(playback_error)?;
+    let service = crate::playback::commands::PlaybackCommandService::new(
+        state.playback.clone(),
+        state.server_manager.clone(),
+        state.db.clone(),
+        state.sync_operation_manager.clone(),
+    );
+    let runtime = tokio::runtime::Handle::current();
+    let snapshot = tokio::task::spawn_blocking(move || {
+        let _runtime = runtime.enter();
+        service.commit_album(reservation, sources)
+    })
+    .await
+    .map_err(playback_task_error)?
+    .map_err(playback_error)?;
     Ok(serde_json::json!({"data":snapshot}))
 }
+
+async fn resolve_playback_album(
+    state: &AppState,
+    source: &crate::playback::model::AlbumSource,
+    reservation: &crate::playback::session::AlbumReservation,
+) -> Result<crate::domain::models::AlbumWithTracks, JsonRpcError> {
+    let resolve = async {
+        let provider = crate::server_manager::get_provider_by_server_id(
+            &state.server_manager,
+            &state.db,
+            &source.server_id,
+        )
+        .await?;
+        provider.get_album(&source.album_id).await
+    };
+    tokio::select! {
+        result = tokio::time::timeout_at(tokio::time::Instant::from_std(reservation.deadline), resolve) => result,
+        _ = async {
+            while !reservation.is_cancelled() {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        } => return Err(JsonRpcError {
+            code: 409, message: "Album playback was superseded".into(),
+            data: Some(serde_json::json!({"code":"GENERATION_CONFLICT"})),
+        }),
+    }.map_err(|_| JsonRpcError {
+        code: ERR_CONNECTION_FAILED, message: "Album resolution timed out".into(),
+        data: Some(serde_json::json!({"code":"PLAYBACK_TIMEOUT"})),
+    })?.map_err(provider_error_to_rpc)
+}
+
+#[cfg(test)]
+#[path = "rpc/album_tests.rs"]
+mod album_review_tests;
 
 async fn handle_playback_control(
     state: &AppState,
@@ -7826,7 +7784,7 @@ mod tests {
         assert!(encoding_passthrough_clear(Some(&plain), false).is_none());
     }
 
-    fn make_test_state(db: Arc<crate::db::Database>) -> Arc<AppState> {
+    pub(super) fn make_test_state(db: Arc<crate::db::Database>) -> Arc<AppState> {
         let device_manager = Arc::new(crate::device::DeviceManager::new(db.clone()));
         let playback =
             crate::playback::PlaybackSession::restore(db.clone(), "test-instance".into());

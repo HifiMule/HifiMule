@@ -489,7 +489,13 @@ export class TracksBrowseView {
         const play = createAlbumPlayButton(album.id, album.serverId, album.name);
         row.appendChild(play);
         row.addEventListener('click', () => this.selectAlbum(album.id));
-        row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.selectAlbum(album.id); } });
+        row.addEventListener('keydown', (e) => {
+            if (e.target !== row) return;
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                this.selectAlbum(album.id);
+            }
+        });
         return row;
     }
 

@@ -77,6 +77,18 @@ impl PlaybackCommandService {
         &self.playback
     }
 
+    /// Run commit and dispatch as one blocking job. Dropping the RPC future
+    /// cannot strand an already committed queue before its audio effect runs.
+    pub(crate) fn commit_album(
+        &self,
+        reservation: super::session::AlbumReservation,
+        sources: Vec<super::model::TrackSource>,
+    ) -> Result<super::model::SessionSnapshot, super::session::PlaybackError> {
+        let snapshot = self.playback.commit_album(reservation, sources)?;
+        self.dispatch_effect(&snapshot);
+        Ok(snapshot)
+    }
+
     fn dispatch_effect(&self, snapshot: &super::model::SessionSnapshot) {
         if snapshot.seek_audio {
             self.dispatch_seek(snapshot);

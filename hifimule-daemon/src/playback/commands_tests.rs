@@ -43,7 +43,7 @@ impl Fixture {
         let portable_id = manager.servers[0].server_id.clone().unwrap();
         let provider = Arc::new(SlowProvider::default());
         manager.providers.insert(local_id, provider.clone());
-        let session = PlaybackSession::restore(db.clone(), "command-test".into());
+        let session = PlaybackSession::restore(db.clone(), uuid::Uuid::new_v4().to_string());
         let initial = session.snapshot().unwrap();
         session
             .apply(ApplySessionParams {
@@ -113,6 +113,83 @@ async fn notified(notify: &Notify) {
     tokio::time::timeout(std::time::Duration::from_secs(3), notify.notified())
         .await
         .expect("production task did not reach barrier");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn committed_album_dispatch_survives_dropped_rpc_caller() {
+    let f = Fixture::new();
+    let before = f.session.snapshot().unwrap();
+    let source = TrackSource {
+        server_id: before.current.as_ref().unwrap().source.server_id.clone(),
+        track_id: "track".into(),
+    };
+    let admission = f
+        .session
+        .reserve_album(
+            PlayAlbumParams {
+                schema_version: 1,
+                instance_id: before.instance_id,
+                session_id: before.session_id,
+                command_id: uuid::Uuid::new_v4().to_string(),
+                expected_queue_revision: before.queue_revision.clone(),
+                expected_generation_id: before.generation_id,
+                source: AlbumSource {
+                    server_id: source.server_id.clone(),
+                    album_id: "album".into(),
+                },
+            },
+            None,
+        )
+        .unwrap();
+    let crate::playback::session::AlbumAdmission::Resolve(reservation) = admission else {
+        panic!("new album request must reserve resolution");
+    };
+    let service = f.service.clone();
+    let runtime = tokio::runtime::Handle::current();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (committed_tx, committed_rx) = tokio::sync::oneshot::channel();
+    let expected_source = source.clone();
+    let job = tokio::task::spawn_blocking(move || {
+        let _runtime = runtime.enter();
+        started_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+        let committed = service.commit_album(reservation, vec![source]);
+        committed_tx.send(committed).unwrap();
+    });
+    // The HTTP caller disappears after the blocking job starts but before its
+    // serialized commit. It must not own the subsequent audio dispatch.
+    started_rx.await.unwrap();
+    drop(job);
+    release_tx.send(()).unwrap();
+    let committed = tokio::time::timeout(std::time::Duration::from_secs(3), committed_rx)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    notified(&f.provider.entered).await;
+    assert_ne!(committed.queue_revision, before.queue_revision);
+    assert_ne!(
+        committed.current.as_ref().unwrap().occurrence_id,
+        before.current.unwrap().occurrence_id
+    );
+    assert_eq!(committed.current.unwrap().source, expected_source);
+    assert_eq!(
+        f.session.snapshot().unwrap().current.unwrap().source,
+        expected_source
+    );
+    assert_eq!(f.provider.calls.load(Ordering::SeqCst), 1);
+    f.service
+        .rpc_control(f.rpc_params(ControlAction::Stop), None)
+        .await
+        .unwrap();
+    f.provider.release.notify_one();
+    notified(&f.provider.finished).await;
+    assert_eq!(
+        f.session.snapshot().unwrap().playback.status,
+        PlaybackStatus::Stopped
+    );
+    assert_eq!(f.provider.calls.load(Ordering::SeqCst), 1);
 }
 async fn status(session: &PlaybackSession, expected: PlaybackStatus) -> SessionSnapshot {
     tokio::time::timeout(std::time::Duration::from_secs(3), async {

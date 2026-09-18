@@ -795,6 +795,22 @@ deadline. The provider album must contain 1–10,000 valid track occurrences;
 cancellation or stale admission leaves the previous queue untouched. Success is
 one atomic replacement, including albums larger than the ordinary 200-item batch.
 
+Album admission is reserved and committed by the serialized playback owner.
+The reservation captures instance/session, queue revision, generation and control
+epoch; Pause, Stop, seek, Next, output changes, replacement and shutdown supersede
+it. The deadline covers provider acquisition (including its lock/connection) and
+album enumeration. Dropping the caller cancels the reservation and releases its
+lifecycle guard. Concurrent requests, including an identical pending request,
+return `PLAYBACK_BUSY`; reusing the pending command ID with a changed payload
+returns `COMMAND_ID_REUSED`.
+
+Successful album receipts are retained for at most 10 minutes and 1024 commands.
+An identical replay is recognized before stale revision checks and provider work,
+returns the authoritative current snapshot, and never starts audio or remints
+occurrences. Album IDs share the apply/control/seek/output command-ID namespace.
+The resolved `PlayAlbum { sources }` operation is internal and cannot be submitted
+through public `playback.applySession`; ordinary insert limits remain unchanged.
+
 Provider order is captured before sorting. Positive disc numbers are valid;
 missing, zero or negative disc numbers use effective disc 1. Within each disc,
 positive track numbers precede missing/zero/negative numbers. The full key is
@@ -824,6 +840,16 @@ UI/native Next records `explicitSkip`; source/decode/load failure records
 cursor; Stop records no outcome; exact-end seek does not advance. Failed atomic
 writes retain the prior coherent state. Schema v2 adds outcomes, and restoration
 returns paused with the complete queue and local outcomes intact.
+
+Each new Retry/replay attempt resets its current occurrence disposition to pending
+(SQL NULL). The last sanitized failure code is retained until successful recovery.
+Terminal disposition, failure code, current occurrence, cursor and checkpoint
+sequence commit together. A failed terminal write stops audio and retains one
+identity-fenced recovery plan; Next and seek cannot bypass it. Storage Retry
+commits that plan once and leaves the result paused (or Completed at final EOF),
+without preparing audio. Stop or a replacement discards the plan. Ordinary
+source/decode Retry still reopens the same occurrence at its committed cursor.
+Next from Stopped retains Stopped status on the successor.
 
 Native Next resolves owner state at execution. `canGoNext` is true only for a real
 successor while lifecycle state permits it; delivery while false has no effect. A

@@ -370,3 +370,64 @@ dropped repeated occurrences, double advancement, a missing failed occurrence,
 paused Next that activates audio, contradictory causes/dispositions, and unknown
 evidence versions. EOF/Next/seek/Stop/output-loss races must show that exactly one
 committed transition owns the effect and stale work cannot start audio.
+
+### Album observation JSON contract (version 1)
+
+The seven required `cause` values are `naturalCompletion`, `next`, `pausedNext`,
+`technicalFailure`, `retry`, `finalCompletion`, and `offlineRestore`. Capture
+additional observations when exercising API and native Next or different race
+orders. Platform, provider and runtime fields belong to the enclosing record.
+Use stable anonymous aliases throughout each observation; never include actual
+track titles, endpoint URLs or credentials. Version 1 is an integer (not a boolean
+or string). Earlier incomplete version-1 observations require additional capture;
+the validator does not infer missing evidence.
+
+Every observation contains these fields:
+
+- `totalCount`: integer from 1 to 10,000; `ordinalSequence`: the complete ordered
+  sequence `[0, 1, …, totalCount - 1]`.
+- `expectedSourceSequence`: source aliases in expected album order, obtained
+  independently from the complete provider fixture. Each alias identifies the
+  portable server and track together. `sourceSequence` is the actual queue source
+  sequence and must match the oracle exactly. Deliberately repeated source tracks
+  repeat their aliases; at least one observation must exercise a repeated source.
+- `occurrenceSequence`: one distinct anonymous occurrence ID for every ordinal,
+  including repetitions of the same source.
+- `before` and `after`: objects containing nonempty string `instanceId`,
+  `sessionId`, `generationId`, `occurrenceId`, `sourceId`, and `queueRevision`, plus
+  nonnegative integer `ordinal` and `positionMs`, and string `transport`. Source
+  and occurrence IDs must match the corresponding sequence entry. Session and
+  queue revision remain equal; owner instance remains equal except on relaunch.
+- `duplicateTerminalDeliveries`: nonnegative integer; `advanceCount`: actual
+  committed successor count, including all duplicate deliveries;
+  `audioActivated`: boolean reporting observed audio activation; `disposition`:
+  the departed/current occurrence's local outcome after this operation (null on
+  successful Retry). Do not infer audio activation from command acceptance.
+
+Record successor snapshots at their committed zero cursor, and record actual
+audio activation separately after preparation. The cause-specific assertions are:
+
+| Cause | Before → after transport | Ordinal/cursor | Audio | Disposition |
+| --- | --- | --- | --- | --- |
+| `naturalCompletion` | active → active | exact successor, zero | true | naturalCompletion |
+| `next` | active → active | exact successor, zero | true | explicitSkip |
+| `pausedNext` | paused → paused | exact successor, zero | false | explicitSkip |
+| `technicalFailure` | active → error | same occurrence and committed cursor | false | technicalFailure |
+| `retry` | error → active | same occurrence and committed cursor | true | null |
+| `finalCompletion` | active → completed | final occurrence and actual terminal cursor | false | naturalCompletion |
+| `offlineRestore` | observed prior state → paused | same occurrence and committed cursor | false | preserved in outcome arrays |
+
+The first three causes have `advanceCount: 1`; the others have zero. Advancing
+or retrying requires a new generation. `finalCompletion` also supplies
+`terminalPositionMs`, equal to the observed after cursor and at least the before
+cursor. `offlineRestore` supplies `offline: true`, new instance and generation
+IDs, `occurrenceSequenceAfter` and `sourceSequenceAfter` equal to the complete
+pre-relaunch sequences, and `outcomeSequenceBefore`/`outcomeSequenceAfter` arrays
+of identical length and values (each null, naturalCompletion, explicitSkip, or
+technicalFailure). These fields establish retention of repeated occurrences and
+local outcomes without exporting media identities.
+
+The old scalar `beforeOrdinal`/`afterOrdinal` and `failedOccurrenceRetained`
+claims cannot replace these observed identity/state objects. A syntactically valid
+record alone cannot certify the fixture oracle or physical audio: the tester must
+capture those observations on the stated installed platform.

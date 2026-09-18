@@ -1,4 +1,6 @@
 use super::model::*;
+mod album_admission;
+pub(crate) use album_admission::{AlbumAdmission, AlbumReservation};
 mod output_selection;
 use crate::db::Database;
 use output_selection::*;
@@ -70,6 +72,16 @@ pub enum NativeControlIntent {
 }
 
 enum OwnerCommand {
+    ReserveAlbum(
+        PlayAlbumParams,
+        Option<crate::sync::MutationGuard>,
+        mpsc::Sender<PResult<AlbumAdmission>>,
+    ),
+    CommitAlbum(
+        AlbumReservation,
+        Vec<TrackSource>,
+        mpsc::Sender<PResult<SessionSnapshot>>,
+    ),
     ListOutputs(ListOutputsParams, mpsc::Sender<PResult<OutputList>>),
     SelectOutput(
         SelectOutputParams,
@@ -112,6 +124,8 @@ enum OwnerControl {
 }
 
 struct Inner {
+    album: album_admission::AlbumAdmissionState,
+    pending_terminal: Option<PendingTerminal>,
     output: OutputState,
     outputs: Option<OutputRuntime>,
     output_dedup: HashMap<String, (SelectOutputParams, PResult<SessionSnapshot>)>,
@@ -136,6 +150,18 @@ struct Inner {
     checkpointed_position_ms: u64,
     playback: PlaybackState,
 }
+#[derive(Clone)]
+struct PendingTerminal {
+    instance_id: String,
+    generation_id: String,
+    occurrence_id: String,
+    session: PersistedSession,
+    outcome: &'static str,
+    status: PlaybackStatus,
+    failure: Option<PlaybackFailure>,
+    resolve_successor: bool,
+}
+
 #[derive(Clone)]
 struct DedupEntry {
     at: Instant,
@@ -228,6 +254,8 @@ impl PlaybackSession {
         let output_gate = Arc::new(AtomicBool::new(false));
         let control_epoch = Arc::new(AtomicU64::new(0));
         let inner = Arc::new(Mutex::new(Inner {
+            album: Default::default(),
+            pending_terminal: None,
             output: OutputState::default(),
             outputs: None,
             output_dedup: HashMap::new(),
@@ -654,6 +682,9 @@ fn owner_loop(
         while let Ok(control) = control_rx.try_recv() {
             match control {
                 OwnerControl::Stop => {
+                    album_admission::cancel_pending(
+                        &mut inner.lock().unwrap_or_else(|e| e.into_inner()),
+                    );
                     while let Ok(command) = command_rx.try_recv() {
                         reject_unstarted(command);
                     }
@@ -668,6 +699,9 @@ fn owner_loop(
                         }
                     }
                     let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
+                    if fenced.load(Ordering::Acquire) {
+                        album_admission::cancel_pending(&mut i);
+                    }
                     let result =
                         sample_progress(&mut i, &ingress).and_then(|()| checkpoint_inner(&mut i));
                     publish_health(&i, &health);
@@ -677,12 +711,19 @@ fn owner_loop(
         }
         {
             let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
+            album_admission::prune(&mut i, fenced.load(Ordering::Acquire));
             reconcile_outputs(
                 &mut i,
                 &ingress,
                 &generation_serial,
                 fenced.load(Ordering::Acquire),
             );
+            if i.pending_terminal
+                .as_ref()
+                .is_some_and(|pending| pending.generation_id != i.generation_id)
+            {
+                i.pending_terminal = None;
+            }
         }
         let command = command_rx.recv_timeout(Duration::from_millis(25));
         let pending: Vec<_> = events
@@ -728,14 +769,30 @@ fn owner_loop(
                     let checkpoint_seek = matches!(&event, PlaybackEvent::SeekCommitted { operation_id, .. }
                         if i.playback.pending_seek.as_ref().is_some_and(|p| &p.operation_id == operation_id));
                     let output_lost = matches!(&event, PlaybackEvent::Failed { code, .. } if code == "OUTPUT_LOST");
-                    if matches!(&event, PlaybackEvent::Failed { code, .. } if code != "OUTPUT_LOST")
-                        && let Some(occurrence_id) = i.session.current_occurrence_id.as_deref()
+                    if i.pending_terminal.is_some() {
+                        continue;
+                    }
+                    if let PlaybackEvent::Failed { code, retryable } = &event
+                        && code != "OUTPUT_LOST"
+                        && code != "OUTPUT_RETIREMENT_PENDING"
+                        && i.session.current_occurrence_id.is_some()
                     {
-                        let _ = i.db.record_playback_outcome(
-                            &i.session.session_id,
-                            occurrence_id,
-                            "technicalFailure",
-                        );
+                        if i.playback.status == PlaybackStatus::Error {
+                            continue;
+                        }
+                        let _ = sample_progress(&mut i, &ingress);
+                        let mut terminal =
+                            terminal_plan(&i, "technicalFailure", PlaybackStatus::Error);
+                        terminal.session.state = TransportState::Paused;
+                        terminal.failure = Some(PlaybackFailure {
+                            code: code.clone(),
+                            retryable: *retryable,
+                        });
+                        if commit_terminal(&mut i, terminal, &generation_serial, false).is_err() {
+                            reset_ingress(&i, &ingress);
+                            publish_health(&i, &health);
+                            continue;
+                        }
                     }
                     if let PlaybackEvent::Completed { position_ms } = event {
                         if matches!(
@@ -756,13 +813,17 @@ fn owner_loop(
                                 continue;
                             }
                             Err(_) => {
-                                i.output_gate.store(false, Ordering::Release);
-                                i.session.state = TransportState::Paused;
-                                i.playback.status = PlaybackStatus::Error;
-                                i.playback.error = Some(PlaybackFailure {
-                                    code: "PERSISTENCE_FAILED".into(),
-                                    retryable: true,
-                                });
+                                if i.pending_terminal.is_none() {
+                                    let mut terminal = terminal_plan(
+                                        &i,
+                                        "naturalCompletion",
+                                        PlaybackStatus::Completed,
+                                    );
+                                    terminal.session.position_ms = position_ms;
+                                    terminal.resolve_successor = true;
+                                    freeze_terminal(&mut i, terminal);
+                                }
+                                reset_ingress(&i, &ingress);
                                 publish_health(&i, &health);
                                 continue;
                             }
@@ -796,6 +857,28 @@ fn owner_loop(
             }
         }
         match command {
+            Ok(OwnerCommand::ReserveAlbum(params, guard, reply)) => {
+                let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
+                let result = if fenced.load(Ordering::Acquire) {
+                    Err(owner_stopped())
+                } else {
+                    album_admission::reserve(&mut i, params, guard)
+                };
+                let _ = reply.send(with_metadata(result, &i));
+            }
+            Ok(OwnerCommand::CommitAlbum(reservation, sources, reply)) => {
+                let mut i = inner.lock().unwrap_or_else(|e| e.into_inner());
+                let result = if fenced.load(Ordering::Acquire) {
+                    Err(owner_stopped())
+                } else {
+                    album_admission::commit(&mut i, reservation, sources, &generation_serial)
+                };
+                if result.is_ok() {
+                    reset_ingress(&i, &ingress);
+                }
+                publish_health(&i, &health);
+                let _ = reply.send(with_metadata(result, &i));
+            }
             Ok(OwnerCommand::ListOutputs(params, reply)) => {
                 let i = inner.lock().unwrap_or_else(|e| e.into_inner());
                 let result = list_outputs(&i, params);
@@ -826,7 +909,8 @@ fn owner_loop(
                     Err(owner_stopped())
                 } else {
                     prune_dedup(&mut i);
-                    if i.control_dedup.contains_key(&params.command_id)
+                    if album_admission::contains_command(&i, &params.command_id)
+                        || i.control_dedup.contains_key(&params.command_id)
                         || i.output_dedup.contains_key(&params.command_id)
                         || i.seek_dedup.contains_key(&params.command_id)
                     {
@@ -875,7 +959,8 @@ fn owner_loop(
                 prune_dedup(&mut i);
                 let result = if fenced.load(Ordering::Acquire) {
                     Err(owner_stopped())
-                } else if i.dedup.contains_key(&params.command_id)
+                } else if album_admission::contains_command(&i, &params.command_id)
+                    || i.dedup.contains_key(&params.command_id)
                     || i.output_dedup.contains_key(&params.command_id)
                     || i.seek_dedup.contains_key(&params.command_id)
                 {
@@ -921,7 +1006,8 @@ fn owner_loop(
                 prune_dedup(&mut i);
                 let result = if fenced.load(Ordering::Acquire) {
                     Err(owner_stopped())
-                } else if i.dedup.contains_key(&params.command_id)
+                } else if album_admission::contains_command(&i, &params.command_id)
+                    || i.dedup.contains_key(&params.command_id)
                     || i.output_dedup.contains_key(&params.command_id)
                     || i.control_dedup.contains_key(&params.command_id)
                 {
@@ -1027,6 +1113,15 @@ fn sample_progress_if_due(
 
 fn sample_progress(i: &mut Inner, ingress: &Mutex<ProgressIngress>) -> PResult<()> {
     let mut p = ingress.lock().unwrap_or_else(|e| e.into_inner());
+    if i.pending_terminal.is_some()
+        || matches!(
+            i.playback.status,
+            PlaybackStatus::Completed | PlaybackStatus::Error
+        )
+    {
+        p.pending = None;
+        return Ok(());
+    }
     if let Some((_, position)) = p.pending {
         let next = i
             .state_sequence
@@ -1097,6 +1192,12 @@ fn with_metadata<T>(result: PResult<T>, i: &Inner) -> PResult<T> {
 }
 fn reject_unstarted(command: OwnerCommand) {
     match command {
+        OwnerCommand::ReserveAlbum(_, _, reply) => {
+            let _ = reply.send(Err(owner_stopped()));
+        }
+        OwnerCommand::CommitAlbum(_, _, reply) => {
+            let _ = reply.send(Err(owner_stopped()));
+        }
         OwnerCommand::ListOutputs(_, reply) => {
             let _ = reply.send(Err(owner_stopped()));
         }
@@ -1166,6 +1267,8 @@ fn retry_restore_inner(
         PlaybackStatus::Idle
     };
     let candidate = Inner {
+        album: Default::default(),
+        pending_terminal: None,
         output: inner.output.clone(),
         outputs: None,
         output_dedup: HashMap::new(),
@@ -1211,7 +1314,7 @@ fn retry_restore_inner(
 }
 
 fn checkpoint_inner(i: &mut Inner) -> PResult<()> {
-    if i.restoration.status == "error" || !i.dirty {
+    if i.restoration.status == "error" || i.pending_terminal.is_some() || !i.dirty {
         return Ok(());
     }
     let seq = i
@@ -1320,6 +1423,12 @@ fn apply_inner(
         return Err(PlaybackError::conflict(
             "RESTORE_FAILED",
             "stored playback state must be recovered first",
+        ));
+    }
+    if i.pending_terminal.is_some() && matches!(p.operation, SessionOperation::AppendQueue { .. }) {
+        return Err(PlaybackError::conflict(
+            "PERSISTENCE_FAILED",
+            "retry or replace the pending storage transition before appending",
         ));
     }
     let mut next_session = i.session.clone();
@@ -1441,6 +1550,7 @@ fn apply_inner(
     let preserve_generation = matches!(p.operation, SessionOperation::AppendQueue { .. })
         && i.session.current_occurrence_id == next_session.current_occurrence_id;
     if !preserve_generation {
+        i.pending_terminal = None;
         i.control_epoch.fetch_add(1, Ordering::AcqRel);
         generation_serial.fetch_add(1, Ordering::AcqRel);
         super::audio::global().control(ControlAction::Stop);
@@ -1597,7 +1707,8 @@ fn snapshot(i: &Inner) -> PResult<SessionSnapshot> {
                         .flatten()
                 })
                 .is_some()
-                && i.restoration.status != "error";
+                && i.restoration.status != "error"
+                && i.pending_terminal.is_none();
             playback
         },
         output: i.output.clone(),
@@ -1630,6 +1741,28 @@ fn control_inner(
             "playback generation is stale",
         ));
     }
+    if i.pending_terminal
+        .as_ref()
+        .is_some_and(|pending| pending.generation_id != i.generation_id)
+    {
+        i.pending_terminal = None;
+    }
+    if let Some(pending) = i.pending_terminal.clone() {
+        match p.action {
+            ControlAction::Retry => {
+                return commit_terminal(i, pending, generation_serial, true);
+            }
+            ControlAction::Stop => {
+                i.pending_terminal = None;
+            }
+            _ => {
+                return Err(PlaybackError::conflict(
+                    "PERSISTENCE_FAILED",
+                    "retry or stop the pending storage transition first",
+                ));
+            }
+        }
+    }
     if matches!(p.action, ControlAction::Resume | ControlAction::Retry) && i.outputs.is_some() {
         output_policy(i).map_err(|code| {
             PlaybackError::invalid(code, "choose an available output before resuming")
@@ -1641,6 +1774,7 @@ fn control_inner(
     if i.playback.pending_seek.is_some()
         && matches!(p.action, ControlAction::Pause | ControlAction::Resume)
     {
+        album_admission::cancel_pending(i);
         i.state_sequence = i
             .state_sequence
             .checked_add(1)
@@ -1683,6 +1817,32 @@ fn control_inner(
             "the current occurrence has no retryable failure",
         ));
     }
+    if matches!(p.action, ControlAction::Resume | ControlAction::Retry)
+        && (p.action == ControlAction::Retry
+            || matches!(
+                i.playback.status,
+                PlaybackStatus::Completed | PlaybackStatus::Error
+            )
+            || i.db
+                .playback_outcome(&p.occurrence_id)
+                .map_err(storage)?
+                .is_some())
+    {
+        let mut attempt = i.session.clone();
+        if p.action == ControlAction::Resume && i.playback.status == PlaybackStatus::Completed {
+            attempt.position_ms = 0;
+        }
+        attempt.checkpoint_sequence = attempt
+            .checkpoint_sequence
+            .checked_add(1)
+            .filter(|n| *n <= i64::MAX as u64)
+            .ok_or_else(|| storage(anyhow::anyhow!("checkpoint sequence overflow")))?;
+        i.db.reset_playback_attempt(&attempt).map_err(storage)?;
+        i.session = attempt;
+        i.checkpointed_position_ms = i.session.position_ms;
+        i.dirty = false;
+    }
+    let mut committed_snapshot = None;
     i.control_epoch.fetch_add(1, Ordering::AcqRel);
     i.state_sequence = i
         .state_sequence
@@ -1751,6 +1911,10 @@ fn control_inner(
                 i.playback.status,
                 PlaybackStatus::Active | PlaybackStatus::Loading
             );
+            let stopped = matches!(
+                i.playback.status,
+                PlaybackStatus::Stopped | PlaybackStatus::Completed
+            );
             let mut next_session = i.session.clone();
             next_session.current_occurrence_id = Some(successor.occurrence_id);
             next_session.position_ms = 0;
@@ -1759,27 +1923,22 @@ fn control_inner(
             } else {
                 TransportState::Paused
             };
-            i.db.transition_playback_occurrence(
-                &next_session,
-                &current.occurrence_id,
+            let mut terminal = terminal_plan(
+                i,
                 "explicitSkip",
-            )
-            .map_err(storage)?;
-            generation_serial.fetch_add(1, Ordering::AcqRel);
-            super::audio::global().control(ControlAction::Stop);
-            i.generation_id = Uuid::new_v4().to_string();
-            i.session = next_session;
-            i.output_gate.store(resume, Ordering::Release);
-            i.playback = PlaybackState {
-                status: if resume {
+                if resume {
                     PlaybackStatus::Loading
+                } else if stopped {
+                    PlaybackStatus::Stopped
                 } else {
                     PlaybackStatus::Paused
                 },
-                ..Default::default()
-            };
+            );
+            terminal.session = next_session;
+            committed_snapshot = Some(commit_terminal(i, terminal, generation_serial, false)?);
         }
         ControlAction::Stop => {
+            i.pending_terminal = None;
             if let Some(pending) = i.playback.pending_seek.take() {
                 i.playback.seek_outcome = Some(SeekOutcome {
                     operation_id: pending.operation_id,
@@ -1808,14 +1967,17 @@ fn control_inner(
             checkpoint_inner(i)?;
         }
     }
-    snapshot(i).map(|mut snapshot| {
-        snapshot.resume_audio = matches!(
-            p.action,
-            ControlAction::Resume | ControlAction::Retry | ControlAction::Next
-        ) && snapshot.state == TransportState::Buffering;
-        snapshot.resume_epoch = i.control_epoch.load(Ordering::Acquire);
-        snapshot
-    })
+    committed_snapshot
+        .map(Ok)
+        .unwrap_or_else(|| snapshot(i))
+        .map(|mut snapshot| {
+            snapshot.resume_audio = matches!(
+                p.action,
+                ControlAction::Resume | ControlAction::Retry | ControlAction::Next
+            ) && snapshot.state == TransportState::Buffering;
+            snapshot.resume_epoch = i.control_epoch.load(Ordering::Acquire);
+            snapshot
+        })
 }
 
 fn seek_inner(
@@ -1823,6 +1985,12 @@ fn seek_inner(
     p: &SeekParams,
     generation_serial: &AtomicU64,
 ) -> PResult<SessionSnapshot> {
+    if i.pending_terminal.is_some() {
+        return Err(PlaybackError::conflict(
+            "PERSISTENCE_FAILED",
+            "retry or stop the pending storage transition first",
+        ));
+    }
     require_schema(p.schema_version)?;
     if Uuid::parse_str(&p.command_id).is_err() {
         return Err(PlaybackError::invalid(
@@ -2178,6 +2346,16 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
                 };
         }
         PlaybackEvent::Active if i.output_gate.load(Ordering::Acquire) => {
+            if let Some(occurrence_id) = i.session.current_occurrence_id.as_deref()
+                && i.db
+                    .clear_playback_failure(&i.session.session_id, occurrence_id)
+                    .is_err()
+            {
+                i.persistence = Status {
+                    status: "error".into(),
+                    code: Some("PERSISTENCE_FAILED".into()),
+                };
+            }
             i.session.state = TransportState::Playing;
             i.playback.status = PlaybackStatus::Active;
         }
@@ -2297,8 +2475,10 @@ fn complete_occurrence(
     let successor =
         i.db.playback_successor(&i.session.session_id, current.ordinal)
             .map_err(storage)?;
-    let mut next_session = i.session.clone();
-    next_session.position_ms = position_ms;
+    let mut terminal = terminal_plan(i, "naturalCompletion", PlaybackStatus::Completed);
+    terminal.session.position_ms = position_ms;
+    terminal.session.state = TransportState::Paused;
+    let advances = successor.is_some();
     if let Some(successor) = successor {
         let resume = matches!(
             i.session.state,
@@ -2307,57 +2487,204 @@ fn complete_occurrence(
             i.playback.status,
             PlaybackStatus::Active | PlaybackStatus::Loading
         );
-        next_session.current_occurrence_id = Some(successor.occurrence_id);
-        next_session.position_ms = 0;
-        next_session.state = if resume {
+        terminal.session.current_occurrence_id = Some(successor.occurrence_id);
+        terminal.session.position_ms = 0;
+        terminal.session.state = if resume {
             TransportState::Buffering
         } else {
             TransportState::Paused
         };
-        i.db.transition_playback_occurrence(
-            &next_session,
-            &current.occurrence_id,
-            "naturalCompletion",
-        )
-        .map_err(storage)?;
+        terminal.status = if resume {
+            PlaybackStatus::Loading
+        } else {
+            PlaybackStatus::Paused
+        };
+    }
+    commit_terminal(i, terminal, generation_serial, false)?;
+    if advances
+        && i.output_gate.load(Ordering::Acquire)
+        && let Some(outputs) = i.outputs.as_mut()
+    {
+        outputs.effect = Some(i.generation_id.clone());
+    }
+    Ok(advances)
+}
+
+fn terminal_plan(i: &Inner, outcome: &'static str, status: PlaybackStatus) -> PendingTerminal {
+    PendingTerminal {
+        instance_id: i.instance_id.clone(),
+        generation_id: i.generation_id.clone(),
+        occurrence_id: i
+            .session
+            .current_occurrence_id
+            .clone()
+            .expect("terminal current occurrence"),
+        session: i.session.clone(),
+        outcome,
+        status,
+        failure: None,
+        resolve_successor: false,
+    }
+}
+
+/// Persist all parts of a terminal transition before publishing or starting its
+/// successor. A failed write retains exactly one immutable, identity-fenced plan.
+fn commit_terminal(
+    i: &mut Inner,
+    mut terminal: PendingTerminal,
+    generation_serial: &AtomicU64,
+    recovery: bool,
+) -> PResult<SessionSnapshot> {
+    if terminal.instance_id != i.instance_id
+        || terminal.session.session_id != i.session.session_id
+        || terminal.session.queue_revision != i.session.queue_revision
+        || terminal.generation_id != i.generation_id
+        || i.session.current_occurrence_id.as_deref() != Some(&terminal.occurrence_id)
+    {
+        i.pending_terminal = None;
+        return Err(PlaybackError::conflict(
+            "GENERATION_CONFLICT",
+            "terminal recovery was superseded",
+        ));
+    }
+    if terminal.resolve_successor {
+        let successor = i
+            .db
+            .playback_occurrence(&i.session.session_id, &terminal.occurrence_id)
+            .and_then(|current| current.ok_or_else(|| anyhow::anyhow!("current occurrence absent")))
+            .and_then(|current| {
+                i.db.playback_successor(&i.session.session_id, current.ordinal)
+            });
+        match successor {
+            Ok(Some(next)) => {
+                terminal.session.current_occurrence_id = Some(next.occurrence_id);
+                terminal.session.position_ms = 0;
+                terminal.status = PlaybackStatus::Paused;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                freeze_terminal(i, terminal);
+                return Err(storage(error));
+            }
+        }
+        terminal.resolve_successor = false;
+    }
+    let sequence = i
+        .state_sequence
+        .checked_add(1)
+        .filter(|n| *n <= i64::MAX as u64)
+        .ok_or_else(|| storage(anyhow::anyhow!("state sequence overflow")))?;
+    terminal.session.checkpoint_sequence = i
+        .session
+        .checkpoint_sequence
+        .checked_add(1)
+        .filter(|n| *n <= i64::MAX as u64)
+        .ok_or_else(|| storage(anyhow::anyhow!("checkpoint sequence overflow")))?;
+    if recovery {
+        terminal.session.state = TransportState::Paused;
+        if terminal.status == PlaybackStatus::Loading {
+            terminal.status = PlaybackStatus::Paused;
+        }
+    }
+    // Resolve response data before committing: a later projection failure must
+    // never turn a durable transition into an apparent rejected command.
+    let projection = (|| -> PResult<SessionSnapshot> {
+        let mut response = snapshot(i)?;
+        response.current = terminal
+            .session
+            .current_occurrence_id
+            .as_deref()
+            .map(|id| {
+                i.db.playback_occurrence(&i.session.session_id, id)
+                    .map_err(storage)
+            })
+            .transpose()?
+            .flatten();
+        if let Some(current) = response.current.as_mut() {
+            current.availability = availability(&i.db, &current.source.server_id)?;
+        }
+        response.playback.can_go_next = if let Some(current) = response.current.as_ref() {
+            i.db.playback_successor(&i.session.session_id, current.ordinal)
+                .map_err(storage)?
+                .is_some()
+        } else {
+            false
+        };
+        Ok(response)
+    })();
+    let mut response = match projection {
+        Ok(response) => response,
+        Err(error) => {
+            freeze_terminal(i, terminal);
+            return Err(error);
+        }
+    };
+    if let Err(error) = i.db.persist_playback_terminal(
+        &terminal.session,
+        &terminal.occurrence_id,
+        terminal.outcome,
+        terminal.failure.as_ref().map(|f| f.code.as_str()),
+    ) {
+        freeze_terminal(i, terminal);
+        return Err(storage(error));
+    }
+    let changed = terminal.session.current_occurrence_id != i.session.current_occurrence_id;
+    if changed || recovery {
         i.control_epoch.fetch_add(1, Ordering::AcqRel);
         generation_serial.fetch_add(1, Ordering::AcqRel);
+        super::audio::global().control(ControlAction::Stop);
         i.generation_id = Uuid::new_v4().to_string();
-        i.session = next_session;
-        i.state_sequence = i
-            .state_sequence
-            .checked_add(1)
-            .ok_or_else(|| PlaybackError::invalid("INVALID_SESSION", "state sequence overflow"))?;
-        i.output_gate.store(resume, Ordering::Release);
-        i.playback = PlaybackState {
-            status: if resume {
-                PlaybackStatus::Loading
-            } else {
-                PlaybackStatus::Paused
-            },
-            ..Default::default()
-        };
-        if resume && let Some(outputs) = i.outputs.as_mut() {
-            outputs.effect = Some(i.generation_id.clone());
-        }
-        Ok(true)
-    } else {
-        next_session.state = TransportState::Paused;
-        i.db.transition_playback_occurrence(
-            &next_session,
-            &current.occurrence_id,
-            "naturalCompletion",
-        )
-        .map_err(storage)?;
-        i.session = next_session;
-        i.output_gate.store(false, Ordering::Release);
-        i.playback.status = PlaybackStatus::Completed;
-        i.state_sequence = i
-            .state_sequence
-            .checked_add(1)
-            .ok_or_else(|| PlaybackError::invalid("INVALID_SESSION", "state sequence overflow"))?;
-        Ok(false)
     }
+    if changed {
+        i.playback = PlaybackState::default();
+    }
+    i.session = terminal.session;
+    i.playback.status = terminal.status;
+    i.playback.error = terminal.failure;
+    i.output_gate.store(
+        i.session.state == TransportState::Buffering,
+        Ordering::Release,
+    );
+    i.pending_terminal = None;
+    i.state_sequence = sequence;
+    i.dirty = false;
+    i.checkpointed_position_ms = i.session.position_ms;
+    i.persistence = Status {
+        status: "ok".into(),
+        code: None,
+    };
+    response.generation_id = i.generation_id.clone();
+    response.state_sequence = i.state_sequence.to_string();
+    response.state = i.session.state;
+    response.position_ms = i.session.position_ms;
+    response.checkpointed_position_ms = i.checkpointed_position_ms;
+    response.persistence = i.persistence.clone();
+    let can_go_next = response.playback.can_go_next;
+    response.playback = i.playback.clone();
+    response.playback.can_go_next = can_go_next;
+    response.output = i.output.clone();
+    response.resume_epoch = i.control_epoch.load(Ordering::Acquire);
+    response.seek_epoch = response.resume_epoch;
+    Ok(response)
+}
+
+fn freeze_terminal(i: &mut Inner, terminal: PendingTerminal) {
+    i.pending_terminal = Some(terminal);
+    i.control_epoch.fetch_add(1, Ordering::AcqRel);
+    i.output_gate.store(false, Ordering::Release);
+    super::audio::global().control(ControlAction::Stop);
+    output_selection::finish_output_preparation(i);
+    i.session.state = TransportState::Paused;
+    i.playback.status = PlaybackStatus::Error;
+    i.playback.error = Some(PlaybackFailure {
+        code: "PERSISTENCE_FAILED".into(),
+        retryable: true,
+    });
+    i.persistence = Status {
+        status: "error".into(),
+        code: Some("PERSISTENCE_FAILED".into()),
+    };
+    i.state_sequence = i.state_sequence.saturating_add(1);
 }
 
 #[cfg(test)]
@@ -3258,6 +3585,409 @@ mod tests {
             Some("naturalCompletion")
         );
         playback.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn retried_failure_and_completed_replay_each_finish_as_a_new_attempt() {
+        let (db, playback, _) = queued();
+        let cleanup = OwnerThreadCleanup(playback.clone());
+        {
+            let mut i = playback.inner.lock().unwrap();
+            i.session.position_ms = 321;
+            let mut terminal = terminal_plan(&i, "technicalFailure", PlaybackStatus::Error);
+            terminal.session.state = TransportState::Paused;
+            terminal.failure = Some(PlaybackFailure {
+                code: "DECODE_FAILED".into(),
+                retryable: true,
+            });
+            commit_terminal(&mut i, terminal, &playback.generation_serial, false).unwrap();
+            let retry = transport(&snapshot(&i).unwrap(), ControlAction::Retry);
+            let resumed = control_inner(&mut i, &retry, &playback.generation_serial).unwrap();
+            assert!(resumed.resume_audio);
+            assert_eq!(resumed.position_ms, 321);
+            let occurrence = resumed.current.unwrap().occurrence_id;
+            assert_eq!(db.playback_outcome(&occurrence).unwrap(), None);
+            apply_playback_event(&mut i, PlaybackEvent::Active);
+            let cleared_reason: Option<String> = db
+                .conn
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT failure_code FROM playback_occurrences WHERE occurrence_id=?1",
+                    [&occurrence],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(cleared_reason, None);
+            let mut failed_again = terminal_plan(&i, "technicalFailure", PlaybackStatus::Error);
+            failed_again.session.position_ms = 400;
+            failed_again.session.state = TransportState::Paused;
+            failed_again.failure = Some(PlaybackFailure {
+                code: "SOURCE_UNAVAILABLE".into(),
+                retryable: true,
+            });
+            commit_terminal(&mut i, failed_again, &playback.generation_serial, false).unwrap();
+            let second_retry = transport(&snapshot(&i).unwrap(), ControlAction::Retry);
+            let second_attempt =
+                control_inner(&mut i, &second_retry, &playback.generation_serial).unwrap();
+            assert_eq!(second_attempt.position_ms, 400);
+            assert_eq!(second_attempt.current.unwrap().occurrence_id, occurrence);
+            complete_occurrence(&mut i, 999, &playback.generation_serial).unwrap();
+            assert_eq!(i.playback.status, PlaybackStatus::Completed);
+            let resume = transport(&snapshot(&i).unwrap(), ControlAction::Resume);
+            let replayed = control_inner(&mut i, &resume, &playback.generation_serial).unwrap();
+            assert_eq!(replayed.position_ms, 0);
+            assert_eq!(db.playback_outcome(&occurrence).unwrap(), None);
+            complete_occurrence(&mut i, 999, &playback.generation_serial).unwrap();
+            assert_eq!(i.playback.status, PlaybackStatus::Completed);
+        }
+        drop(cleanup);
+        let restarted = PlaybackSession::restore(db.clone(), "restart".into());
+        let restored = restarted.snapshot().unwrap();
+        assert_eq!(restored.state, TransportState::Paused);
+        assert_eq!(restored.position_ms, 999);
+        assert_eq!(
+            db.playback_outcome(&restored.current.unwrap().occurrence_id)
+                .unwrap()
+                .as_deref(),
+            Some("naturalCompletion")
+        );
+        restarted.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn failed_terminal_write_recovers_exact_cursor_without_audio_and_survives_restart() {
+        let (db, playback, before) = queued();
+        let cleanup = OwnerThreadCleanup(playback.clone());
+        {
+            let mut i = playback.inner.lock().unwrap();
+            db.conn.lock().unwrap().execute_batch("CREATE TRIGGER terminal_rollback BEFORE UPDATE ON playback_sessions BEGIN SELECT RAISE(ABORT,'injected'); END").unwrap();
+            assert!(complete_occurrence(&mut i, 875, &playback.generation_serial).is_err());
+            assert_eq!(i.session.position_ms, before.position_ms);
+            assert_eq!(i.persistence.code.as_deref(), Some("PERSISTENCE_FAILED"));
+            assert_eq!(
+                db.playback_outcome(&before.current.as_ref().unwrap().occurrence_id)
+                    .unwrap(),
+                None
+            );
+            let failed = snapshot(&i).unwrap();
+            assert_eq!(
+                apply_inner(
+                    &mut i,
+                    &params(
+                        &failed,
+                        SessionOperation::AppendQueue {
+                            sources: vec![TrackSource {
+                                server_id: "offline".into(),
+                                track_id: "later".into()
+                            }]
+                        }
+                    ),
+                    &playback.generation_serial
+                )
+                .unwrap_err()
+                .code,
+                "PERSISTENCE_FAILED"
+            );
+            assert_eq!(
+                control_inner(
+                    &mut i,
+                    &transport(&failed, ControlAction::Next),
+                    &playback.generation_serial
+                )
+                .unwrap_err()
+                .code,
+                "PERSISTENCE_FAILED"
+            );
+            assert_eq!(
+                seek_inner(&mut i, &seek(&failed, 1), &playback.generation_serial)
+                    .unwrap_err()
+                    .code,
+                "PERSISTENCE_FAILED"
+            );
+            assert!(
+                control_inner(
+                    &mut i,
+                    &transport(&failed, ControlAction::Retry),
+                    &playback.generation_serial
+                )
+                .is_err()
+            );
+            assert!(i.pending_terminal.is_some());
+            db.conn
+                .lock()
+                .unwrap()
+                .execute_batch("DROP TRIGGER terminal_rollback")
+                .unwrap();
+            let recovered = control_inner(
+                &mut i,
+                &transport(&failed, ControlAction::Retry),
+                &playback.generation_serial,
+            )
+            .unwrap();
+            assert_eq!(recovered.position_ms, 875);
+            assert_eq!(recovered.playback.status, PlaybackStatus::Completed);
+            assert!(!recovered.resume_audio);
+            assert!(!i.output_gate.load(Ordering::Acquire));
+            assert!(i.pending_terminal.is_none());
+        }
+        drop(cleanup);
+        let restarted = PlaybackSession::restore(db.clone(), "restart".into());
+        assert_eq!(restarted.snapshot().unwrap().position_ms, 875);
+        assert_eq!(
+            db.playback_outcome(&before.current.unwrap().occurrence_id)
+                .unwrap()
+                .as_deref(),
+            Some("naturalCompletion")
+        );
+        restarted.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn failed_technical_terminal_rolls_back_reason_and_cursor_then_recovers_atomically() {
+        let (db, playback, before) = queued();
+        let cleanup = OwnerThreadCleanup(playback.clone());
+        let mut i = playback.inner.lock().unwrap();
+        let mut terminal = terminal_plan(&i, "technicalFailure", PlaybackStatus::Error);
+        terminal.session.position_ms = 432;
+        terminal.session.state = TransportState::Paused;
+        terminal.failure = Some(PlaybackFailure {
+            code: "DECODE_FAILED".into(),
+            retryable: true,
+        });
+        db.conn.lock().unwrap().execute_batch("CREATE TRIGGER terminal_rollback BEFORE UPDATE ON playback_sessions BEGIN SELECT RAISE(ABORT,'injected'); END").unwrap();
+        assert!(commit_terminal(&mut i, terminal, &playback.generation_serial, false).is_err());
+        assert_eq!(db.load_playback_session().unwrap().unwrap().position_ms, 0);
+        assert_eq!(
+            db.playback_outcome(&before.current.as_ref().unwrap().occurrence_id)
+                .unwrap(),
+            None
+        );
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER terminal_rollback")
+            .unwrap();
+        let failed = snapshot(&i).unwrap();
+        let recovered = control_inner(
+            &mut i,
+            &transport(&failed, ControlAction::Retry),
+            &playback.generation_serial,
+        )
+        .unwrap();
+        assert!(!recovered.resume_audio);
+        assert_eq!(recovered.playback.error.unwrap().code, "DECODE_FAILED");
+        let persisted = db.load_playback_session().unwrap().unwrap();
+        assert_eq!(persisted.position_ms, 432);
+        assert_eq!(persisted.checkpoint_sequence, 1);
+        let occurrence_id = before.current.unwrap().occurrence_id;
+        let reason: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT failure_code FROM playback_occurrences WHERE occurrence_id=?1",
+                [&occurrence_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reason, "DECODE_FAILED");
+        drop(i);
+        drop(cleanup);
+        let restarted = PlaybackSession::restore(db.clone(), "restart".into());
+        let restored = restarted.snapshot().unwrap();
+        assert_eq!(restored.position_ms, 432);
+        assert_eq!(restored.state, TransportState::Paused);
+        assert_eq!(
+            db.playback_outcome(&occurrence_id).unwrap().as_deref(),
+            Some("technicalFailure")
+        );
+        restarted.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn stop_or_replacement_discards_failed_terminal_recovery() {
+        for replacement in [false, true] {
+            let (db, playback, _) = queued();
+            let _cleanup = OwnerThreadCleanup(playback.clone());
+            let mut i = playback.inner.lock().unwrap();
+            db.conn.lock().unwrap().execute_batch("CREATE TRIGGER terminal_rollback BEFORE UPDATE ON playback_sessions BEGIN SELECT RAISE(ABORT,'injected'); END").unwrap();
+            assert!(complete_occurrence(&mut i, 875, &playback.generation_serial).is_err());
+            let failed = snapshot(&i).unwrap();
+            db.conn
+                .lock()
+                .unwrap()
+                .execute_batch("DROP TRIGGER terminal_rollback")
+                .unwrap();
+            if replacement {
+                apply_inner(
+                    &mut i,
+                    &params(&failed, SessionOperation::Clear),
+                    &playback.generation_serial,
+                )
+                .unwrap();
+            } else {
+                control_inner(
+                    &mut i,
+                    &transport(&failed, ControlAction::Stop),
+                    &playback.generation_serial,
+                )
+                .unwrap();
+            }
+            assert!(i.pending_terminal.is_none());
+            assert_eq!(
+                control_inner(
+                    &mut i,
+                    &transport(&failed, ControlAction::Retry),
+                    &playback.generation_serial
+                )
+                .unwrap_err()
+                .code,
+                "GENERATION_CONFLICT"
+            );
+            assert_eq!(i.session.position_ms, 0);
+        }
+    }
+
+    #[test]
+    fn stopped_next_preserves_stopped_projection_and_never_dispatches_audio() {
+        let (_, playback, before) = queued();
+        let _cleanup = OwnerThreadCleanup(playback.clone());
+        let mut i = playback.inner.lock().unwrap();
+        apply_inner(
+            &mut i,
+            &params(
+                &before,
+                SessionOperation::AppendQueue {
+                    sources: vec![TrackSource {
+                        server_id: "offline".into(),
+                        track_id: "two".into(),
+                    }],
+                },
+            ),
+            &playback.generation_serial,
+        )
+        .unwrap();
+        let current = snapshot(&i).unwrap();
+        let stopped = control_inner(
+            &mut i,
+            &transport(&current, ControlAction::Stop),
+            &playback.generation_serial,
+        )
+        .unwrap();
+        let next = control_inner(
+            &mut i,
+            &transport(&stopped, ControlAction::Next),
+            &playback.generation_serial,
+        )
+        .unwrap();
+        assert_eq!(next.playback.status, PlaybackStatus::Stopped);
+        assert_eq!(next.state, TransportState::Paused);
+        assert!(!next.resume_audio);
+        assert!(!i.output_gate.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn failed_next_and_natural_advance_recover_successor_paused_once() {
+        for explicit in [false, true] {
+            let (db, playback, before) = queued();
+            let _cleanup = OwnerThreadCleanup(playback.clone());
+            let mut i = playback.inner.lock().unwrap();
+            apply_inner(
+                &mut i,
+                &params(
+                    &before,
+                    SessionOperation::AppendQueue {
+                        sources: vec![TrackSource {
+                            server_id: "offline".into(),
+                            track_id: "two".into(),
+                        }],
+                    },
+                ),
+                &playback.generation_serial,
+            )
+            .unwrap();
+            i.session.state = TransportState::Playing;
+            i.playback.status = PlaybackStatus::Active;
+            let current = snapshot(&i).unwrap();
+            db.conn.lock().unwrap().execute_batch("CREATE TRIGGER terminal_rollback BEFORE UPDATE ON playback_sessions BEGIN SELECT RAISE(ABORT,'injected'); END").unwrap();
+            if explicit {
+                assert!(
+                    control_inner(
+                        &mut i,
+                        &transport(&current, ControlAction::Next),
+                        &playback.generation_serial
+                    )
+                    .is_err()
+                );
+            } else {
+                assert!(complete_occurrence(&mut i, 1000, &playback.generation_serial).is_err());
+            }
+            assert_eq!(
+                i.session.current_occurrence_id,
+                current.current.as_ref().map(|o| o.occurrence_id.clone())
+            );
+            assert!(!i.output_gate.load(Ordering::Acquire));
+            assert_eq!(i.playback.status, PlaybackStatus::Error);
+            db.conn
+                .lock()
+                .unwrap()
+                .execute_batch("DROP TRIGGER terminal_rollback")
+                .unwrap();
+            let failed = snapshot(&i).unwrap();
+            let recovered = control_inner(
+                &mut i,
+                &transport(&failed, ControlAction::Retry),
+                &playback.generation_serial,
+            )
+            .unwrap();
+            assert_eq!(recovered.current.unwrap().source.track_id, "two");
+            assert_eq!(recovered.position_ms, 0);
+            assert_eq!(recovered.playback.status, PlaybackStatus::Paused);
+            assert!(!recovered.resume_audio);
+            assert_eq!(recovered.queue_revision, current.queue_revision);
+            assert_eq!(
+                db.playback_outcome(&current.current.unwrap().occurrence_id)
+                    .unwrap()
+                    .as_deref(),
+                Some(if explicit {
+                    "explicitSkip"
+                } else {
+                    "naturalCompletion"
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn late_progress_cannot_overwrite_committed_failure_or_final_cursor() {
+        for failure in [false, true] {
+            let (db, playback, _) = queued();
+            let _cleanup = OwnerThreadCleanup(playback.clone());
+            let mut i = playback.inner.lock().unwrap();
+            if failure {
+                let mut terminal = terminal_plan(&i, "technicalFailure", PlaybackStatus::Error);
+                terminal.session.state = TransportState::Paused;
+                terminal.session.position_ms = 456;
+                terminal.failure = Some(PlaybackFailure {
+                    code: "DECODE_FAILED".into(),
+                    retryable: true,
+                });
+                commit_terminal(&mut i, terminal, &playback.generation_serial, false).unwrap();
+            } else {
+                complete_occurrence(&mut i, 456, &playback.generation_serial).unwrap();
+            }
+            reset_ingress(&i, &playback.ingress);
+            playback.ingress.lock().unwrap().pending = Some((99, 900));
+            sample_progress(&mut i, &playback.ingress).unwrap();
+            checkpoint_inner(&mut i).unwrap();
+            assert_eq!(i.session.position_ms, 456);
+            assert_eq!(i.checkpointed_position_ms, 456);
+            assert_eq!(
+                db.load_playback_session().unwrap().unwrap().position_ms,
+                456
+            );
+        }
     }
 
     #[test]

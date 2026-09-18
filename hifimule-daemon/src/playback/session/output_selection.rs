@@ -254,7 +254,11 @@ pub(super) fn select_output(
             "invalid output selection identity",
         ));
     }
-    if i.dedup.contains_key(&p.command_id) || i.control_dedup.contains_key(&p.command_id) {
+    album_admission::prune(i, false);
+    if album_admission::contains_command(i, &p.command_id)
+        || i.dedup.contains_key(&p.command_id)
+        || i.control_dedup.contains_key(&p.command_id)
+    {
         return Err(PlaybackError::conflict(
             "COMMAND_ID_REUSED",
             "command identity was reused",

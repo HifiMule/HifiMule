@@ -34,7 +34,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-08
-last_updated: 2026-09-18  # Story 15.8 implementation started
+last_updated: 2026-09-18  # Story 15.8 review fixes; installed platform evidence remains open
 project: HifiMule
 project_key: NOKEY
 tracking_system: file-system

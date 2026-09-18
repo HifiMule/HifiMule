@@ -91,12 +91,20 @@ function albumButtonHarness() {
   const calls = []; const toasts = [];
   class Element {
     listeners = new Map(); disabled = false; name = ''; label = '';
+    children = []; dataset = {}; attributes = {};
+    appendChild(child) { child.parent = this; this.children.push(child); return child; }
+    setAttribute(name, value) { this.attributes[name] = value; }
     addEventListener(name, listener) { this.listeners.set(name, listener); }
-    async dispatch(name) {
-      let stopped = false;
-      await this.listeners.get(name)?.({ stopPropagation: () => { stopped = true; } });
-      return stopped;
+    async dispatchEvent(name, detail = {}) {
+      const event = { target: this, defaultPrevented: false, stopped: false, ...detail,
+        stopPropagation() { this.stopped = true; },
+        preventDefault() { this.defaultPrevented = true; } };
+      for (let node = this; node && !event.stopped; node = node.parent) {
+        await node.listeners.get(name)?.(event);
+      }
+      return event;
     }
+    async dispatch(name) { return (await this.dispatchEvent(name)).stopped; }
   }
   const exports = {};
   const source = ts.transpileModule(readFileSync(new URL('../../hifimule-ui/src/components/AlbumPlayButton.ts', import.meta.url), 'utf8'), {
@@ -110,8 +118,46 @@ function albumButtonHarness() {
         ? { showToast: (...args) => toasts.push(args) }
         : { t: (_key, values) => `Play ${values.title}` },
   });
-  return { create: exports.createAlbumPlayButton, calls, toasts };
+  const viewExports = {};
+  const viewSource = ts.transpileModule(readFileSync(new URL('../../hifimule-ui/src/components/TracksBrowseView.ts', import.meta.url), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  vm.runInNewContext(viewSource, {
+    exports: viewExports, document: { createElement: () => new Element() },
+    require: name => name === './AlbumPlayButton' ? exports : {},
+  });
+  const selections = [];
+  const view = Object.create(viewExports.TracksBrowseView.prototype);
+  view.selectedAlbumId = null;
+  view.selectAlbum = id => selections.push(id);
+  // Mount the real row and helper together; only DOM/browser activation is replaced.
+  const container = new Element();
+  const mountRow = album => container.appendChild(view.buildAlbumRow(album));
+  return { create: exports.createAlbumPlayButton, calls, toasts, mountRow, selections };
 }
+
+test('mounted album row leaves nested keyboard activation to its play button', async () => {
+  const h = albumButtonHarness();
+  const row = h.mountRow({ id: 'album', serverId: 'portable-server', name: 'Album' });
+  const button = row.children[0];
+  for (const key of [' ', 'Enter']) {
+    const event = await button.dispatchEvent('keydown', { key });
+    assert.equal(event.defaultPrevented, false, `${key} must retain button activation`);
+    assert.deepEqual(h.selections, []);
+    // Browser/Shoelace generates a click for an uncancelled activation key.
+    await button.dispatch('click');
+  }
+  assert.deepEqual(h.calls, [
+    { serverId: 'portable-server', albumId: 'album' },
+    { serverId: 'portable-server', albumId: 'album' },
+  ]);
+  assert.deepEqual(h.selections, []);
+  for (const key of [' ', 'Enter']) {
+    assert.equal((await row.dispatchEvent('keydown', { key })).defaultPrevented, true);
+  }
+  assert.deepEqual(h.selections, ['album', 'album']);
+  assert.equal(h.calls.length, 2);
+});
 
 test('loading playback exposes Pause rather than a second Resume', async () => {
   const h = harness(snapshot()); await h.tick();

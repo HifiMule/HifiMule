@@ -300,3 +300,7 @@ If future review findings need follow-up, add them as new story scope or reopen 
 - source_spec: `_bmad-output/implementation-artifacts/spec-fix-linux-pulse-seek-build.md`
   summary: Add targeted coverage that preserves the typed seek mechanism at the PulseAudio decoder boundary.
   evidence: The Linux build catches an `Option`-to-boolean mismatch, but a behavior-level regression test would require extracting or exposing a testable decoder-argument seam.
+
+## Deferred from: code review of 15-8-play-an-album-in-order-and-advance-through-its-tracks.md (2026-09-18)
+
+- **Terminal event coalescing can erase failure before consumption** [hifimule-daemon/src/playback/session.rs:2116] — Failed and Completed share event kind 2. A Completed enqueued after Failed before owner consumption replaces the failure, permitting completion rather than preserving the technical failure. Confirmed unchanged in baseline `b9c2860`; deferred as pre-existing under the code-review workflow. Harden terminal precedence and cover both enqueue orders deterministically; Story 15.8 automatic advancement increases the consequence of the existing ingress gap.
