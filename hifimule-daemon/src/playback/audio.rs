@@ -2833,7 +2833,11 @@ mod tests {
             Some("mp3"),
             "https://music.example/original",
         );
-        for admitted in [Some("flac"), None] {
+        for admitted in [
+            Some("flac"),
+            Some(super::super::model::UNVERIFIED_ALBUM_FORMAT),
+            None,
+        ] {
             let error = qualified_gain_suffix(0.75, Some("mp3"), admitted, &original).unwrap_err();
             assert!(error.retryable);
             assert_eq!(error.code, "SOURCE_UNAVAILABLE");

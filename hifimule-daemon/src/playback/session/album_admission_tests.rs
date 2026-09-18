@@ -764,3 +764,188 @@ fn non_unity_handoff_and_storage_retry_preserve_frozen_member_policy() {
     assert_eq!(replaced.gain_bits, 1.0f32.to_bits());
     assert_eq!(replaced.qualified_suffix, None);
 }
+
+fn legacy_v3_album(gain: bool, omit_digest: bool) -> (Arc<Database>, String, u32) {
+    let owner = Owner::new();
+    let reservation = resolve(&owner.0, request(&owner.0.snapshot().unwrap()));
+    let policy = if gain {
+        crate::playback::loudness::AlbumLoudnessPolicy {
+            version: 1,
+            scalar_bits: 0.75f32.to_bits(),
+            gain_db_bits: Some(0.0f64.to_bits()),
+            peak_bits: Some((crate::playback::loudness::SAMPLE_PEAK_CEILING / 0.75).to_bits()),
+            reason: crate::playback::loudness::AlbumLoudnessReason::OpenSubsonicReplayGain,
+        }
+    } else {
+        crate::playback::loudness::AlbumLoudnessPolicy::unity(
+            crate::playback::loudness::AlbumLoudnessReason::MetadataAbsent,
+        )
+    };
+    let formats = if gain {
+        vec!["flac".into(); 2]
+    } else {
+        Vec::new()
+    };
+    let committed = owner
+        .0
+        .commit_album_with_policy(reservation, sources(2), policy, formats)
+        .unwrap();
+    let db = owner.0.inner.lock().unwrap().db.clone();
+    owner.0.stop_and_join().unwrap();
+    let current = committed.occurrences[1].occurrence_id.clone();
+    let conn = db.conn.lock().unwrap();
+    let json: String = conn
+        .query_row(
+            "SELECT album_context_json FROM playback_sessions",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
+    if omit_digest {
+        legacy.as_object_mut().unwrap().remove("membershipDigest");
+    }
+    legacy.as_object_mut().unwrap().remove("representations");
+    conn.execute("UPDATE playback_sessions SET album_context_json=?1,position_ms=321,transport_state='playing',current_occurrence_id=?2",
+        rusqlite::params![legacy.to_string(), current]).unwrap();
+    conn.execute_batch("UPDATE playback_schema SET version=3; UPDATE playback_occurrences SET outcome='explicitSkip' WHERE ordinal=0").unwrap();
+    drop(conn);
+    (db, current, policy.scalar_bits)
+}
+
+#[test]
+fn legacy_v3_album_restores_and_allows_new_album_without_resetting_gain_or_queue() {
+    for gain in [false, true] {
+        for omit_digest in [false, true] {
+            let (db, current, gain_bits) = legacy_v3_album(gain, omit_digest);
+            let restored = PlaybackSession::restore(db.clone(), Uuid::new_v4().to_string());
+            let before = restored.snapshot().unwrap();
+            assert_eq!(before.restoration.status, "ok");
+            assert_eq!(before.current.as_ref().unwrap().occurrence_id, current);
+            assert_eq!(before.position_ms, 321);
+            assert_eq!(before.state, TransportState::Paused);
+            assert_eq!(before.total_occurrence_count, 2);
+            assert_eq!(before.gain_bits, gain_bits);
+            assert_eq!(
+                before.qualified_suffix.as_deref(),
+                gain.then_some(UNVERIFIED_ALBUM_FORMAT)
+            );
+            assert_eq!(
+                db.playback_outcome(&before.occurrences[0].occurrence_id)
+                    .unwrap()
+                    .as_deref(),
+                Some("explicitSkip")
+            );
+            let version: i64 = db
+                .conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT version FROM playback_schema", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(version, 4);
+            // Re-reading does not guess formats or change the frozen policy.
+            assert_eq!(
+                db.load_playback_session()
+                    .unwrap()
+                    .unwrap()
+                    .album_context
+                    .unwrap()
+                    .policy
+                    .scalar_bits,
+                gain_bits
+            );
+            let replacement = resolve(&restored, request(&before));
+            let played = restored.commit_album(replacement, sources(1)).unwrap();
+            assert_eq!(played.restoration.status, "ok");
+            assert_eq!(played.total_occurrence_count, 1);
+            assert_eq!(played.gain_bits, 1.0f32.to_bits());
+            assert!(played.resume_audio);
+            restored.stop_and_join().unwrap();
+        }
+    }
+}
+
+#[test]
+fn legacy_v3_migration_rolls_back_and_restore_retry_recovers() {
+    let (db, current, bits) = legacy_v3_album(false, true);
+    let old_json: String = db
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT album_context_json FROM playback_sessions",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(db.init_playback_with_injected_failure().is_err());
+    let (version, json): (i64, String) = db
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT version,album_context_json FROM playback_schema,playback_sessions",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(version, 3);
+    assert_eq!(json, old_json);
+    db.conn.lock().unwrap().execute_batch("CREATE TRIGGER block_migration BEFORE UPDATE ON playback_sessions BEGIN SELECT RAISE(ABORT,'injected'); END").unwrap();
+    let restored = PlaybackSession::restore(db.clone(), Uuid::new_v4().to_string());
+    assert_eq!(restored.snapshot().unwrap().restoration.status, "error");
+    db.conn
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER block_migration")
+        .unwrap();
+    let recovered = restored.retry_restore().unwrap();
+    assert_eq!(recovered.restoration.status, "ok");
+    assert_eq!(recovered.current.as_ref().unwrap().occurrence_id, current);
+    assert_eq!(recovered.position_ms, 321);
+    assert_eq!(recovered.gain_bits, bits);
+    let reservation = resolve(&restored, request(&recovered));
+    restored.commit_album(reservation, sources(1)).unwrap();
+    restored.stop_and_join().unwrap();
+}
+
+#[test]
+fn legacy_v3_migration_does_not_repair_corrupt_existing_digest_or_membership() {
+    for corrupt_digest in [false, true] {
+        let (db, _, _) = legacy_v3_album(false, !corrupt_digest);
+        if corrupt_digest {
+            let conn = db.conn.lock().unwrap();
+            let json: String = conn
+                .query_row(
+                    "SELECT album_context_json FROM playback_sessions",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let mut context: serde_json::Value = serde_json::from_str(&json).unwrap();
+            context["membershipDigest"] = "0".repeat(64).into();
+            conn.execute(
+                "UPDATE playback_sessions SET album_context_json=?1",
+                [context.to_string()],
+            )
+            .unwrap();
+        } else {
+            db.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE playback_occurrences SET server_id='wrong' WHERE ordinal=0",
+                    [],
+                )
+                .unwrap();
+        }
+        assert!(db.init_playback().is_err());
+        let version: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT version FROM playback_schema", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+    }
+}

@@ -467,6 +467,10 @@ pub struct PersistedSession {
     pub(crate) album_context: Option<FrozenAlbumContext>,
 }
 
+// Only legacy v3 migration creates this marker. It never qualifies playback:
+// the preparation check requires an exact supported suffix match.
+pub(crate) const UNVERIFIED_ALBUM_FORMAT: &str = "unverified";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct FrozenAlbumContext {
@@ -495,10 +499,10 @@ impl FrozenAlbumContext {
         }
         if (self.policy.scalar() != 1.0 && self.representations.len() != self.member_count as usize)
             || (self.policy.scalar() == 1.0 && !self.representations.is_empty())
-            || self
-                .representations
-                .iter()
-                .any(|suffix| !matches!(suffix.as_str(), "wav" | "flac" | "m4a" | "mp3"))
+            || self.representations.iter().any(|suffix| {
+                suffix != UNVERIFIED_ALBUM_FORMAT
+                    && !matches!(suffix.as_str(), "wav" | "flac" | "m4a" | "mp3")
+            })
         {
             return Err("missing or invalid admitted representations");
         }

@@ -3,7 +3,7 @@ use crate::db::Database;
 use anyhow::{Result, anyhow};
 use rusqlite::{OptionalExtension, params};
 
-pub const PERSISTENCE_VERSION: i64 = 3;
+pub const PERSISTENCE_VERSION: i64 = 4;
 
 impl Database {
     pub fn has_portable_server(&self, server_id: &str) -> Result<bool> {
@@ -58,9 +58,6 @@ impl Database {
                 tx.execute("ALTER TABLE playback_occurrences ADD COLUMN outcome TEXT CHECK(outcome IN ('naturalCompletion','explicitSkip','technicalFailure') OR outcome IS NULL)", [])?;
             }
         }
-        if fail_before_version_commit {
-            return Err(anyhow!("injected playback migration failure"));
-        }
         let has_failure_code = {
             let mut statement = tx.prepare("PRAGMA table_info(playback_occurrences)")?;
             statement
@@ -88,6 +85,12 @@ impl Database {
                 "ALTER TABLE playback_sessions ADD COLUMN album_context_json TEXT",
                 [],
             )?;
+        }
+        if version == Some(3) {
+            migrate_v3_album_context(&tx)?;
+        }
+        if fail_before_version_commit {
+            return Err(anyhow!("injected playback migration failure"));
         }
         tx.execute(
             "INSERT OR IGNORE INTO playback_schema(singleton_id,version) VALUES(1,?1)",
@@ -487,6 +490,84 @@ fn occurrence_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Occurrence> 
     })
 }
 
+/// Early v3 album records predate the digest and per-member format evidence.
+/// Migrate only that schema, preserving queue, cursor, outcomes and frozen gain.
+/// Unknown formats block adjusted preparation, not restoration or a new album.
+fn migrate_v3_album_context(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    use super::model::{AlbumSource, FrozenAlbumContext, UNVERIFIED_ALBUM_FORMAT};
+    let row: Option<(String, String)> = tx.query_row(
+        "SELECT session_id,album_context_json FROM playback_sessions WHERE singleton_id=1 AND album_context_json IS NOT NULL",
+        [], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?;
+    let Some((session_id, json)) = row else {
+        return Ok(());
+    };
+    let mut value: serde_json::Value = serde_json::from_str(&json)?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("INVALID_SESSION"))?;
+    let source: AlbumSource = serde_json::from_value(
+        object
+            .get("source")
+            .cloned()
+            .ok_or_else(|| anyhow!("INVALID_SESSION"))?,
+    )?;
+    source.validate().map_err(|error| anyhow!(error))?;
+    let count = object
+        .get("memberCount")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|count| (1..=super::album::MAX_ALBUM_OCCURRENCES as u64).contains(count))
+        .ok_or_else(|| anyhow!("INVALID_SESSION"))?;
+    let policy: super::loudness::AlbumLoudnessPolicy = serde_json::from_value(
+        object
+            .get("policy")
+            .cloned()
+            .ok_or_else(|| anyhow!("INVALID_SESSION"))?,
+    )?;
+    policy.validate().map_err(|error| anyhow!(error))?;
+    let mut hasher = super::model::album_membership_hasher();
+    let mut statement = tx.prepare("SELECT occurrence_id,ordinal,server_id,track_id FROM playback_occurrences WHERE session_id=?1 AND ordinal<?2 ORDER BY ordinal")?;
+    let rows = statement.query_map(params![session_id, count as i64], occurrence_from_row)?;
+    let mut seen = 0;
+    for row in rows {
+        let row = row?;
+        if row.ordinal != seen
+            || row.source.server_id != source.server_id
+            || row.source.validate().is_err()
+            || uuid::Uuid::parse_str(&row.occurrence_id).is_err()
+        {
+            return Err(anyhow!("INVALID_SESSION"));
+        }
+        super::model::hash_album_member(&mut hasher, &row.source);
+        seen += 1;
+    }
+    if seen != count {
+        return Err(anyhow!("INVALID_SESSION"));
+    }
+    let digest = hasher.finalize().to_hex().to_string();
+    if !object.contains_key("membershipDigest") {
+        object.insert("membershipDigest".into(), digest.clone().into());
+    }
+    if !object.contains_key("representations") {
+        let formats = if policy.scalar() == 1.0 {
+            Vec::new()
+        } else {
+            vec![UNVERIFIED_ALBUM_FORMAT; count as usize]
+        };
+        object.insert("representations".into(), serde_json::to_value(formats)?);
+    }
+    let context: FrozenAlbumContext = serde_json::from_value(value)?;
+    context.validate().map_err(|error| anyhow!(error))?;
+    if context.membership_digest != digest {
+        return Err(anyhow!("INVALID_SESSION"));
+    }
+    tx.execute(
+        "UPDATE playback_sessions SET album_context_json=?1 WHERE singleton_id=1",
+        [serde_json::to_string(&context)?],
+    )?;
+    Ok(())
+}
+
 fn nonnegative(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
     let value: i64 = row.get(index)?;
     u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
@@ -630,7 +711,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, PERSISTENCE_VERSION);
     }
 
     #[test]

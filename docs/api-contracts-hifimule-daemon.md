@@ -916,7 +916,7 @@ commits that plan once and leaves the result paused (or Completed at final EOF),
 without preparing audio. Stop or a replacement discards the plan. Ordinary
 source/decode Retry still reopens the same occurrence at its committed cursor.
 Next from Stopped retains Stopped status on the successor. Playback persistence
-schema v3 adds the private frozen album context described below. Existing v1/v2
+schema v4 migrates the older v3 private album contexts described below. Existing v1/v2
 rows migrate with no album context and therefore use exact unity gain.
 
 ## Frozen album loudness policy (internal contract, Story 15.10)
@@ -975,10 +975,15 @@ prepared handoff, Pause/Resume, output recreation and paused restart. Appended
 occurrences use unity; successful Clear, ReplaceQueue, PlayTrack or PlayAlbum
 replaces the context, while a failed replacement preserves the prior queue and
 policy. Corrupt or future policy records fail restoration rather than being
-reinterpreted as unity. Earlier development v3 non-unity records without
-member-format evidence also fail restoration while retaining their data; no
-format is inferred during offline restore. Legacy v1/v2 sessions and unity v3
-sessions remain restorable without member-format evidence.
+reinterpreted as unity. The v3→v4 transaction fills a missing legacy membership digest from the validated
+ordered original occurrence prefix; it never replaces an existing digest. It
+preserves queue, cursor, outcomes and scalar. Legacy non-unity records without
+format evidence receive an explicit `unverified` format marker per member.
+Those sessions restore paused and permit starting a new album, but adjusted
+playback of an unverified member fails preparation until a new album admission
+provides the evidence. No format or replacement gain is guessed. Unity legacy
+records need no format evidence. Missing fields in v4 records remain restoration
+errors; this compatibility conversion runs only when upgrading v3.
 
 The worker multiplies packed f32 output once after swresample and before each
 bounded PCM insertion, including resampler drain. Exact unity bypasses the

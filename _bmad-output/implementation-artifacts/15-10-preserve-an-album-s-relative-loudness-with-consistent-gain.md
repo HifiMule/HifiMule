@@ -259,3 +259,25 @@ GPT-6.
 - 2026-09-18: Applied adversarial review fixes for capability gating, tolerant API errors, cancellation precedence and exact persisted membership validation; reopened incomplete platform evidence.
 
 - 2026-09-18: Applied all six review patches, added eight regression tests, fixed destination gain projection on Next, and retained in-progress status for outstanding installed-platform evidence.
+
+
+### Saved-session compatibility correction
+
+The user's installed v3 database contained the early album-context shape
+(`source`, `memberCount`, `policy`) without `membershipDigest` or
+`representations`. Strict deserialization/validation rejected that legitimate
+older session, and the existing restoration guard then rejected every new
+PlayAlbum request. This supersedes the earlier review note accepting failed
+restoration for development v3 records.
+
+Playback schema v4 now transactionally derives only a missing legacy digest
+from the validated ordered original membership, preserves queue/cursor/outcomes
+and frozen gain, and represents absent non-unity format evidence explicitly as
+unverified. Restoration remains paused; a new album can be admitted normally.
+Unverified non-unity members cannot bypass preparation qualification. Existing
+invalid digests, invalid membership and corrupt v4 records remain errors.
+Regression tests cover all older field combinations at unity and non-unity,
+new album admission after restoration, migration rollback, restore Retry, and
+refusal to silently repair corrupt existing evidence.
+
+Compatibility-fix validation: three migration regressions passed; full controlled daemon suite 966 passed, 6 ignored; macOS ARM64 daemon build, formatting and diff checks passed. The user database was inspected read-only; migration is applied by the updated daemon at startup.
