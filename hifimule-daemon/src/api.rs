@@ -1697,19 +1697,37 @@ impl CredentialManager {
         Ok(crate::paths::get_app_data_dir()?.join("secrets.enc"))
     }
 
-    /// Loads the multi-server vault (UUID → ServerCredentials). A legacy blob that
-    /// predates migration parses as empty here — `migrate_vault_from_legacy` re-keys
-    /// it during startup before any credential is needed.
+    fn parse_vault_json(json: &str) -> Result<VaultContents> {
+        let vault: VaultContents = serde_json::from_str(json)
+            .map_err(|e| anyhow!("Failed to parse secrets vault: {}", e))?;
+        if let Some((id, _)) = vault
+            .iter()
+            .find(|(_, creds)| creds.token_or_password.trim().is_empty())
+        {
+            return Err(anyhow!(
+                "Stored credential for server {} has an empty secret",
+                id
+            ));
+        }
+        Ok(vault)
+    }
+
+    /// Loads the UUID-keyed multi-server vault. Legacy-shape handling is kept in
+    /// `migrate_vault_from_legacy`; malformed or legacy JSON is never treated as
+    /// an empty current-format vault here.
     fn load_vault() -> Result<VaultContents> {
         #[cfg(not(test))]
         {
             let path = Self::get_vault_path()?;
-            if !path.exists() {
+            if !path
+                .try_exists()
+                .map_err(|e| anyhow!("Failed to inspect secrets vault: {}", e))?
+            {
                 return Ok(VaultContents::default());
             }
             let json = crate::vault::decrypt_file(&path, VAULT_APP_SALT)
                 .map_err(|e| anyhow!("Failed to decrypt secrets vault: {}", e))?;
-            Ok(serde_json::from_str(&json).unwrap_or_default())
+            Self::parse_vault_json(&json)
         }
         #[cfg(test)]
         {
@@ -1739,7 +1757,10 @@ impl CredentialManager {
     #[cfg(not(test))]
     fn load_raw_vault_json() -> Result<Option<String>> {
         let path = Self::get_vault_path()?;
-        if !path.exists() {
+        if !path
+            .try_exists()
+            .map_err(|e| anyhow!("Failed to inspect secrets vault: {}", e))?
+        {
             return Ok(None);
         }
         let json = crate::vault::decrypt_file(&path, VAULT_APP_SALT)
@@ -1936,11 +1957,24 @@ impl CredentialManager {
         Self::save_vault(&vault)
     }
 
+    /// Looks up a server's credential by UUID. A missing entry is an expected
+    /// state distinct from a vault read/decrypt/parse failure.
+    pub fn find_server_credential(id: &str) -> Result<Option<ServerCredentials>> {
+        let credential = Self::load_vault()?.get(id).cloned();
+        if let Some(creds) = &credential
+            && creds.token_or_password.trim().is_empty()
+        {
+            return Err(anyhow!(
+                "Stored credential for server {} has an empty secret",
+                id
+            ));
+        }
+        Ok(credential)
+    }
+
     /// Returns a server's credential by UUID.
     pub fn get_server_credential(id: &str) -> Result<ServerCredentials> {
-        Self::load_vault()?
-            .get(id)
-            .cloned()
+        Self::find_server_credential(id)?
             .ok_or_else(|| anyhow!("No credential found in vault for server: {}", id))
     }
 
@@ -1999,6 +2033,27 @@ impl CredentialManager {
             .ok_or_else(|| anyhow!("No selected server in config"))?;
         let creds = Self::get_server_credential(&id)?;
         Ok((config.url, creds.token_or_password, config.user_id))
+    }
+
+    /// Typed legacy-session lookup for callers where an unconfigured session is
+    /// expected. Storage and parse failures remain errors.
+    pub fn find_legacy_credentials() -> Result<Option<(String, String, Option<String>)>> {
+        let path = Self::get_config_path()?;
+        if !path
+            .try_exists()
+            .map_err(|e| anyhow!("Failed to inspect config file: {}", e))?
+        {
+            return Ok(None);
+        }
+        let config = Self::read_config()?;
+        let id = config
+            .selected_server_id
+            .clone()
+            .ok_or_else(|| anyhow!("No selected server in config"))?;
+        let Some(creds) = Self::find_server_credential(&id)? else {
+            return Ok(None);
+        };
+        Ok(Some((config.url, creds.token_or_password, config.user_id)))
     }
 
     pub fn get_device_id() -> Result<String> {
@@ -2769,6 +2824,40 @@ mod tests {
         assert!(CredentialManager::rekey_legacy_vault(new_format, &server, None).is_none());
         // Empty vault is also "new" (nothing to migrate).
         assert!(CredentialManager::rekey_legacy_vault("{}", &server, None).is_none());
+    }
+
+    #[test]
+    fn test_current_vault_parse_rejects_malformed_json() {
+        let error = CredentialManager::parse_vault_json("{not-json")
+            .expect_err("malformed current vault must not become an empty vault");
+        assert!(
+            error
+                .to_string()
+                .starts_with("Failed to parse secrets vault:")
+        );
+    }
+
+    #[test]
+    fn test_current_vault_parse_rejects_legacy_shape() {
+        let legacy = r#"{"token":"legacy-token","server_secrets":{}}"#;
+        let error = CredentialManager::parse_vault_json(legacy)
+            .expect_err("legacy migration must remain an explicit operation");
+        assert!(
+            error
+                .to_string()
+                .starts_with("Failed to parse secrets vault:")
+        );
+    }
+
+    #[test]
+    fn test_current_vault_parse_rejects_empty_secret() {
+        let current = r#"{"uuid-x":{"token_or_password":"   "}}"#;
+        let error = CredentialManager::parse_vault_json(current)
+            .expect_err("empty stored secrets must be rejected");
+        assert_eq!(
+            error.to_string(),
+            "Stored credential for server uuid-x has an empty secret"
+        );
     }
 
     // AC19 end-to-end: migrate_vault_from_legacy re-keys the seeded legacy blob

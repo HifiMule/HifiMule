@@ -2449,39 +2449,49 @@ async fn handle_save_credentials(params: Option<Value>) -> Result<Value, JsonRpc
     }
 }
 
-async fn handle_get_credentials(state: &AppState) -> Result<Value, JsonRpcError> {
-    match CredentialManager::get_credentials() {
-        Ok((url, token, user_id)) => Ok(serde_json::json!({
+fn selected_credentials_response(db: &crate::db::Database) -> Result<Option<Value>, JsonRpcError> {
+    if let Some(server) = db.get_server_config().map_err(storage_error_to_rpc)? {
+        let credential =
+            CredentialManager::find_server_credential(&server.id).map_err(storage_error_to_rpc)?;
+        let user_id = match server.server_type.as_str() {
+            "jellyfin" => credential.as_ref().and_then(|creds| creds.user_id.clone()),
+            "subsonic" | "openSubsonic" => Some(server.username.clone()),
+            other => {
+                return Err(storage_error_to_rpc(anyhow::anyhow!(
+                    "Unsupported selected server type: {}",
+                    other
+                )));
+            }
+        };
+        let token = credential.map(|creds| creds.token_or_password);
+        return Ok(Some(serde_json::json!({
+            "url": server.url,
+            "token": token,
+            "userId": user_id,
+            "serverType": server.server_type,
+            "serverVersion": server.server_version,
+        })));
+    }
+    Ok(None)
+}
+
+fn legacy_credentials_response(credentials: Option<(String, String, Option<String>)>) -> Value {
+    match credentials {
+        Some((url, token, user_id)) => serde_json::json!({
             "url": url,
             "token": token,
             "userId": user_id
-        })),
-        Err(e) => {
-            let msg = e.to_string();
-            // "No config file found" and "No token found in keyring" are expected
-            // "not yet configured" states — return null so callers show the login screen.
-            // All other errors (I/O failure, corrupted config, keyring access denied) are
-            // real storage faults and should be surfaced so they can be diagnosed.
-            if msg.starts_with("No config file found") || msg.contains("No token found") {
-                if let Ok(Some(config)) = state.db.get_server_config() {
-                    return Ok(serde_json::json!({
-                        "url": config.url,
-                        "token": null,
-                        "userId": config.username,
-                        "serverType": config.server_type,
-                        "serverVersion": config.server_version,
-                    }));
-                }
-                Ok(Value::Null)
-            } else {
-                Err(JsonRpcError {
-                    code: ERR_STORAGE_ERROR,
-                    message: msg,
-                    data: None,
-                })
-            }
-        }
+        }),
+        None => Value::Null,
     }
+}
+
+async fn handle_get_credentials(state: &AppState) -> Result<Value, JsonRpcError> {
+    if let Some(response) = selected_credentials_response(&state.db)? {
+        return Ok(response);
+    }
+    let credentials = CredentialManager::find_legacy_credentials().map_err(storage_error_to_rpc)?;
+    Ok(legacy_credentials_response(credentials))
 }
 
 async fn handle_set_device_profile(
@@ -8852,11 +8862,120 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_credentials_falls_back_to_server_config_for_subsonic_device_init() {
+    async fn test_get_credentials_returns_selected_subsonic_credentials() {
         let _lock = credential_test_lock();
         let temp_dir = tempfile::tempdir().unwrap();
         CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
 
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let id = db
+            .upsert_server(
+                "http://subsonic.example",
+                "subsonic",
+                "subsonic-user",
+                Some("1.16.1"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        CredentialManager::save_server_credential(
+            &id,
+            &crate::api::ServerCredentials {
+                token_or_password: "subsonic-password".to_string(),
+                user_id: None,
+            },
+        )
+        .unwrap();
+        let result = selected_credentials_response(&db)
+            .expect("selected lookup should succeed")
+            .expect("server config identity should be returned");
+
+        assert_eq!(result["url"], "http://subsonic.example");
+        assert_eq!(result["token"], "subsonic-password");
+        assert_eq!(result["userId"], "subsonic-user");
+        assert_eq!(result["serverType"], "subsonic");
+        assert_eq!(result["serverVersion"], "1.16.1");
+    }
+
+    #[tokio::test]
+    async fn test_get_credentials_ignores_stale_legacy_jellyfin_metadata() {
+        let _lock = credential_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp_dir.path().join("config.json"));
+        CredentialManager::save_credentials(
+            "http://stale-jellyfin.example",
+            "stale-jellyfin-token",
+            Some("stale-jellyfin-user-id"),
+        )
+        .unwrap();
+
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let id = db
+            .upsert_server(
+                "http://subsonic.example",
+                "openSubsonic",
+                "subsonic-user",
+                Some("1.16.1"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        CredentialManager::save_server_credential(
+            &id,
+            &crate::api::ServerCredentials {
+                token_or_password: "subsonic-password".to_string(),
+                user_id: None,
+            },
+        )
+        .unwrap();
+
+        let result = selected_credentials_response(&db).unwrap().unwrap();
+        assert_eq!(result["url"], "http://subsonic.example");
+        assert_eq!(result["token"], "subsonic-password");
+        assert_eq!(result["userId"], "subsonic-user");
+        assert_eq!(result["serverType"], "openSubsonic");
+    }
+
+    #[tokio::test]
+    async fn test_get_credentials_preserves_selected_jellyfin_provider_user_id() {
+        let _lock = credential_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        let id = db
+            .upsert_server(
+                "http://jellyfin.example",
+                "jellyfin",
+                "login-name-is-not-provider-id",
+                Some("10.10.7"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        CredentialManager::save_server_credential(
+            &id,
+            &crate::api::ServerCredentials {
+                token_or_password: "jellyfin-access-token".to_string(),
+                user_id: Some("jellyfin-provider-user-id".to_string()),
+            },
+        )
+        .unwrap();
+
+        let result = selected_credentials_response(&db).unwrap().unwrap();
+        assert_eq!(result["url"], "http://jellyfin.example");
+        assert_eq!(result["token"], "jellyfin-access-token");
+        assert_eq!(result["userId"], "jellyfin-provider-user-id");
+        assert_ne!(result["userId"], "login-name-is-not-provider-id");
+    }
+
+    #[tokio::test]
+    async fn test_get_credentials_keeps_missing_selected_credential_as_expected_state() {
+        let _lock = credential_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
         let db = Arc::new(crate::db::Database::memory().unwrap());
         db.upsert_server(
             "http://subsonic.example",
@@ -8868,17 +8987,58 @@ mod tests {
             None,
         )
         .unwrap();
-        let state = make_test_state(db);
 
-        let result = handle_get_credentials(&state)
-            .await
-            .expect("server config identity should be returned");
-
+        let result = selected_credentials_response(&db).unwrap().unwrap();
         assert_eq!(result["url"], "http://subsonic.example");
         assert_eq!(result["token"], Value::Null);
         assert_eq!(result["userId"], "subsonic-user");
-        assert_eq!(result["serverType"], "subsonic");
-        assert_eq!(result["serverVersion"], "1.16.1");
+    }
+
+    #[tokio::test]
+    async fn test_get_credentials_rejects_unsupported_selected_provider() {
+        let _lock = credential_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp_dir.path().join("missing-config.json"));
+        let db = Arc::new(crate::db::Database::memory().unwrap());
+        db.upsert_server(
+            "http://unsupported.example",
+            "unsupported",
+            "user",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let error = selected_credentials_response(&db).unwrap_err();
+        assert_eq!(error.code, ERR_STORAGE_ERROR);
+        assert_eq!(
+            error.message,
+            "Unsupported selected server type: unsupported"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_credentials_uses_legacy_session_without_selected_db_row() {
+        let _lock = credential_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        CredentialManager::set_config_path(temp_dir.path().join("config.json"));
+        CredentialManager::save_credentials(
+            "http://legacy-jellyfin.example",
+            "legacy-jellyfin-token",
+            Some("legacy-jellyfin-user-id"),
+        )
+        .unwrap();
+
+        let db = crate::db::Database::memory().unwrap();
+        assert!(selected_credentials_response(&db).unwrap().is_none());
+        let result =
+            legacy_credentials_response(CredentialManager::find_legacy_credentials().unwrap());
+        assert_eq!(result["url"], "http://legacy-jellyfin.example");
+        assert_eq!(result["token"], "legacy-jellyfin-token");
+        assert_eq!(result["userId"], "legacy-jellyfin-user-id");
+        assert!(result.get("serverType").is_none());
     }
 
     #[tokio::test]
