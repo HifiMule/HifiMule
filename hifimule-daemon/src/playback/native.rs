@@ -138,6 +138,7 @@ pub struct NativeCommandMask {
     pub pause: bool,
     pub toggle: bool,
     pub stop: bool,
+    pub next: bool,
     pub seek: bool,
 }
 
@@ -263,6 +264,7 @@ impl NativePlaybackView {
                 pause: !stopping && current && active,
                 toggle: !stopping && (resumable || active),
                 stop: !stopping && current,
+                next: !stopping && snapshot.playback.can_go_next,
                 seek: !stopping
                     && current
                     && snapshot.playback.seek.available
@@ -623,7 +625,7 @@ fn capabilities(mask: NativeCommandMask) -> souvlaki::MediaControlCapabilities {
         pause: mask.pause,
         toggle: mask.toggle,
         stop: mask.stop,
-        next: false,
+        next: mask.next,
         previous: false,
         seek: mask.seek,
         raise: false,
@@ -637,6 +639,7 @@ fn event_to_intent(event: souvlaki::MediaControlEvent) -> Option<NativeControlIn
         souvlaki::MediaControlEvent::Pause => Some(NativeControlIntent::Pause),
         souvlaki::MediaControlEvent::Toggle => Some(NativeControlIntent::Toggle),
         souvlaki::MediaControlEvent::Stop => Some(NativeControlIntent::Stop),
+        souvlaki::MediaControlEvent::Next => Some(NativeControlIntent::Next),
         souvlaki::MediaControlEvent::SetPosition(position) => u64::try_from(position.0.as_millis())
             .ok()
             .map(NativeControlIntent::SeekAbsolute),
@@ -733,6 +736,7 @@ mod tests {
                 pause: false,
                 toggle: true,
                 stop: true,
+                next: false,
                 seek: false,
             }
         );
@@ -747,6 +751,7 @@ mod tests {
                 pause: true,
                 toggle: true,
                 stop: true,
+                next: false,
                 seek: false,
             }
         );
@@ -859,12 +864,16 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_navigation_events_are_not_remapped() {
+    fn next_is_mapped_but_previous_remains_unsupported() {
         assert_eq!(
             event_to_intent(souvlaki::MediaControlEvent::Stop),
             Some(NativeControlIntent::Stop)
         );
-        assert_eq!(event_to_intent(souvlaki::MediaControlEvent::Next), None);
+        assert_eq!(
+            event_to_intent(souvlaki::MediaControlEvent::Next),
+            Some(NativeControlIntent::Next)
+        );
+        assert_eq!(event_to_intent(souvlaki::MediaControlEvent::Previous), None);
     }
 
     #[test]
@@ -1099,9 +1108,10 @@ mod tests {
             souvlaki::MediaControlEvent::Pause
         ));
         assert_eq!(rx.try_recv().unwrap().intent, NativeControlIntent::Pause);
-        assert!(!(state.lock().unwrap().callback.as_ref().unwrap())(
+        assert!((state.lock().unwrap().callback.as_ref().unwrap())(
             souvlaki::MediaControlEvent::Next
         ));
+        assert_eq!(rx.try_recv().unwrap().intent, NativeControlIntent::Next);
         let initial_calls = state.lock().unwrap().calls.len();
         // UI open/close has no native registration effect; unchanged owner refreshes do no work.
         for _ in 0..5 {

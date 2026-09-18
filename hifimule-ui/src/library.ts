@@ -24,6 +24,7 @@ import {
     playbackPlayTrack,
 } from './rpc';
 import { MediaCard, BrowseDisplayItem } from './components/MediaCard';
+import { createAlbumPlayButton } from './components/AlbumPlayButton';
 import { PlaylistCurationView } from './components/PlaylistCurationView';
 import { TracksBrowseView } from './components/TracksBrowseView';
 import { basketStore } from './state/basket';
@@ -217,6 +218,7 @@ function mapFavoriteArtists(tree: FavoriteTree): BrowseDisplayItem[] {
 function mapAlbums(albums: BrowseAlbum[]): BrowseDisplayItem[] {
     return albums.map(a => ({
         id: a.id,
+        serverId: a.serverId,
         name: a.name,
         type: 'MusicAlbum' as const,
         coverArtId: a.coverArtId,
@@ -239,6 +241,7 @@ function mapFavoriteAlbums(
         const favoriteTracks = tree.tracks.filter(track => track.albumId === album.id);
         return {
             id: album.id,
+            serverId: album.serverId,
             name: album.name,
             type: 'MusicAlbum' as const,
             basketId: scopedFavorite ? favoriteBasketId('album', album.id) : album.id,
@@ -415,6 +418,7 @@ function favoriteAlbumsForArtist(tree: FavoriteTree, artistId: string): BrowseAl
         if (trackArtistId !== artistId || !albumId || !track.albumName) return;
         upsertById(albums, {
             id: albumId,
+            serverId: track.serverId,
             name: track.albumName,
             artistId,
             artistName: track.artistName,
@@ -1048,6 +1052,10 @@ function renderListRow(item: BrowseDisplayItem, index: number, onCurate?: (id: s
             try { await playbackPlayTrack(playbackSource.serverId, playbackSource.trackId); }
             catch (error) { showToast((error as Error).message, 'danger'); }
         });
+        row.appendChild(play);
+    }
+    if (item.type === 'MusicAlbum') {
+        const play = createAlbumPlayButton(item.id, item.serverId, item.name);
         row.appendChild(play);
     }
     // Curate button: appears on Playlist rows when playlist write is supported (mirrors MediaCard grid behavior)

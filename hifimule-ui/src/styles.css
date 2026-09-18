@@ -2174,6 +2174,7 @@ h2 {
 .playback-controls {
     min-height: 3.25rem;
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: .5rem;
     padding: .5rem 1rem;
@@ -2187,7 +2188,9 @@ h2 {
 .playback-controls__timeline input[type="range"] { min-width: 7rem; accent-color: var(--sl-color-primary-500); }
 .playback-controls__timeline input[type="range"]:focus-visible { outline: 2px solid var(--sl-color-primary-500); outline-offset: 2px; }
 .playback-controls__seek-status { grid-column: 1 / -1; min-height: 1em; opacity: .8; }
+.playback-controls__error { flex: 1 0 100%; min-width: 0; }
 .playback-controls sl-button:focus-visible { outline: 2px solid var(--sl-color-primary-500); outline-offset: 2px; }
+.playback-controls sl-button[hidden] { display: none !important; }
 
 .playback-controls__output-dropdown::part(panel) {
     /* `bottom-end` keeps this edge beside the trigger, so the wider panel grows

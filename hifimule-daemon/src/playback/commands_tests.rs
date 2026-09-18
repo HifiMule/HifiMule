@@ -576,3 +576,48 @@ async fn stopped_and_completed_sessions_resume_through_rpc_and_native_from_zero(
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retry_reopens_the_same_occurrence_at_its_committed_cursor_and_reports_repeat_failure() {
+    let f = Fixture::new();
+    let loading = f
+        .session
+        .control_with_guard(f.rpc_params(ControlAction::Resume), None)
+        .unwrap();
+    f.session
+        .publish_event(loading.generation_id, PlaybackEvent::Active);
+    let before = f.session.snapshot().unwrap();
+    let occurrence_id = before.current.as_ref().unwrap().occurrence_id.clone();
+    f.session
+        .report_progress(&before.generation_id, &occurrence_id, 1, 2_345)
+        .unwrap();
+    f.session.final_checkpoint().unwrap();
+    assert_eq!(f.session.snapshot().unwrap().position_ms, 2_345);
+    f.session.publish_event(
+        before.generation_id,
+        PlaybackEvent::Failed {
+            code: "SOURCE_UNAVAILABLE".into(),
+            retryable: true,
+        },
+    );
+    let failed = status(&f.session, PlaybackStatus::Error).await;
+    assert_eq!(failed.position_ms, 2_345);
+
+    let admitted = f
+        .service
+        .rpc_control(f.rpc_params(ControlAction::Retry), None)
+        .await
+        .unwrap();
+    assert_eq!(admitted.current.unwrap().occurrence_id, occurrence_id);
+    assert_eq!(admitted.position_ms, 2_345);
+    assert_ne!(admitted.generation_id, failed.generation_id);
+    assert_eq!(admitted.playback.status, PlaybackStatus::Loading);
+
+    notified(&f.provider.entered).await;
+    assert_eq!(f.provider.calls.load(Ordering::SeqCst), 1);
+    f.provider.release.notify_one();
+    let repeated = status(&f.session, PlaybackStatus::Error).await;
+    assert_eq!(repeated.current.unwrap().occurrence_id, occurrence_id);
+    assert_eq!(repeated.position_ms, 2_345);
+    assert_eq!(repeated.playback.error.unwrap().code, "RESUME_UNAVAILABLE");
+}

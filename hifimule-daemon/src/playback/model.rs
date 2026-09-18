@@ -179,6 +179,7 @@ pub struct PlaybackTrackMetadata {
 #[serde(rename_all = "camelCase")]
 pub struct PlaybackState {
     pub status: PlaybackStatus,
+    pub can_go_next: bool,
     pub metadata: Option<PlaybackTrackMetadata>,
     pub duration_ms: Option<u64>,
     pub representation: Option<String>,
@@ -192,6 +193,7 @@ impl Default for PlaybackState {
     fn default() -> Self {
         Self {
             status: PlaybackStatus::Idle,
+            can_go_next: false,
             metadata: None,
             duration_ms: None,
             representation: None,
@@ -301,6 +303,37 @@ pub struct ApplySessionParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AlbumSource {
+    pub server_id: String,
+    pub album_id: String,
+}
+
+impl AlbumSource {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.server_id.is_empty() || self.album_id.is_empty() {
+            return Err("album source identities must not be empty");
+        }
+        if self.server_id.len() > MAX_ID_BYTES || self.album_id.len() > MAX_ID_BYTES {
+            return Err("album source identity exceeds 1024 UTF-8 bytes");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PlayAlbumParams {
+    pub schema_version: u32,
+    pub instance_id: String,
+    pub session_id: String,
+    pub command_id: String,
+    pub expected_queue_revision: String,
+    pub expected_generation_id: String,
+    pub source: AlbumSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -313,6 +346,7 @@ pub enum SessionOperation {
     SelectCurrent { occurrence_id: String },
     Clear,
     PlayTrack { source: TrackSource },
+    PlayAlbum { sources: Vec<TrackSource> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -345,6 +379,8 @@ pub enum ControlAction {
     Pause,
     Resume,
     Stop,
+    Next,
+    Retry,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -448,6 +484,32 @@ mod seek_contract_tests {
             .unwrap()
             .position_ms,
             9_007_199_254_740_991
+        );
+    }
+
+    #[test]
+    fn strict_album_wire_requires_portable_source_and_rejects_unknown_fields() {
+        let request = serde_json::json!({
+            "schemaVersion": 1, "instanceId": "instance", "sessionId": "session",
+            "commandId": "12345678-1234-1234-1234-123456789abc",
+            "expectedQueueRevision": "0", "expectedGenerationId": "generation",
+            "source": { "serverId": "portable-server", "albumId": "album" }
+        });
+        let parsed = serde_json::from_value::<PlayAlbumParams>(request.clone()).unwrap();
+        assert!(parsed.source.validate().is_ok());
+        let mut unknown = request;
+        unknown
+            .as_object_mut()
+            .unwrap()
+            .insert("tracks".into(), serde_json::json!([]));
+        assert!(serde_json::from_value::<PlayAlbumParams>(unknown).is_err());
+        assert!(
+            AlbumSource {
+                server_id: String::new(),
+                album_id: "album".into()
+            }
+            .validate()
+            .is_err()
         );
     }
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect and validate sanitized Stories 15.4–15.7 installed-playback evidence."""
+"""Collect and validate sanitized Stories 15.4–15.8 installed-playback evidence."""
 
 from __future__ import annotations
 
@@ -84,6 +84,7 @@ def empty_record(target: str) -> dict:
         "outputEvidenceVersion": 1,
         "nativeEvidenceVersion": 1,
         "seekEvidenceVersion": 1,
+        "albumPlaybackEvidenceVersion": 1,
         "outputDeviceKind": "unverified",
         "recordedAt": now(),
         "target": target,
@@ -104,6 +105,7 @@ def empty_record(target: str) -> dict:
             },
         },
         "seek": {"rows": []},
+        "albumPlayback": {"observations": []},
         "outcome": "unverified",
     }
 
@@ -574,6 +576,7 @@ def validate_record(record: dict) -> list[str]:
     errors = []
     errors.extend(validate_native_evidence(record))
     errors.extend(validate_seek_evidence(record))
+    errors.extend(validate_album_playback_evidence(record))
     if record.get("outputEvidenceVersion") != 1:
         errors.append("Story 15.5 output evidence is missing; older playback results are insufficient")
     if record.get("outputDeviceKind") != "physical":
@@ -678,6 +681,41 @@ def validate_record(record: dict) -> list[str]:
         sanitize(record)
     except ValueError as error:
         errors.append(str(error))
+    return errors
+
+
+def validate_album_playback_evidence(record: dict) -> list[str]:
+    if record.get("albumPlaybackEvidenceVersion") != 1:
+        return ["Story 15.8 album playback evidence is missing or has an unsupported version"]
+    album = record.get("albumPlayback")
+    observations = album.get("observations") if isinstance(album, dict) else None
+    if not isinstance(observations, list) or not observations:
+        return ["Story 15.8 album playback evidence has no observations"]
+    errors = []
+    causes = set()
+    for index, item in enumerate(observations):
+        label = f"album observation {index}"
+        if not isinstance(item, dict):
+            errors.append(f"{label} is invalid"); continue
+        cause = item.get("cause"); causes.add(cause)
+        sequence = item.get("ordinalSequence")
+        if not isinstance(sequence, list) or not sequence or any(type(value) is not int or value < 0 for value in sequence):
+            errors.append(f"{label} has an invalid or empty ordinal sequence")
+        if item.get("totalCount") != len(sequence or []):
+            errors.append(f"{label} truncates the album sequence")
+        if cause in {"naturalCompletion", "next"}:
+            before, after = item.get("beforeOrdinal"), item.get("afterOrdinal")
+            if type(before) is not int or type(after) is not int or after <= before:
+                errors.append(f"{label} does not prove forward advancement")
+        if cause == "pausedNext" and item.get("audioActivated") is not False:
+            errors.append(f"{label} activated audio for paused Next")
+        if cause == "technicalFailure" and item.get("failedOccurrenceRetained") is not True:
+            errors.append(f"{label} drops the failed occurrence")
+        if item.get("duplicateTerminalDeliveries", 0) > 0 and item.get("advanceCount") != 1:
+            errors.append(f"{label} advances more than once for duplicate completion")
+    required = {"naturalCompletion", "next", "pausedNext", "technicalFailure", "retry", "finalCompletion", "offlineRestore"}
+    for cause in sorted(required - causes):
+        errors.append(f"album playback observation {cause} is missing")
     return errors
 
 
@@ -839,6 +877,13 @@ def collect(args) -> int:
             "observedLatencyMs": float(latency) if latency else None,
             "audibleDestination": destination,
         }
+        capture_runtime()
+    print("\nRecord Story 15.8 ordered-album observations using anonymous identities and ordinals only.")
+    for cause in ("naturalCompletion", "next", "pausedNext", "technicalFailure", "retry", "finalCompletion", "offlineRestore"):
+        print(f"\n{cause}: include ordinalSequence, totalCount, beforeOrdinal/afterOrdinal where applicable, audioActivated, failedOccurrenceRetained, duplicateTerminalDeliveries and advanceCount.")
+        observation = ask_json_object("Sanitized album observation JSON: ")
+        observation["cause"] = cause
+        record["albumPlayback"]["observations"].append(observation)
         capture_runtime()
     errors = validate_record(record)
     record["outcome"] = "passed" if not errors else "failed"

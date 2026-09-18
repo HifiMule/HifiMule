@@ -64,6 +64,7 @@ pub enum NativeControlIntent {
     Pause,
     Toggle,
     Stop,
+    Next,
     SeekRelative(i64),
     SeekAbsolute(u64),
 }
@@ -727,6 +728,46 @@ fn owner_loop(
                     let checkpoint_seek = matches!(&event, PlaybackEvent::SeekCommitted { operation_id, .. }
                         if i.playback.pending_seek.as_ref().is_some_and(|p| &p.operation_id == operation_id));
                     let output_lost = matches!(&event, PlaybackEvent::Failed { code, .. } if code == "OUTPUT_LOST");
+                    if matches!(&event, PlaybackEvent::Failed { code, .. } if code != "OUTPUT_LOST")
+                        && let Some(occurrence_id) = i.session.current_occurrence_id.as_deref()
+                    {
+                        let _ = i.db.record_playback_outcome(
+                            &i.session.session_id,
+                            occurrence_id,
+                            "technicalFailure",
+                        );
+                    }
+                    if let PlaybackEvent::Completed { position_ms } = event {
+                        if matches!(
+                            i.playback.status,
+                            PlaybackStatus::Completed | PlaybackStatus::Error
+                        ) {
+                            continue;
+                        }
+                        match complete_occurrence(&mut i, position_ms, &generation_serial) {
+                            Ok(true) => {
+                                reset_ingress(&i, &ingress);
+                                publish_health(&i, &health);
+                                continue;
+                            }
+                            Ok(false) => {
+                                reset_ingress(&i, &ingress);
+                                publish_health(&i, &health);
+                                continue;
+                            }
+                            Err(_) => {
+                                i.output_gate.store(false, Ordering::Release);
+                                i.session.state = TransportState::Paused;
+                                i.playback.status = PlaybackStatus::Error;
+                                i.playback.error = Some(PlaybackFailure {
+                                    code: "PERSISTENCE_FAILED".into(),
+                                    retryable: true,
+                                });
+                                publish_health(&i, &health);
+                                continue;
+                            }
+                        }
+                    }
                     if output_lost {
                         i.output_gate.store(false, Ordering::Release);
                         let _ = sample_progress(&mut i, &ingress);
@@ -1289,8 +1330,12 @@ fn apply_inner(
         .filter(|n| *n <= i64::MAX as u64)
         .ok_or_else(|| PlaybackError::invalid("INVALID_SESSION", "state sequence overflow"))?;
     match &p.operation {
-        SessionOperation::ReplaceQueue { sources } => {
-            validate_sources(sources)?;
+        SessionOperation::ReplaceQueue { sources } | SessionOperation::PlayAlbum { sources } => {
+            if matches!(p.operation, SessionOperation::PlayAlbum { .. }) {
+                validate_album_sources(sources)?;
+            } else {
+                validate_sources(sources)?;
+            }
             assigned = make_occurrences(sources, 0);
             decorate_availability(&i.db, &mut assigned)?;
             next_session.current_occurrence_id = assigned.first().map(|o| o.occurrence_id.clone());
@@ -1304,6 +1349,8 @@ fn apply_inner(
                 })?;
             next_session.state = if assigned.is_empty() {
                 TransportState::Idle
+            } else if matches!(p.operation, SessionOperation::PlayAlbum { .. }) {
+                TransportState::Buffering
             } else {
                 TransportState::Paused
             };
@@ -1415,7 +1462,7 @@ fn apply_inner(
         code: None,
     };
     i.playback = match &p.operation {
-        SessionOperation::PlayTrack { .. } => PlaybackState {
+        SessionOperation::PlayTrack { .. } | SessionOperation::PlayAlbum { .. } => PlaybackState {
             status: PlaybackStatus::Loading,
             ..Default::default()
         },
@@ -1426,8 +1473,10 @@ fn apply_inner(
             ..Default::default()
         },
     };
-    if matches!(p.operation, SessionOperation::PlayTrack { .. })
-        && i.outputs.is_some()
+    if matches!(
+        p.operation,
+        SessionOperation::PlayTrack { .. } | SessionOperation::PlayAlbum { .. }
+    ) && i.outputs.is_some()
         && let Err(code) = output_policy(i)
     {
         i.output_gate.store(false, Ordering::Release);
@@ -1439,8 +1488,10 @@ fn apply_inner(
         });
     }
     Ok(ApplyResult {
-        start_audio: matches!(p.operation, SessionOperation::PlayTrack { .. })
-            && (i.outputs.is_none() || output_policy(i).is_ok()),
+        start_audio: matches!(
+            p.operation,
+            SessionOperation::PlayTrack { .. } | SessionOperation::PlayAlbum { .. }
+        ) && (i.outputs.is_none() || output_policy(i).is_ok()),
         current_metadata: metadata(i),
         session_id: i.session.session_id.clone(),
         queue_revision: i.session.queue_revision.to_string(),
@@ -1459,6 +1510,20 @@ fn validate_sources(s: &[TrackSource]) -> PResult<()> {
     for v in s {
         v.validate()
             .map_err(|m| PlaybackError::invalid("INVALID_SESSION", m))?;
+    }
+    Ok(())
+}
+fn validate_album_sources(s: &[TrackSource]) -> PResult<()> {
+    if s.is_empty() || s.len() > super::album::MAX_ALBUM_OCCURRENCES {
+        return Err(PlaybackError::invalid(
+            "ALBUM_INVALID",
+            "album source count is invalid",
+        ));
+    }
+    for source in s {
+        source
+            .validate()
+            .map_err(|message| PlaybackError::invalid("ALBUM_INVALID", message))?;
     }
     Ok(())
 }
@@ -1509,7 +1574,7 @@ fn snapshot(i: &Inner) -> PResult<SessionSnapshot> {
         state_sequence: i.state_sequence.to_string(),
         generation_id: i.generation_id.clone(),
         state: i.session.state,
-        current,
+        current: current.clone(),
         position_ms: i.session.position_ms,
         checkpointed_position_ms: i.checkpointed_position_ms,
         persistence: i.persistence.clone(),
@@ -1522,7 +1587,19 @@ fn snapshot(i: &Inner) -> PResult<SessionSnapshot> {
         },
         occurrences: rows,
         next_cursor: next,
-        playback: i.playback.clone(),
+        playback: {
+            let mut playback = i.playback.clone();
+            playback.can_go_next = current
+                .as_ref()
+                .and_then(|occurrence| {
+                    i.db.playback_successor(&i.session.session_id, occurrence.ordinal)
+                        .ok()
+                        .flatten()
+                })
+                .is_some()
+                && i.restoration.status != "error";
+            playback
+        },
         output: i.output.clone(),
     })
 }
@@ -1553,7 +1630,7 @@ fn control_inner(
             "playback generation is stale",
         ));
     }
-    if p.action == ControlAction::Resume && i.outputs.is_some() {
+    if matches!(p.action, ControlAction::Resume | ControlAction::Retry) && i.outputs.is_some() {
         output_policy(i).map_err(|code| {
             PlaybackError::invalid(code, "choose an available output before resuming")
         })?;
@@ -1581,6 +1658,30 @@ fn control_inner(
             PlaybackStatus::Paused
         };
         return snapshot(i);
+    }
+    if p.action == ControlAction::Next {
+        let current =
+            i.db.playback_occurrence(&i.session.session_id, &p.occurrence_id)
+                .map_err(storage)?
+                .ok_or_else(|| {
+                    PlaybackError::invalid("INVALID_SESSION", "current occurrence is absent")
+                })?;
+        if i.db
+            .playback_successor(&i.session.session_id, current.ordinal)
+            .map_err(storage)?
+            .is_none()
+        {
+            return Err(PlaybackError::invalid(
+                "NEXT_UNAVAILABLE",
+                "the current occurrence has no successor",
+            ));
+        }
+    }
+    if p.action == ControlAction::Retry && i.playback.status != PlaybackStatus::Error {
+        return Err(PlaybackError::invalid(
+            "RETRY_UNAVAILABLE",
+            "the current occurrence has no retryable failure",
+        ));
     }
     i.control_epoch.fetch_add(1, Ordering::AcqRel);
     i.state_sequence = i
@@ -1612,6 +1713,72 @@ fn control_inner(
             i.playback.status = PlaybackStatus::Loading;
             i.playback.error = None;
         }
+        ControlAction::Retry => {
+            if i.playback.status != PlaybackStatus::Error {
+                return Err(PlaybackError::invalid(
+                    "RETRY_UNAVAILABLE",
+                    "the current occurrence has no retryable failure",
+                ));
+            }
+            generation_serial.fetch_add(1, Ordering::AcqRel);
+            super::audio::global().control(ControlAction::Stop);
+            i.generation_id = Uuid::new_v4().to_string();
+            i.session.state = TransportState::Buffering;
+            i.output_gate.store(true, Ordering::Release);
+            i.playback.status = PlaybackStatus::Loading;
+            i.playback.error = None;
+        }
+        ControlAction::Next => {
+            let current =
+                i.db.playback_occurrence(&i.session.session_id, &p.occurrence_id)
+                    .map_err(storage)?
+                    .ok_or_else(|| {
+                        PlaybackError::invalid("INVALID_SESSION", "current occurrence is absent")
+                    })?;
+            let successor =
+                i.db.playback_successor(&i.session.session_id, current.ordinal)
+                    .map_err(storage)?
+                    .ok_or_else(|| {
+                        PlaybackError::invalid(
+                            "NEXT_UNAVAILABLE",
+                            "the current occurrence has no successor",
+                        )
+                    })?;
+            let resume = matches!(
+                i.session.state,
+                TransportState::Playing | TransportState::Buffering
+            ) || matches!(
+                i.playback.status,
+                PlaybackStatus::Active | PlaybackStatus::Loading
+            );
+            let mut next_session = i.session.clone();
+            next_session.current_occurrence_id = Some(successor.occurrence_id);
+            next_session.position_ms = 0;
+            next_session.state = if resume {
+                TransportState::Buffering
+            } else {
+                TransportState::Paused
+            };
+            i.db.transition_playback_occurrence(
+                &next_session,
+                &current.occurrence_id,
+                "explicitSkip",
+            )
+            .map_err(storage)?;
+            generation_serial.fetch_add(1, Ordering::AcqRel);
+            super::audio::global().control(ControlAction::Stop);
+            i.generation_id = Uuid::new_v4().to_string();
+            i.session = next_session;
+            i.output_gate.store(resume, Ordering::Release);
+            i.playback = PlaybackState {
+                status: if resume {
+                    PlaybackStatus::Loading
+                } else {
+                    PlaybackStatus::Paused
+                },
+                ..Default::default()
+            };
+        }
         ControlAction::Stop => {
             if let Some(pending) = i.playback.pending_seek.take() {
                 i.playback.seek_outcome = Some(SeekOutcome {
@@ -1642,7 +1809,10 @@ fn control_inner(
         }
     }
     snapshot(i).map(|mut snapshot| {
-        snapshot.resume_audio = p.action == ControlAction::Resume;
+        snapshot.resume_audio = matches!(
+            p.action,
+            ControlAction::Resume | ControlAction::Retry | ControlAction::Next
+        ) && snapshot.state == TransportState::Buffering;
         snapshot.resume_epoch = i.control_epoch.load(Ordering::Acquire);
         snapshot
     })
@@ -1795,6 +1965,33 @@ fn native_control_inner(
                 PlaybackError::invalid("SEEK_UNAVAILABLE", "the current duration is unavailable")
             })?;
         let target = i128::from(i.session.position_ms) + i128::from(offset_ms);
+        if target > i128::from(duration) {
+            if !i.playback.seek.available {
+                return Err(PlaybackError::invalid(
+                    "SEEK_UNAVAILABLE",
+                    "the current representation has no qualified media-time seek",
+                ));
+            }
+            if let Some(current) =
+                i.db.playback_occurrence(&i.session.session_id, &occurrence_id)
+                    .map_err(storage)?
+                && i.db
+                    .playback_successor(&i.session.session_id, current.ordinal)
+                    .map_err(storage)?
+                    .is_some()
+            {
+                let params = ControlParams {
+                    schema_version: 1,
+                    instance_id: i.instance_id.clone(),
+                    session_id: i.session.session_id.clone(),
+                    command_id: Uuid::new_v4().to_string(),
+                    expected_generation_id: i.generation_id.clone(),
+                    occurrence_id,
+                    action: ControlAction::Next,
+                };
+                return control_inner(i, &params, generation_serial);
+            }
+        }
         let target = target.clamp(0, i128::from(duration)) as u64;
         let params = SeekParams {
             schema_version: 1,
@@ -1811,6 +2008,7 @@ fn native_control_inner(
         NativeControlIntent::Play => ControlAction::Resume,
         NativeControlIntent::Pause => ControlAction::Pause,
         NativeControlIntent::Stop => ControlAction::Stop,
+        NativeControlIntent::Next => ControlAction::Next,
         NativeControlIntent::Toggle => {
             if matches!(
                 i.session.state,
@@ -2080,6 +2278,86 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
         PlaybackEvent::Active | PlaybackEvent::Buffering => {}
     }
     i.state_sequence = i.state_sequence.saturating_add(1);
+}
+
+fn complete_occurrence(
+    i: &mut Inner,
+    position_ms: u64,
+    generation_serial: &AtomicU64,
+) -> PResult<bool> {
+    let occurrence_id = i.session.current_occurrence_id.clone().ok_or_else(|| {
+        PlaybackError::invalid("INVALID_SESSION", "completed occurrence is absent")
+    })?;
+    let current =
+        i.db.playback_occurrence(&i.session.session_id, &occurrence_id)
+            .map_err(storage)?
+            .ok_or_else(|| {
+                PlaybackError::invalid("INVALID_SESSION", "completed occurrence is absent")
+            })?;
+    let successor =
+        i.db.playback_successor(&i.session.session_id, current.ordinal)
+            .map_err(storage)?;
+    let mut next_session = i.session.clone();
+    next_session.position_ms = position_ms;
+    if let Some(successor) = successor {
+        let resume = matches!(
+            i.session.state,
+            TransportState::Playing | TransportState::Buffering
+        ) || matches!(
+            i.playback.status,
+            PlaybackStatus::Active | PlaybackStatus::Loading
+        );
+        next_session.current_occurrence_id = Some(successor.occurrence_id);
+        next_session.position_ms = 0;
+        next_session.state = if resume {
+            TransportState::Buffering
+        } else {
+            TransportState::Paused
+        };
+        i.db.transition_playback_occurrence(
+            &next_session,
+            &current.occurrence_id,
+            "naturalCompletion",
+        )
+        .map_err(storage)?;
+        i.control_epoch.fetch_add(1, Ordering::AcqRel);
+        generation_serial.fetch_add(1, Ordering::AcqRel);
+        i.generation_id = Uuid::new_v4().to_string();
+        i.session = next_session;
+        i.state_sequence = i
+            .state_sequence
+            .checked_add(1)
+            .ok_or_else(|| PlaybackError::invalid("INVALID_SESSION", "state sequence overflow"))?;
+        i.output_gate.store(resume, Ordering::Release);
+        i.playback = PlaybackState {
+            status: if resume {
+                PlaybackStatus::Loading
+            } else {
+                PlaybackStatus::Paused
+            },
+            ..Default::default()
+        };
+        if resume && let Some(outputs) = i.outputs.as_mut() {
+            outputs.effect = Some(i.generation_id.clone());
+        }
+        Ok(true)
+    } else {
+        next_session.state = TransportState::Paused;
+        i.db.transition_playback_occurrence(
+            &next_session,
+            &current.occurrence_id,
+            "naturalCompletion",
+        )
+        .map_err(storage)?;
+        i.session = next_session;
+        i.output_gate.store(false, Ordering::Release);
+        i.playback.status = PlaybackStatus::Completed;
+        i.state_sequence = i
+            .state_sequence
+            .checked_add(1)
+            .ok_or_else(|| PlaybackError::invalid("INVALID_SESSION", "state sequence overflow"))?;
+        Ok(false)
+    }
 }
 
 #[cfg(test)]
@@ -2614,6 +2892,10 @@ mod tests {
         assert_eq!(snapshot.state, TransportState::Paused);
         assert_eq!(snapshot.position_ms, 9876);
         assert_eq!(snapshot.total_occurrence_count, 10_000);
+        assert!(
+            snapshot.playback.can_go_next,
+            "successor lookup must not depend on the first paged snapshot"
+        );
         let mut seen = snapshot.occurrences.len();
         while let Some(cursor) = snapshot.next_cursor.take() {
             let page = restored
@@ -2901,6 +3183,132 @@ mod tests {
                 .unwrap_err()
                 .code,
             "GENERATION_CONFLICT"
+        );
+        playback.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn album_completion_advances_once_and_final_completion_is_consumed() {
+        let db = Arc::new(Database::memory().unwrap());
+        let playback = PlaybackSession::restore(db.clone(), "owner".into());
+        let initial = playback.snapshot().unwrap();
+        let applied = playback
+            .apply(params(
+                &initial,
+                SessionOperation::PlayAlbum {
+                    sources: vec![
+                        TrackSource {
+                            server_id: "server".into(),
+                            track_id: "one".into(),
+                        },
+                        TrackSource {
+                            server_id: "server".into(),
+                            track_id: "two".into(),
+                        },
+                    ],
+                },
+            ))
+            .unwrap();
+        let first = applied.assigned_occurrences[0].clone();
+        let second = applied.assigned_occurrences[1].clone();
+        playback.publish_event(applied.generation_id.clone(), PlaybackEvent::Active);
+        playback.publish_event(
+            applied.generation_id.clone(),
+            PlaybackEvent::Completed { position_ms: 123 },
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        let advanced = playback.snapshot().unwrap();
+        assert_eq!(
+            advanced.current.as_ref().unwrap().occurrence_id,
+            second.occurrence_id
+        );
+        assert_eq!(advanced.position_ms, 0);
+        assert_eq!(
+            db.playback_outcome(&first.occurrence_id)
+                .unwrap()
+                .as_deref(),
+            Some("naturalCompletion")
+        );
+        playback.publish_event(
+            applied.generation_id,
+            PlaybackEvent::Completed { position_ms: 999 },
+        );
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(
+            playback.snapshot().unwrap().current.unwrap().occurrence_id,
+            second.occurrence_id
+        );
+        playback.publish_event(
+            advanced.generation_id,
+            PlaybackEvent::Completed { position_ms: 456 },
+        );
+        std::thread::sleep(Duration::from_millis(50));
+        let completed = playback.snapshot().unwrap();
+        assert_eq!(completed.playback.status, PlaybackStatus::Completed);
+        assert_eq!(
+            completed.current.unwrap().occurrence_id,
+            second.occurrence_id
+        );
+        assert_eq!(completed.position_ms, 456);
+        assert!(!completed.playback.can_go_next);
+        assert_eq!(
+            db.playback_outcome(&second.occurrence_id)
+                .unwrap()
+                .as_deref(),
+            Some("naturalCompletion")
+        );
+        playback.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn paused_next_is_silent_and_records_explicit_skip() {
+        let db = Arc::new(Database::memory().unwrap());
+        let playback = PlaybackSession::restore(db.clone(), "owner".into());
+        let initial = playback.snapshot().unwrap();
+        let applied = playback
+            .apply(params(
+                &initial,
+                SessionOperation::ReplaceQueue {
+                    sources: vec![
+                        TrackSource {
+                            server_id: "server".into(),
+                            track_id: "one".into(),
+                        },
+                        TrackSource {
+                            server_id: "server".into(),
+                            track_id: "two".into(),
+                        },
+                    ],
+                },
+            ))
+            .unwrap();
+        let before = playback.snapshot().unwrap();
+        assert!(before.playback.can_go_next);
+        let next = playback
+            .control_with_guard(
+                ControlParams {
+                    schema_version: 1,
+                    instance_id: before.instance_id,
+                    session_id: before.session_id,
+                    command_id: Uuid::new_v4().to_string(),
+                    expected_generation_id: before.generation_id,
+                    occurrence_id: before.current.unwrap().occurrence_id,
+                    action: ControlAction::Next,
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(next.state, TransportState::Paused);
+        assert!(!next.resume_audio);
+        assert_eq!(
+            next.current.unwrap().occurrence_id,
+            applied.assigned_occurrences[1].occurrence_id
+        );
+        assert_eq!(
+            db.playback_outcome(&applied.assigned_occurrences[0].occurrence_id)
+                .unwrap()
+                .as_deref(),
+            Some("explicitSkip")
         );
         playback.stop_and_join().unwrap();
     }

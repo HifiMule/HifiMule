@@ -19,7 +19,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering as AtomicOrdering};
 
 // JSON-RPC 2.0 Error Codes
 const ERR_METHOD_NOT_FOUND: i32 = -32601;
@@ -107,10 +107,17 @@ pub struct AppState {
 static LIFECYCLE_IDENTITY: OnceLock<hifimule_lifecycle::OwnerDescriptor> = OnceLock::new();
 static LIFECYCLE_STATE: AtomicU8 = AtomicU8::new(0);
 static ACTIVE_LOCAL_REQUESTS: AtomicUsize = AtomicUsize::new(0);
+static ALBUM_RESOLUTION_BUSY: AtomicBool = AtomicBool::new(false);
 struct LocalRequestGuard;
 impl Drop for LocalRequestGuard {
     fn drop(&mut self) {
         ACTIVE_LOCAL_REQUESTS.fetch_sub(1, AtomicOrdering::AcqRel);
+    }
+}
+struct AlbumResolutionGuard;
+impl Drop for AlbumResolutionGuard {
+    fn drop(&mut self) {
+        ALBUM_RESOLUTION_BUSY.store(false, AtomicOrdering::Release);
     }
 }
 pub fn set_shutdown_timeout() {
@@ -481,6 +488,9 @@ async fn handler(
         "playback.applySession" => {
             handle_playback_apply_session(&state, payload.params, mutation_guard.take()).await
         }
+        "playback.playAlbum" => {
+            handle_playback_play_album(&state, payload.params, mutation_guard.take()).await
+        }
         "playback.listOutputs" => handle_playback_list_outputs(&state, payload.params).await,
         "playback.selectOutput" => {
             handle_playback_select_output(&state, payload.params, mutation_guard.take()).await
@@ -591,6 +601,7 @@ fn is_mutating_method(method: &str) -> bool {
             | "device.select"
             | "playlist.create"
             | "playback.applySession"
+            | "playback.playAlbum"
             | "playback.control"
             | "playback.seek"
             | "playback.selectOutput"
@@ -791,6 +802,7 @@ async fn handle_playback_apply_session(
     })?;
     let source = match &p.operation {
         crate::playback::model::SessionOperation::PlayTrack { source } => Some(source.clone()),
+        crate::playback::model::SessionOperation::PlayAlbum { sources } => sources.first().cloned(),
         _ => None,
     };
     let playback = state.playback.clone();
@@ -859,6 +871,140 @@ async fn handle_playback_apply_session(
         });
     }
     Ok(serde_json::json!({"data":result}))
+}
+
+async fn handle_playback_play_album(
+    state: &AppState,
+    params: Option<Value>,
+    mutation_guard: Option<crate::sync::MutationGuard>,
+) -> Result<Value, JsonRpcError> {
+    use crate::playback::album::{AlbumValidationError, order_album_tracks};
+    use crate::playback::model::{
+        ApplySessionParams, PlayAlbumParams, SCHEMA_VERSION, SessionOperation, TrackSource,
+    };
+
+    let p =
+        serde_json::from_value::<PlayAlbumParams>(params.unwrap_or(Value::Null)).map_err(|_| {
+            JsonRpcError {
+                code: ERR_INVALID_PARAMS,
+                message: "Invalid playback.playAlbum parameters".into(),
+                data: Some(serde_json::json!({"code":"ALBUM_INVALID"})),
+            }
+        })?;
+    if p.schema_version != SCHEMA_VERSION
+        || p.source.validate().is_err()
+        || uuid::Uuid::parse_str(&p.command_id).is_err()
+    {
+        return Err(JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Invalid album playback request".into(),
+            data: Some(serde_json::json!({"code":"ALBUM_INVALID"})),
+        });
+    }
+    if ALBUM_RESOLUTION_BUSY
+        .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
+        .is_err()
+    {
+        return Err(JsonRpcError {
+            code: 409,
+            message: "Another album is being resolved".into(),
+            data: Some(serde_json::json!({"code":"PLAYBACK_BUSY","retryable":true})),
+        });
+    }
+    let _resolution_guard = AlbumResolutionGuard;
+    let before = {
+        let playback = state.playback.clone();
+        tokio::task::spawn_blocking(move || playback.snapshot())
+            .await
+            .map_err(playback_task_error)?
+            .map_err(playback_error)?
+    };
+    if before.instance_id != p.instance_id
+        || before.session_id != p.session_id
+        || before.queue_revision != p.expected_queue_revision
+        || before.generation_id != p.expected_generation_id
+    {
+        return Err(JsonRpcError {
+            code: 409,
+            message: "Album playback admission is stale".into(),
+            data: Some(serde_json::json!({"code":"GENERATION_CONFLICT"})),
+        });
+    }
+    let provider = crate::server_manager::get_provider_by_server_id(
+        &state.server_manager,
+        &state.db,
+        &p.source.server_id,
+    )
+    .await
+    .map_err(provider_error_to_rpc)?;
+    let album = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        provider.get_album(&p.source.album_id),
+    )
+    .await
+    .map_err(|_| JsonRpcError {
+        code: ERR_CONNECTION_FAILED,
+        message: "Album resolution timed out".into(),
+        data: Some(serde_json::json!({"code":"PLAYBACK_TIMEOUT"})),
+    })?
+    .map_err(provider_error_to_rpc)?;
+    let tracks = order_album_tracks(album.tracks).map_err(|error| {
+        let code = match error {
+            AlbumValidationError::Empty => "ALBUM_EMPTY",
+            AlbumValidationError::TooLarge => "ALBUM_TOO_LARGE",
+            AlbumValidationError::Invalid => "ALBUM_INVALID",
+        };
+        JsonRpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "Album cannot be queued".into(),
+            data: Some(serde_json::json!({"code":code})),
+        }
+    })?;
+    let after = {
+        let playback = state.playback.clone();
+        tokio::task::spawn_blocking(move || playback.snapshot())
+            .await
+            .map_err(playback_task_error)?
+            .map_err(playback_error)?
+    };
+    if after.queue_revision != p.expected_queue_revision
+        || after.generation_id != p.expected_generation_id
+    {
+        return Err(JsonRpcError {
+            code: 409,
+            message: "Album playback was superseded".into(),
+            data: Some(serde_json::json!({"code":"GENERATION_CONFLICT"})),
+        });
+    }
+    let sources = tracks
+        .into_iter()
+        .map(|track| TrackSource {
+            server_id: p.source.server_id.clone(),
+            track_id: track.id,
+        })
+        .collect();
+    handle_playback_apply_session(
+        state,
+        Some(
+            serde_json::to_value(ApplySessionParams {
+                schema_version: p.schema_version,
+                instance_id: p.instance_id,
+                session_id: p.session_id,
+                command_id: p.command_id,
+                expected_queue_revision: p.expected_queue_revision,
+                operation: SessionOperation::PlayAlbum { sources },
+            })
+            .expect("album apply serialization"),
+        ),
+        mutation_guard,
+    )
+    .await?;
+    let playback = state.playback.clone();
+    let snapshot = tokio::task::spawn_blocking(move || playback.snapshot())
+        .await
+        .map_err(playback_task_error)?
+        .map_err(playback_error)?;
+    Ok(serde_json::json!({"data":snapshot}))
 }
 
 async fn handle_playback_control(
@@ -1078,6 +1224,28 @@ fn playback_tagged_tracks(server_id: Option<&str>, tracks: Vec<Song>) -> Vec<Val
         .collect()
 }
 
+fn playback_tagged_albums(server_id: Option<&str>, albums: Vec<Album>) -> Vec<Value> {
+    albums
+        .into_iter()
+        .map(|album| {
+            let mut value = serde_json::to_value(album).expect("Album serialization is infallible");
+            if let Some(server_id) = server_id {
+                value
+                    .as_object_mut()
+                    .expect("Album serializes as an object")
+                    .insert("serverId".into(), Value::String(server_id.to_string()));
+            }
+            value
+        })
+        .collect()
+}
+
+fn playback_tagged_album(server_id: Option<&str>, album: Album) -> Value {
+    playback_tagged_albums(server_id, vec![album])
+        .pop()
+        .expect("one album")
+}
+
 /// Story 2.13: tag every untagged DesiredItem with the selected server's portable
 /// id so manifest entries always carry the portable identity. Shared by the
 /// single-server delta paths in both `provider_calculate_delta` and
@@ -1289,12 +1457,14 @@ async fn handle_browse_get_artist(
             data: None,
         })?
         .to_owned();
-    let provider = require_provider(state).await?;
+    let (provider, server_id) = require_browse_provider(state).await?;
     let result = provider
         .get_artist(&artist_id)
         .await
         .map_err(provider_error_to_rpc)?;
-    Ok(serde_json::json!({ "artist": result.artist, "albums": result.albums }))
+    Ok(
+        serde_json::json!({ "artist": result.artist, "albums": playback_tagged_albums(server_id.as_deref(), result.albums) }),
+    )
 }
 
 async fn handle_browse_list_albums(
@@ -1317,12 +1487,14 @@ async fn handle_browse_list_albums(
         .as_ref()
         .and_then(|p| p["limit"].as_u64())
         .unwrap_or(50) as u32;
-    let provider = require_provider(state).await?;
+    let (provider, server_id) = require_browse_provider(state).await?;
     let (albums, total) = provider
         .list_albums(library_id.as_deref(), letter.as_deref(), offset, limit)
         .await
         .map_err(provider_error_to_rpc)?;
-    Ok(serde_json::json!({ "albums": albums, "total": total }))
+    Ok(
+        serde_json::json!({ "albums": playback_tagged_albums(server_id.as_deref(), albums), "total": total }),
+    )
 }
 
 async fn handle_browse_get_album(
@@ -1344,7 +1516,7 @@ async fn handle_browse_get_album(
         .await
         .map_err(provider_error_to_rpc)?;
     Ok(
-        serde_json::json!({ "album": result.album, "tracks": playback_tagged_tracks(server_id.as_deref(), result.tracks) }),
+        serde_json::json!({ "album": playback_tagged_album(server_id.as_deref(), result.album), "tracks": playback_tagged_tracks(server_id.as_deref(), result.tracks) }),
     )
 }
 
@@ -1454,13 +1626,15 @@ async fn handle_browse_list_recently_added(
         .and_then(|p| p["libraryId"].as_str())
         .map(str::to_owned);
     let (offset, limit) = browse_pagination(&params);
-    let provider = require_provider(state).await?;
+    let (provider, server_id) = require_browse_provider(state).await?;
     let (albums, total) = provider
         .list_recently_added(library_id.as_deref(), offset, limit)
         .await
         .map_err(provider_error_to_rpc)?;
     let total = total as u64;
-    Ok(serde_json::json!({ "albums": albums, "total": total }))
+    Ok(
+        serde_json::json!({ "albums": playback_tagged_albums(server_id.as_deref(), albums), "total": total }),
+    )
 }
 
 async fn handle_browse_list_frequently_played(
@@ -1538,7 +1712,7 @@ async fn handle_browse_list_favorite_items(
         .map_err(provider_error_to_rpc)?;
     Ok(serde_json::json!({
         "artists": favorites.artists,
-        "albums": favorites.albums,
+        "albums": playback_tagged_albums(server_id.as_deref(), favorites.albums),
         "tracks": playback_tagged_tracks(server_id.as_deref(), favorites.songs),
     }))
 }
@@ -13827,6 +14001,25 @@ mod tests {
     fn playback_track_tags_keep_identical_raw_ids_source_qualified() {
         let first = playback_tagged_tracks(Some("portable-a"), vec![fake_song("same-id")]);
         let second = playback_tagged_tracks(Some("portable-b"), vec![fake_song("same-id")]);
+        assert_eq!(first[0]["id"], second[0]["id"]);
+        assert_eq!(first[0]["serverId"], "portable-a");
+        assert_eq!(second[0]["serverId"], "portable-b");
+    }
+
+    #[test]
+    fn playback_album_tags_capture_portable_source_with_provider_result() {
+        let album = Album {
+            id: "same-id".into(),
+            title: "Album".into(),
+            artist_id: None,
+            artist_name: None,
+            year: None,
+            song_count: Some(2),
+            duration_seconds: None,
+            cover_art_id: None,
+        };
+        let first = playback_tagged_albums(Some("portable-a"), vec![album.clone()]);
+        let second = playback_tagged_albums(Some("portable-b"), vec![album]);
         assert_eq!(first[0]["id"], second[0]["id"]);
         assert_eq!(first[0]["serverId"], "portable-a");
         assert_eq!(second[0]["serverId"], "portable-b");

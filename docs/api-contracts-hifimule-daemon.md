@@ -780,9 +780,56 @@ The playback worker is joined after successful preservation and sync drain. A jo
 
 `playback.applySession` accepts `operation: { type: "playTrack", source: { serverId, trackId } }`. The portable server identity is resolved by the daemon; authenticated URLs and headers are never returned. Admission atomically replaces the queue with one occurrence and returns before source preparation completes.
 
-`playback.control` accepts `{ schemaVersion, instanceId, sessionId, commandId, expectedGenerationId, occurrenceId, action }`, where action is `pause`, `resume`, or `stop`. Stale generation/occurrence controls return a conflict with authoritative session metadata. Command IDs are bounded and idempotent; reuse with another payload is rejected.
+`playback.control` accepts `{ schemaVersion, instanceId, sessionId, commandId, expectedGenerationId, occurrenceId, action }`, where action is `pause`, `resume`, `stop`, `next`, or `retry`. Stale generation/occurrence controls return a conflict with authoritative session metadata. Command IDs are bounded and idempotent; reuse with another payload is rejected. `next` records an explicit local skip and selects the indexed successor while preserving playing/paused intent; it returns `NEXT_UNAVAILABLE` without mutation when no successor exists. `retry` retains the occurrence and committed cursor and starts a newly fenced preparation attempt.
 
 `playback.getSession` includes an additive `playback` object with safe metadata, representation, duration, status (`idle`, `loading`, `active`, `paused`, `stopped`, `completed`, `error`) and a sanitized `{ code, retryable }` failure. It never includes provider requests or credentials.
+
+## Ordered album playback (schema v1, Story 15.8)
+
+`playback.playAlbum` accepts exactly `{ schemaVersion, instanceId, sessionId,
+commandId, expectedQueueRevision, expectedGenerationId, source: { serverId,
+albumId } }`. Source identities are nonempty portable provider identities bounded
+to 1024 UTF-8 bytes. One resolution may be pending per owner and has a 60-second
+deadline. The provider album must contain 1–10,000 valid track occurrences;
+`ALBUM_EMPTY`, `ALBUM_TOO_LARGE`, `ALBUM_INVALID`, provider failure, timeout,
+cancellation or stale admission leaves the previous queue untouched. Success is
+one atomic replacement, including albums larger than the ordinary 200-item batch.
+
+Provider order is captured before sorting. Positive disc numbers are valid;
+missing, zero or negative disc numbers use effective disc 1. Within each disc,
+positive track numbers precede missing/zero/negative numbers. The full key is
+`(effectiveDisc, missingTrack, positiveTrackOrZero, providerOrdinal)`. Titles and
+IDs never participate, and repeated source IDs remain distinct occurrences.
+
+Occurrences persist a local disposition (`naturalCompletion`, `explicitSkip`, or
+`technicalFailure`). Successor lookup uses indexed `(session_id, ordinal)` data,
+never a snapshot page. Natural presentation completion is consumed once per
+occurrence/generation after output drain. With a successor it commits that current
+occurrence at zero; without one it retains the final occurrence and actual cursor
+as Paused/Completed. Decoder EOF, duration metadata and exact-end seek are not
+completion signals.
+
+Committed transitions publish one bounded owner effect to the shared
+`PlaybackCommandService`, outside owner/database locks and independently of UI
+polling or native registration. Effects are fenced by instance, session,
+occurrence, generation and control epoch at dequeue, after provider resolution
+and before activation. Stop, replacement, seek, output loss, shutdown and newer
+generations supersede old work. Paused Next is silent and output loss never routes
+to another endpoint. Duplicate/late EOF, progress, metadata and preparation cannot
+advance or revive the old occurrence.
+
+Play album invents no outcome; natural completion records `naturalCompletion`;
+UI/native Next records `explicitSkip`; source/decode/load failure records
+`technicalFailure`, pauses and never skips; Retry targets the same occurrence and
+cursor; Stop records no outcome; exact-end seek does not advance. Failed atomic
+writes retain the prior coherent state. Schema v2 adds outcomes, and restoration
+returns paused with the complete queue and local outcomes intact.
+
+Native Next resolves owner state at execution. `canGoNext` is true only for a real
+successor while lifecycle state permits it; delivery while false has no effect. A
+qualified MPRIS relative seek strictly beyond duration uses the same Next path
+when a successor exists. Equality stays an exact-end seek, and an unsupported
+seek capability cannot bypass admission.
 
 
 # Explicit playback outputs (schema v1, Story 15.5)
@@ -853,12 +900,12 @@ of physical routing, latency or shared-mode behavior.
 
 # Native playback controls (Story 15.6)
 
-Native Play, Pause, Toggle and Stop are private daemon ingress, not public RPC.
+Native Play, Pause, Toggle, Stop and capability-gated Next are private daemon ingress, not public RPC.
 They enter the same bounded serialized playback owner as `playback.control`.
 Toggle and current occurrence resolve at owner execution; Resume uses the same
 provider resolution, selected-output policy, preparation deadline, audio effect,
 generation fencing and failure publication as RPC Resume. Unsupported actions
-(Next, Previous, Seek, SetPosition, OpenUri, Raise and Quit) are not advertised
+(Previous, Seek, SetPosition, OpenUri, Raise and Quit) are not advertised
 and are rejected without mutation.
 
 The daemon owns one SMTC, MPRemoteCommandCenter or MPRIS registration for its

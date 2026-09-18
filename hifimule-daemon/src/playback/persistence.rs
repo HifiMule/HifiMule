@@ -3,7 +3,7 @@ use crate::db::Database;
 use anyhow::{Result, anyhow};
 use rusqlite::{OptionalExtension, params};
 
-pub const PERSISTENCE_VERSION: i64 = 1;
+pub const PERSISTENCE_VERSION: i64 = 2;
 
 impl Database {
     pub fn has_portable_server(&self, server_id: &str) -> Result<bool> {
@@ -38,18 +38,37 @@ impl Database {
                 }
             })?;
         if let Some(version) = version
-            && version != PERSISTENCE_VERSION
+            && !(1..=PERSISTENCE_VERSION).contains(&version)
         {
             return Err(anyhow!("UNSUPPORTED_PLAYBACK_VERSION"));
         }
         tx.execute_batch("CREATE TABLE IF NOT EXISTS playback_schema (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), version INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS playback_sessions (singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1), session_id TEXT NOT NULL, queue_revision INTEGER NOT NULL CHECK(queue_revision>=0), checkpoint_sequence INTEGER NOT NULL CHECK(checkpoint_sequence>=0), transport_state TEXT NOT NULL, current_occurrence_id TEXT, position_ms INTEGER NOT NULL CHECK(position_ms>=0));
             CREATE TABLE IF NOT EXISTS playback_occurrences (session_id TEXT NOT NULL, occurrence_id TEXT NOT NULL UNIQUE, ordinal INTEGER NOT NULL CHECK(ordinal>=0), server_id TEXT NOT NULL, track_id TEXT NOT NULL, PRIMARY KEY(session_id, ordinal));")?;
+        if version != Some(PERSISTENCE_VERSION) {
+            let has_outcome = {
+                let mut statement = tx.prepare("PRAGMA table_info(playback_occurrences)")?;
+                statement
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+                    .iter()
+                    .any(|name| name == "outcome")
+            };
+            if !has_outcome {
+                tx.execute("ALTER TABLE playback_occurrences ADD COLUMN outcome TEXT CHECK(outcome IN ('naturalCompletion','explicitSkip','technicalFailure') OR outcome IS NULL)", [])?;
+            }
+            if version.is_some() {
+                tx.execute(
+                    "UPDATE playback_schema SET version=2 WHERE singleton_id=1",
+                    [],
+                )?;
+            }
+        }
         if fail_before_version_commit {
             return Err(anyhow!("injected playback migration failure"));
         }
         tx.execute(
-            "INSERT OR IGNORE INTO playback_schema(singleton_id,version) VALUES(1,1)",
+            "INSERT OR IGNORE INTO playback_schema(singleton_id,version) VALUES(1,2)",
             [],
         )?;
         tx.commit()?;
@@ -191,6 +210,14 @@ impl Database {
         .map_err(Into::into)
     }
 
+    pub fn playback_successor(&self, session_id: &str, ordinal: u64) -> Result<Option<Occurrence>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.query_row(
+            "SELECT occurrence_id,ordinal,server_id,track_id FROM playback_occurrences WHERE session_id=?1 AND ordinal>?2 ORDER BY ordinal LIMIT 1",
+            params![session_id, i64::try_from(ordinal)?], occurrence_from_row,
+        ).optional().map_err(Into::into)
+    }
+
     pub fn playback_next_ordinal(&self, session_id: &str) -> Result<u64> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let last: Option<i64> = conn.query_row(
@@ -287,6 +314,56 @@ impl Database {
         update_session(&tx, session)?;
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn transition_playback_occurrence(
+        &self,
+        session: &PersistedSession,
+        departed_occurrence_id: &str,
+        outcome: &str,
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE playback_occurrences SET outcome=?1 WHERE session_id=?2 AND occurrence_id=?3 AND (outcome IS NULL OR (?1='explicitSkip' AND outcome='technicalFailure'))",
+            params![outcome, session.session_id, departed_occurrence_id],
+        )?;
+        if changed != 1 {
+            return Err(anyhow!("terminal playback outcome was already consumed"));
+        }
+        update_session(&tx, session)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn record_playback_outcome(
+        &self,
+        session_id: &str,
+        occurrence_id: &str,
+        outcome: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = conn.execute(
+            "UPDATE playback_occurrences SET outcome=COALESCE(outcome,?1) WHERE session_id=?2 AND occurrence_id=?3",
+            params![outcome, session_id, occurrence_id],
+        )?;
+        if changed != 1 {
+            return Err(anyhow!("playback occurrence is absent"));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn playback_outcome(&self, occurrence_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.query_row(
+            "SELECT outcome FROM playback_occurrences WHERE occurrence_id=?1",
+            [occurrence_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map(|value| value.flatten())
+        .map_err(Into::into)
     }
 
     pub fn clear_playback_session(&self, session: &PersistedSession) -> Result<()> {

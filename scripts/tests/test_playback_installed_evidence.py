@@ -205,6 +205,14 @@ class InstalledEvidenceTests(unittest.TestCase):
                 for name, path, ui_state in evidence.NATIVE_OBSERVATIONS
             }},
             "seek": {"rows": [seek_row()]},
+            "albumPlayback": {"observations": [
+                {"cause": cause, "ordinalSequence": [0, 1], "totalCount": 2,
+                 "beforeOrdinal": 0, "afterOrdinal": 1, "audioActivated": cause != "pausedNext",
+                 "failedOccurrenceRetained": True, "duplicateTerminalDeliveries": 1,
+                 "advanceCount": 1}
+                for cause in ("naturalCompletion", "next", "pausedNext", "technicalFailure",
+                              "retry", "finalCompletion", "offlineRestore")
+            ]},
         })
         record["outcome"] = "passed"
         return record

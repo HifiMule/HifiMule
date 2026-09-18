@@ -508,7 +508,9 @@ impl AudioEngine {
             match action {
                 super::model::ControlAction::Pause => pipeline.gate.store(false, Ordering::Release),
                 super::model::ControlAction::Resume => pipeline.gate.store(true, Ordering::Release),
-                super::model::ControlAction::Stop => {
+                super::model::ControlAction::Stop
+                | super::model::ControlAction::Next
+                | super::model::ControlAction::Retry => {
                     pipeline.gate.store(false, Ordering::Release);
                     pipeline.cancel.store(true, Ordering::Release);
                 }

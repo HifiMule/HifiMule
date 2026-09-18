@@ -15,7 +15,7 @@ pub(super) struct OutputRuntime {
     initialize_missing_default: bool,
     discovery_sequence: u64,
     switch_generation: Option<String>,
-    effect: Option<String>,
+    pub(super) effect: Option<String>,
     active_generation: Option<String>,
     opening_generation: Option<String>,
 }

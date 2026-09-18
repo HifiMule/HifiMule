@@ -177,6 +177,7 @@ export interface BrowseArtist {
 
 export interface BrowseAlbum {
     id: string;
+    serverId?: string;
     name: string;
     artistId: string;
     artistName: string;
@@ -224,7 +225,7 @@ export interface PlaybackSessionSnapshot {
     schemaVersion: number; instanceId: string; sessionId: string; queueRevision: string;
     stateSequence: string; generationId: string; state: string; positionMs: number;
     current: { occurrenceId: string; source: { serverId: string; trackId: string } } | null;
-    playback: { status: PlaybackStatus; metadata: { title: string; artist?: string | null; source: { serverId: string; trackId: string } } | null; durationMs?: number | null;
+    playback: { status: PlaybackStatus; canGoNext: boolean; metadata: { title: string; artist?: string | null; source: { serverId: string; trackId: string } } | null; durationMs?: number | null;
         seek: { available: boolean; reason?: string | null; mechanism?: string | null; decodedLandingToleranceMs?: number | null };
         pendingSeek?: { operationId: string; requestedPositionMs: number; priorCommittedPositionMs: number } | null;
         seekOutcome?: { operationId: string; requestedPositionMs: number; actualPositionMs?: number | null; status: string; error?: { code: string; retryable: boolean } | null } | null;
@@ -258,7 +259,16 @@ export async function playbackPlayTrack(serverId: string, trackId: string): Prom
     });
 }
 
-export async function playbackControl(action: 'pause' | 'resume' | 'stop', observed?: PlaybackSessionSnapshot): Promise<void> {
+export async function playbackPlayAlbum(serverId: string, albumId: string): Promise<void> {
+    const current = await playbackGetSession();
+    await rpcCall('playback.playAlbum', {
+        schemaVersion: 1, instanceId: current.instanceId, sessionId: current.sessionId,
+        commandId: crypto.randomUUID(), expectedQueueRevision: current.queueRevision,
+        expectedGenerationId: current.generationId, source: { serverId, albumId },
+    });
+}
+
+export async function playbackControl(action: 'pause' | 'resume' | 'stop' | 'next' | 'retry', observed?: PlaybackSessionSnapshot): Promise<void> {
     const current = observed ?? await playbackGetSession();
     if (!current.current) return;
     await rpcCall('playback.control', {

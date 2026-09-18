@@ -53,11 +53,14 @@ function harness(initial, control = async () => {}, outputRpc = {}) {
     clearTimeout: id => timers.delete(id),
     require: name => name === '../rpc'
       ? { playbackGetSession: async () => { calls++; return snapshot; }, playbackControl: control,
+          serverList: async () => [{ id: 'local-server', serverId: 'server', url: 'https://music.example', serverType: 'jellyfin', username: 'alexis', name: 'Salon', icon: null, selected: true }],
           playbackListOutputs: outputRpc.list ?? (async () => ({ instanceId: snapshot.instanceId, outputs: snapshot.output?.selected ? [snapshot.output.selected] : [], output: snapshot.output })),
           playbackSelectOutput: outputRpc.select ?? (async () => snapshot),
           playbackSeek: outputRpc.seek ?? (async () => snapshot),
         }
-      : { t: key => key },
+      : name === '../serverIdentity'
+        ? { formatServerIdentity: server => ({ label: server.name || 'Jellyfin' }) }
+        : { t: (key, values) => values?.source ? `${key}: ${values.source}` : key },
   });
   const container = new Element('section');
   const component = new exports.PlaybackControls(container);
@@ -78,16 +81,72 @@ function snapshot(state = 'buffering', sequence = '1', error = null) {
     stateSequence: sequence, generationId: 'generation', state, positionMs: 0,
     current: { occurrenceId: 'occurrence', source: { serverId: 'server', trackId: 'track' } },
     output: { revision: '1', selected: { outputId: 'headphones', displayName: 'Headphones', detail: 'USB', available: true, isDefault: false }, pending: null, active: null, status: 'available', error },
-    playback: { status: error ? 'error' : ({ playing: 'active', buffering: 'loading', paused: 'paused' })[state], metadata: { title: 'Track' },
+    playback: { status: error ? 'error' : ({ playing: 'active', buffering: 'loading', paused: 'paused' })[state], canGoNext: false, metadata: { title: 'Track' },
       durationMs: null, seek: { available: false, reason: 'playback.seek.unavailable' }, error },
   };
 }
 function text(element) { return element.textContent + element.children.map(text).join(' '); }
 
+function albumButtonHarness() {
+  const calls = []; const toasts = [];
+  class Element {
+    listeners = new Map(); disabled = false; name = ''; label = '';
+    addEventListener(name, listener) { this.listeners.set(name, listener); }
+    async dispatch(name) {
+      let stopped = false;
+      await this.listeners.get(name)?.({ stopPropagation: () => { stopped = true; } });
+      return stopped;
+    }
+  }
+  const exports = {};
+  const source = ts.transpileModule(readFileSync(new URL('../../hifimule-ui/src/components/AlbumPlayButton.ts', import.meta.url), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  vm.runInNewContext(source, {
+    exports, document: { createElement: () => new Element() },
+    require: name => name === '../rpc'
+      ? { playbackPlayAlbum: async (serverId, albumId) => calls.push({ serverId, albumId }) }
+      : name === '../toast'
+        ? { showToast: (...args) => toasts.push(args) }
+        : { t: (_key, values) => `Play ${values.title}` },
+  });
+  return { create: exports.createAlbumPlayButton, calls, toasts };
+}
+
 test('loading playback exposes Pause rather than a second Resume', async () => {
   const h = harness(snapshot()); await h.tick();
   assert.ok(h.container.querySelector('[data-playback-action="pause"]'));
   assert.equal(h.container.querySelector('[data-playback-action="resume"]'), null);
+  assert.equal(h.container.querySelector('[data-playback-action="retry"]').hidden, true);
+  h.component.destroy();
+});
+test('Shoelace cannot override hidden transport actions', () => {
+  const styles = readFileSync(new URL('../../hifimule-ui/src/styles.css', import.meta.url), 'utf8');
+  assert.match(styles, /\.playback-controls sl-button\[hidden\]\s*\{\s*display:\s*none\s*!important;\s*\}/);
+});
+test('transport errors use the full player row before wrapping', () => {
+  const styles = readFileSync(new URL('../../hifimule-ui/src/styles.css', import.meta.url), 'utf8');
+  assert.match(styles, /\.playback-controls\s*\{[\s\S]*?flex-wrap:\s*wrap;/);
+  assert.match(styles, /\.playback-controls__error\s*\{[^}]*flex:\s*1 0 100%;/);
+});
+test('album actions capture portable source identity and preserve parent navigation', async () => {
+  const h = albumButtonHarness();
+  const button = h.create('complete-album', 'portable-server-a', 'Album A');
+  assert.equal(button.label, 'Play Album A');
+  assert.equal(button.disabled, false);
+  assert.equal(await button.dispatch('mousedown'), true);
+  assert.equal(await button.dispatch('click'), true);
+  assert.deepEqual(h.calls, [{ serverId: 'portable-server-a', albumId: 'complete-album' }]);
+
+  const unavailable = h.create('album-without-source', undefined, 'Unavailable');
+  assert.equal(unavailable.disabled, true);
+  await unavailable.dispatch('click');
+  assert.equal(h.calls.length, 1);
+});
+test('playback source renders the configured server label instead of its portable UUID', async () => {
+  const h = harness(snapshot()); await h.tick();
+  assert.match(text(h.container), /playback\.source: Salon/);
+  assert.doesNotMatch(text(h.container), /playback\.source: server(?:\s|$)/);
   h.component.destroy();
 });
 test('audio output selection is tucked behind a compact icon control', async () => {
@@ -123,6 +182,39 @@ test('transport rejection is caught and shown without exposing raw diagnostics',
   await h.tick(); await h.container.querySelector('[data-playback-action="stop"]').click();
   assert.match(text(h.container), /playback.command_error/);
   assert.doesNotMatch(text(h.container), /private raw/);
+  h.component.destroy();
+});
+test('Next follows authoritative capability and Retry appears only for retryable failure', async () => {
+  const actions = [];
+  const withNext = snapshot('paused'); withNext.playback.canGoNext = true;
+  const h = harness(withNext, async action => actions.push(action)); await h.tick();
+  const next = h.container.querySelector('[data-playback-action="next"]');
+  assert.equal(next.disabled, false); await next.click();
+  assert.deepEqual(actions, ['next']);
+  const failed = snapshot('paused', '2', { code: 'SOURCE_UNAVAILABLE', retryable: true });
+  failed.playback.canGoNext = false; h.setSnapshot(failed); await h.tick();
+  assert.equal(h.container.querySelector('[data-playback-action="next"]').disabled, true);
+  const retry = h.container.querySelector('[data-playback-action="retry"]');
+  assert.equal(retry.hidden, false); await retry.click();
+  assert.deepEqual(actions, ['next', 'retry']);
+  h.component.destroy();
+});
+test('completed final occurrence keeps Next unavailable and ignores an older poll response', async () => {
+  const completed = snapshot('paused', '9');
+  completed.playback.status = 'completed';
+  completed.playback.canGoNext = false;
+  completed.playback.metadata.title = 'Final track';
+  const h = harness(completed); await h.tick();
+  assert.equal(h.container.querySelector('[data-playback-action="next"]').disabled, true);
+  assert.match(text(h.container), /Final track/);
+
+  const stale = snapshot('playing', '8');
+  stale.playback.metadata.title = 'Stale track';
+  stale.playback.canGoNext = true;
+  h.setSnapshot(stale); await h.tick();
+  assert.match(text(h.container), /Final track/);
+  assert.doesNotMatch(text(h.container), /Stale track/);
+  assert.equal(h.container.querySelector('[data-playback-action="next"]').disabled, true);
   h.component.destroy();
 });
 test('destroy cancels polling and removes pagehide listeners', async () => {
@@ -217,7 +309,7 @@ test('output and seek strings have four-locale parity and no current-default rec
   const catalog = JSON.parse(readFileSync(new URL('../../hifimule-i18n/catalog.json', import.meta.url), 'utf8'));
   const keys = Object.keys(catalog.en).filter(key => key.startsWith('playback.output.')
     || key.startsWith('playback.error.OUTPUT_') || key.startsWith('playback.seek.')
-    || key.startsWith('seek.'));
+    || key.startsWith('seek.') || ['playback.play_album', 'playback.next', 'playback.retry'].includes(key));
   for (const language of ['en', 'fr', 'es', 'de']) {
     for (const key of keys) assert.ok(catalog[language][key], `${language}: ${key}`);
     assert.equal(catalog[language]['playback.resume_default_output'], undefined);

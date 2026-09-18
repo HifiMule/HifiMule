@@ -1,5 +1,6 @@
-import { playbackControl, playbackGetSession, playbackListOutputs, playbackSeek, playbackSelectOutput, PlaybackOutput, PlaybackSessionSnapshot } from '../rpc';
+import { playbackControl, playbackGetSession, playbackListOutputs, playbackSeek, playbackSelectOutput, serverList, PlaybackOutput, PlaybackSessionSnapshot } from '../rpc';
 import { t } from '../i18n';
+import { formatServerIdentity } from '../serverIdentity';
 
 export class PlaybackControls {
     private disposed = false;
@@ -12,6 +13,7 @@ export class PlaybackControls {
     private lastDiscoveryAt = 0;
     private resetOutput = false;
     private outputs: PlaybackOutput[] = [];
+    private serverLabels = new Map<string, string>();
     private optionsSignature = '';
     private readonly outputSelect = document.createElement('select');
     private readonly outputStatus = document.createElement('span');
@@ -32,9 +34,12 @@ export class PlaybackControls {
     private readonly onPageHide = () => this.destroy();
     private readonly title = document.createElement('strong');
     private readonly status = document.createElement('span');
+    private readonly source = document.createElement('span');
     private readonly error = document.createElement('span');
     private readonly primary = this.button('resume');
     private readonly stop = this.button('stop');
+    private readonly next = this.button('next');
+    private readonly retry = this.button('retry');
     constructor(private readonly container: HTMLElement) {
         container.className = 'playback-controls';
         container.setAttribute('aria-label', t('playback.controls'));
@@ -44,6 +49,7 @@ export class PlaybackControls {
         this.status.setAttribute('role', 'status');
         this.status.setAttribute('aria-live', 'polite');
         this.status.setAttribute('aria-atomic', 'true');
+        this.error.className = 'playback-controls__error';
         this.error.setAttribute('role', 'alert');
         const timelineGroup = document.createElement('div');
         timelineGroup.className = 'playback-controls__timeline';
@@ -68,7 +74,8 @@ export class PlaybackControls {
         this.seekStatus.setAttribute('role', 'status');
         this.seekStatus.setAttribute('aria-live', 'polite');
         timelineGroup.append(this.elapsed, this.timeline, this.duration, this.seekStatus);
-        info.append(this.title, this.status, timelineGroup, this.error);
+        this.source.className = 'playback-controls__source';
+        info.append(this.title, this.source, this.status, timelineGroup);
         const outputGroup = document.createElement('div');
         outputGroup.className = 'playback-controls__output';
         this.outputDropdown.className = 'playback-controls__output-dropdown';
@@ -98,9 +105,10 @@ export class PlaybackControls {
         this.outputSelect.addEventListener('change', () => void this.chooseOutput());
         outputGroup.append(outputLabel, refresh, this.outputReset, this.outputStatus);
         this.outputDropdown.append(this.outputToggle, outputGroup);
-        container.replaceChildren(info, this.primary, this.stop, this.outputDropdown);
-        this.primary.hidden = this.stop.hidden = true;
+        container.replaceChildren(info, this.primary, this.stop, this.next, this.retry, this.outputDropdown, this.error);
+        this.primary.hidden = this.stop.hidden = this.next.hidden = this.retry.hidden = true;
         window.addEventListener('pagehide', this.onPageHide, { once: true });
+        void this.refreshServerLabels();
         void this.poll();
         this.scheduleRepaint();
     }
@@ -145,6 +153,10 @@ export class PlaybackControls {
     }
     private render(snapshot: PlaybackSessionSnapshot): void {
         this.title.textContent = snapshot.playback.metadata?.title ?? t('playback.nothing_selected');
+        const sourceId = snapshot.current?.source.serverId;
+        const sourceLabel = sourceId ? this.serverLabels.get(sourceId) : undefined;
+        this.source.textContent = sourceId ? t('playback.source', { source: sourceLabel ?? t('server.default') }) : '';
+        this.source.hidden = !sourceId;
         const statusText = snapshot.playback.error
             ? t(`playback.error.${snapshot.playback.error.code}`)
             : t(`playback.status.${snapshot.playback.status}`);
@@ -158,6 +170,10 @@ export class PlaybackControls {
         this.primary.setAttribute('aria-label', label);
         this.primary.hidden = this.stop.hidden = !snapshot.current;
         this.primary.disabled = this.stop.disabled = this.busy;
+        this.next.hidden = !snapshot.current;
+        this.next.disabled = this.busy || !snapshot.playback.canGoNext;
+        this.retry.hidden = snapshot.playback.status !== 'error' || !snapshot.playback.error?.retryable;
+        this.retry.disabled = this.busy;
         if (action === 'resume' && snapshot.output && (!snapshot.output.selected?.available || snapshot.output.pending)) {
             this.primary.disabled = true;
             this.primary.setAttribute('title', t('playback.output.choose'));
@@ -172,6 +188,19 @@ export class PlaybackControls {
         if (!this.resetOutput) this.outputStatus.textContent = `${outputText} ${active}`.trim();
         this.renderOptions();
         this.renderTimeline();
+    }
+
+    private async refreshServerLabels(): Promise<void> {
+        try {
+            const servers = await serverList();
+            if (this.disposed) return;
+            this.serverLabels = new Map(servers
+                .filter(server => typeof server.serverId === 'string' && server.serverId.length > 0)
+                .map(server => [server.serverId as string, formatServerIdentity(server).label]));
+            if (this.snapshot) this.render(this.snapshot);
+        } catch {
+            // Playback remains usable while server configuration is unavailable.
+        }
     }
 
     private scheduleRepaint(): void {
@@ -347,7 +376,7 @@ export class PlaybackControls {
             if (!this.disposed && this.snapshot) this.render(this.snapshot);
         }
     }
-    private button(action: 'pause' | 'resume' | 'stop'): HTMLElement & { disabled: boolean } {
+    private button(action: 'pause' | 'resume' | 'stop' | 'next' | 'retry'): HTMLElement & { disabled: boolean } {
         const button = document.createElement('sl-button') as any;
         button.size = 'small';
         button.dataset.playbackAction = action;

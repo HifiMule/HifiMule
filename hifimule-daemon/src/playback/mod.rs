@@ -1,3 +1,4 @@
+pub mod album;
 pub mod audio;
 pub mod commands;
 pub mod config;

@@ -5,6 +5,7 @@ import { basketStore } from '../state/basket';
 import { getImageUrl, playbackPlayTrack, rpcCall } from '../rpc';
 import { t } from '../i18n';
 import { showToast } from '../toast';
+import { createAlbumPlayButton } from './AlbumPlayButton';
 
 export interface JellyfinItem {
     Id: string;
@@ -121,6 +122,12 @@ export class MediaCard {
                 try { await playbackPlayTrack(playbackSource.serverId, playbackSource.trackId); }
                 catch (error) { showToast((error as Error).message, 'danger'); }
             });
+            card.querySelector('.card-content')?.appendChild(play);
+        }
+
+        if (isBrowseItem && (item as BrowseDisplayItem).type === 'MusicAlbum') {
+            const album = item as BrowseDisplayItem;
+            const play = createAlbumPlayButton(album.id, album.serverId, itemName);
             card.querySelector('.card-content')?.appendChild(play);
         }
 

@@ -9,6 +9,7 @@ import {
     playbackPlayTrack,
 } from '../rpc';
 import { MediaCard } from './MediaCard';
+import { createAlbumPlayButton } from './AlbumPlayButton';
 import { basketStore, BasketItem } from '../state/basket';
 import { showToast } from '../toast';
 import { t } from '../i18n';
@@ -485,6 +486,8 @@ export class TracksBrowseView {
         row.setAttribute('tabindex', '0');
         row.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
         row.innerHTML = `<span class="curation-row-label" title="${this.escapeAttr(album.name)}">${this.escapeHtml(album.name)}</span>`;
+        const play = createAlbumPlayButton(album.id, album.serverId, album.name);
+        row.appendChild(play);
         row.addEventListener('click', () => this.selectAlbum(album.id));
         row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.selectAlbum(album.id); } });
         return row;

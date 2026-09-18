@@ -70,6 +70,10 @@
     "playback.error.SEEK_UNAVAILABLE": "Seeking is unavailable for this track.",
     "playback.error.SEEK_FAILED": "The track could not be moved to that position.",
     "playback.play_track": "Play {title}",
+    "playback.play_album": "Play album {title}",
+    "playback.next": "Next",
+    "playback.retry": "Retry",
+    "playback.source": "Source: {source}",
     "playback.pause": "Pause", "playback.resume": "Resume", "playback.stop": "Stop",
     "playback.nothing_selected": "Nothing selected",
     "playback.status.idle": "Idle", "playback.status.loading": "Loading", "playback.status.active": "Playing", "playback.status.paused": "Paused", "playback.status.stopped": "Stopped", "playback.status.completed": "Completed", "playback.status.error": "Playback error",
@@ -474,6 +478,10 @@
     "lifecycle.playback_owner_failed": "Your session was saved, but HifiMule could not confirm that its playback worker stopped. Quit remains blocked."
   },
   "fr": {
+    "playback.play_album": "Lire l’album {title}",
+    "playback.next": "Suivant",
+    "playback.retry": "Réessayer",
+    "playback.source": "Source : {source}",
     "playback.resume_selected_output": "Reprendre sur {name}",
     "playback.output.label": "Sortie audio",
     "playback.output.refresh": "Actualiser les sorties",
@@ -932,6 +940,10 @@
     "lifecycle.playback_owner_failed": "Votre session est enregistrée, mais HifiMule n’a pas pu confirmer l’arrêt du service de lecture. La fermeture reste bloquée."
   },
   "es": {
+    "playback.play_album": "Reproducir el álbum {title}",
+    "playback.next": "Siguiente",
+    "playback.retry": "Reintentar",
+    "playback.source": "Fuente: {source}",
     "playback.resume_selected_output": "Reanudar en {name}",
     "playback.output.label": "Salida de audio",
     "playback.output.refresh": "Actualizar salidas",
@@ -1390,6 +1402,10 @@
     "lifecycle.playback_owner_failed": "La sesión se ha guardado, pero HifiMule no pudo confirmar que el servicio de reproducción se detuvo. El cierre sigue bloqueado."
   },
   "de": {
+    "playback.play_album": "Album {title} abspielen",
+    "playback.next": "Weiter",
+    "playback.retry": "Erneut versuchen",
+    "playback.source": "Quelle: {source}",
     "playback.resume_selected_output": "Auf {name} fortsetzen",
     "playback.output.label": "Audioausgabe",
     "playback.output.refresh": "Ausgaben aktualisieren",

@@ -345,3 +345,28 @@ provider/codec/backend/OS/architecture combinations qualified for release.
   requested/landed positions, numeric error, transport before/after, backend,
   buffer peaks and package revision were not supplied, so this observation is
   not yet an AC9-qualified installed row.
+
+## Story 15.8 ordered-album evidence
+
+Ordered-album acceptance uses `albumPlaybackEvidenceVersion: 1`; earlier
+single-track, output, native-control and seek records cannot satisfy it. Every row
+records actual OS, architecture, audio backend/runtime and provider version, plus
+pseudonymous session/generation/occurrence/source identities, queue revision,
+complete ordinal sequence and total count, before/after cursor and transport,
+transition cause, local disposition, duplicate-terminal count, and actual
+successor-audio outcome.
+
+Required installed exercises are a distinguishable ordered album, natural
+advancement with the UI closed, API and native Next, paused Next with no audio,
+an induced technical failure followed by same-occurrence Retry, final completion,
+and offline Quit/relaunch restoration. Run each applicable Jellyfin and
+Subsonic/Navidrome row on Windows, macOS and Linux. Leave unavailable combinations
+explicitly unverified; a VM does not certify another architecture, native API
+delivery does not certify a physical key, and audible order does not prove
+gaplessness.
+
+The validator rejects empty/no-op advancement, wrong or truncated ordering,
+dropped repeated occurrences, double advancement, a missing failed occurrence,
+paused Next that activates audio, contradictory causes/dispositions, and unknown
+evidence versions. EOF/Next/seek/Stop/output-loss races must show that exactly one
+committed transition owns the effect and stale work cannot start audio.

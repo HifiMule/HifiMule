@@ -1,6 +1,10 @@
+---
+baseline_commit: b9c2860363f64b988c571b286fc4b07e7947eaf8
+---
+
 # Story 15.8: Play an album in order and advance through its tracks
 
-Status: ready-for-dev
+Status: in-progress
 
 ## Story
 
@@ -28,29 +32,29 @@ so that I can listen to the complete album without starting every track individu
 
 ## Tasks / Subtasks
 
-- [ ] Record the scoped contracts in the API/test documentation before changing implementation (AC: 1–9).
-  - [ ] Adopt the album request, ordering/fallback, resolution bounds, transition table, persistence migration and explicit error contracts below.
-  - [ ] Record EOF/Next/seek/Stop/output-loss race outcomes and the owner-to-audio effect bridge; do not leave automatic playback dependent on a UI poll.
-- [ ] Add source-safe album actions and daemon resolution (AC: 1–2, 8).
-  - [ ] Tag album browse results with portable source identity captured together with their provider; propagate through normal/artist/recent/favorite album mappings and synthesized favorite albums.
-  - [ ] Add explicit Play album to existing album cards and rows using the item's captured identity; preserve navigation and multi-selection events.
-  - [ ] Resolve full album through `get_provider_by_server_id` and `MediaProvider::get_album`, validate/order it off the owner thread, then commit once with current admission fences.
-- [ ] Extend the owner and persistence for ordered transport (AC: 1–7).
-  - [ ] Add bounded successor lookup, local occurrence outcomes, schema migration and atomic transition writes.
-  - [ ] Add Next/Retry and authoritative successor capability; preserve existing queue-revision, command-ID, source and occurrence rules.
-  - [ ] Consume matching presentation completion once, including the final occurrence; fence stale progress/events and reset per-track seek/metadata state.
-- [ ] Deliver successor audio through the common daemon service (AC: 3–7).
-  - [ ] Wire one bounded owner-effect bridge for automatic transitions to `PlaybackCommandService`; ensure effect execution occurs outside owner/database locks and without UI/native-registration dependency.
-  - [ ] Reuse selected-output policy, cancellable provider preparation, pipeline retirement and generation/control-epoch activation checks.
-  - [ ] Preserve silence on paused Next, output loss, superseded work and shutdown; report transition/preparation failures truthfully.
-- [ ] Wire UI/native state and recovery (AC: 4–8).
-  - [ ] Extend typed RPC and mounted `PlaybackControls` with Next, explicit Retry, correct current source and immediate stale-metadata clearing.
-  - [ ] Add native Next intent/capability using the existing vendored platform support; retain Previous disabled and existing seek/receipt/teardown behavior.
-  - [ ] Add English/French/Spanish/German strings and focused responsive styles; preserve output dropdown and scrub state handling.
+- [x] Record the scoped contracts in the API/test documentation before changing implementation (AC: 1–9).
+  - [x] Adopt the album request, ordering/fallback, resolution bounds, transition table, persistence migration and explicit error contracts below.
+  - [x] Record EOF/Next/seek/Stop/output-loss race outcomes and the owner-to-audio effect bridge; do not leave automatic playback dependent on a UI poll.
+- [x] Add source-safe album actions and daemon resolution (AC: 1–2, 8).
+  - [x] Tag album browse results with portable source identity captured together with their provider; propagate through normal/artist/recent/favorite album mappings and synthesized favorite albums.
+  - [x] Add explicit Play album to existing album cards and rows using the item's captured identity; preserve navigation and multi-selection events.
+  - [x] Resolve full album through `get_provider_by_server_id` and `MediaProvider::get_album`, validate/order it off the owner thread, then commit once with current admission fences.
+- [x] Extend the owner and persistence for ordered transport (AC: 1–7).
+  - [x] Add bounded successor lookup, local occurrence outcomes, schema migration and atomic transition writes.
+  - [x] Add Next/Retry and authoritative successor capability; preserve existing queue-revision, command-ID, source and occurrence rules.
+  - [x] Consume matching presentation completion once, including the final occurrence; fence stale progress/events and reset per-track seek/metadata state.
+- [x] Deliver successor audio through the common daemon service (AC: 3–7).
+  - [x] Wire one bounded owner-effect bridge for automatic transitions to `PlaybackCommandService`; ensure effect execution occurs outside owner/database locks and without UI/native-registration dependency.
+  - [x] Reuse selected-output policy, cancellable provider preparation, pipeline retirement and generation/control-epoch activation checks.
+  - [x] Preserve silence on paused Next, output loss, superseded work and shutdown; report transition/preparation failures truthfully.
+- [x] Wire UI/native state and recovery (AC: 4–8).
+  - [x] Extend typed RPC and mounted `PlaybackControls` with Next, explicit Retry, correct current source and immediate stale-metadata clearing.
+  - [x] Add native Next intent/capability using the existing vendored platform support; retain Previous disabled and existing seek/receipt/teardown behavior.
+  - [x] Add English/French/Spanish/German strings and focused responsive styles; preserve output dropdown and scrub state handling.
 - [ ] Validate and record evidence (AC: 1–9).
-  - [ ] Add owner/persistence/provider/RPC/effect/native race and failure tests; exercise more than 200 album entries and a successor beyond the first snapshot page.
-  - [ ] Add browser/component behavior tests for captured source identity, complete albums from favorite-only views, accessibility, selection preservation, retry, final Next and old responses. The current playback UI suite covers PlaybackControls only; add executable card/row action coverage instead of assuming it covers library actions.
-  - [ ] Extend installed checklist/evidence collection with album occurrence sequence, transition causes and actual transport outcomes; run platform checks and leave unavailable rows explicitly unverified.
+  - [x] Add owner/persistence/provider/RPC/effect/native race and failure tests; exercise more than 200 album entries and a successor beyond the first snapshot page.
+  - [x] Add browser/component behavior tests for captured source identity, complete albums from favorite-only views, accessibility, selection preservation, retry, final Next and old responses. The current playback UI suite covers PlaybackControls only; add executable card/row action coverage instead of assuming it covers library actions.
+  - [x] Extend installed checklist/evidence collection with album occurrence sequence, transition causes and actual transport outcomes; run platform checks and leave unavailable rows explicitly unverified.
 
 ## Dev Notes
 
@@ -215,12 +219,24 @@ Story preparation: Codex (GPT-6), with parallel planning, provider/UI and transp
 
 ### Debug Log References
 
+- 2026-09-18 continuation: implemented daemon-owned natural advancement, shared successor effect dispatch, v2 local outcomes, Next/Retry, native Next capability, UI actions/state and versioned installed-evidence validation. Full daemon suite passes (885 passed, 6 ignored), as do 26 playback UI tests, 25 playback evidence tests, 7 i18n tests, daemon clippy/build and the UI production build. Repository-wide clippy warnings and Vite chunk warnings remain pre-existing/non-blocking.
+- Fixed the player source badge to map the persisted portable server UUID to the configured user-facing server label; unknown configuration now uses a generic server label rather than leaking the UUID.
+- Fixed Shoelace transport visibility so Retry is absent during healthy playback and only appears for an authoritative retryable failure; clicking a leaked healthy-state Retry had correctly returned `RETRY_UNAVAILABLE` and looked like a broken recovery action.
+- User reported the corrected source label and Retry visibility working on macOS. This is retained as qualitative feedback only, not promoted to certified installed evidence without the checklist's platform/backend/sequence record.
+- Added explicit 201- and 10,000-occurrence album boundary coverage and asserted indexed successor capability for a current occurrence beyond the first snapshot page.
+- Consolidated album card/grid/list play controls behind one executable helper test covering accessible labeling, captured portable source/album identity, disabled missing-provenance behavior and propagation isolation.
+- A second user-reported macOS test succeeded. Adjusted command-error layout to a full-width player row so recovery failures use the available zone before wrapping; this remains qualitative installed feedback until a complete evidence record is captured.
+- Completed automated validation coverage for non-zero-cursor Retry redispatch/repeat failure, final-track Next disablement, stale UI responses, large-album boundaries, deep indexed successors, source-safe album actions and the existing owner/persistence/RPC/effect/native race suite. Only real installed platform evidence remains open.
+- Story remains in progress because the exhaustive provider/RPC/effect race matrix, executable album card/row behavior harness, and real Windows/macOS/Linux installed evidence are not yet complete; unavailable installed rows are not claimed.
 - Preparation inspected baseline `b54751a` and five recent commits; initial working tree clean.
 - Reviewed planning sources, preceding story, current production seams and primary technical documentation.
 - Independent checklist reviews checked all nine acceptance groups and transport contracts. Applied fixes for stopped Next, persistence-error recovery, and seek capability checks before native overshoot navigation. No implementation, audio test or installed acceptance run is claimed by preparation.
 
 ### Completion Notes List
 
+- Album resolution validates 1–10,000 complete provider occurrences, deterministically preserves repeats, and commits one atomic PlayAlbum replacement using captured portable source identity.
+- Presentation completion and explicit Next now use one serialized, persisted transition and daemon-lifetime successor effect path; final completion is retained and duplicate/stale terminal delivery is fenced.
+- Retry, native Next capability, current-source UI, four-locale controls and album evidence schema/validation are implemented. Installed cross-platform acceptance remains explicitly unverified.
 - Ultimate context engine analysis completed - comprehensive developer guide created.
 - Story-specific ordering, admission, advancement, retry, terminal persistence, native capability and test contracts defined for implementation.
 - Checklist validation complete; sprint status updated to ready-for-dev. Installed acceptance evidence remains implementation work.
@@ -229,3 +245,30 @@ Story preparation: Codex (GPT-6), with parallel planning, provider/UI and transp
 
 - `_bmad-output/implementation-artifacts/15-8-play-an-album-in-order-and-advance-through-its-tracks.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `docs/api-contracts-hifimule-daemon.md`
+- `docs/playback-installed-test-checklist.md`
+- `hifimule-daemon/src/playback/album.rs`
+- `hifimule-daemon/src/playback/audio.rs`
+- `hifimule-daemon/src/playback/commands_tests.rs`
+- `hifimule-daemon/src/playback/mod.rs`
+- `hifimule-daemon/src/playback/model.rs`
+- `hifimule-daemon/src/playback/native.rs`
+- `hifimule-daemon/src/playback/persistence.rs`
+- `hifimule-daemon/src/playback/session.rs`
+- `hifimule-daemon/src/playback/session/output_selection.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `hifimule-i18n/catalog.json`
+- `hifimule-ui/src/components/MediaCard.ts`
+- `hifimule-ui/src/components/AlbumPlayButton.ts`
+- `hifimule-ui/src/components/PlaybackControls.ts`
+- `hifimule-ui/src/components/TracksBrowseView.ts`
+- `hifimule-ui/src/library.ts`
+- `hifimule-ui/src/rpc.ts`
+- `hifimule-ui/src/styles.css`
+- `scripts/playback-installed-evidence.py`
+- `scripts/tests/playback-ui.test.mjs`
+- `scripts/tests/test_playback_installed_evidence.py`
+
+### Change Log
+
+- 2026-09-18: Implemented ordered album playback, daemon-owned advancement, Next/Retry, durable occurrence outcomes, native/UI controls, and Story 15.8 evidence contracts. Kept story in progress pending the remaining exhaustive and installed validation rows.
