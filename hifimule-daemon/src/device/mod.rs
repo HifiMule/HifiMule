@@ -2105,8 +2105,7 @@ where
     Ok(result_rx)
 }
 
-type MtpEnumerator =
-    std::sync::Arc<dyn Fn() -> Result<Vec<mtp::MtpDeviceInfo>> + Send + Sync>;
+type MtpEnumerator = std::sync::Arc<dyn Fn() -> Result<Vec<mtp::MtpDeviceInfo>> + Send + Sync>;
 
 pub async fn run_mtp_observer(tx: tokio::sync::mpsc::Sender<DeviceEvent>) {
     run_mtp_observer_with_enumerator(
@@ -2140,7 +2139,10 @@ pub(crate) async fn run_mtp_observer_with_enumerator(
                 }
             },
             Err(error) => {
-                daemon_log!("[MTP] Could not start passive device enumeration: {}", error);
+                daemon_log!(
+                    "[MTP] Could not start passive device enumeration: {}",
+                    error
+                );
                 Vec::new()
             }
         };

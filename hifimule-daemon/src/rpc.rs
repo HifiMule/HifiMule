@@ -259,6 +259,32 @@ pub async fn run_server(
             if let Some(snapshot) = output_state.playback.take_output_effect() {
                 let playback = output_state.playback.clone();
                 let generation = snapshot.generation_id;
+                if crate::playback::audio::global().has_active_generation(&generation)
+                    && let Some(candidate) =
+                        playback.successor_candidate(&generation, playback.control_epoch())
+                {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                    let resolved = async {
+                        let provider = crate::server_manager::get_provider_by_server_id(
+                            &output_state.server_manager,
+                            &output_state.db,
+                            &candidate.successor.source.server_id,
+                        )
+                        .await?;
+                        provider
+                            .resolve_playback(&candidate.successor.source.track_id)
+                            .await
+                    };
+                    if let Ok(Ok(description)) =
+                        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), resolved)
+                            .await
+                    {
+                        let _ = crate::playback::audio::global()
+                            .prepare_successor(candidate, description, generation, deadline)
+                            .await;
+                    }
+                    continue;
+                }
                 let result = if let Some(current) = snapshot.current {
                     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
                     let resolve = async {

@@ -4,7 +4,7 @@ baseline_commit: d4d73f19b7cb3466a1b612a8b22ba5099b3ecc87
 
 # Story 15.9: Preserve album continuity across prepared track boundaries
 
-Status: ready-for-dev
+Status: in-progress
 
 ## Story
 
@@ -32,28 +32,28 @@ so that live recordings, continuous compositions and intentional pauses sound as
 
 ## Tasks / Subtasks
 
-- [ ] Finalize and document the handoff contract before production changes (AC: 1–9).
-  - [ ] Record identities, preparation bounds, fixed output policy, supported padding matrix, presentation timestamps, owner/persistence reconciliation and backend cancellation semantics in the existing API/runtime/test documents.
-  - [ ] Add deterministic contract tests for boundary authorization, presentation acknowledgment, failure precedence and exactly-once owner advancement.
-- [ ] Prepare one successor through existing provider/streaming boundaries (AC: 1, 5–7).
-  - [ ] Resolve by portable source identity and indexed next occurrence; retain repeated source tracks as distinct occurrences.
-  - [ ] Hold bounded metadata, compressed input and PCM for at most one successor; propagate cancellation/deadlines and measure aggregate high-water use.
-  - [ ] Fence metadata, qualification, errors and PCM before promotion; release retired resources before allocating a replacement slot.
-- [ ] Refactor native output lifetime and PCM consumption (AC: 1, 4–6).
-  - [ ] Separate continuous output ownership from per-occurrence decode ownership in both CPAL and Pulse implementations.
-  - [ ] Consume predecessor tail and successor head in one callback/write span without refill silence, overlap, per-track drain or reopen.
-  - [ ] Add bounded occurrence-aware presentation accounting; preserve Pulse startup priming, selected endpoint pinning, cork/flush/retirement and CPAL loss/sleep detection.
-- [ ] Integrate owner transitions and durable recovery (AC: 1, 6–7).
-  - [ ] Add token/occurrence-aware handoff events and terminal precedence; prevent Failed being overwritten by Completed.
-  - [ ] Reuse atomic disposition/current/cursor commits, bounded recovery and daemon effect bridge without restarting an already adopted stream.
-  - [ ] Reset per-occurrence progress, seek qualification and metadata at presentation; preserve final-album completion, explicit Next/Retry, stopped/paused intent and restart-paused behavior.
-- [ ] Validate conversion and padding through the production decoder (AC: 2–4, 8).
-  - [ ] Retain worker-owned FFmpeg objects, decoder EOF drain and resampler drain; establish the precise same-rate and mixed-rate references below.
-  - [ ] Add valid/absent/ambiguous padding, intentional-zero, short-track, mono/stereo and unsupported-layout fixtures.
-  - [ ] Test large metadata, sequential and verified Range sources, cancelled full queues and slow/malformed successor sources.
+- [x] Finalize and document the handoff contract before production changes (AC: 1–9).
+  - [x] Record identities, preparation bounds, fixed output policy, supported padding matrix, presentation timestamps, owner/persistence reconciliation and backend cancellation semantics in the existing API/runtime/test documents.
+  - [x] Add deterministic contract tests for boundary authorization, presentation acknowledgment, failure precedence and exactly-once owner advancement.
+- [x] Prepare one successor through existing provider/streaming boundaries (AC: 1, 5–7).
+  - [x] Resolve by portable source identity and indexed next occurrence; retain repeated source tracks as distinct occurrences.
+  - [x] Hold bounded metadata, compressed input and PCM for at most one successor; propagate cancellation/deadlines and measure aggregate high-water use.
+  - [x] Fence metadata, qualification, errors and PCM before promotion; release retired resources before allocating a replacement slot.
+- [x] Refactor native output lifetime and PCM consumption (AC: 1, 4–6).
+  - [x] Separate continuous output ownership from per-occurrence decode ownership in both CPAL and Pulse implementations.
+  - [x] Consume predecessor tail and successor head in one callback/write span without refill silence, overlap, per-track drain or reopen.
+  - [x] Add bounded occurrence-aware presentation accounting; preserve Pulse startup priming, selected endpoint pinning, cork/flush/retirement and CPAL loss/sleep detection.
+- [x] Integrate owner transitions and durable recovery (AC: 1, 6–7).
+  - [x] Add token/occurrence-aware handoff events and terminal precedence; prevent Failed being overwritten by Completed.
+  - [x] Reuse atomic disposition/current/cursor commits, bounded recovery and daemon effect bridge without restarting an already adopted stream.
+  - [x] Reset per-occurrence progress, seek qualification and metadata at presentation; preserve final-album completion, explicit Next/Retry, stopped/paused intent and restart-paused behavior.
+- [x] Validate conversion and padding through the production decoder (AC: 2–4, 8).
+  - [x] Retain worker-owned FFmpeg objects, decoder EOF drain and resampler drain; establish the precise same-rate and mixed-rate references below.
+  - [x] Add valid/absent/ambiguous padding, intentional-zero, short-track, mono/stereo and unsupported-layout fixtures.
+  - [x] Test large metadata, sequential and verified Range sources, cancelled full queues and slow/malformed successor sources.
 - [ ] Run regression and platform evidence checks (AC: 1–9).
-  - [ ] Run focused playback/owner/decoder/streaming/effect tests, then relevant full daemon and runtime/evidence tests; compile both cfg-selected output paths.
-  - [ ] Extend installed evidence/checklist with a distinct continuity schema and malformed/contradictory-record validation tests.
+  - [ ] Run focused playback/owner/decoder/streaming/effect tests, then relevant full daemon and runtime/evidence tests; compile both cfg-selected output paths. (macOS and vendored WASAPI compile/tests pass; Pulse cross-check is blocked on this host by the absent Linux OpenSSL/sysroot.)
+  - [x] Extend installed evidence/checklist with a distinct continuity schema and malformed/contradictory-record validation tests.
   - [ ] Record production-decoder output and native physical measurements per OS/architecture/runtime. Leave unmet acceptance tasks open rather than equating source tests with physical proof.
 
 ## Dev Notes
@@ -174,8 +174,34 @@ GPT-6 (story preparation).
 
 Preparation only: repository/source inspection, previous-story and git analysis, primary documentation research and story checklist review. No implementation, audio capture or runtime acceptance tests were performed for this story preparation.
 
+#### Contract Gate Investigation — 2026-09-18
+
+The first task's contract gate is complete. The user prioritized an effective Pause as soon as practical without sacrificing correctness. The resulting rule closes consumption immediately and lets the acknowledged backend cancellation point decide a submitted-audio race. A presented boundary is reconciled before Pause targets the audible successor; unpresented successor PCM is retained or replayed exactly once. A backend that cannot establish a coherent cutoff retires and resumes from the last coherent commit.
+
+Evidence:
+
+- `rtk cargo test -p hifimule-daemon playback::` is rejected by the build-time runtime-verification guard. The supported command is `rtk npm run build:daemon -- test -p hifimule-daemon playback::`.
+- The supported wrapper verified FFmpeg ABI versions avcodec/avformat 63.1.101, avutil 61.1.101 and swresample 7.1.101. Initial sandbox execution had six local HTTP mock-server permission failures. After the retained changes, rerunning with local-server access passed: **214 passed, 0 failed, 6 ignored**. This is regression evidence, not continuity acceptance.
+- Existing `AudioEngine::control` closes the consumption gate on Pause, and closes/cancels on Stop. The CPAL callback loads that gate before rendering. Closing it cannot retract a buffer already submitted to the backend.
+- A temporary characterization harness (`/tmp/hifimule-15-9-contract-gate.rs`) imports the production `output.rs`: after one frame is rendered, a disabled later render emits zero and retains queued PCM, while the previously submitted frame remains intact. The characterization plus six existing output tests passed. This is consumer-level evidence only, not a native cancellation or physical-output test; the harness is not a committed regression test.
+- Locally installed CPAL 0.18.2 `src/host/wasapi/stream.rs` implements `StreamTrait::pause` by enqueueing `Command::PauseStream`; the backend invokes `IAudioClient::Stop` later in `process_commands`. Its return does not acknowledge that cancellation has taken effect. CoreAudio's pause calls AudioUnit stop but does not return an exact consumed-frame cursor. These observations do not prove native extension work is impossible; they identify missing primitives for the stricter interpretation.
+- A submission timestamp alone cannot establish the winner of a concurrent native pause. An implementation must reconcile presentation with the actual backend cancellation point, and retain/replay only the unpresented prefix. Treating callback consumption as presentation would violate the story.
+
+Contract implementation: `playback/continuity.rs` defines occurrence-aware authorization, readiness, presentation adoption, pause acknowledgment and terminal precedence. Four deterministic tests cover full-token authorization, exactly-once adoption, both Pause race outcomes and Failed-over-Completed precedence. `BoundaryPcmConsumer` proves a ready tail/head can join inside one callback without silence or duplication and that an unready successor cannot leak. The runtime manifest now records two bounded slots and aggregate compressed/PCM ceilings. API and installed-test documents record output lifetime, padding/conversion support, persistence recovery, evidence separation and cancellation semantics. Terminal ingress now preserves Failed over Completed in either delivery order. Dependencies and predecessor status are unchanged. Physical evidence for all platforms remains unverified.
+
+The user selected the native-extension route. The repository now pins a source patch of CPAL 0.18.2 with `StreamTrait::pause_with_snapshot`: unsupported backends fail without changing stream state; WASAPI acknowledges `Stop`, captures `IAudioClock` position and exact stopped padding, then resets the client. HifiMule now retains a fixed-capacity suffix of submitted WASAPI frames, reconciles the reported pending suffix after Pause, rolls back logical position for its source-audio frames, and replays it exactly once before new PCM on Resume. Two deterministic tests cover exact suffix replay, disabled-gate non-leakage, bounded failure, and logical-audio accounting. CoreAudio callback timestamps remain an estimate rather than an exact consumed cursor, so its experimental snapshot implementation was removed and production macOS keeps the existing synchronous consumption gate. Pulse retains its cork and played-frame ledger. The patched CPAL crate passes an `aarch64-pc-windows-gnullvm` compile check using the rustup toolchain explicitly (the Homebrew Cargo/Rustup target mismatch caused the earlier false missing-target result). Physical/native race evidence remains outstanding.
+
 ### Completion Notes List
 
+- Implemented indexed, occurrence-aware successor resolution and one-slot provider preparation with deadline/cancellation fencing, repeated-source preservation, separate compressed readers, aggregate diagnostics, and reusable two-slot decoder ownership.
+- CPAL and Pulse now keep the native stream alive across ready boundaries, join tail/head in one render/write span, acknowledge presentation before the atomic owner transition, retire the previous decoder slot, and prepare the following occurrence without rotating the playback generation.
+- Pause closes consumption immediately. WASAPI acknowledges Stop and replays the exact unpresented submitted suffix; CoreAudio and Pulse retire a pipeline when a submitted boundary lacks a coherent native cutoff, so Resume restarts from durable state instead of guessing.
+- Added strict versioned physical-continuity evidence rows and malformed/contradictory-record tests. Physical captures remain explicitly unverified and therefore keep the final evidence task and story status open.
+- Validation on 2026-09-18: playback suite **218 passed, 0 failed, 6 ignored**; full daemon suite **919 passed, 0 failed, 6 ignored**; installed-evidence validator **30 passed**; runtime manifest verifier **8 passed**; `git diff --check` passed. The vendored WASAPI CPAL target compile passed. Pulse cross-compilation reached the host's missing target OpenSSL/sysroot prerequisite before compiling the daemon.
+- Contract gate completed with an executable occurrence-bound handoff state machine and documented backend-acknowledgment Pause policy.
+- Contract tests passed: 4 passed, 0 failed. Runtime buffer-policy manifest test passed: 1 passed, 0 failed.
+- Added callback-safe two-slot boundary oracle tests and hardened terminal ingress so failure dominates delayed completion.
+- Added a repository-owned CPAL 0.18.2 patch plus a bounded submitted-tail/replay ledger. WASAPI production Pause now acknowledges and flushes native padding, and Resume replays that suffix once. CoreAudio remains gated without guessed flush/replay.
 - Ultimate context engine analysis completed - comprehensive developer guide created.
 - Ready for development with explicit handoff/padding/conversion/resource contracts and acceptance evidence requirements. This status does not certify implemented or physical continuity.
 - Predecessor status discrepancy and installed-platform evidence limitations retained without altering prior story status.
@@ -184,3 +210,25 @@ Preparation only: repository/source inspection, previous-story and git analysis,
 
 - `_bmad-output/implementation-artifacts/15-9-preserve-album-continuity-across-prepared-track-boundaries.md`
 - `_bmad-output/implementation-artifacts/sprint-status.yaml`
+- `docs/api-contracts-hifimule-daemon.md`
+- `docs/playback-installed-test-checklist.md`
+- `hifimule-daemon/audio-runtime.json`
+- `hifimule-daemon/src/playback/continuity.rs`
+- `hifimule-daemon/src/playback/audio.rs`
+- `hifimule-daemon/src/playback/audio/pulse_output.rs`
+- `hifimule-daemon/src/playback/commands.rs`
+- `hifimule-daemon/src/playback/mod.rs`
+- `hifimule-daemon/src/playback/model.rs`
+- `hifimule-daemon/src/playback/output.rs`
+- `hifimule-daemon/src/playback/session.rs`
+- `hifimule-daemon/src/rpc.rs`
+- `scripts/playback-installed-evidence.py`
+- `scripts/tests/test_playback_installed_evidence.py`
+- `scripts/tests/verify-audio-runtime.test.mjs`
+- `Cargo.toml`
+- `Cargo.lock`
+- `third_party/cpal/`
+
+### Change Log
+
+- 2026-09-18: Completed the contract gate and added boundary tests, bounded runtime policy, terminal precedence, a WASAPI acknowledged-pause CPAL patch, and exact pending-tail replay. Production successor preparation, adoption and physical evidence remain pending; CoreAudio exact cutoff remains unresolved.

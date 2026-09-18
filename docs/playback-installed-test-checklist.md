@@ -346,6 +346,36 @@ provider/codec/backend/OS/architecture combinations qualified for release.
   buffer peaks and package revision were not supplied, so this observation is
   not yet an AC9-qualified installed row.
 
+## Story 15.9 continuity evidence
+
+Continuity acceptance uses `continuityEvidenceVersion: 1` and remains distinct
+from ordered-album, decoder, callback-counter, VM, and listening evidence. Each
+physical row records OS, architecture, build commit, controlled FFmpeg identity
+and loaded libraries, CPAL/Pulse versions, endpoint identity hash, fixed output
+rate/layout/format, fixture hashes, preparation result, predecessor and successor
+occurrence IDs, boundary and presented frame offsets, stream open/close counts,
+underruns, capture method, raw capture path and hash, comparison tolerance, and
+listening result.
+
+Use one globally aligned capture. Do not align each side of the boundary
+independently. Compare the captured boundary window against independently decoded,
+drained, converted, and concatenated production references. Report added silence,
+missing frames, duplicate frames, and clock drift separately. A VM, callback
+counter, volume-zero run, or listening result is never labeled physical evidence.
+
+Exercise intentional leading, trailing, and internal zeros; unique boundary
+markers; short tracks; validated and absent/ambiguous padding; repeated sources as
+distinct occurrences; 44.1/48 kHz; mono/stereo; unsupported layouts; and Pause,
+Stop, Next, seek, replacement, output loss, and Quit before readiness, after
+readiness, across one native buffer, and after submission before presentation.
+For Pause, record the request and backend acknowledgment points. The boundary wins
+only if the backend reports it presented by that acknowledgment; unpresented
+successor samples must not leak and later Resume must neither skip nor duplicate.
+
+Mark each platform row `unverified` until the physical capture and raw artifact
+are present. Source tests and decoder fixtures may support diagnosis but cannot
+promote an unverified physical row.
+
 ## Story 15.8 ordered-album evidence
 
 Ordered-album acceptance uses `albumPlaybackEvidenceVersion: 1`; earlier

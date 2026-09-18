@@ -166,22 +166,48 @@ impl PlaybackCommandService {
                 }
                 None => return,
             };
-            if let Some(error) = failure
-                && super::audio::log_pipeline_failure(&playback, &generation, &error)
+            if let Some(error) = failure {
+                if super::audio::log_pipeline_failure(&playback, &generation, &error) {
+                    playback.publish_event_at_epoch(
+                        generation,
+                        super::model::PlaybackEvent::Failed {
+                            code: if error.code().starts_with("OUTPUT_") {
+                                error.code()
+                            } else {
+                                "RESUME_UNAVAILABLE"
+                            }
+                            .into(),
+                            retryable: true,
+                        },
+                        resume_epoch,
+                    );
+                }
+                return;
+            }
+
+            let Some(candidate) = playback.successor_candidate(&generation, resume_epoch) else {
+                return;
+            };
+            let successor_description = async {
+                let provider = crate::server_manager::get_provider_by_server_id(
+                    &manager,
+                    &db,
+                    &candidate.successor.source.server_id,
+                )
+                .await?;
+                provider
+                    .resolve_playback(&candidate.successor.source.track_id)
+                    .await
+            };
+            if let Ok(Ok(description)) = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                successor_description,
+            )
+            .await
             {
-                playback.publish_event_at_epoch(
-                    generation,
-                    super::model::PlaybackEvent::Failed {
-                        code: if error.code().starts_with("OUTPUT_") {
-                            error.code()
-                        } else {
-                            "RESUME_UNAVAILABLE"
-                        }
-                        .into(),
-                        retryable: true,
-                    },
-                    resume_epoch,
-                );
+                let _ = super::audio::global()
+                    .prepare_successor(candidate, description, generation, deadline)
+                    .await;
             }
         });
     }

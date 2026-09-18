@@ -2,7 +2,7 @@ use super::*;
 use crate::playback::{
     decoder::decode_stream_with_seek,
     devices::pulse_stream::PinnedStream,
-    output::{PcmConsumer, PresentationActivity, PresentationLedger},
+    output::{BoundaryPcmConsumer, PresentationActivity, PresentationLedger},
 };
 use std::time::Duration;
 
@@ -99,10 +99,13 @@ pub(super) fn run_output(
     pcm_high_water: Arc<AtomicU64>,
     endpoint: Arc<Mutex<Option<String>>>,
     position_ms: Arc<AtomicU64>,
+    _output_control: Arc<OutputControl>,
+    successor_rx: mpsc::Receiver<PreparedSuccessor>,
     preparation: crate::playback::http_source::Preparation,
     seek_mechanism: Option<crate::providers::PlaybackSeekMechanism>,
     provider_duration_ms: u64,
     mut seek_commit: Option<(String, u64)>,
+    boundary_pending: Arc<AtomicBool>,
 ) -> Result<(), PlaybackPipelineError> {
     let preference = session
         .selected_output(&generation)
@@ -122,6 +125,7 @@ pub(super) fn run_output(
     let capacity = (rate as usize * channels as usize * PCM_TARGET_MILLISECONDS / 1000)
         .min(PCM_CAPACITY_MAX_BYTES / 4);
     let pcm = Arc::new(ArrayQueue::new(capacity));
+    let successor_pcm = Arc::new(ArrayQueue::new(capacity));
     let decoder_pcm = pcm.clone();
     let decoder_cancel = cancel.clone();
     let hint = hint.to_owned();
@@ -152,10 +156,11 @@ pub(super) fn run_output(
             decoder_cancel,
         )
     });
-    let mut consumer = PcmConsumer::new(channels as usize, rate as usize * channels as usize / 10);
+    let mut consumer =
+        BoundaryPcmConsumer::new(channels as usize, rate as usize * channels as usize / 10);
     let mut ledger = PresentationLedger::new();
     let mut scratch = vec![0f32; rate as usize * channels as usize / 100];
-    let occurrence = session
+    let mut occurrence = session
         .snapshot()
         .ok()
         .and_then(|s| s.current)
@@ -169,6 +174,27 @@ pub(super) fn run_output(
     let mut startup_primer = StartupPrimer::new(startup.server_samples);
     let mut submission_cursor = SubmissionCursor::default();
     let mut activity = PresentationActivity::default();
+    let mut successor_decoder: Option<
+        crate::playback::output::DecoderWorker<
+            anyhow::Result<crate::playback::decoder::DecodeSummary>,
+        >,
+    > = None;
+    let mut slot_a_decoder = Some(decoder);
+    let mut slot_a_ready = true;
+    let mut active_slot = 0usize;
+    let mut successor_identity: Option<(
+        crate::playback::continuity::HandoffToken,
+        PlaybackTrackMetadata,
+        u64,
+        String,
+    )> = None;
+    let mut successor_preparation = None;
+    let mut successor_ready = false;
+    let mut boundary_played_frame = None;
+    let mut successor_submitted_frames = 0u64;
+    let mut handoff_published = false;
+    let mut presentation_base_frames = 0u64;
+    let mut latest_presented_frames = 0u64;
     let activity_clock = std::time::Instant::now();
     let mut report_stall = || {
         session.publish_event_at_epoch(
@@ -197,12 +223,96 @@ pub(super) fn run_output(
             output
                 .pump()
                 .map_err(PlaybackPipelineError::output_policy)?;
+            if successor_identity.is_none()
+                && let Ok(prepared) = successor_rx.try_recv()
+            {
+                let PreparedSuccessor {
+                    token,
+                    reader,
+                    decoder_hint,
+                    duration_ms,
+                    metadata,
+                    representation,
+                    preparation,
+                } = prepared;
+                let target_slot = 1usize.saturating_sub(active_slot);
+                let queue = if target_slot == 0 {
+                    pcm.clone()
+                } else {
+                    successor_pcm.clone()
+                };
+                let decoder_cancel = cancel.clone();
+                let worker =
+                    crate::playback::output::DecoderWorker::spawn(cancel.clone(), move || {
+                        decode_stream_with_seek(
+                            reader,
+                            Some(&decoder_hint),
+                            rate,
+                            channels,
+                            0,
+                            None,
+                            false,
+                            Some(duration_ms),
+                            None,
+                            None,
+                            queue,
+                            decoder_cancel,
+                        )
+                    });
+                if target_slot == 0 {
+                    slot_a_decoder = Some(worker);
+                    slot_a_ready = false;
+                } else {
+                    successor_decoder = Some(worker);
+                    successor_ready = false;
+                }
+                successor_identity = Some((token, metadata, duration_ms, representation));
+                successor_preparation = Some(preparation);
+            }
+            let slot_a_finished = slot_a_decoder
+                .as_ref()
+                .is_some_and(|worker| worker.is_finished());
+            let slot_b_finished = successor_decoder
+                .as_ref()
+                .is_some_and(|worker| worker.is_finished());
+            let prepared_slot = 1usize.saturating_sub(active_slot);
+            let (prepared_queue, prepared_finished, prepared_ready) = if prepared_slot == 0 {
+                (&pcm, slot_a_finished, &mut slot_a_ready)
+            } else {
+                (&successor_pcm, slot_b_finished, &mut successor_ready)
+            };
+            if successor_identity.is_some()
+                && !*prepared_ready
+                && (prepared_queue.len() >= rate as usize * channels as usize / 10
+                    || prepared_finished && prepared_queue.len() >= channels as usize)
+            {
+                *prepared_ready = true;
+                if let Some(preparation) = successor_preparation.take() {
+                    preparation.ready();
+                }
+            }
+            if successor_identity.is_some()
+                && prepared_finished
+                && prepared_queue.is_empty()
+                && !*prepared_ready
+            {
+                let failed = if prepared_slot == 0 {
+                    slot_a_decoder.take()
+                } else {
+                    successor_decoder.take()
+                };
+                if let Some(worker) = failed {
+                    let _ = worker.join();
+                }
+                successor_identity = None;
+                successor_preparation = None;
+            }
             pcm_high_water.fetch_max(pcm.len() as u64, Ordering::AcqRel);
             if !ready {
                 preparation
                     .check()
                     .map_err(|e| PlaybackPipelineError::timeout(e.into()))?;
-                if pcm.len() >= startup.initial_samples || decoder.is_finished() {
+                if pcm.len() >= startup.initial_samples || slot_a_finished {
                     if !session.output_opened(&generation, &preference) {
                         return Err(PlaybackPipelineError::output_policy("GENERATION_CONFLICT"));
                     }
@@ -263,23 +373,47 @@ pub(super) fn run_output(
             }
             if ready
                 && gate.load(Ordering::Acquire)
-                && !startup_primer.is_ready(decoder.is_finished(), pcm.is_empty())
+                && !startup_primer.is_ready(slot_a_finished, pcm.is_empty())
             {
                 let len = startup_primer.next_write(output.writable_samples(), scratch.len());
                 if len > 0 {
                     let cursor = output.write_cursor_frames();
-                    let rendered =
-                        consumer.render(&mut scratch[..len], &pcm, true, decoder.is_finished());
-                    if !submission_cursor.record(cursor, len, channels, &rendered, &mut ledger) {
+                    let write_start = cursor
+                        .unwrap_or(submission_cursor.next_frame)
+                        .max(submission_cursor.next_frame);
+                    let rendered = consumer.render(
+                        &mut scratch[..len],
+                        &pcm,
+                        slot_a_ready,
+                        slot_a_finished,
+                        &successor_pcm,
+                        successor_ready,
+                        slot_b_finished,
+                        true,
+                    );
+                    if let Some(offset) = rendered.boundary_frame {
+                        boundary_pending.store(true, Ordering::Release);
+                        boundary_played_frame = Some(write_start.saturating_add(offset as u64));
+                    }
+                    active_slot = rendered.active_slot;
+                    successor_submitted_frames = successor_submitted_frames
+                        .saturating_add(rendered.successor_samples / u64::from(channels));
+                    if !submission_cursor.record(
+                        cursor,
+                        len,
+                        channels,
+                        &rendered.rendered,
+                        &mut ledger,
+                    ) {
                         return Err(PlaybackPipelineError::output_policy("OUTPUT_SWITCH_FAILED"));
                     }
                     output
                         .write(&scratch[..len])
                         .map_err(PlaybackPipelineError::output_policy)?;
-                    startup_primer.record_write(rendered.samples as usize);
+                    startup_primer.record_write(rendered.rendered.samples as usize);
                 }
             }
-            let primed = startup_primer.is_ready(decoder.is_finished(), pcm.is_empty());
+            let primed = startup_primer.is_ready(slot_a_finished, pcm.is_empty());
             let enabled = ready && primed && gate.load(Ordering::Acquire);
             let epoch = event_epoch.load(Ordering::Acquire);
             output
@@ -289,9 +423,33 @@ pub(super) fn run_output(
                 let len = output.writable_samples().min(scratch.len());
                 if len > 0 {
                     let cursor = output.write_cursor_frames();
-                    let rendered =
-                        consumer.render(&mut scratch[..len], &pcm, true, decoder.is_finished());
-                    if !submission_cursor.record(cursor, len, channels, &rendered, &mut ledger) {
+                    let write_start = cursor
+                        .unwrap_or(submission_cursor.next_frame)
+                        .max(submission_cursor.next_frame);
+                    let rendered = consumer.render(
+                        &mut scratch[..len],
+                        &pcm,
+                        slot_a_ready,
+                        slot_a_finished,
+                        &successor_pcm,
+                        successor_ready,
+                        slot_b_finished,
+                        true,
+                    );
+                    if let Some(offset) = rendered.boundary_frame {
+                        boundary_pending.store(true, Ordering::Release);
+                        boundary_played_frame = Some(write_start.saturating_add(offset as u64));
+                    }
+                    active_slot = rendered.active_slot;
+                    successor_submitted_frames = successor_submitted_frames
+                        .saturating_add(rendered.successor_samples / u64::from(channels));
+                    if !submission_cursor.record(
+                        cursor,
+                        len,
+                        channels,
+                        &rendered.rendered,
+                        &mut ledger,
+                    ) {
                         return Err(PlaybackPipelineError::output_policy("OUTPUT_SWITCH_FAILED"));
                     }
                     output
@@ -301,20 +459,79 @@ pub(super) fn run_output(
             }
             if let Some(played) = output.played_frames() {
                 let frames = ledger.advance(played);
-                if frames > last_frames {
+                latest_presented_frames = frames;
+                if !handoff_published
+                    && boundary_played_frame.is_some_and(|boundary| played >= boundary)
+                    && let (Some(boundary), Some((token, metadata, duration_ms, representation))) =
+                        (boundary_played_frame, successor_identity.as_ref())
+                {
+                    session.publish_event_at_epoch(
+                        generation.clone(),
+                        PlaybackEvent::HandoffPresented {
+                            token: token.clone(),
+                            metadata: metadata.clone(),
+                            duration_ms: *duration_ms,
+                            representation: representation.clone(),
+                            successor_offset_frames: played
+                                .saturating_sub(boundary)
+                                .min(successor_submitted_frames),
+                            sample_rate: rate,
+                        },
+                        epoch,
+                    );
+                    handoff_published = true;
+                }
+                let occurrence_frames = frames.saturating_sub(presentation_base_frames);
+                if occurrence_frames > last_frames {
                     sequence += 1;
                     position_ms.store(
-                        base_position_ms + frames.saturating_mul(1000) / u64::from(rate),
+                        base_position_ms + occurrence_frames.saturating_mul(1000) / u64::from(rate),
                         Ordering::Release,
                     );
                     let _ = session.report_progress(
                         &generation,
                         &occurrence,
                         sequence,
-                        base_position_ms + frames.saturating_mul(1000) / u64::from(rate),
+                        base_position_ms + occurrence_frames.saturating_mul(1000) / u64::from(rate),
                     );
-                    last_frames = frames;
+                    last_frames = occurrence_frames;
                 }
+            }
+            if handoff_published
+                && let Some((token, _, _, _)) = successor_identity.as_ref()
+                && occurrence != token.successor_occurrence_id
+                && session
+                    .snapshot()
+                    .ok()
+                    .and_then(|snapshot| snapshot.current)
+                    .is_some_and(|current| current.occurrence_id == token.successor_occurrence_id)
+            {
+                occurrence = token.successor_occurrence_id.clone();
+                sequence = 0;
+                base_position_ms = 0;
+                last_frames = 0;
+                presentation_base_frames = latest_presented_frames;
+                let retired = if active_slot == 0 {
+                    successor_decoder.take()
+                } else {
+                    slot_a_decoder.take()
+                };
+                if let Some(worker) = retired {
+                    let _ = worker.join();
+                }
+                if active_slot == 0 {
+                    successor_ready = false;
+                    while successor_pcm.pop().is_some() {}
+                } else {
+                    slot_a_ready = false;
+                    while pcm.pop().is_some() {}
+                }
+                successor_identity = None;
+                successor_preparation = None;
+                boundary_played_frame = None;
+                successor_submitted_frames = 0;
+                handoff_published = false;
+                boundary_pending.store(false, Ordering::Release);
             }
             if let Some(active) = activity.observe(
                 enabled,
@@ -331,7 +548,16 @@ pub(super) fn run_output(
                     epoch,
                 );
             }
-            if enabled && decoder.is_finished() && pcm.is_empty() {
+            let active_done = if active_slot == 0 {
+                slot_a_decoder
+                    .as_ref()
+                    .is_some_and(|worker| worker.is_finished() && pcm.is_empty())
+            } else {
+                successor_decoder
+                    .as_ref()
+                    .is_some_and(|worker| worker.is_finished() && successor_pcm.is_empty())
+            };
+            if enabled && successor_identity.is_none() && active_done {
                 output
                     .drain(&mut report_stall)
                     .map_err(PlaybackPipelineError::output_policy)?;
@@ -355,19 +581,23 @@ pub(super) fn run_output(
         retirement?;
         return Ok(());
     }
-    let decoded = decoder
+    let worker = if active_slot == 0 {
+        slot_a_decoder.take()
+    } else {
+        successor_decoder.take()
+    }
+    .expect("active decoder exists until completion");
+    let decoded = worker
         .join()
         .map_err(|_| PlaybackPipelineError::decode(anyhow::anyhow!("decoder worker panicked")))?
         .map_err(|e| {
             PlaybackPipelineError::from_decode_error_and_stream_state(e, &stream_failure)
         })?;
     let decoded_ms = if media_seek_requested {
-        decoded.emitted_frames
+        decoded.emitted_frames.saturating_mul(1000) / u64::from(rate)
     } else {
-        decoded.frames
-    }
-    .saturating_mul(1000)
-        / u64::from(rate);
+        decoded.frames.saturating_mul(1000) / u64::from(rate)
+    };
     session.publish_event_at_epoch(
         generation,
         PlaybackEvent::Completed {

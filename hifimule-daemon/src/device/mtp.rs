@@ -793,8 +793,7 @@ pub mod windows_wpd {
                 return Err(anyhow::anyhow!("WPD shell copy aborted for '{}'", filename));
             }
 
-            if find_shell_child_by_name(&dest_folder, filename, ShellChildNameKind::Parsing)
-                .is_ok()
+            if find_shell_child_by_name(&dest_folder, filename, ShellChildNameKind::Parsing).is_ok()
             {
                 crate::daemon_log!("[WPD] shell_copy_to_device: verified destination");
             } else {

@@ -266,6 +266,14 @@ pub enum PlaybackEvent {
     },
     Active,
     Buffering,
+    HandoffPresented {
+        token: super::continuity::HandoffToken,
+        metadata: PlaybackTrackMetadata,
+        duration_ms: u64,
+        representation: String,
+        successor_offset_frames: u64,
+        sample_rate: u32,
+    },
     Completed {
         position_ms: u64,
     },

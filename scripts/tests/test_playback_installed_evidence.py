@@ -132,6 +132,19 @@ def album_observation(cause):
             "occurrenceSequenceAfter": occurrences[:], "sourceSequenceAfter": sources[:]}
 
 
+def continuity_row():
+    return {
+        "backend": "wasapi", "architecture": "x86_64",
+        "runtime": "cpal-0.18.2/ffmpeg-9.0.1", "endpointFormat": "48000Hz/stereo/f32",
+        "captureMethod": "loopback-capture", "measurementKind": "physical-capture",
+        "fixtureSha256": "d" * 64, "captureSha256": "e" * 64,
+        "occurrenceSequence": ["occurrence-a", "occurrence-b", "occurrence-c"],
+        "boundaryOffsetsFrames": [96017, 168028], "preparationStatus": "ready-before-boundary",
+        "openCount": 1, "closeCount": 1, "underruns": 0, "maxGapFrames": 0,
+        "missingFrames": 0, "duplicateFrames": 0, "outcome": "passed",
+    }
+
+
 
 class InstalledEvidenceTests(unittest.TestCase):
     def test_rpc_keeps_owner_token_out_of_returned_data(self):
@@ -222,10 +235,12 @@ class InstalledEvidenceTests(unittest.TestCase):
                 "avcodec": "63.1.101", "avformat": "63.1.101",
                 "avutil": "61.1.101", "swresample": "7.1.101",
                 "sharedEndpoint": "Speakers", "compressedHighWaterBytes": 100,
+                "compressedAggregateHighWaterBytes": 200,
                 "pcmHighWaterSamples": 100,
                 "manifest": {"sourceSha256": "c" * 64,
                              "configureFlags": ["--disable-network"],
                              "bufferPolicy": {"compressedCapacityBytes": 8388608,
+                                              "compressedAggregateCapacityBytes": 16777216,
                                               "pcmCapacityMaxBytes": 1048576}},
             },
             "loadedLibraries": [
@@ -250,9 +265,33 @@ class InstalledEvidenceTests(unittest.TestCase):
                 for cause in ("naturalCompletion", "next", "pausedNext", "technicalFailure",
                               "retry", "finalCompletion", "offlineRestore")
             ]},
+            "continuity": {"rows": [continuity_row()]},
         })
         record["outcome"] = "passed"
         return record
+
+    def test_continuity_evidence_rejects_missing_runtime_capture_and_contradictions(self):
+        record = self.complete_record()
+        self.assertEqual(evidence.validate_continuity_evidence(record), [])
+        for mutation in (
+            lambda row: row.update(runtime=""),
+            lambda row: row.update(captureSha256="bad"),
+            lambda row: row.update(occurrenceSequence=["same", "same", "same"]),
+            lambda row: row.update(boundaryOffsetsFrames=[20, 10]),
+            lambda row: row.update(measurementKind="callback-counter"),
+            lambda row: row.update(openCount=2),
+            lambda row: row.update(maxGapFrames=1),
+            lambda row: row.update(preparationStatus="late"),
+        ):
+            changed = self.complete_record()
+            mutation(changed["continuity"]["rows"][0])
+            self.assertTrue(evidence.validate_continuity_evidence(changed))
+
+    def test_continuity_evidence_rejects_malformed_types_without_exceptions(self):
+        for value in (None, True, {}, "1"):
+            record = self.complete_record()
+            record["continuity"]["rows"][0]["underruns"] = value
+            self.assertTrue(evidence.validate_continuity_evidence(record))
 
     def test_album_evidence_rejects_incorrect_order_identity_and_transport(self):
         def invalid(cause, change):

@@ -784,6 +784,64 @@ The playback worker is joined after successful preservation and sync drain. A jo
 
 `playback.getSession` includes an additive `playback` object with safe metadata, representation, duration, status (`idle`, `loading`, `active`, `paused`, `stopped`, `completed`, `error`) and a sanitized `{ code, retryable }` failure. It never includes provider requests or credentials.
 
+## Prepared album continuity (internal contract, Story 15.9)
+
+Continuity keeps one native output epoch open for a selected endpoint while decode
+ownership moves between adjacent album occurrences. A private handoff token binds
+the daemon instance, session, predecessor and successor occurrence IDs, queue
+revision, control epoch, preparation generation, and output epoch. Source IDs do
+not identify a handoff because an album may contain the same source more than
+once. Preparation does not change current metadata, position, disposition, or the
+durable cursor.
+
+Only one successor may be retained. Each active or successor slot is limited to
+8 MiB compressed input and `min(500 ms, 1 MiB)` frame-aligned PCM; aggregate
+limits are 16 MiB compressed input, 2 MiB PCM, and two source/decoder slots.
+Metadata and native backend buffers are measured separately. A successor becomes
+ready after an authorized decoded head reaches the normal 100 ms target, or clean
+EOF leaves at least one complete frame. Preparation retains the existing 60 s
+deadline. A zero-frame decode is a failure.
+
+The output format is fixed for the output epoch. Each occurrence is decoded and
+resampled independently into that rate and mono/stereo layout, including decoder
+and resampler drain. The boundary is the exact output-frame offset after the
+predecessor's final valid frame. PCM WAV, FLAC, ALAC/M4A, MP3 with validated
+delay/padding metadata, AAC/M4A with validated container timing, and Opus/Ogg
+pre-skip/end trimming are the initial qualification matrix. Missing or ambiguous
+padding metadata never authorizes inferred trimming. Raw AAC, AIFF, Vorbis, and
+WMA remain ordinary-playback formats until separately qualified.
+
+Owner advancement occurs only after the backend reports that the boundary was
+presented. The acknowledgment includes the token, boundary frame, and played
+frame so owner latency can set the successor offset without replay. Duplicate or
+stale acknowledgments are inert; failure for an attempt dominates delayed
+completion. Adoption atomically records predecessor completion and the successor
+cursor while preserving queue revision and advancing state sequence, and it does
+not dispatch a second audio start.
+
+Pause closes the PCM consumption gate synchronously and requests native pause
+immediately. The acknowledged native cancellation point decides a race with a
+submitted boundary: if the boundary was already presented, the owner adopts it
+before applying Pause to the audible successor; otherwise the successor remains
+unadopted and its unpresented PCM is retained or replayed exactly once. Stop,
+Next, seek, replacement, output loss, and Quit close the gate and invalidate
+unpresented preparation. If a backend cannot establish a coherent cancellation
+cutoff, it retires the stream and resumes from the last coherent committed
+occurrence. It never guesses from callback consumption or provider duration.
+
+Implementation qualification: WASAPI uses acknowledged `Stop`, exact stopped
+padding, `Reset`, and a fixed-capacity submitted-tail ledger; Resume replays the
+discarded suffix once before new PCM. Pulse retains its server-side cork and
+played-frame ledger. CoreAudio currently uses the synchronous consumption gate
+only: its callback timestamps estimate presentation but do not prove an exact
+stop cursor, so HifiMule does not use them to flush/replay native buffers.
+
+Persistence failure after presentation closes the gate, retires or corks the
+stream, retains one frozen terminal recovery transaction, and exposes
+`PERSISTENCE_FAILED`. Recovery retries that exact transaction without audio and
+leaves the adopted occurrence paused. Sound already presented is not described
+as rolled back.
+
 ## Ordered album playback (schema v1, Story 15.8)
 
 `playback.playAlbum` accepts exactly `{ schemaVersion, instanceId, sessionId,

@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 const PCM_TARGET_MILLISECONDS: usize = 500;
 const PCM_CAPACITY_MAX_BYTES: usize = 1024 * 1024;
 const STARTUP_FILL_MILLISECONDS: usize = 100;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlaybackPipelineStage {
@@ -300,9 +300,169 @@ struct Pipeline {
     event_epoch: Arc<AtomicU64>,
     worker: std::thread::JoinHandle<()>,
     compressed_high_water: Arc<AtomicU64>,
+    successor_compressed_high_water: Arc<AtomicU64>,
     pcm_high_water: Arc<AtomicU64>,
     endpoint: Arc<Mutex<Option<String>>>,
     position_ms: Arc<AtomicU64>,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    output_control: Arc<OutputControl>,
+    successor_tx: mpsc::SyncSender<PreparedSuccessor>,
+    output_epoch: u64,
+    boundary_pending: Arc<AtomicBool>,
+}
+
+static NEXT_OUTPUT_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+struct PreparedSuccessor {
+    token: super::continuity::HandoffToken,
+    reader: BoundedHttpReader,
+    decoder_hint: String,
+    duration_ms: u64,
+    metadata: PlaybackTrackMetadata,
+    representation: String,
+    preparation: super::http_source::Preparation,
+}
+
+struct OutputControl {
+    #[cfg(target_os = "windows")]
+    configured: Mutex<Option<CpalOutputControl>>,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone)]
+struct CpalOutputControl {
+    stream: Arc<cpal::Stream>,
+    tail: Arc<super::output::SubmittedTail>,
+    replay: Arc<ArrayQueue<super::output::SubmittedFrame>>,
+    consumed: Arc<AtomicU64>,
+    position_ms: Arc<AtomicU64>,
+    base_position_ms: Arc<AtomicU64>,
+    channels: u16,
+    rate: u32,
+    boundary_frame: Arc<AtomicU64>,
+    boundary_deadline_ns: Arc<AtomicU64>,
+}
+
+impl OutputControl {
+    fn new() -> Self {
+        Self {
+            #[cfg(target_os = "windows")]
+            configured: Mutex::new(None),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn configure(
+        &self,
+        stream: Arc<cpal::Stream>,
+        channels: u16,
+        tail: Arc<super::output::SubmittedTail>,
+        replay: Arc<ArrayQueue<super::output::SubmittedFrame>>,
+        consumed: Arc<AtomicU64>,
+        position_ms: Arc<AtomicU64>,
+        base_position_ms: Arc<AtomicU64>,
+        rate: u32,
+        boundary_frame: Arc<AtomicU64>,
+        boundary_deadline_ns: Arc<AtomicU64>,
+    ) {
+        *self
+            .configured
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(CpalOutputControl {
+            stream,
+            tail,
+            replay,
+            consumed,
+            position_ms,
+            base_position_ms,
+            channels,
+            rate,
+            boundary_frame,
+            boundary_deadline_ns,
+        });
+    }
+
+    #[cfg(target_os = "windows")]
+    fn clear(&self) {
+        *self
+            .configured
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+    }
+
+    #[cfg(target_os = "windows")]
+    fn pause(&self) -> Result<(), PlaybackPipelineError> {
+        let configured = self
+            .configured
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let Some(configured) = configured else {
+            return Ok(());
+        };
+        let snapshot = configured.stream.pause_with_snapshot().map_err(|error| {
+            PlaybackPipelineError::output_open(
+                anyhow::Error::new(error).context("acknowledge native pause"),
+            )
+        })?;
+        let reconciled = configured
+            .tail
+            .reconcile(snapshot.pending_frames, &configured.replay)
+            .map_err(|error| {
+                PlaybackPipelineError::output_open(anyhow::anyhow!(
+                    "native pause tail cannot be replayed safely: {error:?}"
+                ))
+            })?;
+        let rollback_samples = reconciled
+            .logical_audio_frames
+            .saturating_mul(u64::from(configured.channels));
+        let previous = configured
+            .consumed
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |samples| {
+                Some(samples.saturating_sub(rollback_samples))
+            })
+            .unwrap_or_else(|samples| samples);
+        let resumed_samples = previous.saturating_sub(rollback_samples);
+        configured.position_ms.store(
+            configured
+                .base_position_ms
+                .load(Ordering::Acquire)
+                .saturating_add(
+                    resumed_samples.saturating_mul(1000)
+                        / u64::from(configured.channels)
+                        / u64::from(configured.rate),
+                ),
+            Ordering::Release,
+        );
+        let boundary = configured.boundary_frame.load(Ordering::Acquire);
+        if boundary != u64::MAX {
+            if snapshot.presented_frames >= boundary {
+                configured.boundary_deadline_ns.store(0, Ordering::Release);
+            } else {
+                return Err(PlaybackPipelineError::cancelled(anyhow::anyhow!(
+                    "pause won before prepared boundary presentation"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn resume(&self) -> Result<(), PlaybackPipelineError> {
+        let configured = self
+            .configured
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(configured) = configured {
+            configured.stream.play().map_err(|error| {
+                PlaybackPipelineError::output_open(
+                    anyhow::Error::new(error).context("resume native output"),
+                )
+            })?;
+        }
+        Ok(())
+    }
 }
 
 fn decoder_hint(representation: &crate::providers::PlaybackRepresentation) -> String {
@@ -395,6 +555,99 @@ pub fn global() -> &'static AudioEngine {
 }
 
 impl AudioEngine {
+    pub(crate) fn has_active_generation(&self, generation: &str) -> bool {
+        self.current
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .is_some_and(|pipeline| {
+                pipeline.generation == generation
+                    && pipeline.alive.load(Ordering::Acquire)
+                    && !pipeline.cancel.load(Ordering::Acquire)
+            })
+    }
+
+    pub(crate) async fn prepare_successor(
+        &self,
+        candidate: super::continuity::SuccessorCandidate,
+        description: PlaybackDescription,
+        generation: String,
+        deadline: std::time::Instant,
+    ) -> Result<(), PlaybackPipelineError> {
+        let (tx, cancel, output_epoch, high_water) = {
+            let current = self
+                .current
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let pipeline = current.as_ref().ok_or_else(|| {
+                PlaybackPipelineError::cancelled(anyhow::anyhow!("active output retired"))
+            })?;
+            if pipeline.generation != generation
+                || pipeline.cancel.load(Ordering::Acquire)
+                || candidate.control_epoch != pipeline.event_epoch.load(Ordering::Acquire)
+            {
+                return Err(PlaybackPipelineError::cancelled(anyhow::anyhow!(
+                    "successor preparation was superseded"
+                )));
+            }
+            (
+                pipeline.successor_tx.clone(),
+                pipeline.cancel.clone(),
+                pipeline.output_epoch,
+                pipeline.successor_compressed_high_water.clone(),
+            )
+        };
+        let duration_ms = u64::from(description.song.duration_seconds).saturating_mul(1000);
+        let metadata = PlaybackTrackMetadata {
+            source: candidate.successor.source.clone(),
+            title: description.song.title.clone(),
+            artist: description.song.artist_name.clone(),
+            album: description.song.album_title.clone(),
+        };
+        let representation = select_playback_representation(description.representations)
+            .map_err(PlaybackPipelineError::from_provider_error)?;
+        let representation_name = representation_name(&representation);
+        let hint = decoder_hint(&representation);
+        let response = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            fetch(&representation.request),
+        )
+        .await
+        .map_err(|_| PlaybackPipelineError::timeout(anyhow::anyhow!("successor timeout")))??;
+        if cancel.load(Ordering::Acquire) {
+            return Err(PlaybackPipelineError::cancelled(anyhow::anyhow!(
+                "successor preparation was superseded"
+            )));
+        }
+        let preparation = super::http_source::Preparation::new(deadline, cancel.clone());
+        let source = super::http_source::HttpSource::new(
+            representation.request,
+            response,
+            preparation.clone(),
+        );
+        let reader = BoundedHttpReader::from_source(source, cancel, high_water);
+        let token = super::continuity::HandoffToken {
+            instance_id: candidate.instance_id,
+            session_id: candidate.session_id,
+            predecessor_occurrence_id: candidate.predecessor_occurrence_id,
+            successor_occurrence_id: candidate.successor.occurrence_id.clone(),
+            queue_revision: candidate.queue_revision,
+            control_epoch: candidate.control_epoch,
+            preparation_generation: candidate.preparation_generation,
+            output_epoch,
+        };
+        tx.try_send(PreparedSuccessor {
+            token,
+            reader,
+            decoder_hint: hint,
+            duration_ms,
+            metadata,
+            representation: representation_name,
+            preparation,
+        })
+        .map_err(|_| PlaybackPipelineError::cancelled(anyhow::anyhow!("successor slot busy")))
+    }
+
     async fn retire(
         old: Pipeline,
         session: &super::PlaybackSession,
@@ -506,8 +759,26 @@ impl AudioEngine {
             .as_ref()
         {
             match action {
-                super::model::ControlAction::Pause => pipeline.gate.store(false, Ordering::Release),
-                super::model::ControlAction::Resume => pipeline.gate.store(true, Ordering::Release),
+                super::model::ControlAction::Pause => {
+                    pipeline.gate.store(false, Ordering::Release);
+                    #[cfg(target_os = "windows")]
+                    if pipeline.output_control.pause().is_err() {
+                        pipeline.cancel.store(true, Ordering::Release);
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    if pipeline.boundary_pending.load(Ordering::Acquire) {
+                        pipeline.cancel.store(true, Ordering::Release);
+                    }
+                }
+                super::model::ControlAction::Resume => {
+                    pipeline.gate.store(true, Ordering::Release);
+                    #[cfg(target_os = "windows")]
+                    if pipeline.output_control.resume().is_err() {
+                        pipeline.gate.store(false, Ordering::Release);
+                        pipeline.cancel.store(true, Ordering::Release);
+                        return;
+                    }
+                }
                 super::model::ControlAction::Stop
                 | super::model::ControlAction::Next
                 | super::model::ControlAction::Retry => {
@@ -729,9 +1000,16 @@ impl AudioEngine {
         let cancel = Arc::new(AtomicBool::new(false));
         let gate = session.output_gate();
         let compressed_high_water = Arc::new(AtomicU64::new(0));
+        let successor_compressed_high_water = Arc::new(AtomicU64::new(0));
         let pcm_high_water = Arc::new(AtomicU64::new(0));
         let endpoint = Arc::new(Mutex::new(None));
         let position_ms = Arc::new(AtomicU64::new(start_ms));
+        let output_control = Arc::new(OutputControl::new());
+        let worker_output_control = output_control.clone();
+        let (successor_tx, successor_rx) = mpsc::sync_channel(1);
+        let output_epoch = NEXT_OUTPUT_EPOCH.fetch_add(1, Ordering::AcqRel);
+        let boundary_pending = Arc::new(AtomicBool::new(false));
+        let worker_boundary_pending = boundary_pending.clone();
         let worker_position = position_ms.clone();
         let preparation = super::http_source::Preparation::new(deadline, cancel.clone());
         let source_reader =
@@ -801,12 +1079,17 @@ impl AudioEngine {
                     worker_pcm_high_water,
                     worker_endpoint,
                     worker_position,
+                    worker_output_control.clone(),
+                    successor_rx,
                     preparation,
                     seek_mechanism,
                     duration_ms,
                     worker_seek,
+                    worker_boundary_pending,
                 )
                 .map_err(|error| error.with_representation(&worker_representation));
+                #[cfg(target_os = "windows")]
+                worker_output_control.clear();
                 session.output_closed(&generation);
                 match result {
                     Err(error)
@@ -851,8 +1134,13 @@ impl AudioEngine {
             position_ms,
             worker,
             compressed_high_water,
+            successor_compressed_high_water,
             pcm_high_water,
             endpoint,
+            output_control,
+            successor_tx,
+            output_epoch,
+            boundary_pending,
         });
         let installed = install_session.with_current_generation(&install_generation, || {
             if install_session.control_epoch() != expected_epoch {
@@ -965,10 +1253,13 @@ fn run_output(
     pcm_high_water: Arc<AtomicU64>,
     endpoint: Arc<Mutex<Option<String>>>,
     position_ms: Arc<AtomicU64>,
+    _output_control: Arc<OutputControl>,
+    successor_rx: mpsc::Receiver<PreparedSuccessor>,
     preparation: super::http_source::Preparation,
     seek_mechanism: Option<crate::providers::PlaybackSeekMechanism>,
     provider_duration_ms: u64,
     seek_commit: Option<(String, u64)>,
+    boundary_pending: Arc<AtomicBool>,
 ) -> Result<(), PlaybackPipelineError> {
     let stream_failure = reader.failure_state();
     let preference = session
@@ -998,6 +1289,23 @@ fn run_output(
     let capacity = (samples_per_second * PCM_TARGET_MILLISECONDS / 1000)
         .min(PCM_CAPACITY_MAX_BYTES / std::mem::size_of::<f32>());
     let pcm = Arc::new(ArrayQueue::new(capacity));
+    let successor_pcm = Arc::new(ArrayQueue::new(capacity));
+    let slot_a_ready = Arc::new(AtomicBool::new(true));
+    let slot_a_finished = Arc::new(AtomicBool::new(false));
+    let successor_ready = Arc::new(AtomicBool::new(false));
+    let successor_finished = Arc::new(AtomicBool::new(false));
+    let active_slot = Arc::new(AtomicU64::new(0));
+    let boundary_frame = Arc::new(AtomicU64::new(u64::MAX));
+    let boundary_deadline_ns = Arc::new(AtomicU64::new(u64::MAX));
+    let submitted_frames = Arc::new(AtomicU64::new(0));
+    let successor_consumed = Arc::new(AtomicU64::new(0));
+    let tail_capacity_frames = if cfg!(target_os = "windows") {
+        capacity / config.channels as usize
+    } else {
+        1
+    };
+    let submitted_tail = Arc::new(super::output::SubmittedTail::new(tail_capacity_frames));
+    let replay = Arc::new(ArrayQueue::new(tail_capacity_frames.max(1)));
     let consumed = Arc::new(AtomicU64::new(0));
     let base_position_ms = Arc::new(AtomicU64::new(start_ms));
     let output_lost = Arc::new(AtomicBool::new(false));
@@ -1048,10 +1356,21 @@ fn run_output(
             generation_serial.clone(),
             expected_serial,
             cancel.clone(),
-            decoder.finished.clone(),
+            slot_a_ready.clone(),
+            slot_a_finished.clone(),
             presentation.clone(),
             position_ms.clone(),
             base_position_ms.clone(),
+            submitted_tail.clone(),
+            replay.clone(),
+            successor_pcm.clone(),
+            successor_ready.clone(),
+            successor_finished.clone(),
+            boundary_frame.clone(),
+            boundary_deadline_ns.clone(),
+            submitted_frames.clone(),
+            successor_consumed.clone(),
+            active_slot.clone(),
         ),
         cpal::SampleFormat::I32 => build_stream::<i32>(
             &device,
@@ -1063,10 +1382,21 @@ fn run_output(
             generation_serial.clone(),
             expected_serial,
             cancel.clone(),
-            decoder.finished.clone(),
+            slot_a_ready.clone(),
+            slot_a_finished.clone(),
             presentation.clone(),
             position_ms.clone(),
             base_position_ms.clone(),
+            submitted_tail.clone(),
+            replay.clone(),
+            successor_pcm.clone(),
+            successor_ready.clone(),
+            successor_finished.clone(),
+            boundary_frame.clone(),
+            boundary_deadline_ns.clone(),
+            submitted_frames.clone(),
+            successor_consumed.clone(),
+            active_slot.clone(),
         ),
         cpal::SampleFormat::F64 => build_stream::<f64>(
             &device,
@@ -1078,10 +1408,21 @@ fn run_output(
             generation_serial.clone(),
             expected_serial,
             cancel.clone(),
-            decoder.finished.clone(),
+            slot_a_ready.clone(),
+            slot_a_finished.clone(),
             presentation.clone(),
             position_ms.clone(),
             base_position_ms.clone(),
+            submitted_tail.clone(),
+            replay.clone(),
+            successor_pcm.clone(),
+            successor_ready.clone(),
+            successor_finished.clone(),
+            boundary_frame.clone(),
+            boundary_deadline_ns.clone(),
+            submitted_frames.clone(),
+            successor_consumed.clone(),
+            active_slot.clone(),
         ),
         cpal::SampleFormat::I16 => build_stream::<i16>(
             &device,
@@ -1093,10 +1434,21 @@ fn run_output(
             generation_serial.clone(),
             expected_serial,
             cancel.clone(),
-            decoder.finished.clone(),
+            slot_a_ready.clone(),
+            slot_a_finished.clone(),
             presentation.clone(),
             position_ms.clone(),
             base_position_ms.clone(),
+            submitted_tail.clone(),
+            replay.clone(),
+            successor_pcm.clone(),
+            successor_ready.clone(),
+            successor_finished.clone(),
+            boundary_frame.clone(),
+            boundary_deadline_ns.clone(),
+            submitted_frames.clone(),
+            successor_consumed.clone(),
+            active_slot.clone(),
         ),
         cpal::SampleFormat::U16 => build_stream::<u16>(
             &device,
@@ -1108,14 +1460,39 @@ fn run_output(
             generation_serial.clone(),
             expected_serial,
             cancel.clone(),
-            decoder.finished.clone(),
+            slot_a_ready.clone(),
+            slot_a_finished.clone(),
             presentation.clone(),
             position_ms.clone(),
             base_position_ms.clone(),
+            submitted_tail.clone(),
+            replay.clone(),
+            successor_pcm.clone(),
+            successor_ready.clone(),
+            successor_finished.clone(),
+            boundary_frame.clone(),
+            boundary_deadline_ns.clone(),
+            submitted_frames.clone(),
+            successor_consumed.clone(),
+            active_slot.clone(),
         ),
         _ => Err(anyhow::anyhow!("unsupported output sample format")),
     }
+    .map(Arc::new)
     .map_err(PlaybackPipelineError::output_open)?;
+    #[cfg(target_os = "windows")]
+    _output_control.configure(
+        stream.clone(),
+        channels,
+        submitted_tail,
+        replay,
+        consumed.clone(),
+        position_ms.clone(),
+        base_position_ms.clone(),
+        rate,
+        boundary_frame,
+        boundary_deadline_ns,
+    );
     while pcm.len() < (rate as usize * channels as usize * STARTUP_FILL_MILLISECONDS / 1000)
         && !decoder.is_finished()
         && !cancel.load(Ordering::Acquire)
@@ -1200,7 +1577,7 @@ fn run_output(
             )));
         }
     };
-    let occurrence = snapshot
+    let mut occurrence = snapshot
         .current
         .map(|value| value.occurrence_id)
         .unwrap_or_default();
@@ -1209,7 +1586,108 @@ fn run_output(
     let mut buffering = false;
     let mut last_samples = 0;
     let mut seq = 0;
+    let mut successor_decoder: Option<
+        super::output::DecoderWorker<anyhow::Result<super::decoder::DecodeSummary>>,
+    > = None;
+    let mut successor_identity: Option<(
+        super::continuity::HandoffToken,
+        PlaybackTrackMetadata,
+        u64,
+        String,
+    )> = None;
+    let mut handoff_published = false;
+    let mut successor_preparation = None;
+    let mut slot_a_decoder = Some(decoder);
     while !cancel.load(Ordering::Acquire) {
+        let current_slot = active_slot.load(Ordering::Acquire) as usize;
+        if successor_identity.is_none()
+            && let Ok(prepared) = successor_rx.try_recv()
+        {
+            let PreparedSuccessor {
+                token,
+                reader,
+                decoder_hint,
+                duration_ms,
+                metadata,
+                representation,
+                preparation,
+            } = prepared;
+            let target_slot = 1usize.saturating_sub(current_slot);
+            let queue = if target_slot == 0 {
+                pcm.clone()
+            } else {
+                successor_pcm.clone()
+            };
+            let decoder_cancel = cancel.clone();
+            let worker = super::output::DecoderWorker::spawn(cancel.clone(), move || {
+                decode_stream_with_seek(
+                    reader,
+                    Some(&decoder_hint),
+                    rate,
+                    channels,
+                    0,
+                    None,
+                    false,
+                    Some(duration_ms),
+                    None,
+                    None,
+                    queue,
+                    decoder_cancel,
+                )
+            });
+            successor_identity = Some((token, metadata, duration_ms, representation));
+            if target_slot == 0 {
+                slot_a_decoder = Some(worker);
+                slot_a_finished.store(false, Ordering::Release);
+                slot_a_ready.store(false, Ordering::Release);
+            } else {
+                successor_decoder = Some(worker);
+                successor_finished.store(false, Ordering::Release);
+                successor_ready.store(false, Ordering::Release);
+            }
+            successor_preparation = Some(preparation);
+        }
+        let a_finished = slot_a_decoder
+            .as_ref()
+            .is_some_and(|worker| worker.is_finished());
+        let b_finished = successor_decoder
+            .as_ref()
+            .is_some_and(|worker| worker.is_finished());
+        slot_a_finished.store(a_finished, Ordering::Release);
+        successor_finished.store(b_finished, Ordering::Release);
+        let prepared_slot = 1usize.saturating_sub(current_slot);
+        let (prepared_queue, prepared_ready, prepared_finished) = if prepared_slot == 0 {
+            (&pcm, &slot_a_ready, a_finished)
+        } else {
+            (&successor_pcm, &successor_ready, b_finished)
+        };
+        if successor_identity.is_some()
+            && !prepared_ready.load(Ordering::Acquire)
+            && (prepared_queue.len()
+                >= rate as usize * channels as usize * STARTUP_FILL_MILLISECONDS / 1000
+                || prepared_finished && prepared_queue.len() >= channels as usize)
+        {
+            prepared_ready.store(true, Ordering::Release);
+            if let Some(preparation) = successor_preparation.take() {
+                preparation.ready();
+            }
+        }
+        if successor_identity.is_some()
+            && prepared_finished
+            && prepared_queue.is_empty()
+            && !prepared_ready.load(Ordering::Acquire)
+        {
+            let failed = if prepared_slot == 0 {
+                slot_a_decoder.take()
+            } else {
+                successor_decoder.take()
+            };
+            if let Some(worker) = failed {
+                let _ = worker.join();
+            }
+            successor_identity = None;
+            successor_preparation = None;
+        }
         pcm_high_water.fetch_max(pcm.len() as u64, Ordering::AcqRel);
         if generation_serial.load(Ordering::Acquire) != expected_serial {
             cancel.store(true, Ordering::Release);
@@ -1217,7 +1695,12 @@ fn run_output(
         }
         if output_lost.load(Ordering::Acquire) {
             cancel.store(true, Ordering::Release);
-            let _ = decoder.join();
+            if let Some(worker) = slot_a_decoder.take() {
+                let _ = worker.join();
+            }
+            if let Some(worker) = successor_decoder.take() {
+                let _ = worker.join();
+            }
             return Err(PlaybackPipelineError::output_lost(anyhow::anyhow!(
                 "output stream callback reported loss"
             )));
@@ -1239,7 +1722,17 @@ fn run_output(
                 control_epoch,
             );
         }
-        if active && pcm.is_empty() && !decoder.is_finished() && !buffering {
+        let active_queue = if current_slot == 0 {
+            &pcm
+        } else {
+            &successor_pcm
+        };
+        let active_finished = if current_slot == 0 {
+            a_finished
+        } else {
+            b_finished
+        };
+        if active && active_queue.is_empty() && !active_finished && !buffering {
             buffering = true;
             active = false;
             session.publish_event_at_epoch(
@@ -1256,8 +1749,91 @@ fn run_output(
             let _ = session.report_progress(&generation, &occurrence, seq, position);
         }
         last_samples = samples;
-        if decoder.is_finished() && presentation.drained_when(|| pcm.is_empty()) {
-            let result = decoder
+        let deadline = boundary_deadline_ns.load(Ordering::Acquire);
+        if deadline != u64::MAX {
+            boundary_pending.store(true, Ordering::Release);
+        }
+        if !handoff_published
+            && deadline != u64::MAX
+            && presentation.now_ns() >= deadline
+            && let Some((token, metadata, duration_ms, representation)) =
+                successor_identity.as_ref()
+        {
+            session.publish_event_at_epoch(
+                generation.clone(),
+                PlaybackEvent::HandoffPresented {
+                    token: token.clone(),
+                    metadata: metadata.clone(),
+                    duration_ms: *duration_ms,
+                    representation: representation.clone(),
+                    successor_offset_frames: 0,
+                    sample_rate: rate,
+                },
+                control_epoch,
+            );
+            handoff_published = true;
+        }
+        if handoff_published
+            && let Some((token, _, _, _)) = successor_identity.as_ref()
+            && occurrence != token.successor_occurrence_id
+            && session
+                .snapshot()
+                .ok()
+                .and_then(|snapshot| snapshot.current)
+                .is_some_and(|current| current.occurrence_id == token.successor_occurrence_id)
+        {
+            occurrence = token.successor_occurrence_id.clone();
+            seq = 0;
+            base_position_ms.store(0, Ordering::Release);
+            consumed.store(0, Ordering::Release);
+            successor_consumed.store(0, Ordering::Release);
+            last_samples = 0;
+            let adopted_slot = active_slot.load(Ordering::Acquire) as usize;
+            let retired = if adopted_slot == 0 {
+                successor_decoder.take()
+            } else {
+                slot_a_decoder.take()
+            };
+            if let Some(worker) = retired {
+                let _ = worker.join();
+            }
+            if adopted_slot == 0 {
+                successor_ready.store(false, Ordering::Release);
+                successor_finished.store(false, Ordering::Release);
+                while successor_pcm.pop().is_some() {}
+            } else {
+                slot_a_ready.store(false, Ordering::Release);
+                slot_a_finished.store(false, Ordering::Release);
+                while pcm.pop().is_some() {}
+            }
+            successor_identity = None;
+            successor_preparation = None;
+            handoff_published = false;
+            boundary_frame.store(u64::MAX, Ordering::Release);
+            boundary_deadline_ns.store(u64::MAX, Ordering::Release);
+            boundary_pending.store(false, Ordering::Release);
+        }
+        let current_slot = active_slot.load(Ordering::Acquire) as usize;
+        let current_done = if current_slot == 0 {
+            slot_a_decoder
+                .as_ref()
+                .is_some_and(|worker| worker.is_finished() && pcm.is_empty())
+        } else {
+            successor_decoder
+                .as_ref()
+                .is_some_and(|worker| worker.is_finished() && successor_pcm.is_empty())
+        };
+        if successor_identity.is_none()
+            && current_done
+            && presentation.drained_when(|| pcm.is_empty() && successor_pcm.is_empty())
+        {
+            let worker = if current_slot == 0 {
+                slot_a_decoder.take()
+            } else {
+                successor_decoder.take()
+            }
+            .expect("active decoder exists until completion");
+            let result = worker
                 .join()
                 .map_err(|_| {
                     PlaybackPipelineError::decode(anyhow::anyhow!("decoder worker panicked"))
@@ -1324,17 +1900,28 @@ fn build_stream<T>(
     generation_serial: Arc<AtomicU64>,
     expected_serial: u64,
     cancel: Arc<AtomicBool>,
-    decoded: Arc<AtomicBool>,
+    slot_a_ready: Arc<AtomicBool>,
+    slot_a_finished: Arc<AtomicBool>,
     presentation: Arc<super::output::PresentationClock>,
     position_ms: Arc<AtomicU64>,
     base_position_ms: Arc<AtomicU64>,
+    _submitted_tail: Arc<super::output::SubmittedTail>,
+    _replay: Arc<ArrayQueue<super::output::SubmittedFrame>>,
+    successor_pcm: Arc<ArrayQueue<f32>>,
+    successor_ready: Arc<AtomicBool>,
+    successor_finished: Arc<AtomicBool>,
+    boundary_frame: Arc<AtomicU64>,
+    boundary_deadline_ns: Arc<AtomicU64>,
+    submitted_frames: Arc<AtomicU64>,
+    successor_consumed: Arc<AtomicU64>,
+    active_slot: Arc<AtomicU64>,
 ) -> anyhow::Result<cpal::Stream>
 where
     T: SizedSample + FromSample<f32> + Sample,
 {
     let rate = config.sample_rate;
     let channels = config.channels;
-    let mut consumer = super::output::PcmConsumer::new(
+    let mut consumer = super::output::BoundaryPcmConsumer::new(
         config.channels as usize,
         rate as usize * config.channels as usize * STARTUP_FILL_MILLISECONDS / 1000,
     );
@@ -1358,13 +1945,58 @@ where
                 && gate.load(Ordering::Acquire)
                 && !cancel.load(Ordering::Acquire)
                 && generation_serial.load(Ordering::Acquire) == expected_serial;
-            let rendered = consumer.render(output, &pcm, enabled, decoded.load(Ordering::Acquire));
-            if let Some(frame_end) = rendered.last_audio_frame {
+            #[cfg(target_os = "windows")]
+            let rendered = consumer.render_with_tail(
+                output,
+                &pcm,
+                slot_a_ready.load(Ordering::Acquire),
+                slot_a_finished.load(Ordering::Acquire),
+                &successor_pcm,
+                successor_ready.load(Ordering::Acquire),
+                successor_finished.load(Ordering::Acquire),
+                &_replay,
+                &_submitted_tail,
+                enabled,
+            );
+            #[cfg(not(target_os = "windows"))]
+            let rendered = consumer.render(
+                output,
+                &pcm,
+                slot_a_ready.load(Ordering::Acquire),
+                slot_a_finished.load(Ordering::Acquire),
+                &successor_pcm,
+                successor_ready.load(Ordering::Acquire),
+                successor_finished.load(Ordering::Acquire),
+                enabled,
+            );
+            active_slot.store(rendered.active_slot as u64, Ordering::Release);
+            let callback_start = submitted_frames
+                .fetch_add((output.len() / channels as usize) as u64, Ordering::AcqRel);
+            if let Some(offset) = rendered.boundary_frame {
+                let absolute = callback_start.saturating_add(offset as u64);
+                if boundary_frame
+                    .compare_exchange(u64::MAX, absolute, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    let timestamps = info.timestamp();
+                    let latency = timestamps.playback.duration_since(timestamps.callback);
+                    let deadline = presentation
+                        .now_ns()
+                        .saturating_add(latency.as_nanos().min(u64::MAX as u128) as u64)
+                        .saturating_add(
+                            (offset as u64).saturating_mul(1_000_000_000) / u64::from(rate),
+                        );
+                    boundary_deadline_ns.store(deadline, Ordering::Release);
+                }
+            }
+            if let Some(frame_end) = rendered.rendered.last_audio_frame {
                 let timestamps = info.timestamp();
                 let latency = timestamps.playback.duration_since(timestamps.callback);
                 presentation.submit(presentation.now_ns(), latency, frame_end, rate);
             }
-            let total = consumed.fetch_add(rendered.samples, Ordering::Release) + rendered.samples;
+            let total = consumed.fetch_add(rendered.rendered.samples, Ordering::Release)
+                + rendered.rendered.samples;
+            successor_consumed.fetch_add(rendered.successor_samples, Ordering::Release);
             position_ms.store(
                 base_position_ms.load(Ordering::Acquire).saturating_add(
                     total.saturating_mul(1000) / u64::from(channels) / u64::from(rate),
@@ -1425,7 +2057,12 @@ pub fn runtime_identity() -> serde_json::Value {
             packed & 0xff
         )
     };
-    let (endpoint, compressed_high_water_bytes, pcm_high_water_samples) = global()
+    let (
+        endpoint,
+        compressed_high_water_bytes,
+        compressed_aggregate_high_water_bytes,
+        pcm_high_water_samples,
+    ) = global()
         .current
         .lock()
         .unwrap_or_else(|error| error.into_inner())
@@ -1438,10 +2075,18 @@ pub fn runtime_identity() -> serde_json::Value {
                     .unwrap_or_else(|error| error.into_inner())
                     .clone(),
                 pipeline.compressed_high_water.load(Ordering::Acquire),
+                pipeline
+                    .compressed_high_water
+                    .load(Ordering::Acquire)
+                    .saturating_add(
+                        pipeline
+                            .successor_compressed_high_water
+                            .load(Ordering::Acquire),
+                    ),
                 pipeline.pcm_high_water.load(Ordering::Acquire),
             )
         })
-        .unwrap_or((None, 0, 0));
+        .unwrap_or((None, 0, 0, 0));
     serde_json::json!({
         "binding": "ffmpeg-next-9.0.0",
         "sharedBackend": if cfg!(target_os="linux") {"pulse"} else if cfg!(target_os="macos") {"coreaudio"} else {"wasapi"},
@@ -1454,6 +2099,7 @@ pub fn runtime_identity() -> serde_json::Value {
         "swresample": version(ffmpeg_next::software::resampling::version()),
         "sharedEndpoint": endpoint,
         "compressedHighWaterBytes": compressed_high_water_bytes,
+        "compressedAggregateHighWaterBytes": compressed_aggregate_high_water_bytes,
         "pcmHighWaterSamples": pcm_high_water_samples,
         "manifest": serde_json::from_str::<serde_json::Value>(include_str!("../../audio-runtime.json"))
             .unwrap_or(serde_json::Value::Null)
@@ -1588,9 +2234,14 @@ mod tests {
                 event_epoch: authorized.clone(),
                 worker: std::thread::spawn(|| {}),
                 compressed_high_water: Arc::new(AtomicU64::new(0)),
+                successor_compressed_high_water: Arc::new(AtomicU64::new(0)),
                 pcm_high_water: Arc::new(AtomicU64::new(0)),
                 endpoint: Arc::new(Mutex::new(None)),
                 position_ms: Arc::new(AtomicU64::new(0)),
+                output_control: Arc::new(OutputControl::new()),
+                successor_tx: mpsc::sync_channel(1).0,
+                output_epoch: 1,
+                boundary_pending: Arc::new(AtomicBool::new(false)),
             })),
         };
         session
@@ -1604,6 +2255,44 @@ mod tests {
         assert!(engine.resume_existing(&resumed.generation_id, &session, resumed.resume_epoch));
         assert_eq!(authorized.load(Ordering::Acquire), resumed.resume_epoch);
         assert!(engine.current.lock().unwrap().is_some());
+        engine.stop_and_join().unwrap();
+        session.stop_and_join().unwrap();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn pause_retires_a_submitted_boundary_without_an_exact_backend_cutoff() {
+        let session = queued_session();
+        let generation = session.snapshot().unwrap().generation_id;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let worker = std::thread::spawn(move || {
+            while !worker_cancel.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+        });
+        let engine = AudioEngine {
+            starts: tokio::sync::Mutex::new(()),
+            current: Mutex::new(Some(Pipeline {
+                cancel: cancel.clone(),
+                gate: Arc::new(AtomicBool::new(true)),
+                alive: Arc::new(AtomicBool::new(true)),
+                generation,
+                event_epoch: Arc::new(AtomicU64::new(session.control_epoch())),
+                worker,
+                compressed_high_water: Arc::new(AtomicU64::new(0)),
+                successor_compressed_high_water: Arc::new(AtomicU64::new(0)),
+                pcm_high_water: Arc::new(AtomicU64::new(0)),
+                endpoint: Arc::new(Mutex::new(None)),
+                position_ms: Arc::new(AtomicU64::new(0)),
+                output_control: Arc::new(OutputControl::new()),
+                successor_tx: mpsc::sync_channel(1).0,
+                output_epoch: 1,
+                boundary_pending: Arc::new(AtomicBool::new(true)),
+            })),
+        };
+        engine.control(super::super::model::ControlAction::Pause);
+        assert!(cancel.load(Ordering::Acquire));
         engine.stop_and_join().unwrap();
         session.stop_and_join().unwrap();
     }
@@ -1682,9 +2371,14 @@ mod tests {
                 event_epoch: Arc::new(AtomicU64::new(session.control_epoch())),
                 worker,
                 compressed_high_water: Arc::new(AtomicU64::new(0)),
+                successor_compressed_high_water: Arc::new(AtomicU64::new(0)),
                 pcm_high_water: Arc::new(AtomicU64::new(0)),
                 endpoint: Arc::new(Mutex::new(None)),
                 position_ms: Arc::new(AtomicU64::new(0)),
+                output_control: Arc::new(OutputControl::new()),
+                successor_tx: mpsc::sync_channel(1).0,
+                output_epoch: 1,
+                boundary_pending: Arc::new(AtomicBool::new(false)),
             })),
         });
         let starting = engine.clone();
@@ -1768,8 +2462,13 @@ mod tests {
                 worker,
                 position_ms: Arc::new(AtomicU64::new(1234)),
                 compressed_high_water: Arc::new(AtomicU64::new(0)),
+                successor_compressed_high_water: Arc::new(AtomicU64::new(0)),
                 pcm_high_water: Arc::new(AtomicU64::new(0)),
                 endpoint: Arc::new(Mutex::new(None)),
+                output_control: Arc::new(OutputControl::new()),
+                successor_tx: mpsc::sync_channel(1).0,
+                output_epoch: 1,
+                boundary_pending: Arc::new(AtomicBool::new(false)),
             })),
         };
         let result = engine

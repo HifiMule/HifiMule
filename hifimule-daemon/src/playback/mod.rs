@@ -2,6 +2,7 @@ pub mod album;
 pub mod audio;
 pub mod commands;
 pub mod config;
+mod continuity;
 pub mod decoder;
 pub mod devices;
 mod http_source;

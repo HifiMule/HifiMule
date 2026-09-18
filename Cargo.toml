@@ -5,7 +5,7 @@ members = [
     "hifimule-daemon",
     "hifimule-ui/src-tauri",
 ]
-exclude = ["third_party/souvlaki"]
+exclude = ["third_party/cpal", "third_party/souvlaki"]
 resolver = "2"
 
 [workspace.package]
@@ -37,6 +37,7 @@ crossbeam-queue = "=0.3.12"
 souvlaki = "=0.8.3"
 
 [patch.crates-io]
+cpal = { path = "third_party/cpal" }
 souvlaki = { path = "third_party/souvlaki" }
 
 [profile.release]

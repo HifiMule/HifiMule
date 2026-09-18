@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect and validate sanitized Stories 15.4–15.8 installed-playback evidence."""
+"""Collect and validate sanitized Stories 15.4–15.9 installed-playback evidence."""
 
 from __future__ import annotations
 
@@ -85,6 +85,7 @@ def empty_record(target: str) -> dict:
         "nativeEvidenceVersion": 1,
         "seekEvidenceVersion": 1,
         "albumPlaybackEvidenceVersion": 1,
+        "continuityEvidenceVersion": 1,
         "outputDeviceKind": "unverified",
         "recordedAt": now(),
         "target": target,
@@ -106,6 +107,7 @@ def empty_record(target: str) -> dict:
         },
         "seek": {"rows": []},
         "albumPlayback": {"observations": []},
+        "continuity": {"rows": []},
         "outcome": "unverified",
     }
 
@@ -147,7 +149,7 @@ def safe_audio_runtime(runtime: dict) -> dict:
         key: runtime[key]
         for key in (
             "binding", "avcodec", "avformat", "avutil", "swresample",
-            "sharedEndpoint", "sharedBackend", "cpalVersion", "pulseVersion", "pulseServerBufferMaxBytes", "compressedHighWaterBytes", "pcmHighWaterSamples",
+            "sharedEndpoint", "sharedBackend", "cpalVersion", "pulseVersion", "pulseServerBufferMaxBytes", "compressedHighWaterBytes", "compressedAggregateHighWaterBytes", "pcmHighWaterSamples",
         )
         if key in runtime
     }
@@ -577,6 +579,7 @@ def validate_record(record: dict) -> list[str]:
     errors.extend(validate_native_evidence(record))
     errors.extend(validate_seek_evidence(record))
     errors.extend(validate_album_playback_evidence(record))
+    errors.extend(validate_continuity_evidence(record))
     if record.get("outputEvidenceVersion") != 1:
         errors.append("Story 15.5 output evidence is missing; older playback results are insufficient")
     if record.get("outputDeviceKind") != "physical":
@@ -618,9 +621,14 @@ def validate_record(record: dict) -> list[str]:
         if not isinstance(manifest.get("configureFlags"), list) or not manifest["configureFlags"]:
             errors.append("FFmpeg configure flags are unverified")
         compressed = runtime.get("compressedHighWaterBytes")
+        compressed_aggregate = runtime.get("compressedAggregateHighWaterBytes")
         pcm = runtime.get("pcmHighWaterSamples")
         if not isinstance(compressed, int) or compressed <= 0 or compressed > policy.get("compressedCapacityBytes", -1):
             errors.append("compressed high-water is absent, zero, or over policy")
+        if (not isinstance(compressed_aggregate, int) or compressed_aggregate <= 0
+                or compressed_aggregate > policy.get("compressedAggregateCapacityBytes", -1)
+                or compressed_aggregate < compressed):
+            errors.append("aggregate compressed high-water is absent, inconsistent, or over policy")
         if not isinstance(pcm, int) or pcm <= 0 or pcm * 4 > policy.get("pcmCapacityMaxBytes", -1):
             errors.append("PCM high-water is absent, zero, or over policy")
     if target == "linux-x64" and isinstance(runtime, dict) and not runtime.get("pulseVersion"):
@@ -681,6 +689,62 @@ def validate_record(record: dict) -> list[str]:
         sanitize(record)
     except ValueError as error:
         errors.append(str(error))
+    return errors
+
+
+def validate_continuity_evidence(record: dict) -> list[str]:
+    """Require measured physical captures, independently from decoder evidence."""
+    if record.get("continuityEvidenceVersion") != 1:
+        return ["Story 15.9 continuity evidence is missing or has an unsupported version"]
+    continuity = record.get("continuity")
+    rows = continuity.get("rows") if isinstance(continuity, dict) else None
+    if not isinstance(rows, list) or not rows:
+        return ["Story 15.9 continuity evidence has no physical-capture rows"]
+    errors = []
+    supported = 0
+    for index, row in enumerate(rows):
+        label = f"continuity row {index}"
+        if not isinstance(row, dict):
+            errors.append(f"{label} is invalid")
+            continue
+        required_text = ("backend", "architecture", "runtime", "endpointFormat",
+                         "captureMethod", "fixtureSha256", "captureSha256")
+        if any(not isinstance(row.get(key), str) or not row[key].strip() for key in required_text):
+            errors.append(f"{label} has missing runtime, endpoint, fixture or capture identity")
+            continue
+        if not re.fullmatch(r"[0-9a-f]{64}", row["fixtureSha256"]) \
+                or not re.fullmatch(r"[0-9a-f]{64}", row["captureSha256"]):
+            errors.append(f"{label} has an invalid fixture or capture hash")
+        offsets = row.get("boundaryOffsetsFrames")
+        sequence = row.get("occurrenceSequence")
+        if (not isinstance(offsets, list) or not offsets
+                or not all(type(value) is int and value >= 0 for value in offsets)
+                or offsets != sorted(offsets)):
+            errors.append(f"{label} has invalid boundary offsets")
+        if (not isinstance(sequence, list) or len(sequence) != len(offsets) + 1
+                or not all(isinstance(value, str) and value.strip() for value in sequence)
+                or len(set(sequence)) != len(sequence)):
+            errors.append(f"{label} has invalid occurrence identity sequence")
+        numeric = ("openCount", "closeCount", "underruns", "maxGapFrames",
+                   "missingFrames", "duplicateFrames")
+        if any(type(row.get(key)) is not int or row[key] < 0 for key in numeric):
+            errors.append(f"{label} has invalid counters")
+            continue
+        outcome = row.get("outcome")
+        if outcome not in {"passed", "unsupported"}:
+            errors.append(f"{label} has an invalid outcome")
+        if outcome == "passed":
+            supported += 1
+            if (row["openCount"] != 1 or row["closeCount"] != 1
+                    or row["underruns"] != 0 or row["maxGapFrames"] != 0
+                    or row["missingFrames"] != 0 or row["duplicateFrames"] != 0):
+                errors.append(f"{label} contradicts successful continuous output")
+            if row.get("preparationStatus") != "ready-before-boundary":
+                errors.append(f"{label} claims success without prepared successors")
+            if row.get("measurementKind") != "physical-capture":
+                errors.append(f"{label} substitutes non-physical evidence")
+    if supported == 0:
+        errors.append("Story 15.9 requires at least one successful physical continuity capture")
     return errors
 
 
@@ -892,7 +956,7 @@ def collect(args) -> int:
         current_health = rpc(current_descriptor, "daemon.health")["data"]
         current_runtime = safe_audio_runtime(current_health["audioRuntime"])
         recorded_runtime = record["audioRuntime"]
-        for key in ("compressedHighWaterBytes", "pcmHighWaterSamples", "pulseServerBufferMaxBytes"):
+        for key in ("compressedHighWaterBytes", "compressedAggregateHighWaterBytes", "pcmHighWaterSamples", "pulseServerBufferMaxBytes"):
             recorded_runtime[key] = max(
                 int(recorded_runtime.get(key) or 0), int(current_runtime.get(key) or 0)
             )

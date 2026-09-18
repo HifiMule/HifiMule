@@ -188,6 +188,38 @@ struct OwnerResources {
 }
 
 impl PlaybackSession {
+    pub(crate) fn successor_candidate(
+        &self,
+        generation_id: &str,
+        control_epoch: u64,
+    ) -> Option<super::continuity::SuccessorCandidate> {
+        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        if inner.generation_id != generation_id
+            || inner.control_epoch.load(Ordering::Acquire) != control_epoch
+            || inner.session.state == TransportState::Idle
+        {
+            return None;
+        }
+        let predecessor_id = inner.session.current_occurrence_id.as_ref()?;
+        let predecessor = inner
+            .db
+            .playback_occurrence(&inner.session.session_id, predecessor_id)
+            .ok()??;
+        let successor = inner
+            .db
+            .playback_successor(&inner.session.session_id, predecessor.ordinal)
+            .ok()??;
+        Some(super::continuity::SuccessorCandidate {
+            instance_id: inner.instance_id.clone(),
+            session_id: inner.session.session_id.clone(),
+            predecessor_occurrence_id: predecessor_id.clone(),
+            successor,
+            queue_revision: inner.session.queue_revision,
+            control_epoch,
+            preparation_generation: self.generation_serial.load(Ordering::Acquire),
+        })
+    }
+
     pub fn restore(db: Arc<Database>, instance_id: String) -> Self {
         let owner_id = instance_id.clone();
         let loaded = db.load_playback_session();
@@ -770,6 +802,29 @@ fn owner_loop(
                         if i.playback.pending_seek.as_ref().is_some_and(|p| &p.operation_id == operation_id));
                     let output_lost = matches!(&event, PlaybackEvent::Failed { code, .. } if code == "OUTPUT_LOST");
                     if i.pending_terminal.is_some() {
+                        continue;
+                    }
+                    if let PlaybackEvent::HandoffPresented {
+                        token,
+                        metadata,
+                        duration_ms,
+                        representation,
+                        successor_offset_frames,
+                        sample_rate,
+                    } = &event
+                    {
+                        let _ = adopt_presented_handoff(
+                            &mut i,
+                            token.clone(),
+                            metadata.clone(),
+                            *duration_ms,
+                            representation.clone(),
+                            *successor_offset_frames,
+                            *sample_rate,
+                            &generation_serial,
+                        );
+                        reset_ingress(&i, &ingress);
+                        publish_health(&i, &health);
                         continue;
                     }
                     if let PlaybackEvent::Failed { code, retryable } = &event
@@ -2280,6 +2335,16 @@ fn enqueue_event(
         return;
     }
     let kind = event_kind(&event);
+    if kind == 2
+        && matches!(event, PlaybackEvent::Completed { .. })
+        && events.iter().any(|(old, _, old_generation, prior)| {
+            *old == serial
+                && old_generation == &generation
+                && matches!(prior, PlaybackEvent::Failed { .. })
+        })
+    {
+        return;
+    }
     events.retain(|(old, _, _, prior)| *old == serial && event_kind(prior) != kind);
     // Bounded independent slots prevent metadata and successful commits being evicted.
     events.push_back((serial, epoch, generation, event));
@@ -2293,6 +2358,7 @@ fn event_kind(event: &PlaybackEvent) -> u8 {
         PlaybackEvent::Active | PlaybackEvent::Buffering => 1,
         PlaybackEvent::Completed { .. } | PlaybackEvent::Failed { .. } => 2,
         PlaybackEvent::SeekCommitted { .. } | PlaybackEvent::SeekFailed { .. } => 3,
+        PlaybackEvent::HandoffPresented { .. } => 6,
     }
 }
 
@@ -2453,9 +2519,101 @@ fn apply_playback_event(i: &mut Inner, event: PlaybackEvent) {
             i.playback.status = PlaybackStatus::Error;
             i.playback.error = Some(PlaybackFailure { code, retryable });
         }
-        PlaybackEvent::Active | PlaybackEvent::Buffering => {}
+        PlaybackEvent::Active
+        | PlaybackEvent::Buffering
+        | PlaybackEvent::HandoffPresented { .. } => {}
     }
     i.state_sequence = i.state_sequence.saturating_add(1);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn adopt_presented_handoff(
+    i: &mut Inner,
+    token: super::continuity::HandoffToken,
+    metadata: PlaybackTrackMetadata,
+    duration_ms: u64,
+    representation: String,
+    successor_offset_frames: u64,
+    sample_rate: u32,
+    generation_serial: &AtomicU64,
+) -> PResult<()> {
+    if token.instance_id != i.instance_id
+        || token.session_id != i.session.session_id
+        || token.queue_revision != i.session.queue_revision
+        || token.control_epoch != i.control_epoch.load(Ordering::Acquire)
+        || token.preparation_generation != generation_serial.load(Ordering::Acquire)
+        || i.session.current_occurrence_id.as_deref()
+            != Some(token.predecessor_occurrence_id.as_str())
+        || metadata.source
+            != i.db
+                .playback_occurrence(&i.session.session_id, &token.successor_occurrence_id)
+                .map_err(storage)?
+                .ok_or_else(|| PlaybackError::invalid("INVALID_SESSION", "successor absent"))?
+                .source
+    {
+        return Err(PlaybackError::conflict(
+            "GENERATION_CONFLICT",
+            "presented handoff was superseded",
+        ));
+    }
+    let mut next = i.session.clone();
+    next.current_occurrence_id = Some(token.successor_occurrence_id.clone());
+    next.position_ms = successor_offset_frames.saturating_mul(1000) / u64::from(sample_rate);
+    next.state = if i.output_gate.load(Ordering::Acquire) {
+        TransportState::Playing
+    } else {
+        TransportState::Paused
+    };
+    next.checkpoint_sequence = next
+        .checkpoint_sequence
+        .checked_add(1)
+        .ok_or_else(|| storage(anyhow::anyhow!("checkpoint sequence overflow")))?;
+    if let Err(error) = i.db.persist_playback_terminal(
+        &next,
+        &token.predecessor_occurrence_id,
+        "naturalCompletion",
+        None,
+    ) {
+        let mut terminal = terminal_plan(i, "naturalCompletion", PlaybackStatus::Paused);
+        terminal.session = next;
+        freeze_terminal(i, terminal);
+        return Err(storage(error));
+    }
+    i.session = next;
+    i.checkpointed_position_ms = i.session.position_ms;
+    i.playback = PlaybackState {
+        status: if i.output_gate.load(Ordering::Acquire) {
+            PlaybackStatus::Active
+        } else {
+            PlaybackStatus::Paused
+        },
+        can_go_next: i
+            .db
+            .playback_occurrence(&i.session.session_id, &token.successor_occurrence_id)
+            .map_err(storage)?
+            .and_then(|current| {
+                i.db.playback_successor(&i.session.session_id, current.ordinal)
+                    .ok()
+                    .flatten()
+            })
+            .is_some(),
+        metadata: Some(metadata),
+        duration_ms: Some(duration_ms),
+        representation: Some(representation),
+        seek: SeekCapability::unavailable("seek.prepared_handoff"),
+        pending_seek: None,
+        seek_outcome: None,
+        error: None,
+    };
+    if i.playback.can_go_next
+        && i.output_gate.load(Ordering::Acquire)
+        && let Some(outputs) = i.outputs.as_mut()
+    {
+        outputs.effect = Some(i.generation_id.clone());
+    }
+    i.state_sequence = i.state_sequence.saturating_add(1);
+    i.dirty = false;
+    Ok(())
 }
 
 fn complete_occurrence(
@@ -3580,6 +3738,74 @@ mod tests {
         assert!(!completed.playback.can_go_next);
         assert_eq!(
             db.playback_outcome(&second.occurrence_id)
+                .unwrap()
+                .as_deref(),
+            Some("naturalCompletion")
+        );
+        playback.stop_and_join().unwrap();
+    }
+
+    #[test]
+    fn presented_handoff_adopts_successor_without_rotating_generation_or_start_effect() {
+        let db = Arc::new(Database::memory().unwrap());
+        let playback = PlaybackSession::restore(db.clone(), "owner".into());
+        let initial = playback.snapshot().unwrap();
+        let applied = playback
+            .apply(params(
+                &initial,
+                SessionOperation::PlayAlbum {
+                    sources: vec![
+                        TrackSource {
+                            server_id: "server".into(),
+                            track_id: "same".into(),
+                        },
+                        TrackSource {
+                            server_id: "server".into(),
+                            track_id: "same".into(),
+                        },
+                    ],
+                },
+            ))
+            .unwrap();
+        let first = applied.assigned_occurrences[0].clone();
+        let second = applied.assigned_occurrences[1].clone();
+        let candidate = playback
+            .successor_candidate(&applied.generation_id, playback.control_epoch())
+            .unwrap();
+        assert_eq!(candidate.predecessor_occurrence_id, first.occurrence_id);
+        assert_eq!(candidate.successor.occurrence_id, second.occurrence_id);
+        let token = super::super::continuity::HandoffToken {
+            instance_id: candidate.instance_id,
+            session_id: candidate.session_id,
+            predecessor_occurrence_id: candidate.predecessor_occurrence_id,
+            successor_occurrence_id: candidate.successor.occurrence_id,
+            queue_revision: candidate.queue_revision,
+            control_epoch: candidate.control_epoch,
+            preparation_generation: candidate.preparation_generation,
+            output_epoch: 9,
+        };
+        let event = PlaybackEvent::HandoffPresented {
+            token: token.clone(),
+            metadata: PlaybackTrackMetadata {
+                source: second.source.clone(),
+                title: "Second".into(),
+                artist: None,
+                album: None,
+            },
+            duration_ms: 1_000,
+            representation: "flac".into(),
+            successor_offset_frames: 12_000,
+            sample_rate: 48_000,
+        };
+        playback.publish_event(applied.generation_id.clone(), event.clone());
+        playback.publish_event(applied.generation_id.clone(), event);
+        std::thread::sleep(Duration::from_millis(50));
+        let adopted = playback.snapshot().unwrap();
+        assert_eq!(adopted.generation_id, applied.generation_id);
+        assert_eq!(adopted.current.unwrap().occurrence_id, second.occurrence_id);
+        assert_eq!(adopted.position_ms, 250);
+        assert_eq!(
+            db.playback_outcome(&first.occurrence_id)
                 .unwrap()
                 .as_deref(),
             Some("naturalCompletion")
@@ -4778,6 +5004,31 @@ mod tests {
             .seek_with_guard(seek(&snapshot, 10_500), None)
             .unwrap();
         assert_eq!(completed.position_ms, 10_500);
+    }
+
+    #[test]
+    fn terminal_failure_dominates_completion_in_both_delivery_orders() {
+        for failed_first in [true, false] {
+            let mut events = VecDeque::new();
+            let failed = PlaybackEvent::Failed {
+                code: "SOURCE_UNAVAILABLE".into(),
+                retryable: true,
+            };
+            let completed = PlaybackEvent::Completed { position_ms: 123 };
+            let ordered = if failed_first {
+                [failed, completed]
+            } else {
+                [completed, failed]
+            };
+            for event in ordered {
+                enqueue_event(&mut events, 7, 11, "generation".into(), event);
+            }
+            assert_eq!(events.len(), 1);
+            assert!(matches!(
+                events.front().unwrap().3,
+                PlaybackEvent::Failed { .. }
+            ));
+        }
     }
     #[test]
     fn review_restored_verified_end_restarts_progress_after_media_resolution() {

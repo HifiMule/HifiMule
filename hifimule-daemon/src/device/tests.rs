@@ -231,7 +231,10 @@ async fn aborted_mtp_observer_discards_a_late_passive_scan_result() {
     observer.await.unwrap_err();
     release_tx.send(()).unwrap();
     tokio::time::sleep(Duration::from_millis(25)).await;
-    assert!(rx.try_recv().is_err(), "a late scan must not emit device work");
+    assert!(
+        rx.try_recv().is_err(),
+        "a late scan must not emit device work"
+    );
 }
 
 #[cfg(target_os = "windows")]
@@ -1512,7 +1515,9 @@ async fn initialize_mtp_keeps_authoritative_cache_when_device_mirror_fails() {
         .expect("a failed best-effort MTP mirror must not abort initialization");
 
     assert!(manager.get_current_device().await.is_some());
-    let cache = cache_dir.path().join(format!("{}.json", manifest.device_id));
+    let cache = cache_dir
+        .path()
+        .join(format!("{}.json", manifest.device_id));
     let cached: DeviceManifest = serde_json::from_slice(&std::fs::read(&cache).unwrap()).unwrap();
     assert_eq!(cached.device_id, manifest.device_id);
 }
